@@ -337,6 +337,14 @@ class JaatoSession:
         # operates against a different workspace than the runtime's
         # default (e.g. a worktree snapshot for fork-replay).
         self._workspace_path: Optional[str] = None
+        # Lazily-loaded pricing table used to stamp cost on LLM telemetry
+        # spans when the provider doesn't report one (mirrors the daemon's
+        # core.py:_build_usage precedence, but computed while the span is
+        # still open — the daemon boundary runs after the span closes).
+        # ``_span_pricing`` is None until first use; ``_span_pricing_loaded``
+        # guards the one-time load so cost-free sessions never read the JSON.
+        self._span_pricing = None
+        self._span_pricing_loaded = False
         # Shape 3 PR 1: per-session resolved env (workspace ``.env`` +
         # profile env + overrides, expanded and secret-URI-resolved).
         # Populated by runner-side ``bootstrap_session`` AFTER the
@@ -7550,6 +7558,10 @@ NOTES
         (which auto-computes ``llm.token_count.total`` via _SpanWrapper),
         plus optional cache and reasoning detail attributes.
 
+        When the provider reports a cost (``usage.cost_usd``), also sets
+        ``gen_ai.usage.cost`` (Langfuse OTLP cost ingestion) and
+        ``llm.cost.total`` (OpenInference / Arize Phoenix).
+
         Also records ``llm.output_messages.*`` (OpenInference indexed attributes)
         from the model response, and ``gen_ai.response.finish_reasons``.
 
@@ -7587,6 +7599,27 @@ NOTES
         if usage.reasoning_tokens is not None:
             span.set_attribute("llm.token_count.completion_details.reasoning", usage.reasoning_tokens)
 
+        # Cost (USD). Precedence mirrors the daemon's core.py:_build_usage:
+        #   1. provider-reported ``usage.cost_usd`` (e.g. claude_cli's
+        #      total_cost_usd, OpenRouter's cost) — fiscal truth, wins.
+        #   2. operator pricing table (.jaato/pricing.json) computed from
+        #      the model name + token counts, so cost lands on the span even
+        #      for providers that don't report it on the wire.
+        #   3. None — no source knew; the observability backend may still
+        #      compute cost from model + token counts (e.g. Langfuse's
+        #      model-pricing catalog).
+        # We resolve here, while the span is open — the daemon boundary that
+        # populates UsageBreakdown.cost_usd runs after the span has closed.
+        # Two keys are emitted so pre-computed cost renders in either backend:
+        #   - ``gen_ai.usage.cost``  → Langfuse's OTLP cost ingestion
+        #   - ``llm.cost.total``     → OpenInference (Arize Phoenix)
+        # Both are cost attributes (not token-count buckets), so emitting both
+        # does not trip Langfuse's inclusive/exclusive token-bucket contract.
+        cost_usd = self._resolve_span_cost(usage)
+        if cost_usd is not None:
+            span.set_attribute("gen_ai.usage.cost", cost_usd)
+            span.set_attribute("llm.cost.total", cost_usd)
+
         # Cache outcome classification (hit/partial/warm/miss/unknown)
         # so external observers can correlate cache behavior with the
         # GC ↔ cache coordination dance.
@@ -7609,6 +7642,50 @@ NOTES
             if usage.output_tokens is not None:
                 self._turn_completion_tokens = getattr(self, '_turn_completion_tokens', 0) + usage.output_tokens
                 turn_span.set_attribute("llm.token_count.completion", self._turn_completion_tokens)
+
+    def _resolve_span_cost(self, usage) -> Optional[float]:
+        """Resolve per-call cost (USD) for an LLM telemetry span.
+
+        Precedence mirrors ``JaatoServer._build_usage`` so the span and the
+        emitted ``UsageBreakdown`` agree:
+
+        1. ``usage.cost_usd`` — provider-reported; fiscal truth, wins.
+        2. Operator pricing table (``.jaato/pricing.json`` via
+           ``shared.pricing``) computed from the model name + token counts.
+        3. ``None`` — no source knew (the backend may still estimate).
+
+        The pricing table is loaded lazily on first non-reported cost and
+        cached on the session, so cost-free sessions never touch the JSON.
+        Any failure to load/compute degrades to ``None`` (telemetry must
+        never break a turn).
+
+        Args:
+            usage: The response ``TokenUsage``.
+
+        Returns:
+            Cost in USD, or ``None`` when no source can supply it.
+        """
+        if usage.cost_usd is not None:
+            return usage.cost_usd
+        if not self._model_name:
+            return None
+        try:
+            if not self._span_pricing_loaded:
+                from shared.pricing import load_pricing
+                self._span_pricing = load_pricing(self.workspace_path)
+                self._span_pricing_loaded = True
+            if self._span_pricing is None or not self._span_pricing.has(self._model_name):
+                return None
+            return self._span_pricing.cost_for_usage(
+                self._model_name,
+                prompt_tokens=int(usage.prompt_tokens or 0),
+                output_tokens=int(usage.output_tokens or 0),
+                cache_read_tokens=usage.cache_read_tokens,
+                cache_creation_tokens=usage.cache_creation_tokens,
+            )
+        except Exception as e:  # pragma: no cover - defensive
+            self._trace(f"LLM_TELEMETRY: pricing-table cost lookup failed: {e}")
+            return None
 
     def _record_input_messages_telemetry(self, span) -> None:
         """Record OpenInference input messages on a telemetry span.

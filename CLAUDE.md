@@ -1243,6 +1243,28 @@ Key attributes:
 - Turn: `session_id`, `agent_type`, `turn_index`, `streaming`, `cancelled`
 - Tool: `tool.name`, `tool.plugin_type`, `tool.success`, `tool.duration_seconds`
 
+Spans follow **OpenInference** semantic conventions (`openinference.span.kind`,
+`llm.token_count.*`, `llm.model_name`), so they render natively in Arize
+Phoenix, Langfuse, and other OpenInference-compatible backends. The LLM span
+carries per-call cost as `gen_ai.usage.cost` (Langfuse) and `llm.cost.total`
+(Phoenix), resolved in the same precedence as `UsageBreakdown`:
+provider-reported `TokenUsage.cost_usd` → operator pricing table
+(`.jaato/pricing.json`, computed from model + token counts) → none (backend may
+still estimate). Resolution happens in `jaato_session._resolve_span_cost` while
+the span is open.
+
+**Langfuse backend:** set `JAATO_TELEMETRY_ENABLED=true` +
+`LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` (+ optional `LANGFUSE_HOST`). The
+`langfuse` backend (`LangfusePlugin`, an `OTelPlugin` subclass) derives the
+`/api/public/otel` endpoint, `http/protobuf` transport (Langfuse is HTTP-only;
+the generic exporter is gRPC-first), and Basic-auth header from the keys. It's
+auto-selected when a Langfuse public key is set and no
+`OTEL_EXPORTER_OTLP_ENDPOINT` is configured; force with
+`JAATO_TELEMETRY_BACKEND=langfuse` (`=otel` to opt out). For a generic OTLP
+collector, set `OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf` (or the `protocol`
+config key) yourself. See
+[docs/opentelemetry-design.md §12.1](docs/opentelemetry-design.md).
+
 ## Coding Policies
 
 ### Docstring Maintenance

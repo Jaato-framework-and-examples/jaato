@@ -524,8 +524,21 @@ class OTelPlugin:
                         key, value = pair.split("=", 1)
                         headers[key.strip()] = value.strip()
 
-            # Try gRPC first, fall back to HTTP
-            try:
+            # Protocol selection. The default is gRPC-first (fall back to HTTP)
+            # for backward compatibility with existing collector setups. Some
+            # backends only speak OTLP/HTTP — Langfuse's ingestion endpoint
+            # (`.../api/public/otel`) is HTTP-only — so honor an explicit
+            # preference: the `protocol` config key, else the standard
+            # OTEL_EXPORTER_OTLP_PROTOCOL env var (`grpc` / `http/protobuf`).
+            protocol = str(
+                config.get(
+                    "protocol",
+                    os.environ.get("OTEL_EXPORTER_OTLP_PROTOCOL", "")  # env: OTLP wire protocol — "grpc" (default) or "http/protobuf"
+                )
+            ).strip().lower()
+            prefer_http = protocol in ("http", "http/protobuf", "httpprotobuf")
+
+            def _grpc_exporter():
                 from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import (
                     OTLPSpanExporter as GrpcExporter
                 )
@@ -533,10 +546,8 @@ class OTelPlugin:
                     endpoint=endpoint,
                     headers=tuple(headers.items()) if headers else None,
                 )
-            except ImportError:
-                pass
 
-            try:
+            def _http_exporter():
                 from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
                     OTLPSpanExporter as HttpExporter
                 )
@@ -544,8 +555,19 @@ class OTelPlugin:
                     endpoint=endpoint,
                     headers=headers if headers else None,
                 )
-            except ImportError:
-                pass
+
+            # Order the two attempts by the requested protocol; each falls
+            # back to the other if its exporter package isn't installed.
+            attempts = (
+                (_http_exporter, _grpc_exporter)
+                if prefer_http
+                else (_grpc_exporter, _http_exporter)
+            )
+            for build in attempts:
+                try:
+                    return build()
+                except ImportError:
+                    continue
 
             # No OTLP exporter available
             return None

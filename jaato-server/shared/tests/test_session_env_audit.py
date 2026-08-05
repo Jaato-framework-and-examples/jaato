@@ -103,6 +103,7 @@ ALLOWLIST: Set[Tuple[str, str]] = {
     ("shared/plugins/subagent/plugin.py",                         "MODEL_NAME"),
     ("shared/plugins/subagent/plugin.py",                         "PROJECT_ID"),
     ("shared/plugins/table_formatter/plugin.py",                  "JAATO_AMBIGUOUS_WIDTH"),
+    ("shared/plugins/telemetry/__init__.py",                      "JAATO_TELEMETRY_BACKEND"),
     ("shared/plugins/telemetry/__init__.py",                      "JAATO_TELEMETRY_ENABLED"),
     ("shared/plugins/telemetry/__init__.py",                      "JAATO_TELEMETRY_EXPORTER"),
     ("shared/plugins/telemetry/__init__.py",                      "JAATO_TELEMETRY_REDACT_CONTENT"),

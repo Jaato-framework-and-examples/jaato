@@ -23,12 +23,15 @@ Usage:
 
 Environment Variables:
     JAATO_TELEMETRY_ENABLED: Enable telemetry (default: false)
+    JAATO_TELEMETRY_BACKEND: Backend — otel (default) or langfuse
     JAATO_TELEMETRY_EXPORTER: Exporter type (otlp, console, file, none)
     JAATO_TELEMETRY_FILE: Output file path for file exporter (default: /tmp/jaato-traces.jsonl)
     JAATO_TELEMETRY_REDACT_CONTENT: Redact prompts/responses (default: true)
     OTEL_EXPORTER_OTLP_ENDPOINT: OTLP endpoint URL
+    OTEL_EXPORTER_OTLP_PROTOCOL: OTLP wire protocol — grpc (default) or http/protobuf
     OTEL_EXPORTER_OTLP_HEADERS: Auth headers (key=value,key2=value2)
     OTEL_SERVICE_NAME: Service name (default: jaato)
+    LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY / LANGFUSE_HOST: Langfuse backend
 """
 
 from .plugin import TelemetryPlugin, SpanContext
@@ -40,7 +43,30 @@ __all__ = [
     "NullTelemetryPlugin",
     "create_plugin",
     "create_otel_plugin",
+    "create_langfuse_plugin",
 ]
+
+
+def _select_backend() -> str:
+    """Resolve which telemetry backend create_plugin() should build.
+
+    Precedence:
+      1. ``JAATO_TELEMETRY_BACKEND`` — explicit (``otel`` / ``langfuse``).
+      2. Auto-detect Langfuse: when the backend is unset, Langfuse keys are
+         present, and no generic OTLP endpoint is configured, prefer the
+         Langfuse backend so its keys "just work" without extra env.
+      3. Default ``otel``.
+    """
+    import os
+
+    backend = os.environ.get("JAATO_TELEMETRY_BACKEND", "").strip().lower()  # env: telemetry backend — "otel" (default) or "langfuse"
+    if backend:
+        return backend
+    has_langfuse_keys = bool(os.environ.get("LANGFUSE_PUBLIC_KEY"))
+    has_otlp_endpoint = bool(os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT"))
+    if has_langfuse_keys and not has_otlp_endpoint:
+        return "langfuse"
+    return "otel"
 
 
 def create_plugin() -> TelemetryPlugin:
@@ -63,8 +89,13 @@ def create_plugin() -> TelemetryPlugin:
         return NullTelemetryPlugin()
 
     try:
-        from .otel_plugin import OTelPlugin
-        plugin = OTelPlugin()
+        backend = _select_backend()
+        if backend == "langfuse":
+            from .langfuse_plugin import LangfusePlugin
+            plugin: TelemetryPlugin = LangfusePlugin()
+        else:
+            from .otel_plugin import OTelPlugin
+            plugin = OTelPlugin()
 
         # Auto-initialize from environment variables
         redact = os.environ.get("JAATO_TELEMETRY_REDACT_CONTENT", "true").lower() not in ("0", "false", "no")  # env: redact prompt/response content from spans (default true)
@@ -77,6 +108,8 @@ def create_plugin() -> TelemetryPlugin:
             # These are read inside initialize() from env vars:
             # OTEL_EXPORTER_OTLP_ENDPOINT, OTEL_EXPORTER_OTLP_HEADERS, OTEL_SERVICE_NAME
             # JAATO_INSTANCE_ID (optional, auto-generated from hostname+PID if unset)
+            # LangfusePlugin additionally derives endpoint/protocol/auth from
+            # LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY / LANGFUSE_HOST.
         })
 
         return plugin
@@ -92,3 +125,15 @@ def create_otel_plugin() -> TelemetryPlugin:
     """
     from .otel_plugin import OTelPlugin
     return OTelPlugin()
+
+
+def create_langfuse_plugin() -> TelemetryPlugin:
+    """Create a LangfusePlugin instance (OTelPlugin preconfigured for Langfuse).
+
+    Derives the OTLP endpoint, HTTP protocol, and Basic-auth header from
+    LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY / LANGFUSE_HOST at
+    ``initialize()``. Raises ImportError if opentelemetry packages are not
+    installed.
+    """
+    from .langfuse_plugin import LangfusePlugin
+    return LangfusePlugin()
