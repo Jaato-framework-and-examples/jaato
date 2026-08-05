@@ -2,8 +2,19 @@
 
 import pytest
 from ..plugin import NotebookPlugin, create_plugin
-from ..backends.local import LocalJupyterBackend
+from ..backends.local import LocalJupyterBackend, INPROCESS_OPT_IN_ENV
 from ..types import ExecutionStatus, OutputType
+
+
+@pytest.fixture(autouse=True)
+def _allow_inprocess_exec(monkeypatch):
+    """Opt into in-process cell execution for the test process.
+
+    The local backend fails closed unless confined by AppArmor or
+    explicitly opted in; the test runner is unconfined, so this fixture
+    supplies the explicit opt-in the tests rely on.
+    """
+    monkeypatch.setenv(INPROCESS_OPT_IN_ENV, "1")
 
 
 class TestLocalBackend:
