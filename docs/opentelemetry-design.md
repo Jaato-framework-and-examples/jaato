@@ -923,14 +923,55 @@ pip install -e "jaato-server/.[telemetry]"
 
 ### 12.1 Langfuse
 
+[Langfuse](https://langfuse.com) ingests jaato's OpenInference spans directly
+over OTLP, so no jaato-side code is required — it's a configuration path.
+
+Three things distinguish Langfuse from a generic OTLP collector:
+
+1. **Endpoint is the `/api/public/otel` path** (not the bare host).
+2. **HTTP-only** — Langfuse does not accept OTLP/gRPC. jaato defaults to
+   gRPC-first, so you must force HTTP via `OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf`
+   (or the `protocol` config key). Without this the exporter silently sends
+   gRPC to an endpoint that never accepts it.
+3. **Basic auth** over `base64("<public_key>:<secret_key>")` (not Bearer).
+
+**Environment configuration (recommended):**
+
+```bash
+export JAATO_TELEMETRY_ENABLED=true
+export JAATO_TELEMETRY_EXPORTER=otlp
+export OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
+export OTEL_EXPORTER_OTLP_ENDPOINT=https://cloud.langfuse.com/api/public/otel
+export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Basic $(echo -n "$LANGFUSE_PUBLIC_KEY:$LANGFUSE_SECRET_KEY" | base64)"
+# Self-hosted: swap the endpoint host for your Langfuse instance.
+```
+
+**Programmatic equivalent:**
+
 ```python
+import base64, os
+
+auth = base64.b64encode(
+    f"{os.environ['LANGFUSE_PUBLIC_KEY']}:{os.environ['LANGFUSE_SECRET_KEY']}".encode()
+).decode()
+
 telemetry.initialize({
-    "endpoint": "https://cloud.langfuse.com",
-    "headers": {
-        "Authorization": f"Bearer {os.environ['LANGFUSE_SECRET_KEY']}"
-    }
+    "enabled": True,
+    "exporter": "otlp",
+    "protocol": "http/protobuf",  # Langfuse is HTTP-only
+    "endpoint": "https://cloud.langfuse.com/api/public/otel",
+    "headers": {"Authorization": f"Basic {auth}"},
 })
 ```
+
+**What renders:** the agent/turn graph, per-LLM-call token counts
+(`llm.token_count.*`), tool spans, and message I/O. **Cost:** jaato stamps
+`gen_ai.usage.cost` (the key Langfuse reads) whenever the provider reports a
+per-call cost (`TokenUsage.cost_usd` — e.g. `claude_cli`, OpenRouter). For
+providers that don't report cost, Langfuse auto-computes it from the model
+name + token counts using its own model-pricing catalog. (Provider-agnostic
+pricing-table cost from `core.py:_build_usage()` is not yet forwarded onto
+spans — see §13.)
 
 ### 12.2 Arize Phoenix
 

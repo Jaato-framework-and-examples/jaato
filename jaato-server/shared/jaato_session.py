@@ -7550,6 +7550,10 @@ NOTES
         (which auto-computes ``llm.token_count.total`` via _SpanWrapper),
         plus optional cache and reasoning detail attributes.
 
+        When the provider reports a cost (``usage.cost_usd``), also sets
+        ``gen_ai.usage.cost`` (Langfuse OTLP cost ingestion) and
+        ``llm.cost.total`` (OpenInference / Arize Phoenix).
+
         Also records ``llm.output_messages.*`` (OpenInference indexed attributes)
         from the model response, and ``gen_ai.response.finish_reasons``.
 
@@ -7586,6 +7590,20 @@ NOTES
             span.set_attribute("llm.token_count.prompt_details.cache_write", usage.cache_creation_tokens)
         if usage.reasoning_tokens is not None:
             span.set_attribute("llm.token_count.completion_details.reasoning", usage.reasoning_tokens)
+
+        # Provider-reported cost (USD). Only some providers populate this on
+        # the wire (e.g. claude_cli's total_cost_usd, OpenRouter's cost); for
+        # the rest ``cost_usd`` is None and cost is resolved downstream at the
+        # daemon boundary (core.py:_build_usage via the pricing table) or
+        # computed by the observability backend from model + token counts.
+        # We emit two keys so pre-computed cost renders in either backend:
+        #   - ``gen_ai.usage.cost``  → Langfuse's OTLP cost ingestion
+        #   - ``llm.cost.total``     → OpenInference (Arize Phoenix)
+        # Both are cost attributes (not token-count buckets), so emitting both
+        # does not trip Langfuse's inclusive/exclusive token-bucket contract.
+        if usage.cost_usd is not None:
+            span.set_attribute("gen_ai.usage.cost", usage.cost_usd)
+            span.set_attribute("llm.cost.total", usage.cost_usd)
 
         # Cache outcome classification (hit/partial/warm/miss/unknown)
         # so external observers can correlate cache behavior with the

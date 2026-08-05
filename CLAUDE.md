@@ -1243,6 +1243,19 @@ Key attributes:
 - Turn: `session_id`, `agent_type`, `turn_index`, `streaming`, `cancelled`
 - Tool: `tool.name`, `tool.plugin_type`, `tool.success`, `tool.duration_seconds`
 
+Spans follow **OpenInference** semantic conventions (`openinference.span.kind`,
+`llm.token_count.*`, `llm.model_name`), so they render natively in Arize
+Phoenix, Langfuse, and other OpenInference-compatible backends. When the
+provider reports a per-call cost (`TokenUsage.cost_usd`), the LLM span carries
+`gen_ai.usage.cost` (Langfuse) and `llm.cost.total` (Phoenix).
+
+**OTLP protocol:** the exporter is gRPC-first by default. Set
+`OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf` (or the `protocol` config key) for
+HTTP-only backends such as **Langfuse** — point the endpoint at its
+`/api/public/otel` path with Basic auth. See
+[docs/opentelemetry-design.md §12.1](docs/opentelemetry-design.md) for the full
+Langfuse config path.
+
 ## Coding Policies
 
 ### Docstring Maintenance
