@@ -199,6 +199,7 @@ class TelemetryPlugin(Protocol):
         agent_name: Optional[str] = None,
         turn_index: Optional[int] = None,
         parent_session_id: Optional[str] = None,
+        user_id: Optional[str] = None,
         attributes: Optional[Dict[str, Any]] = None,
     ) -> Generator[SpanContext, None, None]:
         """Create root span for a turn (send_message call).
@@ -216,6 +217,9 @@ class TelemetryPlugin(Protocol):
             parent_session_id: Optional parent session ID for subagents.
                 Populates ``graph.node.parent_id`` for DAG visualization.
                 Empty string or None means root node.
+            user_id: Optional end-user identifier. Stamped as the
+                OpenInference ``user.id`` attribute (Langfuse User Tracking)
+                on this span and propagated to child llm/tool spans.
             attributes: Optional additional attributes
 
         Yields:

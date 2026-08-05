@@ -754,6 +754,21 @@ class OTelPlugin:
         if session_id and "session.id" not in attrs:
             attrs["session.id"] = session_id
 
+    def _inject_user_id(self, attrs: Dict[str, Any]) -> None:
+        """Stamp ``user.id`` on a span from thread-local context.
+
+        Mirrors :meth:`_inject_session_id`: the active turn's user id (set
+        by :meth:`turn_span`) is propagated onto every child ``llm`` /
+        ``tool`` span so observability backends attribute per-observation
+        usage and cost to the user — the propagation Langfuse's User
+        Tracking recommends. Langfuse's ingestion reads the OpenInference
+        ``user.id`` key directly (alongside ``langfuse.user.id``). No-op
+        when no user id is set or a caller already set ``user.id``.
+        """
+        user_id = getattr(self._agent_context, "user_id", None)
+        if user_id and "user.id" not in attrs:
+            attrs["user.id"] = user_id
+
     def _get_context_metadata(self) -> Dict[str, Any]:
         """Build metadata dict from thread-local context.
 
@@ -819,6 +834,7 @@ class OTelPlugin:
         agent_name: Optional[str] = None,
         turn_index: Optional[int] = None,
         parent_session_id: Optional[str] = None,
+        user_id: Optional[str] = None,
         attributes: Optional[Dict[str, Any]] = None,
     ) -> Generator[_SpanWrapper, None, None]:
         """Create root span for a turn.
@@ -827,8 +843,11 @@ class OTelPlugin:
         ``session.id``, ``agent.name``, and ``graph.node.*`` attributes
         for Phoenix DAG visualization.
 
-        Stores agent identity (session_id, agent_type, agent_name) in a
-        thread-local so that child spans can access the context.
+        Stores agent identity (session_id, agent_type, agent_name) and, when
+        provided, the ``user_id`` in a thread-local so that child spans can
+        access the context. ``user_id`` is stamped as the OpenInference
+        ``user.id`` attribute (Langfuse User Tracking) on this span and
+        propagated to child llm/tool spans.
         """
         if not self.enabled:
             from .null_plugin import _NOOP_SPAN
@@ -840,9 +859,12 @@ class OTelPlugin:
         prev_id = getattr(ctx, "agent_id", None)
         prev_type = getattr(ctx, "agent_type", None)
         prev_name = getattr(ctx, "agent_name", None)
+        prev_user = getattr(ctx, "user_id", None)
         ctx.agent_id = session_id
         ctx.agent_type = agent_type
         ctx.agent_name = agent_name
+        if user_id:
+            ctx.user_id = user_id
 
         # OpenInference attributes
         attrs: Dict[str, Any] = {
@@ -855,6 +877,9 @@ class OTelPlugin:
         if agent_name:
             attrs["agent.name"] = agent_name
         self._inject_daemon_session_id(attrs)
+        # Stamp user.id (just-set for this turn, or inherited from an
+        # enclosing agent context) so the trace is attributed to the user.
+        self._inject_user_id(attrs)
 
         # jaato-specific context packed into metadata
         metadata = self._get_context_metadata()
@@ -884,6 +909,7 @@ class OTelPlugin:
             ctx.agent_id = prev_id
             ctx.agent_type = prev_type
             ctx.agent_name = prev_name
+            ctx.user_id = prev_user
 
     @contextmanager
     def llm_span(
@@ -911,6 +937,7 @@ class OTelPlugin:
         }
         self._inject_daemon_session_id(attrs)
         self._inject_session_id(attrs)
+        self._inject_user_id(attrs)
 
         metadata = self._get_context_metadata()
         metadata["streaming"] = streaming
@@ -952,6 +979,7 @@ class OTelPlugin:
         }
         self._inject_daemon_session_id(attrs)
         self._inject_session_id(attrs)
+        self._inject_user_id(attrs)
 
         metadata = self._get_context_metadata()
         metadata["plugin_type"] = plugin_type

@@ -94,6 +94,7 @@ class NullTelemetryPlugin:
         agent_name: Optional[str] = None,
         turn_index: Optional[int] = None,
         parent_session_id: Optional[str] = None,
+        user_id: Optional[str] = None,
         attributes: Optional[Dict[str, Any]] = None,
     ) -> Generator[_NoOpSpan, None, None]:
         yield _NOOP_SPAN

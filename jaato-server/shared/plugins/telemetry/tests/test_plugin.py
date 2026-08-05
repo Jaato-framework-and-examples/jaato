@@ -1066,3 +1066,44 @@ class TestSessionIdPropagation:
 
         llm = self._spans_by_kind(exporter)["LLM"]
         assert "session.id" not in llm.attributes
+
+
+@pytest.mark.skipif(not OTEL_AVAILABLE, reason="OpenTelemetry not installed")
+class TestUserIdPropagation:
+    """user.id (Langfuse User Tracking) rides the turn span and propagates
+    to child llm/tool spans, so per-observation usage/cost attributes to the
+    user. Langfuse's ingestion reads the OpenInference ``user.id`` key.
+    """
+
+    def _spans_by_kind(self, exporter):
+        return {
+            s.attributes.get("openinference.span.kind"): s
+            for s in exporter.get_finished_spans()
+        }
+
+    def test_user_id_stamped_on_turn_and_children(self):
+        plugin, exporter = _create_test_plugin()
+        with plugin.turn_span(session_id="s", agent_type="main",
+                              agent_name="main", user_id="user-42"):
+            with plugin.llm_span("m", "p"):
+                pass
+            with plugin.tool_span("cli", "call-1"):
+                pass
+        plugin.shutdown()
+
+        spans = self._spans_by_kind(exporter)
+        assert spans["AGENT"].attributes["user.id"] == "user-42"
+        assert spans["LLM"].attributes["user.id"] == "user-42"
+        assert spans["TOOL"].attributes["user.id"] == "user-42"
+
+    def test_no_user_id_when_absent(self):
+        plugin, exporter = _create_test_plugin()
+        with plugin.turn_span(session_id="s", agent_type="main",
+                              agent_name="main"):
+            with plugin.llm_span("m", "p"):
+                pass
+        plugin.shutdown()
+
+        spans = self._spans_by_kind(exporter)
+        assert "user.id" not in spans["AGENT"].attributes
+        assert "user.id" not in spans["LLM"].attributes

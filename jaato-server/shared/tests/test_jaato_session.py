@@ -299,6 +299,59 @@ class TestJaatoSessionSendMessage:
         assert ("input.value", "Hello") in set_calls
         assert ("output.value", "Hello back!") in set_calls
 
+    def test_send_message_forwards_user_id_to_turn_span(self):
+        """send_message passes the resolved end-user id to turn_span so it
+        lands as the OpenInference user.id (Langfuse User Tracking)."""
+        from jaato_sdk.plugins.model_provider.types import TokenUsage, TurnResult
+
+        mock_runtime = MagicMock()
+        mock_provider = MagicMock()
+        mock_response = MagicMock()
+        mock_response.parts = [Part.from_text("hi")]
+        mock_response.finish_reason = FinishReason.STOP
+        mock_response.usage = TokenUsage(prompt_tokens=1, output_tokens=1, total_tokens=2)
+        mock_response.get_text.return_value = "hi"
+        mock_provider.supports_streaming.return_value = True
+        mock_provider.complete.return_value = TurnResult.from_provider_response(mock_response)
+        mock_runtime.create_provider.return_value = mock_provider
+        mock_runtime.get_tool_schemas.return_value = []
+        mock_runtime.get_executors.return_value = {}
+        mock_runtime.get_system_instructions.return_value = None
+        mock_runtime.registry = MagicMock()
+        mock_runtime.registry.enrich_prompt.return_value = MagicMock(prompt="hi")
+        mock_runtime.permission_plugin = None
+        mock_runtime.ledger = None
+
+        session = JaatoSession(mock_runtime, "gemini-2.5-flash")
+        session.configure()
+        session.set_client_user_id("alice@example.com")
+
+        session.send_message("hi")
+
+        _, kwargs = mock_runtime.telemetry.turn_span.call_args
+        assert kwargs.get("user_id") == "alice@example.com"
+
+
+class TestJaatoSessionTelemetryUserId:
+    """Precedence for the telemetry end-user id."""
+
+    def test_client_user_id_wins(self):
+        session = JaatoSession(MagicMock(), "m")
+        session._session_env = {"JAATO_TELEMETRY_USER_ID": "env-user"}
+        session.set_client_user_id("explicit-user")
+        assert session._resolve_telemetry_user_id() == "explicit-user"
+
+    def test_falls_back_to_session_env(self):
+        session = JaatoSession(MagicMock(), "m")
+        session._session_env = {"JAATO_TELEMETRY_USER_ID": "env-user"}
+        assert session._resolve_telemetry_user_id() == "env-user"
+
+    def test_none_when_unset(self, monkeypatch):
+        monkeypatch.delenv("JAATO_TELEMETRY_USER_ID", raising=False)
+        session = JaatoSession(MagicMock(), "m")
+        session._session_env = {}
+        assert session._resolve_telemetry_user_id() is None
+
 
 class TestJaatoSessionGetHistory:
     """Tests for JaatoSession.get_history()."""
