@@ -38,14 +38,47 @@ class _FakeSpan:
         self.output_messages = messages
 
 
-def _stub_session() -> SimpleNamespace:
-    """Minimal stand-in for `self` — the method only touches these two."""
-    return SimpleNamespace(_current_turn_span=None, _trace=lambda *a, **k: None)
+def _stub_session(**overrides) -> SimpleNamespace:
+    """Minimal stand-in for `self`.
+
+    Defaults exercise the no-pricing-table path: ``_model_name`` set but the
+    lazily-loaded ``_span_pricing`` already marked loaded and empty, so the
+    pricing fallback resolves to None without touching disk. Override
+    ``_span_pricing`` / ``_model_name`` / ``workspace_path`` per test.
+    """
+    stub = SimpleNamespace(
+        _current_turn_span=None,
+        _trace=lambda *a, **k: None,
+        _model_name="test-model",
+        _span_pricing=None,
+        _span_pricing_loaded=True,  # empty table; no disk read
+        workspace_path=None,
+    )
+    for key, value in overrides.items():
+        setattr(stub, key, value)
+    # Bind the real resolution logic to the stub so _record_token_telemetry's
+    # self._resolve_span_cost(...) call exercises the actual precedence code.
+    stub._resolve_span_cost = lambda usage: JaatoSession._resolve_span_cost(stub, usage)
+    return stub
 
 
-def _record(span, response) -> None:
+def _record(span, response, session=None) -> None:
     """Invoke the unbound method against a lightweight stub self."""
-    JaatoSession._record_token_telemetry(_stub_session(), span, response)
+    JaatoSession._record_token_telemetry(session or _stub_session(), span, response)
+
+
+class _FakePricing:
+    """Stands in for shared.pricing.PricingTable."""
+
+    def __init__(self, model, cost):
+        self._model = model
+        self._cost = cost
+
+    def has(self, model_name):
+        return model_name == self._model
+
+    def cost_for_usage(self, model_name, **kwargs):
+        return self._cost if model_name == self._model else None
 
 
 class TestCostStamping:
@@ -86,3 +119,55 @@ class TestCostStamping:
         _record(span, response)
         assert span.attributes["gen_ai.usage.cost"] == 0.0
         assert span.attributes["llm.cost.total"] == 0.0
+
+    def test_pricing_table_used_when_provider_omits_cost(self):
+        # Provider reports no cost, but the operator pricing table has an
+        # entry for the model → the computed cost is stamped on the span.
+        span = _FakeSpan()
+        session = _stub_session(
+            _model_name="priced-model",
+            _span_pricing=_FakePricing("priced-model", 0.0042),
+            _span_pricing_loaded=True,
+        )
+        response = ProviderResponse(
+            parts=[],
+            usage=TokenUsage(prompt_tokens=1000, output_tokens=100, cost_usd=None),
+            finish_reason=FinishReason.STOP,
+        )
+        _record(span, response, session)
+        assert span.attributes["gen_ai.usage.cost"] == 0.0042
+        assert span.attributes["llm.cost.total"] == 0.0042
+
+    def test_provider_cost_wins_over_pricing_table(self):
+        # Provider-reported cost is fiscal truth — it beats any table estimate.
+        span = _FakeSpan()
+        session = _stub_session(
+            _model_name="priced-model",
+            _span_pricing=_FakePricing("priced-model", 0.0042),
+            _span_pricing_loaded=True,
+        )
+        response = ProviderResponse(
+            parts=[],
+            usage=TokenUsage(prompt_tokens=1000, output_tokens=100, cost_usd=0.0099),
+            finish_reason=FinishReason.STOP,
+        )
+        _record(span, response, session)
+        assert span.attributes["gen_ai.usage.cost"] == 0.0099
+        assert span.attributes["llm.cost.total"] == 0.0099
+
+    def test_no_cost_when_model_absent_from_pricing_table(self):
+        # Table present but no entry for this model → no cost stamped.
+        span = _FakeSpan()
+        session = _stub_session(
+            _model_name="unlisted-model",
+            _span_pricing=_FakePricing("some-other-model", 0.0042),
+            _span_pricing_loaded=True,
+        )
+        response = ProviderResponse(
+            parts=[],
+            usage=TokenUsage(prompt_tokens=1000, output_tokens=100, cost_usd=None),
+            finish_reason=FinishReason.STOP,
+        )
+        _record(span, response, session)
+        assert "gen_ai.usage.cost" not in span.attributes
+        assert "llm.cost.total" not in span.attributes

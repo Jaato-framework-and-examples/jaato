@@ -930,12 +930,33 @@ Three things distinguish Langfuse from a generic OTLP collector:
 
 1. **Endpoint is the `/api/public/otel` path** (not the bare host).
 2. **HTTP-only** — Langfuse does not accept OTLP/gRPC. jaato defaults to
-   gRPC-first, so you must force HTTP via `OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf`
-   (or the `protocol` config key). Without this the exporter silently sends
-   gRPC to an endpoint that never accepts it.
+   gRPC-first, so the transport must be pinned to HTTP. Without this the
+   exporter silently sends gRPC to an endpoint that never accepts it.
 3. **Basic auth** over `base64("<public_key>:<secret_key>")` (not Bearer).
 
-**Environment configuration (recommended):**
+The **`langfuse` telemetry backend** handles all three for you — configure it
+with just your Langfuse keys:
+
+```bash
+export JAATO_TELEMETRY_ENABLED=true
+export LANGFUSE_PUBLIC_KEY=pk-lf-...
+export LANGFUSE_SECRET_KEY=sk-lf-...
+# LANGFUSE_HOST defaults to https://cloud.langfuse.com; set it for
+# self-hosted or the EU/US regional clouds.
+```
+
+Backend selection: the `langfuse` backend is chosen automatically when
+`LANGFUSE_PUBLIC_KEY` is set and no generic `OTEL_EXPORTER_OTLP_ENDPOINT` is
+configured. Force it explicitly with `JAATO_TELEMETRY_BACKEND=langfuse`
+(`=otel` opts back out even when Langfuse keys are present). The backend is
+`LangfusePlugin` — an `OTelPlugin` subclass that derives the endpoint,
+`http/protobuf` protocol, and Basic-auth header from the keys, then reuses all
+of the parent's span logic. Any explicit `endpoint` / `protocol` / `headers`
+(config key or standard OTLP env var) wins over the derived default, so the
+backend is safe to select behind a custom collector/proxy too.
+
+**Manual OTLP equivalent** (if you prefer the generic exporter over the
+backend — e.g. to keep all telemetry config in standard OTel env vars):
 
 ```bash
 export JAATO_TELEMETRY_ENABLED=true
@@ -943,35 +964,31 @@ export JAATO_TELEMETRY_EXPORTER=otlp
 export OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
 export OTEL_EXPORTER_OTLP_ENDPOINT=https://cloud.langfuse.com/api/public/otel
 export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Basic $(echo -n "$LANGFUSE_PUBLIC_KEY:$LANGFUSE_SECRET_KEY" | base64)"
-# Self-hosted: swap the endpoint host for your Langfuse instance.
 ```
 
 **Programmatic equivalent:**
 
 ```python
-import base64, os
+from shared.plugins.telemetry import create_langfuse_plugin
 
-auth = base64.b64encode(
-    f"{os.environ['LANGFUSE_PUBLIC_KEY']}:{os.environ['LANGFUSE_SECRET_KEY']}".encode()
-).decode()
-
+telemetry = create_langfuse_plugin()
 telemetry.initialize({
     "enabled": True,
-    "exporter": "otlp",
-    "protocol": "http/protobuf",  # Langfuse is HTTP-only
-    "endpoint": "https://cloud.langfuse.com/api/public/otel",
-    "headers": {"Authorization": f"Basic {auth}"},
+    "public_key": "pk-lf-...",
+    "secret_key": "sk-lf-...",
+    # "host": "https://lf.internal:3000",  # optional, self-hosted
 })
 ```
 
 **What renders:** the agent/turn graph, per-LLM-call token counts
 (`llm.token_count.*`), tool spans, and message I/O. **Cost:** jaato stamps
-`gen_ai.usage.cost` (the key Langfuse reads) whenever the provider reports a
-per-call cost (`TokenUsage.cost_usd` — e.g. `claude_cli`, OpenRouter). For
-providers that don't report cost, Langfuse auto-computes it from the model
-name + token counts using its own model-pricing catalog. (Provider-agnostic
-pricing-table cost from `core.py:_build_usage()` is not yet forwarded onto
-spans — see §13.)
+`gen_ai.usage.cost` (the key Langfuse reads) with per-call cost resolved in the
+same precedence as `UsageBreakdown` — provider-reported `TokenUsage.cost_usd`
+(e.g. `claude_cli`, OpenRouter) first, then the operator pricing table
+(`.jaato/pricing.json`, computed from model + token counts) for providers that
+don't report cost. When neither supplies a number, Langfuse falls back to its
+own model-pricing catalog (model name + token counts). See §5 for the cost
+resolution path.
 
 ### 12.2 Arize Phoenix
 
