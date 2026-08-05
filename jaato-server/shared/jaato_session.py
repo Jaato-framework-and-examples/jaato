@@ -592,6 +592,12 @@ class JaatoSession:
         # of the daemon's ``--agent <name>`` resolution.
         self._agent_id: str = agent_id
         self._daemon_session_id: Optional[str] = None  # Session manager ID for telemetry correlation
+        # End-user identity for telemetry user tracking (Langfuse Users view).
+        # Set by the daemon from the authenticated client user when available
+        # (``set_client_user_id``); otherwise resolved from the per-session
+        # ``JAATO_TELEMETRY_USER_ID`` env at turn time. Emitted as the
+        # OpenInference ``user.id`` span attribute.
+        self._client_user_id: Optional[str] = None
 
         # Retry notification callback (client-configurable)
         self._on_retry: Optional[RetryCallback] = None
@@ -791,6 +797,9 @@ class JaatoSession:
         extra_attrs = {}
         if daemon_sid:
             extra_attrs["jaato.session_id"] = daemon_sid
+        _user_id = self._resolve_telemetry_user_id()
+        if _user_id:
+            extra_attrs["user.id"] = _user_id
 
         telemetry.begin_session(session_root, attributes=extra_attrs or None)
         telemetry.begin_agent(
@@ -1012,6 +1021,40 @@ class JaatoSession:
             session_id: The session manager's session ID.
         """
         self._daemon_session_id = session_id
+
+    def set_client_user_id(self, user_id: Optional[str]) -> None:
+        """Set the end-user identity for telemetry user tracking.
+
+        The daemon wires this from the authenticated client user
+        (``get_client_user(client_id)`` — WS/SSO deployments; IPC has no
+        user). It is emitted as the OpenInference ``user.id`` span
+        attribute so observability backends (Langfuse's Users view)
+        attribute traces, token usage, and cost to the user.
+
+        Takes precedence over the ``JAATO_TELEMETRY_USER_ID`` per-session
+        env fallback used by keyless/local deployments.
+
+        Args:
+            user_id: End-user identifier (username, email, or subject
+                claim), or ``None`` to leave it unset.
+        """
+        self._client_user_id = user_id
+
+    def _resolve_telemetry_user_id(self) -> Optional[str]:
+        """Resolve the end-user id for telemetry ``user.id`` on this turn.
+
+        Precedence: explicit ``set_client_user_id`` value (daemon-wired
+        authenticated user) → ``JAATO_TELEMETRY_USER_ID`` per-session env
+        (via :meth:`get_session_env`, so it honors the workspace ``.env`` /
+        profile env) → ``None``. Never raises — telemetry must not break a
+        turn.
+        """
+        try:
+            if self._client_user_id:
+                return self._client_user_id
+            return self.get_session_env("JAATO_TELEMETRY_USER_ID")  # env: end-user id for telemetry user tracking (Langfuse Users)
+        except Exception:
+            return None
 
     def set_ui_hooks(
         self,
@@ -3854,8 +3897,22 @@ NOTES
             agent_name=self._agent_name,
             turn_index=self._turn_index,
             parent_session_id=_parent_sid,
+            user_id=self._resolve_telemetry_user_id(),
         ) as turn_span:
             self._current_turn_span = turn_span
+            # Stamp the user prompt as the trace-level input on the AGENT root
+            # span. Observability backends derive a trace's Input from its root
+            # observation's ``input.value`` — Langfuse's ingestion reads that
+            # key directly. Without it the trace-level Input column stays blank
+            # even though child llm/tool spans carry their own messages.
+            # Redaction (``JAATO_TELEMETRY_REDACT_CONTENT``, on by default) is
+            # applied to this key by _SpanWrapper, exactly like tool input.
+            try:
+                if message:
+                    turn_span.set_attribute("input.value", message)
+                    turn_span.set_attribute("input.mime_type", "text/plain")
+            except Exception:
+                pass
             # Reset per-turn token accumulators for aggregating on the turn span
             self._turn_prompt_tokens = 0
             self._turn_completion_tokens = 0
@@ -3903,6 +3960,16 @@ NOTES
 
             try:
                 response = self._run_chat_loop(processed_message, on_output, wrapped_usage_callback)
+                # Stamp the final response as the trace-level output on the
+                # AGENT root span (mirrors input.value above), so the trace's
+                # Output column is populated from the root observation rather
+                # than left blank. Redacted with input.value when enabled.
+                try:
+                    if response:
+                        turn_span.set_attribute("output.value", response)
+                        turn_span.set_attribute("output.mime_type", "text/plain")
+                except Exception:
+                    pass
                 turn_span.set_status_ok()
             except Exception as e:
                 turn_span.record_exception(e)

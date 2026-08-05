@@ -981,7 +981,13 @@ telemetry.initialize({
 ```
 
 **What renders:** the agent/turn graph, per-LLM-call token counts
-(`llm.token_count.*`), tool spans, and message I/O. **Cost:** jaato stamps
+(`llm.token_count.*`), tool spans, and message I/O. **Trace-level Input/Output:**
+the turn (AGENT) root span carries `input.value` (the user prompt) and
+`output.value` (the final response), which is what populates the Input/Output
+columns in Langfuse's trace table — Langfuse derives a trace's I/O from its root
+observation, so without these the columns render blank even though child
+`llm`/`tool` spans carry their own content. Both are subject to redaction (see
+below). **Cost:** jaato stamps
 `gen_ai.usage.cost` (the key Langfuse reads) with per-call cost resolved in the
 same precedence as `UsageBreakdown` — provider-reported `TokenUsage.cost_usd`
 (e.g. `claude_cli`, OpenRouter) first, then the operator pricing table
@@ -1011,10 +1017,23 @@ OTLP ingestion reads directly: `session.id`, `llm.token_count.*`,
   It's a resource attribute, so no jaato flag is needed — the OTel SDK merges
   `OTEL_RESOURCE_ATTRIBUTES` into every span's resource:
   `export OTEL_RESOURCE_ATTRIBUTES=deployment.environment.name=production`.
+- **User tracking.** jaato emits the OpenInference `user.id` attribute on the
+  turn (AGENT) span and propagates it to child `llm`/`tool` spans, powering
+  Langfuse's [Users view](https://langfuse.com/docs/observability/features/users).
+  The id resolves in precedence: the authenticated client user when the daemon
+  wires it via `JaatoSession.set_client_user_id()` (WS/SSO deployments;
+  `get_client_user(client_id)`), else the per-session `JAATO_TELEMETRY_USER_ID`
+  env (workspace `.env` / profile env) for keyless/local setups. Unset → no
+  `user.id` (Langfuse per-user views stay empty):
 
-**Not yet emitted:** `user.id` (Langfuse's user analytics). jaato has a
-`set_client_user()` identity hook (premium SSO); wiring it onto spans is a
-follow-up — until then, Langfuse per-user views stay empty.
+  ```bash
+  export JAATO_TELEMETRY_USER_ID=alice@example.com
+  ```
+
+  > **Note:** automatic propagation of the authenticated WS user into a
+  > confined runner (via the bootstrap envelope, like `jaato.session_id`) is a
+  > follow-up; today multi-user WS deployments set `set_client_user_id()`
+  > daemon-side or inject `JAATO_TELEMETRY_USER_ID` into the per-session env.
 
 ### 12.2 Arize Phoenix
 
