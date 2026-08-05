@@ -3856,6 +3856,19 @@ NOTES
             parent_session_id=_parent_sid,
         ) as turn_span:
             self._current_turn_span = turn_span
+            # Stamp the user prompt as the trace-level input on the AGENT root
+            # span. Observability backends derive a trace's Input from its root
+            # observation's ``input.value`` — Langfuse's ingestion reads that
+            # key directly. Without it the trace-level Input column stays blank
+            # even though child llm/tool spans carry their own messages.
+            # Redaction (``JAATO_TELEMETRY_REDACT_CONTENT``, on by default) is
+            # applied to this key by _SpanWrapper, exactly like tool input.
+            try:
+                if message:
+                    turn_span.set_attribute("input.value", message)
+                    turn_span.set_attribute("input.mime_type", "text/plain")
+            except Exception:
+                pass
             # Reset per-turn token accumulators for aggregating on the turn span
             self._turn_prompt_tokens = 0
             self._turn_completion_tokens = 0
@@ -3903,6 +3916,16 @@ NOTES
 
             try:
                 response = self._run_chat_loop(processed_message, on_output, wrapped_usage_callback)
+                # Stamp the final response as the trace-level output on the
+                # AGENT root span (mirrors input.value above), so the trace's
+                # Output column is populated from the root observation rather
+                # than left blank. Redacted with input.value when enabled.
+                try:
+                    if response:
+                        turn_span.set_attribute("output.value", response)
+                        turn_span.set_attribute("output.mime_type", "text/plain")
+                except Exception:
+                    pass
                 turn_span.set_status_ok()
             except Exception as e:
                 turn_span.record_exception(e)

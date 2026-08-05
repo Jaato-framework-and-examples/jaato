@@ -981,7 +981,13 @@ telemetry.initialize({
 ```
 
 **What renders:** the agent/turn graph, per-LLM-call token counts
-(`llm.token_count.*`), tool spans, and message I/O. **Cost:** jaato stamps
+(`llm.token_count.*`), tool spans, and message I/O. **Trace-level Input/Output:**
+the turn (AGENT) root span carries `input.value` (the user prompt) and
+`output.value` (the final response), which is what populates the Input/Output
+columns in Langfuse's trace table — Langfuse derives a trace's I/O from its root
+observation, so without these the columns render blank even though child
+`llm`/`tool` spans carry their own content. Both are subject to redaction (see
+below). **Cost:** jaato stamps
 `gen_ai.usage.cost` (the key Langfuse reads) with per-call cost resolved in the
 same precedence as `UsageBreakdown` — provider-reported `TokenUsage.cost_usd`
 (e.g. `claude_cli`, OpenRouter) first, then the operator pricing table

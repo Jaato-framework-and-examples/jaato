@@ -252,6 +252,53 @@ class TestJaatoSessionSendMessage:
 
         assert response == "Hello back!"
 
+    def test_send_message_stamps_trace_io_on_turn_span(self):
+        """The AGENT/turn root span carries input.value (user prompt) and
+        output.value (final response).
+
+        Observability backends (Langfuse) derive a trace's Input/Output from
+        the root observation's input.value/output.value; without these on the
+        turn span the trace-level columns render blank even though child
+        llm/tool spans carry their own content.
+        """
+        from jaato_sdk.plugins.model_provider.types import TokenUsage, TurnResult
+
+        mock_runtime = MagicMock()
+        mock_provider = MagicMock()
+
+        mock_response = MagicMock()
+        mock_response.parts = [Part.from_text("Hello back!")]
+        mock_response.finish_reason = FinishReason.STOP
+        mock_response.usage = TokenUsage(prompt_tokens=10, output_tokens=5, total_tokens=15)
+        mock_response.get_text.return_value = "Hello back!"
+
+        mock_provider.supports_streaming.return_value = True
+        mock_provider.complete.return_value = TurnResult.from_provider_response(mock_response)
+
+        mock_runtime.create_provider.return_value = mock_provider
+        mock_runtime.get_tool_schemas.return_value = []
+        mock_runtime.get_executors.return_value = {}
+        mock_runtime.get_system_instructions.return_value = None
+        mock_runtime.registry = MagicMock()
+        mock_runtime.registry.enrich_prompt.return_value = MagicMock(prompt="Hello")
+        mock_runtime.permission_plugin = None
+        mock_runtime.ledger = None
+
+        session = JaatoSession(mock_runtime, "gemini-2.5-flash")
+        session.configure()
+
+        session.send_message("Hello")
+
+        # The turn span is the context-manager value of turn_span(...).
+        turn_span = mock_runtime.telemetry.turn_span.return_value.__enter__.return_value
+        set_calls = {
+            (c.args[0], c.args[1])
+            for c in turn_span.set_attribute.call_args_list
+            if len(c.args) >= 2
+        }
+        assert ("input.value", "Hello") in set_calls
+        assert ("output.value", "Hello back!") in set_calls
+
 
 class TestJaatoSessionGetHistory:
     """Tests for JaatoSession.get_history()."""
