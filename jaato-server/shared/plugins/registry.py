@@ -844,6 +844,21 @@ class PluginRegistry:
         """List currently exposed plugin names."""
         return list(self._exposed)
 
+    def all_plugins(self) -> Dict[str, Any]:
+        """Snapshot of every DISCOVERED plugin instance, by name.
+
+        Distinct from :meth:`list_exposed` (the subset whose tools are
+        surfaced to the model): this is the full set the registry
+        discovered and instantiated.  Used by the AppArmor composer, which
+        must grant for every plugin the confined runner actually
+        initializes — ``expose_all`` (runner/session.py) inits ALL
+        discovered runner-tier plugins regardless of ``profile.plugins``
+        (the load-gate that would scope init to the declared set was
+        disabled in #114), so grants scoped to ``profile.plugins`` leave
+        auto-loaded plugins without their host-path rules.
+        """
+        return dict(self._plugins)
+
     def is_exposed(self, name: str) -> bool:
         """Check if a plugin's tools are currently exposed to the model."""
         return name in self._exposed
