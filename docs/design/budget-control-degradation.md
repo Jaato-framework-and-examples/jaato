@@ -1,0 +1,312 @@
+# Budget Control & Graceful Degradation — Design Note
+
+**Status**: Design sketch — not yet scheduled for implementation
+**Origin**: discussion comparing jaato against the "advanced agentic
+harness" pattern (typed tools / plan DAG / tiered memory / verification
+hierarchy / budgets / tracer). Every primitive in that pattern already
+maps onto an existing jaato surface **except** multi-dimensional budget
+enforcement with graceful degradation, which the cascade-as-client
+design explicitly deferred (see
+[`cascade-as-client.md`](cascade-as-client.md) §7: "Cascade-level
+resource limits (memory / cpu / token budget tracked per cid)").
+**Scope**: a per-profile `budget_control` block that caps resource
+consumption and, as ceilings approach, **degrades** by rebinding the
+models behind the session's declared `model_tiers` — a brownout, not a
+blackout.
+
+---
+
+## 1. Executive Summary
+
+jaato already **measures** every dimension a budget would cap (tokens,
+dollars, wall-clock, tool-calls, turns) and already has the **runtime
+mechanism** to swap the model backing a tier mid-session
+(`JaatoSession.switch_tier`, cross-provider capable). What it lacks is
+the thin layer that (a) accumulates those measurements against declared
+ceilings and (b) reacts as a ceiling approaches by **reducing cost per
+unit of work** rather than hard-stopping.
+
+The design adds one profile field, `budget_control`, with two halves:
+
+- **`limits`** — multi-dimensional ceilings (`usd`, `tokens`,
+  `seconds`, `tool_calls`, `turns`). Any dimension may be omitted
+  (unbounded).
+- **`degrade`** — an ordered list of rungs. Each rung fires once when
+  *any* dimension crosses its `at` threshold (a percentage of that
+  dimension's limit) and **overlays a new `model_tiers` binding table**:
+  the tier vocabulary and the model's cognitive role are untouched; only
+  the model each tier *points at* changes. A terminal rung can force
+  `finalize` (graceful) or `abort` (hard stop).
+
+The key design decision — arrived at by rejecting two earlier shapes —
+is that **degradation rebinds tier→model mappings; it does not move the
+agent between tiers**. This keeps the *role* axis (owned by the model
+via `enter_tier`) fully orthogonal to the *cost* axis (owned by the
+budget), and it removes any need to assume a cost ordering over the
+semantic tier labels (see §4).
+
+---
+
+## 2. Background — what already exists
+
+| Concern | Existing surface |
+|---|---|
+| Token usage + context % | `TokenLedger` (`shared/token_accounting.py`); `turn.progress` payload carries `percent_used`; `context.updated` carries `total_tokens` / `percent_used`. |
+| Dollar cost | `UsageBreakdown.cost_usd`, resolved provider-reported → `pricing.json` estimate → `None` (`server/core.py:_build_usage_breakdown` / `shared/pricing.py`). Same precedence the telemetry span cost uses. |
+| Wall-clock, tool-calls, turns | `turn.completed` (`duration_seconds`, `function_calls`), `tool.call_completed` (`duration_seconds`), turn counter (`max_turns` is today's only hard cap). |
+| Threshold-crossing reactions | The reactor engine already dispatches actions on bus events with JMESPath `where` clauses (see [`reactor-implementation.md`](../reactor-implementation.md)). |
+| Model vocabulary + per-turn switch | `model_tiers` profile field + `ModelTierConfig` (`shared/model_tiers.py`); the model moves between tiers via the `enter_tier` lifecycle tool. |
+| Runtime model swap (incl. cross-provider) | `JaatoSession.switch_tier` (`jaato_session.py:9357`) → `provider.connect(model, skip_model_test=True)`, with a per-provider instance cache (`_provider_for_tier`, `jaato_session.py:9326`) keyed by `provider_name`. History is provider-neutral (`Message`/`Part`), so it flows across a swap. |
+
+So the mechanism is all present. What is missing is a **`BudgetTracker`**
+(accumulate the dimensions per scope, emit threshold events) and the
+**overlay-application** step that mutates the tier table when a rung
+fires.
+
+---
+
+## 3. Schema
+
+```yaml
+# .jaato/profiles/<name>.yaml
+model_tiers:
+  planner:    { model: anthropic/claude-opus-4,    provider: openrouter }
+  dispatcher: { model: anthropic/claude-sonnet-4,  provider: openrouter }
+  executor:   { model: anthropic/claude-haiku-4-5, provider: openrouter }
+  initial:    dispatcher
+  fallback:   dispatcher
+
+budget_control:
+  limits:                      # omit a dimension to leave it unbounded
+    usd:        3.00           # ← UsageBreakdown.cost_usd (reported → pricing.json)
+    tokens:     300000         # ← total tokens (the one dim GC already enforces)
+    seconds:    480            # ← summed turn.completed / tool.call_completed durations
+    tool_calls: 40             # ← counted from tool.call_completed
+    turns:      30             # ← turn counter (max_turns is the hard cap)
+
+  degrade:                     # ordered; each rung fires ONCE, latched, cumulative
+    - at: 70%
+      model_tiers:             # sparse overlay on the base table; unspecified tiers unchanged
+        planner: { model: google/gemini-flash, provider: openrouter }
+    - at: 90%
+      model_tiers:
+        planner:    { model: google/gemini-flash, provider: openrouter }
+        dispatcher: { model: google/gemini-flash, provider: openrouter }
+    - at: 100%
+      action: finalize         # graceful terminal: inject "wrap up and answer now"
+      # alternative terminals: `abort` (hard stop) | `escalate` (hand to cascade owner)
+```
+
+**Field notes:**
+
+- A `degrade[].model_tiers` overlay entry is a **tier-entry value** —
+  the identical `str` | `{model, provider}` grammar the base
+  `model_tiers` already parses via `_normalize_tier_entry`
+  (`model_tiers.py:139`). No new syntax; overlays validate through the
+  same path. `provider` is the plugin name (`openrouter`, `anthropic`,
+  `ollama`, …); for OpenRouter the `vendor/model` form lives inside
+  `model`.
+- Overlays may **only** reference the officially declared tier names
+  (`VALID_TIER_NAMES` = `planner` / `dispatcher` / `executor` /
+  `vision`). They introduce no ad-hoc labels, so no widening of the tier
+  vocabulary or the `enter_tier` tool schema is required.
+
+### 3.1 No `scope` field (deliberate)
+
+An earlier draft carried `scope: agent | cascade`. It was dropped: a
+profile is a reusable **template**, but a cascade budget is a **runtime
+aggregate** over a live `cid` spanning many sessions — putting a
+cascade-wide cap on a leaf profile is a category error (which profile
+owns the number when three cascades each spawn the profile? when two
+profiles in one cascade both declare a cascade cap?).
+
+Therefore: **a profile-level `budget_control` is always the envelope of
+the one agent instance created from it.** Cascade-/subtree-wide
+budgeting is a *separate surface* declared at cascade launch, on the
+cascade-as-client **owner** (which already holds lifecycle authority for
+the cid). The two compose by **min-wins down the spawn tree**:
+
+```
+effective_agent_limit[dim] = min(profile.budget_control.limits[dim],
+                                 cascade.remaining[dim])
+```
+
+Two axes stay distinct: **profile inheritance** (parent profiles →
+min-wins on the template) vs **spawn-tree propagation** (cascade
+remaining → clamps descendants at runtime). Conflating them under one
+`scope` enum was the smell. The cascade-launch surface is out of scope
+for this note (§8) but the min-wins composition rule is the contract it
+must honor.
+
+---
+
+## 4. Why degradation rebinds tiers instead of switching them
+
+Two rejected shapes and why the third wins:
+
+**Rejected A — "clamp the tier cap."** Degrade by forcing the agent
+down to a cheaper tier (`planner` → `executor`). Problem: the tier
+labels are a **cognitive/role** axis, not a cost axis, and
+`model_tiers.py:64` says so explicitly — "order is conceptual … but
+doesn't enforce ordering on the model assignments; operators are free to
+wire them however the provider's pricing makes sense." An operator may
+map `planner → haiku` and `executor → opus`. So "degrade = go to
+executor" reads cost meaning into labels that carry none, and it *also*
+yanks the model's role identity (it thinks it's now "executing" when it
+was "planning").
+
+**Rejected B — "budget owns an independent ordered model list."**
+Decouples cost from role, but now two things (the model's chosen tier
+and the budget's forced rung) drive the single `_active_tier` /
+`_model_name`, requiring a reconciliation rule when they disagree.
+
+**Chosen — rebind the tier→model table.** At 70%, `planner` still means
+"planner" and the model still calls `enter_tier(planner)` when it wants
+to plan — but `planner` now *resolves to* `gemini-flash`. The role axis
+is untouched; the budget mutates only the binding beneath it. This:
+
+- needs **no cost ordering** over tiers (each tier's replacement is
+  declared independently and explicitly — fully sidesteps the
+  `model_tiers.py:64` caveat);
+- introduces **no new labels** (references only declared tiers);
+- never fights the model's `enter_tier` choices (orthogonal axes).
+
+A **brownout, not a blackout**: every "room" dims to a cheaper bulb;
+none are switched off.
+
+---
+
+## 5. Runtime semantics
+
+1. **Trigger — first dimension wins.** A rung fires when *any* declared
+   dimension crosses its `at` percentage. Blowing the dollar budget
+   while tokens are fine still fires the rung. This is the
+   "multi-dimensional" property.
+2. **Latched.** Once a rung applies, its overlay stays applied even if a
+   later measurement recovers below the threshold. Required because GC
+   *lowers* `percent_used`; without latching the token dimension would
+   flap the model between opus and flash on every GC cycle.
+3. **Cumulative, sparse overlay.** Each rung is a patch keyed by tier;
+   unspecified tiers keep their current binding; later rungs win on
+   collision. A rung only restates a tier whose binding changes at that
+   threshold.
+4. **Application = mutate the tier table, then re-resolve the active
+   tier.** Applying a rung overlays its entries onto the session's
+   `_tier_config.tiers`, then re-points the *currently active* tier at
+   its (possibly new) model. New turns resolve from the mutated table
+   automatically.
+
+---
+
+## 6. Mechanism against real surfaces
+
+Two components, both thin:
+
+### 6.1 `BudgetTracker`
+
+A per-session object that subscribes to events already on the bus and
+accumulates the dimensions:
+
+- `usd` ← `UsageBreakdown.cost_usd` off `turn.completed` /
+  `context.updated` (prefer provider-reported; fall back to
+  `pricing.json` — never guess when both are `None`, just don't advance
+  the `usd` dimension).
+- `tokens` ← running total (already tracked).
+- `seconds` ← sum of `turn.completed.duration_seconds` (+
+  `tool.call_completed.duration_seconds` if tool wall-clock is counted
+  separately).
+- `tool_calls` ← count of `tool.call_completed`.
+- `turns` ← turn counter.
+
+After each update it computes `max(dim_used / dim_limit)` over declared
+dimensions and, when a not-yet-fired rung's `at` is crossed, applies
+that rung. Emits a `budget.threshold_crossed` bus event (source_agent
+convention as per reactor infinite-loop prevention) so reactors /
+observers can also react.
+
+### 6.2 Overlay application — the one real blocker
+
+Applying an overlay to the **currently active** tier must survive the
+`switch_tier` short-circuit. `switch_tier` today compares **tier
+names** (`jaato_session.py:9395`):
+
+```python
+actual_tier, entry = self._tier_config.model_for(requested_tier)
+if actual_tier == self._active_tier:
+    return {"status": "already_at_tier", ...}   # ← no re-connect
+```
+
+So if the agent is in `planner` when the 70% rung rebinds
+`planner: opus → flash`, calling `switch_tier("planner")` would
+short-circuit and **never re-`connect` the new model** — the rebind
+wouldn't take effect until the agent happened to leave and re-enter
+`planner`. The fix is a re-resolve path that compares the **resolved
+entry**, not the tier name:
+
+- After overlaying onto `_tier_config.tiers`, re-run `model_for(active)`
+  and, if `entry.model` / `entry.provider` differs from what
+  `self._provider` is currently connected to, run the
+  swap/`connect(entry.model, skip_model_test=True)` even though
+  `_active_tier` is unchanged.
+
+The cross-provider swap itself is already handled: `_provider_for_tier`
+(`jaato_session.py:9326`) caches provider instances **keyed by
+`provider_name`**, and a same-provider model change is just
+`self._provider.connect(new_model)`. Because that cache is keyed by
+provider name (not by model), correctness for a *same-provider* rebind
+(opus → flash, both `openrouter`) depends entirely on re-running
+`connect(entry.model)` after the overlay — which the re-resolve path
+above provides. A *cross-provider* rebind (e.g. degrade to
+`provider: ollama`) swaps the cached instance by name in O(1), already
+supported.
+
+**This short-circuit is the single implementation risk to verify;
+everything else reuses existing, tested paths.**
+
+---
+
+## 7. Inheritance
+
+`budget_control` follows the profile-inheritance conventions in
+`shared/plugins/subagent/config.py`:
+
+- **`limits`: min-wins.** A child may only *tighten* a dimension:
+  `effective[dim] = min(child[dim], parent[dim])`. A child can never
+  grant itself a larger ceiling than a parent — mirrors the safe
+  direction of the existing `suppress_base_instructions` union merge
+  (a restriction any layer imposes stays imposed).
+- **`degrade`: scalar-override** (child's whole ladder wins if set,
+  else inherit), matching how `model_tiers` itself merges
+  (`config.py:1768`, scalar-override).
+
+---
+
+## 8. Out of scope (deferred)
+
+- **Cascade-launch budget surface** — the owner-side aggregate cap and
+  its min-wins propagation down the spawn tree (§3.1). This note fixes
+  the composition contract; the surface itself is a follow-up on the
+  cascade-as-client owner.
+- **Per-cid resource tracking** (memory / cpu) — the broader
+  `cascade-as-client.md` §7 deferral.
+- **Escalation terminal** (`action: escalate`) wiring to a human /
+  cascade owner — sketched in the schema, not specified here.
+
+---
+
+## 9. Risks
+
+- **`switch_tier` name-compare short-circuit** (§6.2) — the correctness
+  hinge for rebinding the active tier. Must be addressed or the overlay
+  silently no-ops until the next `enter_tier`.
+- **`usd` accuracy** — provider-reported cost is exact; `pricing.json`
+  drifts. The tracker must prefer reported cost and simply not advance
+  the dollar dimension when neither source has a number (never
+  estimate-then-enforce a hard stop on a guess).
+- **Latch vs. GC interaction** — mandated latching (§5.2) is what keeps
+  GC-driven `percent_used` recovery from flapping the model binding.
+- **Single-model profiles** — `budget_control.degrade` with
+  `model_tiers` overlays is meaningful only when the profile declares
+  `model_tiers`. For single-model profiles, only non-tier rung actions
+  (`finalize` / `abort`) are applicable; overlay rungs should be
+  rejected at profile-load with a clear error.
