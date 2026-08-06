@@ -263,6 +263,65 @@ supported.
 **This short-circuit is the single implementation risk to verify;
 everything else reuses existing, tested paths.**
 
+### 6.3 Scaffold discoverability (explain / validate / build)
+
+`jaato-scaffold` introspects the **installed** framework — a new profile
+block is invisible to `explain`, and silently accepted by `validate`,
+unless wired at the same three points `model_tiers` is. The
+implementation **must** follow this pattern (it is not optional polish —
+a block that skips it is a silent-ignore footgun):
+
+1. **`explain profile`** renders `introspect.profile_schema()`
+   (`scaffold/introspect.py:274`), which iterates
+   `dataclasses.fields(SubagentProfile)` and reads each field's
+   `metadata["description"]`. → `budget_control` must be a real
+   dataclass field on `SubagentProfile`
+   (`shared/plugins/subagent/config.py`) with a `default_factory` and
+   `metadata={"description": …}`. Without the field,
+   `SubagentProfile.from_dict` silently drops a `budget_control:` YAML
+   key (it reads only known keys) and `explain` never shows it.
+
+2. **Constraint surfacing** — `introspect._profile_field_constraints()`
+   (`scaffold/introspect.py:254`) resolves allowed-value hints bounded
+   by a framework constant, exactly as it does for `model_tiers`
+   (`VALID_TIER_NAMES` / `RESERVED_KEYS`). → add a `budget_control`
+   entry surfacing the valid dimension names
+   (`usd` / `tokens` / `seconds` / `tool_calls` / `turns`), the
+   `degrade[].at` percentage form, and the terminal action names
+   (`finalize` / `abort` / `escalate`) — so an author sees the real
+   shape without reading source.
+
+3. **`validate`** — `_validate_profile` (`scaffold/validate.py`) walks
+   the **resolved** `SubagentProfile` and carries a bespoke branch per
+   structured block (`model_tiers` at `validate.py:116-132`). →
+   `budget_control` needs its own branch that:
+   - checks `limits` keys ∈ the known dimension set;
+   - validates each `degrade[].model_tiers` overlay by **reusing the
+     identical `VALID_TIER_NAMES` + `introspect.resolve_provider`
+     checks** the `model_tiers` branch already applies — an overlay *is*
+     a tier table, so it inherits the same tier-name-typo and
+     uninstalled-cross-provider defects;
+   - errors on an overlay rung in a profile that declares **no**
+     `model_tiers` (Risk §9 — overlay is meaningless in single-model
+     mode);
+   - checks the terminal `action` ∈ {`finalize`, `abort`, `escalate`}.
+   Without this branch a mistyped `budget_control` is **silently
+   ignored** — the precise failure mode `_validate_profile` exists to
+   prevent (it calls this out explicitly for `plugin_configs` knobs).
+
+4. **`build` / `new`** — `emit_then_validate`
+   (`scaffold/api.py` / `build.py`) runs every generated profile back
+   through the validator, so once (1)–(3) land a scaffolded profile
+   carrying `budget_control` is validated for free; no build-specific
+   work beyond emitting the block.
+
+Net pattern: **dataclass field + `metadata` description + constraint
+entry + bespoke `validate` branch**, mirroring `model_tiers`
+end-to-end. A test analogous to those under `scaffold/tests/` should
+assert the field appears in `profile_schema()` and that a malformed
+`budget_control` produces a diagnostic (guarding against silent
+regression to the ignore path).
+
 ---
 
 ## 7. Inheritance
@@ -299,6 +358,12 @@ everything else reuses existing, tested paths.**
 - **`switch_tier` name-compare short-circuit** (§6.2) — the correctness
   hinge for rebinding the active tier. Must be addressed or the overlay
   silently no-ops until the next `enter_tier`.
+- **Silent-ignore if scaffold wiring is skipped** (§6.3) — a
+  `budget_control` block with no `SubagentProfile` dataclass field +
+  `validate` branch is dropped by `from_dict` and never flagged. The
+  block *looks* configured while doing nothing. This is the highest-
+  likelihood regression and the reason §6.3 is a hard requirement, not
+  polish.
 - **`usd` accuracy** — provider-reported cost is exact; `pricing.json`
   drifts. The tracker must prefer reported cost and simply not advance
   the dollar dimension when neither source has a number (never
