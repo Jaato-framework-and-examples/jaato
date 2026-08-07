@@ -78,7 +78,7 @@ fires.
 model_tiers:
   planner:    { model: anthropic/claude-opus-4,    provider: openrouter }
   dispatcher: { model: anthropic/claude-sonnet-4,  provider: openrouter }
-  executor:   { model: anthropic/claude-haiku-4-5, provider: openrouter }
+  executor:   { model: anthropic/claude-haiku-4.5, provider: openrouter }
   initial:    dispatcher
   fallback:   dispatcher
 
@@ -116,6 +116,35 @@ budget_control:
   (`VALID_TIER_NAMES` = `planner` / `dispatcher` / `executor` /
   `vision`). They introduce no ad-hoc labels, so no widening of the tier
   vocabulary or the `enter_tier` tool schema is required.
+
+### 3.0 Authoring a budgeted profile — three traps
+
+Found while the first PoC was being built; none of them is caught by
+`jaato-scaffold validate`, so they are documented rather than enforced.
+
+1. **`max_turns` must exceed `limits.turns`.** If both are `4` the run
+   stops at turn 4 either way and the abort is *unattributable* — a
+   budget stop is indistinguishable from the turn cap. Set `max_turns`
+   comfortably above the turn ceiling so stopping is attributable only
+   to the budget.
+2. **Preload the tools the demo depends on.** Most tool plugins are
+   discovery-gated (`cli` included): the model must call
+   `list_tools` / `get_tool_schemas` before it can use them. Under a
+   turn budget that discovery *burns the budget*, so rungs fire during
+   discovery instead of during the work, and the run stops being
+   reproducible. Use `cli(preload)` (the validator emits an
+   informational `discovery_gated_tools` line listing what is deferred).
+3. **Model ids are not validated.** The validator checks tier names and
+   that a named provider is installed — it does NOT check that the model
+   id exists on that provider. A typo validates clean and fails at
+   `connect`. Check the provider's catalog (for OpenRouter,
+   `GET /api/v1/models`, public) — note e.g. the OpenRouter id is
+   `anthropic/claude-haiku-4.5` (dot), while the Anthropic-native
+   spelling is `claude-haiku-4-5-20251001`. This bites hardest on a
+   `fallback` tier, which may not be entered until late in a run.
+
+Also note `system_instructions` is deprecated at profile level — put the
+persona in `.jaato/agents/<name>.md`.
 
 ### 3.1 No `scope` field (deliberate)
 
