@@ -87,6 +87,18 @@ VALID_ACTIONS: frozenset = frozenset(
 )
 
 
+class CascadeExhaustedError(RuntimeError):
+    """A child was to be spawned into a cascade with no headroom left.
+
+    Raised by :meth:`CascadeBudgetPool.child_config` instead of handing back
+    a zero-valued limit.  Zero is not a budget a session can run under — the
+    first turn would immediately breach it — and returning ``None``
+    ("unbudgeted") would be catastrophically wrong here, since the reason
+    there is no budget is that the cascade is OUT of budget.  Failing loud
+    forces the caller to refuse the spawn with a real reason.
+    """
+
+
 class BudgetControlConfigError(ValueError):
     """Raised when a ``budget_control`` block can't be parsed or is
     internally inconsistent.  Mirrors
@@ -563,3 +575,159 @@ def overlay_tier_table(
         tiers[tier_name] = entry
         changes[tier_name] = f"{was} -> {entry.model}"
     return changes
+
+
+@dataclass(frozen=True)
+class EffectiveLimits:
+    """Result of clamping a child's own ceiling against a cascade's remainder.
+
+    Carries BOTH inputs, not just the outcome, so an operator can see that
+    ``min()`` actually clamped rather than having to infer it from a single
+    number — the observability the first cascade PoC asked for.
+
+    Attributes:
+        effective: The ceiling the child session will actually run under.
+        profile_limits: What the child's own profile asked for.
+        cascade_remaining: What was left in the cascade pool at spawn time.
+        clamped: Dimensions where the cascade remainder won (i.e. the child
+            asked for more than the cascade had left).
+    """
+
+    effective: Mapping[str, float]
+    profile_limits: Mapping[str, float]
+    cascade_remaining: Mapping[str, float]
+    clamped: Tuple[str, ...] = ()
+
+    @property
+    def exhausted(self) -> Tuple[str, ...]:
+        """Dimensions with no headroom left (effective <= 0).
+
+        Non-empty means the cascade cannot afford this child at all.
+        """
+        return tuple(sorted(d for d, v in self.effective.items() if v <= 0))
+
+    def describe(self) -> str:
+        """One-line, per-dimension account of the clamp for logs/events."""
+        if not self.effective:
+            return "unbudgeted"
+        parts = []
+        for dim in sorted(self.effective):
+            prof = self.profile_limits.get(dim)
+            rem = self.cascade_remaining.get(dim)
+            mark = " CLAMPED" if dim in self.clamped else ""
+            parts.append(
+                f"{dim}: profile={prof if prof is not None else '-'} "
+                f"cascade_remaining={rem if rem is not None else '-'} "
+                f"-> {self.effective[dim]}{mark}"
+            )
+        return "; ".join(parts)
+
+
+class CascadeBudgetPool:
+    """The AGGREGATE ceiling for one cascade (cid) — a single shared counter.
+
+    Distinct from :class:`BudgetTracker`, which is per-session.  The pool is
+    what makes a cascade cap a real ceiling rather than a per-child
+    suggestion:
+
+    * **Atomic, not snapshot.** Spend is applied under a lock to ONE counter.
+      Were each child instead handed a snapshot of the remainder at spawn,
+      N concurrent children could each pass their own check and collectively
+      overshoot — min-wins would silently stop holding under fan-out.
+    * **Two mechanisms, not two alternatives.** :meth:`effective_limits_for`
+      still clamps each child's own ceiling at spawn (``min(profile,
+      remaining)``) — that is a genuine per-child guarantee and the operator-
+      visible one.  The pool is the aggregate on top.
+
+    Granularity: spend is reported at TURN boundaries (the daemon already
+    receives per-turn usage), so a fan-out can overshoot by at most one
+    in-flight turn per concurrent child between the pool crossing and the
+    degrade reaching them.  Bounded and explainable — not a silent
+    unbounded overshoot.  Tightening it would need per-response reporting
+    from runner to daemon, a heavier channel deliberately not built.
+    """
+
+    def __init__(self, cascade_driver_id: str, config: BudgetControlConfig) -> None:
+        self.cascade_driver_id = cascade_driver_id
+        self._tracker = BudgetTracker(config)
+        self._lock = __import__("threading").Lock()
+
+    @property
+    def config(self) -> BudgetControlConfig:
+        return self._tracker.config
+
+    def spend(self, **deltas: Optional[float]) -> Tuple["DegradeRung", ...]:
+        """Apply spend atomically; return rungs the POOL just crossed."""
+        with self._lock:
+            return self._tracker.observe(**deltas)
+
+    def remaining(self) -> Dict[str, float]:
+        """Per-dimension headroom left in the pool (never negative)."""
+        with self._lock:
+            usage = self._tracker.usage.as_dict()
+            return {
+                dim: max(0.0, limit - usage[dim])
+                for dim, limit in self._tracker.config.limits.items()
+            }
+
+    def usage_fraction(self) -> float:
+        with self._lock:
+            return self._tracker.usage_fraction()
+
+    def describe_pressure(self) -> str:
+        with self._lock:
+            return self._tracker.describe_pressure()
+
+    def effective_limits_for(
+        self, profile_limits: Optional[Mapping[str, float]]
+    ) -> EffectiveLimits:
+        """Clamp a child's declared ceiling against what the cascade has left.
+
+        ``effective[dim] = min(profile[dim], remaining[dim])`` where both
+        declare the dimension; otherwise whichever declares it wins (an
+        undeclared dimension is unbounded, so the declared one is strictly
+        tighter).  A child can therefore never widen its parent's ceiling,
+        and never exceed what the cascade still has.
+        """
+        remaining = self.remaining()
+        profile = dict(profile_limits or {})
+        effective: Dict[str, float] = {}
+        clamped = []
+        for dim in set(profile) | set(remaining):
+            p = profile.get(dim)
+            r = remaining.get(dim)
+            if p is not None and r is not None:
+                effective[dim] = min(p, r)
+                if r < p:
+                    clamped.append(dim)
+            elif p is not None:
+                effective[dim] = p
+            else:
+                effective[dim] = r
+                clamped.append(dim)
+        return EffectiveLimits(
+            effective=effective, profile_limits=profile,
+            cascade_remaining=remaining, clamped=tuple(sorted(clamped)),
+        )
+
+    def child_config(
+        self, profile_budget: Optional[BudgetControlConfig]
+    ) -> Tuple[Optional[BudgetControlConfig], EffectiveLimits]:
+        """Build the config a child session should actually run under.
+
+        Returns ``(config, effective)``.  The child keeps its own ``degrade``
+        ladder (the cascade constrains ceilings, not a child's degradation
+        policy) but runs against the clamped limits.
+        """
+        eff = self.effective_limits_for(
+            profile_budget.limits if profile_budget else None)
+        if not eff.effective:
+            return profile_budget, eff
+        if eff.exhausted:
+            raise CascadeExhaustedError(
+                f"cascade {self.cascade_driver_id} has no headroom left on "
+                f"{', '.join(eff.exhausted)} — refusing to spawn a child that "
+                f"could not run a single turn ({eff.describe()})"
+            )
+        degrade = profile_budget.degrade if profile_budget else ()
+        return BudgetControlConfig(limits=eff.effective, degrade=degrade), eff
