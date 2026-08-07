@@ -12,6 +12,7 @@ from typing import Any, Callable, Dict, FrozenSet, List, Optional, Protocol, Tup
 from typing import runtime_checkable
 
 from shared.runtime_limits import RuntimeLimits
+from shared.budget_control import BudgetControlConfig, merge_limits
 from shared.instruction_suppression import normalize_suppression
 
 logger = logging.getLogger(__name__)
@@ -987,6 +988,16 @@ class SubagentProfile:
             applied via cgroup v2 by ``server.cgroups.CgroupsManager``;
             the rest is read by the CLI/interactive_shell plugins at
             tool-call time.  ``None`` means "no limits" (host defaults).
+        budget_control: Optional multi-dimensional budget ceilings
+            (``limits``: usd / tokens / seconds / tool_calls / turns) plus
+            a ``degrade`` ladder applied as those ceilings are
+            approached.  Where ``runtime_limits`` caps HOST resources,
+            this caps agent ECONOMICS.  A degrade rung rebinds
+            ``model_tiers`` bindings (a brownout) rather than moving the
+            agent between tiers, so the model's cognitive role is
+            untouched.  Inheritance: ``limits`` min-wins (a child may only
+            tighten), ``degrade`` is scalar-override.  ``None`` means
+            "unbudgeted".
     """
     name: str = field(metadata={
         "description": "Unique profile identifier (the <agent>.yaml stem)."})
@@ -1122,6 +1133,25 @@ class SubagentProfile:
         "is picked per turn from model_tiers[<active_tier>]. Empty = "
         "single-model mode (falls back to the JAATO_TIER_* env vars, then "
         "`model`)."})
+    # Budget ceilings + the degradation ladder applied as they're
+    # approached.  Distinct from ``runtime_limits`` (host resources:
+    # memory / pids / cpu) — this caps agent ECONOMICS.  A ``degrade``
+    # rung REBINDS ``model_tiers`` entries rather than moving the agent
+    # between tiers, because tier labels are a cognitive/role axis with
+    # no inherent cost ordering (see shared/model_tiers.py).  Parsed +
+    # validated by ``shared/budget_control.py``; full design in
+    # ``docs/design/budget-control-degradation.md``.
+    budget_control: Optional[BudgetControlConfig] = field(
+        default=None, metadata={
+        "description": "Multi-dimensional budget ceilings + graceful degradation. "
+        "`limits`: usd / tokens / seconds / tool_calls / turns (omit a dimension to "
+        "leave it unbounded). `degrade`: an ordered ladder of rungs; a rung fires "
+        "when ANY dimension crosses its `at` percentage and overlays new model_tiers "
+        "bindings (a brownout — the tier vocabulary and the model's role are "
+        "untouched, only the model each tier points at changes) and/or takes a "
+        "terminal action (finalize / abort / escalate). Inheritance: limits "
+        "MIN-WINS (a child may only tighten), degrade is scalar-override. "
+        "None = unbudgeted."})
     # AppArmor confinement intent for the session (PR-A, 2026-05-14).
     #
     # ``False`` (default, back-compat) — the session bootstraps
@@ -1420,7 +1450,7 @@ def build_inline_profile(
             ``plugin_configs``, ``system_instructions``, ``max_turns``,
             ``gc``, ``env``, ``completion_payload_schema``,
             ``completion_processors``,
-            ``runtime_limits``, ``model_tiers``.
+            ``runtime_limits``, ``budget_control``, ``model_tiers``.
         name: Display name for logs and traces. Default ``<inline>``.
         description: Human-readable description for the profile.
 
@@ -1448,6 +1478,13 @@ def build_inline_profile(
             runtime_limits = RuntimeLimits.from_dict(data['runtime_limits'])
         except (ValueError, TypeError) as exc:
             raise ValueError(f"Invalid runtime_limits in inline spec: {exc}")
+
+    budget_control = None
+    if data.get('budget_control'):
+        try:
+            budget_control = BudgetControlConfig.from_dict(data['budget_control'])
+        except (ValueError, TypeError) as exc:
+            raise ValueError(f"Invalid budget_control in inline spec: {exc}")
 
     # ``plugins`` is REQUIRED on every profile / inline spec — absent
     # vs. explicitly-empty have meaningfully different downstream
@@ -1509,6 +1546,7 @@ def build_inline_profile(
         spawn_payload_schema=data.get('spawn_payload_schema'),
         completion_processors=_parse_completion_processors(data.get('completion_processors')),
         runtime_limits=runtime_limits,
+        budget_control=budget_control,
         model_tiers=model_tiers,
         apparmor=bool(data.get('apparmor', False)),
         # Use ``data.get('apparmor_fragments')`` (returns None when
@@ -1603,6 +1641,60 @@ def resolve_profiles(
         _resolve(name)
 
     return resolved, errors
+
+
+def _merge_budget_control(
+    parents: List['SubagentProfile'],
+    child: 'SubagentProfile',
+) -> Optional[BudgetControlConfig]:
+    """Merge ``budget_control`` across parents + child.
+
+    Two different rules, one per half of the block:
+
+    * ``limits`` — **min-wins** across every layer that declares a
+      dimension (:func:`shared.budget_control.merge_limits`).  A child
+      may only ever TIGHTEN a ceiling; it must never grant itself a
+      bigger budget than the profile that spawned it.  This is the same
+      safety direction ``max_turns`` already takes (most restrictive
+      value across parents), and it deliberately differs from the
+      child-replaces-parent rule used by most scalar fields — for a
+      resource ceiling, "child wins" would be an escape hatch.
+      Divergent parent values do NOT conflict: the minimum is
+      well-defined and is the safe resolution.
+    * ``degrade`` — **scalar-override**: the child's whole ladder wins
+      when it declares one, else the first parent that declares one is
+      inherited whole.  Matches ``model_tiers`` (a ladder is a coherent
+      unit; interleaving rungs from two layers would produce a ladder
+      neither author wrote).
+
+    Returns ``None`` when no layer declares anything, so an unbudgeted
+    profile stays unbudgeted.
+    """
+    parent_configs = [
+        p.budget_control for p in parents if p.budget_control is not None
+    ]
+    child_config = child.budget_control
+    if not parent_configs and child_config is None:
+        return None
+
+    limits: Dict[str, float] = {}
+    for cfg in parent_configs:
+        limits = merge_limits(limits, cfg.limits)
+    if child_config is not None:
+        limits = merge_limits(limits, child_config.limits)
+
+    degrade: Tuple[Any, ...] = ()
+    if child_config is not None and child_config.degrade:
+        degrade = child_config.degrade
+    else:
+        for cfg in parent_configs:
+            if cfg.degrade:
+                degrade = cfg.degrade
+                break
+
+    if not limits and not degrade:
+        return None
+    return BudgetControlConfig(limits=limits, degrade=degrade)
 
 
 def _merge_profiles(
@@ -1768,6 +1860,14 @@ def _merge_profiles(
     merged_model_tiers = _resolve_scalar(
         'model_tiers', child.model_tiers, default={})
 
+    # budget_control: NOT a plain scalar-override.  ``limits`` merge
+    # MIN-WINS across parents + child (a child may only TIGHTEN a
+    # ceiling — it must never grant itself a bigger budget than the
+    # profile that spawned it, the same safety direction as max_turns
+    # above), while ``degrade`` is scalar-override (the child's whole
+    # ladder wins, matching model_tiers).
+    merged_budget_control = _merge_budget_control(parents, child)
+
     # completion_payload_schema: scalar-override (parents must agree or
     # child overrides). Inline dicts and string paths both compared as-is
     # via str() in _resolve_scalar.
@@ -1895,6 +1995,7 @@ def _merge_profiles(
         spawn_payload_schema=merged_spawn_schema,
         completion_processors=merged_completion_processors,
         runtime_limits=merged_runtime_limits,
+        budget_control=merged_budget_control,
         model_tiers=merged_model_tiers,
         apparmor=merged_apparmor,
         apparmor_fragments=merged_apparmor_fragments,
@@ -2034,6 +2135,18 @@ def _scan_profiles_dir(
                     errors[name] = err
                 continue
 
+        budget_control = None
+        if 'budget_control' in data and data['budget_control']:
+            try:
+                budget_control = BudgetControlConfig.from_dict(
+                    data['budget_control'])
+            except (ValueError, TypeError) as exc:
+                err = f"Invalid budget_control in profile '{name}': {exc}"
+                logger.warning(err)
+                if name not in errors:
+                    errors[name] = err
+                continue
+
         # ``plugins:`` is a REQUIRED profile key as of server 0.6.x
         # (this PR).  Absent vs. explicitly-empty have meaningfully
         # different semantics:
@@ -2105,6 +2218,7 @@ def _scan_profiles_dir(
             spawn_payload_schema=data.get('spawn_payload_schema'),
             completion_processors=_parse_completion_processors(data.get('completion_processors')),
             runtime_limits=runtime_limits,
+            budget_control=budget_control,
             model_tiers=model_tiers,
             apparmor=bool(data.get('apparmor', False)),
             apparmor_fragments=_normalize_apparmor_fragments(data.get('apparmor_fragments')),
@@ -2453,6 +2567,18 @@ def _discover_premium_profiles() -> Dict[str, 'SubagentProfile']:
                 )
                 continue
 
+        budget_control = None
+        if 'budget_control' in data and data['budget_control']:
+            try:
+                budget_control = BudgetControlConfig.from_dict(
+                    data['budget_control'])
+            except (ValueError, TypeError) as exc:
+                logger.warning(
+                    "Skipping premium profile '%s': invalid budget_control: %s",
+                    name, exc,
+                )
+                continue
+
         # ``plugins:`` is REQUIRED on premium profiles too — see the
         # workspace scanner for the full rationale.
         if 'plugins' not in data:
@@ -2505,6 +2631,7 @@ def _discover_premium_profiles() -> Dict[str, 'SubagentProfile']:
             spawn_payload_schema=data.get('spawn_payload_schema'),
             completion_processors=_parse_completion_processors(data.get('completion_processors')),
             runtime_limits=runtime_limits,
+            budget_control=budget_control,
             model_tiers=model_tiers,
             apparmor=bool(data.get('apparmor', False)),
             apparmor_fragments=_normalize_apparmor_fragments(data.get('apparmor_fragments')),
@@ -2656,6 +2783,19 @@ def validate_profile(data: Any) -> Tuple[bool, List[str], List[str]]:
             except (ValueError, TypeError) as exc:
                 errors.append(f"runtime_limits: {exc}")
 
+    # budget_control sub-validation: delegate to BudgetControlConfig
+    # .from_dict, which raises for unknown dimensions / bad thresholds /
+    # bad overlay tier names — kept in one place rather than duplicated.
+    budget_data = data.get("budget_control")
+    if budget_data is not None:
+        if not isinstance(budget_data, dict):
+            errors.append("'budget_control' must be an object or null")
+        else:
+            try:
+                BudgetControlConfig.from_dict(budget_data)
+            except (ValueError, TypeError) as exc:
+                errors.append(f"budget_control: {exc}")
+
     return len(errors) == 0, errors, warnings
 
 
@@ -2733,6 +2873,12 @@ class SubagentConfig:
             if 'runtime_limits' in profile_data and profile_data['runtime_limits']:
                 runtime_limits = RuntimeLimits.from_dict(profile_data['runtime_limits'])
 
+            # Same fail-at-load-time contract as runtime_limits above.
+            budget_control = None
+            if 'budget_control' in profile_data and profile_data['budget_control']:
+                budget_control = BudgetControlConfig.from_dict(
+                    profile_data['budget_control'])
+
             # Parse plugin entries, separating (preload) annotations
             # and per-plugin tool allow-lists.
             raw_plugins = profile_data.get('plugins', [])
@@ -2770,6 +2916,7 @@ class SubagentConfig:
                 completion_payload_schema=profile_data.get('completion_payload_schema'),
                 completion_processors=_parse_completion_processors(profile_data.get('completion_processors')),
                 runtime_limits=runtime_limits,
+                budget_control=budget_control,
                 model_tiers=model_tiers,
                 apparmor=bool(profile_data.get('apparmor', False)),
                 apparmor_fragments=_normalize_apparmor_fragments(profile_data.get('apparmor_fragments')),

@@ -268,6 +268,17 @@ def _profile_field_constraints() -> Dict[str, str]:
         out["model_tiers"] = f"tier keys: {tiers}  |  reserved control keys: {reserved}"
     except Exception:
         pass
+    try:
+        from shared import budget_control as bc
+        dims = ", ".join(sorted(bc.VALID_DIMENSIONS))
+        actions = ", ".join(sorted(bc.VALID_ACTIONS))
+        out["budget_control"] = (
+            f"limits dimensions: {dims}  |  degrade[].at: percentage in (0, 100] "
+            f"(70 or '70%'; strictly increasing across rungs)  |  "
+            f"degrade[].model_tiers: overlay keyed by tier name  |  "
+            f"degrade[].action: {actions}")
+    except Exception:
+        pass
     return out
 
 

@@ -1,6 +1,10 @@
 # Budget Control & Graceful Degradation — Design Note
 
-**Status**: Design sketch — not yet scheduled for implementation
+**Status**: Config + discoverability layer IMPLEMENTED; runtime layer
+(§6.1 `BudgetTracker`, §6.2 `switch_tier` re-resolve) NOT yet built —
+a profile may declare `budget_control` and it is parsed, inherited,
+validated and surfaced by `jaato-scaffold`, but nothing enforces it at
+runtime yet.
 **Origin**: discussion comparing jaato against the "advanced agentic
 harness" pattern (typed tools / plan DAG / tiered memory / verification
 hierarchy / budgets / tracer). Every primitive in that pattern already
@@ -350,6 +354,33 @@ regression to the ignore path).
   `cascade-as-client.md` §7 deferral.
 - **Escalation terminal** (`action: escalate`) wiring to a human /
   cascade owner — sketched in the schema, not specified here.
+
+---
+
+## 8b. Implementation status
+
+Landed (config + discoverability):
+
+| Piece | Where |
+|---|---|
+| `BudgetControlConfig` / `DegradeRung` / `merge_limits`, parsing + validation | `shared/budget_control.py` (new; modelled on `shared/runtime_limits.py`) |
+| Profile field + all 4 loaders + JSON-validation helper | `shared/plugins/subagent/config.py` |
+| Inheritance (`limits` min-wins, `degrade` scalar-override) | `config._merge_budget_control` |
+| `explain profile` constraint surfacing (§6.3.1–2) | `shared/scaffold/introspect.py` |
+| Validator branch (§6.3.3) — uninstalled overlay provider, `budget_overlay_without_tiers`, `budget_overlay_undeclared_tier` | `shared/scaffold/validate.py` |
+| 45 tests | `shared/tests/test_budget_control.py`, `shared/tests/test_scaffold_budget_control.py` |
+
+Deliberate parse-time invariants (fail loud at profile load, not at
+session start): unknown dimension; non-positive limit; `at` outside
+`(0, 100]`; unknown action; overlay naming a non-tier or a control key
+(`initial`/`fallback`); a rung that does nothing; **`degrade` without
+`limits`** (`at` is a percentage *of* a limit, so no rung could fire);
+non-strictly-increasing thresholds.
+
+Still to build: §6.1 `BudgetTracker` (accumulate the dimensions off the
+bus, emit `budget.threshold_crossed`, apply rungs) and §6.2 the
+`switch_tier` resolved-entry re-resolve so an overlay applied to the
+*currently active* tier actually re-`connect`s.
 
 ---
 
