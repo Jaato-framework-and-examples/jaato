@@ -2068,8 +2068,14 @@ class SessionManager:
             project_val = ""
             location_val = ""
 
+        # Envelope v5, mirroring build_session_envelope.  NOTE: this
+        # envelope does not carry ``model_tiers`` (pre-existing gap), so an
+        # isolated subagent gets action rungs (abort) but NOT tier-overlay
+        # rungs — an overlay needs a tier table to patch.
+        _iso_budget = getattr(profile, "budget_control", None)
         return SessionInitEnvelope(
             session_id=isolated_session_id,
+            budget_control=_iso_budget.to_dict() if _iso_budget else None,
             workspace_path=workspace_path,
             profile_name=sub_apparmor_profile,
             provider_name=provider_name,
@@ -7554,7 +7560,7 @@ class SessionManager:
                 model_tiers=profile.model_tiers,
                 budget_control=(
                     profile.budget_control.to_dict()
-                    if getattr(profile, 'budget_control', None) else None
+                    if profile.budget_control else None
                 ),
                 gc=asdict(profile.gc) if profile.gc else None,
                 runtime_limits=(

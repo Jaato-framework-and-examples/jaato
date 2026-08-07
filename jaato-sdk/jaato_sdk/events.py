@@ -1195,6 +1195,11 @@ class ProfileSummary(BaseModel):
     provider: Optional[str] = None
     max_turns: int = 10
     model_tiers: Dict[str, Any] = Field(default_factory=dict)
+    # Profile-declared budget_control, re-serialised (shared/budget_control.py).
+    # None = unbudgeted.  Declared explicitly because pydantic SILENTLY DROPS
+    # unknown kwargs — without the field the producer's value vanishes with no
+    # error (same class as the #540 turn_accounting drop).
+    budget_control: Optional[Dict[str, Any]] = None
     gc: Optional[Dict[str, Any]] = None
     runtime_limits: Optional[Dict[str, Any]] = None
     completion_payload_schema: Optional[Union[str, Dict[str, Any]]] = None

@@ -6259,6 +6259,9 @@ export type PreloadedPlugins = string[];
 export type Model = string | null;
 export type Provider = string | null;
 export type MaxTurns = number;
+export type BudgetControl = {
+  [k: string]: unknown;
+} | null;
 export type Gc = {
   [k: string]: unknown;
 } | null;
@@ -14536,6 +14539,7 @@ export interface ProfileSummary {
   provider?: Provider;
   max_turns?: MaxTurns;
   model_tiers?: ModelTiers;
+  budget_control?: BudgetControl;
   gc?: Gc;
   runtime_limits?: RuntimeLimits;
   completion_payload_schema?: CompletionPayloadSchema;

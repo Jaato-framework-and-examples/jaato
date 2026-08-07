@@ -378,6 +378,7 @@ def build_session_envelope(
     gc_dict: Optional[dict] = None
     env_overrides: dict = {}
     model_tiers_dict: Optional[Dict[str, Any]] = None
+    budget_control_dict: Optional[Dict[str, Any]] = None
 
     if profile is not None:
         provider_name = getattr(profile, "provider", None) or ""
@@ -393,6 +394,14 @@ def build_session_envelope(
         raw_tiers = getattr(profile, "model_tiers", None) or None
         if raw_tiers:
             model_tiers_dict = {str(k): v for k, v in raw_tiers.items()}
+        # Envelope v5: same contract as model_tiers above — without this
+        # the runner leaves ``JaatoSession._budget_tracker = None`` and the
+        # session silently runs UNBUDGETED regardless of profile config.
+        # The profile holds a parsed ``BudgetControlConfig``; the wire
+        # carries its re-serialised dict (runner re-parses + revalidates).
+        _budget = getattr(profile, "budget_control", None)
+        if _budget is not None:
+            budget_control_dict = _budget.to_dict()
         # Phase 4 §C: carry the full profile.plugin_configs at the
         # envelope's top level (schema v2) so auto-loaded plugins not
         # named in profile.plugins (e.g. permission) receive their
@@ -628,6 +637,7 @@ def build_session_envelope(
         completion_payload_schema=profile_completion_schema,
         completion_processors=profile_completion_processors,
         model_tiers=model_tiers_dict,
+        budget_control=budget_control_dict,
         # Phase 2 cascade-sharing (envelope v4): forward the cascade
         # tenant ID stashed on the server by
         # ``SessionManager._construct_and_initialize_server``.  Runner
