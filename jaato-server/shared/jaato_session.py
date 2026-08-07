@@ -5114,6 +5114,16 @@ NOTES
             'prompt': 0,
             'output': 0,
             'total': 0,
+            # ``total`` is the LAST response's total_tokens, which for a
+            # prompt-inclusive provider is the end-of-turn CONTEXT SIZE — what
+            # GC and the context displays want.  It is NOT what the turn cost:
+            # a turn with a tool call has >=2 responses and each is billed, so
+            # summing responses is the SPEND.  Both are legitimate and
+            # different consumers want different ones; conflating them
+            # undercounted a real 3-turn run by 41%.
+            'spend_total': 0,
+            'spend_prompt': 0,
+            'spend_output': 0,
             'start_time': turn_start.isoformat(),
             'end_time': None,
             'duration_seconds': None,
@@ -5129,6 +5139,10 @@ NOTES
                 turn_data['prompt'] = usage.prompt_tokens
                 turn_data['output'] = usage.output_tokens
                 turn_data['total'] = usage.total_tokens
+                # Accumulate, do not assign — see the field comment above.
+                turn_data['spend_total'] += usage.total_tokens
+                turn_data['spend_prompt'] += usage.prompt_tokens
+                turn_data['spend_output'] += usage.output_tokens
             # Cache tokens: capture when present (streaming path)
             if usage.cache_read_tokens is not None:
                 turn_data['cache_read'] = usage.cache_read_tokens
@@ -8828,6 +8842,16 @@ NOTES
             'prompt': 0,
             'output': 0,
             'total': 0,
+            # ``total`` is the LAST response's total_tokens, which for a
+            # prompt-inclusive provider is the end-of-turn CONTEXT SIZE — what
+            # GC and the context displays want.  It is NOT what the turn cost:
+            # a turn with a tool call has >=2 responses and each is billed, so
+            # summing responses is the SPEND.  Both are legitimate and
+            # different consumers want different ones; conflating them
+            # undercounted a real 3-turn run by 41%.
+            'spend_total': 0,
+            'spend_prompt': 0,
+            'spend_output': 0,
             'start_time': turn_start.isoformat(),
             'end_time': None,
             'duration_seconds': None,

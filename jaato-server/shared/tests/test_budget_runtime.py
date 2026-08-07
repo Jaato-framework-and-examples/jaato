@@ -279,3 +279,28 @@ def test_refused_send_is_flagged_so_no_turn_completed_is_emitted():
     # the gate now reports a refusal; simulate what send_message records
     s._last_send_refused = JaatoSession._refuse_if_budget_exhausted(s) is not None
     assert JaatoSession.was_last_send_refused(s) is True
+
+
+def test_turn_data_separates_context_size_from_turn_spend():
+    """A turn with a tool call has >=2 responses and each is BILLED, but
+    turn_data['total'] ASSIGNS the last response (= end-of-turn context size).
+    Summing turn.completed therefore undercounted a real 3-turn run by 41%.
+    'spend_*' accumulates, so the cascade pool and the per-session tracker
+    count the same thing — min(profile, cascade_remaining) is meaningless if
+    they don't."""
+    turn_data = {'prompt': 0, 'output': 0, 'total': 0,
+                 'spend_total': 0, 'spend_prompt': 0, 'spend_output': 0}
+
+    def observe(prompt, output, total):
+        # mirrors usage_callback_with_turn_tracking
+        turn_data['prompt'] = prompt
+        turn_data['output'] = output
+        turn_data['total'] = total
+        turn_data['spend_total'] += total
+        turn_data['spend_prompt'] += prompt
+        turn_data['spend_output'] += output
+
+    observe(2000, 150, 2150)   # response 1: the tool call
+    observe(2400, 104, 2504)   # response 2: after the tool result
+    assert turn_data['total'] == 2504          # context size at turn end
+    assert turn_data['spend_total'] == 4654    # what the turn actually cost
