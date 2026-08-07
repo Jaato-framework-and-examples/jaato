@@ -218,6 +218,19 @@ class DegradeRung:
             )
         return cls(at_percent=at_percent, model_tiers=overlay, action=action)
 
+    def to_dict(self) -> Dict[str, Any]:
+        """Round-trip form for the session envelope (daemon -> runner)."""
+        out: Dict[str, Any] = {"at": self.at_percent}
+        if self.model_tiers:
+            out["model_tiers"] = {
+                name: {"model": e.model, "provider": e.provider}
+                if e.provider else {"model": e.model}
+                for name, e in self.model_tiers.items()
+            }
+        if self.action:
+            out["action"] = self.action
+        return out
+
 
 @dataclass(frozen=True)
 class BudgetControlConfig:
@@ -330,6 +343,22 @@ class BudgetControlConfig:
             return None
         return cls(limits=limits, degrade=degrade)
 
+    def to_dict(self) -> Dict[str, Any]:
+        """Round-trip form for the session envelope (daemon -> runner).
+
+        The profile parses ``budget_control`` EAGERLY into this object so a
+        malformed block fails at profile load.  The wire therefore carries a
+        re-serialised dict (rather than the author's raw YAML), which the
+        runner re-parses via :meth:`from_dict` — validating a second time,
+        cheaply, on the far side of the process boundary.
+        """
+        out: Dict[str, Any] = {}
+        if self.limits:
+            out["limits"] = dict(self.limits)
+        if self.degrade:
+            out["degrade"] = [r.to_dict() for r in self.degrade]
+        return out
+
 
 def merge_limits(
     parent_limits: Mapping[str, float],
@@ -354,3 +383,165 @@ def merge_limits(
         else:
             merged[dim] = value
     return merged
+
+
+@dataclass
+class BudgetUsage:
+    """Running consumption per dimension.  Mutable — the tracker owns one."""
+
+    usd: float = 0.0
+    tokens: float = 0.0
+    seconds: float = 0.0
+    tool_calls: float = 0.0
+    turns: float = 0.0
+
+    def as_dict(self) -> Dict[str, float]:
+        return {
+            "usd": self.usd,
+            "tokens": self.tokens,
+            "seconds": self.seconds,
+            "tool_calls": self.tool_calls,
+            "turns": self.turns,
+        }
+
+
+class BudgetTracker:
+    """Accumulates consumption and decides which degrade rungs have fired.
+
+    Deliberately **pure logic** — it holds no session, provider, or event-bus
+    reference.  The session feeds it numbers via :meth:`observe` and acts on
+    the rungs it returns.  That keeps the firing policy (the part with the
+    interesting invariants: first-dimension-wins, latching, cumulative
+    overlays) unit-testable without standing up a session.
+
+    Semantics (design note §5):
+
+    * **First dimension wins** — :meth:`usage_fraction` is the MAX over the
+      declared dimensions, so blowing the dollar budget fires a rung even
+      when tokens are nowhere near their ceiling.
+    * **Latched** — a rung fires at most once, tracked in ``_fired``.  This
+      is load-bearing: GC *lowers* token usage, so an unlatched token rung
+      would flap the model between an expensive and a cheap binding on every
+      GC cycle.
+    * **Cumulative** — rungs are not undone; the session keeps every overlay
+      already applied and layers later ones on top.
+
+    A dimension the profile did not declare is unbounded and contributes
+    nothing to the fraction.  ``usd`` only advances when a cost is actually
+    known (provider-reported or priced) — see :meth:`observe`.
+    """
+
+    def __init__(self, config: BudgetControlConfig) -> None:
+        self._config = config
+        self._usage = BudgetUsage()
+        self._fired: set = set()  # indices into config.degrade
+
+    @property
+    def usage(self) -> BudgetUsage:
+        return self._usage
+
+    @property
+    def config(self) -> BudgetControlConfig:
+        return self._config
+
+    def observe(
+        self,
+        *,
+        usd: Optional[float] = None,
+        tokens: Optional[float] = None,
+        seconds: Optional[float] = None,
+        tool_calls: Optional[float] = None,
+        turns: Optional[float] = None,
+    ) -> Tuple["DegradeRung", ...]:
+        """Add consumption, then return the rungs that fire as a result.
+
+        Every argument is a **delta**, not an absolute.  ``None`` means "no
+        news about this dimension" and leaves it untouched — importantly,
+        that is how an unknown cost is handled: when neither the provider nor
+        the pricing table can supply a number, ``usd`` stays put rather than
+        advancing on a guess (a budget must never hard-stop on an estimate it
+        invented).
+
+        Returns rungs in ladder order, each at most once across the tracker's
+        lifetime.  An empty tuple is the overwhelmingly common case.
+        """
+        for name, delta in (
+            ("usd", usd), ("tokens", tokens), ("seconds", seconds),
+            ("tool_calls", tool_calls), ("turns", turns),
+        ):
+            if delta is None:
+                continue
+            try:
+                value = float(delta)
+            except (TypeError, ValueError):
+                continue
+            if value <= 0:
+                continue
+            setattr(self._usage, name, getattr(self._usage, name) + value)
+        return self._newly_fired()
+
+    def usage_fraction(self) -> float:
+        """Highest ``used / limit`` ratio across the DECLARED dimensions.
+
+        Returns ``0.0`` when nothing is capped.  Not clamped — a run that
+        overshoots reports > 1.0, which is meaningful (it says by how much).
+        """
+        usage = self._usage.as_dict()
+        fractions = [
+            usage[dim] / limit
+            for dim, limit in self._config.limits.items()
+            if limit
+        ]
+        return max(fractions, default=0.0)
+
+    def exceeded_dimensions(self) -> Dict[str, float]:
+        """Dimensions at or past 100% of their ceiling → their fraction.
+
+        Reported alongside a fired rung so an operator can see WHICH ceiling
+        drove the degradation, not merely that one did.
+        """
+        usage = self._usage.as_dict()
+        return {
+            dim: usage[dim] / limit
+            for dim, limit in self._config.limits.items()
+            if limit and usage[dim] >= limit
+        }
+
+    def _newly_fired(self) -> Tuple["DegradeRung", ...]:
+        """Rungs whose threshold is now crossed and which have not fired."""
+        fraction = self.usage_fraction() * 100.0
+        fired = []
+        for index, rung in enumerate(self._config.degrade):
+            if index in self._fired:
+                continue
+            if fraction >= rung.at_percent:
+                self._fired.add(index)
+                fired.append(rung)
+        return tuple(fired)
+
+
+def overlay_tier_table(
+    tiers: Dict[str, TierEntry],
+    overlay: Mapping[str, TierEntry],
+) -> Dict[str, str]:
+    """Apply a degrade overlay onto a live tier table, in place.
+
+    Mutates ``tiers`` (the dict held by the session's ``ModelTierConfig``)
+    because the config object is frozen while its tier mapping is not — the
+    binding is what changes, never the tier vocabulary.
+
+    Returns a ``{tier: "old-model -> new-model"}`` map of what actually
+    changed, for logging and for the emitted event.  A rung that rebinds a
+    tier to the model it already had contributes nothing.
+    """
+    changes: Dict[str, str] = {}
+    for tier_name, entry in overlay.items():
+        current = tiers.get(tier_name)
+        if current is not None and (
+            current.model == entry.model and current.provider == entry.provider
+        ):
+            continue
+        was = current.model if current is not None else "(undeclared)"
+        tiers[tier_name] = entry
+        changes[tier_name] = f"{was} -> {entry.model}"
+    return changes

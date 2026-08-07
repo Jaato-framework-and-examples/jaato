@@ -2683,6 +2683,12 @@ class JaatoServer:
         if tier_config is not None:
             kwargs["tier_config"] = tier_config
 
+        # Budget control (profile-declared; already parsed + validated at
+        # profile load).  Absent => the session runs unbudgeted.
+        if self._profile is not None and getattr(
+                self._profile, "budget_control", None) is not None:
+            kwargs["budget_control"] = self._profile.budget_control
+
         # Apply the per-session system-instruction knobs last so they
         # win over any profile-supplied system_instructions.  Distinct
         # from None (which means "no override") — the empty string is a

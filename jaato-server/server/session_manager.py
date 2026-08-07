@@ -7552,6 +7552,10 @@ class SessionManager:
                 provider=profile.provider,
                 max_turns=profile.max_turns,
                 model_tiers=profile.model_tiers,
+                budget_control=(
+                    profile.budget_control.to_dict()
+                    if getattr(profile, 'budget_control', None) else None
+                ),
                 gc=asdict(profile.gc) if profile.gc else None,
                 runtime_limits=(
                     asdict(profile.runtime_limits)

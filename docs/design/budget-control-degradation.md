@@ -1,10 +1,12 @@
 # Budget Control & Graceful Degradation — Design Note
 
-**Status**: Config + discoverability layer IMPLEMENTED; runtime layer
-(§6.1 `BudgetTracker`, §6.2 `switch_tier` re-resolve) NOT yet built —
-a profile may declare `budget_control` and it is parsed, inherited,
-validated and surfaced by `jaato-scaffold`, but nothing enforces it at
-runtime yet.
+**Status**: IMPLEMENTED end-to-end (config + discoverability + runtime).
+A profile may declare `budget_control`; it is parsed, inherited,
+validated, surfaced by `jaato-scaffold`, carried to the runner on the
+session envelope (v5), and ENFORCED at runtime — spend accumulates from
+the session's existing accounting, degrade rungs rebind `model_tiers`
+bindings (the brownout), and `abort` stops the run. Remaining follow-ups
+are listed in §8.
 **Origin**: discussion comparing jaato against the "advanced agentic
 harness" pattern (typed tools / plan DAG / tiered memory / verification
 hierarchy / budgets / tracer). Every primitive in that pattern already
@@ -352,8 +354,18 @@ regression to the ignore path).
   cascade-as-client owner.
 - **Per-cid resource tracking** (memory / cpu) — the broader
   `cascade-as-client.md` §7 deferral.
-- **Escalation terminal** (`action: escalate`) wiring to a human /
-  cascade owner — sketched in the schema, not specified here.
+- **`finalize` / `escalate` agent-facing effect.** Both are latched on
+  `JaatoSession._budget_terminal_action` and surfaced to the client, but
+  neither injects anything into the model's context. That is deliberate:
+  the reactor layer already owns agent-directed actions (`inject_prompt`,
+  `fork_from_originating`, `delete_session`), so the right shape is a
+  typed `budget.threshold_crossed` bus event a reactor rule matches on —
+  which means adding an `EventType` + payload (an SDK/TS-codegen protocol
+  change) and is its own change. `abort` needed no such wiring because
+  cooperative cancel is a session-local primitive (`request_stop`).
+- **Cascade-level budgets** — per-cid aggregate ceilings and the
+  min-wins propagation down the spawn tree (§3.1). The per-profile
+  envelope is what landed; the owner-side cascade cap is still open.
 
 ---
 
@@ -377,10 +389,23 @@ session start): unknown dimension; non-positive limit; `at` outside
 `limits`** (`at` is a percentage *of* a limit, so no rung could fire);
 non-strictly-increasing thresholds.
 
-Still to build: §6.1 `BudgetTracker` (accumulate the dimensions off the
-bus, emit `budget.threshold_crossed`, apply rungs) and §6.2 the
-`switch_tier` resolved-entry re-resolve so an overlay applied to the
-*currently active* tier actually re-`connect`s.
+Landed (runtime):
+
+| Piece | Where |
+|---|---|
+| `BudgetTracker` + `BudgetUsage` + `overlay_tier_table` (§6.1) | `shared/budget_control.py` — pure logic, no session coupling |
+| §6.2 resolved-entry re-resolve + extracted `_is_connected_to` / `_connect_tier_entry` | `shared/jaato_session.py:switch_tier` |
+| Observation hooks (tokens+usd per response; turns+seconds+tool_calls per turn) | `jaato_session._budget_observe_response` / `_budget_observe_turn`, folded into the EXISTING `_record_token_usage` and turn-end accounting — no new measurement path |
+| Rung application (brownout + `abort`) | `jaato_session._apply_budget_rungs` / `_reconnect_active_tier_if_rebound` |
+| Wire: envelope v5 `budget_control` + `to_dict`/`from_dict` round-trip | `shared/session_envelope.py`, `server/session_manager.py` |
+| Plumbing: profile → session | `server/core.py`, `server/runner/session.py`, `jaato_runtime.create_session`, `JaatoSession.configure` |
+| 17 runtime tests | `shared/tests/test_budget_runtime.py` |
+
+Cost resolution reuses `_resolve_span_cost` (provider-reported → pricing
+table → `None`), so the budget and the telemetry span always agree, and
+an unknown cost leaves the `usd` dimension **unadvanced** rather than
+advancing on a guess. All budget work is wrapped so a guardrail failure
+can never break a live turn.
 
 ---
 

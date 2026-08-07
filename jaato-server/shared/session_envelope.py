@@ -56,6 +56,14 @@ from .instruction_suppression import normalize_suppression, suppression_to_wire
 # session.  v3 carries the tier mapping on the envelope so the runner
 # can resolve ``ModelTierConfig`` and register the tool.
 #
+# v5 (2026-08-07): added ``budget_control``.  The profile parses the
+# block eagerly into a ``BudgetControlConfig`` (so a malformed one fails
+# at load); the envelope carries its re-serialised dict so the RUNNER —
+# which owns the live session and its model-tier table — can build the
+# BudgetTracker and apply degrade rungs.  Without it a runner-served
+# session would silently run unbudgeted, the same class of gap v3 closed
+# for ``model_tiers``.
+#
 # v4 (2026-05-20): added ``cascade_driver_id``.  Phase 2 of the
 # cascade-sharing arc (docs/design/runner-cascade-sharing.md): IPC
 # client supplies an opaque cascade tenant ID at session.new; the
@@ -64,7 +72,7 @@ from .instruction_suppression import normalize_suppression, suppression_to_wire
 # Runner-side bootstrap stashes the value onto ``JaatoSession`` so
 # subagent spawns can inherit the parent cascade via the existing
 # ``runtime.create_session()`` path.
-SESSION_ENVELOPE_VERSION = 4
+SESSION_ENVELOPE_VERSION = 5
 
 
 @dataclass
@@ -230,6 +238,10 @@ class SessionInitEnvelope:
     # mode (no ``enter_tier`` tool, no per-tier system-prompt line).
     # See ``shared/model_tiers.py`` for the resolver and schema.
     model_tiers: Optional[Dict[str, Any]] = None
+    # Profile-declared ``budget_control``, re-serialised from the parsed
+    # ``BudgetControlConfig`` (see shared/budget_control.py).  None means
+    # unbudgeted.  The runner re-parses + validates on arrival.
+    budget_control: Optional[Dict[str, Any]] = None
     # v4 (2026-05-20): cascade-sharing tenant ID.  Opaque UTF-8
     # string supplied by the IPC client at session.new (or
     # auto-inherited from parent for subagent sessions).  ``None``
@@ -328,6 +340,9 @@ class SessionInitEnvelope:
             "model_tiers": (
                 dict(self.model_tiers) if self.model_tiers else None
             ),
+            "budget_control": (
+                dict(self.budget_control) if self.budget_control else None
+            ),
             "cascade_driver_id": self.cascade_driver_id,
             # 2026-06-06: both knobs serialized on the wire so the
             # runner-side from_dict() receives them.  See field
@@ -392,6 +407,9 @@ class SessionInitEnvelope:
             location=str(d.get("location", "")),
             model_tiers=(
                 dict(d["model_tiers"]) if d.get("model_tiers") else None
+            ),
+            budget_control=(
+                dict(d["budget_control"]) if d.get("budget_control") else None
             ),
             cascade_driver_id=d.get("cascade_driver_id"),
             # 2026-06-06: defaults preserve backward compat with
