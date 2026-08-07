@@ -424,6 +424,13 @@ class SessionManager:
         # SessionManager).
         self._cascade_clients: Dict[str, List["CascadeClientEntry"]] = {}
         self._cascade_clients_lock = threading.Lock()
+        # Per-cid AGGREGATE budget ceilings (design note §8/b).  Declared by
+        # the cascade OWNER at launch — deliberately not a leaf-profile field,
+        # because a cascade cap is a runtime aggregate over a live cid, not a
+        # property of any one reusable template (§3.1).  Keyed by
+        # cascade_driver_id; absent = that cascade is uncapped.
+        self._cascade_budgets: Dict[str, "CascadeBudgetPool"] = {}
+        self._cascade_budgets_lock = threading.Lock()
         # GC backstop: cascade-client entries with no event for this
         # many seconds + no active sessions in their cid get reaped
         # by the periodic sweep.  Matches the Phase 2 cascade-idle
@@ -1315,6 +1322,14 @@ class SessionManager:
                             "(%s: %s) — runner spawns in the daemon's cgroup",
                             session_id, type(exc).__name__, exc,
                         )
+
+            # Cascade budget: hand the pool to the envelope builder the same
+            # way cascade_driver_id already reaches it — via the server
+            # object — so no signature threads through three helpers.  The
+            # builder does the min(profile, cascade_remaining) clamp and
+            # raises CascadeExhaustedError when there is no headroom.
+            server._cascade_budget_pool = self.get_cascade_budget(
+                cascade_driver_id)
 
             spawn_session_runner(
                 server=server,
@@ -3943,6 +3958,9 @@ class SessionManager:
                 # Handle turn tracking for interrupted tool recovery
                 self._handle_turn_tracking_event(session, event)
 
+                # Cascade budget: deplete the cid pool from this turn's spend.
+                self._accumulate_cascade_budget(session, event)
+
                 for client_id in session.attached_clients:
                     self._emit_to_client(client_id, event)
 
@@ -4253,6 +4271,82 @@ class SessionManager:
             from jaato_sdk.plugins.model_provider.types import PresentationContext
             ctx = PresentationContext.from_dict(event.presentation)
             server.set_presentation_context(ctx)
+
+    # ---------------- cascade budgets (design note §8/b) ----------------
+
+    def set_cascade_budget(self, cascade_driver_id: str, budget: Any) -> None:
+        """Declare the AGGREGATE ceiling for a cascade.  Owner-only.
+
+        ``budget`` is a :class:`~shared.budget_control.BudgetControlConfig`.
+        Declaring it here rather than on a profile is deliberate (§3.1): a
+        profile is a reusable template, but a cascade cap is a runtime
+        aggregate over one live cid — putting it on a leaf profile makes
+        "which profile owns the number" unanswerable the moment two cascades
+        spawn the same profile.
+
+        Idempotent per cid: re-declaring replaces the pool, which resets
+        accumulated spend.  Callers should declare once, at cascade launch.
+        """
+        from shared.budget_control import CascadeBudgetPool
+        with self._cascade_budgets_lock:
+            self._cascade_budgets[cascade_driver_id] = CascadeBudgetPool(
+                cascade_driver_id, budget)
+        logger.info(
+            "cascade budget declared for %s: limits=%s",
+            cascade_driver_id, dict(budget.limits),
+        )
+
+    def get_cascade_budget(self, cascade_driver_id: Optional[str]) -> Optional[Any]:
+        """The :class:`CascadeBudgetPool` for a cid, or ``None`` if uncapped."""
+        if not cascade_driver_id:
+            return None
+        with self._cascade_budgets_lock:
+            return self._cascade_budgets.get(cascade_driver_id)
+
+    def clear_cascade_budget(self, cascade_driver_id: str) -> None:
+        """Drop a cascade's pool (cascade finished / owner unregistered)."""
+        with self._cascade_budgets_lock:
+            self._cascade_budgets.pop(cascade_driver_id, None)
+
+    def _accumulate_cascade_budget(self, session: Session, event: Event) -> None:
+        """Deplete a cascade's pool from one completed turn.
+
+        Reads ``usage.spend_total_tokens`` — the SUM over the turn's
+        responses — never ``total_tokens``, which is the end-of-turn context
+        size and undercounts spend by ~41% on tool-calling turns.  The pool
+        and the per-session tracker must count the same thing, or
+        ``min(profile, cascade_remaining)`` composes two numbers measured on
+        different scales.
+
+        Accumulates from the event stream at the TURN boundary, which is
+        exactly-once per turn (a refused turn emits no TurnCompletedEvent).
+        Never let a budget failure break event delivery — this runs on the
+        emit path.
+        """
+        if not isinstance(event, TurnCompletedEvent):
+            return
+        pool = self.get_cascade_budget(getattr(session, "cascade_driver_id", None))
+        if pool is None:
+            return
+        try:
+            usage = getattr(event, "usage", None)
+            spend = getattr(usage, "spend_total_tokens", None) if usage else None
+            fired = pool.spend(
+                tokens=spend,
+                usd=getattr(usage, "cost_usd", None) if usage else None,
+                seconds=getattr(event, "duration_seconds", None),
+                tool_calls=len(getattr(event, "function_calls", None) or ()),
+                turns=1,
+            )
+            if fired:
+                logger.info(
+                    "cascade %s pool crossed %s (%s)",
+                    pool.cascade_driver_id,
+                    ", ".join(f"{r.at_percent:.0f}%" for r in fired),
+                    pool.describe_pressure(),
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("cascade budget accumulation failed: %s", exc)
 
     def _handle_turn_tracking_event(self, session: Session, event: Event) -> None:
         """Handle events for turn tracking (interrupted tool recovery).

@@ -105,3 +105,71 @@ def test_profile_summary_keeps_budget_control():
     s = ProfileSummary(name="x", description="d",
                        budget_control={"limits": {"usd": 1}})
     assert s.budget_control == {"limits": {"usd": 1}}
+
+
+# ------------------------------- cascade clamp at spawn (slice 2, §8/b)
+
+def _pool(**limits):
+    from shared.budget_control import BudgetControlConfig, CascadeBudgetPool
+    return CascadeBudgetPool("cid1", BudgetControlConfig.from_dict(
+        {"limits": limits}))
+
+
+def _server(profile, pool=None):
+    return SimpleNamespace(
+        _profile=profile, config_root=None, _main_agent_id="main",
+        _cascade_driver_id="cid1" if pool else None,
+        _cascade_budget_pool=pool,
+    )
+
+
+def _envelope(server, sid="s"):
+    from server.runner_spawn import build_session_envelope
+    return build_session_envelope(
+        server=server, session_id=sid, workspace_path="/tmp/ws",
+        profile_name="p")
+
+
+def test_child_actually_RECEIVES_the_clamped_budget():
+    """The exerciser's warning, made a test: assert the spawned child
+    received a clamped budget, not merely that code to clamp one exists."""
+    pool = _pool(tokens=12000)
+    pool.spend(tokens=9300)                      # stage 1 burned this
+    env = _envelope(_server(_profile(budget=_budget_tokens(9000)), pool))
+    assert env.budget_control is not None
+    # asked for 9000, cascade had 2700 left -> clamped
+    assert env.budget_control["limits"]["tokens"] == 2700.0
+
+
+def test_uncapped_cascade_leaves_the_profile_budget_untouched():
+    env = _envelope(_server(_profile(budget=_budget_tokens(9000)), pool=None))
+    assert env.budget_control["limits"]["tokens"] == 9000
+
+
+def test_child_tighter_than_the_cascade_keeps_its_own_ceiling():
+    pool = _pool(tokens=12000)                   # nothing spent
+    env = _envelope(_server(_profile(budget=_budget_tokens(9000)), pool))
+    assert env.budget_control["limits"]["tokens"] == 9000
+
+
+def test_budgetless_child_inherits_the_cascade_remainder():
+    pool = _pool(tokens=12000)
+    pool.spend(tokens=9300)
+    env = _envelope(_server(_profile(budget=None), pool))
+    assert env.budget_control["limits"]["tokens"] == 2700.0
+
+
+def test_exhausted_cascade_refuses_the_spawn_with_evidence():
+    from shared.budget_control import CascadeExhaustedError
+    pool = _pool(tokens=12000)
+    pool.spend(tokens=12000)
+    with pytest.raises(CascadeExhaustedError) as ei:
+        _envelope(_server(_profile(budget=_budget_tokens(9000)), pool))
+    payload = ei.value.as_payload()
+    assert payload["exhausted_dimensions"] == ["tokens"]
+    assert payload["profile_limits"]["tokens"] == 9000
+    assert payload["cascade_remaining"]["tokens"] == 0.0
+
+
+def _budget_tokens(n):
+    return BudgetControlConfig.from_dict({"limits": {"tokens": n}})

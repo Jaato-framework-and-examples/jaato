@@ -400,6 +400,20 @@ def build_session_envelope(
         # The profile holds a parsed ``BudgetControlConfig``; the wire
         # carries its re-serialised dict (runner re-parses + revalidates).
         _budget = getattr(profile, "budget_control", None)
+        # Cascade clamp (design note §3.1/§8b).  When this session belongs to
+        # a cascade with a declared cap, its EFFECTIVE ceiling is
+        # min(profile, cascade_remaining) per dimension — a child may only
+        # ever be tightened, never widened, and never exceed what the cascade
+        # still has.  Both inputs are logged, not just the outcome, so an
+        # operator can SEE min() clamp rather than infer it from one number.
+        _pool = getattr(server, "_cascade_budget_pool", None)
+        if _pool is not None:
+            _effective, _limits = _pool.child_config(_budget)
+            logger.info(
+                "cascade %s budget clamp for session %s -> %s",
+                _pool.cascade_driver_id, session_id, _limits.describe(),
+            )
+            _budget = _effective
         if _budget is not None:
             budget_control_dict = _budget.to_dict()
         # Phase 4 §C: carry the full profile.plugin_configs at the
