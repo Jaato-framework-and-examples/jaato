@@ -304,3 +304,27 @@ def test_turn_data_separates_context_size_from_turn_spend():
     observe(2400, 104, 2504)   # response 2: after the tool result
     assert turn_data['total'] == 2504          # context size at turn end
     assert turn_data['spend_total'] == 4654    # what the turn actually cost
+
+
+def test_spend_accumulates_on_every_path_not_just_streaming():
+    """spend_* must live in _accumulate_turn_tokens, which runs exactly once
+    per response on EVERY path. The streaming usage-callback is the wrong
+    hook twice over: it never fires non-streaming (spend would stay 0), and a
+    provider emitting >1 usage chunk per response would double-count."""
+    from types import SimpleNamespace
+    td = {'prompt': 0, 'output': 0, 'total': 0,
+          'spend_total': 0, 'spend_prompt': 0, 'spend_output': 0}
+
+    def resp(p, o, t):
+        return SimpleNamespace(usage=SimpleNamespace(
+            prompt_tokens=p, output_tokens=o, total_tokens=t,
+            cache_read_tokens=None, cache_creation_tokens=None,
+            thinking_tokens=0))
+
+    sess = SimpleNamespace(_update_thinking_budget=lambda n: None)
+    JaatoSession._accumulate_turn_tokens(sess, resp(2000, 150, 2150), td)
+    JaatoSession._accumulate_turn_tokens(sess, resp(2400, 104, 2504), td)
+    assert td['total'] == 2504        # context size: replaced
+    assert td['spend_total'] == 4654  # spend: accumulated
+    assert td['spend_prompt'] == 4400
+    assert td['spend_output'] == 254

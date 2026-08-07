@@ -5139,10 +5139,6 @@ NOTES
                 turn_data['prompt'] = usage.prompt_tokens
                 turn_data['output'] = usage.output_tokens
                 turn_data['total'] = usage.total_tokens
-                # Accumulate, do not assign — see the field comment above.
-                turn_data['spend_total'] += usage.total_tokens
-                turn_data['spend_prompt'] += usage.prompt_tokens
-                turn_data['spend_output'] += usage.output_tokens
             # Cache tokens: capture when present (streaming path)
             if usage.cache_read_tokens is not None:
                 turn_data['cache_read'] = usage.cache_read_tokens
@@ -7784,6 +7780,17 @@ NOTES
             turn_tokens['prompt'] = response.usage.prompt_tokens
             turn_tokens['output'] = response.usage.output_tokens
             turn_tokens['total'] = response.usage.total_tokens
+            # SPEND accumulates where the replaced fields do not.  This is
+            # the correct hook precisely because it runs exactly ONCE per
+            # response on every path; the streaming usage-callback does not
+            # (it is streaming-only, and a provider emitting more than one
+            # usage chunk per response would double-count there).
+            turn_tokens['spend_total'] = (
+                turn_tokens.get('spend_total', 0) + response.usage.total_tokens)
+            turn_tokens['spend_prompt'] = (
+                turn_tokens.get('spend_prompt', 0) + response.usage.prompt_tokens)
+            turn_tokens['spend_output'] = (
+                turn_tokens.get('spend_output', 0) + response.usage.output_tokens)
 
         # Cache tokens: replace when present (same semantics as prompt/output)
         if response.usage.cache_read_tokens is not None:
