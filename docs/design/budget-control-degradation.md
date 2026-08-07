@@ -259,6 +259,33 @@ behind it.
 
 ---
 
+### 5.2 What each dimension actually measures
+
+Sizing a budget from the wrong mental model is the easiest way to get a
+useless one. Two traps, both observed on real runs:
+
+**`tokens` is prompt-inclusive, so it is a CONTEXT-PRESSURE budget, not a
+work budget.** It accumulates `usage.total_tokens` per *response*, and
+`total_tokens` includes the whole prompt — which is re-sent every turn.
+The dimension therefore grows superlinearly with conversation length
+rather than tracking incremental work. This is the correct measure of
+*spend* (you are billed for the prompt on every call), but anyone sizing
+a token budget by asking "how much work should this agent do" will
+undershoot badly. Measured on a real 4-turn run: 2572, 3008, 1724, 1800
+— note turns 3-4 are *lower* than turns 1-2 despite being later, because
+a degrade rung swapped in a cheaper model and shrank the accounting.
+
+**`usd` only advances when a cost is actually KNOWN.** Resolution is
+provider-reported → `.jaato/pricing.json` → nothing. With neither source
+the dimension stays at `0` and no `usd` rung can ever fire — deliberate
+(§9: never hard-stop on an invented number), but the failure mode is
+silent: the budget looks configured and is inert. A live OpenRouter run
+with no pricing table reported `cost_usd: None` on every turn. **Verify
+`usd` advances before relying on it**; `tokens` / `turns` / `tool_calls`
+are always exact.
+
+---
+
 ### 5.1 What `abort` means (settled by the first live run)
 
 `abort` ends the **session**, not merely the turn: it cancels the
