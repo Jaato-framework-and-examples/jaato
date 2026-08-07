@@ -1330,6 +1330,13 @@ class SessionManager:
             # raises CascadeExhaustedError when there is no headroom.
             server._cascade_budget_pool = self.get_cascade_budget(
                 cascade_driver_id)
+            # Reconcile the pool against every live sibling's TRACKER before
+            # the clamp is computed.  Incremental accumulation from
+            # TurnCompletedEvent is a best-effort live view, but the event
+            # stream has proven both duplicable and droppable, so the number
+            # the clamp is computed FROM is refreshed from the authoritative
+            # per-session tracker at the one moment it has to be right.
+            self._reconcile_cascade_pool(cascade_driver_id)
 
             spawn_session_runner(
                 server=server,
@@ -4308,6 +4315,47 @@ class SessionManager:
         with self._cascade_budgets_lock:
             self._cascade_budgets.pop(cascade_driver_id, None)
 
+    def _reconcile_cascade_pool(self, cascade_driver_id: Optional[str]) -> None:
+        """Refresh a cascade's pool from its live sessions' own trackers.
+
+        Called at the spawn boundary — off the hot path, and precisely when
+        the pool's value has to be correct, because the next child's ceiling
+        is ``min(profile, cascade_remaining)``.
+
+        Reconciliation is delta-based per session
+        (:meth:`CascadeBudgetPool.reconcile_session`), so running it
+        alongside the incremental event-driven accumulation double-counts
+        nothing: whichever saw a token first, the absolute reading settles
+        the total.  A session whose runner is gone or unresponsive is
+        skipped — its last incremental contribution stands.
+        """
+        pool = self.get_cascade_budget(cascade_driver_id)
+        if pool is None:
+            return
+        with self._lock:
+            sessions = [
+                (sid, sess) for sid, sess in self._sessions.items()
+                if getattr(sess, "cascade_driver_id", None) == cascade_driver_id
+            ]
+        for sid, sess in sessions:
+            try:
+                rpc = getattr(getattr(sess, "server", None), "runner_rpc", None)
+                if rpc is None:
+                    continue
+                usage = rpc.session_get_budget_usage_threadsafe(timeout=5.0)
+                deltas = pool.reconcile_session(sid, usage or {})
+                if deltas:
+                    logger.info(
+                        "cascade %s reconciled %s: +%s (remaining %s)",
+                        cascade_driver_id, sid, deltas, pool.remaining(),
+                    )
+            except Exception as exc:  # noqa: BLE001 — best-effort
+                logger.debug(
+                    "cascade %s: could not reconcile %s (%s) — last "
+                    "incremental contribution stands", cascade_driver_id,
+                    sid, exc,
+                )
+
     def _accumulate_cascade_budget(self, session: Session, event: Event) -> None:
         """Deplete a cascade's pool from one completed turn.
 
@@ -4331,13 +4379,24 @@ class SessionManager:
         try:
             usage = getattr(event, "usage", None)
             spend = getattr(usage, "spend_total_tokens", None) if usage else None
-            fired = pool.spend(
-                tokens=spend,
-                usd=getattr(usage, "cost_usd", None) if usage else None,
-                seconds=getattr(event, "duration_seconds", None),
-                tool_calls=len(getattr(event, "function_calls", None) or ()),
-                turns=1,
-            )
+            # Delta-based against this session's running absolute, so the
+            # spawn-time reconciliation (which reads the same tracker) can
+            # run alongside without double-counting either source.
+            sid = getattr(session, "session_id", None) or id(session)
+            prior = pool.session_contribution(sid)
+            absolute = {
+                "tokens": prior.get("tokens", 0.0) + float(spend or 0),
+                "seconds": (prior.get("seconds", 0.0)
+                            + float(getattr(event, "duration_seconds", 0) or 0)),
+                "tool_calls": (prior.get("tool_calls", 0.0)
+                               + len(getattr(event, "function_calls", None) or ())),
+                "turns": prior.get("turns", 0.0) + 1.0,
+            }
+            cost = getattr(usage, "cost_usd", None) if usage else None
+            if cost is not None:
+                absolute["usd"] = prior.get("usd", 0.0) + float(cost)
+            pool.reconcile_session(sid, absolute)
+            fired = ()
             if fired:
                 logger.info(
                     "cascade %s pool crossed %s (%s)",

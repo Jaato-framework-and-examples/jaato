@@ -146,3 +146,53 @@ def test_exhaustion_error_carries_framework_generated_evidence():
     # a non-exhausted dimension still reports, so the trace is complete
     assert payload["cascade_remaining"]["turns"] == 16.0
     assert "cascade_budget_exhausted" in err.render()
+
+
+# ---------- tracker-authoritative reconciliation (the event-stream fix) ----
+
+def test_reconcile_is_idempotent_and_delta_based():
+    p = _pool(tokens=12000)
+    assert p.reconcile_session("s1", {"tokens": 7695})["tokens"] == 7695.0
+    assert p.reconcile_session("s1", {"tokens": 7695}) == {}   # same reading
+    assert p.remaining()["tokens"] == 12000 - 7695
+
+
+def test_reconcile_catches_spend_the_event_stream_dropped():
+    """The leak, closed at the level that matters: the tracker's absolute
+    total settles it regardless of which TurnCompletedEvents arrived."""
+    p = _pool(tokens=12000)
+    p.reconcile_session("s1", {"tokens": 7695})     # what events carried
+    p.reconcile_session("s1", {"tokens": 9314})     # what the tracker saw
+    assert p.remaining()["tokens"] == pytest.approx(12000 - 9314)
+
+
+def test_reconcile_ignores_a_stale_lower_reading():
+    """A late or out-of-order report must never refund spend."""
+    p = _pool(tokens=12000)
+    p.reconcile_session("s1", {"tokens": 9314})
+    assert p.reconcile_session("s1", {"tokens": 100}) == {}
+    assert p.remaining()["tokens"] == pytest.approx(12000 - 9314)
+
+
+def test_reconcile_tracks_sessions_independently():
+    p = _pool(tokens=30000)
+    p.reconcile_session("s1", {"tokens": 9300})
+    p.reconcile_session("s2", {"tokens": 9300})
+    assert p.remaining()["tokens"] == pytest.approx(30000 - 18600)
+    assert p.session_contribution("s1")["tokens"] == 9300
+
+
+def test_reconcile_ignores_unknown_dimensions():
+    p = _pool(tokens=100)
+    p.reconcile_session("s1", {"tokens": 10, "bogus": 999})
+    assert p.remaining()["tokens"] == 90.0
+
+
+def test_linear_chain_via_reconciliation_lands_on_the_predicted_number():
+    """Stage 1 really spent 9314; stage 2 must be clamped from THAT, not
+    from the 7695 the events carried."""
+    p = _pool(tokens=12000)
+    p.reconcile_session("stage1", {"tokens": 9314})
+    cfg, eff = p.child_config(_cfg(limits={"tokens": 9000}))
+    assert cfg.limits["tokens"] == pytest.approx(2686.0)
+    assert eff.clamped == ("tokens",)

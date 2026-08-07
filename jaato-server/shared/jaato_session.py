@@ -7829,6 +7829,27 @@ NOTES
         # This ensures the budget snapshot includes current turn's conversation tokens
         self._update_conversation_budget()
 
+    def get_budget_usage(self) -> Dict[str, float]:
+        """This session's ABSOLUTE budget consumption, per dimension.
+
+        The authoritative figure: it is what the per-session
+        :class:`BudgetTracker` accumulated per RESPONSE, which is the same
+        number the tracker's own percentage reports come from.  Callers
+        reconcile a cascade pool against this rather than summing an event
+        stream — events have proven both duplicable (turn.progress re-emits)
+        and droppable (a cancelled turn's TurnCompletedEvent).
+
+        Falls back to summing ``spend_total`` over ``turn_accounting`` when
+        the session has no tracker (unbudgeted sessions still contribute to
+        a cascade pool).  Returns ``{}`` when neither source has anything.
+        """
+        if self._budget_tracker is not None:
+            return self._budget_tracker.usage.as_dict()
+        spend = sum(
+            int(t.get("spend_total", 0) or 0) for t in self._turn_accounting
+        )
+        return {"tokens": float(spend)} if spend else {}
+
     def was_last_send_refused(self) -> bool:
         """True when the last ``send_message`` was refused by the budget gate.
 

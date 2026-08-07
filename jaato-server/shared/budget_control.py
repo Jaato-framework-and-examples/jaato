@@ -708,6 +708,10 @@ class CascadeBudgetPool:
         self.cascade_driver_id = cascade_driver_id
         self._tracker = BudgetTracker(config)
         self._lock = __import__("threading").Lock()
+        # session_id -> its absolute contribution per dimension.  Lets
+        # reconcile_session apply deltas idempotently from repeated
+        # absolute readings, instead of trusting a stream of increments.
+        self._per_session: Dict[str, Dict[str, float]] = {}
 
     @property
     def config(self) -> BudgetControlConfig:
@@ -734,6 +738,51 @@ class CascadeBudgetPool:
     def describe_pressure(self) -> str:
         with self._lock:
             return self._tracker.describe_pressure()
+
+    def reconcile_session(
+        self, session_id: str, absolute: Mapping[str, float],
+    ) -> Dict[str, float]:
+        """Set a session's TOTAL contribution to the pool, applying the delta.
+
+        Idempotent and monotonic: call it repeatedly with the session's
+        running absolute usage and the pool only ever moves by the
+        difference.  Never decreases a contribution (a lower reading is
+        treated as stale and ignored) so a late or out-of-order report
+        cannot refund spend.
+
+        This exists because accumulating the pool from the EVENT STREAM
+        proved unsound twice: turn.progress re-emits (inflating), and a
+        cancelled turn's TurnCompletedEvent can go missing (leaking).  The
+        invariant that actually matters is "the pool must see every token
+        the per-session TRACKER saw" — so the pool is reconciled against the
+        tracker's own absolute totals rather than derived from a stream of
+        increments that may be duplicated or dropped.
+
+        Returns the deltas actually applied, for logging.
+        """
+        with self._lock:
+            prior = self._per_session.setdefault(session_id, {})
+            deltas: Dict[str, float] = {}
+            for dim, total in (absolute or {}).items():
+                if dim not in VALID_DIMENSIONS:
+                    continue
+                try:
+                    total_f = float(total)
+                except (TypeError, ValueError):
+                    continue
+                seen = prior.get(dim, 0.0)
+                if total_f <= seen:
+                    continue
+                deltas[dim] = total_f - seen
+                prior[dim] = total_f
+            if deltas:
+                self._tracker.observe(**deltas)
+            return deltas
+
+    def session_contribution(self, session_id: str) -> Dict[str, float]:
+        """What this session has contributed to the pool so far."""
+        with self._lock:
+            return dict(self._per_session.get(session_id, {}))
 
     def effective_limits_for(
         self, profile_limits: Optional[Mapping[str, float]]

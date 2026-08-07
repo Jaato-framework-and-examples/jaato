@@ -640,6 +640,13 @@ class RunnerRPC:
             # the seat-flip lands.
             return self._handle_session_get_context_usage()
 
+        if env.method == "session.get_budget_usage":
+            # The session's ABSOLUTE budget consumption per dimension, as
+            # the per-session BudgetTracker accumulated it (per RESPONSE).
+            # A cascade pool reconciles against this rather than summing an
+            # event stream, which has proven both duplicable and droppable.
+            return self._handle_session_get_budget_usage()
+
         if env.method == "session.get_context_limit":
             # Phase 3 §7b.1 precursor: read-only context-window
             # size in tokens.  Daemon-side falls back to this
@@ -1524,6 +1531,22 @@ class RunnerRPC:
                 "stage": "read",
             }
         return True, {"context_limit": limit}
+
+    def _handle_session_get_budget_usage(self) -> "tuple[bool, Any]":
+        """Read-only snapshot of the session's absolute budget consumption.
+
+        Wrapped as ``{"usage": {...}}`` for symmetry with the other read
+        handlers.  Empty dict when the session tracks no budget.
+        """
+        ready, err, session = self._require_ready_session()
+        if not ready:
+            return err
+        try:
+            getter = getattr(session, "get_budget_usage", None)
+            usage = getter() if callable(getter) else {}
+        except Exception as exc:  # noqa: BLE001
+            return False, {"error": f"session.get_budget_usage: {exc}"}
+        return True, {"usage": dict(usage or {})}
 
     def _handle_session_get_context_usage(self) -> "tuple[bool, Any]":
         """Read-only snapshot of context-window usage stats.
