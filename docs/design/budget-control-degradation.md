@@ -235,6 +235,30 @@ none are switched off.
 
 ---
 
+### 5.0 Verifying a brownout actually took effect
+
+The cheapest independent witness is **per-turn wall-clock**, not the
+`budget:` log lines or the system notice — both of those are *reports*
+that the swap happened; duration is an observable *consequence* of it.
+
+From the first live PoC (`turns: 4`, rung at 50% rebinding `planner`
+opus-4 → gemini-2.5-flash-lite):
+
+| turn | model | duration |
+|---|---|---|
+| 0 | opus-4 | 7.411 s |
+| 1 | opus-4 | 6.415 s |
+| 2 | flash-lite | 1.319 s |
+| 3 | flash-lite | 1.350 s |
+
+A ~5× collapse landing exactly on the rung boundary. If the rebind had
+not reached the provider, the durations would not move. This is worth
+asserting on in any brownout demo: it needs no log access, no telemetry
+backend, and it cannot be faked by a notice that fires without the swap
+behind it.
+
+---
+
 ### 5.1 What `abort` means (settled by the first live run)
 
 `abort` ends the **session**, not merely the turn: it cancels the
