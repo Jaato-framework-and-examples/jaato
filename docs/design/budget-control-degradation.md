@@ -535,6 +535,58 @@ can never break a live turn.
 
 ---
 
+## 8c. Validated end-to-end (two live PoCs)
+
+**PoC #1 — per-session brownout + ceiling.** A `turns: 4` profile with a
+50% rung rebinding `planner` opus-4 → gemini-2.5-flash-lite: the rebind
+and the active-tier re-connect land **1 ms apart** (§6.2 holds in
+production, not only in unit tests); exactly four tool calls then none;
+four subsequent sends refused; every decision visible client-side as
+`AGENT_OUTPUT source='system'`. Per-turn duration collapsed ~5× at the
+rung boundary — the independent witness of §5.0.
+
+**PoC #2 — cascade cap, linear 3-stage chain.** Pool 12000, three stages
+of `tokens: 9000`, **none of which mentions the cascade**:
+
+| | capped | uncapped baseline |
+|---|---|---|
+| stage 2 | 3654 tokens, 1 turn — aborted at 132% of its **clamped** 2773 | ~9300, 2–4 turns |
+| stage 3 | never spawned, refused with a machine-readable reason | ~9300, 2 turns |
+
+Pool depletion 12000 → 2773 → 0, with the client's `cascade.budget.get`
+and the daemon's clamp line agreeing at every boundary. The uncapped
+baseline is what makes each difference attributable to the cap rather
+than to stage variance.
+
+### Why the pool reconciles against the tracker — measured
+
+In the PoC #2 run the event stream was **inflated by 33%** by the
+duplicate-emission bug (§ open issues):
+
+| source | stage-1 tokens |
+|---|---|
+| `turn.progress` raw | 12261 |
+| `turn.progress` de-duplicated | 9227 |
+| **pool contribution** | **9227.0** — exact |
+
+Had the pool still accumulated from that stream it would have believed
+stage 1 spent 12261 and refused stage 2 outright. It reconciles against
+the per-session tracker's absolute totals instead, so the inflation
+never reached it. The event stream has now been shown wrong in **both**
+directions on real runs — inflated by re-emission, deflated by a dropped
+final-turn event — which is the case for never deriving a ceiling from
+it.
+
+### Reading a pool: use `usage_fraction`, not differences of `remaining`
+
+`remaining()` floors at zero, so differencing it across stages
+*understates* the last one (a stage that really spent 3654 shows 2773).
+`usage_fraction()` does not floor: `1.0734 × 12000 = 12881`, which is
+both stages' real spend to the token. For per-stage accounting, read
+`usage_fraction`.
+
+---
+
 ## 9. Risks
 
 - **`switch_tier` name-compare short-circuit** (§6.2) — the correctness
