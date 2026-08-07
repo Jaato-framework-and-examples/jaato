@@ -124,3 +124,25 @@ def test_rung_fires_exactly_once_across_concurrent_spenders():
     [t.start() for t in threads]
     [t.join() for t in threads]
     assert len(fired) == 1, "latching must hold across threads"
+
+
+def test_exhaustion_error_carries_framework_generated_evidence():
+    """The refusal must be demonstrable by whoever reads the trace, at the
+    same fidelity as a session-level refusal — not merely proof that the
+    caller's own except block ran."""
+    from shared.budget_control import CascadeExhaustedError
+    p = _pool(usd=10, turns=20)
+    p.spend(usd=10, turns=4)
+    with pytest.raises(CascadeExhaustedError) as ei:
+        p.child_config(_cfg(limits={"usd": 5, "turns": 3}))
+    err = ei.value
+    assert err.cascade_driver_id == "cid1"
+    assert err.exhausted == ("usd",)
+    payload = err.as_payload()
+    assert payload["reason"] == "cascade_budget_exhausted"
+    assert payload["profile_limits"]["usd"] == 5      # what it asked for
+    assert payload["cascade_remaining"]["usd"] == 0.0  # what was left
+    assert payload["exhausted_dimensions"] == ["usd"]
+    # a non-exhausted dimension still reports, so the trace is complete
+    assert payload["cascade_remaining"]["turns"] == 16.0
+    assert "cascade_budget_exhausted" in err.render()

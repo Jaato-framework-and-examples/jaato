@@ -94,9 +94,66 @@ class CascadeExhaustedError(RuntimeError):
     a zero-valued limit.  Zero is not a budget a session can run under — the
     first turn would immediately breach it — and returning ``None``
     ("unbudgeted") would be catastrophically wrong here, since the reason
-    there is no budget is that the cascade is OUT of budget.  Failing loud
-    forces the caller to refuse the spawn with a real reason.
+    there is no budget is that the cascade is OUT of budget.
+
+    **Why refuse rather than spawn-and-abort.** Spawning a doomed child
+    SPENDS the resource the cascade has just run out of: a bootstrap plus —
+    because ``abort`` lets the in-flight turn finish (§5.1) — up to one full
+    turn of a model you cannot afford, multiplied by N under fan-out.  A
+    ceiling that must spend to enforce itself is not a ceiling; that is the
+    Finding-B defect one layer up.  Refusing the spawn is the only option
+    that costs nothing.
+
+    **Carries evidence, not just a message.**  The refusal has to be
+    demonstrable by whoever reads the trace afterwards, at the same fidelity
+    as a session-level refusal — otherwise the only proof is that the
+    caller's own ``except`` block ran, which is self-reported.  So the
+    structured fields below are framework-generated and are what the owner
+    surfaces; ``as_payload()`` is the renderable form.  Note that a refused
+    spawn recorded as such is materially different from an ABSENT one:
+    "absent" and "never attempted" are indistinguishable in a trace.
+
+    Attributes:
+        cascade_driver_id: The cascade with no headroom.
+        limits: The :class:`EffectiveLimits` that would have been produced —
+            both inputs and the clamp, not just the outcome.
+        exhausted: Dimensions with no headroom left.
     """
+
+    def __init__(
+        self,
+        cascade_driver_id: str,
+        limits: "EffectiveLimits",
+        message: Optional[str] = None,
+    ) -> None:
+        self.cascade_driver_id = cascade_driver_id
+        self.limits = limits
+        self.exhausted = limits.exhausted
+        super().__init__(message or (
+            f"cascade {cascade_driver_id} has no headroom left on "
+            f"{', '.join(self.exhausted)} — refusing to spawn a child that "
+            f"could not run a single turn ({limits.describe()})"
+        ))
+
+    def as_payload(self) -> Dict[str, Any]:
+        """Structured form for an event / cascade record / log line."""
+        return {
+            "cascade_driver_id": self.cascade_driver_id,
+            "reason": "cascade_budget_exhausted",
+            "exhausted_dimensions": list(self.exhausted),
+            "effective": dict(self.limits.effective),
+            "profile_limits": dict(self.limits.profile_limits),
+            "cascade_remaining": dict(self.limits.cascade_remaining),
+            "clamped": list(self.limits.clamped),
+            "detail": self.limits.describe(),
+        }
+
+    def render(self) -> str:
+        """One-line client-facing form, matching the session-level refusals."""
+        return (
+            f"[cascade_budget_exhausted ({', '.join(self.exhausted)}) — "
+            f"refusing to spawn: {self.limits.describe()}]"
+        )
 
 
 class BudgetControlConfigError(ValueError):
@@ -724,10 +781,6 @@ class CascadeBudgetPool:
         if not eff.effective:
             return profile_budget, eff
         if eff.exhausted:
-            raise CascadeExhaustedError(
-                f"cascade {self.cascade_driver_id} has no headroom left on "
-                f"{', '.join(eff.exhausted)} — refusing to spawn a child that "
-                f"could not run a single turn ({eff.describe()})"
-            )
+            raise CascadeExhaustedError(self.cascade_driver_id, eff)
         degrade = profile_budget.degrade if profile_budget else ()
         return BudgetControlConfig(limits=eff.effective, degrade=degrade), eff
