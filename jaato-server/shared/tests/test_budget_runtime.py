@@ -125,12 +125,15 @@ def _session(active="planner", model="opus", budget=None):
         _provider_cache={},
         _budget_tracker=BudgetTracker(budget) if budget else None,
         _budget_terminal_action=None,
+        _budget_exhausted_reason=None,
+        _current_output_callback=None,
         _ui_hooks=None,
         _connects=connects,
     )
     for name in ("_is_connected_to", "_connect_tier_entry",
                  "_reconnect_active_tier_if_rebound", "_apply_budget_rungs",
-                 "_surface_budget_event", "switch_tier"):
+                 "_surface_budget_event", "_refuse_if_budget_exhausted",
+                 "switch_tier"):
         setattr(s, name, (lambda n: (lambda *a, **k:
                 getattr(JaatoSession, n)(s, *a, **k)))(name))
     s.request_stop = lambda reason="": s.__setattr__("_stopped", reason) or True
@@ -214,3 +217,50 @@ def test_envelope_round_trips_budget_control():
     assert SessionInitEnvelope.from_dict(env.to_dict()).budget_control == payload
     assert SessionInitEnvelope.from_dict(
         SessionInitEnvelope(**kw).to_dict()).budget_control is None
+
+
+# ------------------------------------------- findings from the live PoC run
+
+def test_abort_latches_a_refusal_so_later_turns_cannot_run():
+    """PoC finding B: abort is a COOPERATIVE cancel of the in-flight turn.
+    Without a latch the client just sends again and every later turn is
+    unbudgeted (rungs are latched, so 100% never re-fires) — a `turns: 4`
+    budget ran to 8. A ceiling that only cancels one turn is not a ceiling."""
+    budget = _cfg(limits={"turns": 4}, degrade=[{"at": 100, "action": "abort"}])
+    s = _session(budget=budget)
+    assert JaatoSession._refuse_if_budget_exhausted(s) is None
+    JaatoSession._apply_budget_rungs(s, s._budget_tracker.observe(turns=4))
+    reason = JaatoSession._refuse_if_budget_exhausted(s)
+    assert reason is not None and "budget_exhausted" in reason
+
+
+def test_finalize_does_not_latch_a_refusal():
+    """finalize is graceful — it must NOT block further turns, that's abort."""
+    budget = _cfg(limits={"turns": 4}, degrade=[{"at": 100, "action": "finalize"}])
+    s = _session(budget=budget)
+    JaatoSession._apply_budget_rungs(s, s._budget_tracker.observe(turns=4))
+    assert JaatoSession._refuse_if_budget_exhausted(s) is None
+
+
+def test_budget_event_uses_the_real_output_channel():
+    """PoC finding A: this used _ui_hooks, which is never set on the runner
+    path, so every budget decision was silently dropped client-side."""
+    seen = []
+    s = _session()
+    s._current_output_callback = lambda src, txt, mode: seen.append((src, txt))
+    JaatoSession._surface_budget_event(s, "degraded planner")
+    assert seen and seen[0][0] == "system" and "degraded planner" in seen[0][1]
+
+
+def test_surface_is_a_noop_without_a_callback():
+    s = _session()
+    s._current_output_callback = None
+    JaatoSession._surface_budget_event(s, "x")   # must not raise
+
+
+def test_pressure_names_the_driving_dimension_below_100pct():
+    """PoC nit: exceeded_dimensions() is empty below 100%, so a 50% rung
+    reported the useless '50% of budget' without saying WHICH dimension."""
+    t = BudgetTracker(_cfg(limits={"turns": 4, "usd": 100}))
+    t.observe(turns=2, usd=1)
+    assert "turns 50%" in t.describe_pressure()

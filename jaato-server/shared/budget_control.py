@@ -507,6 +507,24 @@ class BudgetTracker:
             if limit and usage[dim] >= limit
         }
 
+    def describe_pressure(self) -> str:
+        """Human-readable "which ceiling is driving this" string.
+
+        Names the DRIVING dimension (the one with the highest fraction), not
+        only the exhausted ones.  An earlier version listed
+        :meth:`exceeded_dimensions`, which is empty below 100% — so a rung
+        firing at 50% reported the useless "50% of budget" and never said
+        WHICH of several declared dimensions had moved.
+        """
+        usage = self._usage.as_dict()
+        ranked = sorted(
+            ((usage[d] / lim, d) for d, lim in self._config.limits.items() if lim),
+            reverse=True,
+        )
+        if not ranked:
+            return "no limits declared"
+        return ", ".join(f"{d} {f * 100:.0f}%" for f, d in ranked[:3])
+
     def _newly_fired(self) -> Tuple["DegradeRung", ...]:
         """Rungs whose threshold is now crossed and which have not fired."""
         fraction = self.usage_fraction() * 100.0

@@ -437,6 +437,11 @@ class JaatoSession:
         # a rung asked for, so a caller can see WHY a session wound down.
         self._budget_tracker: Optional['BudgetTracker'] = None
         self._budget_terminal_action: Optional[str] = None
+        # Set once an ``abort`` rung fires.  Gates EVERY subsequent turn —
+        # see ``_refuse_if_budget_exhausted``.  Distinct from
+        # ``_budget_terminal_action`` (which also latches finalize/escalate,
+        # neither of which stops anything).
+        self._budget_exhausted_reason: Optional[str] = None
         self._active_tier: Optional[str] = None
 
         # Spawn-time parameters passed to this session by the caller
@@ -3991,6 +3996,16 @@ NOTES
         Raises:
             RuntimeError: If session is not configured.
         """
+        # Budget ceiling: refuse rather than silently serve an
+        # over-budget turn.  See _refuse_if_budget_exhausted.
+        _refusal = self._refuse_if_budget_exhausted()
+        if _refusal is not None:
+            logger.info("refusing turn: %s", _refusal)
+            if on_output:
+                on_output("system", f"[{_refusal} — session will not run "
+                                    f"further turns]", "write")
+            return f"[{_refusal}]"
+
         if not self._configured:
             raise RuntimeError("Session not configured. Call configure() first.")
 
@@ -7788,6 +7803,22 @@ NOTES
         # This ensures the budget snapshot includes current turn's conversation tokens
         self._update_conversation_budget()
 
+    def _refuse_if_budget_exhausted(self) -> Optional[str]:
+        """Return a refusal reason when an ``abort`` rung has already fired.
+
+        ``abort`` wires to :meth:`request_stop`, which is a COOPERATIVE
+        cancel of the in-flight turn — it neither terminates the session nor
+        refuses later input.  Combined with rung latching (the 100% rung
+        fires once and never again), that made every turn after the first
+        abort effectively unbudgeted: a client that simply kept sending ran
+        a ``turns: 4`` budget to 8 turns.
+
+        So the ceiling is enforced HERE instead: once exhausted, the session
+        refuses further turns rather than silently serving them.  Budget
+        exhaustion means "this session is done", not "cancel this turn".
+        """
+        return self._budget_exhausted_reason
+
     def _budget_observe_response(self, response: ProviderResponse) -> None:
         """Feed one model response's spend to the tracker, then apply rungs.
 
@@ -7849,11 +7880,7 @@ NOTES
         from .budget_control import ACTION_ABORT, overlay_tier_table
 
         for rung in fired:
-            exceeded = self._budget_tracker.exceeded_dimensions()
-            detail = (
-                ", ".join(f"{d} {f*100:.0f}%" for d, f in sorted(exceeded.items()))
-                or f"{self._budget_tracker.usage_fraction()*100:.0f}% of budget"
-            )
+            detail = self._budget_tracker.describe_pressure()
             if rung.model_tiers:
                 if self._tier_config is None:
                     # Rejected by the profile validator, but a session can be
@@ -7886,7 +7913,15 @@ NOTES
                 self._surface_budget_event(
                     f"budget {detail}: {rung.action}")
                 if rung.action == ACTION_ABORT:
-                    self.request_stop(f"budget_exhausted ({detail})")
+                    # Latch FIRST: request_stop only cancels the IN-FLIGHT
+                    # turn (cooperative cancel).  Without the latch the next
+                    # send_message would run unbudgeted — the rungs are
+                    # latched so the 100% rung never re-fires — and the
+                    # "ceiling" would be a one-shot interrupt the client can
+                    # simply talk past.  A ceiling that only cancels one turn
+                    # is not a ceiling.
+                    self._budget_exhausted_reason = f"budget_exhausted ({detail})"
+                    self.request_stop(self._budget_exhausted_reason)
 
     def _reconnect_active_tier_if_rebound(self) -> None:
         """Re-point the provider when the ACTIVE tier's binding just changed.
@@ -7911,14 +7946,22 @@ NOTES
             logger.warning("budget: re-connect after degrade failed: %s", exc)
 
     def _surface_budget_event(self, message: str) -> None:
-        """Make a budget decision visible to the client (best-effort)."""
-        if not self._ui_hooks:
+        """Make a budget decision visible to the client (best-effort).
+
+        Uses ``_current_output_callback`` — the SAME per-turn channel the
+        rest of the session emits ``on_output("system", ...)`` through.
+
+        An earlier version routed this through ``self._ui_hooks``, which is
+        never set on the runner path (the live production path), so every
+        budget decision was silently dropped and the only evidence a budget
+        had acted at all was a server-side log line.  ``on_agent_output``
+        appears nowhere else in this file — that was the tell.
+        """
+        callback = self._current_output_callback
+        if callback is None:
             return
         try:
-            self._ui_hooks.on_agent_output(
-                agent_id=self._agent_id, source="system",
-                text=f"[{message}]", mode="write",
-            )
+            callback("system", f"[{message}]", "write")
         except Exception:  # noqa: BLE001
             pass
 
@@ -8732,6 +8775,16 @@ NOTES
         on_output: OutputCallback
     ) -> str:
         """Send a message with custom Part objects."""
+        # Budget ceiling: refuse rather than silently serve an
+        # over-budget turn.  See _refuse_if_budget_exhausted.
+        _refusal = self._refuse_if_budget_exhausted()
+        if _refusal is not None:
+            logger.info("refusing turn: %s", _refusal)
+            if on_output:
+                on_output("system", f"[{_refusal} — session will not run "
+                                    f"further turns]", "write")
+            return f"[{_refusal}]"
+
         if not self._configured:
             raise RuntimeError("Session not configured.")
         self._ensure_provider()
