@@ -42,7 +42,7 @@ The design adds one profile field, `budget_control`, with two halves:
   dimension's limit) and **overlays a new `model_tiers` binding table**:
   the tier vocabulary and the model's cognitive role are untouched; only
   the model each tier *points at* changes. A terminal rung can force
-  `finalize` (graceful) or `abort` (hard stop).
+  `finalize` (graceful) or `abort` (ends the session — see §5.1).
 
 The key design decision — arrived at by rejecting two earlier shapes —
 is that **degradation rebinds tier→model mappings; it does not move the
@@ -100,7 +100,9 @@ budget_control:
         dispatcher: { model: google/gemini-flash, provider: openrouter }
     - at: 100%
       action: finalize         # graceful terminal: inject "wrap up and answer now"
-      # alternative terminals: `abort` (hard stop) | `escalate` (hand to cascade owner)
+      # alternative terminals: `abort` (ends the session: cancels the
+      #   in-flight turn AND refuses further turns, §5.1)
+      #   | `escalate` (hand to cascade owner)
 ```
 
 **Field notes:**
@@ -230,6 +232,31 @@ none are switched off.
    `_tier_config.tiers`, then re-points the *currently active* tier at
    its (possibly new) model. New turns resolve from the mutated table
    automatically.
+
+---
+
+### 5.1 What `abort` means (settled by the first live run)
+
+`abort` ends the **session**, not merely the turn: it cancels the
+in-flight turn via the cooperative `request_stop`, **and** latches
+`_budget_exhausted_reason` so every subsequent `send_message` is refused.
+
+The latch is not belt-and-braces — without it the ceiling does not
+exist. `request_stop` only cancels the turn in flight, and rungs are
+**latched**, so the 100% rung never fires again; a client that simply
+sends another message then runs completely unbudgeted. The first live PoC
+ran a `limits: {turns: 4}` profile to **8 turns — 200% of budget** on
+exactly this path, with three real tool calls after the abort. A ceiling
+that only cancels one turn is not a ceiling, and "hard stop" in the
+earlier draft of this note was wrong about its own mechanism.
+
+This also bounds the cascade pool (§8): if pool exhaustion pushes `abort`
+to each live session and `abort` did not refuse later turns, the pool's
+overshoot would be unbounded for as long as any client kept sending —
+not the "one in-flight turn per child" the design claims.
+
+`finalize` deliberately does **not** latch a refusal: it is the graceful
+terminal, and blocking further turns is `abort`'s job.
 
 ---
 
