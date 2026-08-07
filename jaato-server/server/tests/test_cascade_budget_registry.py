@@ -123,3 +123,42 @@ def test_depletion_across_stages_is_cumulative():
     cfg, eff = pool.child_config(_cfg(tokens=9000))
     assert cfg.limits["tokens"] == 2700.0     # stage 2 clamped
     assert eff.clamped == ("tokens",)
+
+
+# --------------------------- client-visible refusal (PoC #2 gap) ----------
+
+def test_refusal_reaches_the_client_with_machine_readable_evidence():
+    """Without this the driver saw a session id, silence, then its own turn
+    timeout — indistinguishable from a hung daemon, which wants the opposite
+    response to a budget refusal."""
+    from shared.budget_control import BudgetControlConfig, CascadeBudgetPool
+    from server.session_manager import SessionManager
+
+    emitted = []
+    sm = SimpleNamespace(_emit_to_client=lambda cid, ev: emitted.append((cid, ev)))
+    pool = CascadeBudgetPool("cid1", BudgetControlConfig.from_dict(
+        {"limits": {"tokens": 12000}}))
+    pool.spend(tokens=12000)
+    try:
+        pool.child_config(BudgetControlConfig.from_dict(
+            {"limits": {"tokens": 9000}}))
+        raise AssertionError("expected CascadeExhaustedError")
+    except Exception as exc:
+        SessionManager._emit_cascade_refusal(sm, "client-1", "sid-3", exc)
+
+    assert len(emitted) == 1
+    cid, ev = emitted[0]
+    assert cid == "client-1"
+    assert ev.error_type == "CascadeExhaustedError"
+    assert ev.recoverable is False
+    assert ev.details["reason"] == "cascade_budget_exhausted"
+    assert ev.details["exhausted_dimensions"] == ["tokens"]
+    assert ev.details["profile_limits"]["tokens"] == 9000     # what it asked
+    assert ev.details["cascade_remaining"]["tokens"] == 0.0   # what was left
+
+
+def test_refusal_emit_never_raises():
+    from server.session_manager import SessionManager
+    sm = SimpleNamespace(_emit_to_client=lambda *a: (_ for _ in ()).throw(
+        RuntimeError("sink down")))
+    SessionManager._emit_cascade_refusal(sm, "c", "s", RuntimeError("boom"))

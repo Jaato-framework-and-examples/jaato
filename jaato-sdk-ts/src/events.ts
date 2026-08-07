@@ -5276,6 +5276,9 @@ export type Timestamp41 = string;
 export type Error3 = string;
 export type ErrorType2 = string;
 export type Recoverable = boolean;
+export type Details = {
+  [k: string]: unknown;
+} | null;
 /**
  * All event types in the protocol.
  */
@@ -14400,6 +14403,7 @@ export interface ErrorEvent {
   error?: Error3;
   error_type?: ErrorType2;
   recoverable?: Recoverable;
+  details?: Details;
 }
 /**
  * API retry notification with exponential backoff.

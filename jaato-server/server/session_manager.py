@@ -1338,6 +1338,25 @@ class SessionManager:
             # per-session tracker at the one moment it has to be right.
             self._reconcile_cascade_pool(cascade_driver_id)
 
+            # Pre-flight the cascade clamp HERE rather than letting it raise
+            # inside the envelope builder.  Raising there produced a correct
+            # daemon-side log and a correct SessionTerminatedEvent, but the
+            # driver observed only a session id, silence, and its own
+            # 120s turn timeout — indistinguishable from a hung daemon, which
+            # wants the opposite response to a budget refusal.  Refusing at
+            # the spawn boundary lets the requesting client be told
+            # synchronously, with the framework's own evidence attached.
+            _pool = server._cascade_budget_pool
+            if _pool is not None:
+                from shared.budget_control import CascadeExhaustedError
+                try:
+                    _pool.child_config(
+                        getattr(server, "_profile", None)
+                        and getattr(server._profile, "budget_control", None))
+                except CascadeExhaustedError as exc:
+                    self._emit_cascade_refusal(client_id, session_id, exc)
+                    return False
+
             spawn_session_runner(
                 server=server,
                 session_id=session_id,
@@ -4315,6 +4334,41 @@ class SessionManager:
         with self._cascade_budgets_lock:
             self._cascade_budgets.pop(cascade_driver_id, None)
 
+    def _emit_cascade_refusal(
+        self, client_id: Optional[str], session_id: str, exc: Any,
+    ) -> None:
+        """Tell the requesting client its child was refused, and why.
+
+        A refused spawn must be as observable as a session-level budget
+        refusal.  Without this the driver sees a session id, then nothing,
+        then a turn timeout — it cannot tell "the cascade is out of budget"
+        (finish gracefully) from "the daemon hung" (escalate), and those
+        want opposite responses.
+
+        Carries ``error_type=CascadeExhaustedError`` and the full
+        ``as_payload()`` — exhausted dimensions, both min() inputs, and the
+        rendered detail — so the refusal is evidence the framework handed
+        over rather than something the driver inferred from a timeout.
+        """
+        from jaato_sdk.events import ErrorEvent
+        try:
+            payload = exc.as_payload() if hasattr(exc, "as_payload") else {}
+            logger.warning(
+                "cascade refused spawn of %s: %s", session_id, payload,
+            )
+            if client_id:
+                self._emit_to_client(client_id, ErrorEvent(
+                    error=str(exc),
+                    error_type="CascadeExhaustedError",
+                    recoverable=False,
+                    details=payload,
+                ))
+        except Exception as emit_exc:  # noqa: BLE001 — defensive
+            logger.warning(
+                "cascade refusal emit failed for %s (root cause %s): %s",
+                session_id, exc, emit_exc,
+            )
+
     def _reconcile_cascade_pool(self, cascade_driver_id: Optional[str]) -> None:
         """Refresh a cascade's pool from its live sessions' own trackers.
 
@@ -4345,9 +4399,16 @@ class SessionManager:
                 usage = rpc.session_get_budget_usage_threadsafe(timeout=5.0)
                 deltas = pool.reconcile_session(sid, usage or {})
                 if deltas:
+                    # Log the session's TOTAL contribution too.  The delta
+                    # alone is misleading: the incremental event path has
+                    # usually already applied most dimensions, so a reconcile
+                    # that moves only `usd` reads as though tokens were
+                    # dropped — when tokens were simply already counted.
                     logger.info(
-                        "cascade %s reconciled %s: +%s (remaining %s)",
-                        cascade_driver_id, sid, deltas, pool.remaining(),
+                        "cascade %s reconciled %s: delta=%s total=%s "
+                        "(remaining %s)",
+                        cascade_driver_id, sid, deltas,
+                        pool.session_contribution(sid), pool.remaining(),
                     )
             except Exception as exc:  # noqa: BLE001 — best-effort
                 logger.debug(

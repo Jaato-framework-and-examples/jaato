@@ -1076,6 +1076,13 @@ class ErrorEvent(Event):
     error: str = ""
     error_type: str = ""  # Exception class name
     recoverable: bool = True
+    # Optional machine-readable evidence for errors whose cause is
+    # structured.  ``error`` stays the human-readable sentence; this is what
+    # a driver branches on.  Canonical case: a cascade budget refusal, which
+    # carries the exhausted dimensions and BOTH inputs to the min() that
+    # produced it — so a client can distinguish "out of budget" from
+    # "daemon hung" without parsing prose or reading the server's log.
+    details: Optional[Dict[str, Any]] = None
 
 
 class RetryEvent(Event):

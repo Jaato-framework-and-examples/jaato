@@ -11,7 +11,8 @@
     "cache_creation_tokens": null,
     "reasoning_tokens": null,
     "thinking_tokens": null,
-    "cost_usd": null
+    "cost_usd": null,
+    "spend_total_tokens": null
   },
   "duration_seconds": 0.0,
   "function_calls": [],
