@@ -3033,6 +3033,7 @@ class RunnerRPC:
                         function_calls=last_turn.get("function_calls", []),
                         cache_read_tokens=last_turn.get("cache_read"),
                         cache_creation_tokens=last_turn.get("cache_creation"),
+                        spend_total_tokens=last_turn.get("spend_total"),
                         finish_reason=last_turn.get("finish_reason", "stop"),
                     )
                     usage = session.get_context_usage()
@@ -4786,6 +4787,7 @@ class _AgentUIHooksNotificationShim:
         function_calls: List[Dict[str, Any]],
         cache_read_tokens: Optional[int] = None,
         cache_creation_tokens: Optional[int] = None,
+        spend_total_tokens: Optional[int] = None,
         finish_reason: str = "stop",
     ) -> None:
         """Forward ``on_agent_turn_completed`` across the wire.
@@ -4806,6 +4808,10 @@ class _AgentUIHooksNotificationShim:
                 payload={
                     "agent_id": str(agent_id or ""),
                     "turn_number": int(turn_number or 0),
+                    "spend_total_tokens": (
+                        int(spend_total_tokens)
+                        if spend_total_tokens is not None else None
+                    ),
                     "prompt_tokens": int(prompt_tokens or 0),
                     "output_tokens": int(output_tokens or 0),
                     "total_tokens": int(total_tokens or 0),

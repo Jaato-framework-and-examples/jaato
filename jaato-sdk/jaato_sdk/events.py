@@ -926,6 +926,13 @@ class UsageBreakdown(BaseModel):
     thinking_tokens: Optional[int] = None
     # Cost in USD; None when neither provider nor pricing table knows
     cost_usd: Optional[float] = None
+    # Tokens BILLED across the turn — the sum over the turn's responses.
+    # Distinct from ``total_tokens``, which is the LAST response's total and
+    # therefore the end-of-turn CONTEXT SIZE for a prompt-inclusive provider.
+    # A turn with a tool call has >=2 billed responses, so summing
+    # ``total_tokens`` across turns undercounts spend (measured: 59% of
+    # actual).  ``None`` on per-response usage, where spend == total.
+    spend_total_tokens: Optional[int] = None
 
 
 class GCConfigEvent(Event):

@@ -206,6 +206,7 @@ class AgentUIHooks(Protocol):
         function_calls: List[Dict[str, Any]],
         cache_read_tokens: Optional[int] = None,
         cache_creation_tokens: Optional[int] = None,
+        spend_total_tokens: Optional[int] = None,
         finish_reason: str = "stop",
     ) -> None:
         """Called after each conversation turn completes.
