@@ -3002,6 +3002,22 @@ class RunnerRPC:
             # forwarding failure must not corrupt the send_message
             # response.
             ui_hooks = getattr(session, "_ui_hooks", None)
+            # A turn REFUSED by the budget gate never ran, so it must not be
+            # reported as completed.  Doubly so here: the payload below is
+            # sourced from ``turn_accounting[-1]`` and a refused turn appends
+            # nothing — the event would re-emit the PREVIOUS turn's tokens and
+            # duration.  The refusal still reaches the client as a system
+            # output line, so nothing is lost by suppressing this.
+            # ``is True`` deliberately, not truthiness: a duck-typed / mocked
+            # session returns a truthy object from any attribute, which would
+            # silently suppress the event for every caller.
+            _refused = getattr(session, "was_last_send_refused", None)
+            if callable(_refused):
+                try:
+                    if _refused() is True:
+                        ui_hooks = None
+                except Exception:  # noqa: BLE001
+                    pass
             if ui_hooks is not None:
                 try:
                     agent_id = getattr(session, "_agent_id", None) or "main"

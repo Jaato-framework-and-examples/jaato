@@ -264,3 +264,18 @@ def test_pressure_names_the_driving_dimension_below_100pct():
     t = BudgetTracker(_cfg(limits={"turns": 4, "usd": 100}))
     t.observe(turns=2, usd=1)
     assert "turns 50%" in t.describe_pressure()
+
+
+def test_refused_send_is_flagged_so_no_turn_completed_is_emitted():
+    """PoC residual: a refused turn still emitted TURN_COMPLETED, so a client
+    counting turns over-counted (8 = 4 real + 4 refusals). Worse, the runner
+    sources that payload from turn_accounting[-1] and a refused turn appends
+    nothing — it re-emitted the PREVIOUS turn's tokens."""
+    budget = _cfg(limits={"turns": 2}, degrade=[{"at": 100, "action": "abort"}])
+    s = _session(budget=budget)
+    s._last_send_refused = False
+    assert JaatoSession.was_last_send_refused(s) is False
+    JaatoSession._apply_budget_rungs(s, s._budget_tracker.observe(turns=2))
+    # the gate now reports a refusal; simulate what send_message records
+    s._last_send_refused = JaatoSession._refuse_if_budget_exhausted(s) is not None
+    assert JaatoSession.was_last_send_refused(s) is True

@@ -442,6 +442,10 @@ class JaatoSession:
         # ``_budget_terminal_action`` (which also latches finalize/escalate,
         # neither of which stops anything).
         self._budget_exhausted_reason: Optional[str] = None
+        # True when the LAST send_message was refused by the budget gate
+        # (no turn ran).  Read runner-side to suppress the post-turn
+        # TurnCompletedEvent — see ``was_last_send_refused``.
+        self._last_send_refused: bool = False
         self._active_tier: Optional[str] = None
 
         # Spawn-time parameters passed to this session by the caller
@@ -3999,6 +4003,7 @@ NOTES
         # Budget ceiling: refuse rather than silently serve an
         # over-budget turn.  See _refuse_if_budget_exhausted.
         _refusal = self._refuse_if_budget_exhausted()
+        self._last_send_refused = _refusal is not None
         if _refusal is not None:
             logger.info("refusing turn: %s", _refusal)
             if on_output:
@@ -7802,6 +7807,22 @@ NOTES
         # Update conversation budget and emit for budget panel
         # This ensures the budget snapshot includes current turn's conversation tokens
         self._update_conversation_budget()
+
+    def was_last_send_refused(self) -> bool:
+        """True when the last ``send_message`` was refused by the budget gate.
+
+        Read by the runner RPC handler to SUPPRESS the post-turn
+        ``TurnCompletedEvent``.  A refused turn never ran, so reporting it as
+        completed is doubly wrong: the handler sources its payload from
+        ``turn_accounting[-1]``, and a refused turn appends nothing — so the
+        event would carry the PREVIOUS turn's tokens and duration again.  A
+        client counting turns over-counts; one summing tokens double-counts.
+
+        The refusal is still visible to the client as an
+        ``on_output("system", ...)`` line, so suppressing the event loses no
+        information.
+        """
+        return self._last_send_refused
 
     def _refuse_if_budget_exhausted(self) -> Optional[str]:
         """Return a refusal reason when an ``abort`` rung has already fired.
