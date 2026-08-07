@@ -271,9 +271,28 @@ The dimension therefore grows superlinearly with conversation length
 rather than tracking incremental work. This is the correct measure of
 *spend* (you are billed for the prompt on every call), but anyone sizing
 a token budget by asking "how much work should this agent do" will
-undershoot badly. Measured on a real 4-turn run: 2572, 3008, 1724, 1800
-— note turns 3-4 are *lower* than turns 1-2 despite being later, because
-a degrade rung swapped in a cheaper model and shrank the accounting.
+undershoot badly.
+
+And the number most people reach for to measure it is **not** the number
+the budget counts. From a real calibration run (`limits: {tokens: 9000}`,
+3 turns, 5 responses):
+
+| source | values | sum |
+|---|---|---|
+| per **response** — what the tracker accumulates | 2150, 2504, 1685, 1572, 1594 | **9505** |
+| per **turn** — `turn.completed.total_tokens` | 2504, 1572, 1594 | 5670 |
+
+The tracker's own verdict at abort was `tokens 106%` of 9000, and
+9505/9000 = 105.6% — so the per-response sum matches it exactly, while
+the per-turn figure accounts for **59%** of it. A turn with a tool call
+has >=2 billed responses, and `turn_data['total']` *assigns* rather than
+accumulates, so only the last survives. Fixed additively — `spend_total`
+accumulates alongside `total`, because `total` is legitimately the
+end-of-turn CONTEXT SIZE that GC and the context displays read.
+
+Note responses 3-5 (1685/1572/1594) are *lower* than 1-2 (2150/2504):
+a degrade rung swapped in a cheaper model and the context accounting
+shrank. Spend went down after the brownout — the brownout working.
 
 **`usd` only advances when a cost is actually KNOWN.** Resolution is
 provider-reported → `.jaato/pricing.json` → nothing. With neither source
