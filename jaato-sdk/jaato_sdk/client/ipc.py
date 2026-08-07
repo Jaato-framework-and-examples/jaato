@@ -1828,16 +1828,22 @@ class IPCClient:
         self,
         command: str,
         args: Optional[list] = None,
+        payload: Optional[dict] = None,
     ) -> None:
         """Execute a command.
 
         Args:
             command: Command name.
             args: Command arguments.
+            payload: Optional structured body for verbs that take one
+                (``CommandRequest.payload``) — used where a dict is the
+                natural shape and squeezing it into positional ``args``
+                would be lossy, e.g. ``cascade.budget.set``.
         """
         await self._send_event(CommandRequest(
             command=command,
             args=args or [],
+            payload=payload,
         ))
 
     # ---- typed wake-primitive methods (see _wake_client) ----
@@ -1861,6 +1867,57 @@ class IPCClient:
         See :func:`jaato_sdk.client._wake_client.cascade_register`."""
         from ._wake_client import cascade_register
         await cascade_register(self, cascade_driver_id, role, event_types)
+
+    async def cascade_budget_set(
+        self,
+        cascade_driver_id: str,
+        limits: dict,
+        degrade: Optional[list] = None,
+    ) -> None:
+        """Declare a cascade's AGGREGATE budget ceiling (owner-side).
+
+        ``limits`` maps dimension -> ceiling (``usd`` / ``tokens`` /
+        ``seconds`` / ``tool_calls`` / ``turns``); omit a dimension to leave
+        it unbounded.  ``degrade`` is the optional rung ladder, same grammar
+        as a profile's ``budget_control``.
+
+        Every session subsequently created with this ``cascade_driver_id``
+        has its own ceiling clamped to ``min(profile, cascade_remaining)``
+        at spawn, and a cascade with no headroom left REFUSES the spawn
+        rather than starting a child that cannot run a turn.
+
+        Declared here rather than on a profile because a cap is a runtime
+        aggregate over one live cid, not a property of a reusable template.
+
+        Fire-and-forget; the daemon acknowledges with a
+        ``SystemMessageEvent`` (and reports authoring errors as
+        ``ErrorEvent``).
+        """
+        body: dict = {"limits": dict(limits)}
+        if degrade:
+            body["degrade"] = list(degrade)
+        await self.execute_command(
+            "cascade.budget.set", [cascade_driver_id], payload=body)
+
+    async def cascade_budget_get(self, cascade_driver_id: str) -> None:
+        """Request a cascade's remaining headroom.
+
+        The daemon replies with a ``SystemMessageEvent`` whose ``message`` is
+        JSON: ``{cascade_driver_id, declared, limits, remaining,
+        usage_fraction, pressure}`` — or ``{cascade_driver_id, declared:
+        false}`` when the cid has no budget.
+
+        Same fire-and-forget shape as :meth:`list_profiles`: the reply
+        arrives on the event stream rather than as a return value.  Reading
+        ``remaining`` between stages is the client-side witness of the pool
+        depleting — independent corroboration of the daemon's spawn-time
+        clamp rather than only the framework reporting its own decision.
+        """
+        await self.execute_command("cascade.budget.get", [cascade_driver_id])
+
+    async def cascade_budget_clear(self, cascade_driver_id: str) -> None:
+        """Drop a cascade's budget pool (finished cascade / clean re-run)."""
+        await self.execute_command("cascade.budget.clear", [cascade_driver_id])
 
     async def disable_tool(self, tool_name: str) -> None:
         """Disable a tool directly via registry.
