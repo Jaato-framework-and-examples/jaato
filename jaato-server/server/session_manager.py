@@ -34,6 +34,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from shared.utils.errors import exc_message
 from shared.plugins.session import (
     create_plugin as create_session_plugin,
     load_session_config,
@@ -4504,18 +4505,14 @@ class SessionManager:
                 "timeout (%s) — child is mid-turn; the rung is latched and "
                 "applies at its next turn boundary",
                 cascade_driver_id, session_id,
-                # ``exc or ...`` never fired: an exception instance is
-                # TRUTHY even when it stringifies to "", which is exactly
-                # what a bare TimeoutError does.  Six runs logged an empty
-                # "()".  Test the STRING, not the object.
-                str(exc) or type(exc).__name__,
+                exc_message(exc),
             )
         except Exception as exc:  # noqa: BLE001 — best-effort boundary
             logger.warning(
                 "cascade %s: degrade push to %s failed: %s: %s — unlike a "
                 "timeout this child may never receive the rung",
                 cascade_driver_id, session_id,
-                type(exc).__name__, exc or "(no message)",
+                type(exc).__name__, exc_message(exc),
             )
 
     def _reconcile_cascade_pool(self, cascade_driver_id: Optional[str]) -> None:
@@ -7385,7 +7382,9 @@ class SessionManager:
         session.shutdown + 10 s runner-rpc close + 5 s buffer)
         per disconnect; the per-session unload error message logged
         as ``Failed to save session ...:`` (empty ``str(exc)``) was
-        the timeout's tell.
+        the timeout's tell.  Render exceptions with
+        :func:`shared.utils.errors.exc_message` so that tell can never be
+        an empty slot again.
 
         Args:
             session_id: The session to potentially unload.
