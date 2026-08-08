@@ -119,7 +119,7 @@ budget_control:
   `vision`). They introduce no ad-hoc labels, so no widening of the tier
   vocabulary or the `enter_tier` tool schema is required.
 
-### 3.0 Authoring a budgeted profile — three traps
+### 3.0 Authoring a budgeted profile — four traps
 
 Found while authoring the first budgeted profiles; none is caught by
 `jaato-scaffold validate`, so they are documented rather than enforced.
@@ -136,7 +136,18 @@ Found while authoring the first budgeted profiles; none is caught by
    discovery instead of during the work, and the run stops being
    reproducible. Use `cli(preload)` (the validator emits an
    informational `discovery_gated_tools` line listing what is deferred).
-3. **Model ids are not validated.** The validator checks tier names and
+3. **Every model in a ladder must support what the agent actually does.**
+   A rung that degrades to a model which cannot make tool calls does not
+   degrade the agent, it kills it — and it fails at the worst moment,
+   mid-run, on a rung that only fires under pressure. Worse than a bad id,
+   which at least fails on turn 1.
+   Checking a catalogue's `supported_parameters` is **necessary but not
+   sufficient**: that field is an aggregate over the providers serving a
+   model, so it tells you the model can do tools *somewhere*, not that the
+   provider you are routed to will. A gateway can advertise `tools: true`
+   and still route to an upstream that rejects them. Prefer models already
+   exercised in the same deployment over cheaper unproven ones.
+4. **Model ids are not validated.** The validator checks tier names and
    that a named provider is installed — it does NOT check that the model
    id exists on that provider. A typo validates clean and fails at
    `connect`. Check the provider's catalog (for OpenRouter,
@@ -572,6 +583,170 @@ absolute reading. Do not accumulate a ceiling from an event stream.
 `usage_fraction()` does not floor, so multiplying it by the declared cap
 recovers true total consumption including any overshoot. For per-stage
 accounting, read `usage_fraction`.
+
+---
+
+### 8e. Separate budgets: a child that declared one keeps it
+
+**A subagent is a delegation to another department, with its own budget.**
+That is the governing idea, and it decides both halves — the ladder and
+the numbers.
+
+| the spawn carried a `budget_control`? | limits | ladder | draws on the parent's pot? |
+|---|---|---|---|
+| **yes** (profile file *or* inline spec) | **exactly as declared** | **its own, taken literally** | **no — its own books** |
+| **no** | whatever the parent has left | inherits the parent's | yes |
+
+A child that declared a budget is **not clamped** to the parent's
+remainder, **not refused** when the parent's pot is dry, **does not
+deplete** that pot as it spends, and is **not degraded** when the pot
+crosses a rung. The author wrote a number; the parent is not entitled to
+rewrite it, and the department's spending is accounted separately.
+
+A child that declared nothing has delegated the policy: it draws on what
+the parent has left, inherits the parent's ladder, depletes the pot, and
+is degraded when the pot crosses.
+
+**The test is "did this spawn carry a `budget_control`", from either
+source — not "was a profile file referenced".** The spawn tool accepts
+inline specs as well as profile references, so an author who wants a
+child's policy fixed can express it either way, and an author who spawns
+without one has decided the parent governs. The mechanism chosen IS the
+expression of intent.
+
+**What the shared pot therefore is.** Not a cap on total family spend — a
+cap on the parent's own allowance and the children drawing on it. A caller
+wanting a true all-in total must sum the separate budgets; nothing does
+that today, and nothing should pretend to.
+
+This supersedes the earlier framing in which every child's limits were
+clamped to `min(profile, remaining)`. That rule overrode a declared
+number, which is the same overreach as degrading a profile whose author
+asked for no degradation.
+
+---
+
+### 8e-bis. Whose degradation policy applies to a child
+
+A child in a cascade always runs against the CLAMPED limits. What differs
+is whose *policy* governs it, and the rule turns on whether the child's
+author expressed one at all:
+
+| the child's profile | limits | degrade ladder |
+|---|---|---|
+| declares `budget_control` **with** a ladder | clamped | **its own** |
+| declares `budget_control`, **limits only** | clamped | **none — taken literally** |
+| declares **no** `budget_control` | clamped to the cascade remainder | **inherits the cascade's** |
+
+The middle row is the deliberate one. A block with `limits` and no
+`degrade` is an author saying "cap me but do not degrade me", and the
+cascade is not entitled to override it — **the cascade constrains
+ceilings, never policy**. Degrading a profile whose author did not ask for
+degradation would be the framework substituting its judgement for theirs.
+
+The third row exists because the alternative is worse than it looks: a
+profileless child previously received a ceiling with **no behaviour
+attached**. Its tracker accumulated, crossed the limit, and nothing fired
+— "budgeted" only in the sense that a number had been written down, with a
+best-effort push the sole thing that could degrade it.
+
+Note the inherited ladder's thresholds are percentages of the **child's
+clamped limit**, not the pool's. The policy *shape* ("brown out at half,
+stop at full") applies at whatever scale the child was allocated, which is
+what makes it meaningful for a child holding a slice rather than the whole
+pool.
+
+**Interaction with the aggregate ceiling.** Inheritance means a
+profileless child SELF-ENFORCES — it reaches its own clamped ceiling and
+fires the rungs itself, no push involved. That removes the push from the
+critical path for those children. It does NOT close the aggregate hole:
+the clamp is still a read, so N concurrent children each clamped to the
+full remainder will each self-enforce correctly and still sum past the
+cap. Self-enforcement bounds each child; only a reservation bounds the
+sum.
+
+---
+
+### 8f. Scope: "cascade" is one grouping, not the general case
+
+The aggregate ceiling is currently keyed on ``cascade_driver_id`` and
+lives in ``SessionManager._sessions``. That was a convenience — a cid was
+the only pre-existing way to name a group of related agents — and it left
+the naming, and the implementation, narrower than the problem.
+
+The relationship that actually matters is **parent → children**. A cascade
+is one way to have it. A plain main agent calling ``spawn_subagent`` is
+another, and it is the more common one.
+
+**What that currently means, stated plainly:**
+
+| how the child is created | in `SessionManager._sessions` | carries a cid | pool / clamp / push |
+|---|---|---|---|
+| `session.new` over IPC with a `cascade_driver_id` | yes | yes | **applies** |
+| `session.new` without one | yes | no | no aggregate |
+| `spawn_subagent` (subagent plugin) | **no** — runtime-level session | no | **none of it** |
+
+A subagent is a `JaatoSession` created by ``runtime.create_session()``, not
+a daemon session. It never enters ``_sessions``, so the pool cannot see its
+spend, the spawn-time clamp never runs for it, and a mid-flight push cannot
+reach it. Its own profile's ``budget_control`` is the only budget it can
+have — which is why that had to be forwarded (it was not, and a subagent
+was silently unbudgeted regardless of what its profile declared).
+
+**Consequence for a non-cascade parent.** A main agent with a strict
+``budget_control`` bounds only *its own* session. Spawning ten subagents
+does not touch that ceiling, because the parent's session is not the one
+spending. There is no aggregate over the family today unless the family
+happens to be a cascade.
+
+**Direction, not yet built.** The pool should be keyed on a **spend
+scope** — an identifier a cascade *or* a parent session can own — rather
+than on `cascade_driver_id` specifically, with children drawing from the
+scope they were spawned into. That generalisation and the reservation
+question in §8 are the same decision at different scopes, and are best
+made together rather than retrofitting the cid-keyed mechanism twice.
+
+Until then, read every "cascade" in §8/§8b-§8e as "cascade specifically",
+not "any parent" — the mechanism is real but its reach is narrower than
+the vocabulary suggests.
+
+---
+
+### 8d. When a cascade rung actually takes effect
+
+A pushed rung does **not** take effect when the pool crosses it. It takes
+effect at each child's **next turn boundary**.
+
+A child inside a model call does not service the RPC until its turn ends,
+so a push aimed at a busy child does not ack within the daemon's timeout.
+That timeout is the daemon giving up waiting, **not** a rejection — the
+rung still lands, and rungs latched while a child was busy are applied
+together at the next boundary. Nothing is lost; delivery is *delayed by up
+to one turn*.
+
+Two consequences worth designing around:
+
+* This delay **is** the `cap + (N x one turn)` overshoot. The bound is not
+  a safety margin bolted on — it is the direct arithmetic of every live
+  child being able to finish the turn it is in before a rung reaches it.
+* A timeout in the logs is expected traffic under load, not a fault. It is
+  logged at INFO for that reason; a genuine delivery failure (an
+  unreachable runner) is the WARNING, and is the only case where a child
+  may never receive the rung.
+
+### The aggregate ceiling is conditional on the push
+
+Worth stating plainly because it bounds what §8c's validation claims. The
+spawn-time clamp cannot bound a fan-out: N children spawning concurrently
+each legitimately see the same full remaining, so each may be granted the
+entire pool. Under concurrency the aggregate ceiling therefore rests
+**entirely** on the mid-flight push, and the push is best-effort.
+
+Measured on the same harness: with the push working, total spend settled
+at ~158% of cap (inside the N-turn bound). With the push broken, ~307% of
+cap and no ceiling at all. Nothing in the current design sits between
+those two outcomes — a per-child *reservation* at spawn would provide that
+floor and demote the push to an optimisation. Not built; see §8.
 
 ---
 

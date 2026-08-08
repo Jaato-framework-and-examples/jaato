@@ -717,6 +717,19 @@ class JaatoSession:
         # This ensures enrichment notifications go to the correct agent panel even when
         # multiple sessions share the same registry (e.g., subagents)
         self._current_output_callback: Optional['OutputCallback'] = None
+        # When set, budget notices are ALSO collected here.  A rung pushed
+        # from the cascade can land BETWEEN turns, and every client-facing
+        # output channel this session has is turn-scoped — so the notice
+        # must be handed back to the caller (the daemon) to emit instead.
+        self._budget_notice_sink: Optional[List[str]] = None
+        # Highest rung threshold already applied to THIS session, from any
+        # source.  Latching lives on each BudgetTracker, so two trackers
+        # watching the SAME ladder at different rates each latch
+        # independently — and a lower rung applied later silently reverses a
+        # higher one, because overlays are last-writer-wins per tier.  This
+        # makes "at most once, in order" a property of the LADDER rather
+        # than of whichever tracker noticed.
+        self._budget_applied_rung_pct: float = 0.0
 
         # Current turn span — set while a turn is in progress so that
         # _enrich_tool_result_dict can emit enrichment telemetry events on it.
@@ -7921,8 +7934,33 @@ NOTES
         except Exception as exc:  # noqa: BLE001
             logger.warning("budget: turn observation failed: %s", exc)
 
-    def _apply_budget_rungs(self, fired) -> None:
+    def _apply_budget_rungs(
+        self, fired, origin: str = "self-enforced",
+        pressure: Optional[str] = None,
+    ) -> None:
         """Apply the degrade rungs that just crossed their threshold.
+
+        ``origin`` names the MECHANISM, not whose ladder it was:
+
+        * ``"self-enforced"`` — this session's own tracker crossed its own
+          limit.  Note the ladder itself may have been INHERITED from the
+          parent (a child that declared no budget takes the parent's), so
+          "self-enforced" means "my tracker tripped it", not "my policy".
+        * ``"cascade-pushed"`` — the shared pool crossed and the rung was
+          pushed here from the daemon.
+
+        Mechanism is the distinction a consumer actually needs, and it is
+        why the marker exists at all: "I hit my own ceiling" invites a
+        narrower retry, "the shared pot ran out" means the run is winding
+        down and retrying is pointless.  Both paths land in this function
+        and would otherwise emit identical lines.
+
+        Earlier values were ``"session"`` / ``"cascade"``, which read as
+        "whose ladder" — actively wrong for a profileless child
+        self-enforcing the PARENT's ladder, which would have been labelled
+        ``session``.  Same class as reporting a child's own pressure
+        against a pool-triggered rung: defensible if you know the
+        internals, wrong if you do not.
 
         Two effects, per ``docs/design/budget-control-degradation.md``:
 
@@ -7943,7 +7981,38 @@ NOTES
         from .budget_control import ACTION_ABORT, overlay_tier_table
 
         for rung in fired:
-            detail = self._budget_tracker.describe_pressure()
+            # Rungs apply at most once and IN ORDER, per ladder — not per
+            # tracker.  A pooled child runs the parent's ladder on its own
+            # tracker AND receives pushes of the same ladder from the pool,
+            # and the pool crosses first under concurrent spawn (each child
+            # is handed the full remainder, so the pot depletes ~N times
+            # faster than any one child).  Its own lower rung therefore
+            # fires LATER in wall-clock and, unguarded, rebinds the tier back
+            # to a model the cascade had already degraded away from — onto a
+            # pricier one, at the moment the pot is most exhausted.
+            #
+            # Safe to compare thresholds across sources because under the
+            # separate-budgets rule the two sources are always the SAME
+            # ladder: a child that declared a budget keeps its own and is
+            # never pushed; a child that declared none inherits the parent's,
+            # which is exactly what gets pushed.
+            if rung.at_percent <= self._budget_applied_rung_pct:
+                logger.info(
+                    "budget[%s]: skipping rung at %.0f%% — %.0f%% already "
+                    "applied; a lower rung would rebind BACKWARDS onto a "
+                    "model already degraded away from",
+                    origin, rung.at_percent, self._budget_applied_rung_pct,
+                )
+                continue
+            self._budget_applied_rung_pct = rung.at_percent
+            # A cascade rung fired on the POOL's fraction; reporting this
+            # child's own usage instead reads as a contradiction ("degrading
+            # at 50% (tokens 32%)").  Caller supplies the pool's pressure.
+            detail = pressure or (
+                self._budget_tracker.describe_pressure()
+                if self._budget_tracker is not None else "cascade pressure"
+            )
+            tag = f"budget[{origin}]"
             if rung.model_tiers:
                 if self._tier_config is None:
                     # Rejected by the profile validator, but a session can be
@@ -7958,23 +8027,23 @@ NOTES
                         self._tier_config.tiers, rung.model_tiers)
                     if changes:
                         logger.info(
-                            "budget: degrading at %.0f%% (%s) — rebound %s",
-                            rung.at_percent, detail,
+                            "budget[%s]: degrading at %.0f%% (%s) — rebound %s",
+                            origin, rung.at_percent, detail,
                             "; ".join(f"{k}: {v}" for k, v in changes.items()),
                         )
                         self._reconnect_active_tier_if_rebound()
                         self._surface_budget_event(
-                            f"budget {detail}: degraded "
+                            f"{tag} {detail}: degraded "
                             + "; ".join(f"{k} {v}" for k, v in changes.items())
                         )
             if rung.action:
                 self._budget_terminal_action = rung.action
                 logger.info(
-                    "budget: terminal action '%s' at %.0f%% (%s)",
-                    rung.action, rung.at_percent, detail,
+                    "budget[%s]: terminal action '%s' at %.0f%% (%s)",
+                    origin, rung.action, rung.at_percent, detail,
                 )
                 self._surface_budget_event(
-                    f"budget {detail}: {rung.action}")
+                    f"{tag} {detail}: {rung.action}")
                 if rung.action == ACTION_ABORT:
                     # Latch FIRST: request_stop only cancels the IN-FLIGHT
                     # turn (cooperative cancel).  Without the latch the next
@@ -7983,8 +8052,64 @@ NOTES
                     # "ceiling" would be a one-shot interrupt the client can
                     # simply talk past.  A ceiling that only cancels one turn
                     # is not a ceiling.
-                    self._budget_exhausted_reason = f"budget_exhausted ({detail})"
+                    self._budget_exhausted_reason = (
+                        f"budget_exhausted ({origin}: {detail})")
                     self.request_stop(self._budget_exhausted_reason)
+
+    def apply_cascade_degrade(
+        self, rungs: List[Dict[str, Any]],
+        pool_pressure: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Apply degrade rungs pushed down because the CASCADE pool crossed.
+
+        The mid-flight half of cascade budgets: a child already running when
+        the shared pool crosses must degrade too, rather than keeping the
+        ceiling it was handed at spawn.  A pool that only constrained
+        children at spawn would not be a shared budget — a sibling burning
+        the envelope has to affect everyone still running, which is the
+        whole point of the ceiling being aggregate.
+
+        Deliberately routed through the SAME :meth:`_apply_budget_rungs` a
+        session's own ladder uses, so a pushed rung produces identical
+        machinery — tier rebind, active-tier re-connect, abort latch — and
+        an identical client notice, differing only by its ``origin`` tag.
+
+        Args:
+            rungs: Wire form (``DegradeRung.to_dict()``) — re-parsed here so
+                the runner validates what it was handed rather than trusting
+                the daemon's serialisation.
+
+        Returns:
+            ``{"applied": <n>}``, or ``{"applied": 0, "error": ...}`` when
+            the payload will not parse.  Never raises: a budget push must
+            not break the session it is trying to constrain.
+        """
+        from .budget_control import DegradeRung
+        try:
+            parsed = [
+                DegradeRung.from_dict(r, index=i)
+                for i, r in enumerate(rungs or [])
+            ]
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("apply_cascade_degrade: bad payload: %s", exc)
+            return {"applied": 0, "error": str(exc)}
+        if not parsed:
+            return {"applied": 0, "notices": []}
+        notices: List[str] = []
+        previous_sink = self._budget_notice_sink
+        self._budget_notice_sink = notices
+        try:
+            self._apply_budget_rungs(
+                tuple(parsed), origin="cascade-pushed",
+                pressure=pool_pressure)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("apply_cascade_degrade: apply failed: %s", exc)
+            return {"applied": 0, "error": str(exc), "notices": notices}
+        finally:
+            self._budget_notice_sink = previous_sink
+        # Handed back rather than emitted: the DAEMON emits these, because
+        # it is not turn-scoped and this push may have landed between turns.
+        return {"applied": len(parsed), "notices": notices}
 
     def _reconnect_active_tier_if_rebound(self) -> None:
         """Re-point the provider when the ACTIVE tier's binding just changed.
@@ -8020,11 +8145,18 @@ NOTES
         had acted at all was a server-side log line.  ``on_agent_output``
         appears nowhere else in this file — that was the tell.
         """
+        rendered = f"[{message}]"
+        # Collect first: the sink is the only channel that works when this
+        # runs outside a turn (a cascade push), because both
+        # ``_current_output_callback`` and the runner's ``_ui_hooks`` shim
+        # are installed per-send and restored afterwards.
+        if self._budget_notice_sink is not None:
+            self._budget_notice_sink.append(rendered)
         callback = self._current_output_callback
         if callback is None:
             return
         try:
-            callback("system", f"[{message}]", "write")
+            callback("system", rendered, "write")
         except Exception:  # noqa: BLE001
             pass
 

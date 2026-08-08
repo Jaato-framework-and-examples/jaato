@@ -1554,6 +1554,32 @@ class RunnerRPCClient:
             timeout=timeout,
         )
 
+    async def session_apply_budget_degrade(
+        self, rungs: list, pool_pressure: Optional[str] = None,
+        *, timeout: Optional[float] = 5.0,
+    ) -> Dict[str, Any]:
+        """Push cascade degrade rungs onto a RUNNING session.
+
+        ``pool_pressure`` is the POOL's rendered pressure — the child would
+        otherwise report its own, which reads as a contradiction next to a
+        pool-triggered rung.
+        """
+        return await self._call_named(
+            "session.apply_budget_degrade",
+            {"rungs": list(rungs), "pool_pressure": pool_pressure},
+            timeout=timeout,
+        )
+
+    def session_apply_budget_degrade_threadsafe(
+        self, rungs: list, pool_pressure: Optional[str] = None,
+        *, timeout: Optional[float] = 5.0,
+    ) -> Dict[str, Any]:
+        return self._run_threadsafe(
+            self.session_apply_budget_degrade(
+                rungs, pool_pressure, timeout=timeout),
+            timeout=timeout,
+        )
+
     async def session_get_budget_usage(
         self, *, timeout: Optional[float] = 5.0,
     ) -> Dict[str, Any]:

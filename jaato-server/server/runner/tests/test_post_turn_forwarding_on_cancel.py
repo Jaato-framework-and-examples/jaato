@@ -87,3 +87,65 @@ def test_forwarding_never_raises_on_a_broken_session():
 
 def test_no_hooks_is_a_noop():
     _fwd(SimpleNamespace(_ui_hooks=None), turns_before=0)
+
+
+# ------------- session.apply_budget_degrade wire contract (slice 3) -------
+
+def test_apply_budget_degrade_dispatch_passes_the_args_through(monkeypatch):
+    """Pin the DISPATCH, not the handler.
+
+    The dispatch line read ``env.params``, which does not exist on
+    RequestEnvelope (the field is ``args``, and that is what _call_named
+    populates). Every cascade degrade push therefore died with
+    'AttributeError: RequestEnvelope object has no attribute params'.
+
+    Handler-level tests all passed throughout — they call the handler with a
+    dict and never cross the boundary that was broken. So this drives
+    _dispatch_method with a real envelope: it is the only shape that would
+    have caught it.
+    """
+    from server.runner.rpc import RunnerRPC
+    from server.runner.envelope import RequestEnvelope
+
+    seen = {}
+
+    class _Sess:
+        def apply_cascade_degrade(self, rungs, pool_pressure=None):
+            seen["rungs"] = rungs
+            return {"applied": len(rungs)}
+
+    rpc = RunnerRPC.__new__(RunnerRPC)
+    monkeypatch.setattr(
+        rpc, "_require_ready_session", lambda: (True, None, _Sess()),
+        raising=False)
+
+    rung = {"at": 50.0, "action": "abort"}
+    env = RequestEnvelope(
+        id="r1", method="session.apply_budget_degrade",
+        args={"rungs": [rung]},
+    )
+    ok, result = rpc._dispatch_method(env)
+    assert ok is True, f"dispatch failed: {result}"
+    assert result == {"applied": 1}
+    assert seen["rungs"] == [rung], "args never reached the handler"
+
+
+def test_apply_budget_degrade_tolerates_an_empty_envelope():
+    from server.runner.rpc import RunnerRPC
+
+    class _Sess:
+        def apply_cascade_degrade(self, rungs, pool_pressure=None):
+            return {"applied": 0}
+
+    rpc = SimpleNamespace(_require_ready_session=lambda: (True, None, _Sess()))
+    ok, result = RunnerRPC._handle_session_apply_budget_degrade(rpc, {})
+    assert ok is True and result == {"applied": 0}
+
+
+def test_apply_budget_degrade_on_a_session_without_the_method():
+    from server.runner.rpc import RunnerRPC
+
+    rpc = SimpleNamespace(
+        _require_ready_session=lambda: (True, None, SimpleNamespace()))
+    ok, result = RunnerRPC._handle_session_apply_budget_degrade(rpc, {"rungs": []})
+    assert ok is False and "apply_cascade_degrade" in result["error"]

@@ -130,14 +130,23 @@ def _envelope(server, sid="s"):
         profile_name="p")
 
 
-def test_child_actually_RECEIVES_the_clamped_budget():
-    """The exerciser's warning, made a test: assert the spawned child
-    received a clamped budget, not merely that code to clamp one exists."""
+def test_child_with_its_own_budget_RECEIVES_IT_UNCHANGED():
+    """A delegation to another department keeps the number its author
+    wrote; the parent does not rewrite it to whatever is left in the pot."""
     pool = _pool(tokens=12000)
-    pool.spend(tokens=9300)                      # stage 1 burned this
+    pool.spend(tokens=9300)                      # pot down to 2700
     env = _envelope(_server(_profile(budget=_budget_tokens(9000)), pool))
     assert env.budget_control is not None
-    # asked for 9000, cascade had 2700 left -> clamped
+    assert env.budget_control["limits"]["tokens"] == 9000
+
+
+def test_child_with_no_budget_RECEIVES_the_remainder():
+    """The exerciser's warning, made a test: assert the spawned child
+    actually RECEIVED a budget, not merely that code to compute one
+    exists."""
+    pool = _pool(tokens=12000)
+    pool.spend(tokens=9300)
+    env = _envelope(_server(_profile(budget=None), pool))
     assert env.budget_control["limits"]["tokens"] == 2700.0
 
 
@@ -159,15 +168,14 @@ def test_budgetless_child_inherits_the_cascade_remainder():
     assert env.budget_control["limits"]["tokens"] == 2700.0
 
 
-def test_exhausted_cascade_refuses_the_spawn_with_evidence():
+def test_exhausted_scope_refuses_a_child_that_draws_on_it():
     from shared.budget_control import CascadeExhaustedError
     pool = _pool(tokens=12000)
     pool.spend(tokens=12000)
     with pytest.raises(CascadeExhaustedError) as ei:
-        _envelope(_server(_profile(budget=_budget_tokens(9000)), pool))
+        _envelope(_server(_profile(budget=None), pool))
     payload = ei.value.as_payload()
     assert payload["exhausted_dimensions"] == ["tokens"]
-    assert payload["profile_limits"]["tokens"] == 9000
     assert payload["cascade_remaining"]["tokens"] == 0.0
 
 

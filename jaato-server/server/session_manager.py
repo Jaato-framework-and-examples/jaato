@@ -188,6 +188,12 @@ class Session:
     # was never set, so the GC reaped the observer at 22:07:25
     # despite host_validator having spawned 85s earlier.
     cascade_driver_id: Optional[str] = None
+    # False when this child declared its own budget_control: a delegation
+    # to another department, accounted on its own books.  Such a child does
+    # not deplete the parent's shared pot, is not clamped by it, and is not
+    # degraded when it crosses.  True (default) = draws on the parent's
+    # budget and is governed by it.
+    draws_on_parent_budget: bool = True
     # Phase 3 §3.12 disk-restore + peer-review M5/N1: True when this
     # Session was loaded from disk and is awaiting its first
     # client-attach.  While True, ``check_permission`` ASK paths
@@ -429,6 +435,11 @@ class SessionManager:
         # because a cascade cap is a runtime aggregate over a live cid, not a
         # property of any one reusable template (§3.1).  Keyed by
         # cascade_driver_id; absent = that cascade is uncapped.
+        # Session ids CLAIMED but not yet registered in ``_sessions``.
+        # Allocation and registration are ~336 lines and a full runner spawn
+        # apart, so without an atomic claim the check-then-act races: every
+        # concurrent create inside that window sees the same id free.
+        self._reserved_session_ids: Set[str] = set()
         self._cascade_budgets: Dict[str, "CascadeBudgetPool"] = {}
         self._cascade_budgets_lock = threading.Lock()
         # GC backstop: cascade-client entries with no event for this
@@ -1346,6 +1357,14 @@ class SessionManager:
             # wants the opposite response to a budget refusal.  Refusing at
             # the spawn boundary lets the requesting client be told
             # synchronously, with the framework's own evidence attached.
+            # Does this child draw on the shared pot, or does it have its
+            # own books?  A child that declared a budget is a delegation to
+            # another department: its spend is accounted separately, it is
+            # not clamped, and an exhausted pot does not refuse it.
+            _own_budget = getattr(
+                getattr(server, "_profile", None), "budget_control", None)
+            server._draws_on_parent_budget = _own_budget is None
+
             _pool = server._cascade_budget_pool
             if _pool is not None:
                 from shared.budget_control import CascadeExhaustedError
@@ -4369,6 +4388,131 @@ class SessionManager:
                 session_id, exc, emit_exc,
             )
 
+    def _push_cascade_degrade(self, cascade_driver_id: str, fired) -> None:
+        """Push a crossed cascade rung to every LIVE child of the cascade.
+
+        The mid-flight half of the aggregate ceiling.  Spawn-time clamping
+        alone constrains only children not yet started; a pool that let
+        already-running siblings keep the ceiling they were handed would not
+        be a shared budget — the point of it being aggregate is that one
+        child burning the envelope affects everyone still running.
+
+        Applies to ALL live children rather than recomputing each one's own
+        ceiling: "the cascade is running low, everyone downshift" is what a
+        pool means, and a child that has barely spent still degrades because
+        its siblings did.
+
+        Runner-side the rungs go through the SAME ``_apply_budget_rungs``
+        path a session's own ladder uses, tagged ``origin="cascade"`` — so
+        each pushed child emits the ordinary per-session evidence (tier
+        rebind, active-tier re-connect, client notice), which is what makes
+        "the push landed on THIS child" observable rather than merely "the
+        pool crossed".
+
+        DISPATCHED OFF THE EMIT PATH, one thread per child.  This is called
+        from ``_accumulate_cascade_budget`` inside ``_emit_to_session``,
+        which holds ``self._lock`` for its whole body — so doing the RPC
+        inline blocked the ENTIRE SessionManager (every session's event
+        delivery, not just this cascade's) for the duration.  Measured: three
+        children x a 10s RPC timeout = 30s of frozen event delivery, during
+        which the pushes themselves also timed out because the work they
+        needed could not proceed.  One cause, two symptoms — the push failing
+        AND clients receiving almost nothing.
+
+        Per-child threads rather than a serial loop: a best-effort fan-out
+        must not be serialised behind a per-child timeout, or N children cost
+        N x timeout before any of them degrade.
+        """
+        payload = []
+        for rung in fired:
+            try:
+                payload.append(rung.to_dict())
+            except Exception:  # noqa: BLE001
+                continue
+        if not payload:
+            return
+        pool = self.get_cascade_budget(cascade_driver_id)
+        pressure = pool.describe_pressure() if pool is not None else None
+        with self._lock:
+            targets = [
+                (sid, sess) for sid, sess in self._sessions.items()
+                if getattr(sess, "cascade_driver_id", None) == cascade_driver_id
+            ]
+        for sid, sess in targets:
+            if getattr(sess, "draws_on_parent_budget", True) is False:
+                # Its own budget governs it; the parent's pot running low is
+                # not that child's problem and not the parent's call.
+                continue
+            rpc = getattr(getattr(sess, "server", None), "runner_rpc", None)
+            if rpc is None:
+                continue
+            threading.Thread(
+                target=self._push_cascade_degrade_one,
+                args=(cascade_driver_id, sid, rpc, payload, pressure),
+                name=f"cascade-degrade-{sid}",
+                daemon=True,
+            ).start()
+
+    def _push_cascade_degrade_one(
+        self, cascade_driver_id: str, session_id: str, rpc: Any,
+        payload: list, pool_pressure: Optional[str] = None,
+    ) -> None:
+        """Deliver a cascade degrade to ONE child.  Best-effort, off-thread.
+
+        Never raises: one unreachable runner must not stop its siblings
+        degrading.  The failure log names the exception TYPE because a bare
+        ``TimeoutError`` stringifies to the empty string — a previous version
+        logged ``failed ()`` and told an operator nothing about why.
+
+        A TIMEOUT is treated as distinct from a failure, and deliberately
+        logged at INFO.  It means the daemon stopped waiting, not that the
+        rung was rejected: a child inside a model call does not service the
+        RPC until its turn ends, and the rung then applies at that boundary.
+        An earlier version told the operator such a child "keeps its
+        spawn-time ceiling", which is false — it is degraded, just late.
+        """
+        from jaato_sdk.events import AgentOutputEvent
+        try:
+            result = rpc.session_apply_budget_degrade_threadsafe(
+                payload, pool_pressure, timeout=10.0)
+            logger.info(
+                "cascade %s pushed degrade to %s: %s",
+                cascade_driver_id, session_id, result,
+            )
+            # Emit the child's notices from HERE.  The runner collected them
+            # rather than writing them out because every client-facing
+            # channel a session has is turn-scoped, and a pushed rung can
+            # land between turns — which is why server-side degrades were
+            # invisible to the driver.  The daemon is not turn-scoped.
+            for notice in (result or {}).get("notices") or []:
+                self._emit_to_session(session_id, AgentOutputEvent(
+                    agent_id="main", source="system",
+                    text=str(notice), mode="write",
+                ))
+        except TimeoutError as exc:
+            # A TIMEOUT is the DAEMON giving up waiting, not the runner
+            # refusing.  A child busy inside a model call does not service
+            # the RPC until its turn ends, so the rung lands at that
+            # boundary — measured across three runs: pushes that "failed"
+            # at the 50% crossing were applied together with the 75% rung
+            # at the next boundary.  Nothing is lost, it is DELAYED by up
+            # to one turn, which is exactly the overshoot the
+            # cap + N x one-turn bound accounts for.  Logged at INFO
+            # because it is expected behaviour, not a fault.
+            logger.info(
+                "cascade %s: degrade push to %s did not ack within the "
+                "timeout (%s) — child is mid-turn; the rung applies at its "
+                "next turn boundary",
+                cascade_driver_id, session_id, exc or "no message",
+            )
+        except Exception as exc:  # noqa: BLE001 — best-effort boundary
+            logger.warning(
+                "cascade %s: degrade push to %s failed: %s: %s — unlike a "
+                "timeout this child may never receive the rung",
+                cascade_driver_id, session_id,
+                type(exc).__name__, exc or "(no message)",
+            )
+
     def _reconcile_cascade_pool(self, cascade_driver_id: Optional[str]) -> None:
         """Refresh a cascade's pool from its live sessions' own trackers.
 
@@ -4393,11 +4537,18 @@ class SessionManager:
             ]
         for sid, sess in sessions:
             try:
+                if getattr(sess, "draws_on_parent_budget", True) is False:
+                    continue        # own books — see _accumulate_cascade_budget
                 rpc = getattr(getattr(sess, "server", None), "runner_rpc", None)
                 if rpc is None:
                     continue
                 usage = rpc.session_get_budget_usage_threadsafe(timeout=5.0)
-                deltas = pool.reconcile_session(sid, usage or {})
+                result = pool.reconcile_session(sid, usage or {})
+                deltas = result.deltas
+                if result.fired:
+                    # A refresh can itself cross a rung — the incremental
+                    # view lagged.  Push before the new child is clamped.
+                    self._push_cascade_degrade(cascade_driver_id, result.fired)
                 if deltas:
                     # Log the session's TOTAL contribution too.  The delta
                     # alone is misleading: the incremental event path has
@@ -4437,6 +4588,12 @@ class SessionManager:
         pool = self.get_cascade_budget(getattr(session, "cascade_driver_id", None))
         if pool is None:
             return
+        # A child with its own declared budget spends on its own books, so
+        # it must not deplete the shared pot — otherwise the pot would be
+        # charged twice for the same tokens and would starve the children
+        # that genuinely draw on it.
+        if getattr(session, "draws_on_parent_budget", True) is False:
+            return
         try:
             usage = getattr(event, "usage", None)
             spend = getattr(usage, "spend_total_tokens", None) if usage else None
@@ -4456,15 +4613,15 @@ class SessionManager:
             cost = getattr(usage, "cost_usd", None) if usage else None
             if cost is not None:
                 absolute["usd"] = prior.get("usd", 0.0) + float(cost)
-            pool.reconcile_session(sid, absolute)
-            fired = ()
+            fired = pool.reconcile_session(sid, absolute).fired
             if fired:
                 logger.info(
-                    "cascade %s pool crossed %s (%s)",
+                    "cascade %s pool crossed %s (%s) — pushing to live children",
                     pool.cascade_driver_id,
                     ", ".join(f"{r.at_percent:.0f}%" for r in fired),
                     pool.describe_pressure(),
                 )
+                self._push_cascade_degrade(pool.cascade_driver_id, fired)
         except Exception as exc:  # noqa: BLE001
             logger.warning("cascade budget accumulation failed: %s", exc)
 
@@ -4585,6 +4742,54 @@ class SessionManager:
             self._create_session_impl, *args, **kwargs,
         )
 
+    def _allocate_session_id(self, workspace_path: Optional[str]) -> str:
+        """Atomically CLAIM a unique session id.
+
+        Session ids are second-resolution timestamps
+        (``%Y%m%d_%H%M%S``) with ``_N`` appended on collision.  The
+        collision check used to be plain check-then-act: the candidate was
+        tested against ``_sessions`` here, but only inserted into
+        ``_sessions`` after the runner had spawned — measured at ~7.3s
+        later.  Every concurrent ``create_session`` inside that window saw
+        the same id free and took it, so three simultaneous creates were
+        issued ONE id between them; two of the three sessions then never
+        ran.  Second-resolution ids alone would collide for simultaneous
+        spawns, but the wide window means they collide even when spawns are
+        seconds apart.
+
+        The claim is therefore made under ``self._lock`` against three
+        sources at once — persisted ids, live ``_sessions``, and other
+        in-flight claims — which makes a duplicate IMPOSSIBLE rather than
+        unlikely.  Sub-second entropy would only have narrowed the window.
+
+        The claim is released by :meth:`_release_session_id` once the
+        session is registered (after which ``_sessions`` is authoritative)
+        or the creation fails.  A leaked claim is benign: it only prevents
+        that one timestamp string being reused.
+        """
+        existing_ids = {
+            sess.session_id
+            for sess in self._get_persisted_sessions(workspace_path=workspace_path)
+        }
+        base = datetime.now().strftime("%Y%m%d_%H%M%S")
+        with self._lock:
+            candidate = base
+            counter = 0
+            while (
+                candidate in existing_ids
+                or candidate in self._sessions
+                or candidate in self._reserved_session_ids
+            ):
+                counter += 1
+                candidate = f"{base}_{counter}"
+            self._reserved_session_ids.add(candidate)
+        return candidate
+
+    def _release_session_id(self, session_id: str) -> None:
+        """Drop an in-flight id claim (registered, or creation failed)."""
+        with self._lock:
+            self._reserved_session_ids.discard(session_id)
+
     def _create_session_impl(
         self,
         client_id: str,
@@ -4669,19 +4874,11 @@ class SessionManager:
         Returns:
             The session ID (empty string on failure).
         """
-        # Generate session ID (matches Session Plugin format)
+        # Claim the id ATOMICALLY — see _allocate_session_id for why a
+        # plain check-then-act here handed the same id to concurrent creates.
         timestamp = datetime.now()
-        session_id = timestamp.strftime("%Y%m%d_%H%M%S")
+        session_id = self._allocate_session_id(workspace_path)
         name = session_name or f"Session {timestamp.strftime('%Y-%m-%d %H:%M')}"
-
-        # Check for collision with existing session
-        existing = self._get_persisted_sessions(workspace_path=workspace_path)
-        existing_ids = {s.session_id for s in existing}
-        counter = 0
-        original_id = session_id
-        while session_id in existing_ids or session_id in self._sessions:
-            counter += 1
-            session_id = f"{original_id}_{counter}"
 
         # Get env_file from client config or derive from workspace path
         # Sessions are workspace-bound: the workspace determines the .env file,
@@ -4738,6 +4935,7 @@ class SessionManager:
                 error_type="InvalidSessionSpec",
                 recoverable=True,
             ))
+            self._release_session_id(session_id)
             return ""
 
         if profile_name:
@@ -4974,6 +5172,7 @@ class SessionManager:
         if server is None or session is None:
             # server.initialize() failed; core.py already emitted a
             # detailed ConfigurationError to the in-init sink.
+            self._release_session_id(session_id)
             return ""
 
         logger.info(f"Server initialized successfully for session {session_id}")
@@ -5014,7 +5213,13 @@ class SessionManager:
             # ``cascade_driver_id`` field; getattr returned None for
             # every cascade session, defeating dispatch + GC-skip.
             session.cascade_driver_id = cascade_driver_id
+            # Whether this child draws on the parent's shared pot or keeps
+            # its own books (see _spawn_session_runner_unconditional).
+            session.draws_on_parent_budget = getattr(
+                server, "_draws_on_parent_budget", True)
             self._sessions[session_id] = session
+            # ``_sessions`` is authoritative from here; drop the claim.
+            self._reserved_session_ids.discard(session_id)
             session.attached_clients.add(client_id)
             self._client_to_session[client_id] = session_id
             # Server 0.6.161+ (Bug B): record cid activity so the

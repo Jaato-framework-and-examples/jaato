@@ -126,6 +126,8 @@ def _session(active="planner", model="opus", budget=None):
         _budget_tracker=BudgetTracker(budget) if budget else None,
         _budget_terminal_action=None,
         _budget_exhausted_reason=None,
+        _budget_notice_sink=None,
+        _budget_applied_rung_pct=0.0,
         _current_output_callback=None,
         _ui_hooks=None,
         _connects=connects,

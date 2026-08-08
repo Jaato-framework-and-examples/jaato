@@ -563,6 +563,9 @@ class SubagentPlugin:
                     preloaded_plugins=profile.preloaded_plugins or None,
                     completion_payload_schema=profile.completion_payload_schema,
                     completion_processors=profile.completion_processors or None,
+                    # See the sibling call site: a subagent's own declared
+                    # budget was omitted, leaving it silently unbudgeted.
+                    budget_control=getattr(profile, "budget_control", None),
                     # Per-plugin tool allow-lists (profile ``tools:[...]``).
                     # In-process subagents share the parent's registry, so
                     # the scope MUST be per-session (the session applies it
@@ -2443,6 +2446,21 @@ class SubagentPlugin:
                     "_dispatch_isolated_spawn: runtime_limits "
                     "serialization failed; dropping",
                 )
+        # Budget control (optional).  Same producer trap as runtime_limits
+        # above and as the session envelope: the field is parsed on the far
+        # side and read by _build_isolated_envelope, but nothing put it on
+        # the wire — so an isolated subagent's declared budget silently did
+        # not survive daemon-side reconstruction.
+        if getattr(profile, "budget_control", None) is not None:
+            try:
+                profile_payload["budget_control"] = (
+                    profile.budget_control.to_dict()
+                )
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "_dispatch_isolated_spawn: budget_control "
+                    "serialization failed; dropping",
+                )
         # Preload annotations.
         if profile.preloaded_plugins:
             preload_set = set(profile.preloaded_plugins)
@@ -3280,6 +3298,13 @@ class SubagentPlugin:
                 agent_params=agent_params,
                 completion_payload_schema=profile.completion_payload_schema,
                 completion_processors=profile.completion_processors or None,
+                # A subagent's own declared budget.  Omitted until now, so a
+                # profile that declared ``budget_control`` was silently
+                # unbudgeted the moment it ran as a subagent — the ceiling
+                # existed on paper and nothing enforced it.  Subagents are
+                # runtime-level sessions, so they are also invisible to the
+                # daemon-side pool; this is their ONLY budget.
+                budget_control=getattr(profile, "budget_control", None),
                 suppress_base_instructions=getattr(profile, 'suppress_base_instructions', False),
                 # Per-plugin tool allow-lists (profile ``tools:[...]``) —
                 # per-session, never mutates the shared registry.

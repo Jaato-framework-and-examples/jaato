@@ -640,6 +640,12 @@ class RunnerRPC:
             # the seat-flip lands.
             return self._handle_session_get_context_usage()
 
+        if env.method == "session.apply_budget_degrade":
+            # Mid-flight cascade degrade: the shared pool crossed a rung and
+            # this still-running child must degrade too, rather than keeping
+            # the ceiling it was handed at spawn.
+            return self._handle_session_apply_budget_degrade(env.args or {})
+
         if env.method == "session.get_budget_usage":
             # The session's ABSOLUTE budget consumption per dimension, as
             # the per-session BudgetTracker accumulated it (per RESPONSE).
@@ -1531,6 +1537,19 @@ class RunnerRPC:
                 "stage": "read",
             }
         return True, {"context_limit": limit}
+
+    def _handle_session_apply_budget_degrade(
+        self, params: "dict",
+    ) -> "tuple[bool, Any]":
+        """Apply cascade-pushed degrade rungs to this running session."""
+        ready, err, session = self._require_ready_session()
+        if not ready:
+            return err
+        apply = getattr(session, "apply_cascade_degrade", None)
+        if not callable(apply):
+            return False, {"error": "session has no apply_cascade_degrade"}
+        return True, apply(
+            params.get("rungs") or [], params.get("pool_pressure"))
 
     def _handle_session_get_budget_usage(self) -> "tuple[bool, Any]":
         """Read-only snapshot of the session's absolute budget consumption.

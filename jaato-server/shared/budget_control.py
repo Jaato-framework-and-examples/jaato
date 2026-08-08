@@ -48,7 +48,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Dict, Mapping, Optional, Tuple
+from typing import Any, Dict, Mapping, NamedTuple, Optional, Tuple
 
 # Deliberate reuse of the tier-entry normalizer: a ``degrade[].model_tiers``
 # overlay IS a tier table, so it must accept the byte-identical grammar
@@ -680,6 +680,21 @@ class EffectiveLimits:
         return "; ".join(parts)
 
 
+class ReconcileResult(NamedTuple):
+    """Outcome of :meth:`CascadeBudgetPool.reconcile_session`.
+
+    Both halves are needed by the caller: ``deltas`` says what moved (for
+    logging), ``fired`` says which POOL rungs those deltas crossed and must
+    therefore be pushed to the cascade's live children.  An earlier version
+    returned only the deltas and silently dropped ``fired`` — which meant
+    cascade degrade ladders could never fire, invisible until a cascade
+    declared one.
+    """
+
+    deltas: Dict[str, float]
+    fired: Tuple["DegradeRung", ...]
+
+
 class CascadeBudgetPool:
     """The AGGREGATE ceiling for one cascade (cid) — a single shared counter.
 
@@ -741,7 +756,7 @@ class CascadeBudgetPool:
 
     def reconcile_session(
         self, session_id: str, absolute: Mapping[str, float],
-    ) -> Dict[str, float]:
+    ) -> "ReconcileResult":
         """Set a session's TOTAL contribution to the pool, applying the delta.
 
         Idempotent and monotonic: call it repeatedly with the session's
@@ -758,7 +773,11 @@ class CascadeBudgetPool:
         tracker's own absolute totals rather than derived from a stream of
         increments that may be duplicated or dropped.
 
-        Returns the deltas actually applied, for logging.
+        Returns a :class:`ReconcileResult` — the deltas actually applied
+        (for logging) AND any pool rungs those deltas crossed.  The rungs
+        matter: reconciliation is the pool's real accumulation path, so
+        discarding what ``observe`` fired here would mean cascade-level
+        degrade ladders never fire at all.
         """
         with self._lock:
             prior = self._per_session.setdefault(session_id, {})
@@ -775,9 +794,10 @@ class CascadeBudgetPool:
                     continue
                 deltas[dim] = total_f - seen
                 prior[dim] = total_f
+            fired: Tuple["DegradeRung", ...] = ()
             if deltas:
-                self._tracker.observe(**deltas)
-            return deltas
+                fired = self._tracker.observe(**deltas)
+            return ReconcileResult(deltas=deltas, fired=fired)
 
     def session_contribution(self, session_id: str) -> Dict[str, float]:
         """What this session has contributed to the pool so far."""
@@ -819,17 +839,40 @@ class CascadeBudgetPool:
     def child_config(
         self, profile_budget: Optional[BudgetControlConfig]
     ) -> Tuple[Optional[BudgetControlConfig], EffectiveLimits]:
-        """Build the config a child session should actually run under.
+        """Decide the budget a child spawned into this scope runs under.
 
-        Returns ``(config, effective)``.  The child keeps its own ``degrade``
-        ladder (the cascade constrains ceilings, not a child's degradation
-        policy) but runs against the clamped limits.
+        **A child that declared its own budget keeps it, untouched.**  A
+        subagent is a delegation to another department with its own budget:
+        the author wrote a number, and the parent is not entitled to rewrite
+        it down to whatever happens to be left in the shared pot.  Its
+        spending is accounted on its own books, so it is neither clamped at
+        spawn nor refused when the shared pot is dry.
+
+        **A child that declared nothing draws on the parent's budget** —
+        both the limits (whatever remains) and the degradation ladder.
+        Choosing to spawn without a declared budget, whether by omitting a
+        profile or by an inline spec that does not mention one, IS the
+        author delegating that policy to the parent.
+
+        The test is therefore "did this spawn carry a ``budget_control``",
+        from a profile file or an inline spec alike — not "was a profile
+        referenced".  The spawn tool accepts both, so the mechanism the
+        author chose is itself the expression of intent.
+
+        ``EffectiveLimits`` is still returned in both cases, now purely as
+        OBSERVABILITY: it shows what the child asked for beside what the
+        scope had, so an operator can see the relationship even when
+        nothing was clamped.
         """
         eff = self.effective_limits_for(
             profile_budget.limits if profile_budget else None)
-        if not eff.effective:
+        if profile_budget is not None:
+            # Its own books.  Not clamped, not refused.
             return profile_budget, eff
+        if not eff.effective:
+            return None, eff
         if eff.exhausted:
             raise CascadeExhaustedError(self.cascade_driver_id, eff)
-        degrade = profile_budget.degrade if profile_budget else ()
-        return BudgetControlConfig(limits=eff.effective, degrade=degrade), eff
+        return BudgetControlConfig(
+            limits=eff.effective, degrade=self._tracker.config.degrade
+        ), eff
