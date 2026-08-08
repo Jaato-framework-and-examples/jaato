@@ -644,7 +644,7 @@ class RunnerRPC:
             # Mid-flight cascade degrade: the shared pool crossed a rung and
             # this still-running child must degrade too, rather than keeping
             # the ceiling it was handed at spawn.
-            return self._handle_session_apply_budget_degrade(env.params or {})
+            return self._handle_session_apply_budget_degrade(env.args or {})
 
         if env.method == "session.get_budget_usage":
             # The session's ABSOLUTE budget consumption per dimension, as
