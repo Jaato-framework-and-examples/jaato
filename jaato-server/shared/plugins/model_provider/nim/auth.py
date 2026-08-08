@@ -15,13 +15,17 @@ Storage follows jaato convention:
 """
 
 import json
+import logging
 import os
+from shared.session_context import get_workspace_root, get_config_root
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Optional, Tuple
 
 from .env import DEFAULT_BASE_URL
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -49,25 +53,39 @@ class NIMCredentials:
         )
 
 
-def _get_token_storage_path(for_write: bool = False, workspace_path: Optional[str] = None) -> Path:
+def _get_token_storage_path(
+    for_write: bool = False,
+    workspace_path: Optional[str] = None,
+    config_root: Optional[str] = None,
+) -> Path:
     """Get path to credentials storage file.
 
     Follows jaato convention:
-    1. Project .jaato/ first (project-specific auth)
-    2. Home ~/.jaato/ second (user-level default)
+    1. Project tier — ``<config_root>/nim_auth.json`` when
+       ``config_root`` is set, else ``<workspace>/.jaato/nim_auth.json``.
+    2. Home tier — ``~/.jaato/nim_auth.json``.
 
     Uses JAATO_WORKSPACE_ROOT env var if set (for subagents), otherwise Path.cwd().
+    Uses JAATO_CONFIG_ROOT env var when ``config_root`` is unset, so
+    sessions with a session-level config-root override (exported by
+    :meth:`server.core.JaatoServer._in_workspace`) route credential
+    reads to the same out-of-tree path as the rest of the framework
+    config.
 
     Args:
-        for_write: If True, returns the path to write to (prefers project dir
-                   if it exists, otherwise home). If False, returns the first
-                   existing file or the default write location.
+        for_write: If True, returns the path to write to.
+        workspace_path: Optional explicit workspace path override.
+        config_root: Optional explicit read-only-config root override.
 
     Returns:
         Path to credentials storage file.
     """
-    workspace = workspace_path or os.environ.get("JAATO_WORKSPACE_ROOT") or os.getcwd()
-    project_path = Path(workspace) / ".jaato" / "nim_auth.json"
+    workspace = workspace_path or get_workspace_root() or os.getcwd()
+    effective_config_root = config_root or get_config_root()
+    if effective_config_root:
+        project_path = Path(effective_config_root).expanduser().resolve() / "nim_auth.json"
+    else:
+        project_path = Path(workspace) / ".jaato" / "nim_auth.json"
     home_path = Path.home() / ".jaato" / "nim_auth.json"
 
     if for_write:
@@ -95,41 +113,108 @@ def save_credentials(credentials: NIMCredentials, workspace_path: Optional[str] 
         os.chmod(path, 0o600)
 
 
-def load_credentials(workspace_path: Optional[str] = None) -> Optional[NIMCredentials]:
-    """Load credentials from persistent storage."""
-    path = _get_token_storage_path(workspace_path=workspace_path)
+def load_credentials(
+    workspace_path: Optional[str] = None,
+    config_root: Optional[str] = None,
+) -> Optional[NIMCredentials]:
+    """Load credentials from persistent storage.
+
+    Returns None if the file is absent **or** fails to parse.  A broken
+    file (corrupt JSON, missing ``api_key``, permission error) is logged
+    at WARNING so it is visible in the provider trace log instead of
+    being silently swallowed.  Callers that need to surface the actual
+    reason should use :func:`try_load_credentials_with_reason`.
+
+    See :func:`_get_token_storage_path` for the resolver chain;
+    ``config_root`` overrides the workspace tier when set.
+    """
+    creds, _ = try_load_credentials_with_reason(
+        workspace_path=workspace_path, config_root=config_root,
+    )
+    return creds
+
+
+def try_load_credentials_with_reason(
+    workspace_path: Optional[str] = None,
+    config_root: Optional[str] = None,
+) -> Tuple[Optional[NIMCredentials], Optional[str]]:
+    """Load credentials and return a reason string when the load fails.
+
+    Returns ``(credentials, reason)``:
+
+    - ``(NIMCredentials, None)`` — file loaded successfully.
+    - ``(None, None)`` — no credential file exists.
+    - ``(None, "<reason>")`` — file exists but could not be loaded.
+
+    Lets ``verify_auth`` distinguish "not configured" from "configured
+    but broken" and surface the specific failure (e.g. invalid JSON,
+    missing field, permission error) instead of reporting "No API key
+    found" for both.
+    """
+    path = _get_token_storage_path(
+        workspace_path=workspace_path, config_root=config_root,
+    )
 
     if not path.exists():
-        return None
+        return None, None
 
     try:
         with open(path) as f:
             data = json.load(f)
-        return NIMCredentials.from_dict(data)
-    except Exception:
-        return None
+    except (OSError, PermissionError) as exc:
+        reason = f"cannot read {path}: {exc}"
+        logger.warning("Failed to read NIM credentials: %s", reason)
+        return None, reason
+    except json.JSONDecodeError as exc:
+        reason = f"invalid JSON at {path}: {exc.msg} (line {exc.lineno}, col {exc.colno})"
+        logger.warning("Failed to parse NIM credentials: %s", reason)
+        return None, reason
+
+    try:
+        return NIMCredentials.from_dict(data), None
+    except (KeyError, TypeError) as exc:
+        reason = f"malformed credentials at {path}: missing or invalid field ({exc})"
+        logger.warning("Malformed NIM credentials: %s", reason)
+        return None, reason
+    except Exception as exc:  # defensive — don't mask unexpected failures
+        reason = f"unexpected error loading {path}: {exc.__class__.__name__}: {exc}"
+        logger.warning("Unexpected error loading NIM credentials: %s", reason)
+        return None, reason
 
 
-def clear_credentials(workspace_path: Optional[str] = None) -> None:
+def clear_credentials(
+    workspace_path: Optional[str] = None,
+    config_root: Optional[str] = None,
+) -> None:
     """Clear stored credentials."""
-    path = _get_token_storage_path(workspace_path=workspace_path)
+    path = _get_token_storage_path(
+        workspace_path=workspace_path, config_root=config_root,
+    )
     if path.exists():
         path.unlink()
 
 
-def get_stored_api_key(workspace_path: Optional[str] = None) -> Optional[str]:
+def get_stored_api_key(
+    workspace_path: Optional[str] = None,
+    config_root: Optional[str] = None,
+) -> Optional[str]:
     """Get stored API key if available.
 
     Returns:
         API key string, or None if not stored.
     """
-    creds = load_credentials(workspace_path=workspace_path)
+    creds = load_credentials(
+        workspace_path=workspace_path, config_root=config_root,
+    )
     if creds:
         return creds.api_key
     return None
 
 
-def get_credential_file_path(workspace_path: Optional[str] = None) -> Optional[str]:
+def get_credential_file_path(
+    workspace_path: Optional[str] = None,
+    config_root: Optional[str] = None,
+) -> Optional[str]:
     """Return the path of the credential file that would be loaded.
 
     Used by the provider to report which credential source was used
@@ -140,7 +225,9 @@ def get_credential_file_path(workspace_path: Optional[str] = None) -> Optional[s
         String path like ``"~/.jaato/nim_auth.json"`` or
         ``".jaato/nim_auth.json"``, or None.
     """
-    path = _get_token_storage_path(workspace_path=workspace_path)
+    path = _get_token_storage_path(
+        workspace_path=workspace_path, config_root=config_root,
+    )
     if not path.exists():
         return None
     home = Path.home()
@@ -149,13 +236,18 @@ def get_credential_file_path(workspace_path: Optional[str] = None) -> Optional[s
     return str(path)
 
 
-def get_stored_base_url() -> Optional[str]:
+def get_stored_base_url(
+    workspace_path: Optional[str] = None,
+    config_root: Optional[str] = None,
+) -> Optional[str]:
     """Get stored custom base URL if available.
 
     Returns:
         Base URL string, or None if not stored.
     """
-    creds = load_credentials()
+    creds = load_credentials(
+        workspace_path=workspace_path, config_root=config_root,
+    )
     if creds:
         return creds.base_url
     return None
@@ -178,6 +270,18 @@ def _create_validation_client():
     return get_httpx_client(**kwargs)
 
 
+def _extract_body_snippet(response, limit: int = 300) -> str:
+    """Return a short, safe snippet of a response body for error detail."""
+    try:
+        text = response.text or ""
+    except Exception:
+        return ""
+    text = text.strip().replace("\n", " ")
+    if len(text) > limit:
+        return text[:limit] + "…"
+    return text
+
+
 def validate_api_key(
     api_key: str,
     base_url: Optional[str] = None,
@@ -193,9 +297,24 @@ def validate_api_key(
         base_url: Optional custom base URL (default: NVIDIA hosted API).
 
     Returns:
-        A ``(valid, error_detail)`` tuple. ``valid`` is True when the key
-        is accepted. ``error_detail`` is a human-readable hint when
-        ``valid`` is False (empty string on success).
+        A ``(valid, detail)`` tuple.  ``valid`` is True only when the
+        request authenticates and reaches the model (2xx or 400 "bad
+        request").  Other non-auth errors no longer masquerade as
+        success — this used to silently save a key on 429 / 402 / 5xx
+        responses.  ``detail`` carries a structured code:
+
+        - ``""`` — key is valid.
+        - ``"authentication_error: <status>: <body>"`` — key rejected
+          (401/403).
+        - ``"rate_limit: <status>: <body>"`` — quota / rate limit
+          exceeded (429).  Key was NOT saved.
+        - ``"payment_required: <status>: <body>"`` — billing inactive
+          (402).  Key was NOT saved.
+        - ``"server_error: <status>: <body>"`` — NIM endpoint is
+          temporarily unavailable (5xx).
+        - ``"http_error: <status>: <body>"`` — any other unexpected
+          status.
+        - ``"network_error: <details>"`` — request never reached NIM.
     """
     import httpx
 
@@ -217,16 +336,34 @@ def validate_api_key(
     try:
         client = _create_validation_client()
         response = client.post(test_url, headers=headers, json=body, timeout=30)
-        if response.status_code in (401, 403):
-            return (False, "authentication_error")
-        # Any other status (200, 400, etc.) means the key was accepted
-        return (True, "")
     except httpx.HTTPStatusError as e:
-        if e.response.status_code in (401, 403):
-            return (False, "authentication_error")
-        return (True, "")
+        status = getattr(e.response, "status_code", None)
+        snippet = _extract_body_snippet(e.response) if e.response is not None else ""
+        if status in (401, 403):
+            return (False, f"authentication_error: {status}: {snippet}")
+        if status == 429:
+            return (False, f"rate_limit: {status}: {snippet}")
+        if status == 402:
+            return (False, f"payment_required: {status}: {snippet}")
+        if status is not None and 500 <= status < 600:
+            return (False, f"server_error: {status}: {snippet}")
+        return (False, f"http_error: {status}: {snippet}")
     except Exception as e:
         return (False, f"network_error: {e}")
+
+    status = response.status_code
+    if 200 <= status < 300 or status == 400:
+        return (True, "")
+    snippet = _extract_body_snippet(response)
+    if status in (401, 403):
+        return (False, f"authentication_error: {status}: {snippet}")
+    if status == 429:
+        return (False, f"rate_limit: {status}: {snippet}")
+    if status == 402:
+        return (False, f"payment_required: {status}: {snippet}")
+    if 500 <= status < 600:
+        return (False, f"server_error: {status}: {snippet}")
+    return (False, f"http_error: {status}: {snippet}")
 
 
 def login_with_key(

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "jaato-server"
-version = "0.4.21"
+version = "0.7.0"
 description = "Jaato Server - LLM tool orchestration runtime and daemon"
 readme = "PKG_README.md"
 requires-python = ">=3.10"
@@ -37,6 +37,8 @@ dependencies = [
     "psutil>=5.0.0",  # Cross-platform: server health metrics (CPU/memory monitoring)
     "watchdog>=4.0.0",  # server/workspace_monitor.py: real-time filesystem monitoring with debounce buffering
     "rich>=13.0.0",  # Shared plugins: terminal formatting (tables, panels, syntax highlighting)
+    "wcwidth",  # table_formatter plugin: East-Asian/emoji display-width for column alignment (unconditional import at plugin load)
+    "jsonschema>=4.0.0",  # signal_completion typed payload validation against profile-declared completion_payload_schema
 ]
 
 [project.urls]
@@ -58,6 +60,12 @@ github-models = [
 ]
 nim = [
     "openai>=1.0",  # NIM and ZhipuAI model providers: OpenAI-compatible SDK
+]
+openrouter = [
+    "openai>=1.0",  # OpenRouter model provider: OpenAI-compatible SDK
+]
+ovhcloud = [
+    "openai>=1.0",  # OVHcloud AI Endpoints model provider: OpenAI-compatible SDK
 ]
 # --- Plugin extras ---
 web = [
@@ -100,17 +108,19 @@ telemetry = [
     "opentelemetry-exporter-otlp-proto-http>=1.20.0",  # OTLP HTTP exporter
 ]
 all = [
-    "jaato-server[dev,google,github-models,nim,web,interactive,ast,notebook,diagrams,templates,kaggle,kerberos,telemetry]",
+    "jaato-server[dev,google,github-models,nim,openrouter,ovhcloud,web,interactive,ast,notebook,diagrams,templates,kaggle,kerberos,telemetry]",
 ]
 
 [project.scripts]
 jaato-server = "server.__main__:main"
+jaato-scaffold = "shared.scaffold.__main__:main"
 
 # Entry points for plugin discovery
 # External packages can register plugins by adding to this group
 [project.entry-points."jaato.plugins"]
 artifact_tracker = "shared.plugins.artifact_tracker:create_plugin"
 background = "shared.plugins.background:create_plugin"
+bundle = "shared.plugins.bundle:create_plugin"
 calculator = "shared.plugins.calculator:create_plugin"
 cli = "shared.plugins.cli:create_plugin"
 environment = "shared.plugins.environment:create_plugin"
@@ -158,4 +168,14 @@ cache_google_genai = "shared.plugins.cache_google_genai:create_plugin"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["shared*", "server*", "jaato*"]
+include = ["shared*", "server*", "jaato_embedded*"]
+
+[tool.pytest.ini_options]
+# Register custom marks so pytest doesn't warn on use.  ``apparmor``
+# gates the §2.6 multitenant integration test on hosts with
+# CAP_MAC_ADMIN + CAP_SYSLOG; see
+# docs/design/per_session_confined_runner_phase2_plan.md §6.8.
+markers = [
+    "apparmor: requires AppArmor (CAP_MAC_ADMIN) — runs on user-hosted server",
+]
+asyncio_mode = "auto"

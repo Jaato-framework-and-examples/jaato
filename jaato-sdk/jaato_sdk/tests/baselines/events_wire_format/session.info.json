@@ -1,0 +1,17 @@
+{
+  "type": "session.info",
+  "timestamp": "<TIMESTAMP>",
+  "session_id": "",
+  "session_name": "",
+  "model_provider": "",
+  "model_name": "",
+  "profile_name": null,
+  "sessions": [],
+  "tools": [],
+  "models": [],
+  "user_inputs": [],
+  "memories": [],
+  "sandbox_paths": [],
+  "services": [],
+  "tool_id_mappings": {}
+}

@@ -3,7 +3,7 @@
 import pytest
 from unittest.mock import patch
 
-from jaato_sdk.events import ConnectedEvent
+from jaato_sdk.events import ConnectedEvent, ClientType
 
 
 class TestServerVersionInConnectedEvent:
@@ -51,16 +51,25 @@ class TestGetServerVersion:
 
 
 class TestIncompatibleServerError:
-    """Verify IncompatibleServerError attributes and message."""
+    """Verify IncompatibleServerError attributes and message.
+
+    The contract pivoted from package-version to wire-protocol-version
+    in the gap-5 work — see ``docs/sdk-protocol-versioning.md``.
+    """
 
     def test_attributes(self):
         from jaato_sdk.client.ipc import IncompatibleServerError
-        err = IncompatibleServerError("0.2.10", "0.2.27")
+        # Constructor: (server_protocol, min_protocol, server_version=None)
+        err = IncompatibleServerError("2.0", "1.0", server_version="0.2.10")
+        assert err.server_protocol == "2.0"
+        assert err.min_protocol == "1.0"
         assert err.server_version == "0.2.10"
-        assert err.min_version == "0.2.27"
+        # Pre-1.0 alias kept for callers that read .min_version.
+        assert err.min_version == "1.0"
+        assert "2.0" in str(err)
+        assert "1.0" in str(err)
+        # Daemon package version surfaces in the diagnostic message.
         assert "0.2.10" in str(err)
-        assert "0.2.27" in str(err)
-        assert "upgrade" in str(err).lower()
 
     def test_is_exception(self):
         from jaato_sdk.client.ipc import IncompatibleServerError
@@ -72,7 +81,7 @@ class TestIPCClientServerVersion:
 
     def test_server_version_none_before_connect(self):
         from jaato_sdk.client.ipc import IPCClient
-        client = IPCClient(socket_path="/tmp/test.sock", auto_start=False)
+        client = IPCClient(socket_path="/tmp/test.sock", auto_start=False, client_type=ClientType.TERMINAL)
         assert client.server_version is None
 
 
@@ -86,8 +95,10 @@ class TestRecoveryClientClassifiesIncompatibleAsPermanent:
         client = IPCRecoveryClient(
             socket_path="/tmp/test.sock",
             auto_start=False,
+            client_type=ClientType.TERMINAL,
         )
-        err = IncompatibleServerError("0.1.0", "0.2.27")
+        # Major-version mismatch: incompatible wire shape.
+        err = IncompatibleServerError("2.0", "1.0", server_version="0.5.0")
         assert client._classify_error(err) == "permanent"
 
     def test_classify_connection_refused_as_transient(self):
@@ -97,6 +108,7 @@ class TestRecoveryClientClassifiesIncompatibleAsPermanent:
         client = IPCRecoveryClient(
             socket_path="/tmp/test.sock",
             auto_start=False,
+            client_type=ClientType.TERMINAL,
         )
         err = ConnectionRefusedError("Connection refused")
         assert client._classify_error(err) == "transient"
@@ -110,6 +122,7 @@ class TestRecoveryClientServerVersionProperty:
         client = IPCRecoveryClient(
             socket_path="/tmp/test.sock",
             auto_start=False,
+            client_type=ClientType.TERMINAL,
         )
         assert client.server_version is None
 
@@ -120,9 +133,10 @@ class TestRecoveryClientServerVersionProperty:
         client = IPCRecoveryClient(
             socket_path="/tmp/test.sock",
             auto_start=False,
+            client_type=ClientType.TERMINAL,
         )
         # Simulate a connected inner client
-        inner = IPCClient(socket_path="/tmp/test.sock", auto_start=False)
+        inner = IPCClient(socket_path="/tmp/test.sock", auto_start=False, client_type=ClientType.TERMINAL)
         inner._server_version = "0.2.28"
         client._client = inner
         assert client.server_version == "0.2.28"

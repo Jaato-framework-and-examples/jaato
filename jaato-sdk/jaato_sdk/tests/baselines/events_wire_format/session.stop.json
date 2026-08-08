@@ -1,0 +1,5 @@
+{
+  "type": "session.stop",
+  "timestamp": "<TIMESTAMP>",
+  "agent_id": null
+}

@@ -1,0 +1,8 @@
+{
+  "type": "session.interrupted_turn_recovered",
+  "timestamp": "<TIMESTAMP>",
+  "session_id": "",
+  "agent_id": "",
+  "recovered_calls": 0,
+  "action_taken": ""
+}

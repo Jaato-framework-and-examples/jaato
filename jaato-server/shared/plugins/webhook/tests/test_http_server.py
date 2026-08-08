@@ -27,7 +27,11 @@ class TestWebhookHTTPServer:
         """Create a server with a free port and a callback that records events."""
         port = _find_free_port()
         if routes is None:
-            routes = {"generic": RouteConfig(path="/webhook")}
+            # Localhost integration tests of the HTTP server itself (not auth):
+            # opt the route into unsigned acceptance so the fail-closed gate
+            # doesn't 401 the request under test.
+            routes = {"generic": RouteConfig(path="/webhook",
+                                             allow_unauthenticated=True)}
 
         config = WebhookConfig(
             port=port,
@@ -111,8 +115,8 @@ class TestWebhookHTTPServer:
 
     def test_multiple_routes(self):
         routes = {
-            "github": RouteConfig(path="/webhook/github"),
-            "slack": RouteConfig(path="/webhook/slack"),
+            "github": RouteConfig(path="/webhook/github", allow_unauthenticated=True),
+            "slack": RouteConfig(path="/webhook/slack", allow_unauthenticated=True),
         }
         server, port, received = self._make_server(routes=routes)
         server.start()
@@ -130,6 +134,7 @@ class TestWebhookHTTPServer:
             "github": RouteConfig(
                 path="/webhook/github",
                 event_type_header="X-GitHub-Event",
+                allow_unauthenticated=True,
             ),
         }
         server, port, received = self._make_server(routes=routes)
@@ -295,7 +300,7 @@ class TestRateLimiting:
     def test_rate_limit_integration_429(self):
         """Integration: rate-limited requests get 429 from actual server."""
         port = _find_free_port()
-        routes = {"generic": RouteConfig(path="/webhook")}
+        routes = {"generic": RouteConfig(path="/webhook", allow_unauthenticated=True)}
         config = WebhookConfig(
             port=port, host="127.0.0.1", routes=routes,
             rate_limit_per_second=1,

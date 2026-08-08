@@ -27,6 +27,28 @@ class OpenAPIParseError(Exception):
     pass
 
 
+# Parameter locations valid per OpenAPI spec version.  The
+# ``ParameterLocation`` enum itself accepts every value across both
+# versions (so stored schemas round-trip cleanly regardless of their
+# origin), but the parsers enforce version-specific vocabulary so bad
+# specs produce actionable errors rather than silently accepting
+# cookie parameters in a Swagger 2.0 doc or body parameters in an
+# OpenAPI 3.0 doc.
+_V2_VALID_LOCATIONS = frozenset({
+    ParameterLocation.PATH,
+    ParameterLocation.QUERY,
+    ParameterLocation.HEADER,
+    ParameterLocation.BODY,
+    ParameterLocation.FORM_DATA,
+})
+_V3_VALID_LOCATIONS = frozenset({
+    ParameterLocation.PATH,
+    ParameterLocation.QUERY,
+    ParameterLocation.HEADER,
+    ParameterLocation.COOKIE,
+})
+
+
 def _resolve_ref(spec: Dict[str, Any], ref: str) -> Dict[str, Any]:
     """Resolve a JSON reference in the spec.
 
@@ -214,7 +236,17 @@ def _parse_parameter_v3(param: Dict[str, Any]) -> Parameter:
     except ValueError:
         raise OpenAPIParseError(
             f"Parameter '{param.get('name', '?')}' has unsupported location "
-            f"'{location}'. Supported: path, query, header."
+            f"'{location}'. Supported: path, query, header, cookie."
+        )
+    if parsed_location not in _V3_VALID_LOCATIONS:
+        # body/formData are OAS 2.0 vocabulary — in OAS 3.0 request
+        # bodies live in a separate ``requestBody`` field, not as a
+        # parameter with ``in: body``.  Reject explicitly so mis-versioned
+        # specs don't silently import junk.
+        raise OpenAPIParseError(
+            f"Parameter '{param.get('name', '?')}' has location "
+            f"'{location}' which is not valid in OpenAPI 3.x. "
+            f"Supported here: path, query, header, cookie."
         )
 
     return Parameter(
@@ -246,7 +278,16 @@ def _parse_parameter_v2(param: Dict[str, Any]) -> Parameter:
     except ValueError:
         raise OpenAPIParseError(
             f"Parameter '{param.get('name', '?')}' has unsupported location "
-            f"'{location}'. Supported: path, query, header."
+            f"'{location}'. Supported: path, query, header, body, formData."
+        )
+    if parsed_location not in _V2_VALID_LOCATIONS:
+        # cookie is OAS 3.0-only vocabulary.  Swagger 2.0 has no concept
+        # of cookie parameters — reject so mis-versioned specs don't
+        # silently import junk.
+        raise OpenAPIParseError(
+            f"Parameter '{param.get('name', '?')}' has location "
+            f"'{location}' which is not valid in Swagger 2.x. "
+            f"Supported here: path, query, header, body, formData."
         )
 
     return Parameter(

@@ -13,8 +13,6 @@ Key differences from other providers:
 
 import base64
 import json
-import re
-import threading
 from typing import Any, Dict, List, Optional
 
 from jaato_sdk.plugins.model_provider.types import (
@@ -28,87 +26,24 @@ from jaato_sdk.plugins.model_provider.types import (
     TokenUsage,
     ToolResult,
     ToolSchema,
+    render_result_for_model,
 )
+
+from shared.tool_id_map import id_to_name, name_to_id
 
 
 # ==================== Tool Schema Conversion ====================
-
-# Regex pattern for valid Anthropic tool names
-_ANTHROPIC_TOOL_NAME_PATTERN = re.compile(r'^[a-zA-Z0-9_-]{1,128}$')
-
-# Thread-local storage for tool name mapping (sanitized -> original).
-# Each session's model thread gets its own isolated mapping, preventing
-# cross-session contamination when multiple sessions share the same process.
-_thread_local = threading.local()
-
-
-def _get_tool_name_mapping() -> Dict[str, str]:
-    """Get the thread-local tool name mapping dict.
-
-    Returns:
-        Per-thread dict mapping sanitized tool names to original names.
-    """
-    if not hasattr(_thread_local, 'tool_name_mapping'):
-        _thread_local.tool_name_mapping = {}
-    return _thread_local.tool_name_mapping
-
-
-def sanitize_tool_name(name: str) -> str:
-    """Sanitize tool name to match Anthropic's pattern ^[a-zA-Z0-9_-]{1,128}$.
-
-    Replaces invalid characters (like dots, colons, spaces) with underscores
-    and truncates to 128 characters if needed.
-
-    Args:
-        name: Original tool name.
-
-    Returns:
-        Sanitized tool name safe for Anthropic API.
-    """
-    if _ANTHROPIC_TOOL_NAME_PATTERN.match(name):
-        return name
-    # Replace invalid characters with underscores
-    sanitized = re.sub(r'[^a-zA-Z0-9_-]', '_', name)
-    # Truncate to 128 characters max
-    return sanitized[:128]
-
-
-def get_original_tool_name(sanitized_name: str) -> str:
-    """Get the original tool name from a sanitized name.
-
-    Args:
-        sanitized_name: The sanitized tool name received from Anthropic.
-
-    Returns:
-        Original tool name if mapping exists, otherwise returns the input unchanged.
-    """
-    return _get_tool_name_mapping().get(sanitized_name, sanitized_name)
-
-
-def clear_tool_name_mapping() -> None:
-    """Clear the tool name mapping for the current thread.
-
-    Call when tools are reconfigured.
-    """
-    _get_tool_name_mapping().clear()
 
 
 def tool_schema_to_anthropic(schema: ToolSchema) -> Dict[str, Any]:
     """Convert ToolSchema to Anthropic tool format.
 
     Note: Anthropic uses `input_schema` instead of `parameters`.
-    Tool names are sanitized to match ^[a-zA-Z0-9_-]{1,128}$.
-    A thread-local mapping from sanitized to original names is maintained
-    for reverse lookup, ensuring session isolation.
+    Tool names are replaced with hash-derived IDs so the model cannot
+    infer behavior from the name string.
     """
-    sanitized = sanitize_tool_name(schema.name)
-
-    # Track the mapping if sanitization changed the name
-    if sanitized != schema.name:
-        _get_tool_name_mapping()[sanitized] = schema.name
-
     return {
-        "name": sanitized,
+        "name": name_to_id(schema.name),
         "description": schema.description,
         "input_schema": schema.parameters,
     }
@@ -155,18 +90,16 @@ def part_to_anthropic_content_block(part: Part) -> Optional[Dict[str, Any]]:
         return {
             "type": "tool_use",
             "id": fc.id,
-            "name": fc.name,
+            "name": name_to_id(fc.name),
             "input": fc.args,
         }
 
     if part.function_response is not None:
         fr = part.function_response
-        # Result can be string or dict - Anthropic expects string or list of blocks
-        content: Any
-        if isinstance(fr.result, str):
-            content = fr.result
-        else:
-            content = json.dumps(fr.result)
+        # Result can be string or dict - Anthropic expects string or list of blocks.
+        # render_result_for_model serializes the STRUCTURED result and appends
+        # the model-facing steering suffix (see ToolResult.model_suffix).
+        content: Any = render_result_for_model(fr.result, fr.model_suffix, untrusted=fr.untrusted, untrusted_source=fr.untrusted_source)
 
         block: Dict[str, Any] = {
             "type": "tool_result",
@@ -183,15 +116,11 @@ def part_to_anthropic_content_block(part: Part) -> Optional[Dict[str, Any]]:
             if content:
                 content_blocks.append({"type": "text", "text": content})
             for att in fr.attachments:
-                if att.mime_type.startswith("image/"):
-                    content_blocks.append({
-                        "type": "image",
-                        "source": {
-                            "type": "base64",
-                            "media_type": att.mime_type,
-                            "data": base64.b64encode(att.data).decode("utf-8"),
-                        }
-                    })
+                media = _anthropic_media_block(
+                    att.mime_type, base64.b64encode(att.data).decode("utf-8"),
+                )
+                if media:
+                    content_blocks.append(media)
             block["content"] = content_blocks
 
         return block
@@ -201,15 +130,25 @@ def part_to_anthropic_content_block(part: Part) -> Optional[Dict[str, Any]]:
         data = part.inline_data.get("data", b"")
         if isinstance(data, bytes):
             data = base64.b64encode(data).decode("utf-8")
+        return _anthropic_media_block(mime_type, data)
+
+    return None
+
+
+def _anthropic_media_block(mime_type: str, b64: str) -> Optional[Dict[str, Any]]:
+    """Anthropic content block for a base64 attachment: ``image`` for
+    ``image/*``, ``document`` for ``application/pdf`` (Claude reads PDF pages
+    natively — text AND embedded figures), else ``None``."""
+    if mime_type == "application/pdf":
+        return {
+            "type": "document",
+            "source": {"type": "base64", "media_type": "application/pdf", "data": b64},
+        }
+    if (mime_type or "").startswith("image/"):
         return {
             "type": "image",
-            "source": {
-                "type": "base64",
-                "media_type": mime_type,
-                "data": data,
-            }
+            "source": {"type": "base64", "media_type": mime_type, "data": b64},
         }
-
     return None
 
 
@@ -395,11 +334,9 @@ def content_block_to_part(block: Dict[str, Any]) -> Optional[Part]:
         return Part(text=block.get("text", ""))
 
     if block_type == "tool_use":
-        # Restore original tool name if it was sanitized
-        original_name = get_original_tool_name(block.get("name", ""))
         return Part(function_call=FunctionCall(
             id=block.get("id", ""),
-            name=original_name,
+            name=id_to_name(block.get("name", "")),
             args=block.get("input", {}),
         ))
 
@@ -458,11 +395,8 @@ def message_from_anthropic(msg: Dict[str, Any]) -> Message:
 
 def tool_result_to_anthropic(result: ToolResult) -> Dict[str, Any]:
     """Convert ToolResult to Anthropic tool_result content block."""
-    content: Any
-    if isinstance(result.result, str):
-        content = result.result
-    else:
-        content = json.dumps(result.result)
+    # Serialize the STRUCTURED result + append the model-facing steering suffix.
+    content: Any = render_result_for_model(result.result, result.model_suffix, untrusted=result.untrusted, untrusted_source=result.untrusted_source)
 
     block: Dict[str, Any] = {
         "type": "tool_result",
@@ -539,11 +473,9 @@ def extract_function_calls_from_response(response: Any) -> List[FunctionCall]:
 
     for block in response.content:
         if hasattr(block, "type") and block.type == "tool_use":
-            # Restore original tool name if it was sanitized
-            original_name = get_original_tool_name(block.name)
             calls.append(FunctionCall(
                 id=block.id,
-                name=original_name,
+                name=id_to_name(block.name),
                 args=block.input if hasattr(block, "input") else {},
             ))
 
@@ -637,11 +569,9 @@ def response_from_anthropic(response: Any) -> ProviderResponse:
                 if block.type == "text":
                     parts.append(Part.from_text(block.text))
                 elif block.type == "tool_use":
-                    # Restore original tool name if it was sanitized
-                    original_name = get_original_tool_name(block.name)
                     fc = FunctionCall(
                         id=block.id,
-                        name=original_name,
+                        name=id_to_name(block.name),
                         args=block.input if hasattr(block, "input") else {},
                     )
                     parts.append(Part.from_function_call(fc))

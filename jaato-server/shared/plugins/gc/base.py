@@ -97,7 +97,7 @@ class GCResult:
 
 def _get_pressure_percent() -> Optional[float]:
     """Get pressure_percent from environment, returning None if 0."""
-    value = float(os.getenv('JAATO_GC_PRESSURE', '90.0'))
+    value = float(os.getenv('JAATO_GC_PRESSURE', '90.0'))  # env: context % forcing immediate GC (default 90); 0 or negative switches to continuous mode
     return value if value > 0 else None
 
 
@@ -115,7 +115,7 @@ class GCConfig:
 
     # Trigger settings
     threshold_percent: float = field(
-        default_factory=lambda: float(os.getenv('JAATO_GC_THRESHOLD', '80.0'))
+        default_factory=lambda: float(os.getenv('JAATO_GC_THRESHOLD', '80.0'))  # env: context-full % that triggers GC (default 80)
     )
     """Trigger GC when context usage exceeds this percentage.
 
@@ -124,7 +124,7 @@ class GCConfig:
     """
 
     target_percent: float = field(
-        default_factory=lambda: float(os.getenv('JAATO_GC_TARGET', '60.0'))
+        default_factory=lambda: float(os.getenv('JAATO_GC_TARGET', '60.0'))  # env: context % GC aims to shrink usage down to (default 60)
     )
     """Target context usage after GC. GC will try to reach this level.
 

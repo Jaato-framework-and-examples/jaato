@@ -123,6 +123,7 @@ class TestJaatoClientConnect:
 
         mock_runtime_class.assert_called_once_with(provider_name="github_models",
                                                          workspace_path=None,
+                                                         config_root=None,
                                                          instruction_token_cache=None)
 
     @patch('shared.jaato_client.JaatoRuntime')
@@ -166,3 +167,75 @@ class TestGetDefaultModel:
         """Test that MODEL_NAME env var is returned when set."""
         with patch.dict(os.environ, {"MODEL_NAME": "gemini-2.5-flash"}):
             assert get_default_model() == "gemini-2.5-flash"
+
+
+class TestJaatoClientSetAgentIdentity:
+    """Tests for ``JaatoClient.set_agent_identity`` (Phase 3 §7c step 3).
+
+    Public surface replacing the daemon-side reaches into the
+    private ``_agent_id`` / ``_agent_name`` attributes.
+    """
+
+    def test_sets_both_id_and_name(self):
+        client = JaatoClient(provider_name="anthropic")
+        client.set_agent_identity(
+            agent_id="coordinator",
+            agent_name="Coordinator Agent",
+        )
+        assert client._agent_id == "coordinator"
+        assert client._agent_name == "Coordinator Agent"
+
+    def test_sets_id_only_when_name_omitted(self):
+        """When ``agent_name`` is None, the prior name is preserved
+        — useful when the caller only wants to update the id."""
+        client = JaatoClient(provider_name="anthropic")
+        # Default name is "Main Agent"
+        assert client._agent_name == "Main Agent"
+        client.set_agent_identity(agent_id="researcher")
+        assert client._agent_id == "researcher"
+        assert client._agent_name == "Main Agent"
+
+    def test_sets_id_only_when_name_explicit_none(self):
+        """Explicit ``agent_name=None`` preserves prior name (same
+        as omitting the kwarg)."""
+        client = JaatoClient(provider_name="anthropic")
+        client.set_agent_identity(agent_id="x", agent_name="Custom")
+        assert client._agent_name == "Custom"
+        # Now update id only — name should stay "Custom"
+        client.set_agent_identity(agent_id="y", agent_name=None)
+        assert client._agent_id == "y"
+        assert client._agent_name == "Custom"
+
+    def test_default_identity_before_set(self):
+        """Pin the framework default identity for callers that
+        don't override."""
+        client = JaatoClient(provider_name="anthropic")
+        assert client._agent_id == "main"
+        assert client._agent_name == "Main Agent"
+
+
+class TestJaatoClientGetToolSchemas:
+    """Tests for ``JaatoClient.get_tool_schemas`` (Phase 3 §7c step 3b).
+
+    Public read accessor replacing daemon-side
+    ``client.get_session()._tools`` private-attribute reads.
+    """
+
+    def test_returns_empty_list_before_connect(self):
+        """No session attached → empty list.  Callers can iterate
+        the result unconditionally without a None check."""
+        client = JaatoClient(provider_name="anthropic")
+        assert client.get_tool_schemas() == []
+
+    def test_forwards_to_session_get_tool_schemas(self):
+        """When a session is attached, the call delegates to
+        ``session.get_tool_schemas()``."""
+        client = JaatoClient(provider_name="anthropic")
+        fake_session = MagicMock()
+        fake_session.get_tool_schemas.return_value = ["s1", "s2"]
+        client._session = fake_session
+
+        result = client.get_tool_schemas()
+
+        fake_session.get_tool_schemas.assert_called_once_with()
+        assert result == ["s1", "s2"]

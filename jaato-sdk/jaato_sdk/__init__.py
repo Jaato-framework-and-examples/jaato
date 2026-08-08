@@ -7,9 +7,17 @@ Usage:
 
 from jaato_sdk.client import (
     IPCClient,
+    WSClient,
+    WSRecoveryClient,
     IPCRecoveryClient,
     ConnectionState,
     RecoveryConfig,
+)
+from jaato_sdk.client.convenience import (
+    Session,
+    AgentError,
+    PermissionUnhandled,
+    ask,
 )
 from jaato_sdk.events import (
     Event,
@@ -21,6 +29,13 @@ from jaato_sdk.events import (
     deserialize_event,
 )
 from jaato_sdk.constants import PRERENDERED_LINE_PREFIX
+from jaato_sdk.helpers import compute_cache_hit_percent
+from jaato_sdk.templates import (
+    HELPER_KEYWORDS,
+    classify_template_evaluation_kind,
+)
+from jaato_sdk.completion_processors import ToolCallEntry
+from jaato_sdk.cascade_authoring import ProcessorResult
 from jaato_sdk.trace import (
     trace,
     provider_trace,
@@ -31,9 +46,16 @@ from jaato_sdk.trace import (
 __all__ = [
     # Client
     "IPCClient",
+    "WSClient",
+    "WSRecoveryClient",
     "IPCRecoveryClient",
     "ConnectionState",
     "RecoveryConfig",
+    # High-level convenience facade
+    "Session",
+    "AgentError",
+    "PermissionUnhandled",
+    "ask",
     # Events
     "Event",
     "EventType",
@@ -44,6 +66,15 @@ __all__ = [
     "deserialize_event",
     # Constants
     "PRERENDERED_LINE_PREFIX",
+    # Helpers
+    "compute_cache_hit_percent",
+    # Template walker helpers (server 0.6.58+)
+    "HELPER_KEYWORDS",
+    "classify_template_evaluation_kind",
+    # Completion-processor context shape (server 0.6.158+ / SDK 0.14.0+)
+    "ToolCallEntry",
+    # Completion-processor return contract (server 0.6.160+ / SDK 0.14.2+)
+    "ProcessorResult",
     # Trace
     "trace",
     "provider_trace",

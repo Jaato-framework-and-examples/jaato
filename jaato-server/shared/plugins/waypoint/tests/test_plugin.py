@@ -435,3 +435,87 @@ class TestOwnershipSeparation:
         result = plugin._execute_waypoint({"action": "create", "target": '"second"'})
         assert result["id"] == "w2"  # IDs are never reused
         assert result["owner"] == "user"
+
+
+class TestWaypointWorkspacePathBroadcast:
+    """Tests for ``set_workspace_path`` broadcast (server X.Y.Z+).
+
+    Closes the same coupling class as artifact_tracker: WaypointManager
+    defaults its storage_path to ``Path(".jaato/...").resolve()`` which
+    resolves against process CWD.  Under AppArmor confinement when CWD
+    diverges from workspace_root, the storage file lands outside the
+    sandbox and writes fail.  The plugin now consumes the registry
+    broadcast and prefixes the default template with the workspace path.
+    """
+
+    def test_set_workspace_path_records_path(self, tmp_path):
+        from ..plugin import WaypointPlugin
+        plugin = WaypointPlugin()
+        plugin.initialize({})
+
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        plugin.set_workspace_path(str(ws))
+
+        assert plugin._workspace_path == ws
+
+    def test_set_workspace_path_defaults_storage_path(self, tmp_path):
+        """When no explicit storage_path was supplied, the broadcast
+        sets one under ``<workspace>/.jaato/waypoints.json`` so lazy
+        manager creation lands the file under the sandbox.
+        """
+        from ..plugin import WaypointPlugin
+        plugin = WaypointPlugin()
+        plugin.initialize({})  # no storage_path supplied
+        assert plugin._storage_path is None
+
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        plugin.set_workspace_path(str(ws))
+
+        assert plugin._storage_path == ws / ".jaato" / "waypoints.json"
+
+    def test_set_workspace_path_with_session_scoping(self, tmp_path):
+        """When session_id is set, the default lands under the
+        session-scoped subdirectory.
+        """
+        from ..plugin import WaypointPlugin
+        plugin = WaypointPlugin()
+        plugin.initialize({"session_id": "sess-001"})
+        assert plugin._storage_path is None
+
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        plugin.set_workspace_path(str(ws))
+
+        assert plugin._storage_path == (
+            ws / ".jaato" / "sessions" / "sess-001" / "waypoints.json"
+        )
+
+    def test_explicit_storage_path_not_overridden(self, tmp_path):
+        """When storage_path was supplied in init config, the broadcast
+        records workspace_path but does NOT rewrite storage_path.
+        Mirrors memory plugin's pattern — explicit wins over defaults.
+        """
+        from ..plugin import WaypointPlugin
+        plugin = WaypointPlugin()
+        custom = tmp_path / "custom" / "wp.json"
+        plugin.initialize({"storage_path": str(custom)})
+        assert plugin._storage_path == custom
+
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        plugin.set_workspace_path(str(ws))
+
+        # Workspace path recorded, but storage_path stays explicit.
+        assert plugin._workspace_path == ws
+        assert plugin._storage_path == custom
+
+    def test_set_workspace_path_empty_no_op(self):
+        """Empty path argument is a no-op (doesn't clobber existing state)."""
+        from ..plugin import WaypointPlugin
+        plugin = WaypointPlugin()
+        plugin.initialize({})
+        plugin.set_workspace_path("")
+        assert plugin._workspace_path is None
+        assert plugin._storage_path is None

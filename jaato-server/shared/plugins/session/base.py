@@ -49,18 +49,92 @@ class SessionState:
     metadata: Dict[str, Any] = field(default_factory=dict)
     """Additional plugin-specific metadata."""
 
-    # Connection info for resumption
-    project: Optional[str] = None
-    """GCP project ID used for this session."""
+    profile_name: Optional[str] = None
+    """Name of the SubagentProfile this session was spawned with.
 
-    location: Optional[str] = None
-    """Vertex AI location used for this session."""
+    Persisted so disk-restore can re-bind the full provider recipe
+    (model + provider + plugin_configs + system_instructions + GC
+    strategy) at load time.  When the profile is absent / renamed /
+    deleted between save and restore, the restore path raises a
+    typed error rather than silently constructing a server with
+    incomplete config.
 
-    model: Optional[str] = None
-    """Model name used for this session."""
+    Replaces the pre-multi-provider trio of ``project`` / ``location`` /
+    ``model`` which carried Google-GenAI-shaped fields directly on
+    SessionState.  Those fields are tolerated on deserialize for
+    backward-compat with old session JSONs but are no longer written
+    or read by the framework — the profile is the authoritative
+    recipe source.
+    """
+
+    profile_spec: Optional[Dict[str, Any]] = None
+    """The UNRESOLVED inline-profile spec, when the session was created
+    from an inline profile (``profile_name == "<inline>"``) rather than a
+    named profile on disk.
+
+    An inline profile has no re-resolvable name, so disk-restore cannot
+    re-bind its recipe via the profile registry (the named-profile
+    assumption behind ``profile_name``).  Persisting the original spec
+    dict — the same JSON shape ``build_inline_profile`` accepts — lets
+    restore reconstruct the full recipe (model + provider + plugins +
+    plugin_configs + system_instructions + GC) with NO named profile.
+
+    Stored **unresolved** (secret URIs like ``pass://`` preserved, not the
+    resolved literals) so credentials never land in the on-disk session
+    record; the daemon re-resolves them at restore, exactly as it does at
+    create.  ``None`` for named-profile sessions (they restore via
+    ``profile_name``) and for records written before this field existed.
+    """
 
     workspace_path: Optional[str] = None
     """Workspace path (directory) where this session was created."""
+
+    config_root: Optional[str] = None
+    """Framework-config root override at session-creation time.
+
+    Persisted so disk-restore can hand it back to
+    :func:`discover_profiles` — the workspace tier and
+    ``JAATO_PROFILE_SET`` subdir scans both gate on
+    ``effective_config_root`` (see ``subagent/config.py:1685``).
+    Without this, restoring a session spawned with a profile that
+    lives under ``<config_root>/profiles/<set>/`` fails profile
+    resolution because ``discover_profiles`` falls back to
+    ``<workspace>/.jaato/profiles/`` which is the wrong directory
+    for multi-set workspaces (canonical kb-cascade case: profiles
+    live at ``<repo>/.jaato/profiles/zhipuai_glm5/``, sessions run
+    under ``<repo>/tests/runs/<run>/``).
+
+    None for sessions persisted before 2.4 OR sessions spawned
+    without a config_root override (default workspace-only layout).
+    """
+
+    sandbox_mode: Optional[str] = None
+    """Confinement mode at session-creation time (e.g. ``"apparmor"``).
+
+    Persisted so disk-restore / orphan-revive re-applies the SAME
+    confinement on runner re-spawn.  Without it a revived session's
+    ``_load_session`` read of ``state.sandbox_mode`` was always None
+    (the field didn't exist) → the re-spawned runner ran UNCONFINED
+    after any idle detach — a security regression.  Mirrors the
+    ``BootstrapEnvelope.sandbox_mode`` the restore path consumes;
+    None on old records / never-confined sessions (unchanged behavior).
+    """
+
+    agent_name: Optional[str] = None
+    """Agent/persona identity (``--agent <name>``) the session was
+    spawned with.
+
+    Persisted so disk-restore / orphan-revive rebinds the SAME persona
+    (``.jaato/agents/<name>.md`` layered on the base instructions).
+    Without it a revived session's ``_load_session`` built
+    ``JaatoServer(agent_name=None)`` → no persona → persona-only
+    guidance (e.g. "call ``enter_tier('vision')`` on user images") was
+    silently dropped, so a revived multimodal session kept its
+    ``enter_tier`` tool but never the instruction to use it → images
+    hit the text tier and confabulated.  Mirrors
+    ``BootstrapEnvelope.agent_name``; None on old records / no-persona
+    sessions (unchanged behavior — the agent id falls back to "main").
+    """
 
     budget_state: Optional[Dict[str, Any]] = None
     """Serialized conversation budget for restoration."""
@@ -75,6 +149,21 @@ class SessionState:
     ``"modified"``, ``"deleted"``).  Persisted so the monitor can be
     restored on session reload and the full delta replayed to
     reconnecting clients.
+    """
+
+    session_state: Optional[Dict[str, Any]] = None
+    """Snapshot of session-attached state (extension-owned opaque
+    storage) at save time.
+
+    Captured from ``JaatoSession.get_all_session_state()`` — invokes
+    every registered state provider so the snapshot reflects live
+    values, not whatever was last pushed via ``set_session_state``.
+    Persisted as JSON; the framework treats values as opaque
+    (extensions encrypt before attach if confidentiality is needed).
+    On resume, restored by re-attaching each key via
+    ``JaatoSession.set_session_state``; consumer hooks fire and can
+    re-register providers / instantiate runtime structures from the
+    restored values.
     """
 
 
@@ -100,8 +189,14 @@ class SessionInfo:
     turn_count: int
     """Number of conversation turns."""
 
-    model: Optional[str] = None
-    """Model name used for this session."""
+    profile_name: Optional[str] = None
+    """Name of the SubagentProfile this session was spawned with.
+
+    Denormalised at save time so session-list views can show recipe
+    binding without resolving the profile registry for every entry.
+    None for sessions persisted before this field landed OR for
+    sessions spawned without a profile (legacy / test paths).
+    """
 
     workspace_path: Optional[str] = None
     """Workspace path (directory) where this session was created."""

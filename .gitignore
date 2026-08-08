@@ -66,6 +66,7 @@ tests_enablement_2.0/
 generated-tests/
 src/
 !web-client/src/
+!jaato-sdk-ts/src/
 **/target/
 
 # Logs

@@ -1,0 +1,8 @@
+{
+  "type": "resolve_fork_point.request",
+  "timestamp": "<TIMESTAMP>",
+  "request_id": "",
+  "after_message": null,
+  "after_tool_call": null,
+  "after_timestamp": null
+}

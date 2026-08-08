@@ -1,0 +1,6 @@
+{
+  "type": "mid_turn_prompt.queued",
+  "timestamp": "<TIMESTAMP>",
+  "text": "",
+  "position_in_queue": 0
+}

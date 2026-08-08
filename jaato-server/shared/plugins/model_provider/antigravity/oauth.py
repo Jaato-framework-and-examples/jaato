@@ -12,6 +12,7 @@ import hashlib
 import http.server
 import json
 import os
+from shared.session_context import get_workspace_root, get_config_root
 import secrets
 import threading
 import time
@@ -624,7 +625,7 @@ def _get_token_storage_path(for_write: bool = False, workspace_path: Optional[st
     """
     # Use explicit workspace path if set (thread-safe for subagents)
     # Falls back to CWD for main agent
-    workspace = workspace_path or os.environ.get("JAATO_WORKSPACE_ROOT") or os.getcwd()
+    workspace = workspace_path or get_workspace_root() or os.getcwd()
     project_path = Path(workspace) / ".jaato" / "antigravity_accounts.json"
     home_path = Path.home() / ".jaato" / "antigravity_accounts.json"
 

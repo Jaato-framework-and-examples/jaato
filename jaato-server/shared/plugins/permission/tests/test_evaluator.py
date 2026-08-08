@@ -1,9 +1,10 @@
-"""Tests for runtime-injectable permission evaluators."""
+"""Tests for runtime-injectable permission evaluators.
 
-import os
-import tempfile
-from pathlib import Path
-from unittest.mock import MagicMock
+Path resolution is now owned by ``shared.script_loader`` and covered by
+``shared/tests/test_script_loader.py``. Tests here focus on the evaluator-
+specific contract: loading the ``evaluate`` symbol, decision coercion,
+and the run_evaluator dispatch pipeline.
+"""
 
 import pytest
 
@@ -11,7 +12,6 @@ from shared.plugins.permission.evaluator import (
     EvalContext,
     EvalResult,
     PolicyDecision,
-    _resolve_evaluator_path,
     load_evaluators,
     run_evaluator,
 )
@@ -30,6 +30,7 @@ class TestEvalContext:
         assert ctx.agent_name is None
         assert ctx.session_id is None
         assert ctx.workspace_path is None
+        assert ctx.execution_log == []
         assert ctx.extra == {}
 
     def test_all_fields(self):
@@ -45,35 +46,35 @@ class TestEvalContext:
         assert ctx.agent_type == "subagent"
         assert ctx.extra["custom"] is True
 
+    def test_execution_log_field(self):
+        log = [{"tool_name": "cli", "arguments": {}, "decision": "allow",
+                "reason": "x"}]
+        ctx = EvalContext(tool_name="cli", args={}, execution_log=log)
+        assert ctx.execution_log == log
 
-# ---------------------------------------------------------------------------
-# Path resolution
-# ---------------------------------------------------------------------------
+    def test_evaluator_can_decide_on_execution_log(self, tmp_path):
+        # An evaluator that denies a tool once it has already run >= 2 times
+        # this session — reasoning purely from EvalContext.execution_log.
+        script = tmp_path / ".jaato" / "rate_limit.py"
+        script.parent.mkdir(parents=True)
+        script.write_text(
+            "from shared.plugins.permission.evaluator import PolicyDecision\n"
+            "def evaluate(tool_name, args, context):\n"
+            "    prior = sum(1 for e in context.execution_log\n"
+            "                if e.get('tool_name') == tool_name)\n"
+            "    return PolicyDecision.DENY if prior >= 2 else PolicyDecision.FALLBACK\n"
+        )
+        evaluators = load_evaluators({"default": "rate_limit.py"},
+                                     workspace_path=str(tmp_path))
+        entry = {"tool_name": "cli", "arguments": {}, "decision": "allow", "reason": ""}
 
-class TestResolveEvaluatorPath:
+        def _decide(log):
+            ctx = EvalContext(tool_name="cli", args={}, execution_log=log)
+            return run_evaluator(evaluators, "cli", {}, ctx).decision
 
-    def test_absolute_path_exists(self, tmp_path):
-        script = tmp_path / "eval.py"
-        script.write_text("def evaluate(t, a, c): pass")
-        assert _resolve_evaluator_path(str(script)) == script
-
-    def test_absolute_path_missing(self):
-        assert _resolve_evaluator_path("/nonexistent/eval.py") is None
-
-    def test_relative_workspace_path(self, tmp_path):
-        ws = tmp_path / "workspace"
-        jaato_dir = ws / ".jaato" / "policies"
-        jaato_dir.mkdir(parents=True)
-        script = jaato_dir / "eval.py"
-        script.write_text("def evaluate(t, a, c): pass")
-        result = _resolve_evaluator_path("policies/eval.py", workspace_path=str(ws))
-        assert result == script
-
-    def test_relative_no_workspace_no_home(self, tmp_path):
-        # No workspace, no ~/.jaato match
-        result = _resolve_evaluator_path("nonexistent/eval.py")
-        # May or may not find in ~/.jaato — just verify no crash
-        assert result is None or result.is_file()
+        assert _decide([]) == PolicyDecision.FALLBACK
+        assert _decide([entry]) == PolicyDecision.FALLBACK
+        assert _decide([entry, entry]) == PolicyDecision.DENY
 
 
 # ---------------------------------------------------------------------------

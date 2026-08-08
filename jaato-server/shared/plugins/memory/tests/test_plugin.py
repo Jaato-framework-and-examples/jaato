@@ -31,10 +31,13 @@ class TestMemoryPlugin(unittest.TestCase):
         self.temp_dir = tempfile.mkdtemp()
         self.storage_path = str(Path(self.temp_dir) / "test_memories.jsonl")
 
-        # Initialize plugin
+        self.global_storage_path = str(Path(self.temp_dir) / "global_memories.jsonl")
+
+        # Initialize plugin with both storage paths in temp dir
         self.plugin = MemoryPlugin()
         self.plugin.initialize({
-            "storage_path": self.storage_path
+            "storage_path": self.storage_path,
+            "global_storage_path": self.global_storage_path,
         })
 
     def tearDown(self):
@@ -43,6 +46,18 @@ class TestMemoryPlugin(unittest.TestCase):
         # Clean up temp files
         import shutil
         shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def _promote(self, memory_id: str, maturity: str = "validated"):
+        """Simulate the curator promoting a raw memory to the curated store.
+
+        After this call the memory is retrievable via tag/ID search and
+        appears in enrichment hints.  Tests that need this end-state
+        should call ``_promote(mid)`` immediately after ``store_memory``.
+        """
+        return self.plugin.get_executors()["update_memory"]({
+            "id": memory_id,
+            "maturity": maturity,
+        })
 
     def test_plugin_name(self):
         """Test plugin has correct name."""
@@ -78,6 +93,9 @@ class TestMemoryPlugin(unittest.TestCase):
 
         self.assertEqual(store_result["status"], "success")
         self.assertIn("memory_id", store_result)
+
+        # Promote raw → curated so the memory is retrievable.
+        self._promote(store_result["memory_id"])
 
         # Retrieve by tags
         retrieve_result = self.plugin.get_executors()["retrieve_memories"]({
@@ -163,35 +181,39 @@ class TestMemoryPlugin(unittest.TestCase):
         """Test that retrieved memories include maturity, confidence, scope."""
         executors = self.plugin.get_executors()
 
-        executors["store_memory"]({
+        store = executors["store_memory"]({
             "content": "Some insight",
             "description": "Test insight",
             "tags": ["lifecycle_test"],
             "confidence": 0.8,
             "scope": "universal",
         })
+        # Promote so it's retrievable.  Maturity stays as set by promotion.
+        self._promote(store["memory_id"])
 
         result = executors["retrieve_memories"]({"tags": ["lifecycle_test"]})
         mem = result["memories"][0]
 
-        self.assertEqual(mem["maturity"], MATURITY_RAW)
+        self.assertEqual(mem["maturity"], "validated")
         self.assertEqual(mem["confidence"], 0.8)
         self.assertEqual(mem["scope"], SCOPE_UNIVERSAL)
 
     def test_list_tags(self):
         """Test listing memory tags."""
-        # Store some memories
+        # Store some memories AND promote them so they enter the index.
         executors = self.plugin.get_executors()
-        executors["store_memory"]({
+        m1 = executors["store_memory"]({
             "content": "Auth explanation",
             "description": "Authentication flow",
             "tags": ["auth", "security"]
         })
-        executors["store_memory"]({
+        m2 = executors["store_memory"]({
             "content": "DB explanation",
             "description": "Database schema",
             "tags": ["database", "schema"]
         })
+        self._promote(m1["memory_id"])
+        self._promote(m2["memory_id"])
 
         # List tags
         result = executors["list_memory_tags"]({})
@@ -202,17 +224,23 @@ class TestMemoryPlugin(unittest.TestCase):
         self.assertIn("database", result["tags"])
 
     def test_prompt_enrichment(self):
-        """Test prompt enrichment with memory hints."""
-        # Store a memory first
-        self.plugin.get_executors()["store_memory"]({
+        """Test prompt enrichment with memory hints.
+
+        Requires at least 2 tag overlaps (min_overlap=2 in the indexer)
+        to prevent false-positive matches from large prompts.
+        """
+        # Store + promote so the memory enters the curated index that
+        # enrichment uses.
+        store = self.plugin.get_executors()["store_memory"]({
             "content": "Detailed subagent explanation",
             "description": "How to spawn subagents efficiently",
-            "tags": ["subagent", "spawning", "efficiency"]
+            "tags": ["subagent", "spawn", "efficiently"]
         })
+        self._promote(store["memory_id"])
 
-        # Test enrichment
+        # Prompt must contain at least 2 keywords matching tags
         result = self.plugin.enrich_prompt(
-            "How do I create a subagent efficiently?"
+            "How do I spawn a subagent efficiently?"
         )
 
         # Should find the memory and add hints
@@ -279,7 +307,7 @@ class TestMemoryPlugin(unittest.TestCase):
         result = executors["store_memory"]({
             "content": "Validated insight about patterns",
             "description": "Confirmed pattern usage",
-            "tags": ["validated_pattern_test"]
+            "tags": ["validated", "pattern", "usage"]
         })
 
         memory = self.plugin._storage.get_by_id(result["memory_id"])
@@ -290,7 +318,7 @@ class TestMemoryPlugin(unittest.TestCase):
         self.plugin._indexer.build_index(self.plugin._storage.load_all())
 
         enrichment = self.plugin.enrich_prompt(
-            "How to use validated_pattern_test?"
+            "How to use validated pattern correctly?"
         )
         self.assertEqual(enrichment.metadata["memory_matches"], 1)
 
@@ -320,12 +348,13 @@ class TestMemoryPlugin(unittest.TestCase):
         """Test that usage count increments on retrieval."""
         executors = self.plugin.get_executors()
 
-        # Store memory
-        executors["store_memory"]({
+        # Store memory and promote to curated so it's retrievable.
+        store = executors["store_memory"]({
             "content": "Test content",
             "description": "Test memory",
             "tags": ["test"]
         })
+        self._promote(store["memory_id"])
 
         # Retrieve once
         result1 = executors["retrieve_memories"]({"tags": ["test"]})
@@ -456,20 +485,23 @@ class TestMemoryPlugin(unittest.TestCase):
         """Test that retrieve_memories result includes _telemetry for span enrichment."""
         executors = self.plugin.get_executors()
 
-        executors["store_memory"]({
+        m1 = executors["store_memory"]({
             "content": "Insight A",
             "description": "First insight",
             "tags": ["telem_retrieve_test"],
             "confidence": 0.7,
             "scope": "project",
         })
-        executors["store_memory"]({
+        m2 = executors["store_memory"]({
             "content": "Insight B",
             "description": "Second insight",
             "tags": ["telem_retrieve_test"],
             "confidence": 0.9,
             "scope": "universal",
         })
+        # Promote both so they're retrievable.
+        self._promote(m1["memory_id"])
+        self._promote(m2["memory_id"])
 
         result = executors["retrieve_memories"]({"tags": ["telem_retrieve_test"]})
 
@@ -477,7 +509,8 @@ class TestMemoryPlugin(unittest.TestCase):
         telem = result["_telemetry"]
         self.assertEqual(telem["jaato.memory.operation"], "retrieve")
         self.assertEqual(telem["jaato.memory.count_retrieved"], 2)
-        self.assertIn("raw", telem["jaato.memory.maturities_retrieved"])
+        # Maturity is now "validated" after promotion (no longer raw).
+        self.assertIn("validated", telem["jaato.memory.maturities_retrieved"])
         self.assertIn("project", telem["jaato.memory.scopes_retrieved"])
         self.assertIn("universal", telem["jaato.memory.scopes_retrieved"])
         self.assertAlmostEqual(telem["jaato.memory.avg_confidence"], 0.8, places=2)
@@ -486,11 +519,14 @@ class TestMemoryPlugin(unittest.TestCase):
         """Test that list_memory_tags result includes _telemetry for span enrichment."""
         executors = self.plugin.get_executors()
 
-        executors["store_memory"]({
+        store = executors["store_memory"]({
             "content": "Test",
             "description": "Test",
             "tags": ["telem_list_test"],
         })
+        # list_memory_tags reads the indexer (curated only) — promote
+        # so the memory enters the index.
+        self._promote(store["memory_id"])
 
         result = executors["list_memory_tags"]({})
 
@@ -499,7 +535,8 @@ class TestMemoryPlugin(unittest.TestCase):
         self.assertEqual(telem["jaato.memory.operation"], "list_tags")
         self.assertEqual(telem["jaato.memory.total_count"], 1)
         self.assertGreaterEqual(telem["jaato.memory.tag_count"], 1)
-        self.assertEqual(telem["jaato.memory.count_raw"], 1)
+        # After promotion the memory is validated, not raw.
+        self.assertEqual(telem["jaato.memory.count_validated"], 1)
 
     def test_source_agent_captured(self):
         """Test that source_agent is captured from plugin config."""
@@ -520,133 +557,403 @@ class TestMemoryPlugin(unittest.TestCase):
         plugin.shutdown()
 
 
-class TestMemoryStorageBackwardCompat(unittest.TestCase):
-    """Test backward compatibility when loading old JSONL without lifecycle fields."""
+class TestSplitStorage(unittest.TestCase):
+    """Tests for the raw/curated split storage layout.
+
+    ``MemoryStore.save()`` writes new memories to the raw queue;
+    they don't appear in the curated path until promoted via
+    ``update()`` with a non-raw, non-dismissed maturity.  Replaces
+    the old single-file backward-compat suite (no migration is
+    provided per the dev-stage refactor).
+    """
 
     def setUp(self):
-        """Set up test fixtures."""
         self.temp_dir = tempfile.mkdtemp()
-        self.storage_path = str(Path(self.temp_dir) / "compat_test.jsonl")
+        # MemoryStorage accepts a ``.jsonl`` path for compat — the dir
+        # is created adjacent (``.../mem.jsonl`` → ``.../mem/``).
+        self.storage_path = str(Path(self.temp_dir) / "mem.jsonl")
 
     def tearDown(self):
-        """Clean up temp files."""
         import shutil
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
-    def test_old_format_loads_with_defaults(self):
-        """Test that JSONL lines without lifecycle fields load with defaults."""
-        # Write an old-format memory (no maturity, confidence, scope, etc.)
-        old_memory = {
-            "id": "mem_old_001",
-            "content": "Old format memory",
-            "description": "Before lifecycle fields",
-            "tags": ["legacy", "compat"],
+    def _store(self, **kwargs) -> Memory:
+        defaults = {
+            "id": "mem_x",
+            "content": "x",
+            "description": "x",
+            "tags": ["t"],
             "timestamp": "2024-01-01T00:00:00",
-            "usage_count": 3,
-            "last_accessed": "2024-06-01T00:00:00",
+            "maturity": MATURITY_RAW,
         }
-        with open(self.storage_path, 'w') as f:
-            f.write(json.dumps(old_memory) + '\n')
+        defaults.update(kwargs)
+        return Memory(**defaults)
 
-        storage = MemoryStorage(self.storage_path)
-        memories = storage.load_all()
+    def test_save_routes_to_raw_queue(self):
+        store = MemoryStorage(self.storage_path)
+        store.save(self._store(id="mem_1"))
+        # Curated is empty; raw has the new memory.
+        self.assertEqual(store.load_curated(), [])
+        raw = store.list_raw()
+        self.assertEqual(len(raw), 1)
+        self.assertEqual(raw[0].id, "mem_1")
 
-        self.assertEqual(len(memories), 1)
-        mem = memories[0]
-        self.assertEqual(mem.id, "mem_old_001")
-        self.assertEqual(mem.content, "Old format memory")
-        # Lifecycle fields should have defaults
-        self.assertEqual(mem.maturity, MATURITY_RAW)
-        self.assertEqual(mem.confidence, 0.5)
-        self.assertEqual(mem.scope, SCOPE_PROJECT)
-        self.assertIsNone(mem.evidence)
-        self.assertIsNone(mem.source_agent)
-        self.assertIsNone(mem.source_session)
+    def test_update_promotes_raw_to_curated(self):
+        store = MemoryStorage(self.storage_path)
+        m = self._store(id="mem_2", maturity=MATURITY_RAW)
+        store.save(m)
+        # Promote: same memory with new maturity.
+        m.maturity = MATURITY_VALIDATED
+        store.update(m)
+        # Now curated has it; raw is empty.
+        self.assertEqual(len(store.list_raw()), 0)
+        curated = store.load_curated()
+        self.assertEqual(len(curated), 1)
+        self.assertEqual(curated[0].id, "mem_2")
+        self.assertEqual(curated[0].maturity, MATURITY_VALIDATED)
 
-    def test_unknown_keys_ignored(self):
-        """Test that unknown JSON keys don't crash loading."""
-        weird_memory = {
-            "id": "mem_weird_001",
-            "content": "Has extra keys",
-            "description": "Unknown fields test",
-            "tags": ["weird"],
-            "timestamp": "2024-01-01T00:00:00",
-            "usage_count": 0,
-            "some_future_field": "should be ignored",
-            "another_unknown": 42,
-        }
-        with open(self.storage_path, 'w') as f:
-            f.write(json.dumps(weird_memory) + '\n')
+    def test_update_dismiss_unlinks_from_raw(self):
+        store = MemoryStorage(self.storage_path)
+        m = self._store(id="mem_3")
+        store.save(m)
+        m.maturity = "dismissed"
+        store.update(m)
+        # Gone from both stores.
+        self.assertEqual(len(store.list_raw()), 0)
+        self.assertEqual(store.load_curated(), [])
 
-        storage = MemoryStorage(self.storage_path)
-        memories = storage.load_all()
+    def test_update_modifies_existing_curated(self):
+        store = MemoryStorage(self.storage_path)
+        # Get a memory into curated first.
+        m = self._store(id="mem_4")
+        store.save(m)
+        m.maturity = MATURITY_VALIDATED
+        store.update(m)
+        # Now modify its tags.
+        m.tags = ["new-tag"]
+        store.update(m)
+        curated = store.load_curated()
+        self.assertEqual(len(curated), 1)
+        self.assertEqual(curated[0].tags, ["new-tag"])
 
-        self.assertEqual(len(memories), 1)
-        self.assertEqual(memories[0].id, "mem_weird_001")
+    def test_search_by_tags_skips_raw(self):
+        """Tag search must NOT surface raw memories."""
+        store = MemoryStorage(self.storage_path)
+        store.save(self._store(id="mem_raw", tags=["secret-tag"]))
+        results = store.search_by_tags(["secret-tag"])
+        self.assertEqual(results, [])
+        # After promotion it surfaces.
+        m = store.get_by_id("mem_raw")
+        m.maturity = MATURITY_VALIDATED
+        store.update(m)
+        results = store.search_by_tags(["secret-tag"])
+        self.assertEqual(len(results), 1)
 
-    def test_maturity_queries(self):
-        """Test maturity-based storage queries."""
-        storage = MemoryStorage(self.storage_path)
+    def test_get_by_id_searches_both_stores(self):
+        store = MemoryStorage(self.storage_path)
+        store.save(self._store(id="mem_in_raw"))
+        m2 = self._store(id="mem_in_curated", maturity=MATURITY_VALIDATED)
+        store.save(m2)
+        store.update(m2)  # promote
+        self.assertIsNotNone(store.get_by_id("mem_in_raw"))
+        self.assertIsNotNone(store.get_by_id("mem_in_curated"))
+        self.assertIsNone(store.get_by_id("mem_does_not_exist"))
 
-        # Write memories with different maturities
-        for i, maturity in enumerate([MATURITY_RAW, MATURITY_RAW, MATURITY_VALIDATED, MATURITY_ESCALATED]):
-            mem = Memory(
-                id=f"mem_mat_{i}",
-                content=f"Memory {i}",
-                description=f"Maturity test {i}",
-                tags=["maturity_test"],
-                timestamp=f"2024-01-0{i+1}T00:00:00",
-                maturity=maturity,
+    def test_count_by_maturity_combines_both_stores(self):
+        store = MemoryStorage(self.storage_path)
+        store.save(self._store(id="raw_a"))
+        store.save(self._store(id="raw_b"))
+        m = self._store(id="curated_v", maturity=MATURITY_VALIDATED)
+        store.save(m)
+        store.update(m)
+        counts = store.count_by_maturity()
+        self.assertEqual(counts.get(MATURITY_RAW), 2)
+        self.assertEqual(counts.get(MATURITY_VALIDATED), 1)
+
+    def test_workspace_and_global_stores_are_isolated(self):
+        """Two MemoryStore instances pointing at sibling .jsonl paths
+        must not share storage (each gets its own folder)."""
+        ws_path = str(Path(self.temp_dir) / "ws.jsonl")
+        global_path = str(Path(self.temp_dir) / "global.jsonl")
+        ws = MemoryStorage(ws_path)
+        gl = MemoryStorage(global_path)
+        ws.save(self._store(id="mem_ws"))
+        gl.save(self._store(id="mem_gl"))
+        # Each store sees only its own raw memory.
+        ws_raw_ids = {m.id for m in ws.list_raw()}
+        gl_raw_ids = {m.id for m in gl.list_raw()}
+        self.assertEqual(ws_raw_ids, {"mem_ws"})
+        self.assertEqual(gl_raw_ids, {"mem_gl"})
+
+
+class TestSetSessionAutoWiring(unittest.TestCase):
+    """Server 0.6.167+ — ``set_session(session)`` auto-wiring + the
+    ``source_session`` provenance field on stored memories.
+
+    Pre-0.6.167 the plugin defined ``set_session_context(session_id)``
+    but the framework's canonical wiring is
+    ``plugin.set_session(session)`` (five call sites in
+    ``shared/jaato_session.py``).  Method-name mismatch meant the
+    plugin's ``_session_id`` stayed None forever → every memory ever
+    written had ``source_session=null``.
+
+    Empirical motivation (peer 7:1, 2026-05-28): jq audit of
+    kb-enablement-2.0 store showed 25/25 memories with
+    source_session=null despite source_agent populated.
+    """
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.storage_path = str(Path(self.temp_dir) / "mem.jsonl")
+        self.global_storage_path = str(
+            Path(self.temp_dir) / "global_mem.jsonl"
+        )
+        self.plugin = MemoryPlugin()
+        self.plugin.initialize({
+            "storage_path": self.storage_path,
+            "global_storage_path": self.global_storage_path,
+        })
+        # Isolate the per-execution session ContextVar — _get_session_id
+        # reads the current session from it.  Baseline = no session.
+        from shared.session_context import _current_session
+        self._sess_token = _current_session.set(None)
+
+    def _set_current_session(self, daemon_session_id):
+        """Wire a fake current session carrying ``daemon_session_id``
+        (no parent) into the ContextVar that ``_get_session_id`` reads."""
+        from shared.session_context import _current_session
+        fake = type("FakeSession", (), {
+            "_daemon_session_id": daemon_session_id,
+            "_parent_session": None,
+        })()
+        _current_session.set(fake)
+
+    def tearDown(self):
+        from shared.session_context import _current_session
+        _current_session.reset(self._sess_token)
+        self.plugin.shutdown()
+        import shutil
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def _promote(self, memory_id: str, maturity: str = "validated"):
+        return self.plugin.get_executors()["update_memory"]({
+            "id": memory_id,
+            "maturity": maturity,
+        })
+
+    def test_set_session_is_noop_no_self_state(self):
+        """``set_session`` must NOT store session state on ``self`` —
+        plugin instances are shared across sibling subagents, so a
+        sibling's call would clobber another's.  Enforced by
+        ``tests/test_plugin_session_safety.py``; pinned here too.
+        """
+        # A fabricated session with _daemon_session_id must NOT leak onto
+        # the instance (the old stashing behavior).
+        fake_session = type("FakeSession", (), {})()
+        fake_session._daemon_session_id = "20260528_223344"
+        self.plugin.set_session(fake_session)
+        self.assertIsNone(self.plugin._session_id)
+        # None / bare sessions are tolerated without raising.
+        self.plugin.set_session(None)
+        self.plugin.set_session(type("Bare", (), {})())
+
+    def test_store_memory_carries_source_session_via_config_injection(self):
+        """End-to-end pin: the source_session field is populated from the
+        config-injection path (``initialize`` reads ``config['session_id']``,
+        injected runner-side by ``registry._augment_plugin_config``), NOT
+        from ``set_session``/``_daemon_session_id`` (which is always None
+        runner-side).  Checks the on-disk Memory dataclass directly.
+        """
+        # Re-initialize with the session_id the framework injects via config.
+        self.plugin.initialize({
+            "storage_path": self.storage_path,
+            "global_storage_path": self.global_storage_path,
+            "session_id": "20260528_223344",
+        })
+
+        store_result = self.plugin.get_executors()["store_memory"]({
+            "content": "session-id propagation pin",
+            "description": "verifies source_session populated",
+            "tags": ["pin-test"],
+        })
+        self.assertEqual(store_result["status"], "success")
+        mid = store_result["memory_id"]
+
+        persisted = self.plugin._storage.raw.get(mid)
+        self.assertIsNotNone(persisted, f"memory {mid} not in raw store")
+        self.assertEqual(
+            persisted.source_session, "20260528_223344",
+            "source_session must be populated via config injection — the "
+            "real runner-side path (set_session/_daemon_session_id is None "
+            "runner-side; peer 7:1 retry-49: 4/4 source_session=null).",
+        )
+
+    def test_store_memory_source_session_is_none_when_set_session_not_called(self):
+        """Backwards-compat: if no caller invokes set_session, the
+        plugin keeps the pre-0.6.167 behavior (source_session=None
+        on persisted memories).  Standalone plugin constructors
+        (kb-side scripts, premium extensions) keep working
+        unchanged."""
+        store_result = self.plugin.get_executors()["store_memory"]({
+            "content": "no-wire fallback pin",
+            "description": "verifies fallback to None",
+            "tags": ["pin-test-no-wire"],
+        })
+        mid = store_result["memory_id"]
+        persisted = self.plugin._storage.raw.get(mid)
+        self.assertIsNotNone(persisted)
+        self.assertIsNone(persisted.source_session)
+
+    # ------------------------------------------------------------------
+    # Server 0.6.168+ — runner-side wiring via config + registry
+    # ------------------------------------------------------------------
+
+    def test_initialize_reads_session_id_from_config(self):
+        """Server 0.6.168+: the canonical runner-side wiring path.
+        ``registry.set_session_id(envelope.session_id)`` is called
+        at ``runner/session.py:271``; the registry's
+        ``_augment_plugin_config`` injects it into the plugin's
+        config dict at ``initialize()`` time.  This is what
+        actually fires for cascade sessions — memory is
+        ``PLUGIN_TIER="runner"``.
+
+        PR-196's ``set_session(session)`` reads
+        ``session._daemon_session_id`` which is set only by
+        JaatoClient (daemon-side facade), never on runner-side
+        JaatoSession.  Empirical: peer 7:1 retry-49 post-PR-196
+        still showed source_session=null on 4/4 memories.  This
+        path (config injection) IS reached for runner-side init.
+        """
+        sub_plugin = MemoryPlugin()
+        sub_plugin.initialize({
+            "storage_path": str(Path(self.temp_dir) / "sub_mem.jsonl"),
+            "global_storage_path": str(
+                Path(self.temp_dir) / "sub_global.jsonl"
+            ),
+            "session_id": "20260530_223344",
+        })
+        try:
+            self.assertEqual(sub_plugin._session_id, "20260530_223344")
+        finally:
+            sub_plugin.shutdown()
+
+    def test_get_session_id_reads_current_session_not_registry_or_cache(self):
+        """``_get_session_id`` reads the CURRENT session's
+        ``_daemon_session_id`` (per-execution), NOT the shared
+        ``registry._session_id`` and NOT the cached ``self._session_id``.
+
+        The registry is shared across sibling subagents, so reading its
+        single ``_session_id`` leaked the last-bootstrapped sibling's id.
+        The current session (each sibling has its own) is the correct,
+        per-sibling source.  Pin: with a stale cache AND a (now-ignored)
+        registry value AND a different current-session id, the
+        current-session id wins.
+        """
+        fake_registry = type("FakeRegistry", (), {})()
+        fake_registry._session_id = "registry_sibling_other"  # must be ignored
+        self.plugin._session_id = "cached_first_session"       # stale cache
+        self.plugin.set_plugin_registry(fake_registry)
+
+        self._set_current_session("current_session_A")
+        self.assertEqual(self.plugin._get_session_id(), "current_session_A")
+        # Registry advancing (a sibling bootstrapping) must NOT change us.
+        fake_registry._session_id = "registry_sibling_yet_another"
+        self.assertEqual(self.plugin._get_session_id(), "current_session_A")
+        # Switching the executing session DOES (the per-execution source).
+        self._set_current_session("current_session_B")
+        self.assertEqual(self.plugin._get_session_id(), "current_session_B")
+
+    def test_get_session_id_falls_back_to_cached_when_no_current_session(self):
+        """With no session in context (standalone plugin / no real turn),
+        ``_get_session_id`` falls back to the cached config-injection
+        value — preserves behavior for tests and kb-side scripts that
+        construct the plugin directly."""
+        self.plugin._session_id = "20260530_standalone"
+        # setUp seeded the session ContextVar to None (no current session).
+        self.assertEqual(
+            self.plugin._get_session_id(), "20260530_standalone"
+        )
+
+    def test_store_memory_picks_live_session_id_per_execution(self):
+        """End-to-end pin: the same plugin instance reused across
+        multiple sessions (cascade-pool HIT slot AND/OR sibling
+        subagents) must persist ``source_session`` matching the
+        CURRENTLY-EXECUTING session, not the first-session value cached
+        at plugin init and not a shared registry value.
+
+        Covers two empirical scenarios at once: (1) peer 7:1 retry-49
+        HIT-slot reuse where the cached _session_id went stale, and
+        (2) the sibling-subagent leak where the shared
+        registry._session_id reflected the last-bootstrapped sibling.
+        Both are fixed by reading the per-execution current session.
+        """
+        # A stale registry value that MUST be ignored throughout.
+        fake_registry = type("FakeRegistry", (), {})()
+        fake_registry._session_id = "stale_shared_registry"
+        self.plugin.set_plugin_registry(fake_registry)
+
+        self._set_current_session("session_1")
+        r1 = self.plugin.get_executors()["store_memory"]({
+            "content": "first store",
+            "description": "session_1 memory",
+            "tags": ["pin-hit-1"],
+        })
+        self._set_current_session("session_2")
+        r2 = self.plugin.get_executors()["store_memory"]({
+            "content": "second store",
+            "description": "session_2 memory",
+            "tags": ["pin-hit-2"],
+        })
+        self._set_current_session("session_3")
+        r3 = self.plugin.get_executors()["store_memory"]({
+            "content": "third store",
+            "description": "session_3 memory",
+            "tags": ["pin-hit-3"],
+        })
+        for rid, expected in [
+            (r1["memory_id"], "session_1"),
+            (r2["memory_id"], "session_2"),
+            (r3["memory_id"], "session_3"),
+        ]:
+            persisted = self.plugin._storage.raw.get(rid)
+            self.assertIsNotNone(persisted)
+            self.assertEqual(
+                persisted.source_session, expected,
+                f"HIT-reused slot: memory {rid} should carry "
+                f"source_session={expected!r} (the registry's "
+                f"current value at call time), not the slot's "
+                f"first-session value.",
             )
-            storage.save(mem)
 
-        # get_pending_curation should return only raw
-        pending = storage.get_pending_curation()
-        self.assertEqual(len(pending), 2)
-        for m in pending:
-            self.assertEqual(m.maturity, MATURITY_RAW)
 
-        # count_by_maturity
-        counts = storage.count_by_maturity()
-        self.assertEqual(counts[MATURITY_RAW], 2)
-        self.assertEqual(counts[MATURITY_VALIDATED], 1)
-        self.assertEqual(counts[MATURITY_ESCALATED], 1)
+class TestMemoryPluginFrameworkWiring(unittest.TestCase):
+    """Pin that the framework's set_session(plugin, session) call
+    sites actually exercise the memory plugin's set_session.  Source-
+    level grep — confirms the wiring isn't broken by a future
+    refactor that, e.g., renames set_session or drops one of the
+    five jaato_session.py call sites."""
 
-        # search_by_maturity
-        validated = storage.search_by_maturity({MATURITY_VALIDATED})
-        self.assertEqual(len(validated), 1)
-        self.assertEqual(validated[0].maturity, MATURITY_VALIDATED)
-
-    def test_search_by_tags_active_only(self):
-        """Test that search_by_tags respects active_only filter."""
-        storage = MemoryStorage(self.storage_path)
-
-        # Store one active and one escalated memory with same tags
-        storage.save(Memory(
-            id="mem_active",
-            content="Active memory",
-            description="Active",
-            tags=["shared_tag"],
-            timestamp="2024-01-02T00:00:00",
-            maturity=MATURITY_RAW,
-        ))
-        storage.save(Memory(
-            id="mem_escalated",
-            content="Escalated memory",
-            description="Escalated",
-            tags=["shared_tag"],
-            timestamp="2024-01-01T00:00:00",
-            maturity=MATURITY_ESCALATED,
-        ))
-
-        # active_only=True (default) should return only the active one
-        active = storage.search_by_tags(["shared_tag"])
-        self.assertEqual(len(active), 1)
-        self.assertEqual(active[0].id, "mem_active")
-
-        # active_only=False should return both
-        all_mems = storage.search_by_tags(["shared_tag"], active_only=False)
-        self.assertEqual(len(all_mems), 2)
+    def test_jaato_session_calls_plugin_set_session(self):
+        """At least one ``plugin.set_session(self)`` call exists in
+        ``shared/jaato_session.py`` — the canonical wiring memory
+        plugin's set_session relies on."""
+        from pathlib import Path
+        here = Path(__file__).resolve()
+        repo_root = here.parents[5]  # tests/ → memory/ → plugins/ → shared/ → jaato-server/ → repo
+        js = repo_root / "jaato-server" / "shared" / "jaato_session.py"
+        self.assertTrue(js.is_file(), f"jaato_session.py not found at {js}")
+        src = js.read_text()
+        # ``plugin.set_session(self)`` is the canonical pattern in
+        # jaato_session.py — five call sites at time of writing
+        # (1927/5405/5678/8295/8358).  At least one must exist or
+        # the framework wiring is broken.
+        self.assertIn(
+            "plugin.set_session(self)", src,
+            "jaato_session.py missing 'plugin.set_session(self)' — "
+            "the canonical plugin auto-wiring pattern.  Memory "
+            "plugin's set_session won't fire without it; "
+            "source_session will silently regress to None.",
+        )
 
 
 if __name__ == "__main__":

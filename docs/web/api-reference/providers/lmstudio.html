@@ -1,0 +1,547 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>LM Studio Provider - jaato docs</title>
+  <link rel="stylesheet" href="../../assets/css/style.css">
+  <link rel="vcs-git" href="https://github.com/Jaato-framework-and-examples/jaato">
+</head>
+<body>
+  <header class="header">
+    <a href="../../index.html" class="header-logo">
+      jaato <span>docs</span>
+    </a>
+    <nav class="header-nav">
+      <a href="../../getting-started/quickstart.html">Quickstart</a>
+      <a href="../index.html">API Reference</a>
+      <a href="https://github.com/Jaato-framework-and-examples/jaato" target="_blank">GitHub</a>
+      <div class="header-search">
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+        <input type="text" placeholder="Search docs... (press /)">
+      </div>
+    </nav>
+  </header>
+
+  <div class="layout">
+    <aside class="sidebar">
+      <div class="sidebar-section">
+        <div class="sidebar-title">Getting Started</div>
+        <ul class="sidebar-nav">
+          <li><a href="../../getting-started/quickstart.html">Quickstart</a></li>
+          <li><a href="../../getting-started/typescript-sdk.html">TypeScript SDK</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Core Concepts</div>
+        <ul class="sidebar-nav">
+          <li><a href="../../core-concepts/client.html">Client</a></li>
+          <li><a href="../../core-concepts/plugins.html">Plugins</a></li>
+          <li><a href="../../core-concepts/tools.html">Tools</a></li>
+          <li><a href="../../core-concepts/providers.html">Providers</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">API Reference</div>
+        <ul class="sidebar-nav">
+          <li><a href="../index.html">Overview</a></li>
+          <li><a href="../jaato-client.html">JaatoClient</a></li>
+          <li><a href="../jaato-runtime.html">JaatoRuntime</a></li>
+          <li><a href="../jaato-session.html">JaatoSession</a></li>
+          <li><a href="../plugin-registry.html">PluginRegistry</a></li>
+          <li><a href="../tool-executor.html">ToolExecutor</a></li>
+          <li><a href="../types.html">Types</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Provider Reference</div>
+        <ul class="sidebar-nav">
+          <li><a href="index.html">Overview</a></li>
+          <li><a href="anthropic.html">Anthropic</a></li>
+          <li><a href="google-genai.html">Google GenAI</a></li>
+          <li><a href="github-models.html">GitHub Models</a></li>
+          <li><a href="claude-cli.html">Claude CLI</a></li>
+          <li><a href="antigravity.html">Antigravity</a></li>
+          <li><a href="ollama.html">Ollama</a></li>
+          <li><a href="zhipuai.html">Zhipu AI</a></li>
+          <li><a href="nim.html">NVIDIA NIM</a></li>
+          <li><a href="lmstudio.html" class="active">LM Studio</a></li>
+          <li><a href="vllm.html">vLLM</a></li>
+          <li><a href="tensorrt-llm.html">TensorRT-LLM</a></li>
+          <li><a href="openrouter.html">OpenRouter</a></li>
+          <li><a href="nebius.html">Nebius</a></li>
+          <li><a href="ovhcloud.html">OVHcloud</a></li>
+          <li><a href="triton.html">Triton</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Plugin Reference</div>
+        <ul class="sidebar-nav">
+          <li><a href="../plugins/index.html">Overview</a></li>
+          <li><a href="../plugins/cli.html">CLI</a></li>
+          <li><a href="../plugins/file-edit.html">File Edit</a></li>
+          <li><a href="../plugins/filesystem-query.html">Filesystem Query</a></li>
+          <li><a href="../plugins/todo.html">Todo</a></li>
+          <li><a href="../plugins/web-search.html">Web Search</a></li>
+          <li><a href="../plugins/mcp.html">MCP</a></li>
+          <li><a href="../plugins/permission.html">Permission</a></li>
+          <li><a href="../plugins/session.html">Session</a></li>
+          <li><a href="../plugins/gc.html">GC</a></li>
+          <li><a href="../plugins/other.html">Other Plugins</a></li>
+        </ul>
+      </div>
+    </aside>
+
+    <main class="main">
+      <!-- Overview -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h1>LM Studio Provider</h1>
+          <p class="lead">
+            Run AI models locally through LM Studio's built-in server. No API costs,
+            complete privacy, and access to thousands of models from the LM Studio
+            catalog. Uses an OpenAI-compatible chat API plus LM Studio's native
+            endpoints for model catalog and load control.
+          </p>
+
+          <table>
+            <tbody>
+              <tr><td><strong>Provider Name</strong></td><td><code>lmstudio</code></td></tr>
+              <tr><td><strong>Module</strong></td><td><code>shared.plugins.model_provider.lmstudio</code></td></tr>
+              <tr><td><strong>SDK</strong></td><td><code>openai</code> (OpenAI-compatible API) + <code>httpx</code> (native endpoints)</td></tr>
+              <tr><td><strong>Auth</strong></td><td>None by default; optional bearer token when LM Studio's "Require API Token" is enabled</td></tr>
+            </tbody>
+          </table>
+
+          <h2 id="highlights">Highlights</h2>
+          <ul>
+            <li><strong>Zero API costs</strong> &mdash; Run any model LM Studio supports locally</li>
+            <li><strong>Privacy</strong> &mdash; Data never leaves your machine</li>
+            <li><strong>Model catalog</strong> &mdash; Native <code>/api/v0/models</code> reports each model's real <code>max_context_length</code></li>
+            <li><strong>Load control</strong> &mdash; Optionally POST a load config to <code>/api/v1/models/load</code> at session start</li>
+            <li><strong>Function calling</strong> &mdash; Full tool use via the OpenAI-compatible endpoint</li>
+            <li><strong>Streaming</strong> &mdash; Real-time streaming with cancellation support</li>
+          </ul>
+
+          <div class="callout callout-info">
+            <div class="callout-title">Two Operating Modes</div>
+            <strong>Passive mode</strong> (default): the provider uses whatever model
+            you have already loaded in the LM Studio UI or via <code>lms load</code>.
+            <strong>Load-control mode</strong>: supply a <code>load</code> dict in your
+            profile and the provider POSTs it to <code>/api/v1/models/load</code> before
+            the first chat call, reconfiguring context length, GPU offload, and more.
+          </div>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Quick start</div>
+          <div class="code-block">
+            <pre><code class="language-python">from jaato import JaatoClient
+
+client = JaatoClient(provider_name="lmstudio")
+client.connect(
+    project=None,
+    location=None,
+    model="openai/gpt-oss-20b"
+)
+client.configure_tools(registry)
+
+response = client.send_message(
+    "Hello from LM Studio!",
+    on_output=on_output
+)</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Prerequisites</div>
+          <div class="code-block">
+            <pre><code class="language-bash"># 1. Download LM Studio: https://lmstudio.ai
+# 2. Open LM Studio and load a model
+# 3. Start the local server (default port 1234):
+#    Developer tab → Start Server
+
+# Verify the server is running
+curl http://localhost:1234/api/v0/models</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Configuration -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="configuration">Configuration</h2>
+
+          <h3>Environment Variables</h3>
+          <table>
+            <thead>
+              <tr><th>Variable</th><th>Default</th><th>Description</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>LMSTUDIO_HOST</code></td>
+                <td><code>http://localhost:1234</code></td>
+                <td>LM Studio server URL</td>
+              </tr>
+              <tr>
+                <td><code>LMSTUDIO_MODEL</code></td>
+                <td>&mdash;</td>
+                <td>Default model identifier</td>
+              </tr>
+              <tr>
+                <td><code>LMSTUDIO_CONTEXT_LENGTH</code></td>
+                <td>Discovered from catalog</td>
+                <td>Override context window size (integer)</td>
+              </tr>
+              <tr>
+                <td><code>LMSTUDIO_API_TOKEN</code></td>
+                <td>&mdash;</td>
+                <td>Bearer token (only when LM Studio's "Require API Token" is enabled)</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <div class="callout callout-info">
+            <div class="callout-title">Context Length Auto-Detection</div>
+            The provider queries <code>/api/v0/models</code> at connect time and
+            reads each model's <code>max_context_length</code> automatically.
+            <code>LMSTUDIO_CONTEXT_LENGTH</code> is only needed when the catalog
+            does not report the field (unusual) or to pin a specific value.
+            Fail-fast: if the context window cannot be resolved from either source,
+            the provider raises rather than silently using a hardcoded fallback.
+          </div>
+
+          <h3>Profile Knobs (<code>plugin_configs.lmstudio</code>)</h3>
+          <table>
+            <thead>
+              <tr><th>Key</th><th>Type</th><th>Description</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>host</code></td>
+                <td>str</td>
+                <td>Override <code>LMSTUDIO_HOST</code></td>
+              </tr>
+              <tr>
+                <td><code>context_length</code></td>
+                <td>int</td>
+                <td>Override context window size (tier-2 after catalog auto-detect)</td>
+              </tr>
+              <tr>
+                <td><code>api_token</code></td>
+                <td>str</td>
+                <td>Bearer token override (when "Require API Token" is enabled)</td>
+              </tr>
+              <tr>
+                <td><code>load</code></td>
+                <td>dict</td>
+                <td>Passthrough body for <code>POST /api/v1/models/load</code>; absent = passive mode</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Environment configuration</div>
+          <div class="code-block">
+            <pre><code class="language-bash"># .env file
+JAATO_PROVIDER=lmstudio
+LMSTUDIO_HOST=http://localhost:1234
+LMSTUDIO_MODEL=openai/gpt-oss-20b</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Remote LM Studio server</div>
+          <div class="code-block">
+            <pre><code class="language-bash"># Connect to LM Studio on another machine
+LMSTUDIO_HOST=http://192.168.1.50:1234</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">With authentication enabled</div>
+          <div class="code-block">
+            <pre><code class="language-bash"># When "Require API Token" is enabled in LM Studio
+LMSTUDIO_API_TOKEN=your-token-here</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Load Control -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="load-control">Load Control</h2>
+          <p>
+            When a session profile supplies a <code>load</code> dict under
+            <code>plugin_configs.lmstudio</code>, the provider POSTs it to
+            <code>POST /api/v1/models/load</code> before the first chat call.
+            This lets you configure the in-memory model instance programmatically
+            with context length, GPU offload, KV-cache placement, and more.
+          </p>
+
+          <h3>Load Parameters</h3>
+          <p>
+            All keys are passed through to LM Studio unchanged. LM Studio uses
+            snake_case natively. Common knobs:
+          </p>
+          <table>
+            <thead>
+              <tr><th>Key</th><th>Description</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>context_length</code></td>
+                <td>Context window size in tokens</td>
+              </tr>
+              <tr>
+                <td><code>eval_batch_size</code></td>
+                <td>Evaluation batch size</td>
+              </tr>
+              <tr>
+                <td><code>flash_attention</code></td>
+                <td>Enable Flash Attention (bool)</td>
+              </tr>
+              <tr>
+                <td><code>offload_kv_cache_to_gpu</code></td>
+                <td>Move KV cache to GPU VRAM (bool)</td>
+              </tr>
+              <tr>
+                <td><code>num_experts</code></td>
+                <td>Active experts for MoE models</td>
+              </tr>
+              <tr>
+                <td><code>echo_load_config</code></td>
+                <td>Log resolved load config (bool, for debugging)</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <div class="callout callout-info">
+            <div class="callout-title">Idempotent Load</div>
+            The provider checks <code>GET /api/v1/models</code> before POSTing
+            to <code>/load</code>. If a loaded instance already matches every
+            requested config key, the POST is skipped — no spurious new
+            instances are created.
+          </div>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Profile with load control (YAML)</div>
+          <div class="code-block">
+            <pre><code class="language-yaml">name: local-gpt-oss
+model: openai/gpt-oss-20b
+provider: lmstudio
+
+plugins:
+  - cli
+  - file_edit
+
+plugin_configs:
+  lmstudio:
+    host: "http://localhost:1234"
+    load:
+      context_length: 16384
+      flash_attention: true
+      offload_kv_cache_to_gpu: true
+      eval_batch_size: 512</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Passive mode (no load dict)</div>
+          <div class="code-block">
+            <pre><code class="language-yaml">name: local-passive
+model: qwen/qwen2.5-coder-14b
+provider: lmstudio
+
+plugin_configs:
+  lmstudio:
+    host: "http://localhost:1234"
+    # No 'load' key: uses whatever you loaded in the LM Studio UI</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- API Endpoints -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="endpoints">API Endpoints Used</h2>
+          <p>
+            The provider interacts with three distinct LM Studio surfaces, all on the same host:
+          </p>
+
+          <table>
+            <thead>
+              <tr><th>Endpoint</th><th>Purpose</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>POST /v1/chat/completions</code></td>
+                <td>Chat (OpenAI-compatible, routed through <code>openai</code> SDK)</td>
+              </tr>
+              <tr>
+                <td><code>GET /api/v0/models</code></td>
+                <td>Model catalog: lists available models with <code>max_context_length</code></td>
+              </tr>
+              <tr>
+                <td><code>GET /api/v1/models</code></td>
+                <td>Live instance catalog: loaded instances with their active config (used for load-reuse decisions)</td>
+              </tr>
+              <tr>
+                <td><code>POST /api/v1/models/load</code></td>
+                <td>Load/reconfigure model with specified parameters (load-control mode only)</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <div class="callout callout-warning">
+            <div class="callout-title">Context Length Resolution</div>
+            The provider reads <code>max_context_length</code> from <code>/api/v0/models</code>
+            and, for loaded instances, the live <code>config.context_length</code> from
+            <code>/api/v1/models</code>. The live instance config takes priority since it
+            reflects what was actually configured (e.g., via a previous <code>/load</code>
+            call or the LM Studio UI).
+          </div>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">List available models</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared.plugins.model_provider.lmstudio.provider import (
+    LMStudioProvider
+)
+from shared.plugins.model_provider.base import ProviderConfig
+
+provider = LMStudioProvider()
+provider.initialize(ProviderConfig())
+
+# List all models in catalog
+models = provider.list_models()
+print(models)
+# ['lmstudio-community/Meta-Llama-3.1-8B-Instruct-GGUF',
+#  'openai/gpt-oss-20b', ...]
+
+# Connect and check context limit
+provider.connect("openai/gpt-oss-20b")
+print(provider.get_context_limit())
+# 32768 (auto-detected from catalog)</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Connectivity check</div>
+          <div class="code-block">
+            <pre><code class="language-bash"># The provider probes /api/v0/models at initialize() time.
+# Verify manually:
+curl http://localhost:1234/api/v0/models</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Error Handling -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="errors">Error Handling</h2>
+
+          <table>
+            <thead>
+              <tr><th>Exception</th><th>Cause</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>LMStudioConnectionError</code></td>
+                <td>Server unreachable (not running, wrong port, firewall)</td>
+              </tr>
+              <tr>
+                <td><code>LMStudioAuthenticationError</code></td>
+                <td>Bearer token rejected (401); or "Require API Token" is on but no token set</td>
+              </tr>
+              <tr>
+                <td><code>LMStudioModelNotFoundError</code></td>
+                <td>Requested model is not in LM Studio's catalog</td>
+              </tr>
+              <tr>
+                <td><code>LMStudioLoadError</code></td>
+                <td><code>/api/v1/models/load</code> returned a non-2xx status</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Handle errors</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared.plugins.model_provider.lmstudio.errors import (
+    LMStudioConnectionError,
+    LMStudioModelNotFoundError,
+    LMStudioLoadError,
+)
+
+try:
+    provider.initialize(config)
+    provider.connect("openai/gpt-oss-20b")
+except LMStudioConnectionError as e:
+    print(f"LM Studio server not reachable: {e}")
+    print("Is the server running? Developer tab → Start Server")
+except LMStudioModelNotFoundError as e:
+    print(f"Model not in catalog: {e}")
+    print("Load the model in LM Studio first.")
+except LMStudioLoadError as e:
+    print(f"Load config rejected: {e}")</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- vs Ollama -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="comparison">LM Studio vs Ollama</h2>
+
+          <table>
+            <thead>
+              <tr><th>Feature</th><th>LM Studio</th><th>Ollama</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>GUI</td>
+                <td>Yes (desktop app)</td>
+                <td>No (CLI only)</td>
+              </tr>
+              <tr>
+                <td>Model catalog</td>
+                <td>In-app download + HuggingFace</td>
+                <td>Ollama library (<code>ollama pull</code>)</td>
+              </tr>
+              <tr>
+                <td>Load control</td>
+                <td>Yes (<code>/api/v1/models/load</code>)</td>
+                <td>No (passive only)</td>
+              </tr>
+              <tr>
+                <td>Context auto-detect</td>
+                <td>Yes (<code>/api/v0/models</code>)</td>
+                <td>No (manual override)</td>
+              </tr>
+              <tr>
+                <td>Default port</td>
+                <td>1234</td>
+                <td>11434</td>
+              </tr>
+              <tr>
+                <td>Auth support</td>
+                <td>Optional bearer token</td>
+                <td>None</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Choose based on needs</div>
+          <div class="code-block">
+            <pre><code class="language-python"># LM Studio: GUI-first workflow, load control needed
+client = JaatoClient(provider_name="lmstudio")
+client.connect(None, None, "openai/gpt-oss-20b")
+
+# Ollama: headless/server, simpler setup
+client = JaatoClient(provider_name="ollama")
+client.connect(None, None, "qwen3:32b")</code></pre>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="https://unpkg.com/lunr@2.3.9/lunr.min.js"></script>
+  <script src="../../assets/js/docs.js"></script>
+</body>
+</html>

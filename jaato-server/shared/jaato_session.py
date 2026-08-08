@@ -12,23 +12,60 @@ import tempfile
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace as _dc_replace
 from datetime import datetime
 from enum import Enum
-from typing import Any, Callable, Dict, List, Literal, Optional, Set, Tuple, TYPE_CHECKING
+from typing import Any, Callable, Dict, FrozenSet, List, Literal, Optional, Set, Tuple, TYPE_CHECKING
 
 from .message_queue import MessageQueue, QueuedMessage, SourceType
 from .session_history import SessionHistory
+from .gc_support import (
+    apply_gc_removal_list as _gc_apply_removal_list,
+    build_gc_span_attributes as _gc_build_span_attributes,
+    populate_gc_span_result as _gc_populate_span_result,
+)
+from .tool_result_truncation import (
+    cap_tool_results as _cap_tool_results_impl,
+    truncate_results_to_fit as _truncate_results_to_fit_impl,
+)
+from .tool_result_builder import (
+    extract_multimodal_attachments as _extract_multimodal_attachments_impl,
+    normalize_result_dict as _normalize_result_dict_impl,
+    split_executor_result as _split_executor_result_impl,
+)
+from .instruction_budget_builder import (
+    TokenCountRequest as _TokenCountRequest,
+    count_tokens as _builder_count_tokens,
+    collect_instruction_texts as _builder_collect_instruction_texts,
+    apply_instruction_counts as _builder_apply_instruction_counts,
+)
+from .instruction_suppression import (
+    PIECE_CONSTANTS,
+    PIECE_DISK,
+    PIECE_SECURITY,
+    normalize_suppression,
+)
+from .session_persistence import SessionPersistence
+from .session_telemetry import (
+    classify_cache_outcome,
+    history_to_openinference,
+    response_to_openinference,
+)
 
 logger = logging.getLogger(__name__)
 
 from .ai_tool_runner import ToolExecutor
 from .session_context import set_current_session
+from .tool_id_map import StreamScrubber
 from .retry_utils import with_retry, RequestPacer, RetryCallback, RetryConfig, is_context_limit_error
 from .token_accounting import TokenLedger
 from jaato_sdk.plugins.base import HelpLines, UserCommand, OutputCallback
 from .plugins.gc import GCConfig, GCPlugin, GCRemovalItem, GCResult, GCTriggerReason
-from .plugins.gc.utils import ensure_tool_call_integrity, estimate_history_tokens
+from .plugins.gc.utils import (
+    dedup_identical_tool_results,
+    ensure_tool_call_integrity,
+    estimate_history_tokens,
+)
 from .instruction_budget import (
     InstructionBudget,
     InstructionSource,
@@ -38,6 +75,7 @@ from .instruction_budget import (
     GCPolicy,
     PluginToolType,
     DEFAULT_TOOL_POLICIES,
+    PayloadExceedsContextError,
 )
 from .instruction_token_cache import InstructionTokenCache
 from .plugins.session import SessionPlugin, SessionConfig, SessionState, SessionInfo
@@ -47,6 +85,8 @@ from jaato_sdk.plugins.model_provider.types import (
     Attachment,
     CancelledException,
     CancelToken,
+    DISCOVERABILITY_EAGER,
+    DISCOVERABILITY_DEFERRED,
     FinishReason,
     FunctionCall,
     Message,
@@ -59,6 +99,7 @@ from jaato_sdk.plugins.model_provider.types import (
     ToolSchema,
     TurnOutcome,
     TurnResult,
+    tool_result_is_error,
 )
 
 if TYPE_CHECKING:
@@ -67,12 +108,39 @@ if TYPE_CHECKING:
     from .plugins.subagent.ui_hooks import AgentUIHooks
     from .plugins.telemetry import TelemetryPlugin
     from .plugins.thinking import ThinkingPlugin
+    from .model_tiers import ModelTierConfig
 
 # Import framework instruction for tool result injection
 from .jaato_runtime import _TASK_COMPLETION_INSTRUCTION
 
 # Pattern to match @references in prompts
 AT_REFERENCE_PATTERN = re.compile(r'@([\w./\-]+(?:\.\w+)?)')
+
+# Rewind-with-hint budget.  How many consecutive rewinds we allow
+# per logical operation before giving up and surfacing the failure
+# normally.  The counter resets on any successful tool execution.
+# Keep small: the point is to unstick the model once, not to loop.
+# See ``docs/design/rewind-with-hint.md`` for rationale.
+REWIND_BUDGET_PER_OPERATION = 2
+
+
+def _telemetry_json_default(obj: Any) -> str:
+    """``json.dumps`` ``default=`` for telemetry span output.
+
+    Tool results can carry raw binary (a multimodal ``readFile`` returns
+    ``image_data`` bytes BEFORE ``_build_tool_result`` strips it).  A span
+    attribute must never embed megabytes of binary nor crash the model loop on
+    a non-serializable value — summarise bytes compactly and ``repr`` anything
+    else exotic.
+    """
+    if isinstance(obj, (bytes, bytearray)):
+        return f"<{type(obj).__name__}: {len(obj)} bytes>"
+    return repr(obj)
+
+
+def _telemetry_safe_json(value: Any) -> str:
+    """Serialise a tool result for an OTel span without choking on binary."""
+    return json.dumps(value, default=_telemetry_json_default)
 
 
 class ActivityPhase(Enum):
@@ -123,23 +191,6 @@ class _PinnedReference:
 
 
 @dataclass
-class _TokenCountRequest:
-    """A pending token-count request for a single instruction text.
-
-    Used during two-phase instruction budget population: Phase 1 resolves
-    counts from cache or estimates, Phase 2 refines cache misses via
-    background ``provider.count_tokens()`` calls.
-    """
-    text: str
-    source: InstructionSource
-    child_key: str
-    gc_policy: GCPolicy
-    label: str
-    token_count: int = 0
-    is_estimate: bool = False
-
-
-@dataclass
 class _CancellationResult:
     """Result of a cancellation/mid-turn interrupt check.
 
@@ -163,6 +214,70 @@ class _CancellationResult:
     new_response: Optional[ProviderResponse] = None
 
 
+# Introspection's tools (list_tools / get_tool_schemas) give the model SCHEMA
+# VISIBILITY — the ability to discover deferred tools.
+_INTROSPECTION_TOOL_NAMES = frozenset({"list_tools", "get_tool_schemas"})
+
+
+def _has_deferred_to_discover(exposed_schemas, profile_plugins, preloaded,
+                              tool_scopes, plugin_of) -> bool:
+    """Is there genuinely something for the model to discover?
+
+    True iff a discoverable (non-``core``) tool that belongs to a profile plugin
+    which is NOT ``(preload)``-ed and NOT scoped-out is exposed.  When this is
+    False, nothing is pending *discovery* — but introspection is NOT necessarily
+    dead weight: a session with eager/preloaded real tools still needs it for
+    *re-inspection* after GC offloads their schemas/instructions.  The full drop
+    decision lives in :func:`_should_drop_introspection`.
+
+    Pure (no session/registry deps) so it is unit-testable.  ``plugin_of(name)``
+    maps a tool name to its owning plugin name (or ``None``).
+    """
+    profile = set(profile_plugins or [])
+    pre = set(preloaded or [])
+    scopes = tool_scopes or {}
+    for sc in exposed_schemas:
+        if sc.name in _INTROSPECTION_TOOL_NAMES:
+            continue
+        if getattr(sc, "discoverability", DISCOVERABILITY_DEFERRED) == DISCOVERABILITY_EAGER:
+            continue  # eager — not something to "discover"
+        pname = plugin_of(sc.name)
+        if pname is None or pname not in profile or pname in pre:
+            continue
+        allow = scopes.get(pname)
+        if allow is not None and sc.name not in allow:
+            continue  # scoped out — not exposed
+        return True
+    return False
+
+
+def _should_drop_introspection(has_deferred_to_discover, tool_names) -> bool:
+    """Whether to drop introspection's discovery tools from a session's wire.
+
+    Drop ONLY when the wire is genuinely empty of real tools: nothing is
+    deferred to discover AND there are no real (non-introspection) tools present.
+
+    Keeping introspection whenever real tools exist — even all-eager/preloaded
+    ones with nothing currently deferred — is deliberate: preloading a tool only
+    means its schema/instructions *start* in-context; GC can offload them under
+    context pressure, after which the model needs ``list_tools`` /
+    ``get_tool_schemas`` to RE-INSPECT the tool.  Dropping introspection there
+    would both strip that capability AND (for a no-``suppress_base`` session)
+    leave a "discover via list_tools" prose nudge with no list_tools on the wire
+    — the model then invents the call, hits no-executor, and loops (the ex08
+    lead hang).  A truly empty wire (e.g. ``plugins=[]``) has nothing to inspect,
+    so introspection is correctly dropped — keeping the ``plugins=[]`` "no tools"
+    semantic intact.
+
+    Pure, so it is unit-testable.  ``tool_names`` is the current wire's tool
+    names; ``has_deferred_to_discover`` is :func:`_has_deferred_to_discover`'s
+    result.
+    """
+    if has_deferred_to_discover:
+        return False
+    return not any(n not in _INTROSPECTION_TOOL_NAMES for n in tool_names)
+
+
 class JaatoSession:
     """Per-agent conversation session.
 
@@ -180,7 +295,7 @@ class JaatoSession:
         # Created via runtime.create_session()
         session = runtime.create_session(
             model="gemini-2.5-flash",
-            tools=["cli", "web_search"],
+            plugins=["cli", "web_search"],
             system_instructions="You are a research assistant."
         )
 
@@ -193,7 +308,8 @@ class JaatoSession:
         self,
         runtime: 'JaatoRuntime',
         model: str,
-        provider_name: Optional[str] = None
+        provider_name: Optional[str] = None,
+        agent_id: str = "main",
     ):
         """Initialize a session.
 
@@ -204,6 +320,16 @@ class JaatoSession:
             model: Model name to use for this session.
             provider_name: Optional provider override for cross-provider sessions.
                           If specified, uses a different AI provider than the runtime default.
+            agent_id: Logical agent identifier (e.g. ``"main"``,
+                ``"discovery"``, ``"coordinator"``).  Sets
+                ``self._agent_id`` at construction time so consumers
+                that key on agent identity (``AgentCompletedEvent``,
+                reactor where-clauses, telemetry spans) see the
+                correct value.  Defaults to ``"main"`` for backward
+                compat with callers that don't yet thread the field.
+                Post-construction the only mutator is
+                :meth:`set_ui_hooks` (overwrites with the daemon's
+                resolved id when ui_hooks attach).
         """
         self._runtime = runtime
         self._model_name = model
@@ -212,15 +338,180 @@ class JaatoSession:
         # operates against a different workspace than the runtime's
         # default (e.g. a worktree snapshot for fork-replay).
         self._workspace_path: Optional[str] = None
+        # Lazily-loaded pricing table used to stamp cost on LLM telemetry
+        # spans when the provider doesn't report one (mirrors the daemon's
+        # core.py:_build_usage precedence, but computed while the span is
+        # still open — the daemon boundary runs after the span closes).
+        # ``_span_pricing`` is None until first use; ``_span_pricing_loaded``
+        # guards the one-time load so cost-free sessions never read the JSON.
+        self._span_pricing = None
+        self._span_pricing_loaded = False
+        # Shape 3 PR 1: per-session resolved env (workspace ``.env`` +
+        # profile env + overrides, expanded and secret-URI-resolved).
+        # Populated by runner-side ``bootstrap_session`` AFTER the
+        # session is constructed.  Mirrors the daemon-side
+        # ``JaatoServer._session_env`` attribute — the runner-side
+        # analog where the resolution naturally belongs once Shape 3
+        # PR 4 removes the daemon-side surface.  Empty dict before
+        # population; readers use :meth:`get_session_env`.
+        self._session_env: Dict[str, str] = {}
+        # AppArmor confine-context factory (server 0.6.50+).  Set by
+        # ``JaatoRuntime.create_session`` from
+        # ``runtime._confine_context_factory``.  When set, ``configure()``
+        # wraps dynamic-instructions expansion in the returned context
+        # manager so prefetch scripts run inside the session's
+        # confinement (closes the policy-write-leak on ``.jaato`` for
+        # prefetch).  ``None`` = no confinement applies.
+        self._confine_context_factory: Optional[Callable] = None
+        # Profile-declared JSON Schema for signal_completion's payload parameter.
+        # Either an inline dict or a string path resolved via
+        # .jaato/completion_schemas/. ``LifecycleTools`` consults this field at
+        # construction time; when present the legacy ``summary: str`` parameter
+        # is replaced with a typed ``payload: <schema>``. None = legacy untyped.
+        self._completion_payload_schema: Optional[Any] = None
 
-        # Provider for this session (created during configure())
+        # Path 1 quirk state (server 0.6.195+).  When
+        # ``LifecycleTools._execute_signal_completion`` returns a
+        # ``validation_failed`` error, ``_execute_tools_and_continue``
+        # stamps this with the failing tool's name so the NEXT
+        # ``provider.complete()`` in the same turn can request
+        # named-function ``tool_choice``.  Cleared after one consumed
+        # call so a single retry-with-xgrammar is the contract.
+        # ``None`` = no pending retry.  The provider plugin decides
+        # whether to honor it (vllm honors when its
+        # ``force_tool_choice_for_lifecycle`` quirk is True;
+        # providers without the quirk ignore the kwarg).  See
+        # ``feedback_llama31_vllm_auto_mode_stringifies_args`` and
+        # ``project_backlog_vllm_provider_typed_tool_args`` for the
+        # diagnosis + design.
+        self._pending_tool_choice_name: Optional[str] = None
+
+        # Profile-declared completion processors (kb-authored Python
+        # under ``.jaato/scripts/processors/``).  Each entry is a
+        # ``CompletionProcessor`` carrying a script path + optional
+        # output template + on_error policy.  After
+        # ``signal_completion`` validates against
+        # ``_completion_payload_schema``, ``LifecycleTools`` runs each
+        # processor in turn: probes for ``render`` (produces output
+        # bytes, optionally writes to disk) and/or ``validate``
+        # (returns error list, blocks completion).  Empty list = no
+        # processors (agents handle output themselves; no semantic
+        # post-checks).  ``CompletionProcessor`` typed as ``Any`` here
+        # to avoid a top-level subagent-config import; concrete type
+        # is ``shared.plugins.subagent.config.CompletionProcessor``.
+        # See ``shared/completion_processors.py`` for the loader,
+        # ledger builder, and invocation pipeline.
+        self._completion_processors: List[Any] = []
+
+        # Completion lifecycle tracking — flipped True by
+        # ``LifecycleTools._execute_signal_completion`` on the first
+        # successful invocation.  The completion-nudge guard reads this
+        # at loop-exit (top-level: ``core.py`` model_thread finally;
+        # subagent: end of ``_run_subagent_async``) to decide whether
+        # to inject a nudge prompt back into the session asking the
+        # agent to call ``signal_completion`` before terminating.
+        # ``_completion_nudges_fired`` bounds the retry budget.
+        self._signal_completion_called: bool = False
+        self._completion_nudges_fired: int = 0
+        # Set in configure() when introspection's tools are dropped because there
+        # is nothing deferred to discover — read by introspection's
+        # get_system_instructions to suppress the now-mismatched discovery
+        # guidance (keeps the instruction-gate aligned with the tool-gate).
+        self._introspection_guidance_suppressed: bool = False
+
+        # Per-turn model-tier config.  ``_tier_config`` is the resolved
+        # view (built from profile.tiers or env vars).  ``_active_tier``
+        # tracks which tier the session is currently operating in;
+        # mutated by the ``enter_tier`` lifecycle tool, consulted by
+        # provider model selection and by system-instruction assembly.
+        # Both ``None`` means single-model mode — no ``enter_tier`` tool
+        # is registered, no system-prompt augmentation, the provider
+        # uses the legacy ``self._model_name``.
+        self._tier_config: Optional['ModelTierConfig'] = None
+        self._active_tier: Optional[str] = None
+
+        # Spawn-time parameters passed to this session by the caller
+        # (typically ``spawn_subagent(agent_params={...})``).  Carried
+        # through to dynamic-instructions render scripts as
+        # ``RenderContext.agent_params`` so they can read forwarded
+        # ``case_data`` and other per-spawn fields without parsing
+        # the prompt text.  Empty for top-level sessions whose prompt
+        # carries case data inline.  See
+        # ``shared/dynamic_instructions.py``.
+        self._agent_params: Dict[str, Any] = {}
+
+        # Provider for this session.  Lazy-initialized on first
+        # model use via :meth:`_ensure_provider` (deferred from
+        # ``configure()`` per the 2026-05-13 bootstrap-latency design
+        # at ``docs/design/runner_prewarm_pool_plan.md`` §3.5).  The
+        # 9s zhipuai INIT / multi-second anthropic INIT shifts off
+        # the bootstrap RPC critical path; first model call wears
+        # the cost, which is invisible under the existing streaming
+        # spinner.  ``None`` after configure() finishes; populated
+        # on first ``send_message`` / first BUDGET_BG token-count
+        # refinement attempt, whichever fires first.
         self._provider: Optional['ModelProviderPlugin'] = None
+        # Pending provider-creation args, stashed by ``configure()``
+        # for ``_ensure_provider()`` to consume on first use.  Set
+        # to ``None`` for skip_provider (auth-pending) mode where
+        # the provider truly never gets created here.
+        self._provider_lazy_pending: Optional[Dict[str, Any]] = None
+        # Serializes concurrent first-use _ensure_provider() calls
+        # (e.g., BUDGET_BG thread + send_message racing on a fresh
+        # session).  Once the provider exists, the lock's hot path
+        # is just an "already initialized" check.
+        self._provider_init_lock = threading.Lock()
+        # V2 cross-provider tiers: per-provider instance cache (provider_name ->
+        # ModelProviderPlugin) so a tier that declares a DIFFERENT provider gets
+        # its own cached instance, switched in O(1) by switch_tier without
+        # re-paying create_provider's init cost on every text<->vision hop.
+        # ``_active_provider_name`` tracks which provider self._provider IS
+        # (the provider's own .name is unreliable for subclassed providers like
+        # zhipuai-extends-anthropic, so we track the name we created it under).
+        # Empty/None until the default provider is created in _ensure_provider.
+        self._provider_cache: Dict[str, 'ModelProviderPlugin'] = {}
+        self._active_provider_name: Optional[str] = None
+        # Persistent provider base config (plugin_configs + skip_model_test) for
+        # V2 cross-provider tier switches — set in configure(), read by
+        # _provider_for_tier.  Distinct from _provider_lazy_pending (which is
+        # cleared once the main provider is created).
+        self._tier_provider_base: Optional[Dict[str, Any]] = None
+        # True iff ``configure()`` finished its work successfully.
+        # Decoupled from ``_provider is not None`` because the
+        # provider is now lazy; ``is_configured`` checks this flag
+        # instead.
+        self._configured: bool = False
 
         # Canonical conversation history owned by the session.
         # Phase 1: synced from provider after each provider operation.
         # Phase 2+: session is sole owner; provider receives messages
         # as parameters to stateless complete().
         self._history = SessionHistory()
+
+        # Session-attached state — opaque per-key storage that
+        # extensions persist alongside the journal and that fork
+        # primitives carry across to the new session.  Values must be
+        # JSON-serialisable (extensions encrypt before attach if they
+        # need confidentiality — the framework treats values as
+        # opaque).  Two write modes coexist:
+        #
+        # ``_session_state`` — explicit values pushed via
+        # ``set_session_state(key, value)``.  Right shape for static
+        # or rarely-mutated state (audit chain head, version markers).
+        #
+        # ``_state_providers`` — callbacks registered via
+        # ``register_session_state_provider(key, fn)`` that the
+        # framework invokes at journal-save / waypoint-snapshot /
+        # fork-snapshot time to obtain the current value.  Right
+        # shape for incrementally-mutated state (e.g.
+        # pseudonymization lookup table that grows turn-by-turn) where
+        # forcing the consumer to re-attach after every mutation
+        # would scatter the persistence concern across every mutation
+        # site.  A registered provider takes precedence over any
+        # value previously set via ``set_session_state`` for the
+        # same key.
+        self._session_state: Dict[str, Any] = {}
+        self._state_providers: Dict[str, Callable[[], Any]] = {}
 
         # Session always owns history and uses stateless provider.complete().
         # Legacy send_message()/send_tool_results() path removed in Phase 4.
@@ -229,6 +520,34 @@ class JaatoSession:
         self._executor: Optional[ToolExecutor] = None
         self._tools: Optional[List[ToolSchema]] = None
         self._system_instruction: Optional[str] = None
+        # Per-session AppArmor reference-fragment authorizer.  Set by
+        # JaatoServer.set_reference_authorizer() after WS provisions an
+        # AppArmor profile.  ``None`` means no kernel layer to mutate
+        # — the references plugin operates at the application layer
+        # (sandbox_manager) only.  Plugins access this via
+        # get_reference_authorizer() rather than touching the slot.
+        self._reference_authorizer = None
+        # Phase 3 §7c step 6.1: bool flag mirror of the authorizer
+        # for the runner-side seat.  When the daemon-side _jaato is
+        # removed (step 6.6), the runner-side session reads this
+        # via :meth:`is_reference_authorization_enabled` and uses
+        # the ``apparmor.add_reference_fragment`` runner→daemon RPC
+        # to authorize paths.  Set via
+        # :meth:`set_reference_authorization_enabled` (called by
+        # the new ``session.set_reference_authorizer`` RPC handler).
+        self._reference_authorization_enabled: bool = False
+        # The active override (passed via configure()) — None means the
+        # assembled pipeline output is sent on the wire; "" means no
+        # system message at all; non-empty replaces the assembly entirely.
+        # Stored so _populate_instruction_budget can compute an honest
+        # budget without having to be re-passed the value through every
+        # call site.
+        self._system_instruction_override: Optional[str] = None
+        # Granular partial-suppression: the canonical frozenset of framework
+        # instruction pieces to drop (subset of {disk, constants, security};
+        # see ``instruction_suppression``).  Empty = suppress nothing.  Ignored
+        # when _system_instruction_override is set (override wins).
+        self._suppress_base_instructions: FrozenSet[str] = frozenset()
         self._tool_plugins: Optional[List[str]] = None  # Plugin names for this session
 
         # Per-turn token accounting
@@ -251,9 +570,10 @@ class JaatoSession:
         # Thinking mode
         self._thinking_plugin: Optional['ThinkingPlugin'] = None
 
-        # Session persistence
-        self._session_plugin: Optional[SessionPlugin] = None
-        self._session_config: Optional[SessionConfig] = None
+        # Session persistence (plugin + config ownership and the
+        # save/restore flow live on this collaborator; the
+        # _session_plugin/_session_config properties below delegate to it)
+        self._persistence = SessionPersistence(self)
 
         # Agent type context (for permission checks)
         self._agent_type: str = "main"
@@ -262,8 +582,31 @@ class JaatoSession:
 
         # UI hooks for agent lifecycle events
         self._ui_hooks: Optional['AgentUIHooks'] = None
-        self._agent_id: str = "main"  # Unique ID for this agent
+        # Logical agent identifier — sourced from the constructor
+        # arg so the envelope's resolved agent_id (``"discovery"``,
+        # ``"coordinator"``, ...) lands at construction.  Previously
+        # hardcoded ``"main"`` here and only mutated by
+        # ``set_ui_hooks``, but the runner-side bootstrap bypasses
+        # ``set_ui_hooks`` (installs a notification-shim via direct
+        # attribute write at rpc.py:3178-3185).  Result pre-fix: every
+        # runner-side session carried ``_agent_id="main"`` regardless
+        # of the daemon's ``--agent <name>`` resolution.
+        self._agent_id: str = agent_id
         self._daemon_session_id: Optional[str] = None  # Session manager ID for telemetry correlation
+        # End-user identity for telemetry user tracking (Langfuse Users view).
+        # Set by the daemon from the authenticated client user when available
+        # (``set_client_user_id``); otherwise resolved from the per-session
+        # ``JAATO_TELEMETRY_USER_ID`` env at turn time. Emitted as the
+        # OpenInference ``user.id`` span attribute.
+        self._client_user_id: Optional[str] = None
+        # Custom attributes stamped on every LLM (generation) telemetry span.
+        # A vendor-neutral hook for external code — prefetch scripts, plugins —
+        # to correlate generations with build-time context. Canonical use:
+        # prompt-management linking (a prefetch that resolves a managed prompt
+        # sets the backend's prompt-link keys here, e.g. Langfuse's
+        # ``langfuse.observation.prompt.name`` / ``.version``). Merged in
+        # :meth:`_build_llm_span_attributes`; see :meth:`set_llm_span_attributes`.
+        self._llm_span_attributes: Dict[str, Any] = {}
 
         # Retry notification callback (client-configurable)
         self._on_retry: Optional[RetryCallback] = None
@@ -310,6 +653,15 @@ class JaatoSession:
         # the system prompt and the budget.
         self._deferred_plugin_instructions: Set[str] = set()
         self._preloaded_plugins: set = set()
+        # Per-plugin tool allow-lists (profile ``tools:[...]`` modifier).
+        # Maps plugin name → list of allowed tool names.  A plugin absent
+        # from this dict exposes all its tools.  Enforced per-session in
+        # ``_apply_tool_scopes`` (mirroring the ``_tool_plugins``
+        # plugin-level filter) so a tool outside its plugin's allow-list
+        # never reaches the wire body or the provider's grammar surface.
+        # Never mutates the shared registry — sibling subagents on the
+        # same runtime keep their own scopes.
+        self._tool_scopes: Dict[str, List[str]] = {}
 
         # Priority-aware message queue for agent communication
         # Uses double-linked list for efficient mid-queue removal of parent messages
@@ -364,6 +716,14 @@ class JaatoSession:
         # Tracks whether the current turn is "complex" (multiple model responses with tool calls)
         self._turn_model_response_count: int = 0
         self._turn_had_tool_calls: bool = False
+
+        # Rewind-with-hint state.  Counter increments each time the
+        # rewind detector fires for a MAX_TOKENS-truncated tool call
+        # (see ``shared/rewind.py``); resets on any successful tool
+        # execution so a healthy session is never starved of future
+        # rewinds.  Capped at ``REWIND_BUDGET_PER_OPERATION`` to prevent
+        # a persistently-failing model from looping.
+        self._rewind_count: int = 0
 
         # Background thread for Phase 2 instruction token counting.
         # Set by _start_background_token_counting(), joined before GC.
@@ -446,6 +806,9 @@ class JaatoSession:
         extra_attrs = {}
         if daemon_sid:
             extra_attrs["jaato.session_id"] = daemon_sid
+        _user_id = self._resolve_telemetry_user_id()
+        if _user_id:
+            extra_attrs["user.id"] = _user_id
 
         telemetry.begin_session(session_root, attributes=extra_attrs or None)
         telemetry.begin_agent(
@@ -466,6 +829,29 @@ class JaatoSession:
         """
         self._terminal_width = width
 
+    def set_confine_context_factory(
+        self, factory: Optional[Callable],
+    ) -> None:
+        """Set the AppArmor confine-context factory (server 0.6.50+).
+
+        ``configure()`` wraps the dynamic-instructions expansion
+        (``{{!py:...}}`` / ``{{!py?:...}}``) in the returned context
+        manager so prefetch scripts run inside the session's
+        AppArmor profile.  Closes the gap where prefetch ran
+        unconfined and could write to ``.jaato`` regardless of the
+        deny rules in the profile (R2 of the option-2-phased sandbox
+        refactor).
+
+        Set by :meth:`JaatoRuntime.create_session` from the runtime's
+        own confine-context factory.  ``None`` clears (no confinement
+        applies).
+
+        Args:
+            factory: Zero-arg callable returning a context manager,
+                or ``None``.
+        """
+        self._confine_context_factory = factory
+
     def set_presentation_context(self, ctx: 'PresentationContext') -> None:
         """Set the presentation context describing client display capabilities.
 
@@ -480,6 +866,49 @@ class JaatoSession:
         from jaato_sdk.plugins.model_provider.types import PresentationContext  # noqa: F811
         self._presentation_context = ctx
         self._terminal_width = ctx.content_width
+        # Server 0.6.62+: re-apply the lifecycle-tools interactive-root
+        # filter now that ``_presentation_context`` is known.  At
+        # configure() time the context wasn't yet set (it arrives via
+        # ``_apply_client_config_to_server`` AFTER configure runs), so
+        # the filter defaulted to "expose" — leaking
+        # ``signal_completion`` into the tool surface for what we now
+        # know is an interactive root session.  This call removes it
+        # post-hoc when the filter says so; for non-interactive
+        # contexts (api root, subagent), the call is a no-op.
+        self._reapply_lifecycle_tool_filter()
+
+    def _reapply_lifecycle_tool_filter(self) -> None:
+        """Re-apply the LifecycleTools interactive-root filter post-config.
+
+        Server 0.6.62+: ``configure()`` registers signal_completion + its
+        executor + auto-approval whitelist BEFORE
+        ``_apply_client_config_to_server`` runs, which means
+        ``_presentation_context`` is not yet known at registration time
+        and the filter's "expose by default when unknown" path lets
+        signal_completion through.  After ``set_presentation_context``
+        sets the context, we re-run the filter and remove
+        signal_completion from each surface (schema, executor,
+        permission whitelist) when the filter now says it should be
+        hidden.
+
+        No-op when the filter says signal_completion should remain
+        exposed (api-client root sessions, subagents).
+        """
+        if self._lifecycle_tools is None:
+            return
+        if not self._lifecycle_tools._should_hide_signal_completion():
+            return
+        # Filter wants signal_completion hidden — strip it from the
+        # two surfaces that determine accessibility:
+        #   (1) self._tools (the model's visible tool schema list)
+        #   (2) self._executor._map (the dispatch table)
+        # Permission whitelist isn't actively pruned — the tool not
+        # being in the schema or executor is sufficient; a stale
+        # whitelist entry for a tool that doesn't exist anywhere is
+        # harmless.
+        self._tools = [t for t in self._tools if t.name != "signal_completion"]
+        if "signal_completion" in getattr(self._executor, '_map', {}):
+            del self._executor._map["signal_completion"]
 
     def _get_trace_prefix(self) -> str:
         """Get the trace prefix including agent context."""
@@ -513,8 +942,15 @@ class JaatoSession:
 
     @property
     def is_configured(self) -> bool:
-        """Check if session is configured and ready."""
-        return self._provider is not None
+        """Check if session is configured and ready.
+
+        Decoupled from ``self._provider`` since 2026-05-13 (deferred
+        provider INIT design).  A configured session may not yet have
+        constructed its provider — that happens lazily on first model
+        use via :meth:`_ensure_provider`.  ``is_configured`` reflects
+        whether ``configure()`` finished its work.
+        """
+        return self._configured
 
     @property
     def agent_id(self) -> str:
@@ -572,16 +1008,100 @@ class JaatoSession:
         # reference may not be set yet when set_agent_context is called.
 
     def set_daemon_session_id(self, session_id: str) -> None:
-        """Set the daemon session manager ID for telemetry correlation.
+        """Set the daemon session manager ID for this session.
 
-        This ID (e.g. ``"20260328_204308"``) is emitted as the
-        ``jaato.session_id`` span attribute so Phoenix traces can be
-        correlated back to jaato session manager sessions.
+        This ID (e.g. ``"20260328_204308"``) identifies the daemon-side
+        session-manager session and is the per-session source of truth
+        for any consumer that needs the session id at execution time:
+        emitted as the ``jaato.session_id`` telemetry span attribute,
+        resolved by dynamic-instructions ``{{session_id}}``, and read by
+        the ``memory`` plugin for the ``source_session`` provenance field.
+
+        **Set on BOTH tiers.**  Daemon-side it is wired by ``JaatoClient``;
+        runner-side it is stamped from ``envelope.session_id`` during
+        ``bootstrap_session`` (``runner/session.py``).  The runner-side
+        stamp is load-bearing: each sibling subagent has its own
+        JaatoSession, so reading this per-session value (via
+        ``get_current_session()``) is per-sibling-correct, whereas the
+        previous fallback to the SHARED ``registry._session_id`` leaked
+        the last-bootstrapped sibling's id across siblings.
 
         Args:
             session_id: The session manager's session ID.
         """
         self._daemon_session_id = session_id
+
+    def set_client_user_id(self, user_id: Optional[str]) -> None:
+        """Set the end-user identity for telemetry user tracking.
+
+        The daemon wires this from the authenticated client user
+        (``get_client_user(client_id)`` — WS/SSO deployments; IPC has no
+        user). It is emitted as the OpenInference ``user.id`` span
+        attribute so observability backends (Langfuse's Users view)
+        attribute traces, token usage, and cost to the user.
+
+        Takes precedence over the ``JAATO_TELEMETRY_USER_ID`` per-session
+        env fallback used by keyless/local deployments.
+
+        Args:
+            user_id: End-user identifier (username, email, or subject
+                claim), or ``None`` to leave it unset.
+        """
+        self._client_user_id = user_id
+
+    def set_llm_span_attributes(
+        self, attributes: Dict[str, Any], *, merge: bool = True,
+    ) -> None:
+        """Attach custom attributes to every LLM (generation) telemetry span.
+
+        A vendor-neutral extension hook: external code that runs with a handle
+        on the session — a ``{{!py:}}`` prefetch script (via
+        ``context.session``), a plugin — can stamp attributes onto the
+        generation spans of this session so observability backends correlate
+        each LLM call with build-time context.
+
+        The canonical use is **prompt-management → trace linking**: a prefetch
+        that resolves a managed prompt records the backend's prompt-link keys,
+        e.g. for Langfuse::
+
+            context.session.set_llm_span_attributes({
+                "langfuse.observation.prompt.name": name,
+                "langfuse.observation.prompt.version": version,
+            })
+
+        so Langfuse links the generation to that prompt version and reports
+        per-version performance. Core stays vendor-neutral — the keys are
+        chosen by the caller.
+
+        Values must be OTLP-compatible (str / bool / int / float, or sequences
+        thereof). Applies to LLM spans opened after this call within the
+        session.
+
+        Args:
+            attributes: Attribute key/value pairs to stamp on LLM spans.
+            merge: When True (default) merge into any previously-set
+                attributes; when False replace them (pass ``{}`` to clear).
+        """
+        if merge:
+            self._llm_span_attributes.update(attributes or {})
+        else:
+            self._llm_span_attributes = dict(attributes or {})
+
+    def _resolve_telemetry_user_id(self) -> Optional[str]:
+        """Resolve the end-user id for telemetry ``user.id`` on this turn.
+
+        Precedence: explicit ``set_client_user_id`` value (daemon-wired
+        authenticated user) → ``JAATO_TELEMETRY_USER_ID`` per-session env
+        (via :meth:`get_session_env`, so it honors the workspace ``.env`` /
+        profile env) → ``None``. Never raises — telemetry must not break a
+        turn.
+        """
+        try:
+            if self._client_user_id:
+                return self._client_user_id
+            return self.get_session_env("JAATO_TELEMETRY_USER_ID")  # env: end-user id for telemetry user tracking (Langfuse Users)
+        except Exception:
+            return None
 
     def set_ui_hooks(
         self,
@@ -717,6 +1237,74 @@ class JaatoSession:
         """
         self._on_mid_turn_interrupt = callback
 
+    def get_auth_info(self) -> str:
+        """Return a description of the credential source the session's
+        provider is using.
+
+        Phase 3 §7c step 6.6.4.5c.1.  Public wrapper that surfaces
+        the underlying ``ModelProviderPlugin.get_auth_info()`` value
+        without daemon-side callers reaching into the private
+        ``self._provider`` attr — required for the runner-RPC seat-
+        flip where the JaatoSession lives in a separate process.
+
+        Returns a human-readable string like ``"API key from
+        ~/.jaato/zhipuai_auth.json"`` or ``"PKCE OAuth"``.  Empty
+        string when no provider is attached (pre-:meth:`configure`)
+        or the provider doesn't implement ``get_auth_info``.
+
+        Closes the missing-method gap caught by the §7c step
+        6.6.4.5c.0 audit (commit a88676ca).
+        """
+        if self._provider and hasattr(self._provider, 'get_auth_info'):
+            try:
+                return str(self._provider.get_auth_info() or "")
+            except Exception:  # noqa: BLE001 — best-effort display string
+                return ""
+        return ""
+
+    def try_completion_nudge(self, max_nudges: int) -> Tuple[bool, int]:
+        """Atomic check-and-increment for the completion-nudge guard.
+
+        Phase 3 §7c step 6.6.4.3a.  Collapses three private-state
+        reaches (``_signal_completion_called`` read,
+        ``_completion_nudges_fired`` read, ``_completion_nudges_fired``
+        increment) into one method so daemon-side callers don't need
+        direct private-attr access — required for the runner-RPC
+        seat-flip in §7c step 6.6.4.3b where the JaatoSession lives
+        in a separate process.
+
+        Decision: returns ``(True, n+1)`` when a nudge should fire
+        (agent didn't call ``signal_completion`` AND the budget isn't
+        exhausted) — also bumps the counter atomically so callers
+        don't need to do it.  Returns ``(False, current)`` otherwise
+        (no counter change).
+
+        Args:
+            max_nudges: Bound on ``_completion_nudges_fired``.
+                Caller's nudge-budget knob (the existing daemon-side
+                site uses ``MAX_COMPLETION_NUDGES = 2``).  Must be
+                non-negative; values <= 0 always yield
+                ``(False, current)``.
+
+        Returns:
+            ``(should_nudge, nudges_fired_after_this_call)``.
+            ``nudges_fired_after_this_call`` reflects the
+            post-increment value when ``should_nudge`` is True;
+            otherwise it's the unchanged current count.
+
+        Thread-safety: matches the existing private-attr access
+        pattern — the model_thread is the sole writer at the loop
+        boundary.  No additional locking added (would be a behavior
+        change).
+        """
+        if (
+            not getattr(self, "_signal_completion_called", False)
+            and getattr(self, "_completion_nudges_fired", 0) < max_nudges
+        ):
+            self._completion_nudges_fired += 1
+            return True, self._completion_nudges_fired
+        return False, getattr(self, "_completion_nudges_fired", 0)
+
     def inject_prompt(
         self,
         text: str,
@@ -786,6 +1374,40 @@ class JaatoSession:
             # Low-priority (CHILD) → processed when becoming idle
             self._message_queue.put(text, actual_source_id, actual_source_type)
             self._trace(f"INJECT_PROMPT: queue_size_after={len(self._message_queue)}")
+
+    def try_drain_pending_user(self) -> Optional[str]:
+        """Atomically pop the first pending high-priority (USER/PARENT/SYSTEM)
+        message for the daemon's post-turn drain.
+
+        Multi-turn deadlock fix: a client send that races into the turn
+        wind-down — ``turn.completed`` reaches the client (which sends the
+        next turn) *before* the daemon clears ``_model_running`` — is
+        forwarded by the daemon gate as an :meth:`inject_prompt`.  Finding
+        the session idle with no active turn (and the per-RPC continuation
+        callback already restored to ``None``), ``inject_prompt`` takes the
+        else/queue branch, so the message sits with no drainer and the turn
+        never runs.  The daemon's model-thread ``finally`` calls this after
+        every runner-tier turn (via the ``session.try_drain_pending_user``
+        RPC); when it returns text the daemon starts a fresh turn with it.
+
+        Guarded on ``not _is_running`` so it never steals a message from an
+        active turn (which drains the queue itself mid-turn) — in that case
+        the running turn owns the message and this returns ``None``.
+
+        Returns:
+            The message text to run as the next turn, or ``None`` when no
+            high-priority message is queued or a turn is already running.
+        """
+        if self._is_running:
+            return None
+        if not self._message_queue.has_parent_messages():
+            return None
+        msg = self._message_queue.pop_first_parent_message()
+        if msg is None:
+            return None
+        if self._on_prompt_injected:
+            self._on_prompt_injected(msg.text)
+        return msg.text
 
     def _forward_to_parent(self, event_type: str, content: str) -> None:
         """Forward an event to the parent session.
@@ -976,6 +1598,34 @@ class JaatoSession:
             return getattr(self._runtime.registry, '_workspace_path', None)
         return None
 
+    def get_session_env(
+        self, key: str, default: Optional[str] = None,
+    ) -> Optional[str]:
+        """Read a per-session env value (Shape 3 PR 1).
+
+        Lookup order:
+
+        1. ``self._session_env`` — the resolved workspace ``.env`` +
+           profile env + overrides populated by runner-side
+           ``bootstrap_session``.  Set after the session is
+           constructed; empty dict if Shape 3 PR 1's wiring hasn't
+           populated it (older daemons, test stubs, etc.).
+        2. ``os.environ`` — process-global fallback.  Runner-side
+           bootstrap also writes the resolved env here so third-party
+           code reading the process env sees the same values.
+
+        Mirrors ``shared.session_context.get_session_env`` — but reads
+        from the session-attached attribute instead of the
+        daemon-side ContextVar.  Use this accessor when you have a
+        :class:`JaatoSession` in hand; use the session_context
+        helper from code that runs outside a session method (e.g.
+        plugin discovery / initialize).
+        """
+        if self._session_env and key in self._session_env:
+            return self._session_env[key]
+        import os as _os
+        return _os.environ.get(key, default)
+
     def get_system_instruction(self) -> Optional[str]:
         """Return the materialised system instruction for this session.
 
@@ -1132,6 +1782,24 @@ class JaatoSession:
             The current streaming chunk will complete before stopping.
         """
         if self._cancel_token and self._is_running:
+            # PROBE (cancel-leak prod-vs-isolation diagnostic):
+            # Log cancel_token id() at the source of cancel() — pairs
+            # with the VLLM_COMPLETE_ENTRY_CT logger.info trace in the
+            # vLLM provider so we can correlate "session cancelled its
+            # token T_session" with "provider's for-loop saw cancel on
+            # token T_provider".  Same id() = H2 (instance mismatch)
+            # ruled out.  Different id() = found the bug.
+            #
+            # Routed via logger.info (NOT self._trace) because
+            # self._trace writes land in /tmp/provider_trace.log which
+            # apparmor SILENTLY DENIES under the per-WS confined-runner
+            # profile.  Empirically confirmed 2026-06-09 by peer's
+            # first probe run: only logger.info traces landed.
+            logger.info(
+                "REQUEST_STOP_CT_CANCEL id=%s reason=%r",
+                id(self._cancel_token),
+                reason,
+            )
             self._cancel_token.cancel(reason=reason or "user_cancelled")
             return True
         return False
@@ -1146,6 +1814,69 @@ class JaatoSession:
             enabled: True to use streaming, False for batched responses.
         """
         self._use_streaming = enabled
+
+    def set_reference_authorizer(self, authorizer) -> None:
+        """Install the AppArmor reference-fragment authorizer for this session.
+
+        Called by ``JaatoServer.set_reference_authorizer()`` after WS
+        provisions a confined profile.  Plugins read it via
+        :meth:`get_reference_authorizer`.  Passing ``None`` clears it.
+        """
+        self._reference_authorizer = authorizer
+
+    def get_reference_authorizer(self):
+        """Return the AppArmor reference-fragment authorizer, or ``None``.
+
+        Used by the references plugin to grant kernel-level readonly
+        access to selected reference paths.  ``None`` means the session
+        is not running under AppArmor confinement, so the application-
+        layer ``sandbox_manager`` allowlist is the only authorization
+        layer the plugin needs to touch.
+        """
+        return self._reference_authorizer
+
+    def set_reference_authorization_enabled(self, enabled: bool) -> None:
+        """Set the bool flag indicating AppArmor reference-fragment
+        authorization is available for this session.
+
+        Phase 3 §7c step 6.1.  This is the **runner-side counterpart**
+        of :meth:`set_reference_authorizer`.
+
+        Pre-§7c the daemon called :meth:`set_reference_authorizer`
+        with a Python ``ReferenceAuthorizer`` instance, which the
+        daemon-side references plugin consumed via
+        :meth:`get_reference_authorizer`.  The Python object can't
+        cross the RPC boundary (it holds a daemon-side
+        ``AppArmorManager`` reference), so post-§7c the daemon
+        forwards a bool flag instead.
+
+        When the references plugin migrates runner-side, it reads
+        :meth:`is_reference_authorization_enabled` and uses the
+        existing ``apparmor.add_reference_fragment`` runner→daemon
+        RPC (Phase 3 §3.2.2) to authorize paths.  The session_id
+        for the RPC call is already known runner-side via the
+        bootstrap envelope.
+
+        Args:
+            enabled: ``True`` if the daemon-side AppArmor manager
+                successfully provisioned a profile for this session
+                (i.e. ``ReferenceAuthorizer is not None`` daemon-
+                side).  ``False`` for unconfined sessions.
+        """
+        self._reference_authorization_enabled = bool(enabled)
+
+    def is_reference_authorization_enabled(self) -> bool:
+        """Read the AppArmor reference-fragment authorization flag.
+
+        Returns ``False`` by default (pre-set, or when the daemon
+        forwards ``enabled=False``).  Used by the runner-side
+        references plugin (post-migration) to decide whether to
+        invoke the ``apparmor.add_reference_fragment`` runner→daemon
+        RPC when admitting an external reference path.
+
+        Phase 3 §7c step 6.1.
+        """
+        return getattr(self, "_reference_authorization_enabled", False)
 
     def set_parent_cancel_token(self, token: CancelToken) -> None:
         """Set a parent cancel token for cancellation propagation.
@@ -1193,20 +1924,29 @@ class JaatoSession:
 
     def configure(
         self,
-        tools: Optional[List[str]] = None,
+        plugins: Optional[List[str]] = None,
         system_instructions: Optional[str] = None,
         plugin_configs: Optional[Dict[str, Dict[str, Any]]] = None,
         skip_provider: bool = False,
         preloaded_plugins: Optional[set] = None,
         skip_model_test: bool = False,
         system_instruction_override: Optional[str] = None,
+        suppress_base_instructions: Any = False,
         workspace_path: Optional[str] = None,
+        completion_payload_schema: Optional[Any] = None,
+        tier_config: Optional['ModelTierConfig'] = None,
+        agent_params: Optional[Dict[str, Any]] = None,
+        completion_processors: Optional[List[Any]] = None,
+        tool_scopes: Optional[Dict[str, List[str]]] = None,
+        tools: Optional[List[str]] = None,  # DEPRECATED alias for ``plugins``
     ) -> None:
-        """Configure the session with tools and instructions.
+        """Configure the session with plugins and instructions.
 
         Args:
-            tools: Optional list of plugin names to expose. If None, uses all
-                   exposed plugins from the runtime's registry.
+            plugins: Optional list of plugin names to expose (e.g. ``"cli"``,
+                   ``"web_search"``). If None, uses all exposed plugins from the
+                   runtime's registry. (This is plugin names, NOT tool names —
+                   per-tool allow-lists live in ``tool_scopes``.)
             system_instructions: Optional additional system instructions.
             plugin_configs: Optional per-plugin configuration overrides.
                            Plugins will be re-initialized with these configs.
@@ -1224,11 +1964,38 @@ class JaatoSession:
                 but its result is discarded in favour of this string.  Used by
                 session-manipulation tools that want to replay a session with
                 an edited version of the materialised prompt.
+            suppress_base_instructions: Partial suppression — drop only the
+                BASE layer (``.jaato/instructions/*.md`` + premium baseline)
+                from the assembled prompt while keeping the agent/session
+                instructions, plugin instructions, pinned references, and
+                framework constants.  Intended for small-context models where
+                the framework baseline is the single biggest token consumer.
+                Ignored when ``system_instruction_override`` is set (the full
+                override supersedes any partial suppression).
             workspace_path: If provided, overrides the runtime's workspace
                 path for this session.  Used by fork-replay to point a
                 temp session at a worktree snapshot without affecting other
                 sessions sharing the same runtime.
+            tools: DEPRECATED alias for ``plugins`` (it always took plugin
+                names, never tool names). Pass ``plugins=`` instead; ``tools=``
+                still works with a one-time deprecation warning. ``plugins``
+                wins if both are given.
         """
+        # Back-compat: ``tools`` was a misleading name for the plugin-name list
+        # (it never took tool names).  Honour it as a deprecated alias for
+        # ``plugins`` and warn once.  The body below uses ``plugins``.
+        if tools is not None:
+            import warnings
+            warnings.warn(
+                "JaatoSession.configure(tools=...) is a deprecated alias for "
+                "plugins=; it takes PLUGIN names (e.g. 'cli', 'web_search'), "
+                "not tool names. Use plugins= instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            if plugins is None:
+                plugins = tools
+
         import time as _time
         _t_configure_start = _time.perf_counter()
 
@@ -1236,15 +2003,52 @@ class JaatoSession:
         if workspace_path is not None:
             self._workspace_path = workspace_path
 
+        # Profile-declared completion payload schema (raw — resolved by
+        # LifecycleTools at construction time using session.workspace_path)
+        if completion_payload_schema is not None:
+            self._completion_payload_schema = completion_payload_schema
+
+        # Spawn-time agent_params (forwarded case_data etc.) for
+        # dynamic-instructions render scripts.  See ``_agent_params`` doc
+        # in __init__.
+        if agent_params is not None:
+            self._agent_params = dict(agent_params)
+
+        # Profile-declared completion processors.  See
+        # ``_completion_processors`` doc in __init__ for the contract
+        # and ``shared/completion_processors.py`` for the loader +
+        # invocation pipeline.
+        if completion_processors is not None:
+            self._completion_processors = list(completion_processors)
+
+        # Tier mode: when a tier_config is supplied, the session's
+        # initial model is overridden by the initial tier's model so the
+        # provider connects to the right model from turn 0.  The active
+        # tier is set to the config's initial_tier.  When None, the
+        # session stays in single-model mode (legacy behaviour).
+        if tier_config is not None:
+            self._tier_config = tier_config
+            self._active_tier = tier_config.initial_tier
+            initial_model = tier_config.tiers[tier_config.initial_tier].model
+            if self._model_name and self._model_name != initial_model:
+                logger.info(
+                    "Tier mode active: overriding session model %s with "
+                    "initial tier %s's model %s",
+                    self._model_name, tier_config.initial_tier, initial_model,
+                )
+            self._model_name = initial_model
+
         # Store preloaded plugins for use in deferred instruction collection
         self._preloaded_plugins = preloaded_plugins or set()
+        # Store per-plugin tool allow-lists (profile ``tools:[...]``).
+        self._tool_scopes = dict(tool_scopes) if tool_scopes else {}
         # Store tool plugin names
-        self._tool_plugins = tools
+        self._tool_plugins = plugins
 
         # Re-initialize plugins with session-specific configs if provided
         if plugin_configs and self._runtime.registry:
             for plugin_name, config in plugin_configs.items():
-                if tools is None or plugin_name in tools:
+                if plugins is None or plugin_name in plugins:
                     try:
                         # Inject agent_name into plugin config for trace logging
                         if self._agent_name and "agent_name" not in config:
@@ -1254,29 +2058,41 @@ class JaatoSession:
                     except Exception as e:
                         print(f"Warning: Failed to configure plugin '{plugin_name}': {e}")
 
-        # Create provider for this session (with optional provider override)
-        # Skip if in auth-pending mode
+        # Stash provider-creation args for lazy use by ``_ensure_provider``.
+        # Pre-2026-05-13 the eager ``self._provider = self._runtime.create_provider(...)``
+        # call here added 9s (zhipuai) / 2-3s (anthropic) to the bootstrap
+        # RPC critical path because ``create_provider`` calls
+        # ``provider.initialize(config)`` which does the network handshake.
+        # Deferring shifts that cost to first model call, where the user
+        # is already waiting under the streaming spinner.  See
+        # ``docs/design/runner_prewarm_pool_plan.md`` §3.5 + §4 PR 1.
+        # ``skip_provider`` (auth-pending mode) keeps the existing
+        # "never create the provider here" semantics — the post-auth
+        # handler triggers the lazy path the same way send_message does.
         if not skip_provider:
-            self._provider = self._runtime.create_provider(
-                self._model_name,
-                provider_name=self._provider_name_override,
-                skip_model_test=skip_model_test,
-            )
-
-            # Propagate agent context to provider for trace identification
-            if hasattr(self._provider, 'set_agent_context'):
-                self._provider.set_agent_context(
-                    agent_type=self._agent_type,
-                    agent_name=self._agent_name,
-                    agent_id=self._agent_id
-                )
+            self._provider_lazy_pending = {
+                'model_name': self._model_name,
+                'provider_name': self._provider_name_override,
+                'skip_model_test': skip_model_test,
+                'plugin_configs': plugin_configs,
+            }
+        # Persist the provider base config (plugin_configs + skip_model_test) for
+        # V2 cross-provider tier switches.  _provider_lazy_pending is CLEARED once
+        # the main provider is created (_ensure_provider), but _provider_for_tier
+        # still needs these to build a tier's provider — without this it received
+        # plugin_configs=None and built the tier provider with no api_key at all
+        # (#354 cross-provider tier bug: "No <provider> API key found").
+        self._tier_provider_base = {
+            'skip_model_test': skip_model_test,
+            'plugin_configs': plugin_configs,
+        }
 
         # Create executor
         self._executor = ToolExecutor(ledger=self._runtime.ledger)
 
         # Get tool schemas and executors from runtime
-        self._tools = self._runtime.get_tool_schemas(tools, preloaded_plugins=self._preloaded_plugins)
-        executors = self._runtime.get_executors(tools)
+        self._tools = self._runtime.get_tool_schemas(plugins, preloaded_plugins=self._preloaded_plugins)
+        executors = self._runtime.get_executors(plugins)
 
         # Register executors
         for name, fn in executors.items():
@@ -1322,11 +2138,131 @@ class JaatoSession:
             # Refresh runtime's tool cache to include the newly registered core tools
             self._runtime.refresh_tool_cache()
 
-            # Re-fetch tools to include core tools, and update session tools
-            self._tools = self._runtime.get_tool_schemas(tools)
-            executors = self._runtime.get_executors(tools)
-            for name, fn in executors.items():
+            # Merge newly-registered core tools (stream, event_bus) into the
+            # carefully-built _tools — additive only.  Re-assigning
+            # ``self._tools`` from a fresh ``get_tool_schemas`` call without
+            # ``preloaded_plugins=`` silently re-applies the discoverability
+            # filter and drops preloaded plugins' discoverable tools.
+            existing_names = {s.name for s in self._tools}
+            refreshed_schemas = self._runtime.get_tool_schemas(
+                plugins, preloaded_plugins=self._preloaded_plugins
+            )
+            for schema in refreshed_schemas:
+                if schema.name not in existing_names:
+                    self._tools.append(schema)
+                    existing_names.add(schema.name)
+            for name, fn in self._runtime.get_executors(plugins).items():
                 self._executor.register(name, fn)
+
+            # Register lifecycle tools (signal_completion) directly on this
+            # session.  These are model-facing tools that must be visible in
+            # schemas regardless of profile plugin lists — unlike core tools
+            # (stream controls, event bus) which are internal infrastructure.
+            from .lifecycle_tools import LifecycleTools
+            self._lifecycle_tools = LifecycleTools(self)
+            existing_names = {s.name for s in self._tools}
+            exposed_lifecycle_names = set()
+            for schema in self._lifecycle_tools.get_tool_schemas():
+                if schema.name not in existing_names:
+                    self._tools.append(schema)
+                exposed_lifecycle_names.add(schema.name)
+            # Server 0.6.61+: only register executors for lifecycle
+            # tools that survived the schema filter.  Without this
+            # gate, ``signal_completion`` would still be callable
+            # even when filtered from the tool surface (interactive
+            # root sessions): providers don't strictly enforce schema
+            # membership, so a model emitting the call from cached
+            # knowledge would still hit the executor and terminate
+            # the session — the exact failure the schema filter was
+            # supposed to close.  See LifecycleTools.get_tool_schemas
+            # for the filter rationale.
+            for name, fn in self._lifecycle_tools.get_executors().items():
+                if name in exposed_lifecycle_names:
+                    self._executor.register(name, fn)
+            # Auto-approve so no permission prompt — same gating: only
+            # whitelist lifecycle tools that are actually exposed.
+            if self._runtime.permission_plugin:
+                approved = [
+                    t for t in self._lifecycle_tools.get_auto_approved_tools()
+                    if t in exposed_lifecycle_names
+                ]
+                if approved:
+                    self._runtime.permission_plugin.add_whitelist_tools(approved)
+                # Framework-reserved: lifecycle terminals (signal_completion —
+                # session-level, NOT a registry core tool) PLUS the registry's
+                # core tools (stream / event_bus / introspection / client host
+                # tools) are exempt from a business catch-all "default"
+                # evaluator, so a locked-down default-deny agent can still
+                # complete.  Re-populated here every configure() so it survives
+                # PermissionPlugin.shutdown() nulling _registry between sessions.
+                #
+                # Source is ``get_registered_core_tool_names()`` (the
+                # ``register_core_tool`` set, == ``is_core_tool``) — NOT
+                # ``get_core_tool_schemas()``, which also returns exposed
+                # *plugin* tools flagged ``discoverability='core'`` (readFile,
+                # the todo tools, ...).  Using the broad schema set would
+                # silently exempt those powerful business tools from a
+                # catch-all default evaluator — the exact "never
+                # cli/file_edit/business tools" case #487/#488 prohibit.
+                reserved = set(exposed_lifecycle_names)
+                if self._runtime.registry:
+                    reserved.update(
+                        self._runtime.registry.get_registered_core_tool_names()
+                    )
+                self._runtime.permission_plugin.add_framework_reserved_tools(
+                    reserved
+                )
+
+            # Apply per-plugin tool allow-lists (profile ``tools:[...]``)
+            # to the assembled ``self._tools`` so scoped-out tools are
+            # absent from discovery / token-budget accounting too — not
+            # just the wire body (``_get_tools_for_provider`` is the
+            # final guard).  Lifecycle / core-infra tools have no owning
+            # plugin and always survive.  No-op without configured
+            # scopes.
+            if self._tool_scopes and self._tools:
+                before = len(self._tools)
+                self._tools = self._apply_tool_scopes(self._tools)
+                dropped = before - len(self._tools)
+                if dropped:
+                    self._trace(
+                        f"configure: tool_scopes dropped {dropped} "
+                        f"tool(s) from the initial surface "
+                        f"(scopes={self._tool_scopes})"
+                    )
+
+            # Gate introspection on the presence of something to discover.
+            # Its [core] tools are always in the initial schema, but they are
+            # dead weight (and invite a wasted discovery turn) when EVERY profile
+            # tool is already eager — core, or its plugin is (preload)-ed.  The
+            # deferred set is read from the LIVE registry, so a dynamic plugin
+            # (mcp) that already surfaced discoverable tools keeps introspection
+            # automatically — no hardcoded plugin list.  Conservative: only act
+            # with an explicit profile plugin filter (an unfiltered session
+            # exposes everything and may legitimately need discovery).
+            if self._tool_plugins is not None and self._tools:
+                reg = self._runtime.registry
+                deferred = _has_deferred_to_discover(
+                        reg.get_exposed_tool_schemas(), self._tool_plugins,
+                        self._preloaded_plugins, self._tool_scopes,
+                        lambda n: getattr(reg.get_plugin_for_tool(n), "name", None))
+                if _should_drop_introspection(
+                        deferred, [t.name for t in self._tools]):
+                    # Empty wire -> drop introspection's tools AND flag the
+                    # session so the introspection plugin suppresses its now-
+                    # mismatched discovery GUIDANCE (read by
+                    # introspection.get_system_instructions). See
+                    # _should_drop_introspection for the full rationale (GC
+                    # re-inspection + tool/instruction-gate alignment).
+                    self._introspection_guidance_suppressed = True
+                    n0 = len(self._tools)
+                    self._tools = [t for t in self._tools
+                                   if t.name not in _INTROSPECTION_TOOL_NAMES]
+                    if len(self._tools) != n0:
+                        self._trace(
+                            "configure: dropped introspection — empty wire (no "
+                            "deferred tools to discover, no eager tools to "
+                            "re-inspect)")
 
         # Set permission plugin with agent context
         if self._runtime.permission_plugin:
@@ -1364,6 +2300,36 @@ class JaatoSession:
             if subagent_plugin and hasattr(subagent_plugin, 'set_parent_session'):
                 subagent_plugin.set_parent_session(self)
 
+        # Wire the waypoint plugin with session-state accessors so it can
+        # capture conversation history snapshots when a waypoint is created.
+        # Without this the plugin's history-capture path is dormant: every
+        # waypoint is saved with history_snapshot=None and downstream
+        # consumers (waypoint_info metadata, premium handoff
+        # fork_from_waypoint) get nothing to work with.  The serializer
+        # adapter wraps shared.plugins.session.serialize_history (which
+        # returns List[Dict]) in json.dumps to match the plugin's
+        # Callable[[List[Message]], str] contract — bridges the asymmetry
+        # without changing the plugin's signature or Waypoint's schema.
+        if self._runtime.registry:
+            waypoint_plugin = self._runtime.registry.get_plugin("waypoint")
+            if waypoint_plugin and hasattr(waypoint_plugin, 'set_session_callbacks'):
+                from .plugins.session.serializer import serialize_history
+                waypoint_plugin.set_session_callbacks(
+                    get_history=self.get_history,
+                    serialize_history=lambda msgs: json.dumps(
+                        serialize_history(msgs)
+                    ),
+                    get_turn_index=lambda: self._turn_index,
+                    # Snapshot session-attached state alongside history so
+                    # a fork-from-waypoint primitive can carry extension-
+                    # owned state across the fork (premium pseudonymization
+                    # lookup table, audit chain head, etc.).  Routes
+                    # through get_all_session_state so registered providers
+                    # are invoked — the snapshot reflects live values, not
+                    # stale set-state pushes.
+                    get_session_state=self.get_all_session_state,
+                )
+
         # Auto-wire plugins that need session access
         # Any plugin with set_session() will receive this session reference.
         # When the session has an explicit plugin list (agent profile), only
@@ -1385,14 +2351,81 @@ class JaatoSession:
                 if plugin and hasattr(plugin, 'set_session'):
                     plugin.set_session(self)
 
-        # Build system instructions
-        self._system_instruction = self._runtime.get_system_instructions(
-            plugin_names=tools,
-            additional=system_instructions,
-            presentation_context=self._presentation_context,
+        # Remember both knobs so _populate_instruction_budget (called
+        # below) can produce an honest budget reflecting the wire prompt.
+        # ``suppress_base_instructions`` is normalized to the canonical
+        # frozenset of pieces to drop (accepts bool / dict / list; see
+        # ``instruction_suppression``).
+        self._system_instruction_override = system_instruction_override
+        self._suppress_base_instructions = normalize_suppression(
+            suppress_base_instructions
         )
+        _suppress = self._suppress_base_instructions
+
+        # Build system instructions.
+        #
+        # Full-override path: skip assembly entirely — no disk I/O, no
+        # enrichment churn.  Plugin state was already initialised earlier
+        # in configure_tools(), so tool functionality is intact; only the
+        # would-be-discarded enrichment text is skipped.
+        #
+        # Otherwise: assemble normally.  Each ``include_*`` gate drops one
+        # framework-originated layer when its piece is in the suppression
+        # set — ``disk`` (the .jaato/instructions baseline), ``constants``
+        # (task-completion / parallel / turn-summary), ``security`` (the
+        # untrusted-content boundary) — while the agent prompt and plugin
+        # instructions always remain.  The partial-suppression path for
+        # small-context models.  Base is lazy-loaded on first use, so
+        # sessions that always suppress it never touch the disk.
         if system_instruction_override is not None:
             self._system_instruction = system_instruction_override
+        else:
+            self._system_instruction = self._runtime.get_system_instructions(
+                plugin_names=plugins,
+                additional=system_instructions,
+                presentation_context=self._presentation_context,
+                include_base=PIECE_DISK not in _suppress,
+                include_constants=PIECE_CONSTANTS not in _suppress,
+                include_security=PIECE_SECURITY not in _suppress,
+            )
+
+        # Dynamic-instructions expansion ({{!py:script.py}}).  Walks
+        # the assembled system_instruction for placeholders and
+        # substitutes each with the output of the named user script.
+        # Scripts run on the framework's authority with a RenderContext
+        # carrying session/runtime/registry/workspace_path/config_root/
+        # agent_params handles, plus an os.environ snapshot.  This is
+        # the input-side symmetric counterpart to reactor actions:
+        # the agent never sees these scripts as choices to make, only
+        # their output as content already present in its prompt.
+        # See ``shared/dynamic_instructions.py`` and
+        # ``project_backlog_dynamic_instructions`` (2026-04-30 addendum).
+        if self._system_instruction and (
+            "{{!py:" in self._system_instruction
+            or "{{!py?:" in self._system_instruction
+        ):
+            from .dynamic_instructions import (
+                expand_py_placeholders,
+                build_render_context,
+            )
+            ctx = build_render_context(self, agent_params=self._agent_params)
+            # Server 0.6.50+: when an AppArmor confine-context factory
+            # is set, wrap the dynamic-instructions expansion in the
+            # session's confinement so prefetch scripts and any
+            # ``{{!py:...}}`` callables run with the same kernel-level
+            # filesystem isolation as tools.  Closes the gap where
+            # prefetch could write to ``.jaato`` regardless of the
+            # deny rules in the profile.  Without a factory (IPC, no
+            # AppArmor), the expansion runs as before.
+            if self._confine_context_factory is not None:
+                with self._confine_context_factory():
+                    self._system_instruction = expand_py_placeholders(
+                        self._system_instruction, ctx,
+                    )
+            else:
+                self._system_instruction = expand_py_placeholders(
+                    self._system_instruction, ctx,
+                )
 
         # Store user commands
         if self._runtime.registry:
@@ -1411,22 +2444,127 @@ class JaatoSession:
         # Register built-in model command
         self._register_model_command()
 
-        # Register built-in telepathy tool (share_context)
-        self._register_telepathy_tool()
+        # NOTE: share_context (the subagent→parent push tool) was
+        # previously registered here unconditionally as a session
+        # built-in.  Extracted 2026-06-07 to a dedicated non-core
+        # plugin ``shared/plugins/telepathy``.  Subagent profiles
+        # that need to share context list ``telepathy`` in their
+        # ``plugins:`` field; root sessions don't, so the tool
+        # never appears on their surface.  The plugin also
+        # implements ``is_tool_visible`` (per PR #241) for
+        # belt-and-braces against the edge case where a profile
+        # lists telepathy but the session has no parent.
 
         # Initialize empty session history (skip if in auth-pending mode)
         if not skip_provider:
             self._history.clear()
 
-        # Populate instruction budget after all configuration is complete
+        # Populate instruction budget after all configuration is complete.
+        # ``_count_tokens`` is already defensive against ``self._provider is
+        # None`` — synchronous-phase falls back to the chars/4 estimate; the
+        # background-refinement phase short-circuits via ``has_count_tokens``
+        # when no provider exists.  Budget refinement triggers lazy provider
+        # creation if/when needed (see ``_start_background_token_counting``).
         self._populate_instruction_budget(session_instructions=system_instructions)
 
-        # Wire cache plugin (after budget is populated so we can set it)
-        self._wire_cache_plugin()
+        # Count the INITIAL wire tool-schema array (preloaded / core /
+        # lifecycle tools that bypass the discovery-only schema counting
+        # in ``_track_activated_tools_in_budget``).  Without this the
+        # budget-GC denominator under-reports the true wire by the size
+        # of the static tool array, so the GC threshold is structurally
+        # unreachable and the session walks into a context-window 400
+        # with GC idle.  See the method docstring for the full evidence.
+        self._register_initial_wire_tool_schema_budget()
+
+        # Note: cache plugin wiring moved from here into ``_ensure_provider``
+        # since 2026-05-13 — wiring needs a constructed provider, which is
+        # now lazy.  The cache plugin attaches when the provider first
+        # materializes; for the configure-then-first-message gap (where
+        # there's no provider yet), there's nothing to cache against either.
+
+        self._configured = True
 
         _configure_ms = (_time.perf_counter() - _t_configure_start) * 1000
         if _configure_ms > 10.0:
             self._trace(f"configure: completed in {_configure_ms:.1f}ms")
+
+    def _ensure_provider(self) -> Optional['ModelProviderPlugin']:
+        """Lazy-create the session's provider on first model use.
+
+        Idempotent + thread-safe.  Pre-2026-05-13 the provider was
+        eagerly created in ``configure()`` — that added 9s (zhipuai) or
+        2-3s (anthropic) to the bootstrap RPC critical path because
+        ``create_provider`` calls ``provider.initialize(config)`` which
+        does the network handshake.  Deferring shifts that cost to first
+        model call where the user is already waiting under the streaming
+        spinner.  See ``docs/design/runner_prewarm_pool_plan.md`` §3.5.
+
+        Returns:
+            The constructed provider, or ``None`` if this session is
+            in skip_provider mode (auth-pending — caller is responsible
+            for re-running this once auth completes).
+        """
+        # Fast-path: already initialized.  Avoid lock contention on the
+        # hot path.  Memory visibility is fine: ``self._provider`` is
+        # only written under the lock, so a non-None read here implies
+        # the writer's lock-release happens-before this read.
+        if self._provider is not None:
+            return self._provider
+
+        with self._provider_init_lock:
+            # Re-check under the lock (double-checked locking).
+            if self._provider is not None:
+                return self._provider
+            if self._provider_lazy_pending is None:
+                # skip_provider (auth-pending) mode — provider truly
+                # never created here; post-auth path triggers a new
+                # _ensure_provider call after stashing the pending args.
+                return None
+            cfg = self._provider_lazy_pending
+            self._provider = self._runtime.create_provider(
+                cfg['model_name'],
+                provider_name=cfg['provider_name'],
+                skip_model_test=cfg['skip_model_test'],
+                plugin_configs=cfg['plugin_configs'],
+            )
+            # V2 cross-provider tiers: record which provider this instance IS and
+            # seed the per-provider cache so switch_tier can compare against it
+            # and reuse it on a switch back.
+            self._active_provider_name = cfg['provider_name']
+            if cfg['provider_name'] is not None:
+                self._provider_cache[cfg['provider_name']] = self._provider
+            # Propagate agent context to provider for trace identification.
+            if hasattr(self._provider, 'set_agent_context'):
+                self._provider.set_agent_context(
+                    agent_type=self._agent_type,
+                    agent_name=self._agent_name,
+                    agent_id=self._agent_id,
+                )
+            # Resolve the real context window now that the provider exists.
+            # The budget was created at configure() time with context_limit=0
+            # because the provider is lazy-created and didn't exist yet.  This
+            # is the single point where the model's actual limit (e.g. vLLM's
+            # configured context_length) becomes the budget-GC denominator —
+            # it runs on first model use, before any conversation grows or any
+            # after-turn GC check, so the GC threshold is computed against the
+            # true window from the very first turn.  See
+            # _populate_instruction_budget for the failure mode this closes.
+            if self._instruction_budget is not None:
+                self._instruction_budget.context_limit = (
+                    self._provider.get_context_limit()
+                )
+            # Wire cache plugin now that the provider exists.  Pre-defer
+            # this fired at the end of configure() unconditionally.
+            self._wire_cache_plugin()
+            # Fail loud if a declared ``vision`` tier maps to a model the
+            # provider can't confirm accepts image input — runs once here,
+            # alongside the context-window resolution above, before any
+            # model work (the earliest point the provider exists).
+            self._validate_vision_tier_capability()
+            # Consume the stashed args — repeated calls become no-ops
+            # (the fast-path above returns the cached provider).
+            self._provider_lazy_pending = None
+            return self._provider
 
     def _wire_cache_plugin(self) -> None:
         """Discover and attach the cache plugin matching the active provider.
@@ -1534,60 +2672,148 @@ class JaatoSession:
         Checks whether the provider manages its own tools (e.g. Claude CLI
         in delegated mode). If so, returns an empty list.
 
+        **Per-turn visibility filter.**  Plugins MAY implement an
+        opt-in ``is_tool_visible(tool_name) -> bool`` method to gate
+        their own tools on dynamic session state.  This method is
+        consulted on EVERY ``provider.complete()`` call, so visibility
+        decisions always reflect current state.  Plugins without the
+        method are unaffected.  Tools whose owning plugin returns
+        ``False`` are stripped from the array sent to the model.
+
+        The canonical use case (server 0.6.x+) is the ``todo`` plugin
+        hiding its 8 plan-required tools (``startPlan``,
+        ``setStepStatus``, ``getPlanStatus``, ``completePlan``,
+        ``addStep``, ``addDependentStep``, ``completeStepWithOutput``,
+        ``getBlockedSteps``) when no active plan exists.  Without
+        this filter, small models (e.g. Llama 3.1 8B AWQ on vLLM
+        2026-06-07 smoke) misroute to ``completeStepWithOutput`` as
+        a proxy for ``signal_completion`` because the description
+        overlaps and the precondition isn't enforced at the schema
+        layer.  Same shape as
+        :meth:`LifecycleTools._should_hide_signal_completion` — gate
+        at schema-export time rather than waiting for a clean
+        runtime-rejection error from the plugin.
+
+        A plugin's ``is_tool_visible`` predicate is asked about
+        EVERY tool name in the session (not just the plugin's own
+        tools); a sensible default is ``return True`` for unknown
+        names so other plugins' tools flow through unchanged.
+
         Returns:
             Tools to pass, or empty list if provider manages its own.
         """
         uses_external = getattr(self._provider, 'uses_external_tools', lambda: True)()
-        return self._tools if uses_external else []
+        if not uses_external:
+            return []
+        if not self._tools:
+            return self._tools
+
+        # Per-session tool-scope allow-list filter (profile
+        # ``tools:[...]`` modifier).  Applied FIRST, on every return
+        # path, so a tool outside its plugin's allow-list never reaches
+        # the provider's wire body or grammar surface regardless of how
+        # ``self._tools`` was assembled.  This is the definitive
+        # wire-absence guarantee — the property profile authors rely on
+        # for context-shaving.  A no-op when no scopes are configured.
+        scoped = self._apply_tool_scopes(self._tools)
+
+        registry = getattr(self._runtime, 'registry', None)
+        if registry is None:
+            return scoped
+
+        # Collect plugins that opt in to visibility gating.  Walk
+        # ``list_exposed`` (rather than ``_plugins.keys()``) so
+        # un-exposed plugins don't get consulted.
+        try:
+            exposed_names = registry.list_exposed()
+        except Exception:
+            return scoped
+        filters = []
+        for name in exposed_names:
+            plugin = registry.get_plugin(name)
+            if plugin is not None and hasattr(plugin, 'is_tool_visible'):
+                filters.append(plugin)
+        if not filters:
+            return scoped
+
+        visible: List['ToolSchema'] = []
+        for tool in scoped:
+            hidden = False
+            for plugin in filters:
+                try:
+                    if not plugin.is_tool_visible(tool.name):
+                        hidden = True
+                        break
+                except Exception:
+                    # A buggy predicate must not break the turn — log
+                    # and treat as visible (fail-open).
+                    self._trace(
+                        f"is_tool_visible raised for tool={tool.name!r} "
+                        f"plugin={plugin.name!r}; treating as visible"
+                    )
+            if not hidden:
+                visible.append(tool)
+        return visible
+
+    def _apply_tool_scopes(
+        self, schemas: List['ToolSchema']
+    ) -> List['ToolSchema']:
+        """Filter ``schemas`` to honour per-plugin tool allow-lists.
+
+        For each tool, looks up its owning plugin (via
+        ``registry.get_plugin_for_tool``) and, if that plugin has an
+        entry in ``self._tool_scopes``, drops the tool unless its name
+        is in the allow-list.  Tools with no owning plugin (lifecycle
+        tools like ``signal_completion``, core infra like stream /
+        event-bus controls) have no scope and always survive.
+
+        Mirrors the ``_tool_plugins`` plugin-level filter in
+        :meth:`activate_discovered_tools`, one granularity finer.  Pure
+        function over the input list — never mutates the registry or
+        ``self._tools``.
+
+        Returns the input unchanged when no scopes are configured (the
+        overwhelmingly common case), so the per-turn cost is a single
+        dict-emptiness check for unscoped sessions.
+        """
+        if not self._tool_scopes or not schemas:
+            return schemas
+        registry = getattr(self._runtime, 'registry', None)
+        if registry is None:
+            return schemas
+        kept: List['ToolSchema'] = []
+        for schema in schemas:
+            plugin = registry.get_plugin_for_tool(schema.name)
+            plugin_name = plugin.name if plugin is not None else None
+            allow = (
+                self._tool_scopes.get(plugin_name)
+                if plugin_name is not None
+                else None
+            )
+            if allow is not None and schema.name not in allow:
+                self._trace(
+                    f"tool_scope: dropping {schema.name!r} "
+                    f"(plugin {plugin_name!r} allow-list={allow})"
+                )
+                continue
+            kept.append(schema)
+        return kept
 
     def _count_tokens(self, text: str) -> int:
         """Count tokens using cache, provider, or estimate (in that order).
 
-        Lookup order:
-        1. ``InstructionTokenCache`` — instant, shared across sessions.
-        2. ``provider.count_tokens()`` — accurate HTTP call; result is
-           stored in the cache for future hits.
-        3. ``estimate_tokens()`` — chars/4 approximation fallback.
-
-        Args:
-            text: The text to count tokens for.
-
-        Returns:
-            Token count (actual or estimated).
+        Thin wrapper over
+        :func:`instruction_budget_builder.count_tokens` that supplies this
+        session's runtime cache, provider, and provider-name resolution.
         """
-        if not text:
-            return 0
-
-        # 1. Check instruction token cache
-        cache = self._runtime.instruction_token_cache
         provider_name = self._provider_name_override or self._runtime.provider_name
-        cached = cache.get(provider_name, text)
-        if isinstance(cached, int):
-            return cached
-
-        # 2. Try provider API
-        if self._provider and hasattr(self._provider, 'count_tokens'):
-            try:
-                result = self._provider.count_tokens(text)
-                # Ensure we got an int (handles mocked providers returning MagicMock)
-                if isinstance(result, int):
-                    cache.put(provider_name, text, result)
-                    return result
-                else:
-                    self._trace(
-                        f"count_tokens returned non-int ({type(result).__name__}), "
-                        f"falling back to estimate"
-                    )
-            except Exception as e:
-                self._trace(
-                    f"count_tokens FAILED ({type(e).__name__}: {e}), "
-                    f"falling back to estimate (text length: {len(text)} chars)"
-                )
-
-        # 3. Estimate fallback
-        est = estimate_tokens(text)
-        self._trace(f"count_tokens: using estimate={est} (from {len(text)} chars)")
-        return est
+        return _builder_count_tokens(
+            text,
+            cache=self._runtime.instruction_token_cache,
+            provider=self._provider,
+            provider_name=provider_name,
+            on_trace=self._trace,
+        )
 
     # ------------------------------------------------------------------
     # Two-phase instruction budget population
@@ -1613,15 +2839,22 @@ class JaatoSession:
         Args:
             session_instructions: The user-provided system_instructions from configure().
         """
-        # Get context limit from provider.  By this point the provider has
-        # already connect()'ed and resolved the limit (e.g. from model metadata
-        # or a static lookup), so this is a cheap in-memory read.
-        context_limit = 128_000  # Default
-        if self._provider and hasattr(self._provider, 'get_context_limit'):
-            try:
-                context_limit = self._provider.get_context_limit()
-            except Exception:
-                pass  # keep default
+        # Get context limit from the provider.  The provider is lazy-created
+        # (``_ensure_provider``, first model use) to keep bootstrap off the
+        # critical path, so at configure() time ``self._provider`` is usually
+        # ``None`` — there is no limit to read yet.  In that case the budget
+        # is created with ``context_limit = 0`` (an honest "unknown"; the
+        # utilization/available helpers are already guarded against 0) and the
+        # real limit is filled in by ``_ensure_provider`` the moment the
+        # provider materializes, BEFORE any conversation grows or any GC check
+        # runs.  We deliberately do NOT keep a hardcoded default (e.g. the old
+        # 128_000): that masked a misconfigured/late provider and froze the
+        # budget-GC denominator at a model-agnostic number, so the after-turn
+        # GC threshold was computed against the wrong window and never tripped
+        # — the session walked into a context-window 400 with GC idle.
+        context_limit = 0
+        if self._provider is not None:
+            context_limit = self._provider.get_context_limit()
 
         # Get session_id - use runtime's session ID or generate placeholder
         # The server will assign proper session_id when session is registered
@@ -1636,7 +2869,17 @@ class JaatoSession:
         )
 
         # --- Collect phase: gather all texts that need counting ---
-        requests = self._collect_instruction_texts(session_instructions)
+        # Pass the override and suppress-base flag so the budget
+        # reflects what's actually on the wire — a single OVERRIDE entry
+        # (or nothing) on full override, or the assembly minus BASE on
+        # partial suppression — rather than the assembly pipeline's
+        # would-be-full output.
+        requests = self._collect_instruction_texts(
+            session_instructions,
+            system_instruction_override=self._system_instruction_override,
+            suppress_base=PIECE_DISK in self._suppress_base_instructions,
+            suppress_constants=PIECE_CONSTANTS in self._suppress_base_instructions,
+        )
 
         # --- Resolve phase: use cache or estimate for each request ---
         cache = self._runtime.instruction_token_cache
@@ -1675,125 +2918,39 @@ class JaatoSession:
     def _collect_instruction_texts(
         self,
         session_instructions: Optional[str],
+        system_instruction_override: Optional[str] = None,
+        suppress_base: bool = False,
+        suppress_constants: bool = False,
     ) -> List['_TokenCountRequest']:
         """Collect all instruction texts that need token counting.
 
-        Gathers texts from SYSTEM children (base, client, framework) and
-        PLUGIN children (per-plugin, per-formatter) into a flat list of
-        ``_TokenCountRequest`` objects.
+        Thin wrapper over
+        :func:`instruction_budget_builder.collect_instruction_texts` that
+        supplies this session's runtime, pinned references, and preloaded
+        plugins, and records the returned deferred-plugin names onto
+        ``self._deferred_plugin_instructions`` (the side effect this
+        method has always carried). Returns just the request list, as
+        before.
 
-        Args:
-            session_instructions: The user-provided system_instructions from configure().
-
-        Returns:
-            List of ``_TokenCountRequest`` — one per instruction text.
+        ``suppress_base`` / ``suppress_constants`` drop the disk BASE layer
+        and the framework constants respectively, keeping the budget in step
+        with the wire prompt's ``include_base`` / ``include_constants`` gates.
         """
-        from .jaato_runtime import (
-            _TASK_COMPLETION_INSTRUCTION,
-            _PARALLEL_TOOL_GUIDANCE,
-            _TURN_SUMMARY_INSTRUCTION,
-            _is_parallel_tools_enabled,
+        requests, deferred_plugins = _builder_collect_instruction_texts(
+            self._runtime,
+            session_instructions,
+            system_instruction_override=system_instruction_override,
+            suppress_base=suppress_base,
+            suppress_constants=suppress_constants,
+            pinned_references=getattr(self, '_pinned_references', {}),
+            preloaded_plugins=getattr(self, '_preloaded_plugins', set()),
         )
-
-        requests: List[_TokenCountRequest] = []
-
-        # --- SYSTEM children ---
-
-        # 1. Base instructions from .jaato/instructions/ (or legacy single file)
-        base_instructions = getattr(self._runtime, '_base_system_instructions', None)
-        if base_instructions:
-            requests.append(_TokenCountRequest(
-                text=base_instructions,
-                source=InstructionSource.SYSTEM,
-                child_key=SystemChildType.BASE.value,
-                gc_policy=DEFAULT_SYSTEM_POLICIES[SystemChildType.BASE],
-                label="Base Instructions",
-            ))
-
-        # 2. Client-provided session instructions (programmatic)
-        if session_instructions:
-            requests.append(_TokenCountRequest(
-                text=session_instructions,
-                source=InstructionSource.SYSTEM,
-                child_key=SystemChildType.CLIENT.value,
-                gc_policy=DEFAULT_SYSTEM_POLICIES[SystemChildType.CLIENT],
-                label="Client Instructions",
-            ))
-
-        # 3. Framework constants (concatenated into one request)
-        framework_parts = [_TASK_COMPLETION_INSTRUCTION]
-        if _is_parallel_tools_enabled():
-            framework_parts.append(_PARALLEL_TOOL_GUIDANCE)
-        framework_parts.append(_TURN_SUMMARY_INSTRUCTION)
-        framework_text = "\n\n".join(framework_parts)
-        requests.append(_TokenCountRequest(
-            text=framework_text,
-            source=InstructionSource.SYSTEM,
-            child_key=SystemChildType.FRAMEWORK.value,
-            gc_policy=DEFAULT_SYSTEM_POLICIES[SystemChildType.FRAMEWORK],
-            label="Framework",
-        ))
-
-        # 4. Pinned preselected references (content read by the model and
-        #    promoted to system instruction for GC protection)
-        for ref_id, pinned in getattr(self, '_pinned_references', {}).items():
-            child_key = f"{SystemChildType.SELECTED_REFERENCES.value}:{ref_id}"
-            requests.append(_TokenCountRequest(
-                text=pinned.content,
-                source=InstructionSource.SYSTEM,
-                child_key=child_key,
-                gc_policy=DEFAULT_SYSTEM_POLICIES[SystemChildType.SELECTED_REFERENCES],
-                label=f"ref: {pinned.ref_name}",
-            ))
-
-        # --- PLUGIN children ---
-        # When deferred tool loading is enabled, only include system
-        # instructions from plugins that have at least one core tool.
-        # Instructions for discoverable-only plugins are deferred until
-        # the model activates one of their tools via get_tool_schemas.
-
-        from .jaato_runtime import _is_deferred_tools_enabled
-        deferred_enabled = _is_deferred_tools_enabled()
-
-        if self._runtime.registry:
-            for plugin_name in self._runtime.registry._exposed:
-                if deferred_enabled and plugin_name not in self._preloaded_plugins and not self._runtime.registry.plugin_has_core_tools(plugin_name):
-                    # Remember this plugin's instructions are deferred so we
-                    # can inject them when the model discovers its tools.
-                    # Exception: preloaded plugins always include instructions.
-                    plugin = self._runtime.registry.get_plugin(plugin_name)
-                    if plugin and hasattr(plugin, 'get_system_instructions'):
-                        instr = plugin.get_system_instructions()
-                        if instr:
-                            self._deferred_plugin_instructions.add(plugin_name)
-                    continue
-                plugin = self._runtime.registry.get_plugin(plugin_name)
-                if plugin and hasattr(plugin, 'get_system_instructions'):
-                    instr = plugin.get_system_instructions()
-                    if instr:
-                        requests.append(_TokenCountRequest(
-                            text=instr,
-                            source=InstructionSource.PLUGIN,
-                            child_key=plugin_name,
-                            gc_policy=DEFAULT_TOOL_POLICIES[PluginToolType.CORE],
-                            label=plugin_name,
-                        ))
-
-        # Formatter pipeline instructions (output rendering capabilities)
-        formatter_pipeline = getattr(self._runtime, '_formatter_pipeline', None)
-        if formatter_pipeline and hasattr(formatter_pipeline, '_formatters'):
-            for formatter in formatter_pipeline._formatters:
-                if hasattr(formatter, 'get_system_instructions'):
-                    instr = formatter.get_system_instructions()
-                    if instr:
-                        requests.append(_TokenCountRequest(
-                            text=instr,
-                            source=InstructionSource.PLUGIN,
-                            child_key=formatter.name,
-                            gc_policy=GCPolicy.PRESERVABLE,
-                            label=formatter.name,
-                        ))
-
+        # Record deferred-plugin names only when there are any — matches
+        # the original, which touched this attr solely inside the
+        # deferral branch (so minimal sessions that never defer a plugin
+        # don't require the attribute to exist).
+        if deferred_plugins:
+            self._deferred_plugin_instructions.update(deferred_plugins)
         return requests
 
     def _apply_instruction_counts(
@@ -1803,59 +2960,19 @@ class JaatoSession:
     ) -> None:
         """Build budget children and parent totals from resolved token counts.
 
-        Called once in Phase 1 (with estimates/cached values) and again after
-        Phase 2 completes (with accurate counts for previously-estimated entries).
-
-        Args:
-            requests: List of resolved ``_TokenCountRequest`` objects.
-            context_limit: Context window size for percentage logging.
+        Thin wrapper over
+        :func:`instruction_budget_builder.apply_instruction_counts` (which
+        mutates this session's budget in place) followed by the
+        budget-update emission this method has always performed. Called
+        once in Phase 1 (estimates/cached) and again after Phase 2
+        completes (accurate counts for previously-estimated entries).
         """
-        # Group by source to compute parent totals
-        source_totals: Dict[InstructionSource, int] = {}
-
-        for req in requests:
-            source_totals.setdefault(req.source, 0)
-            source_totals[req.source] += req.token_count
-
-            # Check if child already exists (Phase 2 update path)
-            parent_entry = self._instruction_budget.get_entry(req.source)
-            existing = parent_entry.children.get(req.child_key) if parent_entry else None
-            if existing is not None:
-                existing.tokens = req.token_count
-            else:
-                if req.token_count > 0:
-                    self._instruction_budget.add_child(
-                        req.source,
-                        req.child_key,
-                        req.token_count,
-                        req.gc_policy,
-                        label=req.label,
-                    )
-
-        # Update parent totals
-        for source, total in source_totals.items():
-            self._instruction_budget.update_tokens(source, total)
-
-        # ENRICHMENT and CONVERSATION start at 0
-        self._instruction_budget.update_tokens(InstructionSource.ENRICHMENT, 0)
-        self._instruction_budget.update_tokens(InstructionSource.CONVERSATION, 0)
-
-        # Log summary
-        total_initial = sum(source_totals.values())
-        estimate_count = sum(1 for r in requests if r.is_estimate)
-        try:
-            pct = (total_initial / context_limit * 100) if context_limit else 0
-            self._trace(
-                f"BUDGET_CALC: Budget {'updated' if any(not r.is_estimate for r in requests) else 'initial'} — "
-                f"total={total_initial} tokens ({pct:.1f}% of {context_limit}), "
-                f"estimates={estimate_count}/{len(requests)}"
-            )
-        except (TypeError, ValueError):
-            self._trace(
-                f"BUDGET_CALC: Budget applied — total={total_initial} tokens, "
-                f"estimates={estimate_count}/{len(requests)}"
-            )
-
+        _builder_apply_instruction_counts(
+            self._instruction_budget,
+            requests,
+            context_limit,
+            on_trace=self._trace,
+        )
         # Emit budget update event
         self._emit_instruction_budget_update()
 
@@ -2163,6 +3280,93 @@ class JaatoSession:
         # Emit budget update event
         self._emit_instruction_budget_update()
 
+    def _assert_payload_fits_context(self) -> None:
+        """Pre-flight refuse-send gate.
+
+        Raises ``PayloadExceedsContextError`` when the framework's
+        accounted prompt budget (post-GC) plus the provider's
+        configured ``max_tokens`` cap would exceed the model's
+        context window.
+
+        Call this immediately before a ``provider.complete()`` dispatch,
+        AFTER the outgoing prompt is in history and the budget has been
+        refreshed (``_update_conversation_budget``) — otherwise the
+        gate reads a budget that doesn't yet reflect the prompt about to
+        be sent.  The call sites are the two dispatch chokepoints: the
+        initial turn dispatch in ``_run_chat_loop`` (after the user
+        message is appended) and the intra-turn tool-results dispatch.
+
+        No-ops when:
+
+        - ``self._instruction_budget`` is ``None`` (no budget tracking,
+          can't gate)
+        - ``self._provider`` is ``None`` (no wire-send pending)
+        - ``budget.context_limit`` is ``0`` (honest-unknown limit — the
+          framework does not invent a window it wasn't told)
+
+        The gate uses ``budget.total_tokens()`` (post-GC) compared
+        against ``budget.context_limit``.  When the provider exposes a
+        ``get_max_output_tokens()`` method (vllm, openrouter,
+        tensorrt_llm at time of writing), the comparison includes that
+        cap; otherwise it fires only when the prompt ALONE exceeds the
+        limit.
+
+        Rationale: vLLM 0.22 rejects any request where ``prompt +
+        max_tokens > max_model_len`` with the misleading template
+        message ``"prompt contains at least N tokens"`` where ``N =
+        max_model_len + 1 - max_tokens`` (a deterministic lower-bound
+        template, NOT the real prompt size).  This gate refuses the
+        doomed dispatch and surfaces a structured error pointing at
+        the concrete knobs the operator can turn.
+        """
+        if not self._instruction_budget:
+            return
+        if not self._provider:
+            return
+        limit = self._instruction_budget.context_limit
+        if limit <= 0:
+            return
+
+        total = self._instruction_budget.total_tokens()
+
+        # Provider-side per-request output cap, if exposed.  Three
+        # providers expose this today (vllm / openrouter /
+        # tensorrt_llm); others inherit no method and the gate
+        # degrades to prompt-only.
+        max_tokens: Optional[int] = None
+        get_max = getattr(self._provider, 'get_max_output_tokens', None)
+        if callable(get_max):
+            try:
+                value = get_max()
+            except Exception:
+                value = None
+            if isinstance(value, int) and value > 0:
+                max_tokens = value
+
+        if max_tokens is not None:
+            projected = total + max_tokens
+            if projected > limit:
+                self._trace(
+                    f"REFUSE_SEND: total={total} + max_tokens={max_tokens} "
+                    f"= {projected} > context_limit={limit}"
+                )
+                raise PayloadExceedsContextError(
+                    total_tokens=total,
+                    max_output_tokens=max_tokens,
+                    context_limit=limit,
+                )
+        else:
+            if total > limit:
+                self._trace(
+                    f"REFUSE_SEND: total={total} > context_limit={limit} "
+                    f"(provider exposes no max_tokens; gate on prompt alone)"
+                )
+                raise PayloadExceedsContextError(
+                    total_tokens=total,
+                    max_output_tokens=None,
+                    context_limit=limit,
+                )
+
     def _update_thinking_budget(self, thinking_tokens: int) -> None:
         """Update THINKING entry in instruction budget with cumulative thinking tokens."""
         if not self._instruction_budget:
@@ -2178,6 +3382,25 @@ class JaatoSession:
                 label="Thinking",
             )
         self._emit_instruction_budget_update()
+
+    def get_tool_schemas(self) -> List[ToolSchema]:
+        """Read accessor for the session's resolved tool schemas.
+
+        Returns the list of :class:`ToolSchema` instances the session
+        has activated for the current model — this is the resolved
+        subset (preloaded plugins + on-demand activations), not the
+        registry's full exposed set.
+
+        Returns an empty list when ``configure()`` hasn't run yet
+        (``self._tools is None``) — callers can iterate the result
+        unconditionally without a None check.
+
+        Phase 3 §7c step 3b: replaces daemon-side reads of the
+        private ``self._tools`` attribute (e.g. core.py's
+        ``_build_tool_id_mappings``).  Pre-§7c-step-3b the daemon
+        reached into the private list directly.
+        """
+        return list(self._tools) if self._tools else []
 
     def refresh_tools(self) -> None:
         """Refresh tools from the runtime.
@@ -2267,6 +3490,22 @@ class JaatoSession:
                         f"(plugin '{plugin.name}' not in profile)"
                     )
                     continue
+
+            # Enforce per-plugin tool allow-list (profile ``tools:[...]``):
+            # a scoped-out tool must not be activatable even if the model
+            # discovers it via introspection.  One granularity finer than
+            # the plugin filter above.
+            if self._tool_scopes:
+                plugin = self._runtime.registry.get_plugin_for_tool(tool_name)
+                if plugin is not None:
+                    allow = self._tool_scopes.get(plugin.name)
+                    if allow is not None and tool_name not in allow:
+                        self._trace(
+                            f"activate_discovered_tools: skipping "
+                            f"'{tool_name}' (outside plugin "
+                            f"'{plugin.name}' allow-list={allow})"
+                        )
+                        continue
 
             schema = schema_map[tool_name]
             if self._tools is None:
@@ -2387,6 +3626,80 @@ class JaatoSession:
                     logger.warning(
                         f"Failed to track plugin {plugin_name} in budget: {e}"
                     )
+
+    def _register_initial_wire_tool_schema_budget(self) -> None:
+        """Count the INITIAL wire tool-schema array into the budget.
+
+        The tool-definitions array (``tools[]``) ships on EVERY request
+        and is part of real context utilization — but its tokens were
+        only ever counted by :meth:`_track_activated_tools_in_budget`,
+        which fires ONLY when a tool is DISCOVERED at runtime (deferred
+        loading).  Tools that are PRELOADED or CORE — exposed at
+        ``configure()`` and never "discovered": the lifecycle tools
+        (``prepare_completion`` / ``signal_completion`` / ...), and any
+        plugin carrying a ``(preload)`` modifier — therefore never had
+        their schema tokens counted.  ``_collect_instruction_texts``
+        counts plugin *instruction* text, not tool *schema* JSON, so it
+        doesn't cover them either (and on the
+        ``system_instruction_override`` short-circuit it returns before
+        the plugin block entirely).
+
+        Net effect of the gap: ``InstructionBudget.total_tokens()`` — the
+        denominator the budget-GC trigger reads
+        (``get_context_usage`` → ``utilization_percent``) — under-reported
+        the true wire by the size of the initial tool array (a cascade
+        stage's 16 tools is ~18-25K; ``signal_completion``'s schema alone
+        is several KB).  GC measured conversation-only utilisation, sat
+        below its threshold, and never reclaimed history while the real
+        request walked into a context-window 400.  Empirically:
+        session 20260610_082013 read 58% (37928 tok) while the wire that
+        overflowed carried 63489 (97%).
+
+        This counts the schema JSON for the tools present in
+        ``self._tools`` at configure time (the initial / preloaded /
+        core wire set) into a single ``PLUGIN`` child with the CORE tool
+        policy (LOCKED).  LOCKED is deliberate: ``total_tokens()`` (the
+        GC trigger + the UI budget bar + telemetry) now reflects the
+        static wire, while ``gc_eligible_tokens()`` still EXCLUDES it —
+        so GC measures true utilisation but only ever trims conversation.
+
+        Disjoint from :meth:`_track_activated_tools_in_budget`: discovered
+        tools are appended to ``self._tools`` AFTER this runs (via
+        ``activate_discovered_tools``), so the two never double-count the
+        same tool.
+        """
+        if not self._instruction_budget or not self._tools:
+            return
+        total = 0
+        for schema in self._tools:
+            try:
+                schema_json = json.dumps({
+                    "name": schema.name,
+                    "description": schema.description,
+                    "parameters": schema.parameters,
+                }, indent=2)
+                total += self._count_tokens(schema_json)
+            except Exception:
+                continue
+        if total <= 0:
+            return
+        try:
+            self._instruction_budget.add_child(
+                InstructionSource.PLUGIN,
+                "wire_tool_schemas",
+                total,
+                DEFAULT_TOOL_POLICIES[PluginToolType.CORE],
+                label="Wire tool schemas (initial)",
+            )
+            self._trace(
+                f"BUDGET_WIRE_TOOLS: registered {total} tokens for "
+                f"{len(self._tools)} initial wire tool schemas (LOCKED)"
+            )
+            self._emit_instruction_budget_update()
+        except Exception as e:
+            logger.warning(
+                f"Failed to register initial wire tool schema budget: {e}"
+            )
 
     def _register_model_command(self) -> None:
         """Register the built-in model command for listing and switching models."""
@@ -2554,202 +3867,6 @@ NOTES
             "valid_subcommands": ["list", "select"]
         }
 
-    def _register_telepathy_tool(self) -> None:
-        """Register the built-in share_context tool for agent communication.
-
-        This tool allows any agent (main or subagent) to share structured
-        context with its parent agent. It's a native session capability,
-        not tied to any specific plugin.
-        """
-        # Only register if we have a parent session (subagents can share with parent)
-        # Main agent can also use this to share with subagents via the subagent plugin
-        share_context_schema = ToolSchema(
-            name='share_context',
-            description=(
-                'Share context from your memory with your parent agent. '
-                'Use this to transfer knowledge without the parent needing to '
-                're-read files or re-execute tools.\n\n'
-                'CRITICAL: Share the COMPLETE file content, not summaries or excerpts. '
-                'The parent needs the full content to work with it. Never omit content '
-                '"for brevity" - that defeats the purpose of this tool.\n\n'
-                'IMPORTANT: Do NOT re-read files before sharing. Use your memory of files '
-                'you have already read. Copy the full content from your context.\n\n'
-                'Use this to:\n'
-                '- Share complete file contents you have already read\n'
-                '- Share your analysis or findings\n'
-                '- Share relevant facts you have discovered'
-            ),
-            parameters={
-                "type": "object",
-                "properties": {
-                    "files": {
-                        "type": "object",
-                        "description": (
-                            "Files to share from your memory. Keys are file paths, "
-                            "values are the COMPLETE file content from your context. "
-                            "Do NOT summarize or omit content - share the full text."
-                        ),
-                        "additionalProperties": {"type": "string"}
-                    },
-                    "findings": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": (
-                            "Key findings, facts, or conclusions to share. "
-                            "These should be insights from your analysis."
-                        )
-                    },
-                    "notes": {
-                        "type": "string",
-                        "description": (
-                            "Free-form context, analysis, guidance, or explanation "
-                            "to help the parent agent understand the shared context."
-                        )
-                    }
-                },
-                "required": []
-            }
-        )
-
-        # Add tool schema to session tools
-        if self._tools is None:
-            self._tools = []
-        self._tools = list(self._tools)
-        self._tools.append(share_context_schema)
-
-        # Register executor
-        if self._executor:
-            self._executor.register("share_context", self._execute_share_context)
-
-    def _execute_share_context(self, args: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute the share_context tool.
-
-        Shares structured context with the parent agent.
-
-        Args:
-            args: Tool arguments containing:
-                - files: Optional dict of path -> content from memory
-                - findings: Optional list of key findings
-                - notes: Optional free-form notes
-
-        Returns:
-            Status dict indicating success or error.
-        """
-        files = args.get('files', {})
-        findings = args.get('findings', [])
-        notes = args.get('notes', '')
-
-        # Check if there's anything to share
-        if not files and not findings and not notes:
-            return {
-                'success': False,
-                'error': 'No context to share. Provide at least one of: files, findings, notes.'
-            }
-
-        # Check if we have a parent to share with
-        if not self._parent_session:
-            return {
-                'success': False,
-                'error': 'No parent session available. This agent may be the main agent.'
-            }
-
-        # Format the context
-        formatted_context = self._format_shared_context(files, findings, notes)
-
-        try:
-            # Use same pattern as subagent communication: inject if busy, send if idle
-            # CHILD source type - will be processed when parent is idle
-            if self._parent_session.is_running:
-                # Parent is busy - queue for idle processing
-                self._parent_session.inject_prompt(
-                    formatted_context,
-                    source_id=self._agent_id,
-                    source_type=SourceType.CHILD
-                )
-                return {
-                    'success': True,
-                    'status': 'queued',
-                    'message': 'Context queued for parent. Will be processed when parent is idle.',
-                    'shared': {
-                        'files': list(files.keys()) if files else [],
-                        'findings_count': len(findings) if findings else 0,
-                        'has_notes': bool(notes)
-                    }
-                }
-
-            # Parent is idle - this shouldn't normally happen (subagent runs while parent waits)
-            # But handle it gracefully by injecting anyway
-            self._parent_session.inject_prompt(
-                formatted_context,
-                source_id=self._agent_id,
-                source_type=SourceType.CHILD
-            )
-            return {
-                'success': True,
-                'status': 'sent',
-                'message': 'Context sent to parent.',
-                'shared': {
-                    'files': list(files.keys()) if files else [],
-                    'findings_count': len(findings) if findings else 0,
-                    'has_notes': bool(notes)
-                }
-            }
-
-        except Exception as e:
-            return {
-                'success': False,
-                'error': f'Failed to share context: {str(e)}'
-            }
-
-    def _format_shared_context(
-        self,
-        files: Dict[str, str],
-        findings: List[str],
-        notes: str
-    ) -> str:
-        """Format shared context for injection into parent's conversation.
-
-        Args:
-            files: Dict of file path -> content from memory
-            findings: List of key findings
-            notes: Free-form notes
-
-        Returns:
-            Formatted string for injection with instructions.
-        """
-        parts = []
-
-        # Add instruction prefix so the receiving agent knows to use this content
-        if files:
-            parts.append(
-                "CONTEXT FROM SUBAGENT: The following files and findings are shared from the subagent's memory. "
-                "DO NOT re-read these files - use the content provided below directly."
-            )
-            parts.append("")
-
-        parts.append('<shared_context from_agent="subagent">')
-
-        if files:
-            parts.append('<files>')
-            for path, content in files.items():
-                parts.append(f'<file path="{path}">')
-                parts.append(content)
-                parts.append('</file>')
-            parts.append('</files>')
-
-        if findings:
-            parts.append('<findings>')
-            for finding in findings:
-                parts.append(f'  - {finding}')
-            parts.append('</findings>')
-
-        if notes:
-            parts.append('<notes>')
-            parts.append(notes)
-            parts.append('</notes>')
-
-        parts.append('</shared_context>')
-        return '\n'.join(parts)
 
     def get_model_completions(self, args: List[str]) -> List['CommandCompletion']:
         """Get completions for the model command.
@@ -2797,12 +3914,38 @@ NOTES
 
         return []
 
+    def _parts_from_user_message(
+        self, message: str, attachments: List[Dict[str, Any]]
+    ) -> List["Part"]:
+        """Build a Part list from a user message text + wire attachments.
+
+        Wire attachments are ``{mime_type, data: base64-str, display_name}``
+        (the canonical user-message multimodal contract — client-expanded,
+        JSON-safe).  ``data`` is base64-decoded to the ``bytes`` that
+        ``Part.inline_data`` expects.  The text part precedes the inline-data
+        parts; an empty ``message`` (image-only turn) yields parts with no text.
+        """
+        import base64
+        parts: List[Part] = []
+        if message:
+            parts.append(Part.from_text(message))
+        for att in attachments or []:
+            data = att.get("data")
+            if isinstance(data, str):      # base64 wire form → raw bytes
+                data = base64.b64decode(data)
+            parts.append(Part(inline_data={
+                "mime_type": att.get("mime_type"),
+                "data": data,
+            }))
+        return parts
+
     def send_message(
         self,
         message: str,
         on_output: Optional[OutputCallback] = None,
         on_usage_update: Optional[UsageUpdateCallback] = None,
-        on_gc_threshold: Optional[GCThresholdCallback] = None
+        on_gc_threshold: Optional[GCThresholdCallback] = None,
+        attachments: Optional[List[Dict[str, Any]]] = None
     ) -> str:
         """Send a message to the model.
 
@@ -2814,6 +3957,12 @@ NOTES
                 Signature: (usage: TokenUsage) -> None
             on_gc_threshold: Optional callback when GC threshold is crossed.
                 Signature: (percent_used: float, threshold: float) -> None
+            attachments: Optional user-message multimodal attachments, each a
+                ``{mime_type, data: base64-str, display_name}`` dict (the
+                client-expanded wire contract).  When present, the turn is
+                routed through the multimodal parts loop (text + inline image/
+                file Parts); the model receives them gated by its provider's
+                vision/input modality (see resolve_modalities).
 
         Returns:
             The final model response text.
@@ -2821,8 +3970,30 @@ NOTES
         Raises:
             RuntimeError: If session is not configured.
         """
-        if not self._provider:
+        if not self._configured:
             raise RuntimeError("Session not configured. Call configure() first.")
+
+        # User-message multimodal: attachments present → build a Part list
+        # (text + inline image/file data) and route through the canonical parts
+        # loop instead of the text-only path below.  Keeps one multimodal entry.
+        if attachments:
+            parts = self._parts_from_user_message(message, attachments)
+            return self.send_message_with_parts(parts, on_output)
+
+        # Lazy-init the provider on first model use (deferred-provider-INIT
+        # design 2026-05-13).  The 9s/2-3s INIT cost happens here on first
+        # send_message instead of during configure(), shifting it off the
+        # bootstrap RPC critical path.  Idempotent + thread-safe.
+        self._ensure_provider()
+        if not self._provider:
+            # skip_provider (auth-pending) mode and auth still hasn't
+            # completed — fall through to the existing error path so
+            # the caller sees a clear failure.
+            raise RuntimeError(
+                "Session has no provider — auth-pending mode and auth "
+                "has not completed yet, OR _ensure_provider() returned "
+                "without setting one (check configure() succeeded)"
+            )
 
         # Block while an observation pause is active.  The observer
         # holds the lock briefly (snapshot, interrogation, etc.) and
@@ -2860,8 +4031,22 @@ NOTES
             agent_name=self._agent_name,
             turn_index=self._turn_index,
             parent_session_id=_parent_sid,
+            user_id=self._resolve_telemetry_user_id(),
         ) as turn_span:
             self._current_turn_span = turn_span
+            # Stamp the user prompt as the trace-level input on the AGENT root
+            # span. Observability backends derive a trace's Input from its root
+            # observation's ``input.value`` — Langfuse's ingestion reads that
+            # key directly. Without it the trace-level Input column stays blank
+            # even though child llm/tool spans carry their own messages.
+            # Redaction (``JAATO_TELEMETRY_REDACT_CONTENT``, on by default) is
+            # applied to this key by _SpanWrapper, exactly like tool input.
+            try:
+                if message:
+                    turn_span.set_attribute("input.value", message)
+                    turn_span.set_attribute("input.mime_type", "text/plain")
+            except Exception:
+                pass
             # Reset per-turn token accumulators for aggregating on the turn span
             self._turn_prompt_tokens = 0
             self._turn_completion_tokens = 0
@@ -2873,6 +4058,23 @@ NOTES
             # Reset proactive GC tracking for this turn
             self._gc_threshold_crossed = False
             self._gc_threshold_callback = on_gc_threshold
+
+            # Scrub provider tool-ids (t_xxxxxxxx / c_xxxxxxxx) out of user-facing
+            # MODEL text before it reaches the client.  The id exists only at the
+            # provider boundary, but the model's free-text narration can mention
+            # one — and that must not surface to the user.  Runner-side, where the
+            # _reverse map is populated at schema build.  StreamScrubber handles
+            # ids split across streaming chunks; history keeps the raw ids (the
+            # model stays on hashes), only the user-facing emission is scrubbed.
+            _id_scrubber = StreamScrubber()
+            _raw_output = on_output
+            if _raw_output is not None:
+                def on_output(source, text, mode, _raw=_raw_output, _s=_id_scrubber):
+                    if source == "model" and text:
+                        text = _s.feed(text)
+                        if not text:
+                            return
+                    _raw(source, text, mode)
 
             # Store output callback for this turn so enrichment can use it directly
             # This avoids the race condition where concurrent sessions overwrite
@@ -2892,11 +4094,28 @@ NOTES
 
             try:
                 response = self._run_chat_loop(processed_message, on_output, wrapped_usage_callback)
+                # Stamp the final response as the trace-level output on the
+                # AGENT root span (mirrors input.value above), so the trace's
+                # Output column is populated from the root observation rather
+                # than left blank. Redacted with input.value when enabled.
+                try:
+                    if response:
+                        turn_span.set_attribute("output.value", response)
+                        turn_span.set_attribute("output.mime_type", "text/plain")
+                except Exception:
+                    pass
                 turn_span.set_status_ok()
             except Exception as e:
                 turn_span.record_exception(e)
                 turn_span.set_status_error(str(e))
                 raise
+            finally:
+                # Emit any trailing partial-id fragment the scrubber held back at
+                # the last chunk boundary (raw output — already scrubbed by flush).
+                if _raw_output is not None:
+                    _tail = _id_scrubber.flush()
+                    if _tail:
+                        _raw_output("model", _tail, "write")
 
             # Record turn completion metadata
             turn_metadata = {}
@@ -2912,7 +4131,7 @@ NOTES
                 self._maybe_collect_after_turn()
 
             # Notify session plugin
-            self._notify_session_turn_complete()
+            self._persistence.notify_turn_complete()
 
             # Notify reliability plugin of turn end
             if self._runtime.reliability_plugin:
@@ -2958,6 +4177,15 @@ NOTES
                     percent_used = (usage.total_tokens / context_limit) * 100
                     threshold = self._gc_config.threshold_percent if self._gc_config else 80.0
 
+                    # Diagnostic: log the provider-reported wire size
+                    # (the proactive denominator) alongside the
+                    # InstructionBudget breakdown so the two can be
+                    # compared and the wire_tool_schemas registration
+                    # verified.  Only on a fresh per-turn crossing-check
+                    # (gated by ``not _gc_threshold_crossed``), so it
+                    # fires ~once per turn, not per stream chunk.
+                    self._log_gc_denominator("proactive", usage.total_tokens)
+
                     if percent_used >= threshold:
                         self._gc_threshold_crossed = True
                         self._trace(f"PROACTIVE_GC: Threshold crossed ({percent_used:.1f}% >= {threshold}%)")
@@ -2972,6 +4200,56 @@ NOTES
 
         return wrapped_callback
 
+    def _dedup_history_for_gc(self) -> int:
+        """Collapse byte-identical duplicate tool-results in history (GC Phase 0).
+
+        A model that re-invokes the same tool and gets the identical
+        payload back (the qwen3 ``listAvailableTemplates`` re-call
+        pathology) bloats the wire with redundant copies that GC EVICTION
+        cannot reclaim when they sit in the ``preserve_recent_turns``
+        window.  This SHRINKS each earlier duplicate's result body to a
+        marker (recency, message structure, and tool_call/tool_result
+        pairing all preserved; only exact duplicates touched — zero data
+        loss), then:
+
+        1. invalidates the per-message token cache for the shrunk
+           messages (their ``message_id`` is unchanged, so the cache would
+           otherwise return the stale pre-dedup count); and
+        2. re-syncs the CONVERSATION budget so the denominator reflects
+           the smaller wire.
+
+        Runs before the eviction phases so eviction only handles whatever
+        is still over budget.  Returns the estimated tokens reclaimed
+        (0 if nothing deduped).  No-op when ``dedup_identical_tool_results``
+        is disabled on the GC config (default enabled).
+        """
+        if not self._instruction_budget:
+            return 0
+        if not getattr(
+            self._gc_config, "dedup_identical_tool_results", True
+        ):
+            return 0
+
+        history = self.get_history()
+        new_history, chars_reclaimed, elided_ids = dedup_identical_tool_results(
+            history
+        )
+        if not elided_ids:
+            return 0
+
+        for mid in elided_ids:
+            self._msg_token_cache.pop(mid, None)
+        self._history.replace(new_history)
+        self._update_conversation_budget()
+        self._emit_instruction_budget_update()
+
+        freed_tokens = chars_reclaimed // 4
+        self._trace(
+            f"GC_DEDUP: collapsed {len(elided_ids)} duplicate tool-result "
+            f"message(s), ~{freed_tokens} tokens reclaimed"
+        )
+        return freed_tokens
+
     def _maybe_collect_after_turn(self) -> Optional[GCResult]:
         """Perform GC after turn if threshold was crossed during streaming."""
         if not self._gc_plugin or not self._gc_config:
@@ -2985,8 +4263,20 @@ NOTES
             if self._budget_counting_thread.is_alive():
                 self._trace("PROACTIVE_GC: Background counting still running after 5s, proceeding with estimates")
 
+        # Phase 0: collapse byte-identical duplicate tool-results BEFORE
+        # eviction.  This reclaims redundancy that sits inside the
+        # preserve_recent_turns window (where eviction can't reach) by
+        # shrinking — not removing — the duplicates.  Run first so the
+        # context_usage / history below reflect the smaller wire and
+        # eviction only handles whatever's still over budget.
+        self._dedup_history_for_gc()
+
         context_usage = self.get_context_usage()
         history = self.get_history()
+
+        # Diagnostic: the InstructionBudget denominator this GC decision
+        # is actually evaluating (with wire_tool_schemas broken out).
+        self._log_gc_denominator("after_turn")
 
         # Build pre-GC telemetry attributes for span context
         gc_attrs = self._build_gc_span_attributes(
@@ -3050,209 +4340,51 @@ NOTES
                 attrs.update(cache_attrs)
             except Exception as e:
                 self._trace(f"LLM_TELEMETRY: cache attr fetch failed: {e}")
+        # Custom attributes set via set_llm_span_attributes (e.g. a prefetch's
+        # prompt-management link). Last so callers can override framework keys.
+        if self._llm_span_attributes:
+            attrs.update(self._llm_span_attributes)
         return attrs
-
-    def _classify_cache_outcome(
-        self,
-        prompt_tokens: int,
-        cache_read_tokens: Optional[int],
-        cache_creation_tokens: Optional[int],
-    ) -> str:
-        """Classify a request's cache hit/miss outcome.
-
-        Returns:
-            "hit"   — most prompt tokens served from cache (>= 80%)
-            "partial" — some prompt tokens served from cache (10-80%)
-            "warm"  — cache was being written but not read (creation only)
-            "miss"  — no cache reads, no creation
-            "unknown" — usage data missing
-        """
-        if not prompt_tokens or prompt_tokens <= 0:
-            return "unknown"
-        read = cache_read_tokens or 0
-        creation = cache_creation_tokens or 0
-        ratio = read / prompt_tokens if prompt_tokens else 0
-        if ratio >= 0.8:
-            return "hit"
-        if ratio >= 0.1:
-            return "partial"
-        if creation > 0:
-            return "warm"
-        return "miss"
-
-    def _populate_llm_span_outcome(
-        self,
-        llm_span: Any,
-        response: Optional['ProviderResponse'],
-    ) -> None:
-        """Populate an LLM span with cache outcome derived from the response.
-
-        Called after ``provider.complete()`` returns.  Extracts the
-        cache hit/miss classification from response.usage and sets it
-        as a span attribute.
-        """
-        if not llm_span or not response or not getattr(response, "usage", None):
-            return
-        try:
-            usage = response.usage
-            prompt = int(getattr(usage, "prompt_tokens", 0) or 0)
-            read = getattr(usage, "cache_read_tokens", None)
-            creation = getattr(usage, "cache_creation_tokens", None)
-            llm_span.set_attribute("cache.read_tokens", int(read or 0))
-            llm_span.set_attribute("cache.creation_tokens", int(creation or 0))
-            llm_span.set_attribute(
-                "cache.outcome",
-                self._classify_cache_outcome(prompt, read, creation),
-            )
-        except Exception as e:
-            self._trace(f"LLM_TELEMETRY: failed to populate cache outcome: {e}")
 
     def _build_gc_span_attributes(
         self, context_usage: Dict[str, Any], pre_collect: bool = True,
     ) -> Dict[str, Any]:
         """Build the initial attribute dict for a GC telemetry span.
 
-        Captures budget state, cache anchor (if a cache plugin is active),
-        and context usage at the moment GC is about to run.  These are
-        the "before" values; ``_populate_gc_span_result`` adds the "after"
-        values once GC completes.
-
-        Args:
-            context_usage: Output of ``get_context_usage()``.
-            pre_collect: Reserved for future divergence between pre/post
-                attribute sets.  Currently always True.
-
-        Returns:
-            Dict of OTel-friendly attributes.
+        Thin wrapper over :func:`gc_support.build_gc_span_attributes`
+        supplying this session's budget and cache plugin. ``pre_collect``
+        is reserved for future pre/post divergence (currently unused).
         """
-        attrs: Dict[str, Any] = {
-            "gc.percent_used": float(context_usage.get("percent_used", 0)),
-            "gc.tokens_total": int(context_usage.get("total_tokens", 0)),
-            "gc.context_limit": int(context_usage.get("context_limit", 0)),
-        }
-        if self._instruction_budget:
-            try:
-                attrs["gc.tokens_before"] = int(self._instruction_budget.total_tokens())
-            except Exception:
-                pass
-        # Cache anchor (if any cache plugin exposes it)
-        cache = getattr(self, "_cache_plugin", None)
-        if cache and hasattr(cache, "get_cache_anchor_message_id"):
-            try:
-                anchor = cache.get_cache_anchor_message_id()
-                if anchor:
-                    attrs["gc.cache_anchor_message_id"] = anchor
-            except Exception:
-                pass
-        return attrs
+        return _gc_build_span_attributes(
+            context_usage,
+            budget=self._instruction_budget,
+            cache_plugin=getattr(self, "_cache_plugin", None),
+        )
 
     def _populate_gc_span_result(self, gc_span: Any, result: 'GCResult') -> None:
         """Populate a GC span with attributes derived from the GC result.
 
-        Called after ``gc_plugin.collect()`` returns.  The span receives
-        per-phase counts and aggregate metrics so external observers can
-        correlate GC operations with subsequent cache hit/miss outcomes.
-
-        Args:
-            gc_span: The active OTel span (or no-op span when telemetry
-                is disabled).
-            result: The ``GCResult`` from ``gc_plugin.collect()``.
+        Thin wrapper over :func:`gc_support.populate_gc_span_result`.
         """
-        if not gc_span:
-            return
-        try:
-            gc_span.set_attribute("gc.success", bool(result.success))
-            gc_span.set_attribute("gc.items_collected", int(result.items_collected))
-            gc_span.set_attribute("gc.tokens_freed", int(result.tokens_freed))
-            gc_span.set_attribute("gc.tokens_after", int(result.tokens_after))
-            # Per-phase counts come from result.details
-            details = result.details or {}
-            for key in (
-                "ephemeral_removed",
-                "partial_removed",
-                "preservable_removed",
-                "enrichment_cleared",
-                "tokens_to_free",
-                "target_tokens",
-            ):
-                if key in details:
-                    val = details[key]
-                    # bool first to avoid being treated as int
-                    if isinstance(val, bool):
-                        gc_span.set_attribute(f"gc.{key}", val)
-                    elif isinstance(val, (int, float)):
-                        gc_span.set_attribute(f"gc.{key}", val)
-        except Exception as e:
-            self._trace(f"GC_TELEMETRY: failed to populate span attrs: {e}")
+        _gc_populate_span_result(gc_span, result, on_trace=self._trace)
 
     def _apply_gc_removal_list(
         self, result: GCResult, gc_span: Any = None,
     ) -> None:
         """Apply GC removal list to instruction budget.
 
-        This synchronizes the budget with the actual history changes made by GC.
-        Must be called after a successful GC operation.
-
-        Args:
-            result: The GCResult containing the removal_list.
-            gc_span: Optional active GC telemetry span; passed to the
-                cache plugin's ``on_gc_result`` so it can emit cache
-                invalidation events on the same span.
+        Thin wrapper over :func:`gc_support.apply_gc_removal_list`
+        supplying this session's budget, cache plugin, and trace. Must be
+        called after a successful GC operation to keep the budget in sync
+        with the history changes.
         """
-        if not self._instruction_budget or not result.removal_list:
-            return
-
-        for item in result.removal_list:
-            if item.child_key:
-                # Remove specific child entry
-                self._instruction_budget.remove_child(item.source, item.child_key)
-            else:
-                # Bulk clear entire source (e.g., ENRICHMENT)
-                entry = self._instruction_budget.get_entry(item.source)
-                if entry:
-                    entry.tokens = 0
-                    entry.children.clear()
-
-        # If summary was created (summarize/hybrid plugins), add summary entry
-        summary_tokens = result.details.get("summary_tokens")
-        if summary_tokens and summary_tokens > 0:
-            # Find or create a unique summary key
-            conv_entry = self._instruction_budget.get_entry(InstructionSource.CONVERSATION)
-            if conv_entry:
-                # Count existing summaries to generate unique key
-                summary_count = sum(
-                    1 for key in conv_entry.children.keys()
-                    if key.startswith("gc_summary_")
-                )
-                summary_key = f"gc_summary_{summary_count + 1}"
-                self._instruction_budget.add_child(
-                    source=InstructionSource.CONVERSATION,
-                    child_key=summary_key,
-                    tokens=summary_tokens,
-                    gc_policy=GCPolicy.PRESERVABLE,
-                    label=f"Context Summary #{summary_count + 1}",
-                    metadata={"created_by": result.plugin_name},
-                )
-
-        self._trace(
-            f"GC_BUDGET_SYNC: Applied {len(result.removal_list)} removals to budget"
+        _gc_apply_removal_list(
+            result,
+            budget=self._instruction_budget,
+            cache_plugin=getattr(self, '_cache_plugin', None),
+            on_trace=self._trace,
+            gc_span=gc_span,
         )
-
-        # Notify cache plugin about GC so it can track prefix invalidation.
-        # The cache plugin may emit a 'cache.prefix_invalidated' event on
-        # the active gc_span (when provided) so the GC↔cache coordination
-        # is visible in the trace.
-        _cache = getattr(self, '_cache_plugin', None)
-        if _cache and hasattr(_cache, 'on_gc_result'):
-            try:
-                # Try the span-aware signature first; fall back to legacy
-                # call if the cache plugin only accepts the result.
-                try:
-                    _cache.on_gc_result(result, gc_span=gc_span)
-                except TypeError:
-                    _cache.on_gc_result(result)
-            except Exception as e:
-                self._trace(f"CACHE_PLUGIN: on_gc_result failed: {e}")
 
     def _enrich_and_clean_prompt(self, prompt: str, turn_span=None) -> str:
         """Run prompt through enrichment pipeline and strip @references.
@@ -3291,9 +4423,165 @@ NOTES
     # into a single TurnResult-based flow.  They are used exclusively
     # by ``_run_chat_loop`` and its sub-methods.
 
+    def _maybe_rewind(self, response: ProviderResponse) -> bool:
+        """Attempt a rewind-with-hint recovery for truncated tool calls.
+
+        Detects the ``MAX_TOKENS``-truncated tool call pathology (see
+        ``shared/rewind.py``), rewrites the last assistant message to
+        preserve its narration text while dropping the half-serialized
+        ``tool_use`` part, and appends a synthetic user-role hint
+        naming the specific tool and the truncation reason.  On a hit,
+        the caller should ``continue`` its request loop to re-request
+        the provider with the rewritten history.
+
+        Bounded by :data:`REWIND_BUDGET_PER_OPERATION` — after the cap
+        is reached the pathology is allowed to surface normally via
+        the existing abnormal-termination path in
+        :meth:`_classify_finish_reason`.  The counter resets on any
+        successful tool execution (see the tool-call completion path).
+
+        Telemetry: on fire, sets ``jaato.rewind.reason``,
+        ``jaato.rewind.tool``, and ``jaato.rewind.count`` on the active
+        turn span.
+
+        Args:
+            response: The just-received :class:`ProviderResponse` whose
+                function calls will be inspected.
+
+        Returns:
+            True when the detector fired AND the rewind budget
+            allowed it AND narration text was successfully preserved —
+            caller should re-request the provider.  False otherwise
+            (no detection, budget exhausted, or nothing to preserve).
+        """
+        from .rewind import (
+            detect_truncated_tool_call,
+            find_truncated_call_name,
+        )
+
+        tool_schemas = (
+            self._runtime.registry.get_exposed_tool_schemas()
+            if self._runtime and self._runtime.registry else []
+        )
+        reason = detect_truncated_tool_call(response, tool_schemas)
+        if reason is None:
+            return False
+
+        if self._rewind_count >= REWIND_BUDGET_PER_OPERATION:
+            self._trace(
+                f"REWIND_BUDGET_EXHAUSTED reason={reason} "
+                f"count={self._rewind_count}, letting failure surface"
+            )
+            return False
+
+        bad_call_name = (
+            find_truncated_call_name(response, tool_schemas) or "unknown"
+        )
+        preserved = self._history.rewrite_last_dropping_tool_use()
+        if preserved is None:
+            # No narration to anchor the hint on — fall through.
+            self._trace(
+                f"REWIND_SKIP reason={reason} tool={bad_call_name}: "
+                "no narration preserved"
+            )
+            return False
+
+        self._history.append(
+            Message.from_text(Role.USER, self._build_rewind_hint_text(
+                bad_call_name, reason, preserved,
+            )),
+        )
+        self._rewind_count += 1
+
+        span = getattr(self, '_current_turn_span', None)
+        if span is not None:
+            try:
+                span.set_attribute("jaato.rewind.reason", reason)
+                span.set_attribute("jaato.rewind.tool", bad_call_name)
+                span.set_attribute("jaato.rewind.count", self._rewind_count)
+            except Exception as exc:
+                logger.debug(f"Failed to set rewind telemetry: {exc}")
+
+        self._trace(
+            f"REWIND fired reason={reason} tool={bad_call_name} "
+            f"count={self._rewind_count} preserved_chars={len(preserved)}"
+        )
+        return True
+
+    def _build_rewind_hint_text(
+        self,
+        tool_name: str,
+        reason: str,
+        preserved_narration: str,
+    ) -> str:
+        """Compose the synthetic user-role hint injected after a rewind.
+
+        The hint references the model's own preserved narration, names
+        the specific tool, explains the detection reason, and offers a
+        concrete recipe for working around the truncation.  Keeping the
+        message conversational ("yes, and here's the right way…") is
+        deliberate — a bare "try again" would read as an unexplained
+        reset to the model.
+        """
+        # Trim narration to keep the hint compact; the model has its own
+        # narration in the preceding assistant turn anyway — we just
+        # need enough to anchor the correction.
+        if len(preserved_narration) > 200:
+            preserved_narration = preserved_narration[:197] + "…"
+
+        reason_explanation = {
+            "max_tokens_empty_args": (
+                "the completion budget truncated your arguments — the "
+                "tool call arrived with empty arguments."
+            ),
+            "max_tokens_missing_required": (
+                "the completion budget truncated your arguments — the "
+                "tool call is missing required fields."
+            ),
+        }.get(reason, "your tool call arguments were truncated.")
+
+        return (
+            f"Before that `{tool_name}` call lands: {reason_explanation} "
+            f"Your narration just before the call was: "
+            f"\"{preserved_narration}\". "
+            f"Please write this in smaller pieces instead — for a large "
+            f"file, start with a skeleton call (e.g. outline or placeholder "
+            f"content), then append each section with follow-up calls. "
+            f"For shell or CLI tools with long inputs, split the work "
+            f"across multiple invocations. Try again now."
+        )
+
+    @staticmethod
+    def _abnormal_finish_message(finish_reason: FinishReason) -> str:
+        """Human-readable banner for an abnormal terminal finish reason.
+
+        Surfaced to clients via an ``on_output("system", ...)`` call (which
+        the server adapter turns into an ``AgentOutputEvent(source="system")``)
+        so an operator sees WHY a turn ended early instead of the truncation
+        looking like a clean completion.  Mirrors the sibling notification
+        the cancellation path emits in ``_handle_cancellation``.
+        """
+        return {
+            FinishReason.MAX_TOKENS:
+                "Model stopped early: hit the output-token limit "
+                "(max_tokens); the response is truncated.",
+            FinishReason.SAFETY:
+                "Model stopped early: the provider's safety filter "
+                "triggered (safety); the response may be incomplete.",
+            FinishReason.ERROR:
+                "Model stopped early: the provider reported an error "
+                "(error).",
+        }.get(
+            finish_reason,
+            f"Model stopped early: "
+            f"{getattr(finish_reason, 'value', finish_reason)}.",
+        )
+
     def _classify_finish_reason(
         self,
         response: ProviderResponse,
+        turn_data: Optional[Dict[str, Any]] = None,
+        on_output: Optional[OutputCallback] = None,
     ) -> Optional[TurnResult]:
         """Classify a provider response's finish reason.
 
@@ -3305,17 +4593,39 @@ NOTES
         ``CANCELLED`` is handled separately by ``_handle_cancellation``
         because it requires additional logic (mid-turn interrupts,
         UI notification, model notification).
+
+        Side effects (both best-effort, gated on the optional args):
+
+        - ``turn_data``: when supplied, the response's finish reason is
+          recorded as ``turn_data['finish_reason']`` (the lowercase enum
+          value) for EVERY response — including normal ``STOP`` — so the
+          terminal classification in a turn leaves the true reason on the
+          turn-accounting dict.  That value rides
+          ``on_agent_turn_completed`` → ``TurnCompletedEvent.finish_reason``
+          out to clients, letting them branch deterministically instead of
+          inferring truncation from empty output.
+        - ``on_output``: when supplied AND the finish is abnormal, a
+          human-readable ``source="system"`` banner is emitted so the
+          abnormal stop is visible, not merely logged — the sibling of the
+          cancellation notification.
         """
-        if response.finish_reason in (
+        finish_reason = response.finish_reason
+        if turn_data is not None and finish_reason is not None:
+            turn_data['finish_reason'] = finish_reason.value
+        if finish_reason in (
             FinishReason.STOP,
             FinishReason.UNKNOWN,
             FinishReason.TOOL_USE,
             FinishReason.CANCELLED,
         ):
             return None
-        logger.warning(f"Model stopped with finish_reason={response.finish_reason}")
+        logger.warning(f"Model stopped with finish_reason={finish_reason}")
+        if on_output is not None:
+            on_output(
+                "system", self._abnormal_finish_message(finish_reason), "write"
+            )
         return TurnResult.from_finish_reason(
-            response.finish_reason, response.get_text()
+            finish_reason, response.get_text()
         )
 
     def _handle_cancellation(
@@ -3580,6 +4890,70 @@ NOTES
             fc_group, turn_data, on_output, cancellation_notified
         )
 
+        # 1.4 Path 1 quirk: signal_completion validation_failed →
+        # request named-function tool_choice on the retry.
+        #
+        # When the lifecycle tool returns
+        # ``{"error": "validation_failed", ...}`` (schema mismatch or
+        # fatal processor error), stamp the failing tool's name on the
+        # session so the NEXT ``provider.complete()`` in this turn can
+        # request server-side xgrammar enforcement via named-function
+        # ``tool_choice``.  Scoped to ``signal_completion`` because
+        # that's the only tool today whose return shape carries the
+        # ``"validation_failed"`` sentinel + a schema-validated payload
+        # contract (see ``shared/lifecycle_tools.py:594``).  The
+        # provider plugin decides whether to honor the request — vllm
+        # honors it when ``force_tool_choice_for_lifecycle`` quirk is
+        # True; providers without the quirk no-op.  Cleared after one
+        # consumed call (see ``_do_send_tool_results``) so the contract
+        # is "one xgrammar-enforced retry, then back to auto".
+        self._maybe_stamp_lifecycle_retry_tool_choice(tool_results)
+
+        # 1.5 signal_completion terminates the turn.
+        #
+        # Pre-2026-06-07 the loop continued past a successful
+        # signal_completion call: the result was sent back to the
+        # model with the task-completion spur appended (line 5708,
+        # ``_send_tool_results_and_continue``), the model read
+        # "After each action, continue working..." and either
+        # (a) STRONG models recognized the request was already
+        #     fulfilled, emitted plain text with no tool calls, and
+        #     the outer ``while any(p.function_call ...)`` loop
+        #     exited naturally — the spur worked harmlessly.
+        # (b) WEAK models (Llama 3.1 8B AWQ in the vLLM smoke
+        #     2026-06-07) took "continue working" literally and
+        #     called signal_completion AGAIN with the same payload.
+        #     Framework returned ``{status: completed, ...}`` plus
+        #     the spur AGAIN.  Infinite loop until the harness
+        #     timeout.
+        #
+        # The architectural fix: signal_completion is the terminal
+        # tool by contract.  When it succeeds (= schema validation
+        # passed if ``completion_payload_schema`` is declared, and
+        # all configured completion processors passed — see
+        # ``LifecycleTools._execute_signal_completion``), the
+        # session is OVER.  ``hooks.on_agent_completed`` already
+        # fired inside the executor; downstream consumers have
+        # their event.  There is no model call left to make.
+        # Terminating here is correct for ALL providers — strong
+        # models save one wasted round-trip, weak models stop
+        # looping.
+        #
+        # IMPORTANT: ``_signal_completion_called`` is set ONLY on
+        # the validated-success path.  Schema-validation failures
+        # and fatal-processor failures return the
+        # ``validation_failed`` self-correction error without
+        # setting the flag — so this guard does NOT terminate on
+        # those paths; the normal continuation lets the model
+        # retry signal_completion with a corrected payload.
+        if getattr(self, "_signal_completion_called", False):
+            final_text = ''.join(accumulated_text) if accumulated_text else ""
+            self._trace(
+                "SIGNAL_COMPLETION_TERMINATES_TURN: skipping continuation "
+                "(spur + model round-trip) — session is over"
+            )
+            return None, TurnResult.success(final_text), False
+
         # 2. Simple cancellation check after execution
         if self._is_cancelled():
             reason = self._cancel_token.cancel_reason if self._cancel_token else ""
@@ -3601,6 +4975,15 @@ NOTES
             self._update_conversation_budget()
             self._maybe_collect_before_send()
 
+        # 2.7. Intra-turn refuse-send gate (dispatch chokepoint).  Refresh the
+        # budget so it reflects the post-GC tool-results payload about to be
+        # sent, then refuse if it still exceeds the context window.  Runs
+        # regardless of GC config (GC only tries to reduce; the gate is the
+        # hard stop) — the refresh above is inside the GC branch and would be
+        # skipped when GC is disabled.
+        self._update_conversation_budget()
+        self._assert_payload_fits_context()
+
         # 3. Send results and get continuation
         response = self._send_tool_results_and_continue(
             tool_results, use_streaming, on_output, wrapped_usage_callback, turn_data
@@ -3619,7 +5002,7 @@ NOTES
             return cr.new_response, None, True
 
         # 5. Classify finish reason for abnormal stops
-        abnormal = self._classify_finish_reason(response)
+        abnormal = self._classify_finish_reason(response, turn_data, on_output)
         if abnormal is not None:
             return None, abnormal, False
 
@@ -3742,13 +5125,35 @@ NOTES
             # Rolled back in the outer except block if all retries fail.
             self._history.append(Message.from_text(Role.USER, message))
 
-            # Send message (streaming or batched) with telemetry
-            with self._telemetry.llm_span(
+            # Pre-flight refuse-send gate (dispatch chokepoint).  The user
+            # message is now in history; refresh the budget so it reflects
+            # THIS outgoing prompt, then refuse to dispatch if the accounted
+            # payload (plus the provider's max_tokens cap when known) exceeds
+            # the context window.  Placed here — not at the top of
+            # send_message — because that is before the prompt is appended, so
+            # the budget there cannot see it (the single massive first-turn
+            # prompt would slip through).  Runs once before the rewind retry
+            # loop.
+            self._update_conversation_budget()
+            self._assert_payload_fits_context()
+
+            # Send message (streaming or batched) with telemetry.
+            #
+            # Wrapped in a ``while True`` retry loop to support the
+            # rewind-with-hint recovery path for MAX_TOKENS-truncated
+            # tool calls.  Normal runs iterate once and ``break``.  A
+            # rewind detection rewrites history, injects a user-role
+            # hint, and ``continue``s to re-request the provider —
+            # bounded by ``REWIND_BUDGET_PER_OPERATION``.  See
+            # ``docs/design/rewind-with-hint.md`` and
+            # ``shared/rewind.py``.
+            while True:
+              with self._telemetry.llm_span(
                 model=self._model_name or "unknown",
                 provider=self._provider.name if self._provider else "unknown",
                 streaming=use_streaming,
                 attributes=self._build_llm_span_attributes(),
-            ) as llm_telemetry:
+              ) as llm_telemetry:
                 self._record_input_messages_telemetry(llm_telemetry)
                 if use_streaming:
                     # Track whether we've sent the first chunk (to use "write" vs "append")
@@ -3798,7 +5203,7 @@ NOTES
                         turn_result, _retry_stats = with_retry(
                             lambda: self._provider.complete(
                                 self._history.messages,
-                                system_instruction=self._system_instruction,
+                                system_instruction=self._get_effective_system_instruction(),
                                 tools=self._get_tools_for_provider(),
                                 on_chunk=streaming_callback,
                                 cancel_token=self._cancel_token,
@@ -3819,7 +5224,7 @@ NOTES
                         turn_result, _retry_stats = with_retry(
                             lambda: self._provider.complete(
                                 self._history.messages,
-                                system_instruction=self._system_instruction,
+                                system_instruction=self._get_effective_system_instruction(),
                                 tools=self._get_tools_for_provider(),
                             ),
                             context="complete",
@@ -3837,7 +5242,18 @@ NOTES
                 self._turn_model_response_count += 1
                 # Record token usage to telemetry span
                 self._record_token_telemetry(llm_telemetry, response)
-            self._trace(f"SESSION_STREAMING_COMPLETE parts_count={len(response.parts)} finish={response.finish_reason}")
+              self._trace(f"SESSION_STREAMING_COMPLETE parts_count={len(response.parts)} finish={response.finish_reason}")
+
+              # Rewind-with-hint hook: detect MAX_TOKENS-truncated tool
+              # calls, rewrite history to preserve narration, inject a
+              # corrective user-role hint, and re-request the provider.
+              # ``_maybe_rewind`` returns True when the rewind fired and
+              # the budget allowed it — in which case we loop to
+              # re-request.  Otherwise we break and fall through to the
+              # existing abnormal-termination classifier.
+              if self._maybe_rewind(response):
+                continue
+              break
 
             # Emit turn progress after initial response
             pending_calls = len([p for p in response.parts if p.function_call])
@@ -3851,7 +5267,7 @@ NOTES
                 on_output("thinking", response.thinking, "write")
 
             # Check finish_reason for abnormal termination
-            abnormal = self._classify_finish_reason(response)
+            abnormal = self._classify_finish_reason(response, turn_data, on_output)
             if abnormal is not None:
                 return abnormal.text
 
@@ -4156,6 +5572,34 @@ NOTES
             self._cancel_token = None
             self._set_activity_phase(ActivityPhase.IDLE)
 
+            # Session quiescence hook (server 0.6.27+).  When the agent
+            # called ``signal_completion`` during this turn AND the
+            # turn has now fully wrapped up, the session is quiescent
+            # and safe to terminate.  Notify hooks so the JaatoServer
+            # adapter can emit ``SessionTerminatedEvent`` to attached
+            # clients — replaces the legacy "subscribe AGENT_COMPLETED
+            # + wait 10s for TURN_COMPLETED" heuristic.
+            if (
+                getattr(self, "_signal_completion_called", False)
+                and not getattr(self, "_session_quiescent_emitted", False)
+            ):
+                self._session_quiescent_emitted = True
+                hooks = getattr(self, "_ui_hooks", None) or getattr(
+                    self, "_callbacks", None
+                )
+                if hooks is not None and hasattr(hooks, "on_session_quiescent"):
+                    try:
+                        hooks.on_session_quiescent(
+                            agent_id=self._agent_id,
+                            reason="natural",
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "on_session_quiescent hook raised: %s — "
+                            "event emission skipped, session will still "
+                            "wind down correctly", exc,
+                        )
+
             # Notify parent that this subagent is now idle
             # IDLE should be sent after COMPLETED (subagent ready for more work/cleanup),
             # but NOT after CANCELLED or ERROR (abnormal termination states).
@@ -4167,6 +5611,133 @@ NOTES
             # Child messages are status updates from subagents that were queued
             # while we were busy. Process them before truly becoming idle.
             self._drain_child_messages(on_output)
+
+    def _maybe_stamp_lifecycle_retry_tool_choice(
+        self, tool_results: List[ToolResult],
+    ) -> None:
+        """Path 1 quirk hook (server 0.6.195+).
+
+        Scan ``tool_results`` for ``signal_completion`` returning
+        ``{"error": "validation_failed", ...}`` — the canonical
+        self-correction shape from ``LifecycleTools._execute_signal_completion``
+        when ``completion_payload_schema`` rejected the args.  When
+        found, stamp ``self._pending_tool_choice_name`` with the tool
+        name so the next ``provider.complete()`` call passes
+        ``tool_choice={type: function, function: {name: ...}}`` to the
+        provider.
+
+        Only ``signal_completion`` is scoped today — it's the only
+        tool whose return contract carries the ``"validation_failed"``
+        sentinel + a typed-payload schema worth enforcing via
+        server-side xgrammar.  Generalizing to other tools is
+        mechanical (drop the name check) once another tool surfaces
+        the same pattern.
+
+        Non-validation_failed tool results, results without the
+        sentinel, and results from other tools are no-ops.  The
+        provider plugin decides whether to honor the request via its
+        own quirk gate (vllm: ``force_tool_choice_for_lifecycle``);
+        Stamping is GATED on the active provider HONORING the quirk —
+        ``getattr(self._provider, "_force_tool_choice_for_lifecycle",
+        False)`` (server 0.6.166+, mirrors the
+        ``force_narration_between_tools`` provider-attr gate at the
+        tool-result append site).  A provider whose ``complete()`` does
+        not accept ``tool_choice`` never sets this attr, so the quirk is
+        a silent NO-OP for it — no stamp, no ``tool_choice`` ever passed
+        to its ``complete()``.  This replaces the prior
+        "provider-agnostic stamp + providers ignore the kwarg" design,
+        which ``TypeError``'d on every provider whose signature lacks the
+        kwarg (openrouter codegen, 2026-06-11; only vllm/anthropic/
+        tensorrt_llm accept it, and only vllm sets the attr).
+        Profile-scoped via ``profile.quirks.force_tool_choice_for_lifecycle``.
+        """
+        # Quirk gate: only form the forced-tool_choice intent when the
+        # active provider declares it honors the quirk.  Providers that
+        # don't support the ``tool_choice`` kwarg never set this attr ->
+        # no-op (no TypeError on their complete()).
+        if not getattr(
+            self._provider, "_force_tool_choice_for_lifecycle", False,
+        ):
+            return
+        # PR-255 PROBE INSTRUMENTATION (TEMPORARY, 2026-06-08).
+        #
+        # Empirical disagreement between code-trace + grep on
+        # /tmp/provider_trace.log (zero PENDING_TOOL_CHOICE all-time
+        # despite a cascade flow that DEFINITELY hit signal_completion
+        # validation_failed per peer 7:1's daemon log at 06:13:32).
+        # Three competing hypotheses can't be resolved by reading
+        # source alone: (1) function never called, (2) tr.result is
+        # not a dict at scan time (peer's original hypothesis: spur
+        # stringification reaches us), or (3) result.get("error") is
+        # something other than "validation_failed".
+        #
+        # This single logger.info captures count / names / types /
+        # error_keys-or-first-64-chars in one line per scan so the
+        # next cascade re-run triangulates which holds.  Writes to
+        # ``workspace/.jaato/logs/session_<sid>_*.log`` via the
+        # module-level ``logger`` (per peer-verified path at
+        # ``/home/apanoia/Sources/Jaato-framework-and-examples/jaato-based-kb-enablement-2.0/tests/runs/cascade_smoke/.jaato/logs/``).
+        # Revert after the actual fix lands as PR-256.
+        logger.info(
+            "MAYBE_STAMP_SCAN count=%d names=%s types=%s error_keys=%s",
+            len(tool_results),
+            [t.name for t in tool_results],
+            [type(t.result).__name__ for t in tool_results],
+            [
+                t.result.get("error") if isinstance(t.result, dict)
+                else (t.result[:64] if isinstance(t.result, str) else None)
+                for t in tool_results
+            ],
+        )
+
+        for tr in tool_results:
+            if tr.name != "signal_completion":
+                continue
+            result = tr.result
+            # Result can be dict, string, or other; we only match the
+            # dict shape with the canonical sentinel.
+            if not isinstance(result, dict):
+                continue
+            if result.get("error") != "validation_failed":
+                continue
+            self._pending_tool_choice_name = tr.name
+            self._trace(
+                f"PENDING_TOOL_CHOICE: {tr.name} stamped after "
+                f"validation_failed return — next provider.complete() "
+                f"will request named-function tool_choice if the "
+                f"provider honors the force_tool_choice_for_lifecycle "
+                f"quirk"
+            )
+            return
+
+    def _consume_pending_tool_choice(self) -> Optional[Dict[str, Any]]:
+        """Return the pending tool_choice dict (OpenAI/vLLM wire shape)
+        and clear the stamp.  Called once per ``provider.complete()``
+        at every call site in the turn loop so the retry request fires
+        for exactly one model call before reverting to auto.
+
+        Returns ``None`` when no retry is pending.  Returns a dict
+        ``{"type": "function", "function": {"name": <tool_name>}}``
+        when ready to consume — the canonical OpenAI Chat Completions
+        wire shape; other providers translate (or ignore) at their
+        plugin layer.
+        """
+        # PR-256 PROBE: log consume outcome to distinguish B.1
+        # ("consume returns None for context but not discovery") from
+        # B.2/B.3 (consume returns name but provider-side or wire-side
+        # breaks the chain).  Same destination as the entry probe in
+        # PR-255 — per-session log via module-level ``logger``.
+        # Revert with PR-257 alongside the actual fix.
+        if not self._pending_tool_choice_name:
+            logger.info("MAYBE_STAMP_CONSUME pending=None — no retry queued")
+            return None
+        name = self._pending_tool_choice_name
+        self._pending_tool_choice_name = None
+        logger.info(
+            "MAYBE_STAMP_CONSUME pending=%r — returning OpenAI wire shape, "
+            "cleared", name,
+        )
+        return {"type": "function", "function": {"name": name}}
 
     def _execute_function_call_group(
         self,
@@ -4190,10 +5761,17 @@ NOTES
         # Track that this turn has tool calls (for turn complexity classification)
         self._turn_had_tool_calls = True
 
-        # Check if parallel execution is enabled
-        parallel_enabled = os.environ.get(
-            'JAATO_PARALLEL_TOOLS', 'true'
-        ).lower() not in ('false', '0', 'no')
+        # Check if parallel execution is enabled.  Per-call override
+        # via SendMessageRequest.parallel_tools wins over env; cleared
+        # after one consultation so it only affects the current turn.
+        override = getattr(self, '_parallel_tools_override', None)
+        if override is not None:
+            parallel_enabled = bool(override)
+            self._parallel_tools_override = None
+        else:
+            parallel_enabled = os.environ.get(
+                'JAATO_PARALLEL_TOOLS', 'true'
+            ).lower() not in ('false', '0', 'no')
 
         # Use parallel execution for multiple calls, sequential for single call
         if parallel_enabled and len(function_calls) > 1:
@@ -4309,6 +5887,18 @@ NOTES
 
                 # Emit tool end hook as each completes
                 result = results[fc.id or fc.name]
+                # Rewind-with-hint budget reset: a successful tool
+                # execution ends the "logical operation" that the
+                # rewind budget is gating.  Future MAX_TOKENS-truncated
+                # calls in this session start fresh instead of being
+                # starved by an exhausted counter.  See
+                # ``_maybe_rewind`` for the counter's consumer side.
+                if result.success and self._rewind_count > 0:
+                    self._trace(
+                        f"REWIND_BUDGET_RESET on successful {fc.name} "
+                        f"(was count={self._rewind_count})"
+                    )
+                    self._rewind_count = 0
                 fc_duration = (result.end_time - result.start_time).total_seconds()
                 # Check if tool was auto-backgrounded or has continuation
                 fc_auto_bg = False
@@ -4323,6 +5913,9 @@ NOTES
                         fc_show_output = er.get('show_output')
                         fc_show_popup = er.get('show_popup')
                 if self._ui_hooks:
+                    fc_result_payload = _split_executor_result_impl(
+                        result.executor_result
+                    )[1]
                     self._ui_hooks.on_tool_call_end(
                         agent_id=self._agent_id,
                         tool_name=fc.name,
@@ -4334,6 +5927,7 @@ NOTES
                         continuation_id=fc_continuation_id,
                         show_output=fc_show_output,
                         show_popup=fc_show_popup,
+                        is_error_result=tool_result_is_error(fc_result_payload),
                     )
 
         # Build results in original order
@@ -4367,7 +5961,7 @@ NOTES
         """Execute a streaming tool via the StreamManager.
 
         Args:
-            fc: The function call (with :stream suffix).
+            fc: The function call (with -stream suffix).
             on_output: Optional callback for UI updates.
 
         Returns:
@@ -4484,7 +6078,7 @@ NOTES
             call_id=fc.id or "",
             plugin_type=plugin_type,
         ) as tool_span:
-            # Check if this is a streaming tool (name ends with :stream)
+            # Check if this is a streaming tool (name ends with -stream)
             # Set tool input
             tool_span.set_attribute("input.value", json.dumps(args) if args else "{}")
             tool_span.set_attribute("input.mime_type", "application/json")
@@ -4565,7 +6159,7 @@ NOTES
             elif isinstance(executor_result, dict):
                 result_dict_for_output = executor_result
             if result_dict_for_output is not None:
-                tool_span.set_attribute("output.value", json.dumps(result_dict_for_output))
+                tool_span.set_attribute("output.value", _telemetry_safe_json(result_dict_for_output))
                 tool_span.set_attribute("output.mime_type", "application/json")
 
             # Pack jaato-specific tool metadata
@@ -4594,6 +6188,7 @@ NOTES
 
         # Emit hook: tool ended
         if self._ui_hooks:
+            fc_result_payload = _split_executor_result_impl(executor_result)[1]
             self._ui_hooks.on_tool_call_end(
                 agent_id=self._agent_id,
                 tool_name=name,
@@ -4605,6 +6200,7 @@ NOTES
                 continuation_id=fc_continuation_id,
                 show_output=fc_show_output,
                 show_popup=fc_show_popup,
+                is_error_result=tool_result_is_error(fc_result_payload),
             )
 
         return _ToolExecutionResult(
@@ -4755,7 +6351,7 @@ NOTES
                 tool_span.set_attribute("input.value", json.dumps(args) if args else "{}")
                 tool_span.set_attribute("input.mime_type", "application/json")
 
-                # Check if this is a streaming tool (name ends with :stream)
+                # Check if this is a streaming tool (name ends with -stream)
                 if self._is_streaming_tool(name):
                     # Route to streaming execution
                     executor_result = self._execute_streaming_tool(fc, None)
@@ -4822,7 +6418,7 @@ NOTES
                 elif isinstance(executor_result, dict):
                     result_dict_for_output = executor_result
                 if result_dict_for_output is not None:
-                    tool_span.set_attribute("output.value", json.dumps(result_dict_for_output))
+                    tool_span.set_attribute("output.value", _telemetry_safe_json(result_dict_for_output))
                     tool_span.set_attribute("output.mime_type", "application/json")
 
                 # Pack jaato-specific tool metadata
@@ -4870,20 +6466,16 @@ NOTES
         """Send tool results back to the model and get the continuation response."""
         # with_retry is already imported at module level from .retry_utils
 
-        # Inject task completion spur into last tool result
+        # Inject task-completion spur as a MODEL-FACING suffix on the last tool
+        # result — NOT folded into ``result`` (that str()'d the structured dict
+        # into a repr-string and broke the ledger / provenance / enrichment).
+        # ``result`` stays structured; the converter appends ``model_suffix`` at
+        # serialization time (render_result_for_model).
         if tool_results:
             last = tool_results[-1]
-            result_text = str(last.result) if last.result is not None else ""
-            spurred_result = f"{result_text}\n\n<hidden>{_TASK_COMPLETION_INSTRUCTION}</hidden>"
-            tool_results = tool_results[:-1] + [
-                ToolResult(
-                    call_id=last.call_id,
-                    name=last.name,
-                    result=spurred_result,
-                    is_error=last.is_error,
-                    attachments=last.attachments
-                )
-            ]
+            hidden = f"<hidden>{_TASK_COMPLETION_INSTRUCTION}</hidden>"
+            combined = f"{last.model_suffix}\n\n{hidden}" if last.model_suffix else hidden
+            tool_results = tool_results[:-1] + [_dc_replace(last, model_suffix=combined)]
 
         # Check for queued mid-turn prompts to inject between tool executions.
         # This ensures user prompts are processed during tool-calling chains,
@@ -4911,21 +6503,17 @@ NOTES
         if injected_prompts and tool_results:
             combined_prompt = "\n\n".join(injected_prompts)
             last = tool_results[-1]
-            result_text = str(last.result) if last.result is not None else ""
-            tool_results = tool_results[:-1] + [
-                ToolResult(
-                    call_id=last.call_id,
-                    name=last.name,
-                    result=(
-                        f"{result_text}\n\n"
-                        f"<user_message>{combined_prompt}</user_message>\n"
-                        f"The user has sent a new message during your tool execution. "
-                        f"Please address their input in your next response."
-                    ),
-                    is_error=last.is_error,
-                    attachments=last.attachments
-                )
-            ]
+            # Model-facing suffix (keep ``result`` structured — see above).
+            piggyback = (
+                f"<user_message>{combined_prompt}</user_message>\n"
+                f"The user has sent a new message during your tool execution. "
+                f"Please address their input in your next response."
+            )
+            combined = (
+                f"{last.model_suffix}\n\n{piggyback}"
+                if last.model_suffix else piggyback
+            )
+            tool_results = tool_results[:-1] + [_dc_replace(last, model_suffix=combined)]
             self._trace(
                 f"MID_TURN_PROMPT_PIGGYBACK: Injected {len(injected_prompts)} prompt(s) "
                 f"into last tool result"
@@ -5059,6 +6647,11 @@ NOTES
 
         self._trace("CONTEXT_LIMIT_RECOVERY: Attempting GC before truncation")
 
+        # Phase 0: collapse byte-identical duplicate tool-results first
+        # (shrink, not evict) — reclaims redundancy eviction can't reach in
+        # the preserve_recent_turns window.  See _dedup_history_for_gc.
+        self._dedup_history_for_gc()
+
         context_usage = self.get_context_usage()
         history = self.get_history()
 
@@ -5149,258 +6742,199 @@ NOTES
                 # Hit a non-tool message, stop
                 break
 
-    _TRUNCATION_PRESERVE_LINES = 20  # Lines to keep from the start of truncated results
-    _TRUNCATION_PRESERVE_CHARS = 2000  # Minimum characters to keep when using char-based truncation
-    _TRUNCATION_NOTICE = (
-        "\n\n[NOTICE: This tool result was automatically truncated because it caused "
-        "the prompt to exceed the model's context window. Only the first {kept} "
-        "of {total} are shown above ({removed_tokens} estimated tokens removed). "
-        "If you need more content, re-invoke the tool with offset/limit parameters "
-        "to read in smaller chunks.]"
-    )
-
-    # Target 80% of context limit to leave headroom after truncation
-    _TRUNCATION_TARGET_PERCENT = 0.80
-
     def _truncate_results_to_fit(
         self, tool_results: List[ToolResult], current_tokens: int, limit_tokens: int
     ) -> List[ToolResult]:
-        """Truncate tool results to reduce token count, preserving first lines.
+        """Truncate tool results to reduce token count (reactive recovery).
 
-        Strategy:
-        - Targets 80% of the model's context limit to leave headroom.
-        - Targets the largest results first (they are the most likely culprits).
-        - Preserves the first N lines of content so the model retains useful context.
-        - Appends a notice informing the model about the truncation.
-        - Never removes the tool result itself (models expect one response per call).
-        - Continues truncating multiple tool results until target is reached.
-
-        Args:
-            tool_results: The original tool results.
-            current_tokens: Current total tokens as reported by the model error.
-            limit_tokens: Maximum allowed tokens as reported by the model error.
-
-        Returns:
-            A new list of tool results with large ones truncated.
+        Thin wrapper over
+        :func:`tool_result_truncation.truncate_results_to_fit`.
         """
-        # Estimate size of each result
-        result_sizes = []
-        for i, tr in enumerate(tool_results):
-            result_str = str(tr.result) if tr.result is not None else ""
-            estimated_tokens = len(result_str) / 4  # ~4 chars per token
-            result_sizes.append((i, estimated_tokens, result_str))
-
-        total_result_tokens = sum(size for _, size, _ in result_sizes)
-
-        # Calculate target: reduce to 80% of limit to leave headroom
-        # target_removal = how many tokens we need to remove from current
-        target_context = int(limit_tokens * self._TRUNCATION_TARGET_PERCENT)
-        target_removal = current_tokens - target_context
-
-        self._trace(
-            f"CONTEXT_LIMIT_RECOVERY: truncate called with current={current_tokens}, "
-            f"limit={limit_tokens}, target_context={target_context} (80%), "
-            f"target_removal={target_removal}, total_result_tokens={total_result_tokens}, "
-            f"num_results={len(tool_results)}"
+        return _truncate_results_to_fit_impl(
+            tool_results, current_tokens, limit_tokens, on_trace=self._trace,
         )
-
-        # If we couldn't extract valid token counts, be aggressive: cut 50% of results
-        if target_removal <= 0:
-            target_removal = int(total_result_tokens * 0.5)
-            self._trace(f"CONTEXT_LIMIT_RECOVERY: using aggressive default target_removal={target_removal}")
-
-        # Sort indices by size descending to truncate largest first
-        sized_indices = sorted(
-            range(len(result_sizes)),
-            key=lambda j: result_sizes[j][1],
-            reverse=True,
-        )
-
-        truncated = list(tool_results)  # shallow copy
-        tokens_removed = 0.0
-        preserve_lines = self._TRUNCATION_PRESERVE_LINES
-
-        for j in sized_indices:
-            if tokens_removed >= target_removal:
-                break
-
-            idx, size, result_str = result_sizes[j]
-            tr = tool_results[idx]
-
-            # Skip small results (< 200 tokens estimated) — not worth truncating
-            if size < 200:
-                self._trace(f"CONTEXT_LIMIT_RECOVERY: skipping result {idx} (size={size} < 200)")
-                continue
-
-            # Split into lines and try line-based truncation first
-            lines = result_str.split('\n')
-
-            # Calculate how much content to keep (in characters)
-            # Keep enough to preserve context but remove overflow + safety margin
-            chars_to_remove = int(target_removal * 4)  # tokens -> chars
-            chars_to_keep = max(2000, len(result_str) - chars_to_remove)  # Keep at least 2000 chars
-
-            if len(lines) > preserve_lines:
-                # Line-based truncation: keep first N lines
-                kept_lines = lines[:preserve_lines]
-                kept_text = '\n'.join(kept_lines)
-                truncation_unit = "lines"
-                truncation_kept = preserve_lines
-                truncation_total = len(lines)
-            elif len(result_str) > chars_to_keep:
-                # Character-based truncation: content has few lines but is large
-                # Keep first chars_to_keep characters
-                kept_text = result_str[:chars_to_keep]
-                # Try to break at a word boundary
-                last_space = kept_text.rfind(' ', max(0, chars_to_keep - 200))
-                if last_space > chars_to_keep // 2:
-                    kept_text = kept_text[:last_space]
-                truncation_unit = "characters"
-                truncation_kept = len(kept_text)
-                truncation_total = len(result_str)
-                self._trace(
-                    f"CONTEXT_LIMIT_RECOVERY: using char-based truncation for result {idx} "
-                    f"(lines={len(lines)}, chars={len(result_str)} -> {len(kept_text)})"
-                )
-            else:
-                self._trace(
-                    f"CONTEXT_LIMIT_RECOVERY: skipping result {idx} "
-                    f"(lines={len(lines)}, chars={len(result_str)} — already small enough)"
-                )
-                continue
-
-            kept_tokens = len(kept_text) / 4
-            removed_tokens = size - kept_tokens
-
-            if removed_tokens <= 0:
-                continue
-
-            # Build the truncated content with notice
-            notice = self._TRUNCATION_NOTICE.format(
-                kept=f"{truncation_kept} {truncation_unit}",
-                total=f"{truncation_total} {truncation_unit}",
-                removed_tokens=f"{int(removed_tokens):,}",
-            )
-            truncated_content = kept_text + notice
-
-            truncated[idx] = ToolResult(
-                call_id=tr.call_id,
-                name=tr.name,
-                result=truncated_content,
-                is_error=tr.is_error,
-                attachments=None,  # Drop attachments to reduce size
-            )
-            tokens_removed += removed_tokens
-
-        return truncated
 
     def _cap_tool_results(self, tool_results: List[ToolResult]) -> List[ToolResult]:
         """Proactively cap tool results before they enter history.
 
-        Estimates the aggregate token size of all results and, if they
-        would push the context beyond 80% of the model's limit, truncates
-        the largest results with a hard character cap.
-
-        Uses a direct cap approach (not the removal-based math in
-        ``_truncate_results_to_fit()``) because a single oversized result
-        can be many times larger than the entire context window — the
-        removal formula underflows in that case.
-
-        Args:
-            tool_results: The tool results about to be appended to history.
-
-        Returns:
-            The original list (unchanged) if results fit, or a new list
-            with large results truncated.
+        Thin wrapper over :func:`tool_result_truncation.cap_tool_results`
+        supplying the budget-derived context limit and current total. No-op
+        when no budget (or an unknown context limit) is configured.
         """
         budget = self._instruction_budget
         if not budget or budget.context_limit == 0:
             return tool_results
+        return _cap_tool_results_impl(
+            tool_results,
+            context_limit=budget.context_limit,
+            current_total_tokens=budget.total_tokens(),
+            on_trace=self._trace,
+        )
 
-        # Estimate per-result sizes
-        result_sizes = []
-        total_result_tokens = 0
-        for tr in tool_results:
-            result_str = str(tr.result) if tr.result is not None else ""
-            tokens = len(result_str) / 4  # ~4 chars per token
-            result_sizes.append((tr, result_str, tokens))
-            total_result_tokens += tokens
+    @staticmethod
+    def _mime_to_modality(mime_type: Optional[str]) -> Optional[str]:
+        """Map a MIME type to its canonical input-modality token, or None.
 
-        # Cap: available space to reach 80% of context limit
-        target = int(budget.context_limit * self._TRUNCATION_TARGET_PERCENT)
-        cap_tokens = max(0, target - budget.total_tokens())
+        Mirrors the modality vocabulary in
+        ``shared/plugins/model_provider/base.py`` (image / audio / video /
+        file).  Unknown types return ``None`` so the content gate leaves
+        them untouched — it never over-strips content it can't classify.
+        """
+        if not mime_type:
+            return None
+        m = mime_type.split(";", 1)[0].strip().lower()
+        if m.startswith("image/"):
+            return "image"
+        if m.startswith("audio/"):
+            return "audio"
+        if m.startswith("video/"):
+            return "video"
+        if m == "application/pdf":
+            return "file"
+        return None
 
-        if total_result_tokens <= cap_tokens:
-            self._trace(
-                f"PROACTIVE_CAP: result_tokens={int(total_result_tokens)}, "
-                f"cap_tokens={int(cap_tokens)}, action=passed"
-            )
+    def _gate_tool_results_for_active_modalities(
+        self, tool_results: List[ToolResult]
+    ) -> List[ToolResult]:
+        """Synthetic-self-correct content gate (multimodal-by-composition).
+
+        The active model can only *see* the input modalities its provider
+        declares (``provider.modalities()``).  When a tool returns
+        attachment content of a modality the active model can't view
+        (canonically a ``readFile`` image while in a text-only tier),
+        sending the bytes would silently fail.  Instead this strips those
+        attachments and appends a short, actionable note to the tool
+        result telling the agent to ``enter_tier("vision")`` (or, with no
+        vision tier, that the model can't view the content).
+
+        Per ``docs/design/multimodal-model-support.md`` this is the
+        load-bearing correctness piece: it turns the agent's mistake
+        (reading an image in a non-vision tier) into a loud, self-correcting
+        signal instead of a silent drop, and the turn continues so the
+        agent can switch tiers and re-run the tool.
+
+        No-op when the provider isn't set yet, or when every attachment's
+        modality is supported (the common case — cheap set membership per
+        attachment; vision-capable active models pass straight through).
+        """
+        provider = self._provider
+        if provider is None:
             return tool_results
+        return [
+            self._gate_one_tool_result(r, provider) for r in tool_results
+        ]
 
+    def _gate_one_tool_result(
+        self, result: ToolResult, provider: 'ModelProviderPlugin'
+    ) -> ToolResult:
+        """Apply the modality gate to a single tool result.
+
+        Returns ``result`` unchanged when it has no attachments or all
+        attachment modalities are supported; otherwise returns a copy with
+        the unsupported attachments removed and a withheld-note appended to
+        the result text.
+        """
+        if not result.attachments:
+            return result
+        kept: List[Any] = []
+        withheld: Dict[str, int] = {}
+        for att in result.attachments:
+            modality = self._mime_to_modality(getattr(att, "mime_type", None))
+            # None = unclassifiable; keep (don't over-strip).  Otherwise
+            # keep iff the active model declares it.
+            if modality is None or provider.supports_modality(modality):
+                kept.append(att)
+            else:
+                withheld[modality] = withheld.get(modality, 0) + 1
+        if not withheld:
+            return result
+        note = self._build_withheld_attachment_note(withheld)
         self._trace(
-            f"PROACTIVE_CAP: result_tokens={int(total_result_tokens)}, "
-            f"cap_tokens={int(cap_tokens)}, action=truncating"
+            f"MODALITY_GATE: withheld {dict(withheld)} from tool "
+            f"{result.name!r} (active model {self._model_name!r} lacks them)"
+        )
+        # Keep ``result`` structured; the withheld-attachment note is
+        # model-facing only (append to model_suffix, appended at serialization).
+        combined = (
+            f"{result.model_suffix}\n\n{note}" if result.model_suffix else note
+        )
+        return _dc_replace(result, attachments=(kept or None), model_suffix=combined)
+
+    def _build_withheld_attachment_note(self, withheld: Dict[str, int]) -> str:
+        """Build the actionable note appended to a gated tool result.
+
+        Suggests ``enter_tier("vision")`` when the session declares a
+        vision tier and an image was withheld; otherwise explains the
+        active model can't view the content and no vision tier exists.
+        """
+        kinds = ", ".join(sorted(withheld))
+        model = self._model_name or "the current model"
+        tier_config = self._tier_config
+        vision_available = (
+            tier_config is not None and "vision" in tier_config.tiers
+        )
+        if vision_available and "image" in withheld:
+            return (
+                f"[Attachment withheld: the active model ({model}) can't "
+                f"view {kinds} content.  Call enter_tier(\"vision\") first, "
+                f"then re-run this tool to view it.]"
+            )
+        return (
+            f"[Attachment withheld: the active model ({model}) can't view "
+            f"{kinds} content, and no vision tier is configured for this "
+            f"session.  Use a model that accepts {kinds} input, or declare "
+            f"a vision tier in the profile's model_tiers.]"
         )
 
-        # Hard cap: each result gets at most cap_tokens (divided equally
-        # if multiple, but in practice one result dominates).
-        n_results = len(tool_results)
-        per_result_cap_tokens = max(
-            self._TRUNCATION_PRESERVE_CHARS // 4,
-            cap_tokens // max(1, n_results),
+    def _validate_vision_tier_capability(self) -> None:
+        """Fail loud when a declared ``vision`` tier maps to a model the
+        provider can't confirm accepts image input.
+
+        Mirrors ``get_context_limit()``'s fail-fast at provider-resolution
+        time: invoked once from :meth:`_ensure_provider` when the provider
+        is first created, before any model work — the earliest point the
+        provider exists (it's lazy-created).  V1 tiers are same-provider,
+        so the ``vision`` tier's model lives on the just-created provider;
+        we ask it via the parameterized ``provider.modalities(model=...)``
+        without switching the active model.  No-op unless a ``vision`` tier
+        is declared.
+
+        This is an earlier-warning over the content-boundary gate (which
+        would otherwise surface the misconfiguration only at the first
+        image): a vision tier mapped to a text-only model is a config error
+        worth catching at startup, with an actionable message.
+
+        Raises:
+            ModelTierConfigError: the vision tier maps to a model that
+                doesn't declare image input and no ``modalities`` knob
+                asserts it.
+        """
+        tier_config = self._tier_config
+        provider = self._provider
+        if tier_config is None or provider is None:
+            return
+        from .model_tiers import TIER_VISION, ModelTierConfigError
+        vision_entry = tier_config.tiers.get(TIER_VISION)
+        if vision_entry is None:
+            return
+        # V2 cross-provider: a vision tier on a DIFFERENT provider is NOT checked
+        # here — validating it would eagerly create that provider (paying its
+        # init cost on turn 1 even if vision is never entered).  Such tiers are
+        # validated lazily when first entered + by the content-boundary gate;
+        # only same-provider vision tiers (the active provider owns the model)
+        # are fail-fast checked at startup.
+        if vision_entry.provider and vision_entry.provider != self._active_provider_name:
+            return
+        if provider.supports_modality("image", model=vision_entry.model):
+            return
+        provider_name = getattr(provider, "name", "the provider")
+        raise ModelTierConfigError(
+            f"The 'vision' tier maps to {vision_entry.model!r} "
+            f"({provider_name}), which does not declare image input.  Map "
+            f"the vision tier to a vision-capable model, or set "
+            f"plugin_configs.{provider_name}.modalities: "
+            f'["text", "image"] to assert it.'
         )
-        per_result_cap_chars = int(per_result_cap_tokens * 4)
-
-        truncated = []
-        for tr, result_str, tokens in result_sizes:
-            if tokens <= per_result_cap_tokens:
-                truncated.append(tr)
-                continue
-
-            # Truncate to hard character cap
-            kept_text = result_str[:per_result_cap_chars]
-
-            # Try to break at a word or line boundary
-            last_newline = kept_text.rfind('\n', max(0, per_result_cap_chars - 500))
-            if last_newline > per_result_cap_chars // 2:
-                kept_text = kept_text[:last_newline]
-            else:
-                last_space = kept_text.rfind(' ', max(0, per_result_cap_chars - 200))
-                if last_space > per_result_cap_chars // 2:
-                    kept_text = kept_text[:last_space]
-
-            # Determine units for the notice
-            original_lines = result_str.count('\n') + 1
-            kept_lines = kept_text.count('\n') + 1
-            if original_lines > 1:
-                unit_kept = f"{kept_lines} lines"
-                unit_total = f"{original_lines} lines"
-            else:
-                unit_kept = f"{len(kept_text):,} characters"
-                unit_total = f"{len(result_str):,} characters"
-
-            removed_tokens = int(tokens - len(kept_text) / 4)
-            notice = self._TRUNCATION_NOTICE.format(
-                kept=unit_kept,
-                total=unit_total,
-                removed_tokens=f"{removed_tokens:,}",
-            )
-
-            self._trace(
-                f"PROACTIVE_CAP: truncated result '{tr.name}' from "
-                f"{int(tokens)} to {int(len(kept_text)/4)} tokens "
-                f"(cap={per_result_cap_tokens})"
-            )
-
-            truncated.append(ToolResult(
-                call_id=tr.call_id,
-                name=tr.name,
-                result=kept_text + notice,
-                is_error=tr.is_error,
-                attachments=None,  # Drop attachments to reduce size
-            ))
-
-        return truncated
 
     def _sync_budget_after_truncation(
         self,
@@ -5467,8 +7001,48 @@ NOTES
         # Proactive size guard: cap results before they enter history
         tool_results = self._cap_tool_results(tool_results)
         # Append tool results to session history
+        tool_results = self._gate_tool_results_for_active_modalities(tool_results)
         tool_result_parts = [Part(function_response=r) for r in tool_results]
         self._history.append(Message(role=Role.TOOL, parts=tool_result_parts))
+
+        # Probe B (force_narration_between_tools, 2026-06-09).  Empirical
+        # finding from kb cascade context-stage falsification on
+        # qwen3-14b @ temp=0 (see
+        # ``feedback_small_model_narration_skipping_is_structural``):
+        # small models in tool-mode skip narration regardless of persona
+        # prose AND in-context examples.  Structural failure that
+        # framework-side forcing is the right level to fix.
+        #
+        # Approach: after each tool_result append, inject a synthetic
+        # ``USER``-role message asking the model to extract observations
+        # in 1-2 sentences before continuing.  Model's response is
+        # naturally text-mode (user just asked for text) + may include
+        # the next tool call.  Loop semantics unchanged.
+        #
+        # Gated by ``profile.quirks.force_narration_between_tools``
+        # threaded through ``provider.extra["quirks"]`` (the canonical
+        # per-profile quirk mechanism, symmetric with
+        # ``force_tool_choice_for_lifecycle`` and
+        # ``coerce_typed_tool_args``).  Profile-scoped so the qwen3-14b
+        # narration-skipping quirk doesn't leak to haiku /
+        # openrouter / other profile sets.
+        force_narration = getattr(
+            self._provider, "_force_narration_between_tools", False
+        )
+        if force_narration:
+            narration_prompt = Message(
+                role=Role.USER,
+                parts=[Part(text=(
+                    "Briefly extract what you observed from the previous "
+                    "tool result in 1-2 sentences, then continue with your "
+                    "next action."
+                ))],
+            )
+            self._history.append(narration_prompt)
+            self._trace(
+                f"FORCE_NARRATION: injected synthetic user prompt after "
+                f"{len(tool_results)} tool result(s)"
+            )
 
         with self._telemetry.llm_span(
             model=self._model_name or "unknown",
@@ -5502,16 +7076,36 @@ NOTES
                         self._trace(f"SESSION_TOOL_RESULT_THINKING_CALLBACK len={len(thinking)}")
                         on_output("thinking", thinking, "write")
 
+                # Path 1 quirk consumption: if signal_completion just
+                # returned validation_failed, request named-function
+                # tool_choice on this retry (provider decides whether
+                # to honor via its own quirk gate).  Consumed inline
+                # so the stamp clears for ALL subsequent calls in this
+                # turn — single xgrammar-enforced retry is the
+                # contract.  Only PASSED to provider.complete when
+                # set: providers that don't yet accept the
+                # ``tool_choice`` kwarg (most of them; only vllm
+                # honors it today) never see an unknown kwarg in the
+                # default no-quirk path.  The Protocol declares the
+                # kwarg per
+                # ``shared/plugins/model_provider/base.py:complete``;
+                # explicit per-provider acceptance can land in a
+                # follow-up sweep.
+                _retry_tool_choice = self._consume_pending_tool_choice()
+                _extra_complete_kwargs: Dict[str, Any] = {}
+                if _retry_tool_choice is not None:
+                    _extra_complete_kwargs["tool_choice"] = _retry_tool_choice
                 with self._provider_access():
                     turn_result, _retry_stats = with_retry(
                         lambda: self._provider.complete(
                             self._history.messages,
-                            system_instruction=self._system_instruction,
+                            system_instruction=self._get_effective_system_instruction(),
                             tools=self._get_tools_for_provider(),
                             on_chunk=streaming_callback,
                             cancel_token=self._cancel_token,
                             on_usage_update=wrapped_usage_callback,
                             on_thinking=thinking_callback,
+                            **_extra_complete_kwargs,
                         ),
                         context="complete_tool_results_streaming",
                         on_retry=self._on_retry,
@@ -5519,12 +7113,17 @@ NOTES
                         provider=self._provider
                     )
             else:
+                _retry_tool_choice = self._consume_pending_tool_choice()
+                _extra_complete_kwargs = {}
+                if _retry_tool_choice is not None:
+                    _extra_complete_kwargs["tool_choice"] = _retry_tool_choice
                 with self._provider_access():
                     turn_result, _retry_stats = with_retry(
                         lambda: self._provider.complete(
                             self._history.messages,
-                            system_instruction=self._system_instruction,
+                            system_instruction=self._get_effective_system_instruction(),
                             tools=self._get_tools_for_provider(),
+                            **_extra_complete_kwargs,
                         ),
                         context="complete_tool_results",
                         on_retry=self._on_retry,
@@ -5654,7 +7253,7 @@ NOTES
                     turn_result, _retry_stats = with_retry(
                         lambda: self._provider.complete(
                             self._history.messages,
-                            system_instruction=self._system_instruction,
+                            system_instruction=self._get_effective_system_instruction(),
                             tools=self._get_tools_for_provider(),
                             on_chunk=streaming_callback,
                             cancel_token=self._cancel_token,
@@ -5673,7 +7272,7 @@ NOTES
                     turn_result, _retry_stats = with_retry(
                         lambda: self._provider.complete(
                             self._history.messages,
-                            system_instruction=self._system_instruction,
+                            system_instruction=self._get_effective_system_instruction(),
                             tools=self._get_tools_for_provider(),
                         ),
                         context="complete_mid_turn",
@@ -5715,24 +7314,33 @@ NOTES
            that provider converters send it as-is (avoiding JSON escaping of
            file content, which breaks subsequent ``updateFile`` calls).
         """
-        # Executor returns (ok, result_dict) tuple
-        if isinstance(executor_result, tuple) and len(executor_result) == 2:
-            ok, result_data = executor_result
-        else:
-            ok = True
-            result_data = executor_result
+        # Executor returns (ok, result_dict) tuple, or a bare value.
+        ok, result_data = _split_executor_result_impl(executor_result)
+
+        # Mark results from untrusted-content tools (web_fetch / web_search /
+        # MCP) so the provider converter wraps the model-facing text in the
+        # untrusted-content boundary — indirect-prompt-injection mitigation.
+        # See TRAIT_UNTRUSTED_CONTENT.
+        from jaato_sdk.plugins.model_provider.types import TRAIT_UNTRUSTED_CONTENT
+        _untrusted = bool(
+            self._runtime.registry
+            and TRAIT_UNTRUSTED_CONTENT in self._runtime.registry.get_tool_traits(fc.name)
+        )
+        _untrusted_source = fc.name if _untrusted else None
 
         # Check for multimodal result
         attachments: Optional[List[Attachment]] = None
         if isinstance(result_data, dict) and result_data.get('_multimodal'):
-            attachments = self._extract_multimodal_attachments(result_data)
+            attachments = _extract_multimodal_attachments_impl(result_data)
             result_data = {k: v for k, v in result_data.items()
-                          if not k.startswith('_multimodal') and k not in ('image_data',)}
+                          if not k.startswith('_multimodal')
+                          and k not in ('image_data', 'file_data')}
 
         # String results pass through directly so converters never
         # JSON-encode them (which would escape quotes, backslashes, etc.).
         if isinstance(result_data, str):
             # Run string-level enrichment (template extraction, etc.)
+            enrichment_metadata: Optional[Dict[str, Any]] = None
             if ok and self._runtime.registry:
                 enrichment = self._runtime.registry.enrich_tool_result(
                     fc.name,
@@ -5744,64 +7352,46 @@ NOTES
                 result_data = enrichment.result
                 # Check for preselected reference pinning signal
                 self._check_and_pin_reference(enrichment.metadata, result_data)
+                if enrichment.metadata:
+                    enrichment_metadata = enrichment.metadata
 
             return ToolResult(
                 call_id=fc.id,
                 name=fc.name,
                 result=result_data,
                 is_error=not ok,
-                attachments=attachments
+                attachments=attachments,
+                enrichment_metadata=enrichment_metadata,
+                untrusted=_untrusted,
+                untrusted_source=_untrusted_source,
             )
 
-        # Build result dict
-        if isinstance(result_data, dict):
-            result_dict = result_data
-        else:
-            result_dict = {"result": result_data}
-
-        # Inject advisory comment from permission evaluator (ALLOW_WITH_COMMENT)
-        # before stripping internal metadata.  The comment becomes a visible
-        # field so the model sees the feedback alongside the tool result.
-        perm_meta = result_dict.get('_permission')
-        if isinstance(perm_meta, dict) and perm_meta.get('comment'):
-            result_dict['_permission_note'] = perm_meta['comment']
-
-        # Strip internal metadata keys (prefixed with '_') before sending
-        # to the model.  These carry scaffolding like _permission, _multimodal
-        # flags, etc. that are not meaningful to the model.  The
-        # _permission_note is intentionally kept (renamed below).
-        permission_note = result_dict.pop('_permission_note', None)
-        result_dict = {
-            k: v for k, v in result_dict.items()
-            if not k.startswith('_')
-        }
-        if permission_note:
-            result_dict['permission_note'] = permission_note
-
-        # For error results, extract a clean error string so provider
-        # converters don't double-wrap a dict inside {"error": str(dict)}.
-        # This ensures the model receives a readable message (e.g.,
-        # "Tool not executed. User comment: ...") rather than a repr of
-        # internal scaffolding.
-        if not ok and 'error' in result_dict:
-            error_msg = result_dict['error']
-            # If 'error' is the only remaining key, pass the string directly
-            # so converters don't JSON-encode a single-key dict.
-            if len(result_dict) == 1:
-                result_dict = error_msg
+        # Normalize the payload into the model-facing form: wrap non-dicts,
+        # surface the permission advisory note, strip internal '_' keys, and
+        # collapse single-key error dicts to a bare string.
+        result_dict = _normalize_result_dict_impl(result_data, ok=ok)
 
         # Run tool result enrichment (e.g., template extraction)
+        enrichment_metadata: Optional[Dict[str, Any]] = None
         if ok and self._runtime.registry:
-            result_dict = self._enrich_tool_result_dict(
+            result_dict, enrichment_metadata = self._enrich_tool_result_dict(
                 fc.name, result_dict, tool_args=fc.args
             )
+            if not enrichment_metadata:
+                # Distinguish "enrichment ran, produced nothing" from
+                # "enrichment didn't run" — both leave None on the
+                # ToolResult so processors don't get a misleading {}.
+                enrichment_metadata = None
 
         return ToolResult(
             call_id=fc.id,
             name=fc.name,
             result=result_dict,
             is_error=not ok,
-            attachments=attachments
+            attachments=attachments,
+            enrichment_metadata=enrichment_metadata,
+            untrusted=_untrusted,
+            untrusted_source=_untrusted_source,
         )
 
     def _inject_synthetic_cancelled_results(self, fcs: List[FunctionCall]) -> None:
@@ -5827,6 +7417,7 @@ NOTES
             ToolResult(call_id=fc.id, name=fc.name, result={"error": "cancelled"}, is_error=True)
             for fc in fcs
         ]
+        tool_results = self._gate_tool_results_for_active_modalities(tool_results)
         tool_result_parts = [Part(function_response=r) for r in tool_results]
         self._history.append(Message(role=Role.TOOL, parts=tool_result_parts))
         self._trace(
@@ -5839,7 +7430,7 @@ NOTES
         tool_name: str,
         result_dict: Dict[str, Any],
         tool_args: Optional[Dict[str, Any]] = None
-    ) -> Dict[str, Any]:
+    ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         """Run tool result enrichment on tool results.
 
         Two enrichment modes:
@@ -5855,23 +7446,48 @@ NOTES
         critical for concurrent sessions (e.g., subagents running in parallel with
         the parent) that share the same registry.
 
+        Returns:
+            Tuple of ``(enriched_dict, combined_metadata)``.  ``combined_metadata``
+            is the per-plugin enrichment metadata dict (``{plugin_name: meta}``)
+            produced by ``registry.enrich_tool_result``.  Callers stash it on
+            ``ToolResult.enrichment_metadata`` so completion processors see it
+            via ``context.tool_calls[i].enrichment_metadata`` (see
+            ``build_tool_call_ledger``).
+
         Args:
             tool_name: Name of the tool that produced the result.
             result_dict: The result dictionary to enrich.
             tool_args: Optional tool call arguments for context-aware enrichment.
 
         Returns:
-            Enriched result dictionary.
+            Tuple ``(enriched_dict, combined_metadata)`` — see method docstring.
         """
         enriched_dict = result_dict.copy()
+        # Aggregate metadata across BOTH the file_writer single-call path
+        # and the text-fields multi-call path.  Later calls overwrite
+        # earlier per-plugin metadata for the same plugin name; in
+        # practice each plugin contributes once per call so this is
+        # last-write-wins on intentional duplicates only.
+        combined_metadata: Dict[str, Any] = {}
 
         # Tools declaring the file_writer trait get full-JSON enrichment
-        # (LSP diagnostics, artifact tracking, etc.)
-        from jaato_sdk.plugins.model_provider.types import TRAIT_FILE_WRITER
+        # (LSP diagnostics, artifact tracking, etc.).  Tools declaring the
+        # greppable_content trait take the SAME full-dict path so that
+        # result-rewriter enrichment plugins (e.g. result_grep) can inspect
+        # and shrink structured payloads (call_service.body/headers) that the
+        # text-field path below never sees.  Both route the whole result dict
+        # through enrich_tool_result; the field-level path only fires for the
+        # six well-known text keys, missing structured dicts entirely.
+        from jaato_sdk.plugins.model_provider.types import (
+            TRAIT_FILE_WRITER,
+            TRAIT_GREPPABLE_CONTENT,
+        )
         tool_traits = self._runtime.registry.get_tool_traits(tool_name)
 
-        if TRAIT_FILE_WRITER in tool_traits:
-            # Pass full result as JSON so LSP can extract file paths
+        if TRAIT_FILE_WRITER in tool_traits or TRAIT_GREPPABLE_CONTENT in tool_traits:
+            # Pass full result as JSON so enrichers see the entire payload
+            # (LSP file-path extraction for file_writer; full-body grep for
+            # greppable_content).
             import json
             result_json = json.dumps(result_dict)
             # Pass session's callback to route notifications to correct agent panel
@@ -5890,7 +7506,9 @@ NOTES
                     enriched_dict['_lsp_diagnostics'] = enrichment.result
             self._check_and_pin_reference(enrichment.metadata, result_json)
             self._emit_enrichment_telemetry(enrichment.metadata, 'tool_result')
-            return enriched_dict
+            if enrichment.metadata:
+                combined_metadata.update(enrichment.metadata)
+            return enriched_dict, combined_metadata
 
         # For other tools: enrich large text fields
         text_fields = ('result', 'content', 'stdout', 'output', 'text', 'data')
@@ -5913,8 +7531,10 @@ NOTES
                     # Check for pinning signal (only need first match)
                     self._check_and_pin_reference(enrichment.metadata, value)
                     self._emit_enrichment_telemetry(enrichment.metadata, 'tool_result')
+                    if enrichment.metadata:
+                        combined_metadata.update(enrichment.metadata)
 
-        return enriched_dict
+        return enriched_dict, combined_metadata
 
     def _emit_enrichment_telemetry(
         self,
@@ -6086,29 +7706,6 @@ NOTES
             self._system_instruction,
         )
 
-    def _extract_multimodal_attachments(
-        self,
-        result: Dict[str, Any]
-    ) -> Optional[List[Attachment]]:
-        """Extract multimodal attachments from a result dict."""
-        multimodal_type = result.get('_multimodal_type', 'image')
-
-        if multimodal_type == 'image':
-            image_data = result.get('image_data')
-            if not image_data:
-                return None
-
-            mime_type = result.get('mime_type', 'image/png')
-            display_name = result.get('display_name', 'image')
-
-            return [Attachment(
-                mime_type=mime_type,
-                data=image_data,
-                display_name=display_name
-            )]
-
-        return None
-
     def _accumulate_turn_tokens(
         self,
         response: ProviderResponse,
@@ -6187,6 +7784,10 @@ NOTES
         (which auto-computes ``llm.token_count.total`` via _SpanWrapper),
         plus optional cache and reasoning detail attributes.
 
+        When the provider reports a cost (``usage.cost_usd``), also sets
+        ``gen_ai.usage.cost`` (Langfuse OTLP cost ingestion) and
+        ``llm.cost.total`` (OpenInference / Arize Phoenix).
+
         Also records ``llm.output_messages.*`` (OpenInference indexed attributes)
         from the model response, and ``gen_ai.response.finish_reasons``.
 
@@ -6205,7 +7806,7 @@ NOTES
             )
 
         # Record output messages (OpenInference indexed attributes)
-        output_msgs = self._response_to_openinference(response)
+        output_msgs = response_to_openinference(response)
         if output_msgs:
             span.set_output_messages(output_msgs)
 
@@ -6224,11 +7825,32 @@ NOTES
         if usage.reasoning_tokens is not None:
             span.set_attribute("llm.token_count.completion_details.reasoning", usage.reasoning_tokens)
 
+        # Cost (USD). Precedence mirrors the daemon's core.py:_build_usage:
+        #   1. provider-reported ``usage.cost_usd`` (e.g. claude_cli's
+        #      total_cost_usd, OpenRouter's cost) — fiscal truth, wins.
+        #   2. operator pricing table (.jaato/pricing.json) computed from
+        #      the model name + token counts, so cost lands on the span even
+        #      for providers that don't report it on the wire.
+        #   3. None — no source knew; the observability backend may still
+        #      compute cost from model + token counts (e.g. Langfuse's
+        #      model-pricing catalog).
+        # We resolve here, while the span is open — the daemon boundary that
+        # populates UsageBreakdown.cost_usd runs after the span has closed.
+        # Two keys are emitted so pre-computed cost renders in either backend:
+        #   - ``gen_ai.usage.cost``  → Langfuse's OTLP cost ingestion
+        #   - ``llm.cost.total``     → OpenInference (Arize Phoenix)
+        # Both are cost attributes (not token-count buckets), so emitting both
+        # does not trip Langfuse's inclusive/exclusive token-bucket contract.
+        cost_usd = self._resolve_span_cost(usage)
+        if cost_usd is not None:
+            span.set_attribute("gen_ai.usage.cost", cost_usd)
+            span.set_attribute("llm.cost.total", cost_usd)
+
         # Cache outcome classification (hit/partial/warm/miss/unknown)
         # so external observers can correlate cache behavior with the
         # GC ↔ cache coordination dance.
         try:
-            outcome = self._classify_cache_outcome(
+            outcome = classify_cache_outcome(
                 int(usage.prompt_tokens or 0),
                 usage.cache_read_tokens,
                 usage.cache_creation_tokens,
@@ -6247,6 +7869,50 @@ NOTES
                 self._turn_completion_tokens = getattr(self, '_turn_completion_tokens', 0) + usage.output_tokens
                 turn_span.set_attribute("llm.token_count.completion", self._turn_completion_tokens)
 
+    def _resolve_span_cost(self, usage) -> Optional[float]:
+        """Resolve per-call cost (USD) for an LLM telemetry span.
+
+        Precedence mirrors ``JaatoServer._build_usage`` so the span and the
+        emitted ``UsageBreakdown`` agree:
+
+        1. ``usage.cost_usd`` — provider-reported; fiscal truth, wins.
+        2. Operator pricing table (``.jaato/pricing.json`` via
+           ``shared.pricing``) computed from the model name + token counts.
+        3. ``None`` — no source knew (the backend may still estimate).
+
+        The pricing table is loaded lazily on first non-reported cost and
+        cached on the session, so cost-free sessions never touch the JSON.
+        Any failure to load/compute degrades to ``None`` (telemetry must
+        never break a turn).
+
+        Args:
+            usage: The response ``TokenUsage``.
+
+        Returns:
+            Cost in USD, or ``None`` when no source can supply it.
+        """
+        if usage.cost_usd is not None:
+            return usage.cost_usd
+        if not self._model_name:
+            return None
+        try:
+            if not self._span_pricing_loaded:
+                from shared.pricing import load_pricing
+                self._span_pricing = load_pricing(self.workspace_path)
+                self._span_pricing_loaded = True
+            if self._span_pricing is None or not self._span_pricing.has(self._model_name):
+                return None
+            return self._span_pricing.cost_for_usage(
+                self._model_name,
+                prompt_tokens=int(usage.prompt_tokens or 0),
+                output_tokens=int(usage.output_tokens or 0),
+                cache_read_tokens=usage.cache_read_tokens,
+                cache_creation_tokens=usage.cache_creation_tokens,
+            )
+        except Exception as e:  # pragma: no cover - defensive
+            self._trace(f"LLM_TELEMETRY: pricing-table cost lookup failed: {e}")
+            return None
+
     def _record_input_messages_telemetry(self, span) -> None:
         """Record OpenInference input messages on a telemetry span.
 
@@ -6257,97 +7923,357 @@ NOTES
         Args:
             span: The LLM span context to set attributes on.
         """
-        input_msgs = self._history_to_openinference()
+        input_msgs = history_to_openinference(self._history.messages)
         if input_msgs:
             span.set_input_messages(input_msgs)
-
-    @staticmethod
-    def _response_to_openinference(response: ProviderResponse) -> List[Dict[str, Any]]:
-        """Convert a ProviderResponse to OpenInference output message dicts.
-
-        Returns a list with a single assistant message containing text content
-        and any tool calls from the response parts.
-
-        Args:
-            response: The provider response to convert.
-
-        Returns:
-            List of message dicts with 'role', 'content', and optional
-            'tool_calls' suitable for ``span.set_output_messages()``.
-        """
-        text = response.get_text()
-        function_calls = response.get_function_calls()
-
-        if not text and not function_calls:
-            return []
-
-        msg: Dict[str, Any] = {"role": "assistant", "content": text or ""}
-        if function_calls:
-            msg["tool_calls"] = [
-                {
-                    "name": fc.name,
-                    "arguments": json.dumps(fc.args) if fc.args else "{}",
-                }
-                for fc in function_calls
-            ]
-        return [msg]
-
-    def _history_to_openinference(self) -> List[Dict[str, Any]]:
-        """Convert the current session history to OpenInference input message dicts.
-
-        Maps jaato ``Message`` objects to the dict format expected by
-        ``span.set_input_messages()``: each dict has 'role' and 'content'.
-
-        Returns:
-            List of message dicts suitable for ``span.set_input_messages()``.
-        """
-        result = []
-        for msg in self._history.messages:
-            # Map jaato roles to OpenInference roles
-            role = msg.role.value  # "user", "model", "tool"
-            if role == "model":
-                role = "assistant"
-
-            # Extract text content from parts
-            texts = [p.text for p in msg.parts if p.text]
-            content = "".join(texts) if texts else ""
-
-            entry: Dict[str, Any] = {"role": role, "content": content}
-
-            # Include tool calls from model messages
-            if msg.role == Role.MODEL:
-                tool_calls = [
-                    {
-                        "name": p.function_call.name,
-                        "arguments": json.dumps(p.function_call.args)
-                            if p.function_call.args else "{}",
-                    }
-                    for p in msg.parts
-                    if p.function_call
-                ]
-                if tool_calls:
-                    entry["tool_calls"] = tool_calls
-
-            result.append(entry)
-        return result
 
     def get_history(self) -> List[Message]:
         """Get current conversation history.
 
-        Returns the session's canonical copy of the history. The session
-        is the sole owner of conversation state; providers receive messages
-        as parameters to ``complete()``.
+        Returns the session's canonical copy of the history.  When an
+        inbound history transformer is registered (e.g. a
+        pseudonymization consumer), this returns the **transformed**
+        view — the form that lives in the canonical container.  Trusted
+        callers that need the un-transformed form should use
+        :meth:`get_history_raw` instead.
+
+        The session is the sole owner of conversation state; providers
+        receive messages as parameters to ``complete()``.
         """
         return self._history.messages
+
+    def get_history_raw(self) -> List[Message]:
+        """Get the trusted-caller view of conversation history.
+
+        When a raw-view transformer is registered on the underlying
+        :class:`SessionHistory`, this returns the result of running
+        each stored Message through that transformer (typically the
+        un-pseudonymized form for premium's user-display swap-back
+        path).  When no transformer is registered, this returns the
+        same data as :meth:`get_history`.
+
+        Trusted callers (user-display renderer, audit logger, the
+        narrow set of components that legitimately need raw values)
+        should call this accessor explicitly so the trust grant is
+        visible at the call site.
+        """
+        return self._history.messages_raw
+
+    def set_history_inbound_transformer(
+        self, fn: Optional[Callable[[Message], Message]]
+    ) -> None:
+        """Register an inbound transformer on the session's history.
+
+        Plug-in surface for pseudonymization / redaction / audit /
+        content-filter consumers that need to transform every Message
+        before it lands in the canonical container.  See
+        :meth:`SessionHistory.set_inbound_transformer` for semantics.
+
+        Premium typically calls this from a session hook
+        (:meth:`SessionManager.add_session_hook`) so the transformer
+        is wired before any user message arrives.
+        """
+        self._history.set_inbound_transformer(fn)
+
+    def set_history_raw_view_transformer(
+        self, fn: Optional[Callable[[Message], Message]]
+    ) -> None:
+        """Register a raw-view transformer on the session's history.
+
+        Plug-in surface paired with :meth:`set_history_inbound_transformer`
+        — when the inbound transformer redacts, the raw-view transformer
+        un-redacts for trusted callers via :meth:`get_history_raw`.
+        See :meth:`SessionHistory.set_raw_view_transformer` for
+        semantics.
+        """
+        self._history.set_raw_view_transformer(fn)
+
+    # ─── Session-attached state ──────────────────────────────────────
+    #
+    # Generic facility for extensions to attach opaque state to a
+    # session.  The framework owns the storage container, the
+    # persistence path (via the session journal), and the fork-carry
+    # plumbing (via the ``initial_session_state`` kwarg on
+    # ``SessionManager.create_*_session`` and the
+    # ``session_state_snapshot`` field on ``Waypoint``).  Encryption,
+    # schema validation, and cross-session sharing stay out of scope
+    # — extensions handle those.
+
+    def set_session_state(self, key: str, value: Any) -> None:
+        """Attach opaque state under a string key.
+
+        Right shape for **static or rarely-mutated state** (audit chain
+        head, version markers, telemetry counters the consumer updates
+        explicitly).  For **incrementally-mutated state** (e.g. a
+        lookup table that grows turn-by-turn) prefer
+        :meth:`register_session_state_provider` — pushing on every
+        mutation is brittle.
+
+        ``value`` must be JSON-serialisable; non-serialisable values
+        raise ``TypeError`` at attach time so the failure surfaces at
+        the call site rather than at journal-save.
+
+        Setting a key that has a registered provider does not unregister
+        the provider — providers always win for both reads and
+        snapshot-for-persistence.  The pushed value is retained as a
+        fallback that surfaces only if the provider is later
+        unregistered.
+        """
+        try:
+            json.dumps(value)
+        except (TypeError, ValueError) as exc:
+            raise TypeError(
+                f"set_session_state({key!r}): value must be JSON-serialisable "
+                f"(the framework persists session_state as JSON; encrypt before "
+                f"attach if confidentiality is needed). Underlying error: {exc}"
+            ) from exc
+        self._session_state[key] = value
+
+    def register_session_state_provider(
+        self, key: str, fn: Callable[[], Any]
+    ) -> None:
+        """Register a callback returning the current value for ``key``.
+
+        Plug-in surface for **incrementally-mutated state** (e.g. the
+        pseudonymization lookup table that grows whenever a new
+        sensitive value is encountered).  ``fn`` is invoked by the
+        framework at journal-save, waypoint-snapshot, and fork-snapshot
+        time (i.e. inside :meth:`get_all_session_state` /
+        :meth:`get_session_state` for this key) and must return a
+        JSON-serialisable value.  Encryption (if needed) happens inside
+        ``fn`` — the framework treats the return value as opaque JSON.
+
+        At most one provider per key — registering a second time
+        replaces the prior registration.  A registered provider takes
+        precedence over any value previously set via
+        :meth:`set_session_state` for the same key (for both
+        :meth:`get_session_state` reads and snapshot-for-persistence).
+        """
+        if not callable(fn):
+            raise TypeError(
+                f"register_session_state_provider({key!r}): fn must be callable"
+            )
+        self._state_providers[key] = fn
+
+    def get_session_state(self, key: str, default: Any = None) -> Any:
+        """Read the current value for ``key``, or ``default`` if absent.
+
+        If a provider is registered for ``key``, returns the provider's
+        current value (so the read reflects live state, not whatever
+        was last pushed via :meth:`set_session_state`).  Otherwise
+        returns the value last set via :meth:`set_session_state`, or
+        ``default`` if the key has neither.
+        """
+        provider = self._state_providers.get(key)
+        if provider is not None:
+            return provider()
+        if key in self._session_state:
+            return self._session_state[key]
+        return default
+
+    def get_all_session_state(self) -> Dict[str, Any]:
+        """Snapshot of all currently-attached state.
+
+        Invokes every registered provider once (so the snapshot
+        reflects live values at call time, not whatever was last
+        pushed) and merges with set-state values; provider values win
+        on key collision.  Returns a copy — mutation of the returned
+        dict doesn't propagate back into the session.
+
+        This is the right call for fork primitives and the journal
+        save path: it materialises the current state into a plain
+        dict that can be carried across to a new session via
+        ``initial_session_state`` or persisted on disk.
+        """
+        snapshot: Dict[str, Any] = dict(self._session_state)
+        for key, fn in self._state_providers.items():
+            snapshot[key] = fn()
+        return snapshot
 
     def get_turn_accounting(self) -> List[Dict[str, Any]]:
         """Get token usage and timing per turn."""
         return list(self._turn_accounting)
 
+    def restore_turn_accounting(
+        self, turns: List[Dict[str, Any]],
+    ) -> None:
+        """Replace the per-turn token-usage / timing list.
+
+        Pre-§7c-step-6.6.1.0 the daemon's persistence-restore
+        path (``server/session_manager.py:2558``) reached into
+        the private ``self._turn_accounting`` attribute directly:
+
+            jaato_session._turn_accounting = list(state.turn_accounting)
+
+        That violated the same encapsulation discipline §7c step
+        3a (set_agent_identity) + step 3b (get_tool_schemas)
+        established.  This public method replaces the
+        private-attr write with a stable surface that the
+        upcoming ``session.restore_turn_accounting`` runner-RPC
+        (§7c step 6.6.1.2) can wrap.
+
+        Args:
+            turns: List of per-turn dicts from a
+                :class:`SessionState` snapshot.  Caller owns the
+                list; a shallow copy is taken to isolate
+                in-session state from caller mutation.
+        """
+        self._turn_accounting = list(turns)
+
+    def restore_conversation_budget(
+        self, snapshot: Dict[str, Any],
+    ) -> None:
+        """Restore the CONVERSATION budget entry from a saved snapshot.
+
+        Pre-§7c-step-6.6.1.0 the daemon's persistence-restore
+        path (``server/session_manager.py:2592-2593``) reached
+        through the session into the underlying
+        :class:`InstructionBudget`:
+
+            jaato_session.instruction_budget.restore_conversation_from_snapshot(
+                state.budget_state)
+
+        The :meth:`InstructionBudget.restore_conversation_from_snapshot`
+        method exists, but JaatoSession had no public wrapper.
+        This method exposes the operation as a stable
+        JaatoSession-level surface for the upcoming
+        ``session.restore_conversation_budget`` runner-RPC
+        (§7c step 6.6.1.3).
+
+        No-op when ``self._instruction_budget`` is None
+        (pre-:meth:`configure`); matches the daemon caller's
+        existing ``if jaato_session.instruction_budget:`` guard.
+
+        Args:
+            snapshot: Conversation-source snapshot dict from a
+                :class:`SessionState`'s ``budget_state``.  Format
+                is opaque here; the underlying InstructionBudget
+                method validates + reconstructs the entry tree.
+        """
+        if self._instruction_budget is None:
+            return
+        self._instruction_budget.restore_conversation_from_snapshot(snapshot)
+
+    def set_parallel_tools_override(self, enabled: bool) -> None:
+        """Stash a per-turn override for parallel-tool execution.
+
+        Pre-§7c-step-6.6.3.0 the daemon's SDK request handler
+        (``server/session_manager.py:4096``) reached into the
+        private attribute directly:
+
+            jaato_session._parallel_tools_override = event.parallel_tools
+
+        That violated the same encapsulation discipline §7c
+        step 3a / 3b / 6.1 (1/3) / 6.6.1.0 / 6.6.3.0 / 6.6.3.1 /
+        6.6.3.2 established.  This public method replaces the
+        private-attr write with a stable surface that the
+        upcoming ``session.set_parallel_tools_override``
+        runner-RPC (§7c step 6.6.3.3) can wrap.
+
+        Semantic: the override wins over ``JAATO_PARALLEL_TOOLS``
+        env-var consultation for the current turn ONLY.  The
+        session's tool-execution branch reads the override at
+        line 4886-4889 and clears it after one read — i.e. each
+        ``set_parallel_tools_override(True)`` call affects
+        exactly the next turn that consults the override.
+
+        Args:
+            enabled: True to force parallel-tool execution for the
+                next turn; False to disable.  Caller passes the
+                raw bool from the SDK request; daemon's existing
+                ``if event.parallel_tools is not None:`` guard
+                prevents passing None (no-override) through this
+                method.
+        """
+        self._parallel_tools_override = bool(enabled)
+
+    def snapshot_conversation_budget(self) -> Optional[Dict[str, Any]]:
+        """Return a serializable snapshot of the CONVERSATION budget
+        entry for persistence.
+
+        Inverse of :meth:`restore_conversation_budget` (added in
+        §7c step 6.6.1.0).  Pre-§7c-step-6.6.3.0 the daemon's
+        persistence-save path
+        (``server/session_manager.py:2986``) reached through the
+        session into the underlying :class:`InstructionBudget`:
+
+            jaato_session.instruction_budget.get_conversation_snapshot()
+
+        The :meth:`InstructionBudget.get_conversation_snapshot`
+        method exists (instruction_budget.py:390), but
+        JaatoSession had no public wrapper.  This method exposes
+        the operation as a stable JaatoSession-level surface for
+        the upcoming ``session.snapshot_conversation_budget``
+        runner-RPC (§7c step 6.6.3.2).
+
+        Returns ``None`` when ``self._instruction_budget`` is
+        None (pre-:meth:`configure`); matches the daemon caller's
+        existing ``if jaato_session.instruction_budget:`` guard
+        semantic.
+
+        Returns:
+            Conversation-source snapshot dict (JSON-native), or
+            ``None`` when budget unavailable / no conversation
+            entry exists.
+        """
+        if self._instruction_budget is None:
+            return None
+        return self._instruction_budget.get_conversation_snapshot()
+
+    def append_history_message(self, message: Message) -> None:
+        """Append a single message to the session's history.
+
+        Pre-§7c-step-6.6.3.0 the daemon's interrupted-tool-call
+        recovery path (``server/session_manager.py:2855``) did
+        the get-modify-reset dance manually:
+
+            current_history = jaato_session.get_history()
+            current_history.append(synthetic_message)
+            jaato_session.reset_session(current_history)
+
+        That worked but was awkward — three calls for one
+        operation, and `reset_session` clears
+        ``_turn_accounting`` as a side effect (which the
+        recovery path actually wants, since the interrupted
+        turn's accounting is mid-flight).  This method
+        preserves the existing semantic exactly: appends the
+        message + clears turn_accounting (via the underlying
+        ``reset_session`` call).
+
+        Phase 3 §7c step 6.6.3.0 (encapsulation cleanup,
+        prerequisite for §7c step 6.6.3.1's
+        ``session.append_history_message`` runner-RPC).
+
+        Args:
+            message: A :class:`Message` instance to append.
+        """
+        current_history = self.get_history()
+        current_history.append(message)
+        self.reset_session(current_history)
+
     def get_context_limit(self) -> int:
-        """Get the context window limit for the current model."""
+        """Get the context window limit for the current model.
+
+        Returns ``0`` — the honest "unknown" sentinel — when the provider
+        has not been materialized yet.  The provider is lazy-created
+        (``_ensure_provider``, first model use), so before the first turn
+        there is no model to read a window from.
+
+        This mirrors the ``InstructionBudget`` design, which also starts at
+        ``context_limit = 0`` (see ``_populate_instruction_budget``) rather
+        than a hardcoded default: a fake non-zero limit (the old
+        ``1_048_576``) masked a not-yet-materialized/misconfigured provider
+        and, worse, poisoned the daemon-side ``_cached_context_limit`` — the
+        cache only refreshes on a ``0`` reading (``core.py`` context-update
+        handler), so a bogus 1M value was cached at ``initialize()`` time and
+        never healed, making every ``ContextUpdatedEvent`` report 1M even for
+        a tiny-context model (e.g. Gemini Nano ~9k).  Every consumer of this
+        value already guards ``context_limit > 0`` / ``max(0, ...)``, and the
+        runner RPC handler documents ``0`` as the provider-not-initialized
+        signal daemon callers retry on.
+        """
         if not self._provider:
-            return 1_048_576
+            return 0
         return self._provider.get_context_limit()
 
     def get_context_usage(self) -> Dict[str, Any]:
@@ -6384,6 +8310,59 @@ NOTES
             'tokens_remaining': tokens_remaining,
         }
 
+    def _log_gc_denominator(self, label: str, provider_total: int = 0) -> None:
+        """Emit (``logger.info``) the GC-trigger denominator breakdown so
+        the budget-GC decision is inspectable from the daemon log.
+
+        Two denominators are in play and must be told apart:
+
+        - **provider path** (proactive GC during streaming): the wire
+          size vLLM itself reports (``usage.total_tokens``) — ground
+          truth for what's actually on the wire.
+        - **InstructionBudget path** (pre-send / after-turn GC):
+          ``InstructionBudget.total_tokens()`` — what PR-274's
+          ``wire_tool_schemas`` LOCKED PLUGIN child feeds into, and what
+          ``gc_budget``'s threshold check reads via
+          ``get_context_usage``.
+
+        Logging both side-by-side (with the ``wire_tool_schemas`` child
+        broken out) makes three things verifiable from one line: (a) did
+        PR-274's tool-schema registration actually land in the
+        InstructionBudget; (b) does the InstructionBudget total track the
+        provider's true wire or diverge from it; (c) at a GC decision,
+        which number the threshold is being compared against.
+
+        Uses ``logger.info`` deliberately — NOT ``self._trace``, which
+        apparmor can silently swallow on confined runner sessions (see
+        ``feedback_apparmor_blocks_provider_trace_silently``).
+        """
+        ib = self._instruction_budget
+        if ib is None:
+            logger.info(
+                "GC_DENOM[%s] no_instruction_budget provider_total=%d",
+                label, provider_total,
+            )
+            return
+
+        def _src_total(source) -> int:
+            entry = ib.get_entry(source)
+            return entry.total_tokens() if entry is not None else 0
+
+        sys_t = _src_total(InstructionSource.SYSTEM)
+        plugin_entry = ib.get_entry(InstructionSource.PLUGIN)
+        plugin_t = plugin_entry.total_tokens() if plugin_entry is not None else 0
+        wire_t = 0
+        if plugin_entry is not None and "wire_tool_schemas" in plugin_entry.children:
+            wire_t = plugin_entry.children["wire_tool_schemas"].tokens
+        conv_t = _src_total(InstructionSource.CONVERSATION)
+        logger.info(
+            "GC_DENOM[%s] ib_total=%d (sys=%d plugin=%d[wire_tools=%d] "
+            "conv=%d) limit=%d pct=%.1f%% gc_eligible=%d | provider_total=%d",
+            label, ib.total_tokens(), sys_t, plugin_t, wire_t, conv_t,
+            ib.context_limit, ib.utilization_percent(),
+            ib.gc_eligible_tokens(), provider_total,
+        )
+
     def reset_session(self, history: Optional[List[Message]] = None) -> None:
         """Reset the chat session, clearing turn accounting and optionally restoring history.
 
@@ -6410,6 +8389,18 @@ NOTES
             if self._pinned_references:
                 self._remove_pinned_from_system_instruction()
                 self._pinned_references.clear()
+            # Notify enrichment plugins (memory, references, template, ...)
+            # so they can clear per-session dedup tracking.  Otherwise hints
+            # that were surfaced in the wiped conversation would never be
+            # re-emitted in the fresh one.
+            if self._runtime and self._runtime.registry:
+                try:
+                    self._runtime.registry.broadcast_history_cleared()
+                except Exception as exc:
+                    logger.debug(
+                        f"[session:{self._agent_id}] "
+                        f"broadcast_history_cleared failed: {exc}"
+                    )
 
     def get_turn_boundaries(self) -> List[int]:
         """Get indices where each turn starts in the history."""
@@ -6562,8 +8553,11 @@ NOTES
         Uses ``provider.complete()`` with a single user message and no tools.
         Does not modify or use session history.
         """
-        if not self._provider:
+        if not self._configured:
             raise RuntimeError("Session not configured.")
+        self._ensure_provider()
+        if not self._provider:
+            raise RuntimeError("Session has no provider (skip_provider mode + auth incomplete)")
 
         messages = [Message.from_text(Role.USER, prompt)]
         with self._provider_access():
@@ -6577,8 +8571,11 @@ NOTES
         on_output: OutputCallback
     ) -> str:
         """Send a message with custom Part objects."""
-        if not self._provider:
+        if not self._configured:
             raise RuntimeError("Session not configured.")
+        self._ensure_provider()
+        if not self._provider:
+            raise RuntimeError("Session has no provider (skip_provider mode + auth incomplete)")
 
         return self._run_chat_loop_with_parts(parts, on_output)
 
@@ -6621,7 +8618,7 @@ NOTES
                     turn_result, _retry_stats = with_retry(
                         lambda: self._provider.complete(
                             self._history.messages,
-                            system_instruction=self._system_instruction,
+                            system_instruction=self._get_effective_system_instruction(),
                             tools=self._get_tools_for_provider(),
                         ),
                         context="complete_with_parts",
@@ -6647,7 +8644,7 @@ NOTES
                 else:
                     return f"[Model stopped unexpectedly: {response.finish_reason}]"
 
-            function_calls = list(response.function_calls) if response.function_calls else []
+            function_calls = list(response.get_function_calls())
             while function_calls:
                 response_text = response.get_text()
                 if response_text and on_output:
@@ -6728,6 +8725,9 @@ NOTES
                     # Emit hook: tool ended
                     fc_duration = (fc_end - fc_start).total_seconds()
                     if self._ui_hooks:
+                        fc_result_payload = _split_executor_result_impl(
+                            executor_result
+                        )[1]
                         self._ui_hooks.on_tool_call_end(
                             agent_id=self._agent_id,
                             tool_name=name,
@@ -6739,6 +8739,7 @@ NOTES
                             continuation_id=fc_continuation_id,
                             show_output=fc_show_output,
                             show_popup=fc_show_popup,
+                            is_error_result=tool_result_is_error(fc_result_payload),
                         )
 
                     turn_data['function_calls'].append({
@@ -6757,6 +8758,7 @@ NOTES
                 # Proactive size guard: cap results before they enter history
                 tool_results = self._cap_tool_results(tool_results)
                 # Append tool results to session history
+                tool_results = self._gate_tool_results_for_active_modalities(tool_results)
                 tool_result_parts = [Part(function_response=r) for r in tool_results]
                 self._history.append(Message(role=Role.TOOL, parts=tool_result_parts))
 
@@ -6771,7 +8773,7 @@ NOTES
                         turn_result, _retry_stats = with_retry(
                             lambda: self._provider.complete(
                                 self._history.messages,
-                                system_instruction=self._system_instruction,
+                                system_instruction=self._get_effective_system_instruction(),
                                 tools=self._get_tools_for_provider(),
                             ),
                             context="complete_tool_results_parts",
@@ -6787,7 +8789,7 @@ NOTES
                     self._accumulate_turn_tokens(response, turn_data)
                     # Record token usage to telemetry span
                     self._record_token_telemetry(llm_telemetry, response)
-                function_calls = list(response.function_calls) if response.function_calls else []
+                function_calls = list(response.get_function_calls())
 
             final_text = response.get_text()
             if final_text and on_output:
@@ -6818,6 +8820,31 @@ NOTES
             raise
 
         finally:
+            # Record the terminal response's finish reason on the turn
+            # accounting (it rides ``TurnCompletedEvent.finish_reason``) and,
+            # for an abnormal stop, surface a ``source="system"`` banner so a
+            # truncated turn isn't mistaken for a clean completion.  Unlike
+            # ``_run_chat_loop`` this parts loop has no per-continuation
+            # classifier, so the terminal ``response`` here is the single
+            # reliable capture point — it also covers a *continuation* that
+            # ended abnormally, which the initial-response inline check above
+            # never saw.
+            if response is not None and response.finish_reason is not None:
+                turn_data['finish_reason'] = response.finish_reason.value
+                if (
+                    response.finish_reason in (
+                        FinishReason.MAX_TOKENS,
+                        FinishReason.SAFETY,
+                        FinishReason.ERROR,
+                    )
+                    and on_output is not None
+                ):
+                    on_output(
+                        "system",
+                        self._abnormal_finish_message(response.finish_reason),
+                        "write",
+                    )
+
             turn_end = datetime.now()
             turn_data['end_time'] = turn_end.isoformat()
             turn_data['duration_seconds'] = (turn_end - turn_start).total_seconds()
@@ -6898,7 +8925,21 @@ NOTES
             )
             return None
 
+        # Phase 0: collapse byte-identical duplicate tool-results BEFORE the
+        # before-send GC check.  This is the GC path that fires on the
+        # InstructionBudget utilisation (vs the streaming-flag-gated
+        # after-turn path), so it's the one that catches a request about to
+        # overflow the context window — dedup must run here too, or the
+        # duplicate-catalog bloat is never reclaimed before the send.
+        # Re-reads context_usage below so the GC_CHECK percent reflects the
+        # smaller wire.
+        self._dedup_history_for_gc()
+
         context_usage = self.get_context_usage()
+        # Diagnostic: full denominator breakdown (sys/plugin[wire_tools]/conv)
+        # so the GC_CHECK percent can be attributed to its sources and the
+        # wire_tool_schemas registration verified.
+        self._log_gc_denominator("before_send")
         logger.info(
             "GC_CHECK: plugin=%s usage=%.1f%% threshold=%.1f%% target=%.1f%% continuous=%s",
             type(self._gc_plugin).__name__,
@@ -6937,11 +8978,63 @@ NOTES
 
                 if result.success:
                     if result.items_collected == 0:
-                        # GC ran but collected nothing - this is often surprising to users
-                        self._trace(
-                            f"GC_BEFORE_SEND: WARNING - GC triggered but collected 0 items. "
-                            f"Check preserve_recent_turns setting vs actual turn count. "
-                            f"Details: {result.details}"
+                        # GC ran but collected nothing — often surprising to
+                        # operators debugging cascade overflow.  Surface the
+                        # LOCKED-vs-eligible breakdown so the operator can
+                        # tell WHICH class of "nothing trimmable" applies:
+                        #
+                        # - High locked_tokens, low eligible_tokens: most of
+                        #   the budget is body-wired (persona, pinned refs,
+                        #   tool schemas, framework instructions).  Fix:
+                        #   externalize content, shrink persona, or extend
+                        #   context window.  GC cannot help.
+                        # - Low locked + low eligible: budget is mostly
+                        #   empty; threshold was crossed by something else
+                        #   (e.g. provider-reported usage from a streaming
+                        #   chunk).  Investigate budget accuracy.
+                        # - Moderate eligible but 0 collected: strategy
+                        #   restrictions (gc_truncate's preserve_recent_turns,
+                        #   gc_budget's per-source policies) prevented
+                        #   removal.  Tune the strategy config.
+                        #
+                        # Routed via ``logger.info`` (NOT ``self._trace``)
+                        # so the diagnostic lands in /tmp/jaato.log — the
+                        # apparmor-confined runner can't write to the
+                        # default ``self._trace`` path
+                        # ([[project_backlog_apparmor_blocks_provider_trace_silently]]).
+                        locked = (
+                            self._instruction_budget.locked_tokens()
+                            if self._instruction_budget else 0
+                        )
+                        eligible = (
+                            self._instruction_budget.gc_eligible_tokens()
+                            if self._instruction_budget else 0
+                        )
+                        preservable = (
+                            self._instruction_budget.preservable_tokens()
+                            if self._instruction_budget else 0
+                        )
+                        total = (
+                            self._instruction_budget.total_tokens()
+                            if self._instruction_budget else 0
+                        )
+                        context_limit = (
+                            self._instruction_budget.context_limit
+                            if self._instruction_budget else 0
+                        )
+                        logger.info(
+                            "GC_NO_ITEMS_COLLECTED: GC triggered but freed "
+                            "0 items.  budget breakdown: total=%d "
+                            "locked=%d eligible=%d preservable=%d "
+                            "context_limit=%d.  reason=%s.  "
+                            "details=%s.  When locked >> eligible, the "
+                            "budget is body-wired and GC cannot help — "
+                            "reduce locked content (externalize references, "
+                            "shrink persona/schemas) or extend the context "
+                            "window.",
+                            total, locked, eligible, preservable,
+                            context_limit, reason.value if reason else None,
+                            result.details,
                         )
                     else:
                         self._trace(
@@ -7064,6 +9157,22 @@ NOTES
         return False
 
     # ==================== Session Persistence ====================
+    # The plugin/config and the save/restore flow live on the
+    # ``SessionPersistence`` collaborator (``self._persistence``).  These
+    # methods are thin delegations; the properties below keep
+    # ``_session_plugin`` / ``_session_config`` readable for the handful
+    # of external/internal readers that reach for them directly
+    # (jaato_client, refresh_tools, revert).
+
+    @property
+    def _session_plugin(self) -> Optional[SessionPlugin]:
+        """The attached session plugin, or None (owned by _persistence)."""
+        return self._persistence.plugin
+
+    @property
+    def _session_config(self) -> Optional[SessionConfig]:
+        """The session config paired with the plugin (owned by _persistence)."""
+        return self._persistence.config
 
     def set_session_plugin(
         self,
@@ -7071,38 +9180,11 @@ NOTES
         config: Optional[SessionConfig] = None
     ) -> None:
         """Set the session plugin for persistence."""
-        self._session_plugin = plugin
-        self._session_config = config or SessionConfig()
-
-        if hasattr(plugin, 'set_session'):
-            plugin.set_session(self)
-
-        if hasattr(plugin, 'get_user_commands'):
-            for cmd in plugin.get_user_commands():
-                self._user_commands[cmd.name] = cmd
-
-        if hasattr(plugin, 'get_executors') and self._executor:
-            for name, fn in plugin.get_executors().items():
-                self._executor.register(name, fn)
-
-        if hasattr(plugin, 'get_tool_schemas'):
-            session_schemas = plugin.get_tool_schemas()
-            if session_schemas:
-                current_tools = list(self._tools) if self._tools else []
-                current_tools.extend(session_schemas)
-                self._tools = current_tools
-
-        if self._session_config.auto_resume_last:
-            state = self._session_plugin.on_session_start(self._session_config)
-            if state:
-                self._restore_session_state(state)
+        self._persistence.set_plugin(plugin, config)
 
     def remove_session_plugin(self) -> None:
         """Remove the session plugin."""
-        if self._session_plugin:
-            self._session_plugin.shutdown()
-        self._session_plugin = None
-        self._session_config = None
+        self._persistence.remove_plugin()
 
     def save_session(
         self,
@@ -7110,88 +9192,31 @@ NOTES
         user_inputs: Optional[List[str]] = None
     ) -> str:
         """Save the current session."""
-        if not self._session_plugin:
-            raise RuntimeError("No session plugin configured.")
-
-        state = self._get_session_state(session_id, user_inputs)
-        self._session_plugin.save(state)
-
-        if hasattr(self._session_plugin, 'set_current_session_id'):
-            self._session_plugin.set_current_session_id(state.session_id)
-
-        return state.session_id
+        return self._persistence.save(session_id, user_inputs)
 
     def resume_session(self, session_id: str) -> SessionState:
         """Resume a previously saved session."""
-        if not self._session_plugin:
-            raise RuntimeError("No session plugin configured.")
-
-        state = self._session_plugin.load(session_id)
-        self._restore_session_state(state)
-        return state
+        return self._persistence.resume(session_id)
 
     def list_sessions(self) -> List[SessionInfo]:
         """List all available sessions."""
-        if not self._session_plugin:
-            raise RuntimeError("No session plugin configured.")
-        return self._session_plugin.list_sessions()
+        return self._persistence.list()
 
     def delete_session(self, session_id: str) -> bool:
         """Delete a saved session."""
-        if not self._session_plugin:
-            raise RuntimeError("No session plugin configured.")
-        return self._session_plugin.delete(session_id)
+        return self._persistence.delete(session_id)
 
     def _get_session_state(
         self,
         session_id: Optional[str] = None,
         user_inputs: Optional[List[str]] = None
     ) -> SessionState:
-        """Build a SessionState from current state."""
-        if not session_id:
-            if (self._session_plugin and
-                    hasattr(self._session_plugin, 'get_current_session_id')):
-                session_id = self._session_plugin.get_current_session_id()
-            if not session_id:
-                session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-
-        now = datetime.now()
-        turn_accounting = self.get_turn_accounting()
-
-        description = None
-        if self._session_plugin and hasattr(self._session_plugin, '_session_description'):
-            description = self._session_plugin._session_description
-
-        return SessionState(
-            session_id=session_id,
-            history=self.get_history(),
-            created_at=now,
-            updated_at=now,
-            turn_count=len(turn_accounting),
-            turn_accounting=turn_accounting,
-            user_inputs=user_inputs or [],
-            project=self._runtime.project,
-            location=self._runtime.location,
-            model=self._model_name,
-            description=description,
-        )
+        """Build a SessionState snapshot (delegates to _persistence)."""
+        return self._persistence.build_state(session_id, user_inputs)
 
     def _restore_session_state(self, state: SessionState) -> None:
-        """Restore session state from a SessionState."""
-        self.reset_session(state.history)
-        self._turn_accounting = list(state.turn_accounting)
-
-    def _notify_session_turn_complete(self) -> None:
-        """Notify session plugin that a turn completed."""
-        if not self._session_plugin or not self._session_config:
-            return
-
-        state = self._get_session_state()
-
-        if hasattr(self._session_plugin, 'increment_turn_count'):
-            self._session_plugin.increment_turn_count()
-
-        self._session_plugin.on_turn_complete(state, self._session_config)
+        """Restore session state from a SessionState (delegates to _persistence)."""
+        self._persistence.restore_state(state)
 
     # ------------------------------------------------------------------
     # Conversation fork
@@ -7237,10 +9262,30 @@ NOTES
         Raises:
             TimeoutError: If the provider is not available within
                 *timeout* seconds.
-            RuntimeError: If the session has no configured provider.
+            RuntimeError: If the session has no provider — typically
+                because the session was configured with
+                ``skip_provider=True`` (auth-pending mode) and auth
+                hasn't completed yet.
         """
+        # Lazy-init the provider on first model use (deferred-provider-INIT
+        # design 2026-05-13).  Mirrors send_message:3560 — provider
+        # construction is deferred from configure() to first model
+        # call to keep the bootstrap RPC critical path short.  Before
+        # this fix, replay_messages did a bare ``if not self._provider``
+        # check that surfaced as "Session not configured" on
+        # forensic-fork sessions where send_message never fired
+        # (canonical caller: ``session_ops.interrogate_session``
+        # against a create_headless_session fork — the fork is fully
+        # configured but its provider has never been materialised).
+        # Idempotent + thread-safe per ``_ensure_provider``.
+        self._ensure_provider()
         if not self._provider:
-            raise RuntimeError("Session not configured — cannot replay.")
+            raise RuntimeError(
+                "Session has no provider — "
+                "skip_provider (auth-pending) mode and auth has not "
+                "completed yet, OR _ensure_provider() returned "
+                "without setting one (check configure() succeeded)."
+            )
 
         self._fork_gate.clear()
         if not self._provider_idle.wait(timeout=timeout):
@@ -7252,12 +9297,194 @@ NOTES
         try:
             result = self._provider.complete(
                 messages,
-                system_instruction=self._system_instruction,
+                system_instruction=self._get_effective_system_instruction(),
             )
             response = self._unwrap_turn_result(result)
             return response.get_text() or ""
         finally:
             self._fork_gate.set()
+
+    def _get_effective_system_instruction(self) -> Optional[str]:
+        """System instruction to send to the provider on this turn.
+
+        Equal to the assembled :attr:`_system_instruction` plus a single
+        line naming the current tier when tier mode is active.
+        Recomputed dynamically (not stored on ``_system_instruction``)
+        so tier switches take effect immediately without re-assembling
+        the whole prompt — and so the assembled instruction stays a
+        stable cache anchor for providers that key prompt cache on it.
+        """
+        if self._active_tier is None:
+            return self._system_instruction
+        tier_line = (
+            f"You are currently operating in the `{self._active_tier}` tier."
+        )
+        if self._system_instruction:
+            return self._system_instruction + "\n\n" + tier_line
+        return tier_line
+
+    def _provider_for_tier(self, provider_name: str, model: str) -> 'ModelProviderPlugin':
+        """Cached provider instance for a cross-provider tier (V2).
+
+        Creates + caches on first use, keyed by ``provider_name``.  Reuses the
+        session's lazy-pending ``plugin_configs`` / ``skip_model_test`` so each
+        provider reads its OWN ``plugin_configs`` section (e.g.
+        ``plugin_configs.openrouter``).  A later switch back is O(1) (cache hit).
+        """
+        prov = self._provider_cache.get(provider_name)
+        if prov is not None:
+            return prov
+        # Read the PERSISTENT base config, NOT _provider_lazy_pending — the
+        # latter is cleared to None once the main provider is created, which
+        # left cross-provider tier providers with plugin_configs=None (no
+        # api_key).  _tier_provider_base survives that clear.
+        cfg = self._tier_provider_base or {}
+        prov = self._runtime.create_provider(
+            model,
+            provider_name=provider_name,
+            skip_model_test=cfg.get('skip_model_test', True),
+            plugin_configs=cfg.get('plugin_configs'),
+        )
+        if hasattr(prov, 'set_agent_context'):
+            prov.set_agent_context(
+                agent_type=self._agent_type,
+                agent_name=self._agent_name,
+                agent_id=self._agent_id,
+            )
+        self._provider_cache[provider_name] = prov
+        return prov
+
+    def switch_tier(self, requested_tier: str) -> Dict[str, Any]:
+        """Switch the session's active model tier.
+
+        Called by the ``enter_tier`` lifecycle tool.  Resolves the
+        requested tier through ``_tier_config.model_for`` (which routes
+        to the configured fallback when the tier isn't declared),
+        re-points the active provider at the new tier's model via
+        ``provider.connect(model, skip_model_test=True)`` (cheap — no
+        network round-trip, just sets ``self._model_name`` on the
+        provider), updates ``_active_tier``, and returns a structured
+        result the tool surfaces back to the model.
+
+        The returned dict tells the model exactly what happened:
+            * ``status``: ``"switched"`` (tier changed),
+              ``"already_at_tier"`` (idempotent no-op), or
+              ``"fallback_used"`` (requested tier wasn't declared, fell
+              back to ``tier_config.tier_fallback``).
+            * ``active_tier``: the actual tier the session is now in.
+            * ``requested_tier``: what the model asked for (helps the
+              model self-correct when fallback fired).
+            * ``model``: the model name now in use.
+
+        Raises:
+            RuntimeError: If tier mode isn't active for this session
+                (the ``enter_tier`` tool shouldn't be registered then,
+                so this is a programmer-error guard).
+            ValueError: If ``requested_tier`` isn't one of the framework's
+                three valid names; raised through to surface as an
+                ``error`` in the tool result.
+        """
+        if self._tier_config is None or self._active_tier is None:
+            raise RuntimeError(
+                "switch_tier called but session is in single-model mode "
+                "(no tier config); enter_tier tool should not be registered"
+            )
+
+        actual_tier, entry = self._tier_config.model_for(requested_tier)
+
+        if actual_tier == self._active_tier:
+            return {
+                "status": "already_at_tier",
+                "active_tier": actual_tier,
+                "requested_tier": requested_tier,
+                "model": entry.model,
+            }
+
+        if self._provider is not None:
+            target_provider = entry.provider
+            try:
+                if target_provider and target_provider != self._active_provider_name:
+                    # V2 cross-provider tier: swap self._provider to the cached
+                    # (or newly-created) instance for this tier's provider, then
+                    # point it at the tier's model.  History is provider-neutral
+                    # (Message/Part), so the conversation flows across the swap.
+                    self._provider = self._provider_for_tier(
+                        target_provider, entry.model)
+                    self._active_provider_name = target_provider
+                self._provider.connect(entry.model, skip_model_test=True)
+            except Exception as exc:
+                logger.warning(
+                    "switch_tier: swap/connect to %s/%s failed: %s",
+                    target_provider or self._active_provider_name,
+                    entry.model, exc,
+                )
+                raise
+
+        previous_tier = self._active_tier
+        self._active_tier = actual_tier
+        self._model_name = entry.model
+
+        logger.info(
+            "Tier switch: %s → %s (model %s)",
+            previous_tier, actual_tier, entry.model,
+        )
+
+        return {
+            "status": (
+                "fallback_used"
+                if actual_tier != requested_tier
+                else "switched"
+            ),
+            "active_tier": actual_tier,
+            "requested_tier": requested_tier,
+            "model": entry.model,
+        }
+
+    def set_initial_history(self, messages: List[Message]) -> None:
+        """Seed an empty session with replayed conversation history.
+
+        Pre-turn-loop primitive used by spawn-from-snapshot callers
+        (premium handoff via ``fork_session_from_history``, waypoint
+        fork-to-session, test harnesses).  The session must be **idle**
+        and its history must be **empty** at call time — both are true
+        for a freshly created session before any user/agent turn.
+
+        Replayed messages may include tool-use / tool-result blocks for
+        tools the new session's profile doesn't expose.  These remain
+        as inert context for the model to read; we deliberately do not
+        strip them, so handoff preserves the source agent's reasoning
+        trace.  If a provider chokes on unknown tool references at
+        sampling time, that's a provider-specific concern surfaced via
+        the normal tool-result reconciliation path on the first new
+        turn.
+
+        The session's system instruction is NOT touched — it comes
+        from the new session's own agent/profile, independently of the
+        replayed user/assistant turns.
+
+        Args:
+            messages: The conversation history to seed.  Caller owns
+                the list; a shallow copy is taken.
+
+        Raises:
+            RuntimeError: If the session is not idle or its history
+                already contains messages.  This is a defensive guard
+                — the right place to call this method is between
+                ``server.initialize()`` and any ``inject_prompt`` /
+                ``handle_request``.
+        """
+        if self._is_running:
+            raise RuntimeError(
+                "set_initial_history requires an idle session; this one "
+                "is mid-turn."
+            )
+        if self._history.messages_ref:
+            raise RuntimeError(
+                "set_initial_history requires an empty history; this "
+                f"session already has {len(self._history.messages_ref)} "
+                "messages."
+            )
+        self._history.replace(messages)
 
     def resolve_fork_point(
         self,
@@ -7354,9 +9581,7 @@ NOTES
 
     def close_session(self) -> None:
         """Close the current session."""
-        if self._session_plugin and self._session_config:
-            state = self._get_session_state()
-            self._session_plugin.on_session_end(state, self._session_config)
+        self._persistence.close()
 
 
 __all__ = ['JaatoSession']

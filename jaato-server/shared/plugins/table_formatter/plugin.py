@@ -1,12 +1,17 @@
 # shared/plugins/table_formatter/plugin.py
-"""Table formatter plugin with box-drawing rendering.
+"""Table formatter plugin emitting semantic ``<j-table>`` markup.
 
-Detects markdown tables in model output and renders them with Unicode
-box-drawing characters for proper fixed-width display.
+Detects markdown tables in streaming model output and converts them to
+client-agnostic ``<j-table>`` / ``<j-thead>`` / ``<j-tr>`` / ``<j-td>``
+markup.  Each attached client (TUI, web dashboard, chat bridge) renders
+that markup natively — the server never emits terminal box-drawing or
+ANSI.  This keeps the wire format neutral when heterogeneous clients
+co-attach to a single session.
 
 Detection patterns:
-1. Markdown tables: | Header | Header |  with separator line |---|---|
-2. ASCII grid tables: +---+---+ style borders
+1. Markdown tables: ``| Header | Header |`` with ``|---|---|`` separator
+2. ASCII grid tables (``+---+---+``): passed through unchanged — they
+   already carry their own borders.
 
 Usage (pipeline):
     from shared.plugins.formatter_pipeline import create_pipeline
@@ -35,28 +40,13 @@ def _get_ambiguous_width() -> int:
         1 or 2 depending on configuration.
     """
     try:
-        value = os.environ.get("JAATO_AMBIGUOUS_WIDTH", "1")
+        value = os.environ.get("JAATO_AMBIGUOUS_WIDTH", "1")  # env: width of East Asian Ambiguous chars in tables (1 default; 2 for CJK terminals)
         return 2 if value == "2" else 1
     except (ValueError, TypeError):
         return 1
 
 # Priority for pipeline ordering (20-39 = structural formatting)
 DEFAULT_PRIORITY = 25
-
-# Box-drawing characters for table rendering
-BOX_CHARS = {
-    "top_left": "┌",
-    "top_right": "┐",
-    "bottom_left": "└",
-    "bottom_right": "┘",
-    "horizontal": "─",
-    "vertical": "│",
-    "t_down": "┬",
-    "t_up": "┴",
-    "t_right": "├",
-    "t_left": "┤",
-    "cross": "┼",
-}
 
 # Patterns for table detection
 # Markdown table: | cell | cell | with at least one |---|
@@ -113,42 +103,18 @@ def _display_width(text: str) -> int:
     return width
 
 
-def _pad_to_width(text: str, target_width: int, align: str = "left") -> str:
-    """Pad a string to a target display width, accounting for wide characters.
-
-    Args:
-        text: The string to pad.
-        target_width: The desired display width.
-        align: Alignment - 'left', 'right', or 'center'.
-
-    Returns:
-        The padded string.
-    """
-    current_width = _display_width(text)
-    padding_needed = max(0, target_width - current_width)
-
-    if align == "right":
-        return " " * padding_needed + text
-    elif align == "center":
-        left_pad = padding_needed // 2
-        right_pad = padding_needed - left_pad
-        return " " * left_pad + text + " " * right_pad
-    else:  # left
-        return text + " " * padding_needed
-
-
 class TableFormatterPlugin:
-    """Plugin that formats tables with box-drawing characters.
+    """Plugin that converts markdown tables into semantic ``<j-table>`` markup.
 
-    Implements the FormatterPlugin protocol for use in a formatter pipeline.
-    Detects markdown tables and renders them with Unicode box-drawing
-    characters for proper fixed-width display.
+    Implements the FormatterPlugin protocol for use in a formatter
+    pipeline.  Detects markdown tables in streaming input and emits
+    client-agnostic semantic tags that attached clients render natively
+    (TUI to box-drawing, web dashboards to HTML ``<table>``, chat
+    bridges to a card/list layout, …).
 
     Features:
-    - Detects markdown tables (| col | col | with |---|---|)
-    - Detects ASCII grid tables (+---+---+ style)
-    - Renders with Unicode box-drawing characters
-    - Preserves column alignment
+    - Detects markdown tables (``| col | col |`` with ``|---|---|``)
+    - Passes ASCII grid tables (``+---+---+``) through unchanged
     - Handles multi-line streaming input
     """
 
@@ -312,7 +278,7 @@ class TableFormatterPlugin:
 
         # Check if this is actually a valid table
         if table_type == "markdown" and self._is_valid_markdown_table(table_text):
-            yield self._render_markdown_table(table_text)
+            yield self._render_semantic_table(table_text)
         elif table_type == "ascii_grid":
             yield self._render_ascii_grid_table(table_text)
         else:
@@ -427,87 +393,35 @@ class TableFormatterPlugin:
 
     # ==================== Table Rendering ====================
 
-    def _render_markdown_table(self, text: str) -> str:
-        """Render a markdown table with box-drawing characters."""
-        headers, rows, alignments = self._parse_markdown_table(text)
+    def _render_semantic_table(self, text: str) -> str:
+        """Render a markdown table as semantic ``<j-table>`` markup.
 
+        Emits format-independent tags that clients render natively:
+
+        - Web clients → HTML ``<table>``
+        - Chat clients → card/list layout
+        - API clients → structured JSON
+
+        The ``j-`` prefix identifies jaato pipeline semantic tags.
+        """
+        headers, rows, alignments = self._parse_markdown_table(text)
         if not headers and not rows:
             return text + "\n"
 
-        # Calculate column widths
-        all_rows = [headers] + rows if headers else rows
-        num_cols = max(len(row) for row in all_rows) if all_rows else 0
+        lines = ["<j-table>"]
 
-        if num_cols == 0:
-            return text + "\n"
-
-        # Normalize row lengths
-        for row in all_rows:
-            while len(row) < num_cols:
-                row.append("")
-
-        # Extend alignments if needed
-        while len(alignments) < num_cols:
-            alignments.append("left")
-
-        # Calculate max width for each column
-        col_widths = []
-        for col_idx in range(num_cols):
-            max_width = 0
-            for row in all_rows:
-                if col_idx < len(row):
-                    max_width = max(max_width, _display_width(row[col_idx]))
-            col_widths.append(max(max_width, 1))  # Minimum width of 1
-
-        # Build the table
-        lines = []
-
-        # Top border
-        lines.append(self._make_border("top", col_widths))
-
-        # Header row (if present)
         if headers:
-            lines.append(self._make_row(headers, col_widths, alignments))
-            lines.append(self._make_border("middle", col_widths))
+            lines.append("<j-thead>")
+            cells = "".join(f"<j-th>{cell}</j-th>" for cell in headers)
+            lines.append(cells)
+            lines.append("</j-thead>")
 
-        # Data rows
         for row in rows:
-            lines.append(self._make_row(row, col_widths, alignments))
+            cells = "".join(f"<j-td>{cell}</j-td>" for cell in row)
+            lines.append(f"<j-tr>{cells}</j-tr>")
 
-        # Bottom border
-        lines.append(self._make_border("bottom", col_widths))
-
+        lines.append("</j-table>")
         return "\n".join(lines) + "\n"
-
-    def _make_border(self, position: str, col_widths: List[int]) -> str:
-        """Create a horizontal border line."""
-        if position == "top":
-            left = BOX_CHARS["top_left"]
-            mid = BOX_CHARS["t_down"]
-            right = BOX_CHARS["top_right"]
-        elif position == "middle":
-            left = BOX_CHARS["t_right"]
-            mid = BOX_CHARS["cross"]
-            right = BOX_CHARS["t_left"]
-        else:  # bottom
-            left = BOX_CHARS["bottom_left"]
-            mid = BOX_CHARS["t_up"]
-            right = BOX_CHARS["bottom_right"]
-
-        horiz = BOX_CHARS["horizontal"]
-        segments = [horiz * (w + 2) for w in col_widths]
-        return left + mid.join(segments) + right
-
-    def _make_row(self, cells: List[str], col_widths: List[int], alignments: List[str]) -> str:
-        """Create a data row with proper alignment."""
-        vert = BOX_CHARS["vertical"]
-        formatted_cells = []
-
-        for i, (cell, width, align) in enumerate(zip(cells, col_widths, alignments)):
-            formatted = _pad_to_width(cell, width, align)
-            formatted_cells.append(f" {formatted} ")
-
-        return vert + vert.join(formatted_cells) + vert
 
     def _render_ascii_grid_table(self, text: str) -> str:
         """Render ASCII grid table (already has borders, just pass through)."""
@@ -524,7 +438,10 @@ class TableFormatterPlugin:
         Args:
             config: Dict with optional settings:
                 - priority: Pipeline priority (default: 25)
-                - console_width: Terminal width (default: 120)
+                - console_width: Console width in columns (default: 120).
+                  Kept for API compatibility; semantic markup rendering
+                  ignores terminal width because clients re-flow content
+                  to their own display.
         """
         config = config or {}
         self._priority = config.get("priority", DEFAULT_PRIORITY)
@@ -541,6 +458,20 @@ class TableFormatterPlugin:
     def shutdown(self) -> None:
         """Cleanup when plugin is disabled."""
         pass
+
+    def reset_for_next_session(self) -> None:
+        """Cascade-sharing reset — NO-OP for this plugin.
+
+        Phase 1 hotfix (server 0.6.148+): added to satisfy the
+        ``ToolPlugin`` / ``EnrichmentPlugin`` protocol's runtime
+        ``isinstance`` check.  Per Daniel's litmus test (see
+        ``docs/design/runner-cascade-sharing.md`` §4.3), this
+        plugin holds no per-session state that the next cascade
+        session would benefit from having cleared.  Override in
+        future PRs if the litmus test changes.
+        """
+        pass
+
 
 
 def create_plugin() -> TableFormatterPlugin:

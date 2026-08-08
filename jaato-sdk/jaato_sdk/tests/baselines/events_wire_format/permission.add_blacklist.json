@@ -1,0 +1,6 @@
+{
+  "type": "permission.add_blacklist",
+  "timestamp": "<TIMESTAMP>",
+  "tools": [],
+  "patterns": []
+}

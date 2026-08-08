@@ -1,0 +1,6 @@
+{
+  "type": "peer.spawn_rejected",
+  "timestamp": "<TIMESTAMP>",
+  "request_id": "",
+  "reason": ""
+}

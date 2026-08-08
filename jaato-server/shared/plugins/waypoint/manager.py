@@ -71,6 +71,15 @@ class WaypointManager:
         # Used to capture history snapshots for waypoint metadata
         self._get_history: Optional[Callable[[], List["Message"]]] = None
         self._serialize_history: Optional[Callable[[List["Message"]], str]] = None
+        # Optional callback for capturing session-attached state alongside
+        # history.  When wired (via set_session_state_callback) the manager
+        # invokes it at waypoint create time so a future fork-from-waypoint
+        # primitive can carry extension-owned state (e.g. premium's
+        # pseudonymization lookup table) across the fork.  Returns the
+        # session's get_all_session_state() snapshot — a JSON-serialisable
+        # dict — which the manager JSON-encodes into the waypoint's
+        # session_state_snapshot field.
+        self._get_session_state: Optional[Callable[[], Dict[str, Any]]] = None
 
         # Load existing waypoints (also loads _next_id)
         self._load()
@@ -95,6 +104,26 @@ class WaypointManager:
         """
         self._get_history = get_history
         self._serialize_history = serialize_history
+
+    def set_session_state_callback(
+        self,
+        get_session_state: Callable[[], Dict[str, Any]],
+    ) -> None:
+        """Set the callback for capturing session-attached state.
+
+        Paired with :meth:`set_history_callbacks`; invoked at waypoint
+        create time so a fork-from-waypoint primitive can carry
+        extension-owned state across the fork.  ``get_session_state``
+        must return a JSON-serialisable dict — the same shape as
+        :meth:`JaatoSession.get_all_session_state`, which invokes
+        registered providers to produce a live snapshot.  The manager
+        JSON-encodes the returned dict into the waypoint's
+        ``session_state_snapshot`` field.
+
+        Wiring is handled by :class:`WaypointPlugin.set_session_callbacks`
+        — extensions and tests typically don't call this directly.
+        """
+        self._get_session_state = get_session_state
 
     def _ensure_initial_waypoint(self) -> None:
         """Ensure the implicit initial waypoint (w0) exists."""
@@ -224,6 +253,19 @@ class WaypointManager:
             message_count = len(history)
             history_snapshot = self._serialize_history(history)
 
+        # Capture session-attached state alongside history.  Invoking
+        # the callback (which delegates to JaatoSession.get_all_session_state)
+        # forces every registered provider to materialise its current
+        # value — so a fork-from-waypoint replay sees what was live at
+        # waypoint-create time, not a stale push.  Empty dict collapses
+        # to None so legacy waypoints round-trip unchanged when no
+        # state has been attached.
+        session_state_snapshot: Optional[str] = None
+        if self._get_session_state is not None:
+            attached = self._get_session_state()
+            if attached:
+                session_state_snapshot = json.dumps(attached)
+
         waypoint = Waypoint(
             id=wp_id,
             description=description,
@@ -235,6 +277,7 @@ class WaypointManager:
             user_message_preview=user_message_preview,
             owner=owner,
             parent_id=parent_id,
+            session_state_snapshot=session_state_snapshot,
         )
 
         self._waypoints[wp_id] = waypoint

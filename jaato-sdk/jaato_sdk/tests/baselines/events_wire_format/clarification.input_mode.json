@@ -1,0 +1,9 @@
+{
+  "type": "clarification.input_mode",
+  "timestamp": "<TIMESTAMP>",
+  "agent_id": "",
+  "request_id": "",
+  "tool_name": "",
+  "question_index": 0,
+  "total_questions": 0
+}

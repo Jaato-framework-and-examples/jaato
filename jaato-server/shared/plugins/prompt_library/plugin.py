@@ -21,12 +21,14 @@ Template syntax:
 - {{$1}}, {{$2}}, etc. - Positional parameters (for Claude compat)
 - {{$0}} - All arguments joined with spaces
 - $ARGUMENTS - Claude Code compatibility (becomes {{$0}})
+- {{!command}} - Command substitution (runs command, embeds output)
 """
 
 import base64
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -37,13 +39,67 @@ from typing import Dict, List, Any, Callable, Optional, Set, TYPE_CHECKING
 
 import yaml
 
+from shared.subprocess_runner import run_command as _run_command, RunResult
+
 if TYPE_CHECKING:
     from ..permission.plugin import PermissionPlugin
 
-from jaato_sdk.plugins.model_provider.types import ToolSchema
+
+def tokenize_prompt_args(text: str) -> List[str]:
+    """Split a prompt-args string into tokens, respecting double-quoted spans.
+
+    Used by both the ``%name args...`` text path (in
+    :class:`server.session_manager.SessionManager._expand_prompt_references`)
+    and the ``/prompt name args...`` slash-command path
+    (:meth:`PromptLibraryPlugin._execute_user_command`) so that
+    multi-word values can be delivered without positional misalignment.
+
+    Tokenization rules:
+      * Whitespace separates tokens (same as ``str.split``).
+      * Double-quoted spans (``"foo bar"``) are kept as a single token,
+        with the surrounding quotes stripped.  Useful for named args
+        like ``key="value with spaces"``.
+      * Apostrophes (``'``) are **literal** characters — many natural
+        languages (Spanish, French, English contractions) embed them
+        in regular text, so honoring them as quote chars would corrupt
+        common values.  This is the key divergence from default POSIX
+        ``shlex.split``.
+      * Backslash escapes inside double-quoted spans are honored
+        (``"a\\"b"`` → ``a"b``).
+      * Unterminated quotes degrade gracefully: the function falls back
+        to plain whitespace splitting and returns the raw tokens, so
+        malformed input is never a hard error at this layer.
+
+    Args:
+        text: The args portion of a prompt invocation, after the
+            ``%name`` or subcommand has been stripped.
+
+    Returns:
+        Token list ready to feed to the positional / ``key=value``
+        partitioner in :meth:`_execute_prompt_command`.
+    """
+    if not text:
+        return []
+    lex = shlex.shlex(text, posix=True)
+    lex.whitespace_split = True
+    lex.quotes = '"'
+    lex.commenters = ''
+    try:
+        return list(lex)
+    except ValueError:
+        # Unterminated quote or similar — fall back to plain split so
+        # malformed input still produces *some* tokenization rather
+        # than failing the whole prompt expansion.
+        return text.split()
+
+from jaato_sdk.plugins.model_provider.types import (
+    ToolSchema,
+    DISCOVERABILITY_DEFERRED,
+)
 from jaato_sdk.plugins.base import UserCommand, CommandCompletion, HelpLines
 from .validation import PromptValidator, format_validation_error
 from shared.http import get_httpx_client
+from shared.plugins.runner_forwarding import RunnerForwardingMixin
 from shared.trace import trace as _trace_write
 
 # Type alias for output callback: (source, text, mode) -> None
@@ -64,6 +120,31 @@ NAMED_PARAM_PATTERN = re.compile(r'\{\{([a-zA-Z_][a-zA-Z0-9_]*)(?::([^}]*))?\}\}
 POSITIONAL_PARAM_PATTERN = re.compile(r'\{\{\$(\d+)(?::([^}]*))?\}\}')
 # Claude Code $ARGUMENTS placeholder
 ARGUMENTS_PLACEHOLDER = re.compile(r'\$ARGUMENTS\b')
+# Command substitution: {{!command args...}}
+COMMAND_PATTERN = re.compile(r'\{\{!(.+?)\}\}')
+# Timeout for command substitution (seconds)
+COMMAND_TIMEOUT = 30
+
+# Authoring documentation for the placeholder grammar above.  This single
+# string is the source of truth cited at BOTH authoring surfaces the model
+# sees — the ``savePrompt`` ``content`` tool-parameter description and the
+# ``get_system_instructions`` "Creating and Updating Prompts" block — so the
+# two cannot drift apart (the drift that let a model author a prompt with
+# Jinja filter syntax jaato's grammar never matched).  jaato's grammar is NOT
+# Jinja/nunjucks: the filter form ``{{name | default('x')}}`` does not match
+# NAMED_PARAM_PATTERN (after the name it requires ``:`` or ``}}``, not a space)
+# so it is left literal and ``name`` is never registered as a parameter.
+PARAM_GRAMMAR_DOC = (
+    "Placeholder grammar (this is NOT Jinja/nunjucks):\n"
+    "- {{name}} - required parameter.\n"
+    "- {{name:default text}} - optional; the default is used when the caller "
+    "omits the arg. The default runs to the first '}', so it cannot contain "
+    "'}'.\n"
+    "- {{$1}}, {{$2}}, {{$0}} - positional args ({{$0}} = all args joined).\n"
+    "- {{!command}} - shell command substitution.\n"
+    "Filter syntax such as {{name | default('x')}} is unsupported and renders "
+    "literally."
+)
 
 
 @dataclass
@@ -107,7 +188,7 @@ class FetchResult:
     source_params: str = ""
 
 
-class PromptLibraryPlugin:
+class PromptLibraryPlugin(RunnerForwardingMixin):
     """Plugin that provides prompt library functionality.
 
     Users can:
@@ -115,17 +196,33 @@ class PromptLibraryPlugin:
     - Type `prompt <name> [args...]` to use a prompt
 
     Model can:
-    - Call listPrompts() to discover available prompts
-    - Call usePrompt(name, params) to retrieve and expand a prompt
-    - Call savePrompt(name, content, description) to create new prompts
+    - Discover prompt tools via list_tools(category="prompt")
+    - Invoke a prompt by calling its prompt.<name>(...) tool directly
+    - Call savePrompt(name, content, description) to create/update prompts
+    - Call deletePrompt(name) to remove a writable prompt
     """
 
     def __init__(self):
         self._workspace_path: Optional[str] = None
+        # Optional override for the read-only framework-config root.
+        # When non-None, prompt/agent/skill discovery uses
+        # ``<config_root>/{prompts,agents,skills,commands}/`` in place
+        # of the workspace tier; the user tier (``~/.jaato/...``) is
+        # always honored.  Set by ``PluginRegistry.set_config_root``.
+        self._config_root: Optional[str] = None
         self._initialized = False
         self._agent_name: Optional[str] = None
-        # Cache of discovered prompts (refreshed on each list)
+        # Cache of discovered prompts.  mtime-gated: ``_discover_prompts``
+        # re-walks ONLY when a source directory's mtime changes (entries
+        # added/removed/renamed); otherwise it returns this cache.  Pre-fix
+        # this was re-walked on EVERY call — an uncached per-item
+        # realpath/symlink walk that, on a cold daemon-side instance during
+        # re-attach, blocked the event loop ~15s inside the synchronous
+        # tool-id-registry emit (the register-push self-block).
         self._prompt_cache: Dict[str, PromptInfo] = {}
+        # Source-mtime signature the cache was built from (None = never
+        # walked).  Compared in _discover_prompts to decide whether to re-walk.
+        self._prompt_cache_signature: Optional[tuple] = None
         # Confirmation callback for interactive prompts (set by client)
         self._confirm_callback: Optional[Callable[[str, List[str]], Optional[str]]] = None
         # Output callback for progress messages
@@ -142,6 +239,82 @@ class PromptLibraryPlugin:
     @property
     def name(self) -> str:
         return "prompt_library"
+
+    @classmethod
+    def get_apparmor_rules(
+        cls,
+        *,
+        workspace_path: str,
+        session_id: str,
+        config_root: Optional[str],
+        plugin_config: Dict[str, Any],
+    ) -> List[str]:
+        """Contribute prompt_library host paths to the AppArmor profile.
+
+        Phase 2 of the plugin-apparmor-contribution refactor
+        (template v23, 2026-05-16).  These paths used to be hardcoded
+        in ``apparmor.py:PROFILE_TEMPLATE``; sessions without the
+        prompt_library plugin in ``profile.plugins`` no longer carry
+        the grants (least-privilege).
+
+        The plugin discovers prompts from five tiers (see
+        :class:`PromptLibraryPlugin` module docstring):
+        - workspace tier: ``.jaato/prompts/`` (covered by the
+          framework-template workspace rule)
+        - user tier: ``~/.jaato/prompts/`` and ``~/.jaato/skills/``
+        - Claude Code interop: ``~/.claude/skills/`` and
+          ``~/.claude/commands/``
+
+        Phase 4 (template v26): also covers ``~/.jaato/agents/`` —
+        the plugin's ``_discover_prompts`` walks the agents directory
+        because agents (markdown files with ``params:`` frontmatter)
+        are discoverable as prompts.  ``~/.jaato/agents/`` is also
+        independently declared by ``SubagentPlugin.get_apparmor_rules``
+        — the resolver unions both contributions; AppArmor parsing
+        is idempotent on duplicate rules.
+
+        **Writable prompt/skill tiers (savePrompt/deletePrompt).** The
+        plugin OWNS tools that write/unlink prompts and skills in their
+        four WRITABLE sources (``_execute_delete_prompt``: ``project``/
+        ``global`` prompts, ``project-skills``/``global-skills``).  Those
+        need ``w`` (unlink is granted by ``w`` — classic AppArmor has no
+        standalone ``d`` mode).  By tier:
+        - **workspace** (``project``/``project-skills``): covered by the
+          framework ``{workspace_path}/** rwkl`` rule.  The framework
+          template deliberately OMITS ``.jaato/prompts/`` from its
+          ``audit deny ... wlk`` block (a more-specific allow cannot
+          override that deny, so the deny itself must not cover prompts)
+          — see ``apparmor.py``.  Accepted posture tradeoff: a confined
+          runner may author/rewrite prompts (whose content is later
+          executed).  ``.jaato/skills/`` was never under a deny.
+        - **home** (``global``/``global-skills``): granted ``rwk`` below
+          (was read-only before deletePrompt support).
+        - **config_root** (cascade override that routes the workspace
+          tier to ``<config_root>/{prompts,skills}/``): granted ``rwk``
+          below when set.
+        ``~/.jaato/agents/`` and the ``~/.claude/`` interop dirs stay
+        READ-ONLY (agents/skills there are not managed by these tools).
+        """
+        rules = [
+            "@{HOME}/.jaato/prompts/    rwk,",
+            "@{HOME}/.jaato/prompts/**  rwk,",
+            "@{HOME}/.jaato/skills/     rwk,",
+            "@{HOME}/.jaato/skills/**   rwk,",
+            "@{HOME}/.jaato/agents/     r,",
+            "@{HOME}/.jaato/agents/**   r,",
+            "@{HOME}/.claude/skills/    r,",
+            "@{HOME}/.claude/skills/**  r,",
+            "@{HOME}/.claude/commands/  r,",
+            "@{HOME}/.claude/commands/**  r,",
+        ]
+        if config_root:
+            rules += [
+                f"{config_root}/prompts/    rwk,",
+                f"{config_root}/prompts/**  rwk,",
+                f"{config_root}/skills/     rwk,",
+                f"{config_root}/skills/**   rwk,",
+            ]
+        return rules
 
     def initialize(self, config: Optional[Dict[str, Any]] = None) -> None:
         """Initialize the prompt library plugin.
@@ -167,10 +340,37 @@ class PromptLibraryPlugin:
         self._initialized = False
         self._prompt_cache.clear()
 
+    def reset_for_next_session(self) -> None:
+        """Cascade-sharing reset — NO-OP for this plugin.
+
+        Phase 1 hotfix (server 0.6.148+): added to satisfy the
+        ``ToolPlugin`` / ``EnrichmentPlugin`` protocol's runtime
+        ``isinstance`` check.  Per Daniel's litmus test (see
+        ``docs/design/runner-cascade-sharing.md`` §4.3), this
+        plugin holds no per-session state that the next cascade
+        session would benefit from having cleared.  Override in
+        future PRs if the litmus test changes.
+        """
+        pass
+
+
     def set_workspace_path(self, path: str) -> None:
         """Set the workspace root path (called by registry)."""
         self._workspace_path = path
         self._trace(f"set_workspace_path: {path}")
+
+    def set_config_root(self, path: Optional[str]) -> None:
+        """Adopt the registry-broadcast ``config_root`` override.
+
+        When ``path`` is non-None, prompt/agent/skill/command discovery
+        routes the workspace tier to ``<path>/<subdir>/`` instead of
+        ``<workspace>/.jaato/<subdir>/``.  ``.claude/`` interop dirs
+        stay anchored to ``<workspace>/`` regardless because they're
+        external tooling artifacts.  When ``path`` is ``None``, the
+        plugin falls back to today's workspace-anchored discovery.
+        """
+        self._config_root = path
+        self._trace(f"set_config_root: {path}")
 
     def set_confirm_callback(
         self,
@@ -213,7 +413,11 @@ class PromptLibraryPlugin:
         This refreshes the prompt cache and notifies subscribers.
         """
         self._trace(f"_notify_tools_changed: {new_tools}")
-        # Refresh the cache
+        # Refresh the cache.  Force a re-walk past the mtime gate: a content
+        # edit to an EXISTING prompt doesn't bump the source-dir mtime, so the
+        # gate would otherwise skip the rediscovery this explicit "prompts
+        # changed" signal exists to perform.
+        self._prompt_cache_signature = None
         self._discover_prompts()
         # Notify callback if set
         if self._on_tools_changed:
@@ -249,38 +453,50 @@ class PromptLibraryPlugin:
 
         sources = []
 
-        # Workspace-relative sources (only when workspace is set)
-        if workspace:
+        # Workspace tier — config_root takes precedence when set,
+        # routing the workspace .jaato/{agents,prompts,skills,commands}
+        # subdirectories to ``<config_root>/{...}/`` instead.
+        # ``.claude/`` interop dirs stay anchored to the actual
+        # workspace because they're external (Claude Code) artifacts.
+        jaato_workspace_root: Optional[Path] = None
+        if self._config_root:
+            jaato_workspace_root = Path(self._config_root).expanduser().resolve()
+        elif workspace:
+            jaato_workspace_root = workspace / ".jaato"
+
+        if jaato_workspace_root is not None:
             sources.extend([
-                # Jaato agents — parameterized prompts used as session identity
                 PromptSource(
-                    path=workspace / ".jaato" / "agents",
+                    path=jaato_workspace_root / "agents",
                     source_name="project-agents",
                     entry_file=PROMPT_ENTRY_FILE,
                     writable=True,
                 ),
-                # Jaato native prompts (writable)
                 PromptSource(
-                    path=workspace / ".jaato" / "prompts",
+                    path=jaato_workspace_root / "prompts",
                     source_name="project",
                     entry_file=PROMPT_ENTRY_FILE,
                     writable=True,
                 ),
-                # Jaato skills (writable, for ClawdHub installs)
                 PromptSource(
-                    path=workspace / ".jaato" / "skills",
+                    path=jaato_workspace_root / "skills",
                     source_name="project-skills",
                     entry_file=SKILL_ENTRY_FILE,
                     writable=True,
                 ),
-                # Legacy slash_command directory (read-only, superseded by prompts/skills)
                 PromptSource(
-                    path=workspace / ".jaato" / "commands",
+                    path=jaato_workspace_root / "commands",
                     source_name="legacy-commands",
                     entry_file=PROMPT_ENTRY_FILE,
                     writable=False,
                 ),
-                # Claude Code interop (read-only)
+            ])
+
+        # Claude-Code interop sources stay anchored to the actual
+        # workspace dir even when config_root is set — they're
+        # external tooling artifacts that live outside our control.
+        if workspace:
+            sources.extend([
                 PromptSource(
                     path=workspace / ".claude" / "skills",
                     source_name="claude-skills",
@@ -453,6 +669,23 @@ class PromptLibraryPlugin:
 
         return None
 
+    def _prompt_sources_signature(self, sources) -> tuple:
+        """Cheap change-detector for the prompt source dirs: ``(path, mtime)``
+        per source.  A directory's mtime bumps when entries are added,
+        removed, or renamed — the cases that change the discovered set.
+        Absent/unreadable sources record ``None`` so a source appearing (or
+        becoming readable) later invalidates the cache.  Stat-only — NO
+        realpath/symlink resolution, so it stays cheap even on the slow
+        filesystem that made the full walk ~15s.
+        """
+        sig = []
+        for source in sources:
+            try:
+                sig.append((str(source.path), source.path.stat().st_mtime))
+            except (OSError, PermissionError):
+                sig.append((str(source.path), None))
+        return tuple(sig)
+
     def _discover_prompts(self) -> Dict[str, PromptInfo]:
         """Discover all available prompts from all sources.
 
@@ -461,10 +694,22 @@ class PromptLibraryPlugin:
         silently. ``.claude/skills`` and ``.claude/commands`` are
         Claude Code interop directories that may live outside the
         session sandbox.
+
+        mtime-gated: returns the cached result unless a source directory
+        has changed since the last walk (see ``_prompt_sources_signature``).
+        The per-item realpath/symlink resolve in ``_load_prompt_info`` is
+        what made this ~15s on a cold filesystem; gating it keeps the hot
+        ``get_tool_schemas`` path (and ~15 other callers) cheap and, on
+        re-attach, off the event-loop-blocking critical path.
         """
+        sources = self._get_prompt_sources()
+        signature = self._prompt_sources_signature(sources)
+        if self._prompt_cache and signature == self._prompt_cache_signature:
+            return self._prompt_cache
+
         prompts: Dict[str, PromptInfo] = {}
 
-        for source in self._get_prompt_sources():
+        for source in sources:
             try:
                 if not source.path.exists():
                     continue
@@ -498,7 +743,69 @@ class PromptLibraryPlugin:
                     self._trace(f"Discovered prompt: {info.name} from {info.source}")
 
         self._prompt_cache = prompts
+        self._prompt_cache_signature = signature
         return prompts
+
+    def _expand_commands(self, content: str, cwd: str) -> str:
+        """Expand ``{{!command}}`` placeholders by executing the command.
+
+        Each ``{{!...}}`` block is executed via the shared subprocess
+        runner (:func:`shared.subprocess_runner.run_command`) with the
+        skill directory as the working directory.  stdout replaces the
+        placeholder; on failure (non-zero exit or timeout) an inline
+        error message is embedded instead.
+
+        This runs **before** parameter substitution so that command
+        output is available as literal text to the model.
+
+        Args:
+            content: Prompt body potentially containing ``{{!...}}``
+                     placeholders.
+            cwd: Working directory for command execution (typically the
+                 skill's root directory).
+
+        Returns:
+            Content with all ``{{!...}}`` placeholders replaced by
+            their command output or error messages.
+        """
+        if '{{!' not in content:
+            return content
+
+        def _run(match: re.Match) -> str:
+            cmd = match.group(1).strip()
+            self._trace(f"_expand_commands: running '{cmd}' in {cwd}")
+            try:
+                r: RunResult = _run_command(
+                    cmd,
+                    cwd=cwd,
+                    timeout=COMMAND_TIMEOUT,
+                    max_output_chars=0,  # no truncation for embedded output
+                    check_cancel=False,  # expansion is pre-model, not cancellable
+                )
+                if r.timed_out:
+                    return f"[command timed out after {COMMAND_TIMEOUT}s: {cmd}]"
+                if r.returncode != 0:
+                    stderr = r.stderr.strip()
+                    return (
+                        f"[command failed: {cmd}]\n"
+                        f"[exit code {r.returncode}]\n"
+                        f"{stderr}"
+                    )
+                return r.stdout.rstrip('\n')
+            except Exception as e:
+                return f"[command error: {cmd}]\n[{e}]"
+
+        return COMMAND_PATTERN.sub(_run, content)
+
+    def _get_skill_cwd(self, info: 'PromptInfo') -> str:
+        """Return the working directory for a prompt's command execution.
+
+        For directory-based prompts this is the prompt directory itself;
+        for single-file prompts it is the parent directory.
+        """
+        if info.is_directory:
+            return str(info.path)
+        return str(info.path.parent)
 
     def _substitute_params(
         self,
@@ -627,6 +934,8 @@ class PromptLibraryPlugin:
 
         info = prompts[name]
         content = self._get_prompt_content(info)
+        # Expand {{!command}} placeholders before parameter substitution
+        content = self._expand_commands(content, self._get_skill_cwd(info))
         rendered, missing = self._substitute_params(content, params or {}, [])
 
         # Re-read frontmatter for metadata
@@ -1492,7 +1801,7 @@ class PromptLibraryPlugin:
             description=info.description or f"Prompt: {info.name}",
             parameters=self._params_to_json_schema(info.params),
             category="prompt",
-            discoverability="discoverable",
+            discoverability=DISCOVERABILITY_DEFERRED,
         )
 
     # ==================== Model Tools ====================
@@ -1525,7 +1834,10 @@ class PromptLibraryPlugin:
                         },
                         "content": {
                             "type": "string",
-                            "description": "The prompt content with optional {{param}} placeholders"
+                            "description": (
+                                "The prompt body, with optional parameter "
+                                "placeholders.\n\n" + PARAM_GRAMMAR_DOC
+                            ),
                         },
                         "description": {
                             "type": "string",
@@ -1548,7 +1860,7 @@ class PromptLibraryPlugin:
                     "required": ["name", "content", "description"]
                 },
                 category="prompt",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
             # deletePrompt - remove prompts
             ToolSchema(
@@ -1573,7 +1885,7 @@ class PromptLibraryPlugin:
                     "required": ["name"]
                 },
                 category="prompt",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
         ]
 
@@ -1602,7 +1914,11 @@ class PromptLibraryPlugin:
         for name in self._discover_prompts():
             executors[f"prompt.{name}"] = self._make_prompt_executor(name)
 
-        return executors
+        # Phase 3 §3.4 wave 1: forwards via runner-RPC when a runner
+        # is attached; falls through to in-process otherwise.  The
+        # wrap happens AFTER the dynamic prompt.<name> executors are
+        # built so each one gets the same forward treatment.
+        return self.wrap_executors_for_runner_forwarding(executors)
 
     def _make_prompt_executor(self, prompt_name: str) -> Callable[[Dict[str, Any]], Dict[str, Any]]:
         """Factory for prompt tool executors.
@@ -1642,6 +1958,8 @@ class PromptLibraryPlugin:
 
         try:
             content = self._get_prompt_content(info)
+            # Expand {{!command}} placeholders before parameter substitution
+            content = self._expand_commands(content, self._get_skill_cwd(info))
             # Params from tool call are named params
             substituted, missing = self._substitute_params(content, params, [])
 
@@ -1989,7 +2307,7 @@ description: {description}
         # Extract args - could be a list or have 'args' key
         positional_args = args.get('args', [])
         if isinstance(positional_args, str):
-            positional_args = positional_args.split() if positional_args else []
+            positional_args = tokenize_prompt_args(positional_args)
 
         return self._execute_prompt_command({'args': positional_args})
 
@@ -2034,6 +2352,18 @@ description: {description}
         prompt_name = positional_args[0]
         prompt_args_raw = positional_args[1:]
 
+        # ``--help``/``-h`` immediately after the prompt name shows the
+        # prompt's parameter documentation instead of executing it.  This
+        # works for both the ``/prompt <name> --help`` command path and
+        # the ``%<name> --help`` reference path.
+        if prompt_args_raw and prompt_args_raw[0] in ('--help', '-h'):
+            prompts = self._discover_prompts()
+            if prompt_name not in prompts:
+                available = list(prompts.keys())
+                hint = f'Available prompts: {", ".join(available[:5])}{"..." if len(available) > 5 else ""}'
+                return f'Prompt not found: {prompt_name}\n{hint}'
+            return self._format_prompt_help(prompts[prompt_name])
+
         # Caller-supplied named params take precedence over anything
         # parsed from positional ``key=value`` tokens.
         explicit_named: Dict[str, str] = dict(args.get('named') or {})
@@ -2070,6 +2400,8 @@ description: {description}
 
         try:
             content = self._get_prompt_content(info)
+            # Expand {{!command}} placeholders before parameter substitution
+            content = self._expand_commands(content, self._get_skill_cwd(info))
 
             # Map positional args to named placeholders using the order
             # declared in the prompt's frontmatter ``params`` block.  This
@@ -2364,6 +2696,68 @@ Examples:
             ("    - Skills from github paths are saved to skills/ directory", "dim"),
         ])
 
+    def _format_prompt_help(self, info: PromptInfo) -> HelpLines:
+        """Build per-prompt help from YAML frontmatter.
+
+        Invoked for both ``/prompt <name> --help`` (user command path)
+        and ``%<name> --help`` (server-side reference interception in
+        ``session_manager``).  Returned as :class:`HelpLines` so the
+        server emits a :class:`HelpTextEvent` for pager display in both
+        paths — the session manager detects ``HelpLines`` directly when
+        handling ``%`` help references, and
+        :meth:`JaatoServer.execute_command` does the same conversion
+        for the command path.
+
+        Args:
+            info: The resolved :class:`PromptInfo` for the target prompt.
+
+        Returns:
+            Styled help lines listing the description, tags, source,
+            path, a usage line showing ``<required>`` and ``[optional]``
+            placeholders, and a parameter block with each parameter's
+            required/optional status, default, ``enum`` choices, and
+            description (all drawn from the prompt's frontmatter).
+        """
+        lines: List[tuple] = []
+        lines.append((f"Prompt: {info.name}", "bold"))
+        if info.description:
+            lines.append((f"  {info.description}", ""))
+        lines.append(("", ""))
+        lines.append((f"Source: {info.source}", "dim"))
+        lines.append((f"Path:   {info.path}", "dim"))
+        if info.tags:
+            lines.append((f"Tags:   {', '.join(info.tags)}", "dim"))
+        lines.append(("", ""))
+
+        if not info.params:
+            lines.append(("This prompt takes no parameters.", ""))
+            lines.append(("", ""))
+            lines.append(("USAGE", "bold"))
+            lines.append((f"    prompt {info.name}", ""))
+            lines.append((f"    %{info.name}", ""))
+            return HelpLines(lines=lines)
+
+        placeholders: List[str] = []
+        for pname, param in info.params.items():
+            token = f"<{pname}>" if param.required else f"[{pname}]"
+            placeholders.append(token)
+        placeholder_str = " ".join(placeholders)
+        lines.append(("USAGE", "bold"))
+        lines.append((f"    prompt {info.name} {placeholder_str}", ""))
+        lines.append((f"    %{info.name} {placeholder_str}", ""))
+        lines.append(("", ""))
+        lines.append(("PARAMETERS", "bold"))
+        for pname, param in info.params.items():
+            meta_parts = ["required" if param.required else "optional"]
+            if param.default is not None:
+                meta_parts.append(f"default={param.default!r}")
+            if param.enum:
+                meta_parts.append(f"choices={param.enum}")
+            lines.append((f"    {pname} ({', '.join(meta_parts)})", ""))
+            if param.description:
+                lines.append((f"        {param.description}", "dim"))
+        return HelpLines(lines=lines)
+
     def get_auto_approved_tools(self) -> List[str]:
         """Return tools that should be auto-approved.
 
@@ -2407,6 +2801,8 @@ Use savePrompt(name, content, description) to create new reusable prompts.
 Use savePrompt(name, content, description, overwrite=true) to update an existing prompt.
 The user can also invoke prompts with `prompt <name> [args...]`
 
+{PARAM_GRAMMAR_DOC}
+
 ### Deleting Prompts
 Use deletePrompt(name) to remove a prompt from the library.
 Only prompts in writable locations (.jaato/) can be deleted.
@@ -2418,7 +2814,7 @@ When you notice the user performing similar tasks repeatedly (2-3 times), sugges
 If they agree, use savePrompt() with:
 - A descriptive name (lowercase, hyphens)
 - Clear instructions capturing their preferences
-- Parameter placeholders: {{{{file}}}}, {{{{focus}}}}"""
+- Parameter placeholders per the grammar above, e.g. {{{{file}}}}, {{{{focus:security}}}}"""
 
 
 def create_plugin() -> PromptLibraryPlugin:

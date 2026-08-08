@@ -15,6 +15,7 @@ from shared.instruction_budget import (
     DEFAULT_SYSTEM_POLICIES,
     GC_POLICY_INDICATORS,
     estimate_tokens,
+    PayloadExceedsContextError,
 )
 
 
@@ -574,3 +575,80 @@ class TestEstimateTokens:
     def test_custom_ratio(self):
         """Custom chars_per_token should work."""
         assert estimate_tokens("a" * 100, chars_per_token=2.0) == 50
+
+
+class TestPayloadExceedsContextError:
+    """Tests for PayloadExceedsContextError (PR-β refuse-send gate)."""
+
+    def test_with_max_output_tokens_renders_projected_and_actionable_knobs(self):
+        """When max_output_tokens is provided, message must show
+        prompt + max_tokens = projected, and name the three operator
+        knobs (max_tokens / model / profile-trim)."""
+        err = PayloadExceedsContextError(
+            total_tokens=44_952,
+            max_output_tokens=2_048,
+            context_limit=40_944,
+        )
+        msg = str(err)
+        # Fields preserved on the exception object for caller introspection.
+        assert err.total_tokens == 44_952
+        assert err.max_output_tokens == 2_048
+        assert err.context_limit == 40_944
+        # Message contains the deterministic arithmetic.
+        assert "44952" in msg
+        assert "2048" in msg
+        assert "40944" in msg
+        # Projected total appears.
+        assert "47000" in msg
+        # Names the three operator knobs.
+        assert "max_tokens" in msg
+        assert "model" in msg
+        assert "profile" in msg
+
+    def test_without_max_output_tokens_gates_on_prompt_alone(self):
+        """When the provider exposes no max_output_tokens, message
+        must reflect that the gate fires on prompt alone."""
+        err = PayloadExceedsContextError(
+            total_tokens=50_000,
+            max_output_tokens=None,
+            context_limit=40_960,
+        )
+        msg = str(err)
+        assert err.max_output_tokens is None
+        assert "50000" in msg
+        assert "40960" in msg
+        # When max_tokens is unknown, must not invent a number.
+        assert "None" not in msg
+        # Still names model + profile knobs (max_tokens is uncontrollable here).
+        assert "model" in msg
+        assert "profile" in msg
+
+    def test_custom_message_override(self):
+        """Callers can supply a custom message and the fields remain
+        introspectable on the exception."""
+        err = PayloadExceedsContextError(
+            total_tokens=100,
+            max_output_tokens=10,
+            context_limit=50,
+            message="custom payload too large",
+        )
+        assert str(err) == "custom payload too large"
+        assert err.total_tokens == 100
+        assert err.max_output_tokens == 10
+        assert err.context_limit == 50
+
+    def test_is_an_exception(self):
+        """PayloadExceedsContextError must be raise-able and catchable
+        as a plain Exception (no special base class assumed)."""
+        with pytest.raises(PayloadExceedsContextError):
+            raise PayloadExceedsContextError(
+                total_tokens=100,
+                max_output_tokens=10,
+                context_limit=50,
+            )
+        with pytest.raises(Exception):
+            raise PayloadExceedsContextError(
+                total_tokens=100,
+                max_output_tokens=10,
+                context_limit=50,
+            )

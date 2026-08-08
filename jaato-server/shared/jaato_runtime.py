@@ -15,7 +15,11 @@ from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 
 from .token_accounting import TokenLedger
 from .instruction_token_cache import InstructionTokenCache
-from jaato_sdk.plugins.model_provider.types import ToolSchema
+from jaato_sdk.plugins.model_provider.types import (
+    ToolSchema,
+    DISCOVERABILITY_EAGER,
+    DISCOVERABILITY_DEFERRED,
+)
 from .plugins.model_provider.base import ProviderConfig
 from .plugins.model_provider import load_provider
 from .plugins.telemetry import TelemetryPlugin, create_plugin as create_telemetry_plugin
@@ -25,6 +29,7 @@ if TYPE_CHECKING:
     from .plugins.permission import PermissionPlugin
     from .plugins.reliability import ReliabilityPlugin
     from .plugins.model_provider.base import ModelProviderPlugin
+    from .model_tiers import ModelTierConfig
 
 logger = logging.getLogger(__name__)
 
@@ -160,7 +165,8 @@ def _get_sandbox_guidance() -> Optional[str]:
     Returns sandbox awareness instructions if a workspace root is set,
     informing the model about path restrictions.
     """
-    workspace = os.environ.get('JAATO_WORKSPACE_ROOT') or os.environ.get('workspaceRoot')
+    from shared.session_context import get_workspace_root
+    workspace = get_workspace_root() or os.environ.get('workspaceRoot')  # env: workspace root hint (VS Code-style) fallback when session context has none
     if not workspace:
         return None
 
@@ -175,7 +181,7 @@ def _get_sandbox_guidance() -> Optional[str]:
 
 def _is_parallel_tools_enabled() -> bool:
     """Check if parallel tool execution is enabled."""
-    return os.environ.get(
+    return os.environ.get(  # env: run multiple tool calls per turn in a thread pool (default true; max 8 concurrent)
         'JAATO_PARALLEL_TOOLS', 'true'
     ).lower() not in ('false', '0', 'no')
 
@@ -190,7 +196,7 @@ def _is_deferred_tools_enabled() -> bool:
     Default is 'true' for token economy. Set JAATO_DEFERRED_TOOLS=false
     to disable and load all tools upfront.
     """
-    return os.environ.get(
+    return os.environ.get(  # env: load only core tools upfront, others discovered on demand (default true); false loads all
         'JAATO_DEFERRED_TOOLS', 'true'
     ).lower() not in ('false', '0', 'no')
 
@@ -218,13 +224,14 @@ class JaatoRuntime:
         main_session = runtime.create_session(model="gemini-2.5-flash")
         sub_session = runtime.create_session(
             model="gemini-2.5-flash",
-            tools=["cli", "web_search"],
+            plugins=["cli", "web_search"],
             system_instructions="You are a research assistant."
         )
     """
 
     def __init__(self, provider_name: str = "google_genai",
                  workspace_path: Optional[Path] = None,
+                 config_root: Optional[str] = None,
                  instruction_token_cache: Optional[InstructionTokenCache] = None):
         """Initialize JaatoRuntime.
 
@@ -234,6 +241,13 @@ class JaatoRuntime:
                 When running as a daemon, the process cwd may differ from the
                 client's workspace, so callers should pass the workspace path
                 explicitly. Falls back to ``Path.cwd()`` when not provided.
+            config_root: Optional override for the read-only framework-config
+                search root.  When unset, the daemon scans
+                ``<workspace_path>/.jaato/`` for profiles, agents, prompts,
+                references, completion_schemas, instructions, scripts,
+                services etc.  When set, that workspace-anchored search is
+                replaced with this path.  The ``~/.jaato/`` user tier is
+                always honored regardless.  See ``shared/config_resolver.py``.
             instruction_token_cache: Optional shared cache for instruction token
                 counts.  When provided (e.g. from ``SessionManager``), cached
                 counts survive across session creates/restores within the same
@@ -242,6 +256,7 @@ class JaatoRuntime:
         """
         self._provider_name: str = provider_name
         self._workspace_path: Optional[Path] = workspace_path
+        self._config_root: Optional[str] = config_root
         self._provider_config: Optional[ProviderConfig] = None
 
         # Multi-provider support: map provider_name -> ProviderConfig
@@ -264,12 +279,29 @@ class JaatoRuntime:
         self._system_instructions: Optional[str] = None
         self._auto_approved_tools: List[str] = []
 
+        # AppArmor confine-context factory (server 0.6.50+).  Set by
+        # ``JaatoServer`` from the WS pre-initialize hook so sessions
+        # created on this runtime can wrap their dynamic-instructions
+        # expansion (and any other configure-time work) in
+        # ``apparmor_confine(profile)``.  ``None`` means no confinement
+        # applies (IPC sessions, AppArmor unavailable).  See
+        # ``shared/safe_pool.py`` for the per-thread reset and
+        # ``server/apparmor.py`` for the context manager itself.
+        self._confine_context_factory: Optional[Callable] = None
+
         # Formatter pipeline (optional, for collecting formatter instructions)
         self._formatter_pipeline: Optional[Any] = None
 
-        # Base system instructions (loaded from .jaato/instructions/ or legacy single file)
+        # Base system instructions (loaded from .jaato/instructions/ or
+        # legacy single file).  Loaded **lazily** on first request via
+        # ``get_base_system_instructions`` so sessions that supply
+        # ``system_instruction_override`` (replacing the assembled prompt
+        # entirely) never pay the disk-I/O cost.  ``_base_loaded`` flips
+        # to True after the first load attempt — distinguishes "not yet
+        # loaded" from "loaded but no instruction files found" (where
+        # ``_base_system_instructions`` legitimately stays ``None``).
         self._base_system_instructions: Optional[str] = None
-        self._load_base_system_instructions()
+        self._base_loaded: bool = False
 
         # Content-addressed token count cache (shared across sessions)
         self._instruction_token_cache: InstructionTokenCache = (
@@ -291,20 +323,50 @@ class JaatoRuntime:
         # Subscribe telemetry to bus for plan/step context propagation
         self._telemetry.subscribe_to_bus(self._event_bus)
 
+    def get_base_system_instructions(self) -> Optional[str]:
+        """Return the base system instructions, loading on first call.
+
+        Lazy resolution: the actual disk read happens only when a session
+        first asks for the assembled prompt.  Sessions that supply a
+        ``system_instruction_override`` never call this, so they pay
+        nothing for the premium/workspace/user instruction files they
+        won't use.  Subsequent calls return the cached value (None when
+        no instruction files were found).
+
+        The runtime-wide cache is intentional: every session sharing the
+        same runtime sees the same base layer (it's framework config,
+        not per-session state), so loading once and sharing keeps memory
+        flat across N sessions.
+        """
+        if not self._base_loaded:
+            self._load_base_system_instructions()
+            self._base_loaded = True
+        return self._base_system_instructions
+
     def _load_base_system_instructions(self) -> None:
-        """Load base system instructions from .jaato/instructions/ folder.
+        """Load base system instructions from .jaato/instructions/ folders.
 
-        Searches for instruction files in two locations (first match wins):
-        1. Current working directory: .jaato/instructions/
-        2. User config directory: ~/.jaato/instructions/
+        Three tiers, loaded in order and concatenated:
+        1. Premium tier — the ``jaato.premium`` ``instructions`` content
+           path, when a premium package is installed.  Loaded FIRST and
+           always additive (the baseline behavioral layer).
+        2. Workspace tier — ``<config_root>/instructions/`` when
+           ``config_root`` is set, else
+           ``<workspace_path>/.jaato/instructions/``.
+        3. User tier — ``~/.jaato/instructions/``.
 
-        All ``*.md`` files found in the instructions folder are sorted by
+        The workspace and user tiers are searched first-match-wins (the
+        workspace tier is preferred); the premium tier is independent of
+        that choice and is always prepended on top.
+
+        Within each loaded folder, all ``*.md`` files are sorted by
         filename (so numeric prefixes like ``00-``, ``10-``, ``15-`` control
-        ordering) and concatenated with double-newline separators.
+        ordering) and concatenated with double-newline separators
+        (``README.md`` is skipped — see ``_load_instruction_files``).
 
         Falls back to the legacy single-file path
-        ``.jaato/system_instructions.md`` if no instructions folder exists
-        in either location.
+        ``.jaato/system_instructions.md`` only when no tier
+        (premium/workspace/user) yielded any content.
 
         The combined contents are prepended to all agent system instructions,
         ensuring consistent behavior across main agent and all subagents.
@@ -320,9 +382,18 @@ class JaatoRuntime:
             premium_parts = self._load_instruction_files(Path(premium_dir))
             all_parts.extend(premium_parts)
 
-        # 2. Workspace or user instructions (layered on top of premium)
+        # 2. Workspace or user instructions (layered on top of premium).
+        #    The workspace tier honors ``config_root`` when set so the
+        #    daemon can load instructions from a path the agent's
+        #    sandboxed filesystem can't reach.
+        if self._config_root:
+            workspace_instructions = (
+                Path(self._config_root).expanduser().resolve() / "instructions"
+            )
+        else:
+            workspace_instructions = base / ".jaato" / "instructions"
         search_dirs = [
-            base / ".jaato" / "instructions",
+            workspace_instructions,
             Path.home() / ".jaato" / "instructions",
         ]
 
@@ -337,9 +408,19 @@ class JaatoRuntime:
             self._base_system_instructions = "\n\n".join(all_parts)
             return
 
-        # Fallback: legacy single-file path
+        # Fallback: legacy single-file path.  Honors config_root for
+        # the workspace tier so an out-of-tree project layout still
+        # resolves to its single-file instructions when the user
+        # hasn't migrated to the multi-file folder layout yet.
+        if self._config_root:
+            legacy_workspace = (
+                Path(self._config_root).expanduser().resolve()
+                / "system_instructions.md"
+            )
+        else:
+            legacy_workspace = base / ".jaato" / "system_instructions.md"
         legacy_paths = [
-            base / ".jaato" / "system_instructions.md",
+            legacy_workspace,
             Path.home() / ".jaato" / "system_instructions.md",
         ]
 
@@ -460,6 +541,30 @@ class JaatoRuntime:
         """
         self._formatter_pipeline = pipeline
 
+    def set_confine_context_factory(
+        self, factory: Optional[Callable],
+    ) -> None:
+        """Set the AppArmor confine-context factory (server 0.6.50+).
+
+        Called by ``JaatoServer`` from the WS pre-initialize hook so
+        sessions created on this runtime can wrap their dynamic-
+        instructions expansion (and any other configure-time work) in
+        ``apparmor_confine(profile)``.  The factory is a zero-argument
+        callable returning a context manager — same shape as
+        :func:`server.apparmor.make_confine_context`.
+
+        Sessions read this in ``create_session`` and propagate it onto
+        the new ``JaatoSession`` via :meth:`JaatoSession.set_confine_context_factory`
+        so ``configure()`` can use it.
+
+        Setting to ``None`` clears the factory (no confinement applies).
+
+        Args:
+            factory: Zero-arg callable returning a context manager, or
+                ``None``.
+        """
+        self._confine_context_factory = factory
+
     @property
     def deferred_tools_enabled(self) -> bool:
         """Check if deferred tool loading is enabled.
@@ -517,7 +622,8 @@ class JaatoRuntime:
         self,
         allow_interactive: bool = False,
         on_message: Optional[Callable[[str], None]] = None,
-        provider_name: Optional[str] = None
+        provider_name: Optional[str] = None,
+        plugin_configs: Optional[Dict[str, Dict[str, Any]]] = None,
     ) -> bool:
         """Verify authentication before loading tools.
 
@@ -531,6 +637,16 @@ class JaatoRuntime:
             on_message: Optional callback for status messages during login.
             provider_name: Optional provider name to verify. If None, uses
                 the runtime's default provider.
+            plugin_configs: Optional per-plugin profile config dict, identical
+                in shape to ``SubagentProfile.plugin_configs``.  When the
+                profile carries provider-specific knobs under
+                ``plugin_configs[provider_name]`` (e.g. an LM Studio bearer
+                token, a custom NIM ``base_url``), they're merged into the
+                ``ProviderConfig.extra`` handed to ``provider.verify_auth``
+                so credential resolution at verify time matches what
+                ``initialize()`` will see later.  Without this, providers
+                fall back to environment-only credential discovery and
+                profile-supplied secrets are invisible at verify time.
 
         Returns:
             True if authentication is configured and valid.
@@ -553,15 +669,24 @@ class JaatoRuntime:
         """
         effective_provider = provider_name or self._provider_name
 
-        # Create a temporary provider instance just for auth verification
-        # We don't call initialize() yet - verify_auth is designed to work
-        # before full initialization
+        # Create a temporary provider instance just for auth verification.
+        # We don't call initialize() yet — verify_auth is designed to work
+        # before full initialization (no clients, no network).
         provider = load_provider(effective_provider, config=None)
 
-        # Call verify_auth on the provider
+        # Build a lightweight ProviderConfig that surfaces any profile
+        # knobs the provider may need to resolve credentials (host,
+        # api_token, base_url, etc.).  Providers that don't read config
+        # ignore the kwarg.
+        verify_config: Optional[ProviderConfig] = None
+        provider_overrides = (plugin_configs or {}).get(effective_provider)
+        if provider_overrides:
+            verify_config = ProviderConfig(extra=dict(provider_overrides))
+
         return provider.verify_auth(
             allow_interactive=allow_interactive,
-            on_message=on_message
+            on_message=on_message,
+            config=verify_config,
         )
 
     def register_provider(
@@ -787,14 +912,22 @@ class JaatoRuntime:
     def create_session(
         self,
         model: str,
-        tools: Optional[List[str]] = None,
+        plugins: Optional[List[str]] = None,
         system_instructions: Optional[str] = None,
         plugin_configs: Optional[Dict[str, Dict[str, Any]]] = None,
         provider_name: Optional[str] = None,
         preloaded_plugins: Optional[set] = None,
         skip_model_test: bool = False,
         system_instruction_override: Optional[str] = None,
+        suppress_base_instructions: bool = False,
         workspace_path: Optional[str] = None,
+        completion_payload_schema: Optional[Any] = None,
+        tier_config: Optional['ModelTierConfig'] = None,
+        agent_params: Optional[Dict[str, Any]] = None,
+        completion_processors: Optional[List[Any]] = None,
+        agent_id: str = "main",
+        tool_scopes: Optional[Dict[str, List[str]]] = None,
+        tools: Optional[List[str]] = None,  # DEPRECATED alias for ``plugins``
     ) -> 'JaatoSession':
         """Create a new session from this runtime.
 
@@ -804,8 +937,10 @@ class JaatoRuntime:
 
         Args:
             model: Model name to use for this session.
-            tools: Optional list of plugin names to expose. If None, uses all
-                   exposed plugins from the registry.
+            plugins: Optional list of plugin names to expose (e.g. ``"cli"``,
+                   ``"web_search"``). If None, uses all exposed plugins from the
+                   registry. (Plugin names, NOT tool names — per-tool allow-lists
+                   live in ``tool_scopes``. Mirrors ``SubagentProfile.plugins``.)
             system_instructions: Optional additional system instructions to
                                 prepend to the base instructions.
             plugin_configs: Optional per-plugin configuration overrides.
@@ -824,10 +959,28 @@ class JaatoRuntime:
                 accounting) but its output is discarded.  Used by
                 session-manipulation tools that replay a session with an
                 edited version of the materialised prompt.
+            suppress_base_instructions: If True, drop the BASE layer (the
+                .jaato/instructions/ files plus any premium-provided baseline)
+                from the assembled system instruction while keeping the agent
+                .md content, plugin instructions, and framework constants.
+                Useful for fitting a session into a small model's context window
+                — the framework-level baseline is usually the largest single
+                contributor.  Ignored when ``system_instruction_override`` is
+                set (full override supersedes partial suppression).
             workspace_path: If provided, overrides the runtime's workspace
                 path for this session.  Used by fork-replay to point a temp
                 session at a worktree snapshot without affecting other sessions
                 sharing the same runtime.
+            tool_scopes: Optional per-plugin tool allow-lists (profile
+                ``tools:[...]`` modifier).  Maps plugin name → list of
+                allowed tool names; the session drops every other tool the
+                plugin ships from its own wire body + grammar surface.
+                Applied per-session — the shared registry is never mutated,
+                so sibling sessions on this runtime keep their own scopes.
+            tools: DEPRECATED alias for ``plugins`` (it always took plugin
+                names, never tool names). Pass ``plugins=`` instead; ``tools=``
+                still works with a one-time deprecation warning. ``plugins``
+                wins if both are given.
 
         Returns:
             JaatoSession configured with the specified settings.
@@ -835,6 +988,20 @@ class JaatoRuntime:
         Raises:
             RuntimeError: If runtime is not connected or configured.
         """
+        # Back-compat: ``tools`` was a misleading name for the plugin-name list.
+        # Honour it as a deprecated alias for ``plugins`` and warn once.
+        if tools is not None:
+            import warnings
+            warnings.warn(
+                "JaatoRuntime.create_session(tools=...) is a deprecated alias "
+                "for plugins=; it takes PLUGIN names (e.g. 'cli', 'web_search'), "
+                "not tool names. Use plugins= instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            if plugins is None:
+                plugins = tools
+
         if not self._connected:
             raise RuntimeError("Runtime not connected. Call connect() first.")
         if not self._registry:
@@ -845,19 +1012,33 @@ class JaatoRuntime:
 
         # Create session with runtime reference and optional provider override
         t0 = time.perf_counter()
-        session = JaatoSession(self, model, provider_name=provider_name)
+        session = JaatoSession(
+            self, model, provider_name=provider_name, agent_id=agent_id,
+        )
+        # Propagate the AppArmor confine-context factory so the session's
+        # configure() can wrap dynamic-instructions expansion in the
+        # session's confinement (server 0.6.50+).  None means no
+        # confinement applies.
+        if self._confine_context_factory is not None:
+            session.set_confine_context_factory(self._confine_context_factory)
         session_create_ms = (time.perf_counter() - t0) * 1000
 
         # Configure session tools
         t1 = time.perf_counter()
         session.configure(
-            tools=tools,
+            plugins=plugins,
             system_instructions=system_instructions,
             plugin_configs=plugin_configs,
             preloaded_plugins=preloaded_plugins,
             skip_model_test=skip_model_test,
             system_instruction_override=system_instruction_override,
+            suppress_base_instructions=suppress_base_instructions,
             workspace_path=workspace_path,
+            completion_payload_schema=completion_payload_schema,
+            tier_config=tier_config,
+            agent_params=agent_params,
+            completion_processors=completion_processors,
+            tool_scopes=tool_scopes,
         )
         session_configure_ms = (time.perf_counter() - t1) * 1000
 
@@ -873,9 +1054,10 @@ class JaatoRuntime:
     def create_session_without_provider(
         self,
         model: str,
-        tools: Optional[List[str]] = None,
+        plugins: Optional[List[str]] = None,
         system_instructions: Optional[str] = None,
-        plugin_configs: Optional[Dict[str, Dict[str, Any]]] = None
+        plugin_configs: Optional[Dict[str, Dict[str, Any]]] = None,
+        tools: Optional[List[str]] = None,  # DEPRECATED alias for ``plugins``
     ) -> 'JaatoSession':
         """Create a session without provider (for auth-pending mode).
 
@@ -885,13 +1067,27 @@ class JaatoRuntime:
 
         Args:
             model: Model name (stored for later use after auth completes).
-            tools: Optional list of plugin names to expose.
+            plugins: Optional list of plugin names to expose (NOT tool names).
             system_instructions: Optional additional system instructions.
             plugin_configs: Optional per-plugin configuration overrides.
+            tools: DEPRECATED alias for ``plugins``. ``plugins`` wins if both
+                are given; ``tools=`` emits a one-time deprecation warning.
 
         Returns:
             JaatoSession configured without a provider.
         """
+        if tools is not None:
+            import warnings
+            warnings.warn(
+                "JaatoRuntime.create_session_without_provider(tools=...) is a "
+                "deprecated alias for plugins=; it takes PLUGIN names, not tool "
+                "names. Use plugins= instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            if plugins is None:
+                plugins = tools
+
         if not self._connected:
             raise RuntimeError("Runtime not connected. Call connect() first.")
         if not self._registry:
@@ -901,7 +1097,7 @@ class JaatoRuntime:
 
         session = JaatoSession(self, model)
         session.configure(
-            tools=tools,
+            plugins=plugins,
             system_instructions=system_instructions,
             plugin_configs=plugin_configs,
             skip_provider=True  # Don't create provider
@@ -914,6 +1110,7 @@ class JaatoRuntime:
         model: str,
         provider_name: Optional[str] = None,
         skip_model_test: bool = False,
+        plugin_configs: Optional[Dict[str, Dict[str, Any]]] = None,
     ) -> 'ModelProviderPlugin':
         """Create a new provider instance for a session.
 
@@ -930,6 +1127,11 @@ class JaatoRuntime:
                 model responds during ``provider.connect()``.  The model will
                 be validated on the first real message instead.  Used during
                 bootstrap to reduce startup latency.
+            plugin_configs: Optional per-plugin configuration dict from the
+                session profile.  Providers are plugins (``PLUGIN_KIND =
+                "model_provider"``), so their profile-level knobs live under
+                ``plugin_configs[provider_name]`` and are merged into
+                ``config.extra`` before provider initialization.
 
         Returns:
             Initialized and connected ModelProviderPlugin.
@@ -955,16 +1157,104 @@ class JaatoRuntime:
             )
             self._provider_configs[effective_provider] = config
 
-        # Inject workspace_path into config.extra for providers that need it
-        # (e.g., GitHub Models provider for OAuth token resolution)
+        # Inject workspace_path AND config_root into config.extra for
+        # providers that need them (auth-credential lookup paths, OAuth
+        # token resolution, etc.).  The env-var approach
+        # (``JAATO_CONFIG_ROOT`` exported by ``JaatoServer._in_workspace``)
+        # is not reliable for headless reactor-spawned sessions whose
+        # ``send_message`` runs in a fresh thread whose timing isn't
+        # tied to the parent's context-manager scope.  Carrying these
+        # on the provider config makes the value available to every
+        # call site without thread-local fragility.
         if self._registry:
+            from dataclasses import replace
             workspace_path = self._registry.get_workspace_path()
+            config_root = self._registry.get_config_root() or self._config_root
+            extra_with_paths = dict(config.extra)
             if workspace_path:
-                # Create a copy of config with workspace_path in extra to avoid
-                # modifying the stored config
+                extra_with_paths['workspace_path'] = workspace_path
+            if config_root:
+                extra_with_paths['config_root'] = config_root
+            if extra_with_paths != config.extra:
+                config = replace(config, extra=extra_with_paths)
+        elif self._config_root:
+            # Even without a registry, prefer the runtime's stored
+            # config_root over an env-var fallback so the value travels
+            # with the call.
+            from dataclasses import replace
+            extra_with_paths = {**config.extra, 'config_root': self._config_root}
+            config = replace(config, extra=extra_with_paths)
+
+        # Merge profile-level provider config.  Providers are plugins, so
+        # their profile knobs sit under ``plugin_configs[provider_name]``.
+        # Child keys override the stored ProviderConfig.extra so a profile
+        # can tune host, context length, load params, etc. per-session.
+        #
+        # Server 0.6.132+ (PR-149): ``api_key`` is promoted from the
+        # provider_overrides dict to the top-level ``ProviderConfig.api_key``
+        # field BEFORE the rest is merged into ``extra``.  Pre-PR-149 the
+        # whole dict landed in ``extra``, so ``plugin_configs.<provider>.api_key:
+        # pass://...`` was silently ignored by every provider's
+        # ``initialize()`` (which reads ``config.api_key``, not
+        # ``config.extra["api_key"]``).  Discovered v135 — openrouter
+        # cascade failed APIKeyNotFoundError despite a correctly resolved
+        # pass:// URI in plugin_configs.openrouter.api_key.  Same latent
+        # bug for zhipuai (its working path was the stored-credential
+        # fallback ``~/.jaato/zhipuai_auth.json``, not the documented
+        # plugin_configs surface).
+        if plugin_configs:
+            provider_overrides = plugin_configs.get(effective_provider)
+            if provider_overrides:
                 from dataclasses import replace
-                extra_with_workspace = {**config.extra, 'workspace_path': workspace_path}
-                config = replace(config, extra=extra_with_workspace)
+                overrides = dict(provider_overrides)
+                # api_key is a top-level ProviderConfig field — promote
+                # so providers reading ``config.api_key`` (the universal
+                # auth-field contract across openrouter / zhipuai /
+                # anthropic / nim / etc.) see the profile-supplied value.
+                promoted_api_key = overrides.pop("api_key", None)
+                merged_extra = {**config.extra, **overrides}
+                replace_kwargs: Dict[str, Any] = {"extra": merged_extra}
+                if promoted_api_key:
+                    replace_kwargs["api_key"] = promoted_api_key
+                config = replace(config, **replace_kwargs)
+
+        # Fail loud at the provider credential boundary: if api_key is still
+        # shaped like an unresolved secret URI (e.g. ``pass://...`` that passed
+        # through because no resolver is registered — the providing plugin isn't
+        # installed), refuse rather than send the literal URI as a credential
+        # (which produced a confusing upstream 401 — the nebius regression).
+        # ``_resolve_secret_uri`` stays lenient/pass-through so non-provider
+        # consumers (service_connector) keep reporting "credential missing"
+        # gracefully; the strict check lives here, where a literal secret URI
+        # is unambiguously wrong.
+        from .plugins.subagent.config import (
+            looks_like_unresolved_secret_uri,
+            looks_like_malformed_secret_uri,
+            SecretResolutionError,
+        )
+        # Near-miss FIRST: a single-colon ``pass:...`` (the ``//``-dropped typo)
+        # is invisible to the resolver (regex miss → passed through literally),
+        # so it would otherwise leak to the provider as a bearer token and
+        # produce a confusing upstream 401.  Fail loud with a did-you-mean.
+        malformed_scheme = looks_like_malformed_secret_uri(config.api_key)
+        if malformed_scheme:
+            raise SecretResolutionError(
+                config.api_key,
+                f"provider '{effective_provider}' received a MALFORMED secret "
+                f"URI as its api_key — a single-colon '{malformed_scheme}:...'. "
+                f"Secret URIs require '//': did you mean "
+                f"'{malformed_scheme}://<path>'?  (A resolver for "
+                f"'{malformed_scheme}' IS registered; only the '//' is missing.)",
+            )
+        if looks_like_unresolved_secret_uri(config.api_key):
+            raise SecretResolutionError(
+                config.api_key,
+                f"provider '{effective_provider}' received an unresolved secret "
+                f"URI as its api_key — no resolver is registered for its scheme "
+                f"(is the plugin that provides it, e.g. jaato-premium, "
+                f"installed?). Refusing to send a literal secret URI as a "
+                f"credential.",
+            )
 
         t0 = time.perf_counter()
         provider = load_provider(effective_provider, config)
@@ -1005,7 +1295,7 @@ class JaatoRuntime:
             try:
                 schemas = plugin.get_tool_schemas()
                 for schema in schemas:
-                    if getattr(schema, 'discoverability', None) == 'core':
+                    if getattr(schema, 'discoverability', None) == DISCOVERABILITY_EAGER:
                         core_plugins.append(plugin_name)
                         break  # Found one core tool, plugin qualifies
             except Exception:
@@ -1093,7 +1383,7 @@ class JaatoRuntime:
                     # Filter to core tools only - others discovered via introspection
                     plugin_schemas = [
                         s for s in plugin_schemas
-                        if getattr(s, 'discoverability', 'discoverable') == 'core'
+                        if getattr(s, 'discoverability', DISCOVERABILITY_DEFERRED) == DISCOVERABILITY_EAGER
                     ]
                 schemas.extend(plugin_schemas)
 
@@ -1104,7 +1394,7 @@ class JaatoRuntime:
                 # Permission tools should be core (always available)
                 permission_schemas = [
                     s for s in permission_schemas
-                    if getattr(s, 'discoverability', 'discoverable') == 'core'
+                    if getattr(s, 'discoverability', DISCOVERABILITY_DEFERRED) == DISCOVERABILITY_EAGER
                 ]
             schemas.extend(permission_schemas)
 
@@ -1156,12 +1446,18 @@ class JaatoRuntime:
         additional: Optional[str] = None,
         presentation_context: Optional['PresentationContext'] = None,
         preloaded_plugins: Optional[set] = None,
+        include_base: bool = True,
+        include_constants: bool = True,
+        include_security: bool = True,
     ) -> Optional[str]:
         """Get system instructions, optionally filtered by plugin names.
 
         The final instructions are assembled in this order:
         1. Base system instructions from .jaato/instructions/ folder (if exists,
-           falls back to legacy .jaato/system_instructions.md)
+           falls back to legacy .jaato/system_instructions.md) — skipped when
+           ``include_base`` is False so a session can keep its own agent/plugin/
+           framework content without carrying the framework-level baseline
+           (useful for small-context models)
         2. Additional instructions passed as parameter
         3. Plugin-specific system instructions
         4. Formatter pipeline instructions (output rendering capabilities)
@@ -1186,6 +1482,16 @@ class JaatoRuntime:
                 to the client's capabilities.
             preloaded_plugins: Optional set of plugin names that should bypass
                               deferred tool loading for system instructions.
+            include_constants: When False, skip the framework prompt constants
+                              (task-completion/verification, parallel/batching,
+                              turn-summary) — the granular counterpart of
+                              ``include_base``.  Driven by
+                              ``suppress_base_instructions: {constants: true}``.
+            include_security: When False, skip the untrusted-content boundary.
+                              Driven only by an explicit
+                              ``suppress_base_instructions: {security: true}``
+                              (the blanket ``true`` keeps it — it is the
+                              indirect-prompt-injection defense).
 
         Returns:
             Combined system instructions string, or None.
@@ -1238,9 +1544,14 @@ class JaatoRuntime:
         # Assemble final instructions: base -> additional -> plugin
         result_parts = []
 
-        # 1. Base system instructions from .jaato/instructions/ (or legacy single file)
-        if self._base_system_instructions:
-            result_parts.append(self._base_system_instructions)
+        # 1. Base system instructions from .jaato/instructions/ (or legacy
+        #    single file) — lazy-loaded on first request.  Skipped when
+        #    include_base=False so sessions with suppress_base_instructions
+        #    don't pay the disk I/O (and don't get the baseline content).
+        if include_base:
+            base = self.get_base_system_instructions()
+            if base:
+                result_parts.append(base)
 
         # 2. Additional instructions passed as parameter
         if additional:
@@ -1262,13 +1573,28 @@ class JaatoRuntime:
             if ctx_instruction:
                 result_parts.append(ctx_instruction)
 
-        # 6. Framework-level prompt constants (provided by jaato-premium)
-        if _TASK_COMPLETION_INSTRUCTION:
-            result_parts.append(_TASK_COMPLETION_INSTRUCTION)
-        if _is_parallel_tools_enabled() and _PARALLEL_TOOL_GUIDANCE:
-            result_parts.append(_PARALLEL_TOOL_GUIDANCE)
-        if _TURN_SUMMARY_INSTRUCTION:
-            result_parts.append(_TURN_SUMMARY_INSTRUCTION)
+        # 6. Framework-level prompt constants (provided by jaato-premium).
+        #    Skipped when include_constants=False — the granular counterpart of
+        #    include_base, for ``suppress_base_instructions: {constants: true}``.
+        if include_constants:
+            if _TASK_COMPLETION_INSTRUCTION:
+                result_parts.append(_TASK_COMPLETION_INSTRUCTION)
+            if _is_parallel_tools_enabled() and _PARALLEL_TOOL_GUIDANCE:
+                result_parts.append(_PARALLEL_TOOL_GUIDANCE)
+            if _TURN_SUMMARY_INSTRUCTION:
+                result_parts.append(_TURN_SUMMARY_INSTRUCTION)
+
+        # 7. Untrusted-content boundary (security baseline).  Included by
+        # default — web_fetch/web_search/MCP tools are deferred-loaded, so
+        # gating on tool presence would drop the instruction for a tool the
+        # model can still discover + call.  Teaches the model to treat
+        # boundary-wrapped tool results as data, not instructions
+        # (indirect-prompt-injection defense).  Dropped ONLY when a session
+        # explicitly opts in via ``suppress_base_instructions: {security:
+        # true}`` (never by the blanket ``true``).
+        if include_security:
+            from jaato_sdk.plugins.model_provider.types import untrusted_boundary_instruction
+            result_parts.append(untrusted_boundary_instruction())
 
         return "\n\n".join(result_parts)
 

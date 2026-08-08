@@ -187,7 +187,8 @@ class TestConverters:
 
         assert len(api_tools) == 1
         assert "functionDeclarations" in api_tools[0]
-        assert api_tools[0]["functionDeclarations"][0]["name"] == "read_file"
+        from shared.tool_id_map import name_to_id
+        assert api_tools[0]["functionDeclarations"][0]["name"] == name_to_id("read_file")
 
     def test_response_from_api(self):
         """Test converting API response to ProviderResponse."""
@@ -216,7 +217,14 @@ class TestConverters:
         assert response.usage.output_tokens == 5
 
     def test_response_with_function_call(self):
-        """Test converting response with function call."""
+        """Test converting response with function call.
+
+        The API returns hash-derived tool IDs (e.g., ``t_c9f8123b``).
+        The converter translates them back to original names.
+        """
+        from shared.tool_id_map import name_to_id
+        tool_id = name_to_id("read_file")
+
         api_response = {
             "candidates": [
                 {
@@ -225,7 +233,7 @@ class TestConverters:
                         "parts": [
                             {
                                 "functionCall": {
-                                    "name": "read_file",
+                                    "name": tool_id,
                                     "args": {"path": "/tmp/test.txt"},
                                 }
                             }
@@ -238,9 +246,9 @@ class TestConverters:
 
         response = response_from_api(api_response)
 
-        assert len(response.function_calls) == 1
-        assert response.function_calls[0].name == "read_file"
-        assert response.function_calls[0].args == {"path": "/tmp/test.txt"}
+        assert len(response.get_function_calls()) == 1
+        assert response.get_function_calls()[0].name == "read_file"
+        assert response.get_function_calls()[0].args == {"path": "/tmp/test.txt"}
         assert response.finish_reason == FinishReason.TOOL_USE
 
     def test_parse_sse_event(self):

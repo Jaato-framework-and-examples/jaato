@@ -140,6 +140,23 @@ GEMINI_CLI_MODELS = {
     },
 }
 
-# Default context and output limits
-DEFAULT_CONTEXT_LIMIT = 200_000
+# INPUT modalities per served model.  Every Antigravity / Gemini-CLI
+# model (Gemini 2.5 / 3, Claude Sonnet/Opus 4.5) accepts image input
+# alongside text.  Exact-keyed (model names are exact); a model absent
+# here resolves to the text-only floor in modalities().
+MODEL_INPUT_MODALITIES = {
+    "antigravity-gemini-3-pro": frozenset({"text", "image"}),
+    "antigravity-gemini-3-flash": frozenset({"text", "image"}),
+    "antigravity-claude-sonnet-4-5": frozenset({"text", "image"}),
+    "antigravity-claude-sonnet-4-5-thinking": frozenset({"text", "image"}),
+    "antigravity-claude-opus-4-5-thinking": frozenset({"text", "image"}),
+    "gemini-2.5-flash": frozenset({"text", "image"}),
+    "gemini-2.5-pro": frozenset({"text", "image"}),
+    "gemini-3-flash-preview": frozenset({"text", "image"}),
+    "gemini-3-pro-preview": frozenset({"text", "image"}),
+}
+
+# Default output limit (the context window has no blanket default — per-model
+# tables + the context_length override knob resolve it, else the provider
+# raises; see get_context_limit and the project no-fallback rule).
 DEFAULT_OUTPUT_LIMIT = 8192

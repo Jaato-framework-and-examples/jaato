@@ -8,6 +8,7 @@ import logging
 import threading
 import uuid
 from concurrent.futures import Future, ThreadPoolExecutor
+from shared.safe_pool import SafeThreadPoolExecutor
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional
 
@@ -74,9 +75,15 @@ class BackgroundCapableMixin:
         self._bg_tool_output_callback: Optional[Callable[[str], None]] = None
 
     def _ensure_bg_executor(self) -> ThreadPoolExecutor:
-        """Lazily initialize the thread pool executor."""
+        """Lazily initialize the thread pool executor.
+
+        Server 0.6.47+: uses :class:`SafeThreadPoolExecutor` so every
+        background task runs the registered AppArmor pre-task hook,
+        closing the residual stuck-confinement gap when a worker
+        carries state from a prior session.
+        """
         if self._bg_executor is None:
-            self._bg_executor = ThreadPoolExecutor(max_workers=self._bg_max_workers)
+            self._bg_executor = SafeThreadPoolExecutor(max_workers=self._bg_max_workers)
             self._bg_initialized = True
         return self._bg_executor
 

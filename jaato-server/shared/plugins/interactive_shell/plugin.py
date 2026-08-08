@@ -18,10 +18,17 @@ from datetime import datetime
 from typing import Dict, List, Any, Callable, Optional
 
 from jaato_sdk.plugins.base import UserCommand
-from jaato_sdk.plugins.model_provider.types import ToolSchema
+from jaato_sdk.plugins.model_provider.types import (
+    ToolSchema,
+    DISCOVERABILITY_DEFERRED,
+)
 from .session import ShellSession, _BACKEND, _BACKEND_ERROR, IS_MSYS2
 from .ansi import strip_ansi
 from shared.ai_tool_runner import get_current_tool_output_callback
+from shared.plugins.runner_forwarding import RunnerForwardingMixin
+from ..workspace_venv import (
+    resolve_venv_path, ensure_workspace_venv, pip_apparmor_rules,
+)
 
 
 # Maximum concurrent interactive sessions
@@ -34,7 +41,7 @@ REAPER_INTERVAL = 30.0
 DEFAULT_MAX_IDLE = 300  # 5 minutes
 
 
-class InteractiveShellPlugin:
+class InteractiveShellPlugin(RunnerForwardingMixin):
     """Plugin that provides interactive shell session management.
 
     Allows the model to spawn long-lived sessions and drive any
@@ -71,9 +78,35 @@ class InteractiveShellPlugin:
         self._max_lifetime = 600
         self._idle_timeout = 0.5
         self._workspace_root: Optional[str] = None
+        # Workspace-scoped venv path for spawned sessions (None/empty = off).
+        # See shared/plugins/workspace_venv.py.
+        self._workspace_venv: Optional[str] = None
         self._agent_name: Optional[str] = None
         self._initialized = False
         self._tool_output_callback: Optional[Callable[[str], None]] = None
+
+        # Per-session runtime limits installed by the executor via
+        # set_runtime_limits().  ``_cgroup_attach`` becomes preexec_fn
+        # at spawn time so the new PTY child joins the session's cgroup
+        # before exec().  ``_runtime_limits`` is currently informational
+        # — interactive sessions are inherently long-lived, so the
+        # ``tool_timeout_seconds`` cap doesn't apply per-call; the
+        # max_lifetime config remains the relevant ceiling.  Output
+        # caps from RuntimeLimits are not enforced here either: each
+        # ``shell_input``/``shell_read`` already trims to a fixed
+        # buffer at the protocol layer (see read_until_idle in session.py).
+        self._cgroup_attach: Optional[Callable[[], None]] = None
+        self._runtime_limits = None
+        # Phase 5 §5.10d: AppArmor child-profile transition callback
+        # installed via set_apparmor_child_transition_callback().  When
+        # set, the plugin's ShellSession spawn preexec_fn writes
+        # ``changeprofile <profile>//child`` to
+        # /proc/self/attr/current between fork() and exec() so the new
+        # PTY child enters the per-session ``//child`` sub-profile
+        # (which drops the escape-vector rules).  None until the
+        # executor calls — same contract as _cgroup_attach.  See
+        # docs/design/phase5_5_10_apparmor_child_subprofile_audit.md.
+        self._apparmor_child_transition: Optional[Callable[[], None]] = None
         # Reaper thread
         self._reaper_thread: Optional[threading.Thread] = None
         self._reaper_stop = threading.Event()
@@ -126,6 +159,8 @@ class InteractiveShellPlugin:
                     self._workspace_root = os.path.realpath(
                         os.path.abspath(workspace)
                     )
+            if 'workspace_venv' in config:
+                self._workspace_venv = config['workspace_venv']
 
         self._initialized = True
         self._start_reaper()
@@ -155,6 +190,48 @@ class InteractiveShellPlugin:
 
         self._initialized = False
 
+    def reset_for_next_session(self) -> None:
+        """Cascade-sharing reset (Phase 1b, server 0.6.143+).
+
+        Per Daniel's litmus test: PTY sessions are typically per-agent,
+        per-session.  The next session's agent has no awareness of the
+        prior session's spawns and cannot meaningfully address them.
+        Carrying them across the boundary leaves orphan PTYs accumulating
+        — bounded by the reaper's max_lifetime/max_idle, but still
+        operator-confusing.
+
+        Per-session state CLEARED:
+        - ``_sessions``: PTY shell session map.  CLOSE each session
+          + clear the dict.  Same logic as ``shutdown()`` per-session
+          cleanup but without stopping the reaper thread (reaper
+          persists across cascade sessions).
+        - ``_session_counter``: per-session counter reset to 0.
+        - ``_agent_name``: re-set by next session's ``initialize()``.
+        - ``_tool_output_callback``: re-wired by next session.
+
+        Survives the reset:
+        - ``_max_sessions``, ``_max_idle``, ``_max_lifetime``,
+          ``_idle_timeout``: workspace-tier config.
+        - ``_workspace_root``: constant within cascade.
+        - ``_initialized``: stays True (reaper still running).
+        - Reaper thread + control flags: keep alive between sessions.
+        - ``_cgroup_attach``, ``_runtime_limits``,
+          ``_apparmor_child_transition``: lifecycle hooks (re-wired
+          on next session).
+
+        """
+        self._trace("reset_for_next_session: closing per-session PTYs, keeping reaper")
+        with self._lock:
+            for session_id in list(self._sessions.keys()):
+                try:
+                    self._sessions[session_id].close()
+                except Exception:
+                    pass
+            self._sessions.clear()
+        self._session_counter = 0
+        self._agent_name = None
+        self._tool_output_callback = None
+
     def get_config_schema(self) -> dict:
         """Return JSON Schema for this plugin's configuration."""
         return {
@@ -180,8 +257,38 @@ class InteractiveShellPlugin:
                     "default": 0.5,
                     "description": "Output settling time in seconds",
                 },
+                "workspace_venv": {
+                    "type": "string",
+                    "default": "",
+                    "description": (
+                        "Path to a workspace-scoped venv to activate for "
+                        "spawned sessions (empty = off). Relative paths "
+                        "resolve against the workspace root. Created if "
+                        "absent with --system-site-packages. Recommended: "
+                        ".jaato/tool-venv"
+                    ),
+                },
             },
         }
+
+    @classmethod
+    def get_apparmor_rules(
+        cls,
+        *,
+        workspace_path: str,
+        session_id: str,
+        config_root: Optional[str],
+        plugin_config: Dict[str, Any],
+    ) -> List[str]:
+        """Contribute pip's AppArmor rules to the profile.
+
+        Interactive shells can run ``pip``: the distro/UA OS-id reads (crashes
+        without them under confinement) plus, when a ``workspace_venv`` is set,
+        an ``ix`` grant on the venv bin so a bare ``pip`` / console script runs.
+        Scoped to sessions that load ``interactive_shell`` — least-privilege.
+        See ``pip_apparmor_rules``.
+        """
+        return pip_apparmor_rules(plugin_config.get("workspace_venv"), workspace_path)
 
     def set_workspace_path(self, path: Optional[str]) -> None:
         """Update the workspace root path.
@@ -194,6 +301,88 @@ class InteractiveShellPlugin:
         else:
             self._workspace_root = None
         self._trace(f"set_workspace_path: {self._workspace_root}")
+
+    def set_runtime_limits(self, attach_callback, limits) -> None:
+        """Receive per-session cgroup attach + app-layer caps from the executor.
+
+        Forwarded by ``ToolExecutor.set_runtime_limits``.  At spawn
+        time, ``attach_callback`` becomes ``preexec_fn`` on the
+        backend's spawn call so the forked PTY child joins the
+        session's cgroup before ``exec``.  Existing sessions are not
+        re-attached — operators tuning limits mid-session must close
+        and respawn (rare for interactive PTY workflows).
+
+        ``limits`` is stored but not actively enforced here:
+        ``tool_timeout_seconds`` doesn't map cleanly to a long-lived
+        PTY (the existing ``max_lifetime`` config covers that), and
+        per-read output caps are already enforced by
+        ``read_until_idle``'s buffer.  Stored for future use and so
+        operators can introspect what the plugin received.
+        """
+        self._cgroup_attach = attach_callback
+        self._runtime_limits = limits
+        self._trace(
+            f"set_runtime_limits: attach={attach_callback is not None} "
+            f"limits={limits!r}"
+        )
+
+    def set_apparmor_child_transition_callback(
+        self,
+        callback: Optional[Callable[[], None]],
+    ) -> None:
+        """Install the AppArmor child-profile transition callback
+        (Phase 5 §5.10d).
+
+        Mirrors the cli plugin's §5.10c wiring exactly.  Forwarded by
+        ``ToolExecutor.set_apparmor_child_transition_callback`` at
+        runner-side bootstrap.  When set, the plugin's
+        ``ShellSession`` spawn composes this callback with the
+        cgroup-attach callback: AppArmor transition FIRST, then
+        cgroup attach, then exec.  Order matters — the new ``//child``
+        profile applies during the cgroup write.
+
+        Closes the verified escape at ``apparmor.py:413-449`` for the
+        interactive_shell surface: a PTY child running
+        ``python3 -c 'open("/proc/self/attr/current","w").write("changeprofile unconfined")'``
+        from a shell tool cannot escape the per-session profile.
+
+        Argument may be ``None`` when the runner isn't AppArmor-
+        confined (JAATO_RUNNER_DISABLE_CONFINE=1 or daemon-side
+        legacy paths) — spawn falls back to cgroup-only preexec_fn.
+        """
+        self._apparmor_child_transition = callback
+        self._trace(
+            f"set_apparmor_child_transition_callback: "
+            f"transition={callback is not None}"
+        )
+
+    def _build_subprocess_preexec_fn(
+        self,
+    ) -> Optional[Callable[[], None]]:
+        """Phase 5 §5.10d: compose the apparmor + cgroup preexec_fn.
+
+        Mirrors :meth:`CLIToolPlugin._build_subprocess_preexec_fn` —
+        same four-case ladder (none / apparmor-only / cgroup-only /
+        both), same apparmor-first ordering, same fail-closed
+        semantics (an exception in preexec_fn propagates as a spawn
+        failure; ShellSession surfaces the failure to the caller
+        instead of returning a half-started session that's lost
+        confinement).
+        """
+        apparmor_cb = self._apparmor_child_transition
+        cgroup_cb = self._cgroup_attach
+        if apparmor_cb is None and cgroup_cb is None:
+            return None
+        if apparmor_cb is None:
+            return cgroup_cb
+        if cgroup_cb is None:
+            return apparmor_cb
+
+        def _composite() -> None:
+            apparmor_cb()
+            cgroup_cb()
+
+        return _composite
 
     # --- Tool schemas ---
 
@@ -241,7 +430,7 @@ class InteractiveShellPlugin:
                     "required": ["command"],
                 },
                 category="system",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
             ToolSchema(
                 name='shell_input',
@@ -272,7 +461,7 @@ class InteractiveShellPlugin:
                     "required": ["session_id", "input"],
                 },
                 category="system",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
             ToolSchema(
                 name='shell_read',
@@ -299,7 +488,7 @@ class InteractiveShellPlugin:
                     "required": ["session_id"],
                 },
                 category="system",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
             ToolSchema(
                 name='shell_control',
@@ -331,7 +520,7 @@ class InteractiveShellPlugin:
                     "required": ["session_id", "key"],
                 },
                 category="system",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
             ToolSchema(
                 name='shell_close',
@@ -351,7 +540,7 @@ class InteractiveShellPlugin:
                     "required": ["session_id"],
                 },
                 category="system",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
             ToolSchema(
                 name='shell_list',
@@ -365,20 +554,32 @@ class InteractiveShellPlugin:
                     "properties": {},
                 },
                 category="system",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
         ]
 
     def get_executors(self) -> Dict[str, Callable[[Dict[str, Any]], Any]]:
-        """Return executor mapping for all tools."""
-        return {
+        """Return executor mapping for all tools.
+
+        Phase 3 §3.5 wave 2: forwards via runner-RPC when a runner
+        is attached so spawned PTY subprocesses inherit the runner's
+        AppArmor profile (kernel-confined per-session multitenancy
+        becomes real for shell sessions).  Falls through to in-
+        process for sessions without a runner.
+
+        Cgroup attach + runtime-limits plumbing migration (per plan
+        §3.5 / peer-review M2) lands in a follow-on commit; for now
+        the runner-side path uses the default cgroup attach the
+        runner's ``set_runtime_limits`` already wires.
+        """
+        return self.wrap_executors_for_runner_forwarding({
             'shell_spawn': self._exec_spawn,
             'shell_input': self._exec_input,
             'shell_read': self._exec_read,
             'shell_control': self._exec_control,
             'shell_close': self._exec_close,
             'shell_list': self._exec_list,
-        }
+        })
 
     def get_system_instructions(self) -> Optional[str]:
         """Return system instructions for interactive shell tools."""
@@ -506,9 +707,28 @@ IMPORTANT NOTES:
 
         # AppArmor confinement (if any) is inherited from the parent
         # thread via fork+exec — see ToolExecutor.set_apparmor_context.
+        # Phase 5 §5.10d — preexec_fn composes two callbacks between
+        # fork() and exec():
+        #   1. AppArmor child-profile transition (writes
+        #      ``changeprofile <session>//child`` to
+        #      /proc/self/attr/current).  The forked PTY child enters
+        #      the ``//child`` sub-profile, dropping the escape-vector
+        #      rules — a model-controlled shell that writes to
+        #      attr/current gets EACCES.
+        #   2. Cgroup attach (writes the forked child's PID to
+        #      cgroup.procs), so memory.max / pids.max / cpu.weight
+        #      apply from the first instruction of the new program.
+        # Either callback may be None; the composite handles all
+        # four (none, apparmor-only, cgroup-only, both).
         spawn_command = command
 
         self._trace(f"spawn: id={session_id}, cmd={command[:80]}, backend={_BACKEND}")
+
+        # Resolve + create-if-absent the workspace venv (if configured) so the
+        # spawned session runs with it activated (pip persists, imports resolve).
+        venv_path = resolve_venv_path(self._workspace_venv, self._workspace_root)
+        if venv_path:
+            ensure_workspace_venv(venv_path)
 
         try:
             session = ShellSession(
@@ -519,6 +739,8 @@ IMPORTANT NOTES:
                 idle_timeout=self._idle_timeout,
                 max_lifetime=self._max_lifetime,
                 cwd=self._workspace_root,
+                preexec_fn=self._build_subprocess_preexec_fn(),
+                workspace_venv=venv_path,
             )
 
             # Read initial output (program banner, first prompt, etc.)

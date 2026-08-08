@@ -88,6 +88,29 @@ class TestAuthentication:
 
         assert "ANTHROPIC_API_KEY" in str(exc_info.value)
 
+    def test_verify_auth_reads_config_param_before_initialize(self):
+        """verify_auth must read the ``config`` PARAMETER, not
+        ``self._config``, so it works BEFORE initialize().
+
+        Regression for the in-process runtime path
+        (``JaatoRuntime.verify_auth``) which creates a FRESH provider with
+        ``config=None`` and does NOT call ``initialize()`` — so
+        ``self._config`` is unset.  The provider previously read
+        ``getattr(self._config, 'extra', ...)`` at verify time and raised
+        ``AttributeError: 'AnthropicProvider' object has no attribute
+        '_config'``.  After the fix it reaches the normal credential check
+        and raises ``APIKeyNotFoundError`` (no creds), NOT AttributeError.
+        """
+        provider = AnthropicProvider()  # fresh — no initialize()
+        cfg = ProviderConfig(extra={"workspace_path": "/ws", "config_root": "/cr"})
+        with patch.dict('os.environ', {}, clear=True), \
+                patch('shared.plugins.model_provider.anthropic.provider.'
+                      'try_load_tokens_with_reason', return_value=(None, None)), \
+                patch('shared.plugins.model_provider.anthropic.provider.'
+                      'get_valid_access_token', return_value=None):
+            with pytest.raises(APIKeyNotFoundError):
+                provider.verify_auth(allow_interactive=False, config=cfg)
+
     @patch('anthropic.Anthropic')
     def test_initialize_with_api_key(self, mock_client_class):
         """Should initialize with API key from config."""
@@ -126,6 +149,173 @@ class TestAuthentication:
 
         assert provider._enable_thinking is True
         assert provider._thinking_budget == 15000
+
+
+class TestConfigNamespacing:
+    """Tests for the four-layer config namespacing introduced in 0.6.24.
+
+    Layers (under ``plugin_configs.anthropic``):
+      - Top-level: api_key / oauth_token (auth identity)
+      - api_params: temperature / top_p / top_k / max_tokens /
+                    enable_thinking / thinking_budget
+      - framework_overrides: rare escape hatches (none defined today)
+
+    Backward compatibility: same keys are also read from the legacy
+    flat position with a deprecation warning per key.
+    """
+
+    @patch('anthropic.Anthropic')
+    def test_new_shape_no_deprecation_warning(self, mock_client_class, caplog):
+        mock_client_class.return_value = MagicMock()
+        provider = AnthropicProvider()
+        with caplog.at_level("WARNING"):
+            provider.initialize(ProviderConfig(
+                api_key="sk-ant-test",
+                extra={
+                    "api_params": {
+                        "temperature": 0.0,
+                        "top_p": 0.95,
+                        "top_k": 40,
+                        "max_tokens": 4096,
+                        "enable_thinking": False,
+                        "thinking_budget": 5000,
+                    },
+                },
+            ))
+        assert provider._temperature == 0.0
+        assert provider._top_p == 0.95
+        assert provider._top_k == 40
+        assert provider._max_tokens_override == 4096
+        assert provider._enable_thinking is False
+        assert provider._thinking_budget == 5000
+        legacy_warnings = [r for r in caplog.records if "legacy" in r.getMessage().lower()]
+        assert legacy_warnings == [], (
+            f"new shape should not emit deprecation warnings, got: "
+            f"{[r.getMessage() for r in legacy_warnings]}"
+        )
+
+    @patch('anthropic.Anthropic')
+    def test_legacy_flat_shape_still_works_with_warnings(
+        self, mock_client_class, caplog,
+    ):
+        mock_client_class.return_value = MagicMock()
+        provider = AnthropicProvider()
+        with caplog.at_level("WARNING"):
+            provider.initialize(ProviderConfig(
+                api_key="sk-ant-test",
+                extra={
+                    "temperature": 0.5,
+                    "top_p": 1.0,
+                    "enable_thinking": True,
+                    "thinking_budget": 8000,
+                },
+            ))
+        assert provider._temperature == 0.5
+        assert provider._top_p == 1.0
+        assert provider._enable_thinking is True
+        assert provider._thinking_budget == 8000
+        legacy_warnings = [r for r in caplog.records if "legacy" in r.getMessage().lower()]
+        assert len(legacy_warnings) >= 4, (
+            f"expected ≥4 deprecation warnings (temperature/top_p/enable_thinking/"
+            f"thinking_budget), got {len(legacy_warnings)}"
+        )
+
+    @patch('anthropic.Anthropic')
+    def test_new_layer_wins_over_legacy_flat_key(self, mock_client_class):
+        # When both the nested layer key and the legacy flat key are
+        # present, the nested form wins (legacy is the deprecation
+        # fallback only).
+        mock_client_class.return_value = MagicMock()
+        provider = AnthropicProvider()
+        provider.initialize(ProviderConfig(
+            api_key="sk-ant-test",
+            extra={
+                "api_params": {"temperature": 0.7},
+                "temperature": 0.3,
+                "enable_thinking": False,        # legacy
+            },
+        ))
+        assert provider._temperature == 0.7
+        # enable_thinking still picked up via legacy fallback when
+        # not in api_params at all
+        assert provider._enable_thinking is False
+
+    @patch('anthropic.Anthropic')
+    def test_no_sampling_config_means_none(self, mock_client_class):
+        # When the profile sets nothing, instance vars stay at their
+        # __init__ defaults (None) so complete() omits them from
+        # messages.create() and the API server-side default applies.
+        mock_client_class.return_value = MagicMock()
+        provider = AnthropicProvider()
+        provider.initialize(ProviderConfig(api_key="sk-ant-test"))
+        assert provider._temperature is None
+        assert provider._top_p is None
+        assert provider._top_k is None
+        assert provider._max_tokens_override is None
+
+
+class TestComplete_SamplingParams:
+    """Verify sampling params reach messages.create() when set."""
+
+    @patch('anthropic.Anthropic')
+    def test_temperature_passed_to_messages_create(self, mock_client_class):
+        from jaato_sdk.plugins.model_provider.types import Message, Role
+        mock_client = MagicMock()
+        mock_client_class.return_value = mock_client
+        # mock the response to look like an Anthropic Message
+        mock_response = MagicMock()
+        mock_response.content = []
+        mock_response.stop_reason = "end_turn"
+        mock_response.usage = MagicMock(input_tokens=10, output_tokens=5,
+                                          cache_creation_input_tokens=0,
+                                          cache_read_input_tokens=0)
+        mock_client.messages.create.return_value = mock_response
+
+        provider = AnthropicProvider()
+        provider.initialize(ProviderConfig(
+            api_key="sk-ant-test",
+            extra={"api_params": {"temperature": 0.0, "top_p": 0.95, "top_k": 40,
+                                    "max_tokens": 2048}},
+        ))
+        provider.connect("claude-sonnet-4-20250514")
+        provider.complete(
+            messages=[Message.from_text(Role.USER, "hi")],
+            system_instruction="be brief",
+        )
+        # Verify the sampling params reached the SDK
+        call_kwargs = mock_client.messages.create.call_args.kwargs
+        assert call_kwargs["temperature"] == 0.0
+        assert call_kwargs["top_p"] == 0.95
+        assert call_kwargs["top_k"] == 40
+        assert call_kwargs["max_tokens"] == 2048
+
+    @patch('anthropic.Anthropic')
+    def test_omit_sampling_when_unset(self, mock_client_class):
+        from jaato_sdk.plugins.model_provider.types import Message, Role
+        mock_client = MagicMock()
+        mock_client_class.return_value = mock_client
+        mock_response = MagicMock()
+        mock_response.content = []
+        mock_response.stop_reason = "end_turn"
+        mock_response.usage = MagicMock(input_tokens=10, output_tokens=5,
+                                          cache_creation_input_tokens=0,
+                                          cache_read_input_tokens=0)
+        mock_client.messages.create.return_value = mock_response
+
+        provider = AnthropicProvider()
+        provider.initialize(ProviderConfig(api_key="sk-ant-test"))
+        provider.connect("claude-sonnet-4-20250514")
+        provider.complete(
+            messages=[Message.from_text(Role.USER, "hi")],
+            system_instruction="be brief",
+        )
+        call_kwargs = mock_client.messages.create.call_args.kwargs
+        # Sampling params absent → API server-side default applies
+        assert "temperature" not in call_kwargs
+        assert "top_p" not in call_kwargs
+        assert "top_k" not in call_kwargs
+        # max_tokens still set (framework default)
+        assert "max_tokens" in call_kwargs
 
 
 class TestConnection:
@@ -245,6 +435,65 @@ class TestErrorHandling:
         with pytest.raises(ContextLimitError):
             provider.complete(messages)
 
+    @patch('anthropic.Anthropic')
+    def test_api_connection_error_propagates_to_caller(self, mock_client_class):
+        """PR #177 (2026-05-21): anthropic SDK network-layer errors
+        (APIConnectionError, APITimeoutError) must escape
+        ``provider.complete()`` so ``with_retry`` sees them and
+        exponential-backoffs.  Pre-fix, the SDK error was swallowed
+        into ``TurnResult.from_exception()``; ``with_retry`` saw
+        fn() return normally and never retried.  Surfaced by peer's
+        kb-orchestrator v152-retry-11 (Finding C)."""
+        import anthropic
+        mock_client = MagicMock()
+        mock_client.messages.create.return_value = create_mock_response()
+        mock_client_class.return_value = mock_client
+
+        provider = AnthropicProvider()
+        provider.initialize(ProviderConfig(api_key="sk-ant-test"))
+        provider.connect('claude-sonnet-4-20250514')
+
+        # Real anthropic.APIConnectionError (the actual SDK class, not
+        # a jaato-typed wrapper).  Constructed with a mock request per
+        # the SDK's expected signature; fallback to bare-string ctor
+        # if SDK shape varies.
+        try:
+            request = MagicMock()
+            conn_err = anthropic.APIConnectionError(request=request)
+        except TypeError:
+            conn_err = anthropic.APIConnectionError("Connection error")
+        mock_client.messages.create.side_effect = conn_err
+        messages = [Message.from_text(Role.USER, "Test")]
+
+        # MUST escape — NOT swallowed into TurnResult.
+        with pytest.raises(anthropic.APIConnectionError):
+            provider.complete(messages)
+
+    @patch('anthropic.Anthropic')
+    def test_api_timeout_error_propagates_to_caller(self, mock_client_class):
+        """PR #177: anthropic.APITimeoutError follows the same path
+        as APIConnectionError — both must escape provider.complete
+        so with_retry can classify them transient."""
+        import anthropic
+        mock_client = MagicMock()
+        mock_client.messages.create.return_value = create_mock_response()
+        mock_client_class.return_value = mock_client
+
+        provider = AnthropicProvider()
+        provider.initialize(ProviderConfig(api_key="sk-ant-test"))
+        provider.connect('claude-sonnet-4-20250514')
+
+        try:
+            request = MagicMock()
+            timeout_err = anthropic.APITimeoutError(request=request)
+        except TypeError:
+            timeout_err = anthropic.APITimeoutError("Request timeout")
+        mock_client.messages.create.side_effect = timeout_err
+        messages = [Message.from_text(Role.USER, "Test")]
+
+        with pytest.raises(anthropic.APITimeoutError):
+            provider.complete(messages)
+
 
 class TestTokenManagement:
     """Tests for token counting and context limits."""
@@ -271,12 +520,30 @@ class TestTokenManagement:
 
         assert provider.get_context_limit() == 200_000
 
-    def test_get_context_limit_unknown_model(self):
-        """get_context_limit() should return default for unknown models."""
+    def test_get_context_limit_unknown_model_raises(self):
+        """No hardcoded fallback: an unknown model with no override raises
+        rather than returning a guessed default."""
         provider = AnthropicProvider()
         provider._model_name = 'unknown-model'
 
-        assert provider.get_context_limit() == 200_000  # Default
+        with pytest.raises(ValueError, match="no known context window"):
+            provider.get_context_limit()
+
+    def test_get_context_limit_override_knob_wins(self):
+        """framework_overrides.context_length overrides the per-model table —
+        the escape hatch for unlisted models / budget-down."""
+        provider = AnthropicProvider()
+        provider._model_name = 'claude-sonnet-4-20250514'  # would be 200_000
+        provider._context_length_knob = 100_000
+
+        assert provider.get_context_limit() == 100_000
+
+    def test_get_context_limit_override_knob_covers_unknown_model(self):
+        provider = AnthropicProvider()
+        provider._model_name = 'some-future-model'
+        provider._context_length_knob = 500_000
+
+        assert provider.get_context_limit() == 500_000
 
 
 class TestCapabilities:
@@ -571,7 +838,8 @@ class TestComplete:
 
         call_kwargs = mock_client.messages.create.call_args.kwargs
         assert 'tools' in call_kwargs
-        assert call_kwargs['tools'][0]['name'] == 'get_weather'
+        from shared.tool_id_map import name_to_id
+        assert call_kwargs['tools'][0]['name'] == name_to_id('get_weather')
 
     @patch('anthropic.Anthropic')
     def test_complete_extracts_function_calls(self, mock_client_class):

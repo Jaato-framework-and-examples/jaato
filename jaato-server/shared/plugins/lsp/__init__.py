@@ -4,4 +4,5 @@ from .plugin import LSPToolPlugin, create_plugin
 
 PLUGIN_KIND = "tool"
 
+PLUGIN_TIER = "runner"
 __all__ = ['LSPToolPlugin', 'create_plugin']

@@ -120,6 +120,7 @@
         <div class="sidebar-title">Getting Started</div>
         <ul class="sidebar-nav">
           <li><a href="../getting-started/quickstart.html">Quickstart</a></li>
+          <li><a href="../getting-started/typescript-sdk.html">TypeScript SDK</a></li>
         </ul>
       </div>
 
@@ -194,6 +195,13 @@
           <li><a href="../api-reference/providers/ollama.html">Ollama</a></li>
           <li><a href="../api-reference/providers/zhipuai.html">Zhipu AI</a></li>
           <li><a href="../api-reference/providers/nim.html">NVIDIA NIM</a></li>
+          <li><a href="../api-reference/providers/lmstudio.html">LM Studio</a></li>
+          <li><a href="../api-reference/providers/vllm.html">vLLM</a></li>
+          <li><a href="../api-reference/providers/tensorrt-llm.html">TensorRT-LLM</a></li>
+          <li><a href="../api-reference/providers/openrouter.html">OpenRouter</a></li>
+          <li><a href="../api-reference/providers/nebius.html">Nebius</a></li>
+          <li><a href="../api-reference/providers/ovhcloud.html">OVHcloud</a></li>
+          <li><a href="../api-reference/providers/triton.html">Triton</a></li>
         </ul>
       </div>
     </aside>
@@ -261,7 +269,7 @@
           When a client connects, it receives a <code>ConnectedEvent</code> with protocol version and <code>server_info</code> (including <code>server_version</code> — the server's package version from <code>pyproject.toml</code>), followed by a <code>SessionInfoEvent</code> containing the full state snapshot: session metadata, available tools, model list, and command history. If the session was created with an <a href="subagent-architecture.html#agent-profiles">agent profile</a>, the <code>SessionInfoEvent</code> includes a <code>profile_name</code> field identifying which profile is active. Clients can compare <code>server_version</code> against their own minimum to refuse connection to obsolete servers. This allows the client to fully initialize without additional requests.
         </p>
         <p>
-          On reconnection (e.g., after network drop), the server calls <code>emit_current_state()</code> which replays all relevant events: session info, tracked agents and their status, instruction budgets, and clears any stale pending permission/clarification requests.
+          On reconnection (e.g., after network drop), the server calls <code>emit_current_state()</code> which replays all relevant events: session info, tracked agents and their status, instruction budgets, and clears any stale pending permission/clarification requests. This applies to the <em>same</em> connection; a <em>new</em> WebSocket connection starts in its own auto-provisioned workspace and must select the session's workspace before re-attaching (see <a href="#workspace-reconnect">Workspace selection &amp; WebSocket reconnect</a> below).
         </p>
 
         <h2 id="agent-lifecycle">Agent Lifecycle Events</h2>
@@ -321,8 +329,18 @@
           <tbody>
             <tr>
               <td><code>session.new</code></td>
-              <td><code>[name] [--profile &lt;name&gt;]</code></td>
-              <td><code>SessionInfoEvent</code> (with <code>profile_name</code> if profile used)</td>
+              <td><code>[name] [--profile &lt;name&gt;]</code>, or an inline spec in <code>payload.spec</code> (<code>{model, provider, plugins, plugin_configs}</code>) for a fresh daemon with no pre-installed profile</td>
+              <td><code>SessionInfoEvent</code> — carries the new <code>session_id</code> (with <code>profile_name</code> if a profile was used)</td>
+            </tr>
+            <tr>
+              <td><code>session.list</code></td>
+              <td><em>none</em></td>
+              <td><code>SessionListEvent</code> — each entry carries <code>id</code> and <code>workspace_path</code></td>
+            </tr>
+            <tr>
+              <td><code>session.attach</code></td>
+              <td><code>[&lt;session_id&gt;]</code></td>
+              <td>restores the session and replays its history (see the workspace note below)</td>
             </tr>
             <tr>
               <td><code>session.profiles</code></td>
@@ -331,6 +349,32 @@
             </tr>
           </tbody>
         </table>
+
+        <h3 id="workspace-reconnect">Workspace selection &amp; WebSocket reconnect</h3>
+        <p>
+          The <strong>Workspace Config</strong> events in the category table are how
+          a client targets a workspace. The load-bearing one is
+          <code>workspace.select</code>
+          (<code>{"type": "workspace.select", "name": "&lt;workspace_path&gt;"}</code>),
+          answered by a <code>ConfigStatusEvent</code> (<code>config.status</code>).
+        </p>
+        <p>
+          This is what makes WebSocket reconnect work. Each WebSocket connection
+          auto-provisions its <em>own</em> workspace, so a new connection cannot
+          reach a session created on an earlier one until it selects that session's
+          workspace. The sequence is <code>session.list</code> (read the session's
+          <code>workspace_path</code>) &rarr; <code>workspace.select</code> &rarr;
+          <code>session.attach</code>. The cold restore is asynchronous: a
+          <code>message.send</code> issued while it settles can return a
+          <em>recoverable</em> <code>ErrorEvent</code>
+          (<code>error_type: "SessionError"</code>, <code>"Session not found"</code>) —
+          re-attach and resend. Attaching a session whose workspace you have not
+          selected returns that same opaque error by design: workspace isolation is
+          a security boundary, so the server will not confirm that a session exists
+          in a workspace the connection has not selected. See the
+          <a href="../guides/connection-recovery.html#websocket">Web Clients</a>
+          guide for a worked example.
+        </p>
 
         <h2 id="transport">Transport Layers</h2>
         <p>

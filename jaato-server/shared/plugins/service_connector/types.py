@@ -19,10 +19,38 @@ class AuthType(str, Enum):
 
 
 class ParameterLocation(str, Enum):
-    """Where a parameter is located in the request."""
+    """Where a parameter is located in the request.
+
+    Covers the full OpenAPI parameter-location vocabulary across both
+    major spec versions jaato stores:
+
+    - ``path``, ``query``, ``header`` — present in both OAS 2.0 and 3.0.
+    - ``body`` — OAS 2.0 only (OAS 3.0 uses a separate ``requestBody``
+      object instead of an ``in: body`` parameter entry).  Stored
+      schemas generated from OAS 2.0 specs carry these through
+      verbatim, including per-field flattened body entries.
+    - ``formData`` — OAS 2.0 only (form-encoded bodies, e.g. for file
+      uploads).  OAS 3.0 expresses the same via a request-body media
+      type like ``multipart/form-data``.
+    - ``cookie`` — OAS 3.0 only.
+
+    Without the OAS 2.0 / OAS 3.0 extras, ``from_dict`` deserialization
+    raised ``ValueError: 'body' is not a valid ParameterLocation`` for
+    any stored schema with body-flattened parameters — breaking
+    ``list_schemas`` and every lookup that crosses those entries.
+
+    Consumers that switch on location (``auth.py`` routing API keys,
+    request-building in ``http_client.py``) handle only the three
+    original values explicitly; the new members fall through as no-ops
+    where the consumer doesn't care, and are visible to consumers that
+    do care about body/form/cookie handling.
+    """
     PATH = "path"
     QUERY = "query"
     HEADER = "header"
+    BODY = "body"
+    FORM_DATA = "formData"
+    COOKIE = "cookie"
 
 
 @dataclass
@@ -476,6 +504,11 @@ class HttpResponse:
         full_length: Original body length before truncation.
         request_validation: Validation result for the request (if schema exists).
         response_validation: Validation result for the response (if schema exists).
+        auth_attempts: Per-credential resolution attempts that produced
+            the auth headers for this request.  Internal metadata used
+            by ``call_service``'s 401/403 path to build the
+            ``auth_context`` diagnostic — deliberately excluded from
+            :meth:`to_dict` so successful responses don't leak provenance.
     """
     status: int
     headers: Dict[str, str]
@@ -485,9 +518,18 @@ class HttpResponse:
     full_length: Optional[int] = None
     request_validation: Optional[ValidationResult] = None
     response_validation: Optional[ValidationResult] = None
+    # Typed as List[Any] in this module because importing AuthAttempt
+    # would create a types ↔ auth import cycle.  Concrete type is
+    # List[shared.plugins.service_connector.auth.AuthAttempt].
+    auth_attempts: List[Any] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary for tool response."""
+        """Convert to dictionary for tool response.
+
+        Note: ``auth_attempts`` is intentionally excluded — provenance
+        metadata is only relevant on the auth-error path and the plugin
+        consumes it directly from the dataclass.
+        """
         result: Dict[str, Any] = {
             "status": self.status,
             "headers": self.headers,

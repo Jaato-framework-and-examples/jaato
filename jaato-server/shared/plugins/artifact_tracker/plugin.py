@@ -18,6 +18,7 @@ from a previous session from leaking into the new one.
 
 import json
 import os
+from shared.session_context import get_workspace_root, get_config_root
 import tempfile
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional
@@ -28,8 +29,12 @@ from .models import (
     ArtifactType,
     ReviewStatus,
 )
-from jaato_sdk.plugins.model_provider.types import ToolSchema
+from jaato_sdk.plugins.model_provider.types import (
+    ToolSchema,
+    DISCOVERABILITY_DEFERRED,
+)
 from jaato_sdk.plugins.base import UserCommand, ToolResultEnrichmentResult
+from shared.plugins.runner_forwarding import RunnerForwardingMixin
 from shared.trace import trace as _trace_write
 
 
@@ -69,7 +74,7 @@ def _detect_workspace_root() -> Optional[str]:
         Resolved absolute path to workspace root, or None if not found.
     """
     # Priority 1: JAATO_WORKSPACE_ROOT
-    workspace = os.environ.get('JAATO_WORKSPACE_ROOT')
+    workspace = get_workspace_root()
     if workspace:
         return os.path.realpath(os.path.abspath(workspace))
 
@@ -81,7 +86,7 @@ def _detect_workspace_root() -> Optional[str]:
     return None
 
 
-class ArtifactTrackerPlugin:
+class ArtifactTrackerPlugin(RunnerForwardingMixin):
     """Plugin that tracks artifacts created/modified by the model.
 
     Key features:
@@ -192,6 +197,60 @@ class ArtifactTrackerPlugin:
         self._initialized = True
         self._trace(f"initialize: storage_path={self._storage_path}, workspace_root={self._workspace_root}")
 
+    def set_workspace_path(self, path: str) -> None:
+        """Update workspace_root from the registry's broadcast.
+
+        Mirrors the memory plugin's pattern (``shared/plugins/memory/plugin.py:155``).
+        Without this hook, ``self._storage_path`` (default
+        ``.jaato/.artifact_tracker.json``) is resolved by ``open()`` against
+        process CWD instead of workspace_root.  When CWD diverges from
+        workspace (daemon started elsewhere, or session sandboxed under a
+        different cwd), the file lands outside the AppArmor-permitted
+        sandbox and writes fail with EACCES.
+
+        Resolving via ``_workspace_root`` (set here from the broadcast or
+        in ``initialize`` from config) is the contract every other
+        runtime-state plugin honours.
+
+        Args:
+            path: Workspace root path broadcast by ``PluginRegistry``
+                after ``initialize``.  When non-empty, replaces any
+                workspace_root seeded from config.
+        """
+        if path:
+            self._workspace_root = os.path.realpath(os.path.abspath(path))
+            self._trace(f"set_workspace_path: workspace_root={self._workspace_root}")
+
+    def _resolve_storage_path(self) -> Optional[str]:
+        """Resolve ``self._storage_path`` to an absolute filesystem path.
+
+        Returns the absolute path that ``_load_state`` / ``_save_state`` /
+        ``_clear_state_file`` should operate on.  Resolution order:
+
+        1. ``self._storage_path`` already absolute → returned verbatim.
+        2. ``self._workspace_root`` set → joined with the relative
+           template (the path lands under the workspace's
+           AppArmor-permitted sandbox subtree).
+        3. Neither absolute nor workspace_root set → fall back to
+           ``os.path.abspath`` (process CWD).  Logs a TRACE warning so
+           the fallback is diagnosable; under AppArmor confinement this
+           is the path that fails with EACCES.
+        """
+        if not self._storage_path:
+            return None
+        if os.path.isabs(self._storage_path):
+            return self._storage_path
+        if self._workspace_root:
+            return os.path.normpath(
+                os.path.join(self._workspace_root, self._storage_path)
+            )
+        self._trace(
+            "_resolve_storage_path: WARNING — no workspace_root, falling "
+            f"back to CWD for relative path '{self._storage_path}' "
+            "(AppArmor-confined sessions will likely fail to write here)"
+        )
+        return os.path.abspath(self._storage_path)
+
     def shutdown(self) -> None:
         """Shutdown the plugin and save state."""
         self._trace("shutdown")
@@ -200,6 +259,35 @@ class ArtifactTrackerPlugin:
         self._registry = None
         self._workspace_root = None
         self._initialized = False
+
+    def reset_for_next_session(self) -> None:
+        """Cascade-sharing reset (Phase 1, server 0.6.142+) — NO-OP.
+
+        **Daniel-corrected (2026-05-20)**: artifact tracking state is
+        cross-session by design.  Per Daniel's litmus test:
+
+            "A plugin's state should SURVIVE this call if a subsequent
+            session within the SAME cascade might benefit from it."
+
+        Artifacts produced by session A (rendered files, build outputs,
+        dependency graph edges) become inputs for session B's validation
+        / further dependency tracking.  Clearing the registry between
+        cascade sessions would break the cross-stage data flow this
+        plugin was built to support.
+
+        Survives the reset (the entire plugin state):
+        - ``_registry``: the in-memory artifact + dependency graph
+          (persisted to disk on shutdown).
+        - ``_workspace_root``: workspace-tier, constant within cascade.
+        - ``_storage_path``: where state persists.
+
+        ``shutdown()`` (final teardown at cascade end) saves state +
+        drops references.
+        """
+        self._trace(
+            "reset_for_next_session: NO-OP — artifact graph is cross-session "
+            "by-design (Daniel litmus test, 2026-05-20)"
+        )
 
     def _to_display_path(self, path: str) -> str:
         """Convert an absolute path to a display path relative to workspace_root.
@@ -243,24 +331,25 @@ class ArtifactTrackerPlugin:
         clean artifact registry, preventing stale artifacts from leaking across
         sessions on the same workspace.
         """
-        if not self._storage_path:
+        storage_path = self._resolve_storage_path()
+        if not storage_path:
             return
 
         try:
-            storage_path = os.path.abspath(self._storage_path)
             if os.path.exists(storage_path):
                 os.remove(storage_path)
                 self._trace(f"_clear_state_file: removed stale state file {storage_path}")
         except OSError as e:
-            self._trace(f"_clear_state_file: failed to remove {self._storage_path}: {e}")
+            self._trace(f"_clear_state_file: failed to remove {storage_path}: {e}")
 
     def _load_state(self) -> None:
         """Load state from storage file."""
-        if not self._storage_path or not os.path.exists(self._storage_path):
+        storage_path = self._resolve_storage_path()
+        if not storage_path or not os.path.exists(storage_path):
             return
 
         try:
-            with open(self._storage_path, 'r') as f:
+            with open(storage_path, 'r') as f:
                 data = json.load(f)
                 self._registry = ArtifactRegistry.from_dict(data)
         except (json.JSONDecodeError, IOError) as e:
@@ -268,17 +357,46 @@ class ArtifactTrackerPlugin:
             self._registry = ArtifactRegistry()
 
     def _save_state(self) -> None:
-        """Save state to storage file."""
-        if not self._storage_path or not self._registry:
+        """Save state to storage file atomically.
+
+        Phase 3 §3.10 / §3.14 atomic-write contract: write to a
+        temp file in the same directory + ``os.replace`` rename so
+        a SIGTERM mid-write never produces a partial / corrupted
+        file.  Same pattern as ``waypoint`` and ``memory`` (curated
+        layer).  See parent design §4.6 (atomic-write requirement
+        for runner-tier persistence) + plan §3.14.
+        """
+        if not self._registry:
+            return
+        storage_path = self._resolve_storage_path()
+        if not storage_path:
             return
 
+        storage_dir = os.path.dirname(storage_path)
         try:
-            # Ensure parent directory exists
-            storage_path = os.path.abspath(self._storage_path)
-            os.makedirs(os.path.dirname(storage_path), exist_ok=True)
-
-            with open(self._storage_path, 'w') as f:
-                json.dump(self._registry.to_dict(), f, indent=2)
+            os.makedirs(storage_dir, exist_ok=True)
+            # Tempfile in the SAME directory as the target so
+            # ``os.replace`` is an atomic intra-filesystem rename
+            # (cross-fs renames fall back to copy-then-unlink and
+            # would defeat the atomicity guarantee).
+            fd, tmp_path = tempfile.mkstemp(
+                prefix=".artifact_tracker_state.",
+                suffix=".tmp",
+                dir=storage_dir,
+            )
+            try:
+                with os.fdopen(fd, "w") as f:
+                    json.dump(self._registry.to_dict(), f, indent=2)
+                os.replace(tmp_path, storage_path)
+            except BaseException:
+                # Cleanup the tempfile on any failure (KeyboardInterrupt
+                # included so the SIGTERM-mid-write window doesn't leave
+                # detritus behind).
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+                raise
         except IOError as e:
             print(f"Warning: Failed to save artifact tracker state: {e}")
 
@@ -327,7 +445,7 @@ class ArtifactTrackerPlugin:
                     "required": ["path", "artifact_type", "description"]
                 },
                 category="memory",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
             ToolSchema(
                 name="updateArtifact",
@@ -384,7 +502,7 @@ class ArtifactTrackerPlugin:
                     "required": ["path"]
                 },
                 category="memory",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
             ToolSchema(
                 name="listArtifacts",
@@ -413,7 +531,7 @@ class ArtifactTrackerPlugin:
                     "required": []
                 },
                 category="memory",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
             ToolSchema(
                 name="flagForReview",
@@ -437,7 +555,7 @@ class ArtifactTrackerPlugin:
                     "required": ["path", "reason"]
                 },
                 category="memory",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
             ToolSchema(
                 name="acknowledgeReview",
@@ -472,7 +590,7 @@ class ArtifactTrackerPlugin:
                     "required": []
                 },
                 category="memory",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
             ToolSchema(
                 name="checkRelated",
@@ -498,7 +616,7 @@ class ArtifactTrackerPlugin:
                     "required": ["path"]
                 },
                 category="memory",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
             ToolSchema(
                 name="removeArtifact",
@@ -523,7 +641,7 @@ class ArtifactTrackerPlugin:
                     "required": []
                 },
                 category="memory",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
             ToolSchema(
                 name="notifyChange",
@@ -551,13 +669,17 @@ class ArtifactTrackerPlugin:
                     "required": ["path", "reason"]
                 },
                 category="memory",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
         ]
 
     def get_executors(self) -> Dict[str, Callable[[Dict[str, Any]], Any]]:
-        """Return the executors for artifact tracking tools."""
-        return {
+        """Return the executors for artifact tracking tools.
+
+        Phase 3 §3.10 wave 4: forwards via runner-RPC when a runner
+        is attached; falls through to in-process otherwise.
+        """
+        return self.wrap_executors_for_runner_forwarding({
             "trackArtifact": self._execute_track_artifact,
             "updateArtifact": self._execute_update_artifact,
             "listArtifacts": self._execute_list_artifacts,
@@ -568,7 +690,7 @@ class ArtifactTrackerPlugin:
             "notifyChange": self._execute_notify_change,
             # User command aliases
             "artifacts": self._execute_list_artifacts,
-        }
+        })
 
     def get_system_instructions(self) -> Optional[str]:
         """Return system instructions for the artifact tracker plugin.

@@ -233,7 +233,10 @@ class ScrollableBufferControl(BufferControl):
     DOUBLE_CLICK_THRESHOLD = 0.4
 
     def __init__(self, on_scroll_up=None, on_scroll_down=None, input_buffer=None,
-                 on_selection_complete=None, **kwargs):
+                 on_selection_complete=None,
+                 get_copy_button_regions=None,
+                 on_copy_button_clicked=None,
+                 **kwargs):
         super().__init__(**kwargs)
         self._on_scroll_up = on_scroll_up
         self._on_scroll_down = on_scroll_down
@@ -242,6 +245,14 @@ class ScrollableBufferControl(BufferControl):
         self._on_selection_complete = on_selection_complete  # Callback with selected text
         self._last_click_time = 0.0  # For double-click detection
         self._last_click_pos = None  # Position of last click
+        # Copy-button click routing.  ``get_copy_button_regions`` returns
+        # the live list of (start_offset, end_offset, button_index) tuples
+        # for the slot this control is wired to (recomputed each sync);
+        # ``on_copy_button_clicked`` is invoked with the matched index
+        # when MOUSE_DOWN lands inside a region — short-circuits the
+        # selection flow so a click on the button doesn't start a drag.
+        self._get_copy_button_regions = get_copy_button_regions
+        self._on_copy_button_clicked = on_copy_button_clicked
 
     def _select_word_at_cursor(self) -> str | None:
         """Select the word at the current cursor position and return it."""
@@ -293,6 +304,30 @@ class ScrollableBufferControl(BufferControl):
                 app.layout.focus(self)
             # Call parent handler to set cursor position
             super().mouse_handler(mouse_event)
+
+            # Copy-button hit-test BEFORE entering selection mode — if
+            # the click landed on a [copy] button we copy the turn,
+            # show feedback, and short-circuit so no selection starts
+            # (otherwise the user would see a stray cursor on the
+            # button row and the next drag would extend selection from
+            # there).  Region offsets are character positions in the
+            # plain_text the BufferControl reads from.
+            current_pos = self.buffer.cursor_position
+            if self._get_copy_button_regions and self._on_copy_button_clicked:
+                for region_start, region_end, button_index in self._get_copy_button_regions():
+                    if region_start <= current_pos < region_end:
+                        self._on_copy_button_clicked(button_index)
+                        # Reset double-click tracking so this click
+                        # doesn't pair with a future click on adjacent
+                        # text into an accidental word-select.
+                        self._last_click_time = 0.0
+                        self._last_click_pos = None
+                        self._mouse_down_cursor_pos = None
+                        # Return focus to input — the user shouldn't
+                        # have to click again to type.
+                        if app and app.layout and self._input_buffer:
+                            app.layout.focus(self._input_buffer)
+                        return None
 
             current_time = time.time()
             current_pos = self.buffer.cursor_position
@@ -439,6 +474,11 @@ class PTDisplay:
         # Theme configuration (needed for styling)
         self._theme = theme_config or load_theme()
 
+        # Per-extension openers used by the workspace panel "open file" action.
+        # See ``openers.py`` for config schema and search order.
+        from openers import load_openers
+        self._openers = load_openers()
+
         # Agent registry and tab bar (horizontal tabs at top)
         self._agent_registry = agent_registry
         self._agent_tab_bar: Optional[AgentTabBar] = None
@@ -463,7 +503,12 @@ class PTDisplay:
         self._workspace_panel = WorkspacePanel(
             toggle_key=self._keybinding_config.toggle_workspace,
             open_file_key=self._keybinding_config.workspace_open_file,
+            diff_key=self._keybinding_config.workspace_diff,
             clear_key=self._keybinding_config.workspace_clear,
+            paste_ref_key=self._keybinding_config.workspace_paste_ref,
+            hide_key=self._keybinding_config.workspace_hide,
+            show_hidden_key=self._keybinding_config.workspace_show_hidden,
+            gitignore_key=self._keybinding_config.workspace_gitignore,
         )
         self._workspace_panel.set_theme(self._theme)
         self._output_buffer = OutputBuffer()
@@ -473,7 +518,6 @@ class PTDisplay:
 
         # Formatter pipeline — server handles formatting, no client-side pipeline
         self._formatter_pipeline = None
-        self._code_block_formatter = None
         self._inline_md_formatter = None
 
         # Set keybinding config and theme on agent registry buffers too
@@ -1102,18 +1146,30 @@ class PTDisplay:
             and not self._waiting_for_channel_input
         )
 
-    def _open_workspace_file(self) -> None:
-        """Open the workspace panel's selected file in the external editor.
+    def _open_workspace_file(self, action: str = "raw") -> None:
+        """Open the workspace panel's selected file in an external program.
 
         Resolves the relative file path shown in the workspace panel against
-        the session workspace root, then launches ``$EDITOR`` (or ``$VISUAL``,
-        falling back to ``vi``) via ``run_in_terminal`` so the TUI is properly
-        suspended and restored.  Does nothing if the cursor is on a directory
-        or the file doesn't exist on disk.
+        the session workspace root, then chooses a launcher via
+        :func:`openers.resolve_opener` for the given *action*.  The default
+        ``"raw"`` action falls back to ``$EDITOR`` (or ``$VISUAL`` → ``vi``);
+        the ``"diff"`` action has no built-in fallback — if no pattern in
+        ``.jaato/openers.json`` defines it, this is a no-op.  Users override
+        per-extension via ``.jaato/openers.json`` or ``~/.jaato/openers.json``
+        using either a bare string (treated as ``raw``) or an action dict
+        (e.g. ``{"raw": "glow -p", "diff": "git diff HEAD --"}``).  The
+        launch happens inside ``run_in_terminal`` so the TUI is properly
+        suspended and restored.  Does nothing if the cursor is on a
+        directory, the file doesn't exist on disk, or the resolver returns
+        an empty argv (no opener configured for the action).
+
+        Args:
+            action: Opener action name — ``"raw"`` (default) for
+                editor-style open, ``"diff"`` for a diff viewer.
         """
         import os
         import subprocess
-        from editor_utils import get_editor
+        from openers import resolve_opener
         from prompt_toolkit.application import run_in_terminal
 
         rel_path = self._workspace_panel.get_selected_file_path()
@@ -1133,14 +1189,83 @@ class PTDisplay:
         if not os.path.isfile(abs_path):
             return
 
-        editor = get_editor()
+        opener_argv = resolve_opener(rel_path, self._openers, action=action)
+        if not opener_argv:
+            # No opener configured for this action (only happens for
+            # non-``raw`` actions; ``raw`` always has the editor fallback).
+            return
+        argv = opener_argv + [abs_path]
 
         async def _open():
             def _run():
-                subprocess.call([editor, abs_path])
+                subprocess.call(argv)
             await run_in_terminal(_run, in_executor=False)
 
         self._app.create_background_task(_open())
+
+    def _toggle_workspace_gitignore(self) -> None:
+        """Add or remove the cursor entry from ``<workspace>/.gitignore``.
+
+        The pattern written matches the entry id used by the workspace
+        panel (directories keep their trailing ``/``, files are written
+        verbatim).  Removal is exact-match only — partial matches and
+        commented lines are never touched.  When the entry is sandbox-
+        monitored (absolute path) this is a no-op since the path lies
+        outside the workspace root that ``.gitignore`` covers.
+
+        The server's ``WorkspaceMonitor`` watches ``.gitignore`` and
+        reloads its parser on the modification event so the new pattern
+        takes effect on subsequent file events.
+        """
+        import os
+
+        path = self._workspace_panel.get_selected_path()
+        if not path:
+            return
+        # Sandbox-monitored entries use absolute paths and don't live
+        # under the workspace root, so they're not addressable via the
+        # workspace ``.gitignore``.
+        if os.path.isabs(path):
+            return
+
+        workspace = (
+            os.path.expanduser(self._session_workspace)
+            if self._session_workspace
+            else os.getcwd()
+        )
+        gitignore_path = os.path.join(workspace, ".gitignore")
+        pattern = path  # already has trailing "/" for dirs
+
+        try:
+            existing = ""
+            if os.path.exists(gitignore_path):
+                with open(gitignore_path, "r", encoding="utf-8") as fh:
+                    existing = fh.read()
+            lines = existing.splitlines()
+            stripped = [ln.strip() for ln in lines]
+
+            if pattern in stripped:
+                # Drop every exact-match occurrence.
+                new_lines = [
+                    ln for ln, s in zip(lines, stripped) if s != pattern
+                ]
+                new_content = "\n".join(new_lines)
+                if new_content and not new_content.endswith("\n"):
+                    new_content += "\n"
+            else:
+                # Append, ensuring the previous content ends with a newline.
+                if existing and not existing.endswith("\n"):
+                    existing += "\n"
+                new_content = existing + pattern + "\n"
+
+            with open(gitignore_path, "w", encoding="utf-8") as fh:
+                fh.write(new_content)
+        except OSError:
+            # Best-effort UI affordance — never blow up the TUI on a
+            # failed disk write (read-only mount, permission denied).
+            return
+
+        self._app.invalidate()
 
     def _on_pane_mouse_scroll(self, pane_index: int, direction: str) -> None:
         """Handle mouse scroll in a specific pane.
@@ -1573,6 +1698,25 @@ class PTDisplay:
         else:
             self._sync_multi_pane()
 
+    @staticmethod
+    def _compute_copy_button_regions(plain_text: str) -> List[Tuple[int, int, int]]:
+        """Locate copy-button click regions in ``plain_text``.
+
+        Each rendered button is a literal ``[copy N]`` (1-based ``N``);
+        the regex matches the whole label and captures ``N`` for the
+        ``OutputBuffer.get_copy_button(N - 1)`` lookup.  No invisible
+        marker tail — Rich's wrap algorithm could split the marker
+        from the visible label whenever right-padding placed it at
+        the panel's wrap boundary.
+        """
+        from output_buffer import COPY_BUTTON_RE
+        regions: List[Tuple[int, int, int]] = []
+        for match in COPY_BUTTON_RE.finditer(plain_text):
+            # Convert 1-based visible label back to 0-based registry index.
+            button_index = int(match.group(1)) - 1
+            regions.append((match.start(), match.end(), button_index))
+        return regions
+
     def _sync_single_pane(self):
         """Sync output for single-pane mode (original behavior)."""
         ansi_content = self._renderer.render(self._get_output_panel_content())
@@ -1595,6 +1739,11 @@ class PTDisplay:
 
         if current_line_fragments:
             slot.line_fragments[line_num] = current_line_fragments
+
+        # Recompute copy-button click regions for the BufferControl
+        # mouse handler.  Done after fragments are populated so the
+        # offsets line up with what pt-toolkit sees as cursor positions.
+        slot.copy_button_regions = self._compute_copy_button_regions(plain_text)
 
         old_selection = slot.pt_buffer.selection_state
         old_cursor = slot.pt_buffer.cursor_position
@@ -1659,6 +1808,8 @@ class PTDisplay:
 
             if current_line_fragments:
                 slot.line_fragments[line_num] = current_line_fragments
+
+            slot.copy_button_regions = self._compute_copy_button_regions(plain_text)
 
             old_selection = slot.pt_buffer.selection_state
             old_cursor = slot.pt_buffer.cursor_position
@@ -2261,6 +2412,18 @@ class PTDisplay:
             """
             self._open_workspace_file()
 
+        @kb.add(*keys.get_key_args("workspace_diff"),
+                filter=Condition(lambda: self._workspace_captures_keys()) & not_in_search_mode)
+        def handle_workspace_diff(event):
+            """Open the selected workspace file in the external diff viewer.
+
+            Resolves the ``"diff"`` action from ``.jaato/openers.json``.  No-op
+            if no pattern defines a diff opener for the file.  Same gating as
+            ``workspace_open_file`` — only fires when the panel has focus and
+            the input buffer is empty.
+            """
+            self._open_workspace_file(action="diff")
+
         @kb.add(*keys.get_key_args("workspace_clear"),
                 filter=Condition(lambda: self._workspace_captures_keys()) & not_in_search_mode)
         def handle_workspace_clear(event):
@@ -2268,7 +2431,69 @@ class PTDisplay:
             self._workspace_panel.clear()
             self._app.invalidate()
 
-        @kb.add(*keys.get_key_args("toggle_budget"), filter=not_in_search_mode)
+        @kb.add(*keys.get_key_args("workspace_paste_ref"),
+                filter=Condition(
+                    lambda: self._workspace_panel.is_visible
+                    and self._workspace_panel.has_files
+                    and not self._waiting_for_channel_input
+                ) & not_in_search_mode)
+        def handle_workspace_paste_ref(event):
+            """Insert the selected workspace entry into the input as ``@<path>``.
+
+            Unlike the other workspace bindings this one does **not** require
+            the input buffer to be empty — that lets the user stack multiple
+            references (e.g. ``@a.py @b.py describe these``).  A separator
+            space is inserted automatically when the cursor sits next to
+            non-whitespace.
+            """
+            path = self._workspace_panel.get_selected_path()
+            if not path:
+                return
+
+            buf = self._input_buffer
+            before = buf.document.text_before_cursor
+            needs_lead_space = bool(before) and not before[-1].isspace()
+            snippet = f"{' ' if needs_lead_space else ''}@{path} "
+            buf.insert_text(snippet)
+            self._app.invalidate()
+
+        @kb.add(*keys.get_key_args("workspace_hide"),
+                filter=Condition(lambda: self._workspace_captures_keys()) & not_in_search_mode)
+        def handle_workspace_hide(event):
+            """Hide the entry under the cursor (per-session, client-side).
+
+            Hidden entries disappear from the list.  Use ``workspace_show_hidden``
+            to bring them back temporarily so they can be unhidden.
+            """
+            self._workspace_panel.hide_at_cursor()
+            self._app.invalidate()
+
+        @kb.add(*keys.get_key_args("workspace_show_hidden"),
+                filter=Condition(lambda: self._workspace_captures_keys()) & not_in_search_mode)
+        def handle_workspace_show_hidden(event):
+            """Toggle visibility of the hidden entry set."""
+            self._workspace_panel.toggle_show_hidden()
+            self._app.invalidate()
+
+        @kb.add(*keys.get_key_args("workspace_gitignore"),
+                filter=Condition(lambda: self._workspace_captures_keys()) & not_in_search_mode)
+        def handle_workspace_gitignore(event):
+            """Add or remove the cursor entry from the workspace ``.gitignore``.
+
+            Writes the workspace's ``.gitignore`` directly (creating it
+            when missing).  The line written matches the exact entry id
+            (directories keep their trailing ``/``).  Removal is exact-
+            match only — a line containing comments or differently
+            spelled patterns is left alone.
+
+            The server's ``WorkspaceMonitor`` watches ``.gitignore`` and
+            reloads its parser when this file changes, so the new pattern
+            takes effect on subsequent filesystem events without a
+            session restart.  Files already tracked are unaffected — use
+            ``workspace_clear`` if you also want to drop them from the
+            current view.
+            """
+            self._toggle_workspace_gitignore()
         def handle_ctrl_b(event):
             """Handle Ctrl+B - toggle budget panel visibility."""
             self._budget_panel.toggle()
@@ -2362,6 +2587,21 @@ class PTDisplay:
             """Handle Ctrl+T - toggle tool view between collapsed/expanded."""
             buffer = self._get_active_buffer()
             buffer.toggle_tools_expanded()
+            self._app.invalidate()
+
+        @kb.add(*keys.get_key_args("toggle_budget"), filter=not_in_search_mode)
+        def handle_toggle_budget(event):
+            """Handle Ctrl+B - toggle budget consumption panel.
+
+            Mirrors the toggle_plan / toggle_workspace / toggle_tools
+            pattern — the panel exists and renders correctly, but the
+            keybinding to show/hide it had been omitted from the kb
+            registration; without this @kb.add the configured
+            ``toggle_budget`` key is dead.  Restores the C+B-opens-budget
+            shortcut documented at budget_panel.py:41 and surfaced via
+            the budget-data hint at pt_display.py:1048-1049.
+            """
+            self._budget_panel.toggle()
             self._app.invalidate()
 
         @kb.add(*keys.get_key_args("tool_output_popup_tab"), filter=not_in_search_mode)
@@ -2585,6 +2825,37 @@ class PTDisplay:
                 else:
                     self.set_status_message(f"Copy failed ({provider_name})")
 
+        def on_copy_button_clicked_for_pane(pane_index: int):
+            """Build the click handler for a pane.
+
+            Resolves the active OutputBuffer for the slot at click time
+            (so agent-switching within a pane Just Works), looks up the
+            captured turn snapshot via index, formats it as markdown, and
+            writes to the system clipboard.  Emits a status-bar message
+            so the user gets immediate feedback (the clipboard op is
+            otherwise silent and easy to second-guess).
+            """
+            def _handle(button_index: int) -> None:
+                from output_buffer import format_turn_for_clipboard
+                # Resolve the active buffer for this pane.
+                slot = self._pane_manager.get_slot(pane_index)
+                buf = None
+                if slot and slot.visible_agent_id and self._agent_registry:
+                    buf = self._agent_registry.get_buffer(slot.visible_agent_id)
+                if buf is None:
+                    buf = self._output_buffer
+                button = buf.get_copy_button(button_index)
+                if button is None:
+                    self.set_status_message("Copy button no longer available (turn evicted)")
+                    return
+                content = format_turn_for_clipboard(button.turn_items)
+                ok = self._clipboard.copy(content)
+                if ok:
+                    self.set_status_message(f"Copied turn ({len(content)} chars) to clipboard")
+                else:
+                    self.set_status_message("Copy failed (clipboard unavailable)")
+            return _handle
+
         # Pre-allocate 4 pane slots with their own rendering pipelines
         for i in range(PaneManager.MAX_PANES):
             pt_buf = Buffer(document=Document("", 0), read_only=True)
@@ -2601,6 +2872,16 @@ class PTDisplay:
                     self._on_pane_mouse_scroll(idx, "down")
                 return _scroll_down
 
+            # Closures over the slot index so each pane gets its own
+            # region accessor (regions are stored on the slot during
+            # _sync_*) and click handler (resolves the slot's active
+            # OutputBuffer at click time).
+            def _make_get_regions(idx):
+                def _get():
+                    s = self._pane_manager.get_slot(idx)
+                    return s.copy_button_regions if s else []
+                return _get
+
             ctrl = ScrollableBufferControl(
                 buffer=pt_buf,
                 input_processors=[proc],
@@ -2609,6 +2890,8 @@ class PTDisplay:
                 on_scroll_down=_make_scroll_down(i),
                 input_buffer=self._input_buffer,
                 on_selection_complete=on_selection_complete,
+                get_copy_button_regions=_make_get_regions(i),
+                on_copy_button_clicked=on_copy_button_clicked_for_pane(i),
             )
             win = Window(
                 ctrl,
@@ -3250,9 +3533,9 @@ class PTDisplay:
         if self._agent_registry:
             self._agent_registry.set_theme_all(theme)
 
-        # Update code block formatter syntax theme to match UI theme
-        if self._code_block_formatter:
-            self._code_block_formatter.set_syntax_theme(theme.name)
+        # Propagate theme name to the output buffer's <j-code> renderer
+        # so the Pygments Syntax theme tracks the active UI theme.
+        self._output_buffer.set_syntax_theme_from_ui_theme(theme.name)
 
         # Update inline markdown formatter colors to match UI theme
         if self._inline_md_formatter:

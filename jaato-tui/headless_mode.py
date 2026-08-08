@@ -106,9 +106,15 @@ async def run_headless_mode(
     renderer = HeadlessFileRenderer(workspace=workspace, flush_immediately=True)
     renderer.start()
 
-    # Create IPC client with recovery support
+    # Create IPC client with recovery support.  ``--headless`` mode is
+    # for non-TTY automation (CI, scripting, batch runs); declare
+    # ClientType.API so the server's interactive-root filter does NOT
+    # strip ``signal_completion`` — headless agents need it to terminate
+    # cleanly.
+    from jaato_sdk.events import ClientType
     client = IPCRecoveryClient(
         socket_path=socket_path,
+        client_type=ClientType.API,
         auto_start=auto_start,
         env_file=env_file,
         workspace_path=workspace,
@@ -147,7 +153,7 @@ async def run_headless_mode(
     # Set default permission policy to "allow" for headless mode
     # This auto-approves all tools not in blacklist, avoiding per-prompt responses
     print("[headless] Setting permission policy to auto-approve...", file=sys.stderr)
-    await client.execute_command("permissions", ["default", "allow"])
+    await client.set_default_policy("allow")
 
     # Disable clarification tool - no user to answer questions in headless mode
     # Uses direct registry call (no response events to consume)
@@ -347,9 +353,9 @@ async def run_headless_mode(
             elif isinstance(event, ContextUpdatedEvent):
                 renderer.on_context_updated(
                     agent_id=event.agent_id or "main",
-                    total_tokens=event.total_tokens or 0,
-                    prompt_tokens=event.prompt_tokens or 0,
-                    output_tokens=event.output_tokens or 0,
+                    total_tokens=event.usage.total_tokens or 0,
+                    prompt_tokens=event.usage.prompt_tokens or 0,
+                    output_tokens=event.usage.output_tokens or 0,
                     turns=event.turns or 0,
                     percent_used=event.percent_used or 0.0,
                 )
@@ -409,9 +415,9 @@ async def run_headless_mode(
     try:
         session_id = client.session_id
         if session_id:
-            await client.execute_command("session.delete", [session_id])
+            await client.delete_session(session_id)
         else:
-            await client.execute_command("session.end", [])
+            await client.end_session()
         print("[headless] Session ended", file=sys.stderr)
     except Exception as e:
         # Best-effort: connection may already be closing

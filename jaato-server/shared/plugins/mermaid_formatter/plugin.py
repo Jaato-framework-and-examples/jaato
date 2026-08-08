@@ -136,11 +136,11 @@ class MermaidFormatterPlugin:
         self._background = config.get("background", "white")
 
         # Check env vars
-        env_theme = os.environ.get("JAATO_MERMAID_THEME")
+        env_theme = os.environ.get("JAATO_MERMAID_THEME")  # env: mermaid theme for rendered diagrams (default 'default')
         if env_theme:
             self._theme = env_theme
 
-        env_scale = os.environ.get("JAATO_MERMAID_SCALE")
+        env_scale = os.environ.get("JAATO_MERMAID_SCALE")  # env: raster scale factor for rendered mermaid diagrams (default 2)
         if env_scale:
             try:
                 self._scale = int(env_scale)
@@ -155,7 +155,7 @@ class MermaidFormatterPlugin:
         # Artifact directory for saving rendered diagrams
         # JAATO_VISION_DIR env var takes priority; otherwise set_workspace_path()
         # will resolve to <workspace>/.jaato/vision/ when called by the pipeline.
-        env_vision_dir = os.environ.get("JAATO_VISION_DIR")
+        env_vision_dir = os.environ.get("JAATO_VISION_DIR")  # env: output dir for rendered diagrams/screenshots (default <workspace>/.jaato/vision)
         if env_vision_dir:
             self._artifact_dir = env_vision_dir
         # else: remains None until set_workspace_path() is called

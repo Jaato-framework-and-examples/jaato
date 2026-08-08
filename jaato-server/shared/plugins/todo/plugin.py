@@ -21,13 +21,14 @@ from jaato_sdk.plugins.todo.models import (
     PlanStatus, StepStatus, TodoPlan, TodoStep,
     TaskEventType, TaskEvent, TaskRef, EventFilter, Subscription
 )
-from jaato_sdk.plugins.model_provider.types import ToolSchema, EditableContent, TRAIT_REPLAY_SAFE
+from jaato_sdk.plugins.model_provider.types import ToolSchema, EditableContent, TRAIT_REPLAY_SAFE, DISCOVERABILITY_EAGER
 from .storage import TodoStorage, create_storage, InMemoryStorage
 from .channels import TodoReporter, ConsoleReporter, create_reporter
 from shared.trace import trace as _trace_write
 from .config_loader import load_config, TodoConfig
 from .event_bus import TaskEventBus
 from jaato_sdk.plugins.base import UserCommand
+from shared.plugins.runner_forwarding import RunnerForwardingMixin
 
 
 # Thread-local storage for per-agent context
@@ -69,7 +70,37 @@ def _is_validation_step(description: str) -> bool:
     return bool(_VALIDATION_STEP_PATTERN.search(description))
 
 
-class TodoPlugin:
+# Tools whose business logic requires an active plan
+# (``_get_current_plan() is not None``).  Each function's first
+# significant check is ``if not plan: return {"error": "No active
+# plan..."}`` — see the function bodies for the runtime-side
+# rejection that fires when the plan is missing.
+#
+# This constant is consulted by :meth:`TodoPlugin.is_tool_visible`
+# to hide these tools at schema-export time when no plan exists,
+# rather than offering them to the model and waiting for a clean
+# runtime rejection.  Same shape as
+# :meth:`LifecycleTools._should_hide_signal_completion`: the
+# precondition belongs at the visibility layer, not the call layer.
+#
+# ``plan`` is included as the user-command alias for
+# ``getPlanStatus`` (see ``get_executors`` mapping).  ``createPlan``
+# is NOT included — it is the entry point that creates the plan
+# in the first place.
+PLAN_REQUIRED_TOOLS: frozenset[str] = frozenset({
+    "startPlan",
+    "setStepStatus",
+    "getPlanStatus",
+    "completePlan",
+    "addStep",
+    "addDependentStep",
+    "completeStepWithOutput",
+    "getBlockedSteps",
+    "plan",  # user-command alias for getPlanStatus
+})
+
+
+class TodoPlugin(RunnerForwardingMixin):
     """Plugin that provides plan registration and progress tracking.
 
     This plugin exposes tools for the LLM to:
@@ -164,6 +195,46 @@ class TodoPlugin:
     @property
     def name(self) -> str:
         return "todo"
+
+    def is_tool_visible(self, tool_name: str) -> bool:
+        """Per-turn visibility predicate consulted by ``JaatoSession``.
+
+        Hides the 8 (+1 alias) plan-required tools — listed in
+        :data:`PLAN_REQUIRED_TOOLS` — when no plan is active, so the
+        model never sees a tool whose precondition doesn't hold.
+        Mirrors :meth:`LifecycleTools._should_hide_signal_completion`
+        (gate at the schema-export layer, not the call layer).
+
+        For any tool name NOT in :data:`PLAN_REQUIRED_TOOLS`
+        (including tools owned by other plugins), returns ``True``
+        unconditionally — the predicate has no opinion on other
+        plugins' tools.
+
+        Called by ``JaatoSession._get_tools_for_provider`` on every
+        ``provider.complete()`` invocation, so the visibility
+        decision always reflects current plan state.  When the model
+        calls ``createPlan`` successfully, the 8 plan-required tools
+        become visible on the NEXT turn; when ``completePlan``
+        finishes the plan, they disappear again.
+
+        Args:
+            tool_name: Name of the tool whose visibility is being
+                queried.
+
+        Returns:
+            ``True`` if the tool should be exposed to the model on
+            the current turn; ``False`` to hide it.
+        """
+        if tool_name not in PLAN_REQUIRED_TOOLS:
+            return True
+        try:
+            return self._get_current_plan() is not None
+        except Exception:
+            # Defensive: a buggy plan-lookup must not break the turn.
+            # Fail-open (treat tool as visible) — the runtime check
+            # inside ``_execute_*`` will still surface a clean error
+            # if the plan really is missing.
+            return True
 
     def _trace(self, msg: str) -> None:
         """Write trace message to log file for debugging."""
@@ -293,6 +364,29 @@ class TodoPlugin:
         """
         self._trace("shutdown: cleaning up (preserving plan tracking and storage)")
 
+    def reset_for_next_session(self) -> None:
+        """Cascade-sharing reset (Phase 1, server 0.6.142+) — NO-OP.
+
+        Per Daniel's litmus test: "A plugin's state should SURVIVE this
+        call if a subsequent session within the SAME cascade might
+        benefit from it."
+
+        Todo's per-session state is structured as a PER-AGENT dict
+        (``_current_plan_ids: Dict[agent_name → plan_id]``).  When a
+        new session in the same cascade runs under a different agent,
+        it gets its own dict entry — no interference with prior
+        sessions' plans.  When a new session is the SAME agent
+        re-entering, accessing the prior plan IS the right behavior
+        (cascade-stage handoff).
+
+        Therefore the litmus test resolves to NO-OP — todo's
+        cross-session state is by-design preserved.  This matches
+        the existing ``shutdown()`` preservation policy (the docstring
+        above already documents the principle for the non-cascade
+        case).
+        """
+        self._trace("reset_for_next_session: NO-OP (per-agent plan map is cross-session by design)")
+
     def get_config_schema(self) -> Dict[str, Any]:
         """Return JSON Schema for this plugin's configuration."""
         return {
@@ -339,7 +433,7 @@ class TodoPlugin:
                     "required": ["title", "steps"]
                 },
                 category="coordination",
-                discoverability="core",
+                discoverability=DISCOVERABILITY_EAGER,
                 editable=EditableContent(
                     parameters=["title", "steps"],
                     format="yaml",
@@ -364,7 +458,7 @@ class TodoPlugin:
                     "required": []
                 },
                 category="coordination",
-                discoverability="core",
+                discoverability=DISCOVERABILITY_EAGER,
                 traits=frozenset({TRAIT_REPLAY_SAFE}),
             ),
             ToolSchema(
@@ -400,7 +494,7 @@ class TodoPlugin:
                     "required": ["step_id", "status"]
                 },
                 category="coordination",
-                discoverability="core",
+                discoverability=DISCOVERABILITY_EAGER,
                 traits=frozenset({TRAIT_REPLAY_SAFE}),
             ),
             ToolSchema(
@@ -417,7 +511,7 @@ class TodoPlugin:
                     "required": []
                 },
                 category="coordination",
-                discoverability="core",
+                discoverability=DISCOVERABILITY_EAGER,
                 traits=frozenset({TRAIT_REPLAY_SAFE}),
             ),
             ToolSchema(
@@ -441,7 +535,7 @@ class TodoPlugin:
                     "required": ["status"]
                 },
                 category="coordination",
-                discoverability="core",
+                discoverability=DISCOVERABILITY_EAGER,
                 traits=frozenset({TRAIT_REPLAY_SAFE}),
             ),
             ToolSchema(
@@ -466,7 +560,7 @@ class TodoPlugin:
                     "required": ["description"]
                 },
                 category="coordination",
-                discoverability="core",
+                discoverability=DISCOVERABILITY_EAGER,
                 traits=frozenset({TRAIT_REPLAY_SAFE}),
             ),
             # === Cross-agent collaboration tools ===
@@ -551,7 +645,7 @@ class TodoPlugin:
                     "required": ["step_id", "depends_on"]
                 },
                 category="coordination",
-                discoverability="core",
+                discoverability=DISCOVERABILITY_EAGER,
                 traits=frozenset({TRAIT_REPLAY_SAFE}),
             ),
             ToolSchema(
@@ -595,7 +689,7 @@ class TodoPlugin:
                     "required": ["step_id", "output"]
                 },
                 category="coordination",
-                discoverability="core",
+                discoverability=DISCOVERABILITY_EAGER,
                 traits=frozenset({TRAIT_REPLAY_SAFE}),
             ),
             ToolSchema(
@@ -619,14 +713,18 @@ class TodoPlugin:
                     "required": []
                 },
                 category="coordination",
-                discoverability="core",
+                discoverability=DISCOVERABILITY_EAGER,
                 traits=frozenset({TRAIT_REPLAY_SAFE}),
             ),
         ]
 
     def get_executors(self) -> Dict[str, Callable[[Dict[str, Any]], Any]]:
-        """Return the executors for TODO tools."""
-        return {
+        """Return the executors for TODO tools.
+
+        Phase 3 §3.4 wave 1: forwards via runner-RPC when a runner
+        is attached; falls through to in-process otherwise.
+        """
+        return self.wrap_executors_for_runner_forwarding({
             "createPlan": self._execute_create_plan,
             "startPlan": self._execute_start_plan,
             "setStepStatus": self._execute_set_step_status,
@@ -639,7 +737,7 @@ class TodoPlugin:
             "addDependentStep": self._execute_add_dependent_step,
             "completeStepWithOutput": self._execute_complete_step_with_output,
             "getBlockedSteps": self._execute_get_blocked_steps,
-        }
+        })
 
     def get_system_instructions(self) -> Optional[str]:
         """Return system instructions for the TODO plugin."""

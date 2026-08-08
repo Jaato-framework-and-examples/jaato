@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# Pre-commit hook: keep the generated TS SDK events mirror in sync.
+#
+# When jaato-sdk/jaato_sdk/events.py is part of the commit, regenerate
+# jaato-sdk-ts/src/events.ts (via scripts/codegen_ts_events.py) and stage it,
+# so the committed mirror is never stale and the "Codegen: jaato-sdk-ts
+# events.ts staleness" CI check stays green.
+#
+# Activate once per clone:
+#     git config core.hooksPath .githooks
+#
+# Override the interpreter if the jaato-sdk isn't on the default python:
+#     PYTHON=/path/to/venv/bin/python git commit ...
+# Bypass entirely:  git commit --no-verify
+set -euo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+
+# Only act when events.py is actually part of this commit — otherwise every
+# commit would needlessly run the codegen.
+if ! git diff --cached --name-only | grep -qx 'jaato-sdk/jaato_sdk/events.py'; then
+    exit 0
+fi
+
+py="${PYTHON:-python3}"
+echo "pre-commit: events.py changed — regenerating events.ts ..."
+if ! "$py" "$repo_root/scripts/codegen_ts_events.py"; then
+    {
+        echo "pre-commit: FAILED to regenerate events.ts."
+        echo "  Run it with jaato-sdk installed (pip install -e jaato-sdk/):"
+        echo "      python scripts/codegen_ts_events.py"
+        echo "  or point the hook at your venv: PYTHON=.venv/bin/python git commit ..."
+        echo "  To bypass this hook: git commit --no-verify"
+    } >&2
+    exit 1
+fi
+
+# Stage the (possibly) updated mirror so it lands in this commit.
+git add "$repo_root/jaato-sdk-ts/src/events.ts"
+echo "pre-commit: events.ts regenerated + staged."
+exit 0

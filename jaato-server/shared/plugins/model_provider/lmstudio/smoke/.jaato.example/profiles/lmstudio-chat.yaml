@@ -1,0 +1,21 @@
+name: lmstudio-chat
+description: >
+  Pure chat smoke for the lmstudio provider against a local LM Studio
+  server — sends one user message, expects one text response, no
+  tools.  No completion_payload_schema declared → signal_completion is
+  HIDDEN from the model's tool surface (2026-06-07 schema gate).  The
+  turn ends naturally when the provider's response has no function
+  calls.
+
+model: openai/gpt-oss-20b
+provider: lmstudio
+
+max_turns: 1
+
+suppress_base_instructions: true
+
+plugins: []
+
+plugin_configs:
+  lmstudio:
+    host: "${LMSTUDIO_HOST}"

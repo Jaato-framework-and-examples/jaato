@@ -47,8 +47,10 @@ async def run_command_mode(
     )
     from client_commands import parse_user_input, CommandAction
 
+    from jaato_sdk.events import ClientType
     client = IPCRecoveryClient(
         socket_path=socket_path,
+        client_type=ClientType.TERMINAL,
         auto_start=auto_start,
         env_file=env_file,
     )
@@ -103,7 +105,7 @@ async def run_command_mode(
         # Execute based on action type
         if parsed.action == CommandAction.EXIT:
             # End session - stop agent and delete from server
-            await client.execute_command("session.delete", [session_id])
+            await client.delete_session(session_id)
             print(f"Session '{session_id}' ended")
 
         elif parsed.action == CommandAction.STOP:

@@ -26,7 +26,7 @@ from ..errors import (
     ContextLimitError,
     InfrastructureError,
 )
-from ..converters import (
+from ..._openai_compat.converters import (
     sanitize_tool_name,
     get_original_tool_name,
     clear_tool_name_mapping,
@@ -45,7 +45,6 @@ from ..env import (
     resolve_context_length,
     is_self_hosted,
     DEFAULT_BASE_URL,
-    DEFAULT_CONTEXT_LENGTH,
 )
 
 
@@ -111,17 +110,19 @@ class TestEnvironment:
         with patch.dict("os.environ", {"JAATO_NIM_BASE_URL": "http://localhost:8000/v1"}):
             assert resolve_base_url() == "http://localhost:8000/v1"
 
-    def test_resolve_context_length_default(self):
+    def test_resolve_context_length_unset_is_none(self):
+        # No hardcoded fallback (no-fallback rule): unset env → None, so the
+        # provider raises a "not configured" error rather than guessing a default.
         with patch.dict("os.environ", {}, clear=True):
-            assert resolve_context_length() == DEFAULT_CONTEXT_LENGTH
+            assert resolve_context_length() is None
 
     def test_resolve_context_length_from_env(self):
         with patch.dict("os.environ", {"JAATO_NIM_CONTEXT_LENGTH": "131072"}):
             assert resolve_context_length() == 131072
 
-    def test_resolve_context_length_invalid(self):
+    def test_resolve_context_length_invalid_is_none(self):
         with patch.dict("os.environ", {"JAATO_NIM_CONTEXT_LENGTH": "not-a-number"}):
-            assert resolve_context_length() == DEFAULT_CONTEXT_LENGTH
+            assert resolve_context_length() is None
 
     def test_is_self_hosted_localhost(self):
         assert is_self_hosted("http://localhost:8000/v1") is True
@@ -138,44 +139,30 @@ class TestEnvironment:
 
 # ==================== Converter Tests ====================
 
-class TestToolNameSanitization:
-    """Tests for tool name sanitization and reverse mapping."""
+class TestToolNameMapping:
+    """Tests for hash-derived tool name IDs and reverse mapping."""
 
-    def setup_method(self):
-        clear_tool_name_mapping()
+    def test_returns_hash_id(self):
+        result = sanitize_tool_name("my_tool")
+        assert result.startswith("t_")
+        assert len(result) == 10
 
-    def test_valid_name_unchanged(self):
-        assert sanitize_tool_name("my_tool") == "my_tool"
-        assert sanitize_tool_name("tool-name") == "tool-name"
+    def test_deterministic(self):
+        assert sanitize_tool_name("my_tool") == sanitize_tool_name("my_tool")
 
-    def test_dots_replaced(self):
-        assert sanitize_tool_name("mcp.server.tool") == "mcp_server_tool"
-
-    def test_colons_replaced(self):
-        assert sanitize_tool_name("ns:tool") == "ns_tool"
-
-    def test_truncation(self):
-        long_name = "a" * 100
-        assert len(sanitize_tool_name(long_name)) == 64
+    def test_different_names_produce_different_ids(self):
+        assert sanitize_tool_name("read_file") != sanitize_tool_name("write_file")
 
     def test_reverse_mapping(self):
-        register_tool_name_mapping("mcp_server_tool", "mcp.server.tool")
-        assert get_original_tool_name("mcp_server_tool") == "mcp.server.tool"
+        tool_id = sanitize_tool_name("mcp.server.tool")
+        assert get_original_tool_name(tool_id) == "mcp.server.tool"
 
     def test_reverse_mapping_unknown(self):
-        assert get_original_tool_name("unknown_tool") == "unknown_tool"
-
-    def test_clear_mapping(self):
-        register_tool_name_mapping("sanitized", "original")
-        clear_tool_name_mapping()
-        assert get_original_tool_name("sanitized") == "sanitized"
+        assert get_original_tool_name("t_nonexist") == "t_nonexist"
 
 
 class TestToolSchemaConversion:
     """Tests for ToolSchema to OpenAI format conversion."""
-
-    def setup_method(self):
-        clear_tool_name_mapping()
 
     def test_basic_schema(self):
         schema = ToolSchema(
@@ -186,11 +173,11 @@ class TestToolSchemaConversion:
         result = tool_schema_to_openai(schema)
 
         assert result["type"] == "function"
-        assert result["function"]["name"] == "read_file"
+        assert result["function"]["name"] == sanitize_tool_name("read_file")
         assert result["function"]["description"] == "Read a file"
         assert result["function"]["parameters"]["type"] == "object"
 
-    def test_schema_with_sanitization(self):
+    def test_schema_roundtrip(self):
         schema = ToolSchema(
             name="mcp.server.tool",
             description="A tool",
@@ -198,27 +185,24 @@ class TestToolSchemaConversion:
         )
         result = tool_schema_to_openai(schema)
 
-        assert result["function"]["name"] == "mcp_server_tool"
-        # Reverse mapping should work
-        assert get_original_tool_name("mcp_server_tool") == "mcp.server.tool"
+        tool_id = result["function"]["name"]
+        assert tool_id.startswith("t_")
+        assert get_original_tool_name(tool_id) == "mcp.server.tool"
 
 
 class TestMessageConversion:
     """Tests for Message <-> OpenAI format conversion."""
 
-    def setup_method(self):
-        clear_tool_name_mapping()
-
     def test_user_message(self):
         msg = Message.from_text(Role.USER, "Hello")
-        result = message_to_openai(msg)
+        result, = message_to_openai(msg)   # single-element list
 
         assert result["role"] == "user"
         assert result["content"] == "Hello"
 
     def test_assistant_message_text(self):
         msg = Message(role=Role.MODEL, parts=[Part(text="Hi there")])
-        result = message_to_openai(msg)
+        result, = message_to_openai(msg)
 
         assert result["role"] == "assistant"
         assert result["content"] == "Hi there"
@@ -226,26 +210,43 @@ class TestMessageConversion:
     def test_assistant_message_with_tool_calls(self):
         fc = FunctionCall(id="call_1", name="read_file", args={"path": "/tmp"})
         msg = Message(role=Role.MODEL, parts=[Part(function_call=fc)])
-        result = message_to_openai(msg)
+        result, = message_to_openai(msg)
 
         assert result["role"] == "assistant"
         assert result["content"] is None
         assert len(result["tool_calls"]) == 1
         assert result["tool_calls"][0]["id"] == "call_1"
-        assert result["tool_calls"][0]["function"]["name"] == "read_file"
+        assert result["tool_calls"][0]["function"]["name"] == sanitize_tool_name("read_file")
 
     def test_tool_result_message(self):
         tr = ToolResult(call_id="call_1", name="read_file", result={"content": "file data"})
         msg = Message(role=Role.TOOL, parts=[Part(function_response=tr)])
-        result = message_to_openai(msg)
+        result, = message_to_openai(msg)
 
         assert result["role"] == "tool"
         assert result["tool_call_id"] == "call_1"
         assert json.loads(result["content"]) == {"content": "file data"}
 
+    def test_parallel_tool_results_all_reach_wire(self):
+        """N parallel function_response parts → N wire tool messages (not
+        just the first).  Shared converter used by nim/vllm/lmstudio/
+        tensorrt_llm — the parallel-tool-result truncation bug, 2026-06-12."""
+        trs = [
+            ToolResult(call_id=f"call_{i}", name="call_service",
+                       result={"docs": [{"a": f"artifact-{i}"}]})
+            for i in range(5)
+        ]
+        msg = Message(role=Role.TOOL,
+                      parts=[Part(function_response=tr) for tr in trs])
+        result = message_to_openai(msg)
+        assert len(result) == 5
+        assert [m["tool_call_id"] for m in result] == [f"call_{i}" for i in range(5)]
+        assert [json.loads(m["content"])["docs"][0]["a"] for m in result] == \
+            [f"artifact-{i}" for i in range(5)]
+
     def test_roundtrip_user_message(self):
         original = Message.from_text(Role.USER, "Hello world")
-        openai_msg = message_to_openai(original)
+        openai_msg, = message_to_openai(original)
         restored = message_from_openai(openai_msg)
 
         assert restored.role == Role.USER
@@ -253,7 +254,7 @@ class TestMessageConversion:
 
     def test_roundtrip_assistant_message(self):
         original = Message(role=Role.MODEL, parts=[Part(text="Response")])
-        openai_msg = message_to_openai(original)
+        openai_msg, = message_to_openai(original)
         restored = message_from_openai(openai_msg)
 
         assert restored.role == Role.MODEL
@@ -376,41 +377,75 @@ class TestAuthentication:
 
         assert "JAATO_NIM_API_KEY" in str(exc_info.value)
 
-    @patch("shared.plugins.model_provider.nim.provider.get_openai_client_class")
+    @patch("shared.plugins.model_provider._openai_compat.base.get_openai_client_class")
     def test_initialize_with_api_key(self, mock_client_class):
         """Should initialize with key from config.api_key."""
         mock_client_class.return_value = MagicMock()
 
         provider = NIMProvider()
-        provider.initialize(ProviderConfig(api_key="nvapi-test"))
+        # context_length is now required (no hardcoded default); set it so this
+        # auth-focused test reaches client creation.
+        provider.initialize(ProviderConfig(
+            api_key="nvapi-test", extra={"context_length": 131072},
+        ))
 
         assert provider._api_key == "nvapi-test"
         assert provider._client is not None
 
-    @patch("shared.plugins.model_provider.nim.provider.get_openai_client_class")
+    @patch("shared.plugins.model_provider._openai_compat.base.get_openai_client_class")
     @patch.dict("os.environ", {"JAATO_NIM_API_KEY": "nvapi-env"}, clear=True)
     def test_initialize_from_env(self, mock_client_class):
         """Should auto-detect key from JAATO_NIM_API_KEY env var."""
         mock_client_class.return_value = MagicMock()
 
         provider = NIMProvider()
-        provider.initialize(ProviderConfig())
+        provider.initialize(ProviderConfig(extra={"context_length": 131072}))
 
         assert provider._api_key == "nvapi-env"
 
-    @patch("shared.plugins.model_provider.nim.provider.get_openai_client_class")
+    @patch("shared.plugins.model_provider._openai_compat.base.get_openai_client_class")
     @patch.dict("os.environ", {"JAATO_NIM_BASE_URL": "http://localhost:8000/v1"}, clear=True)
     def test_initialize_self_hosted_no_key(self, mock_client_class):
         """Should initialize without key for self-hosted endpoints."""
         mock_client_class.return_value = MagicMock()
 
         provider = NIMProvider()
-        provider.initialize(ProviderConfig())
+        provider.initialize(ProviderConfig(extra={"context_length": 131072}))
 
         assert provider._api_key is None
         assert provider._client is not None
 
-    @patch("shared.plugins.model_provider.nim.provider.get_openai_client_class")
+    @patch("shared.plugins.model_provider._openai_compat.base.get_openai_client_class")
+    @patch.dict("os.environ", {}, clear=True)
+    def test_initialize_raises_when_context_unresolved(self, mock_client_class):
+        """No hardcoded fallback: with neither profile knob nor env set, the
+        provider raises rather than guessing a default context window."""
+        mock_client_class.return_value = MagicMock()
+        provider = NIMProvider()
+        with pytest.raises(ValueError, match="context_length could not be resolved"):
+            provider.initialize(ProviderConfig(api_key="nvapi-test"))
+
+    @patch("shared.plugins.model_provider._openai_compat.base.get_openai_client_class")
+    @patch.dict("os.environ", {"JAATO_NIM_CONTEXT_LENGTH": "200000"}, clear=True)
+    def test_initialize_resolves_context_from_env(self, mock_client_class):
+        """Env tier resolves when no profile knob is set."""
+        mock_client_class.return_value = MagicMock()
+        provider = NIMProvider()
+        provider.initialize(ProviderConfig(api_key="nvapi-test"))
+        assert provider._context_length == 200000
+
+    @patch("shared.plugins.model_provider._openai_compat.base.get_openai_client_class")
+    def test_initialize_profile_knob_beats_env(self, mock_client_class):
+        """Profile knob (config.extra.context_length) wins over the env tier."""
+        mock_client_class.return_value = MagicMock()
+        with patch.dict("os.environ", {"JAATO_NIM_CONTEXT_LENGTH": "200000"}):
+            provider = NIMProvider()
+            provider.initialize(ProviderConfig(
+                api_key="nvapi-test", extra={"context_length": 131072},
+            ))
+            assert provider._context_length == 131072
+
+    @patch("shared.plugins.model_provider._openai_compat.base.get_openai_client_class")
     def test_initialize_custom_base_url(self, mock_client_class):
         """Should use custom base_url from config.extra."""
         mock_client_class.return_value = MagicMock()
@@ -418,12 +453,12 @@ class TestAuthentication:
         provider = NIMProvider()
         provider.initialize(ProviderConfig(
             api_key="nvapi-test",
-            extra={"base_url": "http://nim.internal:8080/v1"},
+            extra={"base_url": "http://nim.internal:8080/v1", "context_length": 131072},
         ))
 
         assert provider._base_url == "http://nim.internal:8080/v1"
 
-    @patch("shared.plugins.model_provider.nim.provider.get_openai_client_class")
+    @patch("shared.plugins.model_provider._openai_compat.base.get_openai_client_class")
     def test_initialize_custom_context_length(self, mock_client_class):
         """Should use custom context_length from config.extra."""
         mock_client_class.return_value = MagicMock()
@@ -445,6 +480,47 @@ class TestVerifyAuth:
         with patch.dict("os.environ", {"JAATO_NIM_API_KEY": "nvapi-test"}):
             assert provider.verify_auth() is True
 
+    def test_verify_auth_honors_profile_extra_api_key(self):
+        """The pre-init gate must accept a profile-supplied key in
+        config.extra['api_key'] — the shape the runtime builds for
+        verify_auth (ProviderConfig(extra=plugin_configs[nim])).  With no
+        env var and no stored creds, this used to wrongly fail (parity bug
+        vs openrouter/zhipuai)."""
+        provider = NIMProvider()
+        cfg = ProviderConfig(extra={"api_key": "nvapi-from-profile"})
+        with patch.dict("os.environ", {}, clear=True):
+            with patch(
+                "shared.plugins.model_provider.nim.auth"
+                ".try_load_credentials_with_reason",
+                return_value=(None, None),
+            ):
+                assert provider.verify_auth(config=cfg) is True
+
+    def test_verify_auth_honors_profile_top_level_api_key(self):
+        """config.api_key (top-level) is also honored."""
+        provider = NIMProvider()
+        cfg = ProviderConfig(api_key="nvapi-top-level")
+        with patch.dict("os.environ", {}, clear=True):
+            with patch(
+                "shared.plugins.model_provider.nim.auth"
+                ".try_load_credentials_with_reason",
+                return_value=(None, None),
+            ):
+                assert provider.verify_auth(config=cfg) is True
+
+    def test_verify_auth_profile_key_beats_missing_env_and_creds(self):
+        """No env, no stored creds, key only in the profile config ->
+        verify_auth returns True (does NOT raise) on the bootstrap path."""
+        provider = NIMProvider()
+        cfg = ProviderConfig(extra={"api_key": "nvapi-x", "workspace_path": "/tmp"})
+        with patch.dict("os.environ", {}, clear=True):
+            with patch(
+                "shared.plugins.model_provider.nim.auth"
+                ".try_load_credentials_with_reason",
+                return_value=(None, None),
+            ):
+                assert provider.verify_auth(allow_interactive=False, config=cfg) is True
+
     def test_verify_auth_self_hosted(self):
         provider = NIMProvider()
         with patch.dict("os.environ", {"JAATO_NIM_BASE_URL": "http://localhost:8000/v1"}, clear=True):
@@ -460,6 +536,30 @@ class TestVerifyAuth:
         provider = NIMProvider()
         with patch.dict("os.environ", {}, clear=True):
             assert provider.verify_auth(allow_interactive=True) is False
+
+    def test_verify_auth_surfaces_broken_credentials(self):
+        """Broken credential file must surface the reason, not be
+        swallowed into a generic "no key" error.
+
+        Mirrors the Zhipu AI fix: a corrupt / unreadable credential
+        file used to be indistinguishable from a missing one, which
+        produced misleading "No API key found" messages while the real
+        problem (corrupt JSON, missing api_key, permission error) stayed
+        hidden.  The provider now emits the actual load reason.
+        """
+        provider = NIMProvider()
+        with patch.dict("os.environ", {}, clear=True):
+            with patch(
+                "shared.plugins.model_provider.nim.auth.try_load_credentials_with_reason",
+                return_value=(None, "invalid JSON at /tmp/nim_auth.json: Expecting value"),
+            ):
+                messages = []
+                # Not self-hosted, no key -> should raise, but first emit the reason
+                with pytest.raises(APIKeyNotFoundError):
+                    provider.verify_auth(on_message=messages.append)
+                joined = "\n".join(messages)
+                assert "could not be loaded" in joined
+                assert "invalid JSON" in joined
 
 
 class TestConnection:

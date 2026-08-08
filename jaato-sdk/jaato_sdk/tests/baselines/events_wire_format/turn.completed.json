@@ -1,0 +1,20 @@
+{
+  "type": "turn.completed",
+  "timestamp": "<TIMESTAMP>",
+  "agent_id": "",
+  "turn_number": 0,
+  "usage": {
+    "prompt_tokens": 0,
+    "output_tokens": 0,
+    "total_tokens": 0,
+    "cache_read_tokens": null,
+    "cache_creation_tokens": null,
+    "reasoning_tokens": null,
+    "thinking_tokens": null,
+    "cost_usd": null
+  },
+  "duration_seconds": 0.0,
+  "function_calls": [],
+  "formatted_text": null,
+  "finish_reason": "stop"
+}

@@ -1,0 +1,45 @@
+name: anthropic-signal_completion
+description: >
+  Lifecycle smoke for the anthropic provider — exercises signal_completion
+  with a non-trivial completion_payload_schema (3 fields, 2 required).
+  Validates the schema-driven termination contract end-to-end:
+  schema declared → signal_completion is exposed (2026-06-07 gate) →
+  model emits payload → jsonschema.validate passes → session ends.
+
+model: claude-sonnet-4-6
+provider: anthropic
+
+max_turns: 3
+
+suppress_base_instructions: true
+
+plugins: []
+
+plugin_configs:
+  anthropic:
+    api_key: "${ANTHROPIC_API_KEY}"
+
+completion_payload_schema:
+  type: object
+  additionalProperties: false
+  required:
+    - summary
+    - status
+  properties:
+    summary:
+      type: string
+      description: >
+        A one-sentence summary of what the agent did.  Required.
+    status:
+      type: string
+      enum: [ok, partial, failed]
+      description: >
+        Outcome classification.  Required.  ``ok`` for normal
+        completion, ``partial`` if some sub-task was skipped,
+        ``failed`` if the agent gave up.
+    word_count:
+      type: integer
+      minimum: 0
+      description: >
+        Number of words in the summary.  Optional but tests
+        whether weak models can emit integer typed fields.

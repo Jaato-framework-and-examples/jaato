@@ -89,7 +89,7 @@ def _get_kroki_url() -> str:
     e.g. http://localhost:8000 — useful when the public kroki.io
     is blocked by an enterprise firewall.
     """
-    return os.environ.get("JAATO_KROKI_URL", "https://kroki.io").rstrip("/")
+    return os.environ.get("JAATO_KROKI_URL", "https://kroki.io").rstrip("/")  # env: Kroki server used to render diagrams (default https://kroki.io); point at a self-hosted one
 
 
 def _check_kroki() -> bool:

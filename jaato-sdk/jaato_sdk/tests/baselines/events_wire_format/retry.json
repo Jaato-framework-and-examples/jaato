@@ -1,0 +1,9 @@
+{
+  "type": "retry",
+  "timestamp": "<TIMESTAMP>",
+  "message": "",
+  "attempt": 0,
+  "max_attempts": 0,
+  "delay": 0.0,
+  "error_type": ""
+}

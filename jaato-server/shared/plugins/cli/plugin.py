@@ -1,6 +1,8 @@
 """CLI tool plugin for executing local shell commands."""
 
+import logging
 import os
+from shared.session_context import get_workspace_root, get_config_root
 import re
 import shutil
 import shlex
@@ -10,13 +12,24 @@ import threading
 from datetime import datetime
 from typing import Dict, List, Any, Callable, Optional
 
+logger = logging.getLogger(__name__)
+
 from jaato_sdk.plugins.base import UserCommand
 from ..background import BackgroundCapableMixin
-from jaato_sdk.plugins.model_provider.types import ToolSchema, EditableContent
+from shared.plugins.runner_forwarding import RunnerForwardingMixin
+from jaato_sdk.plugins.model_provider.types import (
+    ToolSchema,
+    EditableContent,
+    DISCOVERABILITY_DEFERRED,
+)
 from ..sandbox_utils import check_path_with_jaato_containment, detect_jaato_symlink
+from ..workspace_venv import (
+    resolve_venv_path, ensure_workspace_venv, apply_venv_to_env, pip_apparmor_rules,
+)
 from shared.ai_tool_runner import get_current_tool_output_callback, get_current_cancel_token
 from jaato_sdk.plugins.model_provider.types import CancelledException
 from shared.path_utils import msys2_to_windows_path
+from shared.subprocess_runner import run_command, requires_shell, RunResult
 from shared.trace import trace as _trace_write
 
 
@@ -89,7 +102,7 @@ _WRITE_OUTPUT_CMDS = frozenset({
 })
 
 
-class CLIToolPlugin(BackgroundCapableMixin):
+class CLIToolPlugin(BackgroundCapableMixin, RunnerForwardingMixin):
     """Plugin that provides CLI command execution capability.
 
     Supports background execution via BackgroundCapableMixin. Commands that
@@ -110,15 +123,40 @@ class CLIToolPlugin(BackgroundCapableMixin):
         super().__init__(max_workers=4)
 
         self._extra_paths: List[str] = []
+        # Secrets-broker (feature #10): env-var name globs to strip from the
+        # environment handed to model-driven subprocesses.  Empty = off.
+        self._scrub_secret_env: List[str] = []
         self._max_output_chars: int = DEFAULT_MAX_OUTPUT_CHARS
         self._auto_background_threshold: float = DEFAULT_AUTO_BACKGROUND_THRESHOLD
         self._initialized = False
+
+        # Per-session runtime limits installed by ToolExecutor via
+        # set_runtime_limits().  None until the executor calls; the
+        # Popen branches treat None as "no kernel attach, no app-layer
+        # cap override, no wall-clock timeout".
+        self._cgroup_attach = None
+        self._runtime_limits = None
+        # Phase 5 §5.10c: AppArmor child-profile transition callback
+        # installed via set_apparmor_child_transition_callback().  When
+        # set, the cli plugin's Popen preexec_fn writes
+        # ``changeprofile <profile>//child`` to /proc/self/attr/current
+        # between fork() and exec() so the spawned subprocess lands in
+        # the per-session ``//child`` sub-profile (which drops the
+        # escape-vector rules).  None until the executor calls — same
+        # contract as _cgroup_attach.  See
+        # docs/design/phase5_5_10_apparmor_child_subprofile_audit.md.
+        self._apparmor_child_transition: Optional[Callable[[], None]] = None
         # Agent context for trace logging
         self._agent_name: Optional[str] = None
         # Note: tool output callback is managed by BackgroundCapableMixin
         # (self._bg_tool_output_callback) via set_tool_output_callback()
         # Workspace root for path sandboxing (None = no sandboxing)
         self._workspace_root: Optional[str] = None
+        # Workspace-scoped venv path for tool subprocesses (None/empty = off).
+        # When set, commands run with this venv activated so the model's
+        # ``pip install`` persists there and later imports resolve.  See
+        # shared/plugins/workspace_venv.py.
+        self._workspace_venv: Optional[str] = None
         # Plugin registry for checking authorized external paths
         self._plugin_registry = None
 
@@ -141,7 +179,7 @@ class CLIToolPlugin(BackgroundCapableMixin):
             Resolved absolute path to workspace root, or None if not found.
         """
         # Priority 1: JAATO_WORKSPACE_ROOT
-        workspace = os.environ.get('JAATO_WORKSPACE_ROOT')
+        workspace = get_workspace_root()
         if workspace:
             resolved = os.path.realpath(os.path.abspath(workspace))
             self._trace(f"_detect_workspace_root: using JAATO_WORKSPACE_ROOT={resolved}")
@@ -189,6 +227,14 @@ class CLIToolPlugin(BackgroundCapableMixin):
                 workspace = config['workspace_root']
                 if workspace:
                     self._workspace_root = os.path.realpath(os.path.abspath(workspace))
+            if 'workspace_venv' in config:
+                self._workspace_venv = config['workspace_venv']
+            if 'scrub_secret_env' in config:
+                scrub = config['scrub_secret_env']
+                if isinstance(scrub, str):
+                    scrub = [scrub]
+                if isinstance(scrub, (list, tuple)):
+                    self._scrub_secret_env = [str(s) for s in scrub]
 
         # Auto-detect workspace_root from environment if not explicitly provided
         if not self._workspace_root:
@@ -256,6 +302,105 @@ class CLIToolPlugin(BackgroundCapableMixin):
         registry.register_category("system", "Shell commands, environment, system operations")
         self._trace("set_plugin_registry: registry set")
 
+    def set_runtime_limits(self, attach_callback, limits) -> None:
+        """Receive per-session cgroup attach + app-layer caps from the executor.
+
+        Forwarded by ``ToolExecutor.set_runtime_limits`` whenever the
+        WS server provisions a session's cgroup.  At Popen time:
+
+        * ``attach_callback`` becomes ``preexec_fn`` so the forked child
+          joins the session's cgroup before ``exec``, picking up the
+          kernel-enforced ``memory.max`` / ``pids.max`` / ``cpu.weight``.
+        * ``limits.tool_timeout_seconds`` becomes a wall-clock deadline
+          enforced by the Python layer (cgroup v2 has no equivalent).
+        * ``limits.max_output_bytes`` overrides the static
+          ``_max_output_chars`` for stdout/stderr truncation in the
+          final result.
+
+        Both arguments may be ``None`` when no profile-level
+        ``runtime_limits`` is configured — in that case Popen falls
+        back to the previous behaviour (no preexec_fn, no timeout,
+        static output cap).
+        """
+        self._cgroup_attach = attach_callback
+        self._runtime_limits = limits
+        self._trace(
+            f"set_runtime_limits: attach={attach_callback is not None} "
+            f"limits={limits!r}"
+        )
+
+    def set_apparmor_child_transition_callback(
+        self,
+        callback: Optional[Callable[[], None]],
+    ) -> None:
+        """Install the AppArmor child-profile transition callback
+        (Phase 5 §5.10c).
+
+        Forwarded by
+        ``ToolExecutor.set_apparmor_child_transition_callback`` at
+        runner-side bootstrap.  When set, the cli plugin's
+        ``subprocess.Popen`` ``preexec_fn`` composes this callback
+        with the cgroup-attach callback: AppArmor transition FIRST,
+        then cgroup attach, then exec.  Order matters — the new
+        ``//child`` profile must apply during the cgroup write
+        (cgroup writes are allowed in ``//child``, but future
+        tightening shouldn't surprise us).
+
+        Closes the verified escape at ``apparmor.py:413-449``: a
+        process in ``//child`` cannot write ``changeprofile`` to
+        ``/proc/self/attr/current`` (kernel rejects with EACCES).
+        Model-controlled subprocess content can no longer escape the
+        per-session profile.
+
+        Argument may be ``None`` when the runner isn't AppArmor-
+        confined (JAATO_RUNNER_DISABLE_CONFINE=1 or daemon-side
+        legacy paths) — Popen falls back to cgroup-only preexec_fn.
+        """
+        self._apparmor_child_transition = callback
+        self._trace(
+            f"set_apparmor_child_transition_callback: "
+            f"transition={callback is not None}"
+        )
+
+    def _build_subprocess_preexec_fn(
+        self,
+    ) -> Optional[Callable[[], None]]:
+        """Phase 5 §5.10c: compose the apparmor + cgroup preexec_fn.
+
+        Returns the appropriate callable for ``Popen(preexec_fn=...)``:
+
+        - When BOTH apparmor transition AND cgroup attach are set:
+          returns a composite that runs apparmor first, then cgroup.
+        - When only one is set: returns just that one.
+        - When neither is set: returns ``None`` (Popen with no
+          preexec_fn — today's pre-§5.10 behavior).
+
+        Apparmor-first ordering matches §6.1 of the audit doc — the
+        new profile applies during the cgroup write.  Both writes
+        succeed today on either profile; ordering is defensive
+        against future tightening.
+
+        Both callbacks fail-closed: any exception propagates as a
+        Popen spawn failure.  A failed apparmor transition would
+        leave the child in the parent profile with the escape rules
+        intact — exactly the gap §5.10 closes — so spawn failure is
+        the correct posture.
+        """
+        apparmor_cb = self._apparmor_child_transition
+        cgroup_cb = self._cgroup_attach
+        if apparmor_cb is None and cgroup_cb is None:
+            return None
+        if apparmor_cb is None:
+            return cgroup_cb
+        if cgroup_cb is None:
+            return apparmor_cb
+
+        def _composite() -> None:
+            apparmor_cb()
+            cgroup_cb()
+
+        return _composite
+
     def shutdown(self) -> None:
         """Shutdown the CLI plugin."""
         self._trace("shutdown: cleaning up")
@@ -264,6 +409,20 @@ class CLIToolPlugin(BackgroundCapableMixin):
         self._initialized = False
         # Cleanup background executor
         self._shutdown_bg_executor()
+
+    def reset_for_next_session(self) -> None:
+        """Cascade-sharing reset — NO-OP for this plugin.
+
+        Phase 1 hotfix (server 0.6.148+): added to satisfy the
+        ``ToolPlugin`` / ``EnrichmentPlugin`` protocol's runtime
+        ``isinstance`` check.  Per Daniel's litmus test (see
+        ``docs/design/runner-cascade-sharing.md`` §4.3), this
+        plugin holds no per-session state that the next cascade
+        session would benefit from having cleared.  Override in
+        future PRs if the litmus test changes.
+        """
+        pass
+
 
     def get_config_schema(self) -> dict:
         """Return JSON Schema for this plugin's configuration."""
@@ -291,8 +450,51 @@ class CLIToolPlugin(BackgroundCapableMixin):
                     "default": 4,
                     "description": "Maximum concurrent background workers",
                 },
+                "scrub_secret_env": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "default": [],
+                    "description": (
+                        "Env-var name globs (case-insensitive fnmatch) to strip "
+                        "from the environment of commands run by this tool, so a "
+                        "model-driven command cannot read raw credentials the "
+                        "runner itself holds (e.g. echo $GITHUB_TOKEN). Empty = "
+                        "off (default). Recommended starting set: "
+                        "['*_API_KEY','*_TOKEN','*_SECRET','ANTHROPIC_AUTH_TOKEN']."
+                    ),
+                },
+                "workspace_venv": {
+                    "type": "string",
+                    "default": "",
+                    "description": (
+                        "Path to a workspace-scoped venv to activate for "
+                        "commands (empty = off). Relative paths resolve "
+                        "against the workspace root. Created if absent with "
+                        "--system-site-packages; the model's pip installs "
+                        "persist there. Recommended: .jaato/tool-venv"
+                    ),
+                },
             },
         }
+
+    @classmethod
+    def get_apparmor_rules(
+        cls,
+        *,
+        workspace_path: str,
+        session_id: str,
+        config_root: Optional[str],
+        plugin_config: Dict[str, Any],
+    ) -> List[str]:
+        """Contribute pip's AppArmor rules to the profile.
+
+        The cli tool can run ``pip`` (directly or via the model's shell
+        commands): the distro/UA OS-id reads (crashes without them under
+        confinement) plus, when a ``workspace_venv`` is set, an ``ix`` grant on
+        the venv bin so a bare ``pip`` / console script runs.  Scoped to
+        sessions that load ``cli`` — least-privilege.  See ``pip_apparmor_rules``.
+        """
+        return pip_apparmor_rules(plugin_config.get("workspace_venv"), workspace_path)
 
     def get_tool_schemas(self) -> List[ToolSchema]:
         """Return the ToolSchema for the CLI tool."""
@@ -331,7 +533,7 @@ class CLIToolPlugin(BackgroundCapableMixin):
                 "required": ["command"]
             },
             category="system",
-            discoverability="discoverable",
+            discoverability=DISCOVERABILITY_DEFERRED,
             editable=EditableContent(
                 parameters=["command"],
                 format="text",
@@ -340,8 +542,18 @@ class CLIToolPlugin(BackgroundCapableMixin):
         )]
 
     def get_executors(self) -> Dict[str, Callable[[Dict[str, Any]], Any]]:
-        """Return the executor mapping."""
-        return {'cli_based_tool': self._execute}
+        """Return the executor mapping.
+
+        Phase 3: forwards via runner-RPC when a runner is attached
+        (the canonical wave-1 pattern); falls through to in-process
+        otherwise.  This collapses Phase 2's hand-rolled
+        ``_execute_via_runner`` indirection in ``_execute`` onto the
+        shared ``RunnerForwardingMixin`` — same wire path, same
+        cancellation contract, less per-plugin duplication.
+        """
+        return self.wrap_executors_for_runner_forwarding({
+            'cli_based_tool': self._execute,
+        })
 
     def get_system_instructions(self) -> Optional[str]:
         """Return system instructions for the CLI tool."""
@@ -570,20 +782,36 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
             cmd_preview = command[:100] + "..." if len(command) > 100 else command
             self._trace(f"execute_streaming: {cmd_preview}")
 
-            # Validate paths are within workspace (if sandboxing enabled)
-            blocked_path = self._validate_command_paths(command, arg_list)
-            if blocked_path:
-                result = self._make_not_found_result(blocked_path, command)
-                # Call callbacks with the fake error
-                on_stderr(result['stderr'].encode('utf-8'))
-                on_returncode(result['returncode'])
-                return result
+            # Validate paths are within workspace (if sandboxing enabled).
+            # Returns a ready result dict on refusal (blocked path or
+            # unparseable command), or None when the command is allowed.
+            refusal = self._validate_command_paths(command, arg_list)
+            if refusal is not None:
+                # Call callbacks with the refusal error
+                on_stderr(refusal['stderr'].encode('utf-8'))
+                on_returncode(refusal['returncode'])
+                return refusal
 
             # Prepare environment
             env = os.environ.copy()
             if extra_paths:
                 path_sep = os.pathsep
                 env['PATH'] = env.get('PATH', '') + path_sep + path_sep.join(extra_paths)
+
+            # Activate the workspace venv (if configured) so ``pip install``
+            # persists to it and later imports resolve.  Prepends the venv
+            # bin ahead of extra_paths so the venv's python/pip win.
+            venv_path = resolve_venv_path(self._workspace_venv, self._workspace_root)
+            if venv_path:
+                ensure_workspace_venv(venv_path)
+                apply_venv_to_env(env, venv_path)
+
+            # Secrets-broker scrub (feature #10): strip declared secret vars
+            # from the subprocess env so a model-driven command can't read raw
+            # credentials the runner itself holds.  No-op when unconfigured.
+            if self._scrub_secret_env:
+                from shared.secret_scrub import scrub_env as _scrub_secret_env
+                env = _scrub_secret_env(env, self._scrub_secret_env)
 
             # Check if shell interpretation is needed
             use_shell = self._requires_shell(command)
@@ -612,7 +840,41 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
             # Start process with pipes.
             # AppArmor confinement (if any) is inherited from the parent
             # thread via fork+exec — see ToolExecutor.set_apparmor_context.
+            # Phase 5 §5.10c — preexec_fn composes two callbacks that
+            # run between fork() and exec():
+            #   1. AppArmor child-profile transition (writes
+            #      ``changeprofile <session>//child`` to
+            #      /proc/self/attr/current).  The forked child enters
+            #      the ``//child`` sub-profile which drops the escape-
+            #      vector rules — model-controlled subprocess content
+            #      can't write to attr/current anymore.
+            #   2. Cgroup attach (writes the forked child's PID to
+            #      cgroup.procs), so the new program comes up under
+            #      the session's memory.max / pids.max / cpu.weight.
+            # Either callback may be None; the composite handles
+            # all four (none, apparmor-only, cgroup-only, both).
             cmd = command if use_shell else argv
+
+            # Diagnostic (server 0.6.108+, 2026-05-16): surface the env
+            # preconditions immediately before Popen so we can confirm
+            # whether ``HOME`` survives the daemon -> template ->
+            # pool-slot -> cli inheritance chain.  v100/v101 cascade
+            # evidence showed ``cat ~/...`` failing with the tilde
+            # unexpanded — symptom of HOME unset/empty in the
+            # subprocess.  Grep across the server code base found no
+            # explicit HOME mutation, so the loss (if it really is
+            # HOME loss) happens via a runtime path that source
+            # inspection alone cannot pinpoint.  This log line is the
+            # ground truth at the Popen boundary.
+            logger.info(
+                "CLI_SUBPROCESS_ENV path=streaming shell=%s cwd=%r "
+                "home=%r user=%r path_len=%d env_keys=%d cmd_preview=%r",
+                use_shell, self._workspace_root,
+                env.get("HOME", "<MISSING>"),
+                env.get("USER", "<MISSING>"),
+                len(env.get("PATH", "")), len(env),
+                command[:80] + ("..." if len(command) > 80 else ""),
+            )
 
             proc = subprocess.Popen(
                 cmd,
@@ -620,7 +882,8 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
                 stderr=subprocess.PIPE,
                 env=env,
                 shell=use_shell,
-                cwd=self._workspace_root
+                cwd=self._workspace_root,
+                preexec_fn=self._build_subprocess_preexec_fn(),
             )
 
             # Collect output while streaming to callbacks
@@ -660,8 +923,28 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
             stdout_thread.start()
             stderr_thread.start()
 
-            # Wait for process and readers to complete
-            proc.wait()
+            # Wait for process and readers to complete.
+            # When the session's RuntimeLimits sets a wall-clock cap,
+            # we honour it here at the Python layer (cgroup v2 has no
+            # equivalent knob).  On expiry: SIGTERM, brief grace, then
+            # SIGKILL.  The reader threads observe EOF on the now-closed
+            # pipes and exit naturally.
+            tool_timeout = (
+                self._runtime_limits.tool_timeout_seconds
+                if self._runtime_limits is not None
+                else None
+            )
+            timed_out = False
+            try:
+                proc.wait(timeout=tool_timeout)
+            except subprocess.TimeoutExpired:
+                timed_out = True
+                proc.terminate()
+                try:
+                    proc.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait()
             stdout_done.wait()
             stderr_done.wait()
 
@@ -672,22 +955,39 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
             stdout = b''.join(stdout_chunks).decode('utf-8', errors='replace')
             stderr = b''.join(stderr_chunks).decode('utf-8', errors='replace')
 
+            # Per-session override of the static max_output_chars.  When
+            # the profile sets ``runtime_limits.max_output_bytes`` it
+            # takes precedence; otherwise the plugin's configured cap
+            # applies.  Bytes vs chars: we truncate the decoded string
+            # by character count, accepting that a multi-byte UTF-8
+            # tail might be slightly over the byte budget.  The cap is
+            # an order-of-magnitude guardrail, not a hard byte ceiling.
+            output_cap = self._max_output_chars
+            if (
+                self._runtime_limits is not None
+                and self._runtime_limits.max_output_bytes is not None
+            ):
+                output_cap = self._runtime_limits.max_output_bytes
+
             # Truncate for final result (streaming already captured full output)
             truncated = False
-            if len(stdout) > self._max_output_chars:
-                stdout = stdout[:self._max_output_chars]
+            if len(stdout) > output_cap:
+                stdout = stdout[:output_cap]
                 truncated = True
-            if len(stderr) > self._max_output_chars:
-                stderr = stderr[:self._max_output_chars]
+            if len(stderr) > output_cap:
+                stderr = stderr[:output_cap]
                 truncated = True
 
             result = {'stdout': stdout, 'stderr': stderr, 'returncode': returncode}
             if truncated:
                 result['truncated'] = True
                 result['truncation_message'] = (
-                    f"Output truncated to {self._max_output_chars} chars in final result. "
+                    f"Output truncated to {output_cap} chars in final result. "
                     "Full output available via getBackgroundTaskOutput."
                 )
+            if timed_out:
+                result['timed_out'] = True
+                result['timeout_seconds'] = tool_timeout
 
             return result
 
@@ -699,16 +999,9 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
     def _requires_shell(self, command: str) -> bool:
         """Check if a command requires shell interpretation.
 
-        Detects shell metacharacters like pipes, redirections, command chaining,
-        and command substitution that cannot be handled by subprocess without shell.
-
-        Args:
-            command: The command string to check.
-
-        Returns:
-            True if the command contains shell metacharacters requiring shell=True.
+        Delegates to :func:`shared.subprocess_runner.requires_shell`.
         """
-        return bool(SHELL_METACHAR_PATTERN.search(command))
+        return requires_shell(command)
 
     # --- Path sandboxing implementation ---
 
@@ -901,34 +1194,54 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
         self,
         command: str,
         arg_list: Optional[List[str]] = None
-    ) -> Optional[str]:
+    ) -> Optional[Dict[str, Any]]:
         """Validate that all paths in a command are within workspace_root.
 
         Each path is checked with its inferred access mode: paths in write
         positions (redirections, write commands) require "readwrite"
         authorization; all other paths only require "read" access.
 
-        If any path is outside the workspace, returns the blocked path for
-        a fake "not found" error. The model sees this as if the path doesn't
-        exist.
+        **Fail-closed contract.** The path heuristics below tokenise the
+        command with :func:`shlex.split`, which models POSIX shell word
+        splitting. If ``shlex`` *cannot* parse the command (unbalanced
+        quotes, dangling escapes), the tokens it would produce no longer
+        match how ``/bin/sh`` will interpret the string — so the path
+        extraction can't reason about it safely. Historically the helpers
+        degraded to a naive ``str.split()`` here, which parses differently
+        than the shell and could let an out-of-workspace path slip past the
+        check. Instead we now refuse the command outright. This is a
+        security boundary: when we can't analyse, we deny.
 
         Args:
             command: The command string.
             arg_list: Optional separate argument list.
 
         Returns:
-            None if all paths are valid, or the first blocked path string.
+            ``None`` if all paths are valid; otherwise a ready-to-return
+            result dict (``stdout``/``stderr``/``returncode``) describing
+            why the command was refused — either a blocked path (mimicking
+            "not found") or an unparseable command (shell syntax error).
         """
         if not self._workspace_root:
             # No sandboxing configured
             return None
+
+        # Fail closed before any heuristic runs: a command the validator
+        # cannot tokenise the way the shell will is refused, not degraded.
+        try:
+            shlex.split(command)
+        except ValueError as exc:
+            self._trace(
+                f"path_sandbox: refusing unparseable command for validation ({exc})"
+            )
+            return self._make_unparseable_result(command, exc)
 
         classified = self._classify_path_modes(command, arg_list)
 
         for path, mode in classified:
             if not self._is_path_within_workspace(path, mode=mode):
                 self._trace(f"path_sandbox: blocked access to '{path}' (outside workspace, mode={mode})")
-                return path
+                return self._make_not_found_result(path, command)
 
         return None
 
@@ -959,10 +1272,43 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
             'returncode': 1
         }
 
+    def _make_unparseable_result(
+        self, command: str, exc: Exception
+    ) -> Dict[str, Any]:
+        """Create a result dict for a command that failed sandbox parsing.
+
+        Returned by :meth:`_validate_command_paths` when ``shlex.split``
+        cannot tokenise the command (e.g. unbalanced quotes), so the path
+        sandbox can't verify it stays within the workspace. The command is
+        refused with a shell-style syntax error (returncode 2, the POSIX
+        convention for a shell parse failure) rather than executed.
+
+        The message is explicit so the model can self-correct — typically
+        by balancing quotes or simplifying the quoting — instead of seeing
+        a misleading "file not found".
+
+        Args:
+            command: The original command string (unused beyond context;
+                kept for symmetry with :meth:`_make_not_found_result`).
+            exc: The ``shlex`` parse error, surfaced to aid correction.
+
+        Returns:
+            Dict with stdout, stderr, returncode for a refused command.
+        """
+        stderr = (
+            "sh: syntax error: command could not be parsed for sandbox "
+            f"validation ({exc}); rewrite it with balanced quotes/escapes."
+        )
+        return {
+            'stdout': '',
+            'stderr': stderr,
+            'returncode': 2,
+        }
+
     # --- End path sandboxing implementation ---
 
     def _execute(self, args: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute a CLI command.
+        """Execute a CLI command in-process.
 
         Exactly one of the following forms should be provided:
         1. command: full shell-like command string (preferred for simplicity).
@@ -970,6 +1316,15 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
 
         Shell metacharacters (pipes, redirections, command chaining) are auto-detected
         and the command is executed through the shell when required.
+
+        **Phase 3 dispatch.**  When the session has a runner subprocess
+        attached, ``get_executors`` wraps this method with the
+        ``RunnerForwardingMixin`` forwarder, which routes the call
+        through ``tool.execute`` RPC instead of invoking this body.
+        The cli ``subprocess.Popen`` then happens inside the kernel-
+        confined runner process so the spawned child inherits the
+        per-session AppArmor profile.  When no runner is attached,
+        the wrapper falls through to this in-process path.
 
         Args:
             args: Dict containing 'command' and optionally 'args' and 'extra_paths'.
@@ -989,119 +1344,93 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
             cmd_preview = command[:100] + "..." if len(command) > 100 else command
             self._trace(f"execute: {cmd_preview}")
 
-            # Validate paths are within workspace (if sandboxing enabled)
-            blocked_path = self._validate_command_paths(command, arg_list)
-            if blocked_path:
-                return self._make_not_found_result(blocked_path, command)
+            # Validate paths are within workspace (if sandboxing enabled).
+            # Returns a ready result dict on refusal (blocked path or
+            # unparseable command), or None when the command is allowed.
+            refusal = self._validate_command_paths(command, arg_list)
+            if refusal is not None:
+                return refusal
 
-            # Prepare environment with extended PATH if extra_paths is provided
-            env = os.environ.copy()
+            # Merge separate arg_list into the command string so the
+            # shared runner receives a single command expression.
+            if arg_list and not self._requires_shell(command):
+                command = ' '.join(
+                    [shlex.quote(command)] + [shlex.quote(a) for a in arg_list]
+                )
+
+            # Build extra env for PATH extension
+            extra_env: Optional[Dict[str, str]] = None
             if extra_paths:
                 path_sep = os.pathsep
-                env['PATH'] = env.get('PATH', '') + path_sep + path_sep.join(extra_paths)
+                extra_env = {
+                    'PATH': os.environ.get('PATH', '')
+                    + path_sep + path_sep.join(extra_paths)
+                }
 
-            # Check if the command requires shell interpretation
-            use_shell = self._requires_shell(command)
+            # Activate the workspace venv (if configured) on the FOREGROUND path
+            # too — run_command starts from os.environ + extra_env, so seed a
+            # full env, activate, and carry the venv-touched keys back into
+            # extra_env.  Without this, foreground `python`/`pip` resolve to the
+            # runner base venv instead of the tool-venv (parity with the
+            # streaming path in _execute_streaming).
+            venv_path = resolve_venv_path(self._workspace_venv, self._workspace_root)
+            if venv_path:
+                ensure_workspace_venv(venv_path)
+                seed = dict(os.environ)
+                if extra_env:
+                    seed.update(extra_env)
+                apply_venv_to_env(seed, venv_path)
+                extra_env = extra_env or {}
+                for _k in ('PATH', 'VIRTUAL_ENV', 'PYTHONPATH'):
+                    if _k in seed:
+                        extra_env[_k] = seed[_k]
 
-            # Prepare command/argv for execution
-            argv: Optional[List[str]] = None
-            if not use_shell:
-                # Non-shell mode: parse into argv list for safer execution
-                if arg_list:
-                    # Model passed command as executable name and args separately
-                    argv = [command] + arg_list
-                else:
-                    # Full command string
-                    argv = shlex.split(command)
-
-                # Normalize single-string with spaces passed mistakenly as executable
-                if len(argv) == 1 and ' ' in argv[0]:
-                    argv = shlex.split(argv[0])
-
-                # Resolve executable via PATH (including PATHEXT) for Windows
-                exe = argv[0]
-                resolved = shutil.which(exe, path=env.get('PATH'))
-                if resolved:
-                    argv[0] = resolved
-                else:
-                    return {
-                        'error': f"cli_based_tool: executable '{exe}' not found in PATH",
-                        'hint': 'Configure extra_paths or provide full path to the executable.'
-                    }
-
-            # Use streaming execution if callback is set
-            # Check thread-local first for parallel execution support
+            # Resolve streaming callback
             effective_callback = self._get_effective_output_callback()
-            cancel_token = get_current_cancel_token()
             self._trace(f"execute: streaming={'YES' if effective_callback else 'NO'}")
 
-            # Both streaming and non-streaming use Popen so we can check the
-            # cancel token while the process runs.
-            # AppArmor confinement (if any) is inherited from the parent
-            # thread via fork+exec — see ToolExecutor.set_apparmor_context.
-            cmd = command if use_shell else argv
+            # Per-session runtime limits (from RuntimeLimits) override
+            # the static plugin-level caps when present.  Bare attribute
+            # reads guard against profiles that set only kernel limits
+            # — limits=None is fine, fields default to None.
+            limits = self._runtime_limits
+            effective_max_output = self._max_output_chars
+            effective_timeout: Optional[float] = None
+            if limits is not None:
+                if limits.max_output_bytes is not None:
+                    effective_max_output = limits.max_output_bytes
+                if limits.tool_timeout_seconds is not None:
+                    effective_timeout = limits.tool_timeout_seconds
 
-            proc = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                encoding='utf-8',
-                errors='replace',
-                env=env,
-                shell=use_shell,
-                cwd=self._workspace_root
+            # Delegate to shared subprocess runner
+            r: RunResult = run_command(
+                command,
+                cwd=self._workspace_root,
+                timeout=effective_timeout,
+                max_output_chars=effective_max_output,
+                extra_env=extra_env,
+                on_stdout_line=effective_callback,
+                check_cancel=True,
+                preexec_fn=self._build_subprocess_preexec_fn(),
+                scrub_env=self._scrub_secret_env or None,
             )
 
-            stdout_lines = []
-            stderr_lines = []
+            # Executable-not-found is surfaced as an error dict so the
+            # model sees a clear actionable message rather than a raw
+            # returncode=127 result.
+            if r.returncode == 127 and "not found in PATH" in r.stderr:
+                return {
+                    'error': f"cli_based_tool: {r.stderr}",
+                    'hint': 'Configure extra_paths or provide full path to the executable.'
+                }
 
-            if effective_callback:
-                # Streaming mode: read stdout line by line, check cancel between lines
-                if proc.stdout:
-                    for line in proc.stdout:
-                        if cancel_token is not None and cancel_token.is_cancelled:
-                            proc.kill()
-                            proc.wait()
-                            raise CancelledException("Tool cancelled during streaming output")
-                        stdout_lines.append(line)
-                        effective_callback(line.rstrip('\n\r'))
-            else:
-                # Non-streaming mode: read chunks, check cancel between reads
-                if proc.stdout:
-                    while True:
-                        if cancel_token is not None and cancel_token.is_cancelled:
-                            proc.kill()
-                            proc.wait()
-                            raise CancelledException("Tool cancelled during subprocess execution")
-                        chunk = proc.stdout.read(4096)
-                        if not chunk:
-                            break
-                        stdout_lines.append(chunk)
+            result: Dict[str, Any] = {
+                'stdout': r.stdout,
+                'stderr': r.stderr,
+                'returncode': r.returncode,
+            }
 
-            # Read remaining stderr after stdout is consumed
-            if proc.stderr:
-                stderr_lines = proc.stderr.readlines()
-
-            proc.wait()
-            stdout = ''.join(stdout_lines)
-            stderr = ''.join(stderr_lines)
-            returncode = proc.returncode
-
-            # Truncate large outputs to prevent context window overflow
-            truncated = False
-
-            if len(stdout) > self._max_output_chars:
-                stdout = stdout[:self._max_output_chars]
-                truncated = True
-
-            if len(stderr) > self._max_output_chars:
-                stderr = stderr[:self._max_output_chars]
-                truncated = True
-
-            result = {'stdout': stdout, 'stderr': stderr, 'returncode': returncode}
-
-            if truncated:
+            if r.truncated:
                 result['truncated'] = True
                 result['truncation_message'] = (
                     f"Output truncated to {self._max_output_chars} chars. "
@@ -1112,10 +1441,10 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
             # these as span attributes on the enclosing tool_span.
             result['_telemetry'] = {
                 'jaato.cli.command': command[:200],
-                'jaato.cli.returncode': returncode,
-                'jaato.cli.stdout_bytes': len(stdout),
-                'jaato.cli.stderr_bytes': len(stderr),
-                'jaato.cli.shell_mode': use_shell,
+                'jaato.cli.returncode': r.returncode,
+                'jaato.cli.stdout_bytes': len(r.stdout),
+                'jaato.cli.stderr_bytes': len(r.stderr),
+                'jaato.cli.shell_mode': requires_shell(command),
                 'jaato.cli.cwd': str(self._workspace_root or ''),
             }
 

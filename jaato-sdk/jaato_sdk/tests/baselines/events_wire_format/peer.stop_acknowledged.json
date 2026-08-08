@@ -1,0 +1,6 @@
+{
+  "type": "peer.stop_acknowledged",
+  "timestamp": "<TIMESTAMP>",
+  "request_id": "",
+  "remote_agent_id": ""
+}

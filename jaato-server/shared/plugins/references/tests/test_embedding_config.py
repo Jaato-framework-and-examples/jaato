@@ -33,6 +33,7 @@ class TestLoadEmbeddingConfig:
             "embedding_model": "all-MiniLM-L6-v2",
             "embedding_dimensions": 384,
             "embedding_sidecar": "references.embeddings.npy",
+            "rows": ["ref-a", "ref-b"],
         }))
 
         config = ReferencesConfig(references_dir=str(refs_dir))
@@ -41,7 +42,40 @@ class TestLoadEmbeddingConfig:
         assert config.embedding_model == "all-MiniLM-L6-v2"
         assert config.embedding_dimensions == 384
         assert config.embedding_sidecar == "references.embeddings.npy"
+        assert config.embedding_rows == ["ref-a", "ref-b"]
         assert config.config_base_path == str(refs_dir.resolve())
+
+    def test_skips_when_rows_missing(self, tmp_path):
+        """rows is required; an older config without it is treated as unindexed."""
+        refs_dir = tmp_path / "references"
+        refs_dir.mkdir()
+        (refs_dir / EMBEDDING_CONFIG_FILENAME).write_text(json.dumps({
+            "embedding_model": "all-MiniLM-L6-v2",
+            "embedding_dimensions": 384,
+            "embedding_sidecar": "references.embeddings.npy",
+        }))
+
+        config = ReferencesConfig(references_dir=str(refs_dir))
+        _load_embedding_config(config, str(tmp_path))
+
+        assert config.embedding_model is None
+        assert config.embedding_rows is None
+
+    def test_skips_when_rows_not_list_of_strings(self, tmp_path):
+        refs_dir = tmp_path / "references"
+        refs_dir.mkdir()
+        (refs_dir / EMBEDDING_CONFIG_FILENAME).write_text(json.dumps({
+            "embedding_model": "all-MiniLM-L6-v2",
+            "embedding_dimensions": 384,
+            "embedding_sidecar": "references.embeddings.npy",
+            "rows": [0, 1, 2],
+        }))
+
+        config = ReferencesConfig(references_dir=str(refs_dir))
+        _load_embedding_config(config, str(tmp_path))
+
+        assert config.embedding_model is None
+        assert config.embedding_rows is None
 
     def test_no_op_when_file_missing(self, tmp_path):
         refs_dir = tmp_path / "references"
@@ -81,11 +115,12 @@ class TestLoadEmbeddingConfig:
         assert config.embedding_model is None
 
     def test_skips_missing_required_fields(self, tmp_path):
-        """All three fields must be present."""
+        """model, dimensions, and sidecar must all be present."""
         refs_dir = tmp_path / "references"
         refs_dir.mkdir()
         (refs_dir / EMBEDDING_CONFIG_FILENAME).write_text(json.dumps({
             "embedding_model": "all-MiniLM-L6-v2",
+            "rows": [],
             # missing embedding_dimensions and embedding_sidecar
         }))
 
@@ -102,6 +137,7 @@ class TestLoadEmbeddingConfig:
             "embedding_model": "all-MiniLM-L6-v2",
             "embedding_dimensions": 384,
             "embedding_sidecar": "references.embeddings.npy",
+            "rows": [],
         }))
 
         config = ReferencesConfig(
@@ -121,6 +157,7 @@ class TestLoadEmbeddingConfig:
             "embedding_model": "test-model",
             "embedding_dimensions": 128,
             "embedding_sidecar": "sidecar.npy",
+            "rows": [],
         }))
 
         config = ReferencesConfig(references_dir=".jaato/references")
@@ -128,6 +165,7 @@ class TestLoadEmbeddingConfig:
 
         assert config.embedding_model == "test-model"
         assert config.embedding_dimensions == 128
+        assert config.embedding_rows == []
 
 
 class TestDiscoverReferencesSkipsEmbeddingConfig:
@@ -171,13 +209,14 @@ class TestLoadConfigEmbeddingIntegration:
             "name": "Reference A",
             "type": "local",
             "path": "/tmp",
-            "embedding": {"index": 0, "source_hash": "sha256:abc123"},
+            "embedding": {"source_hash": "sha256:abc123"},
         }))
 
         (refs_dir / EMBEDDING_CONFIG_FILENAME).write_text(json.dumps({
             "embedding_model": "all-MiniLM-L6-v2",
             "embedding_dimensions": 384,
             "embedding_sidecar": "references.embeddings.npy",
+            "rows": ["ref-a"],
         }))
 
         config = load_config(workspace_path=str(tmp_path))
@@ -185,6 +224,7 @@ class TestLoadConfigEmbeddingIntegration:
         assert config.embedding_model == "all-MiniLM-L6-v2"
         assert config.embedding_dimensions == 384
         assert config.embedding_sidecar == "references.embeddings.npy"
+        assert config.embedding_rows == ["ref-a"]
         assert len(config.sources) == 1
         assert config.sources[0].id == "ref-a"
 
@@ -206,6 +246,7 @@ class TestLoadConfigEmbeddingIntegration:
             "embedding_model": "merged-model",
             "embedding_dimensions": 768,
             "embedding_sidecar": "merged.npy",
+            "rows": ["ref-merged"],
         }))
 
         # Also write separate embedding config (should be ignored)
@@ -213,6 +254,7 @@ class TestLoadConfigEmbeddingIntegration:
             "embedding_model": "separate-model",
             "embedding_dimensions": 384,
             "embedding_sidecar": "separate.npy",
+            "rows": [],
         }))
 
         config = load_config(path=str(config_file), workspace_path=str(tmp_path))

@@ -30,13 +30,21 @@ import asyncio
 import json
 import logging
 import os
-import struct
 import sys
 import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Set
+
+from shared.framing import (
+    HEADER_SIZE,
+    MAX_MESSAGE_SIZE,
+    FrameTooLargeError,
+    read_frame,
+    write_frame,
+)
+from shared.session_id import is_safe_session_id
 
 
 # Windows named pipe prefix (\\.\pipe\)
@@ -75,6 +83,7 @@ def _get_display_path(path: str) -> str:
 from jaato_sdk.events import (
     Event,
     EventType,
+    PROTOCOL_VERSION,
     ConnectedEvent,
     ErrorEvent,
     SystemMessageEvent,
@@ -89,6 +98,8 @@ from jaato_sdk.events import (
     CommandListRequest,
     ClientConfigRequest,
     PostAuthSetupResponse,
+    ToolsRegisterClientRequest,
+    ToolExecuteResultEvent,
 )
 
 
@@ -101,9 +112,11 @@ def _get_server_version() -> str:
     return pkg_version("jaato-server")
 
 
-# Message framing: 4-byte length prefix (big-endian) + JSON payload
-HEADER_SIZE = 4
-MAX_MESSAGE_SIZE = 10 * 1024 * 1024  # 10 MB max
+# Message framing constants are imported from shared.framing — see
+# that module for the wire format (4-byte big-endian length prefix +
+# UTF-8 payload).  Re-exported here as ``HEADER_SIZE`` /
+# ``MAX_MESSAGE_SIZE`` for any in-tree caller still importing them
+# from server.ipc.
 
 
 @dataclass
@@ -190,26 +203,41 @@ class JaatoIPCServer:
     def __init__(
         self,
         socket_path: Optional[str] = None,
-        socket_mode: int = 0o666,
+        socket_mode: int = 0o660,
         on_session_request: Optional[Callable[[str, str, Event], None]] = None,
         on_command_list_request: Optional[Callable[[], list]] = None,
+        on_client_disconnect: Optional[Callable[[str], None]] = None,
     ):
         """Initialize the IPC server.
 
         Args:
             socket_path: Path to the Unix domain socket or Windows pipe name.
                 Defaults to platform-appropriate path.
-            socket_mode: Unix file permissions for the socket (default: 0o666,
-                world read/write). Use 0o660 to restrict to owner and group.
+            socket_mode: Unix file permissions for the socket (default: 0o660,
+                owner and group only). The IPC transport has no per-message
+                authentication, so any principal that can open the socket can
+                fully drive the agent (send prompts, run whitelisted tools,
+                read/write the workspace). 0o660 keeps that reachable only by
+                the daemon's owner and group; pass 0o666 to opt into
+                world-accessible (e.g. cross-user containers on a trusted host).
             on_session_request: Callback for session requests.
                 Called with (client_id, session_id, event).
             on_command_list_request: Callback to get list of available commands.
                 Returns list of {name, description} dicts.
+            on_client_disconnect: Callback fired when an IPC client
+                connection terminates (clean disconnect or error).
+                Called with ``(client_id,)``.  Wired to
+                ``CommandRouter.handle_client_disconnect`` so that
+                ``SessionManager`` detaches the client from its session
+                — without this, ``session.attached_clients`` retains
+                stale ids forever and per-session resources (workspace
+                monitor inotify handles) leak.
         """
         self.socket_path = socket_path or _get_default_ipc_path()
         self.socket_mode = socket_mode
         self._on_session_request = on_session_request
         self._on_command_list_request = on_command_list_request
+        self._on_client_disconnect = on_client_disconnect
 
         # Server state
         self._server: Optional[asyncio.Server] = None
@@ -217,6 +245,26 @@ class JaatoIPCServer:
         self._clients: Dict[str, IPCClientConnection] = {}
         self._client_counter = 0
         self._lock = asyncio.Lock()
+        # Client-provided ("host") tool support.  ``_session_manager`` is wired
+        # at construction (server/__main__.py) so the IPC transport can reach a
+        # session's registry to register the proxy tools; ``_client_tool_waiters``
+        # holds call_id -> (Event, holder) for the proxy executors' blocking wait
+        # on the client's ToolExecuteResultEvent.
+        self._session_manager = None
+        self._client_tool_waiters: Dict[str, Any] = {}
+        # Host tools registered BEFORE session.new — buffered here for the
+        # post-session.new proxy-EXECUTOR registration (the SCHEMAS are buffered
+        # separately in SessionManager for the pre-spawn envelope seeding).
+        self._pending_client_tools_ipc: Dict[str, Any] = {}
+
+        # Custom message-type handlers registered by daemon extensions
+        # via ``register_message_handler``.  Fires when a client sends
+        # a JSON message whose ``type`` field doesn't match any built-
+        # in event class (parallel to the WS path's
+        # ``_message_handlers`` at ``websocket.py``).  Built-in types
+        # cannot be overridden — those still take the typed-event
+        # dispatch in ``_handle_message``.
+        self._message_handlers: Dict[str, Any] = {}
 
         # Event loop reference for thread-safe operations
         self._event_loop: Optional[asyncio.AbstractEventLoop] = None
@@ -401,7 +449,7 @@ class JaatoIPCServer:
         # Send connected event
         try:
             connected_event = ConnectedEvent(
-                protocol_version="1.0",
+                protocol_version=PROTOCOL_VERSION,
                 server_info={
                     "client_id": client_id,
                     "transport": "ipc",
@@ -446,6 +494,19 @@ class JaatoIPCServer:
                     del self._clients[client_id]
                 if client_id in self._event_queues:
                     del self._event_queues[client_id]
+            # Detach from session via the transport-agnostic helper
+            # (CommandRouter.handle_client_disconnect → SessionManager.detach_client).
+            # Without this, session.attached_clients retains the dead
+            # client_id, _maybe_unload_session blocks forever, and the
+            # session's workspace_monitor never releases its inotify
+            # handle — leading to Errno 24 on long-lived daemons.
+            if self._on_client_disconnect:
+                try:
+                    self._on_client_disconnect(client_id)
+                except Exception as exc:
+                    logger.error(
+                        f"on_client_disconnect failed for {client_id}: {exc}"
+                    )
 
             try:
                 writer.close()
@@ -458,41 +519,72 @@ class JaatoIPCServer:
     async def _read_message(self, reader: asyncio.StreamReader) -> Optional[str]:
         """Read a length-prefixed message from the stream.
 
-        Returns:
-            The message string, or None if connection closed.
+        Thin wrapper around :func:`shared.framing.read_frame` —
+        delegates the wire format so the runner-RPC channel can share
+        the same framing.  Returns ``None`` on clean EOF or peer
+        reset; oversize-frame errors propagate as
+        :class:`shared.framing.FrameTooLargeError`.
         """
-        try:
-            # Read length header - use readexactly for reliable framed reading
-            header = await reader.readexactly(HEADER_SIZE)
-
-            length = struct.unpack(">I", header)[0]
-            if length > MAX_MESSAGE_SIZE:
-                raise ValueError(f"Message too large: {length} bytes")
-
-            # Read payload
-            payload = await reader.readexactly(length)
-            return payload.decode("utf-8")
-
-        except asyncio.IncompleteReadError:
-            # Connection closed before complete message was read
-            return None
-        except ConnectionResetError:
-            # Connection was reset by peer
-            return None
+        return await read_frame(reader)
 
     async def _write_message(
         self,
         writer: asyncio.StreamWriter,
         message: str,
     ) -> None:
-        """Write a length-prefixed message to the stream."""
-        payload = message.encode("utf-8")
-        header = struct.pack(">I", len(payload))
-        logger.debug(f"_write_message: writing {len(payload)} bytes")
-        writer.write(header + payload)
-        logger.debug("_write_message: calling drain()")
-        await writer.drain()
-        logger.debug("_write_message: drain() completed")
+        """Write a length-prefixed message to the stream.
+
+        Thin wrapper around :func:`shared.framing.write_frame` —
+        same wire format as the daemon-runner RPC.
+        """
+        await write_frame(writer, message)
+
+    def register_message_handler(
+        self,
+        message_type: str,
+        handler: Any,
+    ) -> None:
+        """Register an async handler for a custom IPC message type.
+
+        Symmetric to :meth:`JaatoWSServer.register_message_handler`.
+        Daemon extensions call this (via
+        ``_ExtensionContext.ipc_server`` or the unified
+        ``_ExtensionContext.register_message_handler``) to handle
+        custom message types on IPC connections — the same
+        connections used for built-in session/command messages.
+
+        The handler is called when a client sends a JSON message
+        whose ``type`` field matches *message_type* and no built-in
+        event class deserialises from it.  Built-in types cannot be
+        overridden.
+
+        Handler signature is intentionally **transport-agnostic**
+        (no raw socket passed) so the same callback works on both
+        IPC and WS sides:
+
+            async def handler(message: dict, client_id: str, user: Optional[str]) -> None
+
+        - ``message``: the parsed JSON dict.
+        - ``client_id``: server-assigned client identifier — feed
+          back into ``ctx.emit_to_client(client_id, event)`` to
+          target the reply.
+        - ``user``: authenticated user identifier or ``None``
+          (always ``None`` on IPC today; included for symmetry with
+          WS, which does carry an authenticated user when SSO is
+          wired up).
+
+        Args:
+            message_type: The ``type`` field value to match
+                (e.g., ``"gates.list"``).
+            handler: Async callback with the signature above.
+        """
+        if message_type in self._message_handlers:
+            logger.warning(
+                "Overwriting existing IPC handler for message type '%s'",
+                message_type,
+            )
+        self._message_handlers[message_type] = handler
+        logger.debug("Registered IPC message handler: %s", message_type)
 
     async def _handle_message(self, client_id: str, message: str) -> None:
         """Handle an incoming message from a client."""
@@ -502,6 +594,31 @@ class JaatoIPCServer:
             await self._send_error(client_id, f"Invalid JSON: {e}")
             return
         except ValueError as e:
+            # Unknown event type — check extension message handlers
+            # before falling through to error.  Mirrors the WS
+            # dispatch fallthrough at ``websocket.py``.
+            try:
+                raw = json.loads(message)
+            except json.JSONDecodeError:
+                await self._send_error(client_id, str(e))
+                return
+            msg_type = raw.get("type", "")
+            handler = self._message_handlers.get(msg_type)
+            if handler:
+                async with self._lock:
+                    client = self._clients.get(client_id)
+                user = getattr(client, "user_id", None) if client else None
+                try:
+                    await handler(raw, client_id, user)
+                except Exception:
+                    logger.exception(
+                        "IPC message handler for '%s' raised", msg_type,
+                    )
+                    await self._send_error(
+                        client_id,
+                        f"Handler for '{msg_type}' raised — see daemon log",
+                    )
+                return
             await self._send_error(client_id, str(e))
             return
 
@@ -516,6 +633,27 @@ class JaatoIPCServer:
             )
             return
 
+        # Client-provided ("host") tool registration (mirrors the WS path; uses
+        # the shared registration helper) — register the proxy schema/executor so
+        # the agent can call it, the executor proxying back to this IPC client.
+        if isinstance(event, ToolsRegisterClientRequest):
+            self._register_client_tools_ipc(
+                client_id, event.tools, getattr(event, "categories", None))
+            return
+        # Client-side tool execution result — wake the proxy executor's waiter.
+        if isinstance(event, ToolExecuteResultEvent):
+            entry = self._client_tool_waiters.pop(event.call_id, None)
+            if entry is not None:
+                waiter, holder = entry
+                # Decode the JSON-encoded host-tool result to its native value
+                # (symmetric with the SDK's encode) so it records like an
+                # in-process tool result — see decode_client_tool_result.
+                from server.client_tools import decode_client_tool_result
+                holder["result"] = decode_client_tool_result(event.result)
+                holder["error"] = event.error
+                waiter.set()
+            return
+
         # Get client's session
         async with self._lock:
             client = self._clients.get(client_id)
@@ -523,6 +661,18 @@ class JaatoIPCServer:
 
         # Handle session selection
         if hasattr(event, 'session_id') and event.session_id:
+            # Client-supplied id — reject a traversal / injection id at the
+            # boundary before it reaches persistence / cgroup / apparmor sinks.
+            if not is_safe_session_id(event.session_id):
+                await self._send_to_client(
+                    client_id,
+                    ErrorEvent(
+                        error="invalid session_id: must match [A-Za-z0-9._-] "
+                              "(1-256 chars) with no '..'",
+                        error_type="RequestError",
+                    ),
+                )
+                return
             session_id = event.session_id
             async with self._lock:
                 if client:
@@ -549,6 +699,30 @@ class JaatoIPCServer:
                         session_id or "",
                         event,
                     )
+                    # After session.new/attach, register buffered host-tool
+                    # EXECUTORS now that the session (+ registry) exists.  The
+                    # SCHEMAS already rode the runner envelope (seeded pre-spawn
+                    # in the session.new flow); this wires the daemon-side proxy
+                    # executors for execution.  Mirrors websocket's post-apply.
+                    if (isinstance(event, CommandRequest)
+                            and event.command.lower() in ("session.new", "session.attach")):
+                        if client_id in self._pending_client_tools_ipc:
+                            pending = self._pending_client_tools_ipc.pop(client_id)
+                            # Wires tools + drives any deferred wake AFTER the
+                            # runner push (see _register_client_tools_ipc._push).
+                            self._register_client_tools_ipc(client_id, pending)
+                        else:
+                            # No buffered host tools to wire → drive any deferred
+                            # wake for the now-attached session immediately.
+                            _c = self._clients.get(client_id)
+                            _sid = _c.session_id if _c else None
+                            if _sid and self._session_manager is not None:
+                                try:
+                                    self._session_manager.drive_pending_wake(_sid)
+                                except Exception:
+                                    logger.exception(
+                                        "deferred-wake drive on no-tools attach "
+                                        "failed for %s", _sid)
             else:
                 await self._send_error(
                     client_id,
@@ -574,6 +748,89 @@ class JaatoIPCServer:
             ErrorEvent(error=error, error_type="RequestError")
         )
 
+    def _make_ipc_send_request(self, session_id: str):
+        """Build the proxy executor's transport send: dispatch the
+        ``ToolExecuteRequestEvent`` to every IPC client attached to
+        ``session_id``.  Returns True iff at least one received it (the shared
+        helper retries while none is connected)."""
+        def _send(event) -> bool:
+            sent = False
+            for cid, client in list(self._clients.items()):
+                if client.session_id == session_id:
+                    self.send_event(cid, event)
+                    sent = True
+            return sent
+        return _send
+
+    def _register_client_tools_ipc(self, client_id, tools, categories=None) -> None:
+        """Register client-provided ("host") tools for an IPC client.
+
+        Before the session exists (registered before session.new): buffer the
+        SCHEMAS via the ``SessionManager`` so the session.new flow seeds the
+        runner envelope before the spawn (shared with the WS path).  Once the
+        session exists: register the proxy executors (which send
+        ``ToolExecuteRequestEvent`` to this IPC client) on the session registry
+        via the shared helper.
+        """
+        sm = self._session_manager
+        if sm is None:
+            logger.warning("IPC client tools: no session_manager wired — ignoring")
+            return
+        client = self._clients.get(client_id)
+        session_id = client.session_id if client else None
+        session = sm.get_session(session_id) if session_id else None
+        if (session is None or getattr(session, "server", None) is None
+                or session.server.registry is None):
+            # No session yet: buffer the SCHEMAS (SessionManager → pre-spawn
+            # envelope seed) AND the tools for the post-session.new proxy-executor
+            # registration below.
+            sm.buffer_client_tools(client_id, tools)
+            self._pending_client_tools_ipc[client_id] = tools
+            logger.info("Buffered %d IPC client tools for %s (session pending)",
+                        len(tools or []), client_id)
+            return
+        from server.client_tools import register_client_tools
+        registered = register_client_tools(
+            session.server.registry, session.server, tools,
+            send_request=self._make_ipc_send_request(session_id),
+            waiters=self._client_tool_waiters,
+        )
+        # Glue the schemas to the RUNNER-tier model so it SEES a tool registered
+        # AFTER session.new (register_client_tools above wires daemon-side
+        # execution only; the model runs in the runner).  Best-effort — see the
+        # WS path for the rationale.
+        runner_rpc = getattr(session.server, "_runner_rpc", None)
+        if runner_rpc is not None:
+            # Run the blocking runner-RPC OFF the daemon event loop: this method
+            # runs in the async dispatch, and the threadsafe RPC waits on
+            # future.result() against that same loop — calling it inline
+            # deadlocks (the loop can't deliver the RPC response while blocked).
+            # Best-effort background thread; the proxy is already registered.
+            import threading
+
+            def _push(rpc=runner_rpc, t=tools, cid=client_id, sid=session_id):
+                try:
+                    res = rpc.session_register_client_tools_threadsafe(t)
+                    logger.info(
+                        "mid-session client-tool runner push for %s: %s", cid, res)
+                except Exception:
+                    logger.exception(
+                        "mid-session client-tool runner push failed for %s", cid)
+                # Deferred-turn (Option 2): the runner now has this client's host
+                # tools, so it's safe to drive any wake deferred while the session
+                # was cold — the turn's schema will include these tools.  Driving
+                # here (after the push) rather than at attach-end closes the
+                # drive-races-tool-wiring gap.  drive_pending_wake is idempotent.
+                try:
+                    self._session_manager.drive_pending_wake(sid)
+                except Exception:
+                    logger.exception(
+                        "deferred-wake drive after client-tool push failed for %s", sid)
+
+            threading.Thread(target=_push, daemon=True).start()
+        logger.info("Registered %d IPC client tools for %s: %s",
+                    len(registered), client_id, registered)
+
     def send_event(self, client_id: str, event: Event) -> None:
         """Send an event to a specific client (``EventSink`` protocol).
 
@@ -586,6 +843,24 @@ class JaatoIPCServer:
         if client_id not in self._event_queues:
             return
         self.queue_event(client_id, event)
+
+    def broadcast_event(self, event: Event) -> None:
+        """Send an event to every connected IPC client (``EventSink`` protocol).
+
+        Used for daemon-wide events that don't belong to a specific
+        session.  Iterates a snapshot of the current client list, so
+        clients connecting/disconnecting during the broadcast do not
+        race with the iteration.
+
+        Per-client delivery failures are swallowed by ``queue_event``
+        (log-and-continue), so one stuck client never blocks the rest.
+
+        Thread-safe.
+        """
+        # Snapshot keys to avoid "dictionary changed size during iteration"
+        # when a client connects/disconnects mid-broadcast.
+        for client_id in list(self._event_queues.keys()):
+            self.queue_event(client_id, event)
 
     def queue_event(self, client_id: str, event: Event) -> None:
         """Queue an event for delivery to a client.

@@ -1,0 +1,9 @@
+{
+  "type": "gc.config",
+  "timestamp": "<TIMESTAMP>",
+  "agent_id": "",
+  "threshold": null,
+  "strategy": null,
+  "target_percent": null,
+  "continuous_mode": false
+}

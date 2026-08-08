@@ -26,7 +26,11 @@ from jaato_sdk.plugins.base import (
     model_matches_requirements,
     OutputCallback,
 )
-from jaato_sdk.plugins.model_provider.types import ToolSchema
+from jaato_sdk.plugins.model_provider.types import (
+    ToolSchema,
+    DISCOVERABILITY_EAGER,
+    DISCOVERABILITY_DEFERRED,
+)
 from .streaming.protocol import StreamingCapable
 from .enrichment_formatter import (
     EnrichmentNotification,
@@ -43,17 +47,79 @@ PLUGIN_ENTRY_POINT_GROUPS = {
 }
 
 
-def _trace(msg: str, include_traceback: bool = False) -> None:
+# Cross-tier plugin discovery.  ``PLUGIN_TIER = "daemon_callable"`` is
+# the third tier value (alongside ``"daemon"`` / ``"runner"``): the
+# plugin is discovered on BOTH sides, with the daemon-side instance
+# owning the body and the runner-side instance being a
+# ``DaemonForwardingMixin`` stub for schema-surfacing to the model.
+# See ``shared/plugins/CLAUDE.md`` for the full pattern + the
+# ``test_plugin_tier_partition`` static-analysis gate.
+#
+# Discovery semantics encoded here (consumed by
+# :func:`_tier_filter_matches`):
+#   - ``tier_filter="runner"`` accepts ``{"runner", "daemon_callable"}``
+#   - ``tier_filter="daemon"`` accepts ``{"daemon", "daemon_callable"}``
+#   - ``tier_filter=None`` accepts everything (Phase 2 behaviour)
+_TIER_FILTER_ACCEPTS: Dict[str, Set[str]] = {
+    "runner": {"runner", "daemon_callable"},
+    "daemon": {"daemon", "daemon_callable"},
+}
+
+
+def _tier_filter_matches(
+    plugin_tier: Optional[str], tier_filter: Optional[str],
+) -> bool:
+    """Whether *plugin_tier* should be loaded under *tier_filter*.
+
+    Encapsulates the cross-tier acceptance rule so both
+    ``_discover_via_entry_points`` and ``_discover_via_directory``
+    share one implementation.  Plugins lacking a ``PLUGIN_TIER``
+    annotation are excluded under ANY filter (the "annotate or be
+    excluded" contract from §3.3.5) — silent exclusion is what the
+    build-fail gate in ``test_plugin_tier_partition`` catches.
+
+    Args:
+        plugin_tier: Declared ``PLUGIN_TIER`` value, or ``None`` if
+            absent.  Must be one of ``"daemon"`` / ``"runner"`` /
+            ``"daemon_callable"`` for the filtered path to admit it.
+        tier_filter: Filter to apply.  ``None`` means "no filter"
+            and admits every annotated plugin.
+
+    Returns:
+        True iff the plugin should be loaded under this filter.
+    """
+    if tier_filter is None:
+        # No filter: any annotated plugin passes.  Unannotated ones
+        # (plugin_tier is None) still pass — the "annotate or be
+        # excluded" rule only fires when a filter IS set, matching
+        # the pre-§3.3.5 daemon-side behaviour where everything got
+        # loaded.
+        return True
+    if plugin_tier is None:
+        # Filter set but no annotation: skip per §3.3.5 contract.
+        return False
+    accepted = _TIER_FILTER_ACCEPTS.get(tier_filter, {tier_filter})
+    return plugin_tier in accepted
+
+
+def _trace(msg: str, include_traceback: bool = False, warning: bool = False) -> None:
     """Write trace message to log file for debugging.
 
     Args:
         msg: The message to log.
-        include_traceback: If True, append the current exception traceback.
+        include_traceback: If True, log at ERROR with the current exception
+            traceback attached (for genuine plugin bugs / unexpected failures).
+        warning: If True (and ``include_traceback`` is False), log at WARNING
+            for a concise, user-visible one-liner — used for expected,
+            actionable skips (e.g. a plugin's optional backend dependency is
+            not installed) where a full traceback would read as a crash.
     """
     _trace_write("PluginRegistry", msg, include_traceback=include_traceback)
     # Also log to standard logger for visibility
     if include_traceback:
         logger.error(msg, exc_info=True)
+    elif warning:
+        logger.warning(msg)
     else:
         logger.debug(msg)
 
@@ -164,6 +230,20 @@ class PluginRegistry:
         self._core_auto_approved: Set[str] = set()  # Auto-approved core tools
         # Workspace path for plugins that need it
         self._workspace_path: Optional[str] = None
+        # Optional override for the read-only framework-config root.
+        # When None (the default), plugins that consult
+        # ``shared.config_resolver.resolve_config_search_path`` fall back
+        # to ``<workspace_path>/.jaato/`` (today's behavior).
+        self._config_root: Optional[str] = None
+        # Per-session framework values injected into every plugin's
+        # config dict at ``initialize()`` time (server 0.6.129+).
+        # See :meth:`_augment_plugin_config` for the contract.  Set
+        # before :meth:`expose_all` fires; the post-init
+        # ``set_workspace_path`` / ``set_config_root`` broadcasts
+        # still run for idempotent refresh AND to propagate later
+        # mid-session changes.
+        self._session_id: Optional[str] = None
+        self._agent_name: Optional[str] = None
         # Cache: tool_name -> plugin for get_plugin_for_tool() lookups
         self._tool_plugin_cache: Dict[str, ToolPlugin] = {}
         # Bootstrap timing: plugin name -> timing data
@@ -396,7 +476,8 @@ class PluginRegistry:
     def discover(
         self,
         plugin_kind: str = "tool",
-        include_directory: bool = True
+        include_directory: bool = True,
+        tier_filter: Optional[str] = None,
     ) -> List[str]:
         """Discover plugins via entry points and optionally directory scanning.
 
@@ -415,6 +496,16 @@ class PluginRegistry:
                         Only plugins with matching PLUGIN_KIND are loaded.
             include_directory: Also scan the plugins directory for local plugins.
                              Useful during development when package isn't installed.
+            tier_filter: Optional tier restriction (Phase 3 §3.3.5).  When
+                set to ``"daemon"``, only plugins declaring
+                ``PLUGIN_TIER = "daemon"`` are loaded; ``"runner"`` loads
+                only runner-tier plugins.  When ``None`` (default), no
+                tier restriction — preserves Phase 2 behaviour where the
+                daemon discovers everything.  Plugins without a
+                ``PLUGIN_TIER`` annotation are SKIPPED when a filter is
+                set (the contract is "annotate or be excluded"); this
+                makes the partition deterministic and catches new
+                plugins landing without an explicit tier.
 
         Returns:
             List of discovered plugin names.
@@ -422,22 +513,41 @@ class PluginRegistry:
         discovered = []
 
         # First, discover via entry points (installed packages)
-        discovered.extend(self._discover_via_entry_points(plugin_kind))
+        discovered.extend(
+            self._discover_via_entry_points(plugin_kind, tier_filter=tier_filter)
+        )
 
         # Then, optionally scan the plugins directory (development mode)
         if include_directory:
-            discovered.extend(self._discover_via_directory(plugin_kind))
+            discovered.extend(
+                self._discover_via_directory(
+                    plugin_kind, tier_filter=tier_filter,
+                )
+            )
 
         # When discovering tool plugins, also discover enrichment plugins
         # so callers don't need to make a separate discover("enrichment") call
         if plugin_kind == "tool":
-            discovered.extend(self._discover_via_entry_points("enrichment"))
+            discovered.extend(
+                self._discover_via_entry_points(
+                    "enrichment", tier_filter=tier_filter,
+                )
+            )
             if include_directory:
-                discovered.extend(self._discover_via_directory("enrichment"))
+                discovered.extend(
+                    self._discover_via_directory(
+                        "enrichment", tier_filter=tier_filter,
+                    )
+                )
 
         return discovered
 
-    def _discover_via_entry_points(self, plugin_kind: str) -> List[str]:
+    def _discover_via_entry_points(
+        self,
+        plugin_kind: str,
+        *,
+        tier_filter: Optional[str] = None,
+    ) -> List[str]:
         """Discover plugins registered via entry points.
 
         External packages can register plugins by adding to the appropriate
@@ -445,6 +555,10 @@ class PluginRegistry:
 
         Args:
             plugin_kind: Kind of plugin to discover ('tool', 'gc', etc.).
+            tier_filter: Optional tier restriction (Phase 3 §3.3.5).
+                When set, the loaded plugin's module-level
+                ``PLUGIN_TIER`` must match; mismatched plugins are
+                skipped (a debug trace records the skip reason).
 
         Returns:
             List of discovered plugin names.
@@ -470,17 +584,62 @@ class PluginRegistry:
                     continue
 
                 try:
+                    # Phase 3 §3.3.5: tier filter — read PLUGIN_TIER from
+                    # the entry-point's defining module.  ``ep.load()``
+                    # imports the module already; we read the attr from
+                    # the loaded factory's module.  Cross-tier
+                    # ``"daemon_callable"`` plugins are admitted by
+                    # BOTH ``"runner"`` and ``"daemon"`` filters — see
+                    # :func:`_tier_filter_matches`.
                     create_plugin = ep.load()
+                    if tier_filter is not None:
+                        ep_module = getattr(create_plugin, "__module__", "")
+                        ep_tier = self._lookup_module_tier(ep_module)
+                        if not _tier_filter_matches(ep_tier, tier_filter):
+                            _trace(
+                                f" Entry point '{ep.name}': PLUGIN_TIER "
+                                f"={ep_tier!r} not accepted by "
+                                f"filter={tier_filter!r}; skipping"
+                            )
+                            continue
+
                     plugin = create_plugin()
 
-                    # Verify protocol implementation
+                    # Verify protocol implementation.  Failing the
+                    # protocol check used to be a debug-only _trace,
+                    # which made plugins invisibly disappear from the
+                    # registry — same footgun as missing PLUGIN_KIND
+                    # and same footgun the directory-path side fixed
+                    # at PR #171.  Promote to a real warning that
+                    # names the missing methods so the author knows
+                    # exactly what to add.  Mirrors the directory-
+                    # path warning at ``_discover_via_directory``
+                    # (see ``_missing_protocol_methods``).
                     if plugin_kind == "tool" and not isinstance(plugin, ToolPlugin):
-                        _trace(f" Entry point '{ep.name}': "
-                              f"plugin does not implement ToolPlugin protocol")
+                        missing = _missing_protocol_methods(plugin, ToolPlugin)
+                        logger.warning(
+                            "Entry point '%s' (%s): plugin does not "
+                            "implement the ToolPlugin protocol — it "
+                            "will be silently skipped. Missing "
+                            "methods: %s. Add them to the plugin "
+                            "class.",
+                            ep.name,
+                            getattr(ep, "value", "<unknown>"),
+                            ", ".join(missing) if missing else "(unknown)",
+                        )
                         continue
                     if plugin_kind == "enrichment" and not isinstance(plugin, EnrichmentPlugin):
-                        _trace(f" Entry point '{ep.name}': "
-                              f"plugin does not implement EnrichmentPlugin protocol")
+                        missing = _missing_protocol_methods(plugin, EnrichmentPlugin)
+                        logger.warning(
+                            "Entry point '%s' (%s): plugin does not "
+                            "implement the EnrichmentPlugin protocol "
+                            "— it will be silently skipped. Missing "
+                            "methods: %s. Add them to the plugin "
+                            "class.",
+                            ep.name,
+                            getattr(ep, "value", "<unknown>"),
+                            ", ".join(missing) if missing else "(unknown)",
+                        )
                         continue
 
                     self._plugins[plugin.name] = plugin
@@ -499,10 +658,42 @@ class PluginRegistry:
 
         return discovered
 
+    @staticmethod
+    def _lookup_module_tier(module_name: str) -> Optional[str]:
+        """Read ``PLUGIN_TIER`` from a plugin module's package.
+
+        Most plugin entry points point at
+        ``<package>.<plugin_name>.plugin:create_plugin``; the
+        ``PLUGIN_TIER`` annotation lives on the plugin package's
+        ``__init__.py``.  We walk up to the package root by stripping
+        the trailing ``.plugin`` (or whatever submodule the factory
+        lives in).
+
+        Returns the tier string (``"daemon"`` / ``"runner"``) or
+        ``None`` if the module isn't loaded yet OR the package
+        doesn't declare a tier.
+        """
+        if not module_name:
+            return None
+        # Try the module itself first, then its parent package.
+        # ``shared.plugins.cli.plugin`` → ``shared.plugins.cli``.
+        candidates = [module_name]
+        if "." in module_name:
+            candidates.append(module_name.rsplit(".", 1)[0])
+        for candidate in candidates:
+            mod = sys.modules.get(candidate)
+            if mod is not None:
+                tier = getattr(mod, "PLUGIN_TIER", None)
+                if isinstance(tier, str):
+                    return tier
+        return None
+
     def _discover_via_directory(
         self,
         plugin_kind: str,
-        plugin_dir: Optional[Path] = None
+        plugin_dir: Optional[Path] = None,
+        *,
+        tier_filter: Optional[str] = None,
     ) -> List[str]:
         """Discover plugins by scanning the plugins directory.
 
@@ -512,6 +703,11 @@ class PluginRegistry:
         Args:
             plugin_kind: Kind of plugin to discover ('tool', 'gc', etc.).
             plugin_dir: Directory to scan. Defaults to this package's directory.
+            tier_filter: Optional tier restriction (Phase 3 §3.3.5).
+                When set, the module's ``PLUGIN_TIER`` must match;
+                missing or mismatched annotations are skipped.  Read
+                directly from the imported module so the pre-§3.3.5
+                "annotate or be excluded" contract holds.
 
         Returns:
             List of discovered plugin names.
@@ -535,35 +731,27 @@ class PluginRegistry:
                 module = importlib.import_module(f".{name}", package="shared.plugins")
                 import_ms = (time.perf_counter() - t0) * 1000
 
-                # Check plugin kind - only load plugins matching requested kind.
-                # Distinguish "kind mismatch" (legitimate skip — we're
-                # discovering a different kind) from "PLUGIN_KIND missing"
-                # (likely a plugin author bug — log a warning).
-                module_kind = getattr(module, 'PLUGIN_KIND', None)
-                if module_kind is None:
-                    # Only warn once per (module, plugin_kind) pair so we
-                    # don't spam every discovery pass.
-                    if not hasattr(self, '_warned_missing_kind'):
-                        self._warned_missing_kind: Set[str] = set()
-                    if name not in self._warned_missing_kind:
-                        self._warned_missing_kind.add(name)
-                        # Suppress for plugins that legitimately have no
-                        # PLUGIN_KIND yet (e.g., test fixtures, README dirs).
-                        # The warning targets real plugin directories with
-                        # a create_plugin() factory but no kind marker.
-                        if hasattr(module, 'create_plugin'):
-                            logger.warning(
-                                "Plugin module '%s' has no PLUGIN_KIND in "
-                                "__init__.py — it will be silently skipped "
-                                "by directory discovery. Add "
-                                "'PLUGIN_KIND = \"tool\"' (or \"enrichment\", "
-                                "\"gc\", \"session\", \"model_provider\") to "
-                                "%s/__init__.py and export it in __all__.",
-                                name, name,
-                            )
+                # Only act on modules that opt in via PLUGIN_KIND matching
+                # this scan. Absent PLUGIN_KIND means the module belongs to
+                # another registry (formatter_pipeline, JaatoRuntime direct
+                # import, etc.) — skip silently, since create_plugin is a
+                # convention shared across registries.
+                if getattr(module, 'PLUGIN_KIND', None) != plugin_kind:
                     continue
-                if module_kind != plugin_kind:
-                    continue
+
+                # Phase 3 §3.3.5: tier filter.  Cross-tier
+                # ``"daemon_callable"`` plugins are admitted by BOTH
+                # ``"runner"`` and ``"daemon"`` filters — see
+                # :func:`_tier_filter_matches`.
+                if tier_filter is not None:
+                    module_tier = getattr(module, 'PLUGIN_TIER', None)
+                    if not _tier_filter_matches(module_tier, tier_filter):
+                        _trace(
+                            f" Plugin '{name}': PLUGIN_TIER={module_tier!r} "
+                            f"not accepted by filter={tier_filter!r}; "
+                            f"skipping"
+                        )
+                        continue
 
                 if hasattr(module, 'create_plugin'):
                     t1 = time.perf_counter()
@@ -616,6 +804,19 @@ class PluginRegistry:
                         "create_ms": round(create_ms, 2),
                     }
 
+            except ModuleNotFoundError as exc:
+                # A plugin's (declared) dependency is not installed in this
+                # environment — e.g. interactive_shell needs pexpect on Unix.
+                # The plugin correctly does NOT load; this is an environment-
+                # provisioning issue, not a plugin bug, so emit a concise,
+                # actionable one-line WARNING naming the missing module rather
+                # than dumping a full traceback that reads as a crash mid-scan.
+                missing = exc.name or str(exc)
+                _trace(
+                    f" Plugin '{name}' skipped: missing dependency "
+                    f"'{missing}' — install it to enable this plugin.",
+                    warning=True,
+                )
             except Exception as exc:
                 _trace(f" Error loading plugin '{name}': {exc}", include_traceback=True)
 
@@ -642,6 +843,21 @@ class PluginRegistry:
     def list_exposed(self) -> List[str]:
         """List currently exposed plugin names."""
         return list(self._exposed)
+
+    def all_plugins(self) -> Dict[str, Any]:
+        """Snapshot of every DISCOVERED plugin instance, by name.
+
+        Distinct from :meth:`list_exposed` (the subset whose tools are
+        surfaced to the model): this is the full set the registry
+        discovered and instantiated.  Used by the AppArmor composer, which
+        must grant for every plugin the confined runner actually
+        initializes — ``expose_all`` (runner/session.py) inits ALL
+        discovered runner-tier plugins regardless of ``profile.plugins``
+        (the load-gate that would scope init to the declared set was
+        disabled in #114), so grants scoped to ``profile.plugins`` leave
+        auto-loaded plugins without their host-path rules.
+        """
+        return dict(self._plugins)
 
     def is_exposed(self, name: str) -> bool:
         """Check if a plugin's tools are currently exposed to the model."""
@@ -778,6 +994,38 @@ class PluginRegistry:
             self._core_auto_approved.add(schema.name)
         _trace(f"Registered core tool: {schema.name} (auto_approved={auto_approved})")
 
+    def is_core_tool(self, tool_name: str) -> bool:
+        """Return True if ``tool_name`` is a framework core tool.
+
+        Core tools are framework machinery registered via
+        :meth:`register_core_tool` — the lifecycle terminal
+        ``signal_completion``, introspection/event-bus tools, etc. — as
+        opposed to a plugin-provided tool (``cli``, ``file_edit``, business
+        tools).  Consumers use this to give framework machinery different
+        treatment from the business tool surface (e.g. the permission
+        pipeline exempts core tools from a catch-all ``"default"`` evaluator
+        so a business default-deny can't brick the agent's ability to
+        complete).
+        """
+        return tool_name in self._core_tools
+
+    def get_registered_core_tool_names(self) -> Set[str]:
+        """Return the names of tools registered via :meth:`register_core_tool`.
+
+        This is the authoritative "framework machinery" set — stream
+        controls, event-bus, introspection, client host tools — mirroring
+        :meth:`is_core_tool`.  It is DELIBERATELY narrower than
+        :meth:`get_core_tool_schemas`, which returns every exposed *plugin*
+        tool whose ``discoverability == 'core'`` (an eager-loading
+        performance flag applied to real business tools like ``readFile``
+        and the ``todo`` tools).  Consumers that must distinguish framework
+        machinery from the business tool surface — e.g. the permission
+        pipeline's catch-all ``"default"`` evaluator exemption — must use
+        THIS accessor, not ``get_core_tool_schemas()``, or they silently
+        exempt powerful plugin tools from that evaluator (see #487/#488).
+        """
+        return set(self._core_tools.keys())
+
     def get_core_executors(self) -> Dict[str, Callable[[Dict[str, Any]], Any]]:
         """Get executors for all registered core framework tools.
 
@@ -816,10 +1064,15 @@ class PluginRegistry:
         # get_tool_schemas() / get_executors() on them.
         if name in self._enrichment_only:
             if not hasattr(plugin, '_initialized'):
-                plugin.initialize(config)
+                # Server 0.6.129+: framework-known values
+                # (workspace_path, config_root, session_id,
+                # agent_name) injected into config via setdefault.
+                # See :meth:`_augment_plugin_config` for the contract.
+                effective_config = self._augment_plugin_config(config)
+                plugin.initialize(effective_config)
                 plugin._initialized = True
-                if config:
-                    self._configs[name] = config
+                if effective_config:
+                    self._configs[name] = effective_config
                 _trace(f" Enrichment-only plugin '{name}' initialized (not exposed)")
             return True
 
@@ -834,9 +1087,13 @@ class PluginRegistry:
 
         # Initialize if not already exposed, or if new config provided
         if name not in self._exposed:
+            # Server 0.6.129+: inject framework-known values into the
+            # plugin's config before initialize.  See
+            # :meth:`_augment_plugin_config`.
+            effective_config = self._augment_plugin_config(config)
             t0 = time.perf_counter()
             try:
-                plugin.initialize(config)
+                plugin.initialize(effective_config)
             except Exception as exc:
                 # Don't let one broken plugin take down the whole session.
                 # Record the failure and skip exposing the plugin so the
@@ -852,8 +1109,8 @@ class PluginRegistry:
             self._init_timings[name] = {"init_ms": round(init_ms, 2)}
             if init_ms > 5.0:  # Log plugins taking >5ms to initialize
                 _trace(f" Plugin '{name}' initialize: {init_ms:.1f}ms")
-            if config:
-                self._configs[name] = config
+            if effective_config:
+                self._configs[name] = effective_config
             self._exposed.add(name)
             self._tool_plugin_cache.clear()
             # Wire up plugin with registry for authorized external paths
@@ -887,8 +1144,10 @@ class PluginRegistry:
                     "Continuing with re-initialize.",
                     name, exc, exc_info=True,
                 )
+            # Server 0.6.129+: framework-key injection for re-init too.
+            effective_config = self._augment_plugin_config(config)
             try:
-                plugin.initialize(config)
+                plugin.initialize(effective_config)
             except Exception as exc:
                 logger.error(
                     "Plugin '%s' initialize() during re-init failed: %s. "
@@ -900,12 +1159,38 @@ class PluginRegistry:
                 self._configs.pop(name, None)
                 self._tool_plugin_cache.clear()
                 return False
-            self._configs[name] = config
+            self._configs[name] = effective_config
             self._tool_plugin_cache.clear()
             # Re-wire after re-initialization
             if hasattr(plugin, 'set_plugin_registry'):
                 plugin.set_plugin_registry(self)
                 _trace(f" Plugin '{name}' re-wired with registry")
+
+            # Re-broadcast workspace_path / config_root onto the
+            # re-initialized plugin.  These are normally pushed by
+            # ``set_workspace_path`` / ``set_config_root`` broadcast
+            # methods that fire only on registry-level state changes —
+            # not on per-plugin re-init.  Without this replay, a
+            # subagent that re-exposes a plugin with a tweaked config
+            # (e.g. agent_name injected) silently rebuilds the plugin
+            # with no awareness of the broadcasted overrides, causing
+            # path-anchored state (schema_store base, config-anchored
+            # caches, etc.) to drift back to defaults.
+            if hasattr(plugin, 'set_workspace_path') and self._workspace_path:
+                try:
+                    plugin.set_workspace_path(self._workspace_path)
+                    _trace(f" Plugin '{name}' replayed set_workspace_path")
+                except Exception as exc:
+                    _trace(f" Plugin '{name}' set_workspace_path replay failed: {exc}")
+            if (
+                hasattr(plugin, 'set_config_root')
+                and getattr(self, '_config_root', None) is not None
+            ):
+                try:
+                    plugin.set_config_root(self._config_root)
+                    _trace(f" Plugin '{name}' replayed set_config_root")
+                except Exception as exc:
+                    _trace(f" Plugin '{name}' set_config_root replay failed: {exc}")
 
             # Restore any authorized/denied paths that were lost during
             # re-initialization (the plugin's config reload may not have
@@ -949,10 +1234,27 @@ class PluginRegistry:
             self._configs.pop(name, None)
             self._tool_plugin_cache.clear()
 
+    # Plugins that must always initialize regardless of the session's
+    # requested plugin set.  ``introspection`` provides the
+    # ``list_tools`` / ``get_tool_schemas`` tools that the
+    # deferred-loading mechanism depends on; ``permission`` is the
+    # framework's policy engine and is wired even when not in
+    # profile.plugins (the runner-side bootstrap constructs it
+    # separately, but the registry path should keep it included for
+    # symmetry with other call sites).  Add other unconditionally-
+    # essential plugins here only with care — anything in this set
+    # pays its initialize cost for EVERY session regardless of
+    # profile.
+    _ALWAYS_INITIALIZE_PLUGINS = frozenset({
+        "introspection",
+        "permission",
+    })
+
     def expose_all(
         self,
         config: Optional[Dict[str, Dict[str, Any]]] = None,
         on_progress: Optional[Callable[[str], None]] = None,
+        requested_plugins: Optional[List[str]] = None,
     ) -> None:
         """Expose all discovered plugins' tools.
 
@@ -966,16 +1268,65 @@ class PluginRegistry:
             on_progress: Optional callback invoked with each plugin name
                 before it is exposed.  Used by the server to emit
                 per-plugin init progress events.
+            requested_plugins: When provided, only initializes plugins
+                whose name is in this list — PLUS the unconditionally-
+                essential set (:attr:`_ALWAYS_INITIALIZE_PLUGINS`) AND
+                all enrichment-only plugins (their enrichment fires
+                for every session regardless of profile.plugins).
+                Other discovered plugins remain registered in
+                ``self._plugins`` but get NEITHER ``initialize()``
+                NOR tool exposure — saving their per-session cost.
+
+                ``None`` (default) preserves pre-2026-05-15 behaviour:
+                every discovered plugin is initialized and exposed.
+
+                Motivated by the runner-side bootstrap measurement
+                showing the ``references`` plugin's
+                ``SentenceTransformer`` model load took ~7.6s on
+                EVERY session — even when ``references`` wasn't in
+                ``profile.plugins`` — because ``expose_all`` ran
+                ``initialize()`` unconditionally.  Filed as the
+                architectural fix for the references-init bottleneck;
+                see ``project_backlog_parallel_tool_main_thread_bottleneck``
+                lineage.
         """
         import concurrent.futures
 
         config = config or {}
+
+        # Resolve the effective initialize set.
+        #
+        # ``None`` ⇒ initialize every discovered plugin (back-compat
+        # for daemon-side ``server/core.py`` callers + tests that
+        # don't pass the kwarg).
+        #
+        # Non-None ⇒ union of:
+        #   1. caller's requested plugins,
+        #   2. ``_ALWAYS_INITIALIZE_PLUGINS`` (introspection +
+        #      permission today),
+        #   3. all enrichment-only plugins (their enrichment fires
+        #      regardless of profile.plugins, so they need their
+        #      ``initialize()`` to set up subscriptions).
+        # Anything not in this union is left registered-but-
+        # uninitialized: ``self._plugins[name]`` still holds the
+        # instance, but ``expose_tool()`` doesn't fire for it, so
+        # neither its tools nor its ``initialize()`` side-effects
+        # reach the session.
+        if requested_plugins is None:
+            target_names: Optional[set] = None  # sentinel: "all"
+        else:
+            target_names = (
+                set(requested_plugins)
+                | set(self._ALWAYS_INITIALIZE_PLUGINS)
+                | set(self._enrichment_only)
+            )
 
         # Identify plugins that opt into parallel init (I/O-heavy, like MCP)
         parallel_names = [
             name for name, plugin in self._plugins.items()
             if getattr(plugin, 'PARALLEL_INIT', False)
             and name not in self._exposed
+            and (target_names is None or name in target_names)
         ]
 
         # Pre-initialize I/O-heavy plugins in background threads so their
@@ -988,7 +1339,10 @@ class PluginRegistry:
             )
             for name in parallel_names:
                 plugin = self._plugins[name]
-                cfg = config.get(name)
+                # Server 0.6.129+: framework-key injection also for
+                # parallel-init path (PARALLEL_INIT plugins like MCP).
+                # See :meth:`_augment_plugin_config`.
+                cfg = self._augment_plugin_config(config.get(name))
                 _trace(f"Starting parallel init for plugin '{name}'")
                 futures[name] = executor.submit(plugin.initialize, cfg)
             executor.shutdown(wait=False)
@@ -997,7 +1351,17 @@ class PluginRegistry:
         # pre-initialized above, expose_tool() will find them already
         # initialized (their initialize() is idempotent) and skip the
         # initialization step.
+        skipped: List[str] = []
         for name in self._plugins:
+            if target_names is not None and name not in target_names:
+                # Plugin is discovered + registered but not requested
+                # by this session — skip both initialize() and tool
+                # exposure.  The plugin instance survives in
+                # ``self._plugins`` so introspection still works, but
+                # its tools won't appear in the session's tool list
+                # and its per-session ``initialize()`` cost is avoided.
+                skipped.append(name)
+                continue
             # If this plugin is being pre-initialized, wait for it first
             if name in futures:
                 try:
@@ -1007,6 +1371,12 @@ class PluginRegistry:
             if on_progress:
                 on_progress(name)
             self.expose_tool(name, config.get(name))
+
+        if skipped:
+            _trace(
+                f"expose_all: skipped initialize for {len(skipped)} "
+                f"plugins not requested by session: {sorted(skipped)}"
+            )
 
     def unexpose_all(self) -> None:
         """Stop exposing all plugins' tools."""
@@ -1058,9 +1428,14 @@ class PluginRegistry:
         self._workspace_path = path
         _trace(f"set_workspace_path: {path}")
 
-        # Broadcast to all exposed plugins that support it
-        for name in self._exposed:
-            plugin = self._plugins.get(name)
+        # Broadcast to ALL registered plugins that support it — not just the
+        # ones exposed to the model.  A runner-tier plugin can need the per-
+        # session workspace before/without model exposure (e.g. a pool-slot
+        # runner whose plugin was initialized at template time, or the notebook
+        # subprocess backend that spawns kernels rooted at the workspace).  The
+        # exposed-only scope was a #344-class propagation gap: registered-but-
+        # unexposed plugins silently kept their init-time (launch-dir) default.
+        for name, plugin in self._plugins.items():
             if plugin and hasattr(plugin, 'set_workspace_path'):
                 try:
                     plugin.set_workspace_path(path)
@@ -1075,6 +1450,140 @@ class PluginRegistry:
             The workspace path, or None if not set.
         """
         return self._workspace_path
+
+    def set_config_root(self, path: Optional[str]) -> None:
+        """Set the read-only framework-config root override and broadcast.
+
+        Plugins that implement ``set_config_root(path)`` will be
+        notified.  Plugins without that method are skipped (parity
+        with :meth:`set_workspace_path`).  When ``path`` is ``None``,
+        plugins fall back to ``<workspace_path>/.jaato/`` for config
+        reads (today's behavior).
+
+        Args:
+            path: Absolute path to the config root, or ``None`` to
+                clear any prior override.
+        """
+        self._config_root: Optional[str] = path
+        _trace(f"set_config_root: {path}")
+
+        # Parity with set_workspace_path: broadcast to ALL registered plugins,
+        # not just exposed ones (same #344-class propagation gap).
+        for name, plugin in self._plugins.items():
+            if plugin and hasattr(plugin, 'set_config_root'):
+                try:
+                    plugin.set_config_root(path)
+                    _trace(f"  -> {name}.set_config_root()")
+                except Exception as exc:
+                    _trace(f"  -> {name}.set_config_root() failed: {exc}")
+
+    def set_session_id(self, session_id: Optional[str]) -> None:
+        """Set the session_id injected into plugin configs at init.
+
+        Server 0.6.129+: matches :meth:`set_workspace_path` /
+        :meth:`set_config_root` shape but doesn't broadcast — session_id
+        doesn't change mid-session, so no broadcast hook needed.  The
+        value is read by :meth:`_augment_plugin_config` at
+        :meth:`expose_tool` time.
+
+        Args:
+            session_id: Session identifier, or ``None`` to clear.
+        """
+        self._session_id = session_id
+
+    def set_agent_name(self, agent_name: Optional[str]) -> None:
+        """Set the agent_name injected into plugin configs at init.
+
+        Server 0.6.129+: mirrors :meth:`set_session_id`.  Read by
+        plugins that emit trace logs scoped to the agent identity
+        (e.g. ``file_edit``, ``memory``).
+        """
+        self._agent_name = agent_name
+
+    def _augment_plugin_config(
+        self, config: Optional[Dict[str, Any]],
+    ) -> Optional[Dict[str, Any]]:
+        """Pre-populate plugin config with framework-known values.
+
+        Server 0.6.129+ structural fix.  Replaces the prior per-call-
+        site threading of framework values (``workspace_path``,
+        ``config_root``, ``session_id``, ``agent_name``) into
+        plugin_configs at ``core.py:1730`` (daemon-side) AND
+        ``server/runner/session.py:_bootstrap_session`` (runner-side).
+        Both sites had to manually populate these for every framework
+        concept that crossed the boundary — the "12 sites per
+        concept" pattern documented in
+        ``project_backlog_profile_field_propagation_duplication``.
+
+        Now: callers (daemon, runner, in-process subagent spawn) set
+        framework values on the registry via :meth:`set_workspace_path`
+        / :meth:`set_config_root` / :meth:`set_session_id` /
+        :meth:`set_agent_name` BEFORE calling
+        :meth:`expose_all` or :meth:`expose_tool`.  This method
+        augments the per-plugin config dict at every
+        ``plugin.initialize`` call site so each plugin sees the
+        framework values in its config without each caller having to
+        thread them per-plugin.
+
+        Operator-supplied values win (``setdefault`` semantics) —
+        explicit ``plugin_configs.<plugin>.workspace_path`` in a
+        profile YAML overrides the framework-known value.
+
+        Returns the augmented config dict, or the original
+        ``config`` if no framework values are set yet (preserving
+        the pre-fix behavior when callers bypass the setters).
+        """
+        framework_keys: Dict[str, Any] = {}
+        if self._workspace_path is not None:
+            framework_keys["workspace_path"] = self._workspace_path
+        if self._config_root is not None:
+            framework_keys["config_root"] = self._config_root
+        if self._session_id is not None:
+            framework_keys["session_id"] = self._session_id
+        if self._agent_name is not None:
+            framework_keys["agent_name"] = self._agent_name
+
+        if not framework_keys:
+            return config
+
+        augmented = dict(config) if config else {}
+        for k, v in framework_keys.items():
+            augmented.setdefault(k, v)
+        return augmented
+
+    def get_config_root(self) -> Optional[str]:
+        """Get the current read-only framework-config root override.
+
+        Returns:
+            The config_root override, or ``None`` if no override is in
+            effect (the default — loaders fall back to
+            ``<workspace_path>/.jaato/``).
+        """
+        return getattr(self, '_config_root', None)
+
+    def broadcast_history_cleared(self) -> None:
+        """Notify all plugins that the session history has been cleared.
+
+        Plugins implementing ``on_history_cleared()`` use this hook to
+        reset per-session enrichment tracking (e.g., which memory/
+        template/reference hints were already injected).  Without it,
+        enrichment plugins would never re-surface their hints after a
+        ``reset`` command, because their dedup state would still reflect
+        the wiped conversation.
+
+        Includes enrichment-only plugins since the main dedup consumers
+        (memory, references, template) live in either bucket depending on
+        how they were discovered.
+        """
+        _trace("broadcast_history_cleared")
+        for name in self._exposed | self._enrichment_only:
+            plugin = self._plugins.get(name)
+            if plugin and hasattr(plugin, 'on_history_cleared'):
+                try:
+                    plugin.on_history_cleared()
+                    _trace(f"  -> {name}.on_history_cleared()")
+                except Exception as exc:
+                    _trace(f"  -> {name}.on_history_cleared() failed: {exc}")
 
     def get_bootstrap_timings(self) -> Dict[str, dict]:
         """Get per-plugin bootstrap timing data.
@@ -1099,11 +1608,30 @@ class PluginRegistry:
                 result[name] = entry
         return result
 
-    def get_exposed_tool_schemas(self) -> List[ToolSchema]:
-        """Get ToolSchemas from all exposed plugins and core tools."""
+    def get_exposed_tool_schemas(
+        self, exclude_runner_tier: bool = False,
+    ) -> List[ToolSchema]:
+        """Get ToolSchemas from all exposed plugins and core tools.
+
+        ``exclude_runner_tier=True`` skips ``PLUGIN_TIER = "runner"``
+        plugins.  Used by the daemon-side tool-id-registry emit, whose
+        runner-tier tool names come from the runner via
+        ``session_get_tool_schemas`` — NOT a daemon-side walk.  Invoking a
+        runner-tier plugin's ``get_tool_schemas`` daemon-side runs its
+        filesystem discovery ON THE DAEMON (e.g. ``prompt_library``'s
+        prompt walk); on the event-loop thread during re-attach that
+        blocked the loop ~15s and self-blocked the register-RPC send.
+        """
         schemas = []
         # Add plugin tool schemas
         for name in self._exposed:
+            if exclude_runner_tier:
+                plugin = self._plugins.get(name)
+                tier = self._lookup_module_tier(
+                    getattr(type(plugin), "__module__", "")
+                ) if plugin is not None else None
+                if tier == "runner":
+                    continue
             try:
                 schemas.extend(self._plugins[name].get_tool_schemas())
             except Exception as exc:
@@ -1254,7 +1782,7 @@ class PluginRegistry:
         """Get ToolSchemas from exposed plugins and core tools, excluding disabled.
 
         This is what should be sent to the model - only enabled tools.
-        For plugins implementing StreamingCapable, auto-generates :stream
+        For plugins implementing StreamingCapable, auto-generates -stream
         variants for tools that support streaming.
 
         Returns:
@@ -1269,7 +1797,7 @@ class PluginRegistry:
                 enabled_schemas = [s for s in plugin_schemas if s.name not in self._disabled_tools]
                 schemas.extend(enabled_schemas)
 
-                # Auto-generate :stream variants for streaming-capable plugins
+                # Auto-generate -stream variants for streaming-capable plugins
                 if isinstance(plugin, StreamingCapable):
                     for schema in enabled_schemas:
                         if plugin.supports_streaming(schema.name):
@@ -1287,19 +1815,23 @@ class PluginRegistry:
         return schemas
 
     def _create_streaming_schema(self, base_schema: ToolSchema) -> ToolSchema:
-        """Create a :stream variant of a tool schema.
+        """Create a -stream variant of a tool schema.
 
         The streaming variant has the same parameters but different behavior -
         it returns immediately with initial chunks and continues streaming
         in the background.
 
-        Inherits category and discoverability from the base schema.
+        Inherits category and discoverability from the base schema.  The
+        suffix is ``-stream`` (server 0.6.65+) — was ``:stream`` previously,
+        but the colon failed strict upstream tool-name regexes
+        (Anthropic / Bedrock / OpenAI all enforce ``^[a-zA-Z0-9_-]{1,128}$``).
+        Hyphen is universally regex-safe.
 
         Args:
             base_schema: The base tool schema to create a streaming variant for.
 
         Returns:
-            A new ToolSchema for the :stream variant.
+            A new ToolSchema for the -stream variant.
         """
         streaming_description = (
             f"{base_schema.description} "
@@ -1308,7 +1840,7 @@ class PluginRegistry:
             f"Call dismiss_stream(stream_id) when you have enough results.)"
         )
         return ToolSchema(
-            name=f"{base_schema.name}:stream",
+            name=f"{base_schema.name}-stream",
             description=streaming_description,
             parameters=base_schema.parameters,
             category=base_schema.category,
@@ -1322,7 +1854,7 @@ class PluginRegistry:
         with discoverability='core'. Other tools can be discovered via
         introspection (list_tools, get_tool_schemas).
 
-        For plugins implementing StreamingCapable, auto-generates :stream
+        For plugins implementing StreamingCapable, auto-generates -stream
         variants for core tools that support streaming.
 
         Returns:
@@ -1337,11 +1869,11 @@ class PluginRegistry:
                 core_schemas = [
                     s for s in plugin_schemas
                     if s.name not in self._disabled_tools
-                    and getattr(s, 'discoverability', 'discoverable') == 'core'
+                    and getattr(s, 'discoverability', DISCOVERABILITY_DEFERRED) == DISCOVERABILITY_EAGER
                 ]
                 schemas.extend(core_schemas)
 
-                # Auto-generate :stream variants for streaming-capable plugins (core tools)
+                # Auto-generate -stream variants for streaming-capable plugins (core tools)
                 if isinstance(plugin, StreamingCapable):
                     for schema in core_schemas:
                         if plugin.supports_streaming(schema.name):
@@ -1354,7 +1886,7 @@ class PluginRegistry:
         # Add core tool schemas that have discoverability='core' (excluding disabled)
         for name, schema in self._core_tools.items():
             if name not in self._disabled_tools:
-                if getattr(schema, 'discoverability', 'discoverable') == 'core':
+                if getattr(schema, 'discoverability', DISCOVERABILITY_DEFERRED) == DISCOVERABILITY_EAGER:
                     schemas.append(schema)
 
         return schemas
@@ -1397,24 +1929,24 @@ class PluginRegistry:
         """Check if a tool name is a streaming variant.
 
         Args:
-            tool_name: Tool name to check (e.g., "grep_content:stream").
+            tool_name: Tool name to check (e.g., "grep_content-stream").
 
         Returns:
-            True if this is a :stream variant.
+            True if this is a -stream variant.
         """
-        return tool_name.endswith(":stream")
+        return tool_name.endswith("-stream")
 
     def get_base_tool_name(self, tool_name: str) -> str:
         """Get the base tool name from a streaming variant.
 
         Args:
-            tool_name: Tool name (e.g., "grep_content:stream").
+            tool_name: Tool name (e.g., "grep_content-stream").
 
         Returns:
             Base tool name (e.g., "grep_content").
         """
         if self.is_streaming_tool(tool_name):
-            return tool_name[:-7]  # Remove ":stream" suffix
+            return tool_name[:-7]  # Remove "-stream" suffix
         return tool_name
 
     def get_streaming_plugin(self, tool_name: str) -> Optional[StreamingCapable]:
@@ -1477,7 +2009,7 @@ class PluginRegistry:
             return False
         try:
             for schema in plugin.get_tool_schemas():
-                if getattr(schema, 'discoverability', 'discoverable') == 'core':
+                if getattr(schema, 'discoverability', DISCOVERABILITY_DEFERRED) == DISCOVERABILITY_EAGER:
                     return True
         except Exception:
             pass

@@ -1,0 +1,11 @@
+{
+  "type": "permission.input_mode",
+  "timestamp": "<TIMESTAMP>",
+  "agent_id": "",
+  "request_id": "",
+  "tool_name": "",
+  "call_id": null,
+  "response_options": [],
+  "tool_args": null,
+  "editable_metadata": null
+}

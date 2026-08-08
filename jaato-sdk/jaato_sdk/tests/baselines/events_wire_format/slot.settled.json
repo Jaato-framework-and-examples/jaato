@@ -1,0 +1,10 @@
+{
+  "type": "slot.settled",
+  "timestamp": "<TIMESTAMP>",
+  "session_id": "",
+  "agent_id": null,
+  "cascade_driver_id": null,
+  "was_warm": false,
+  "pool_slot_pid": 0,
+  "terminal_reason": null
+}

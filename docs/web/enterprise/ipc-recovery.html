@@ -120,6 +120,7 @@
         <div class="sidebar-title">Getting Started</div>
         <ul class="sidebar-nav">
           <li><a href="../getting-started/quickstart.html">Quickstart</a></li>
+          <li><a href="../getting-started/typescript-sdk.html">TypeScript SDK</a></li>
         </ul>
       </div>
 
@@ -194,6 +195,13 @@
           <li><a href="../api-reference/providers/ollama.html">Ollama</a></li>
           <li><a href="../api-reference/providers/zhipuai.html">Zhipu AI</a></li>
           <li><a href="../api-reference/providers/nim.html">NVIDIA NIM</a></li>
+          <li><a href="../api-reference/providers/lmstudio.html">LM Studio</a></li>
+          <li><a href="../api-reference/providers/vllm.html">vLLM</a></li>
+          <li><a href="../api-reference/providers/tensorrt-llm.html">TensorRT-LLM</a></li>
+          <li><a href="../api-reference/providers/openrouter.html">OpenRouter</a></li>
+          <li><a href="../api-reference/providers/nebius.html">Nebius</a></li>
+          <li><a href="../api-reference/providers/ovhcloud.html">OVHcloud</a></li>
+          <li><a href="../api-reference/providers/triton.html">Triton</a></li>
         </ul>
       </div>
     </aside>
@@ -210,6 +218,20 @@
           <strong>Practical integration guide:</strong> For a step-by-step guide on using
           <code>IPCRecoveryClient</code> in your client code, see the
           <a href="../guides/connection-recovery.html">Connection Recovery Guide</a>.
+        </div>
+
+        <div class="callout callout-info" style="margin-top: 16px; padding: 16px 20px; border-left: 4px solid #0ea5e9; background: rgba(14, 165, 233, 0.08); border-radius: 4px;">
+          <strong>Remote daemons — <code>WSRecoveryClient</code>:</strong> the same
+          state machine, backoff, and session-reattachment design described here
+          also backs <code>WSRecoveryClient</code>, the WebSocket
+          (<code>ws://</code> / <code>wss://</code>) counterpart of
+          <code>IPCRecoveryClient</code>. It enables secure remote recovery: pair it
+          with <code>ssl=</code> / <code>ca=</code> for self-signed <code>wss://</code>
+          TLS (scoped per connection, never <code>os.environ</code>) and the
+          server's bearer-token auth. Reach for it via
+          <code>jaato.session(mode="ws", recovery=True, …)</code>; see the
+          <a href="../guides/connection-recovery.html#ws-recovery-client">Connection
+          Recovery Guide</a>.
         </div>
       </section>
 

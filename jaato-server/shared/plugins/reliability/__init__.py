@@ -8,6 +8,7 @@ tools are escalated to require explicit user approval.
 # Plugin kind identifier for registry discovery
 PLUGIN_KIND = "tool"
 
+PLUGIN_TIER = "runner"
 from .plugin import (
     ReliabilityPlugin,
     ReliabilityPermissionWrapper,

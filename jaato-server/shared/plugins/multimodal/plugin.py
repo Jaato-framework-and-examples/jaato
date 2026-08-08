@@ -30,9 +30,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Any, Callable, Optional
 
-from jaato_sdk.plugins.model_provider.types import ToolSchema
+from jaato_sdk.plugins.model_provider.types import (
+    ToolSchema,
+    DISCOVERABILITY_DEFERRED,
+)
 from jaato_sdk.plugins.base import PromptEnrichmentResult, UserCommand
 
+from shared.plugins.runner_forwarding import RunnerForwardingMixin
 from shared.trace import trace as _trace_write
 
 
@@ -45,7 +49,7 @@ IMAGE_EXTENSIONS = {
 AT_REFERENCE_PATTERN = re.compile(r'@([\w./\-]+\.\w+)')
 
 
-class MultimodalPlugin:
+class MultimodalPlugin(RunnerForwardingMixin):
     """Plugin that provides multimodal image viewing capabilities.
 
     This plugin:
@@ -119,6 +123,20 @@ class MultimodalPlugin:
         self._trace("shutdown")
         self._detected_images.clear()
         self._initialized = False
+
+    def reset_for_next_session(self) -> None:
+        """Cascade-sharing reset — NO-OP for this plugin.
+
+        Phase 1 hotfix (server 0.6.148+): added to satisfy the
+        ``ToolPlugin`` / ``EnrichmentPlugin`` protocol's runtime
+        ``isinstance`` check.  Per Daniel's litmus test (see
+        ``docs/design/runner-cascade-sharing.md`` §4.3), this
+        plugin holds no per-session state that the next cascade
+        session would benefit from having cleared.  Override in
+        future PRs if the litmus test changes.
+        """
+        pass
+
 
     def get_config_schema(self) -> Dict[str, Any]:
         """Return JSON Schema for this plugin's configuration."""
@@ -246,12 +264,22 @@ class MultimodalPlugin:
                 "required": ["path"]
             },
             category="filesystem",
-            discoverability="discoverable",
+            discoverability=DISCOVERABILITY_DEFERRED,
         )]
 
     def get_executors(self) -> Dict[str, Callable[[Dict[str, Any]], Any]]:
-        """Return the executor mapping."""
-        return {'viewImage': self._execute_view_image}
+        """Return the executor mapping.
+
+        Phase 3 §3.4 wave 1: when a runner is attached
+        (``registry.runner_rpc`` set), the wrapper forwards the call
+        via ``tool.execute`` RPC; the actual file-read happens in
+        the kernel-confined runner so the workspace path stays
+        contained.  Falls through to the in-process body for
+        sessions without a runner (no-apparmor / pre-runner clients).
+        """
+        return self.wrap_executors_for_runner_forwarding({
+            'viewImage': self._execute_view_image,
+        })
 
     def _execute_view_image(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Execute the viewImage tool.

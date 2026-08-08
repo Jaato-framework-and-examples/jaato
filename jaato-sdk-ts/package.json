@@ -1,0 +1,40 @@
+{
+  "name": "@jaato/sdk",
+  "version": "0.6.0",
+  "description": "Jaato SDK for TypeScript / JavaScript — protocol and client library for jaato-server. Mirrors the Python jaato-sdk method-for-method.",
+  "license": "BUSL-1.1",
+  "author": "apanoia",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Jaato-framework-and-examples/jaato.git",
+    "directory": "jaato-sdk-ts"
+  },
+  "keywords": [
+    "jaato",
+    "sdk",
+    "websocket",
+    "client",
+    "llm",
+    "agent"
+  ],
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "src",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "test": "node --import tsx --test --test-force-exit src/client.test.ts src/convenience.test.ts",
+    "test:load": "node --import tsx --test --test-force-exit src/client.load.test.ts",
+    "codegen": "cd .. && .venv/bin/python scripts/codegen_ts_events.py",
+    "codegen:check": "cd .. && .venv/bin/python scripts/codegen_ts_events.py --check"
+  },
+  "devDependencies": {
+    "json-schema-to-typescript": "^15.0.0",
+    "tsx": "^4.21.0",
+    "typescript": "^5.4.0"
+  }
+}

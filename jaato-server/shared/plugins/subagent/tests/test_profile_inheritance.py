@@ -8,6 +8,7 @@ from shared.plugins.subagent.config import (
     _normalize_inherits,
     resolve_profiles,
 )
+from shared.runtime_limits import RuntimeLimits
 
 
 class TestNormalizeInherits:
@@ -27,6 +28,49 @@ class TestNormalizeInherits:
 
     def test_non_string(self):
         assert _normalize_inherits(42) is None
+
+
+class TestSuppressBaseInstructionsMerge:
+    """``suppress_base_instructions`` merges by UNION across the chain — a
+    piece dropped by any layer stays dropped (a minimalist parent can't be
+    silently overridden)."""
+
+    def test_union_of_parent_and_child_pieces(self):
+        profiles = {
+            # Parent drops only the framework constants.
+            "base": SubagentProfile(
+                name="base", description="Base",
+                suppress_base_instructions={"constants": True},
+            ),
+            # Child drops only the disk layer.
+            "child": SubagentProfile(
+                name="child", description="Child",
+                suppress_base_instructions={"disk": True},
+                inherits=["base"],
+            ),
+        }
+        resolved, errors = resolve_profiles(profiles)
+        assert not errors
+        # Union: both pieces suppressed.
+        assert resolved["child"].suppress_base_instructions == frozenset(
+            {"disk", "constants"}
+        )
+
+    def test_child_empty_still_inherits_parent_suppression(self):
+        profiles = {
+            "base": SubagentProfile(
+                name="base", description="Base",
+                suppress_base_instructions=True,  # -> {disk, constants}
+            ),
+            "child": SubagentProfile(
+                name="child", description="Child", inherits=["base"],
+            ),
+        }
+        resolved, errors = resolve_profiles(profiles)
+        assert not errors
+        assert resolved["child"].suppress_base_instructions == frozenset(
+            {"disk", "constants"}
+        )
 
 
 class TestResolveSingleInheritance:
@@ -112,6 +156,79 @@ class TestResolveSingleInheritance:
         assert not errors
         assert resolved["child"].model == "claude-sonnet-4-20250514"
 
+    def test_child_inherits_runtime_limits(self):
+        limits = RuntimeLimits(memory_max_mb=512, pids_max=256)
+        profiles = {
+            "base": SubagentProfile(
+                name="base", description="Base",
+                runtime_limits=limits,
+            ),
+            "child": SubagentProfile(
+                name="child", description="Child",
+                inherits=["base"],
+            ),
+        }
+        resolved, errors = resolve_profiles(profiles)
+        assert not errors
+        assert resolved["child"].runtime_limits == limits
+
+    def test_child_overrides_runtime_limits(self):
+        profiles = {
+            "base": SubagentProfile(
+                name="base", description="Base",
+                runtime_limits=RuntimeLimits(memory_max_mb=512),
+            ),
+            "child": SubagentProfile(
+                name="child", description="Child",
+                runtime_limits=RuntimeLimits(memory_max_mb=2048),
+                inherits=["base"],
+            ),
+        }
+        resolved, errors = resolve_profiles(profiles)
+        assert not errors
+        assert resolved["child"].runtime_limits.memory_max_mb == 2048
+
+    def test_runtime_limits_conflict_between_parents_is_error(self):
+        # Two parents declaring different limits without child override
+        # must produce a conflict (scalar-override semantics).
+        profiles = {
+            "p1": SubagentProfile(
+                name="p1", description="",
+                runtime_limits=RuntimeLimits(memory_max_mb=512),
+            ),
+            "p2": SubagentProfile(
+                name="p2", description="",
+                runtime_limits=RuntimeLimits(memory_max_mb=2048),
+            ),
+            "child": SubagentProfile(
+                name="child", description="",
+                inherits=["p1", "p2"],
+            ),
+        }
+        resolved, errors = resolve_profiles(profiles)
+        assert "child" in errors
+        assert "runtime_limits" in errors["child"]
+
+    def test_runtime_limits_parents_agree_no_conflict(self):
+        # Two parents declaring the *same* limits should merge without
+        # conflict — frozen dataclass equality drives the agreement check.
+        limits = RuntimeLimits(memory_max_mb=512, pids_max=256)
+        profiles = {
+            "p1": SubagentProfile(
+                name="p1", description="", runtime_limits=limits,
+            ),
+            "p2": SubagentProfile(
+                name="p2", description="", runtime_limits=limits,
+            ),
+            "child": SubagentProfile(
+                name="child", description="",
+                inherits=["p1", "p2"],
+            ),
+        }
+        resolved, errors = resolve_profiles(profiles)
+        assert not errors
+        assert resolved["child"].runtime_limits == limits
+
     def test_system_instructions_concatenated(self):
         profiles = {
             "base": SubagentProfile(
@@ -174,6 +291,38 @@ class TestResolveSingleInheritance:
         resolved, errors = resolve_profiles(profiles)
         assert not errors
         assert resolved["child"].preloaded_plugins == {"cli", "memory", "todo"}
+
+    def test_tool_scopes_per_plugin_override(self):
+        # Parent scopes file_edit + cli; child re-scopes file_edit (wins)
+        # and leaves cli untouched (parent's scope survives).
+        profiles = {
+            "base": SubagentProfile(
+                name="base", description="Base",
+                tool_scopes={"file_edit": ["readFile"], "cli": ["run"]},
+            ),
+            "child": SubagentProfile(
+                name="child", description="Child",
+                tool_scopes={"file_edit": ["readFile", "writeFile"]},
+                inherits=["base"],
+            ),
+        }
+        resolved, errors = resolve_profiles(profiles)
+        assert not errors
+        assert resolved["child"].tool_scopes == {
+            "file_edit": ["readFile", "writeFile"],  # child wins
+            "cli": ["run"],                            # parent survives
+        }
+
+    def test_tool_scopes_empty_when_unset(self):
+        profiles = {
+            "base": SubagentProfile(name="base", description="Base"),
+            "child": SubagentProfile(
+                name="child", description="Child", inherits=["base"],
+            ),
+        }
+        resolved, errors = resolve_profiles(profiles)
+        assert not errors
+        assert resolved["child"].tool_scopes == {}
 
 
 class TestResolveMultipleInheritance:
@@ -426,3 +575,350 @@ class TestNoInheritance:
         resolved, errors = resolve_profiles({})
         assert not errors
         assert resolved == {}
+
+
+class TestCompletionPayloadSchemaInheritance:
+    """Scalar-override semantics for completion_payload_schema."""
+
+    SAMPLE = {"type": "object", "properties": {"summary": {"type": "string"}}}
+    OTHER = {"type": "object", "properties": {"foo": {"type": "string"}}}
+
+    def test_child_inherits_parent_schema(self):
+        profiles = {
+            "base": SubagentProfile(
+                name="base", description="Base",
+                completion_payload_schema=self.SAMPLE,
+            ),
+            "child": SubagentProfile(
+                name="child", description="Child",
+                inherits=["base"],
+            ),
+        }
+        resolved, errors = resolve_profiles(profiles)
+        assert not errors
+        assert resolved["child"].completion_payload_schema == self.SAMPLE
+
+    def test_child_overrides_parent_schema(self):
+        profiles = {
+            "base": SubagentProfile(
+                name="base", description="Base",
+                completion_payload_schema=self.SAMPLE,
+            ),
+            "child": SubagentProfile(
+                name="child", description="Child",
+                completion_payload_schema=self.OTHER,
+                inherits=["base"],
+            ),
+        }
+        resolved, errors = resolve_profiles(profiles)
+        assert not errors
+        assert resolved["child"].completion_payload_schema == self.OTHER
+
+    def test_two_parents_disagree_is_conflict(self):
+        profiles = {
+            "p1": SubagentProfile(
+                name="p1", description="P1",
+                completion_payload_schema=self.SAMPLE,
+            ),
+            "p2": SubagentProfile(
+                name="p2", description="P2",
+                completion_payload_schema=self.OTHER,
+            ),
+            "child": SubagentProfile(
+                name="child", description="Child",
+                inherits=["p1", "p2"],
+            ),
+        }
+        resolved, errors = resolve_profiles(profiles)
+        assert "child" in errors
+        assert "completion_payload_schema" in errors["child"]
+
+    def test_two_parents_disagree_child_overrides_resolves(self):
+        profiles = {
+            "p1": SubagentProfile(
+                name="p1", description="P1",
+                completion_payload_schema=self.SAMPLE,
+            ),
+            "p2": SubagentProfile(
+                name="p2", description="P2",
+                completion_payload_schema=self.OTHER,
+            ),
+            "child": SubagentProfile(
+                name="child", description="Child",
+                completion_payload_schema=self.SAMPLE,
+                inherits=["p1", "p2"],
+            ),
+        }
+        resolved, errors = resolve_profiles(profiles)
+        assert not errors
+        assert resolved["child"].completion_payload_schema == self.SAMPLE
+
+    def test_path_string_inherited(self):
+        profiles = {
+            "base": SubagentProfile(
+                name="base", description="Base",
+                completion_payload_schema="triage.json",
+            ),
+            "child": SubagentProfile(
+                name="child", description="Child",
+                inherits=["base"],
+            ),
+        }
+        resolved, errors = resolve_profiles(profiles)
+        assert not errors
+        assert resolved["child"].completion_payload_schema == "triage.json"
+
+    def test_no_schema_anywhere_stays_none(self):
+        profiles = {
+            "base": SubagentProfile(name="base", description="Base"),
+            "child": SubagentProfile(
+                name="child", description="Child",
+                inherits=["base"],
+            ),
+        }
+        resolved, errors = resolve_profiles(profiles)
+        assert not errors
+        assert resolved["child"].completion_payload_schema is None
+
+
+class TestApparmorInheritance:
+    """PR-A (2026-05-14): ``apparmor`` follows OR semantics across the
+    inheritance chain.  Once any layer (parents or child) sets it True,
+    the resolved profile is confined.  Rationale matches
+    ``suppress_base_instructions``: a security primitive shouldn't be
+    silently downgradeable by an inheritor.
+    """
+
+    def test_default_unset_resolves_false(self):
+        profiles = {
+            "base": SubagentProfile(name="base", description="Base"),
+            "child": SubagentProfile(
+                name="child", description="Child", inherits=["base"],
+            ),
+        }
+        resolved, errors = resolve_profiles(profiles)
+        assert not errors
+        assert resolved["child"].apparmor is False
+
+    def test_parent_true_propagates_to_child(self):
+        """Parent declares apparmor=True; child without an explicit
+        value inherits it (the security gradient flows downward)."""
+        profiles = {
+            "secure_base": SubagentProfile(
+                name="secure_base", description="Base", apparmor=True,
+            ),
+            "child": SubagentProfile(
+                name="child", description="Child", inherits=["secure_base"],
+            ),
+        }
+        resolved, errors = resolve_profiles(profiles)
+        assert not errors
+        assert resolved["child"].apparmor is True
+
+    def test_child_true_with_unconfined_parent_still_true(self):
+        """Child opts in explicitly even if parents didn't."""
+        profiles = {
+            "loose": SubagentProfile(name="loose", description="Loose"),
+            "child": SubagentProfile(
+                name="child", description="Child",
+                inherits=["loose"], apparmor=True,
+            ),
+        }
+        resolved, errors = resolve_profiles(profiles)
+        assert not errors
+        assert resolved["child"].apparmor is True
+
+    def test_child_cannot_disable_parent_confinement(self):
+        """OR semantics: an inheritor setting apparmor=False
+        cannot silently downgrade a confined parent.  This matches
+        ``suppress_base_instructions``'s rationale — security
+        primitives are one-way (off → on, never back).  An inheritor
+        that genuinely wants unconfined operation should not inherit
+        from a confined parent."""
+        profiles = {
+            "confined": SubagentProfile(
+                name="confined", description="Confined", apparmor=True,
+            ),
+            "child": SubagentProfile(
+                name="child", description="Child",
+                inherits=["confined"], apparmor=False,
+            ),
+        }
+        resolved, errors = resolve_profiles(profiles)
+        assert not errors
+        # Parent's True wins via OR semantics.
+        assert resolved["child"].apparmor is True
+
+    def test_multi_parent_any_true_wins(self):
+        """One confined parent + one unconfined parent → resolved True."""
+        profiles = {
+            "p_confined": SubagentProfile(
+                name="p_confined", description="P1", apparmor=True,
+            ),
+            "p_loose": SubagentProfile(
+                name="p_loose", description="P2", apparmor=False,
+            ),
+            "child": SubagentProfile(
+                name="child", description="Child",
+                inherits=["p_confined", "p_loose"],
+            ),
+        }
+        resolved, errors = resolve_profiles(profiles)
+        assert not errors
+        assert resolved["child"].apparmor is True
+
+
+class TestApparmorFragmentsInheritance:
+    """Piece 1 (2026-05-14): ``apparmor_fragments`` follows
+    CHILD-REPLACES-PARENT semantics across the inheritance chain.
+    Distinct from ``apparmor`` (bool, OR-merged) above: this is the
+    list of *which* fragments to compose, and replace lets cascade
+    authors SCOPE DOWN from a broader parent set (least-privilege).
+    """
+
+    def test_absent_everywhere_resolves_none(self):
+        """No declaration anywhere → None.  Workspace-default
+        "compose all fragments" applies at render time
+        (back-compat for non-cascade workspaces)."""
+        profiles = {
+            "base": SubagentProfile(name="base", description="Base"),
+            "child": SubagentProfile(
+                name="child", description="Child", inherits=["base"],
+            ),
+        }
+        resolved, errors = resolve_profiles(profiles)
+        assert not errors
+        assert resolved["child"].apparmor_fragments is None
+
+    def test_parent_declaration_propagates_to_child(self):
+        """Parent declares a list; child inherits it verbatim when
+        child doesn't override.  Pattern for cascade base profile
+        declaring the cross-stage commons."""
+        profiles = {
+            "base": SubagentProfile(
+                name="base", description="Base",
+                apparmor_fragments=["jaato-kb-enablement-2"],
+            ),
+            "child": SubagentProfile(
+                name="child", description="Child", inherits=["base"],
+            ),
+        }
+        resolved, errors = resolve_profiles(profiles)
+        assert not errors
+        assert resolved["child"].apparmor_fragments == ["jaato-kb-enablement-2"]
+
+    def test_child_replaces_parent_list(self):
+        """Child's list REPLACES parent's — does not union.  This is
+        the load-bearing semantic for least-privilege scoping:
+        host_validator declares ``[host_validator]`` and gets ONLY
+        that fragment, not the union with the parent's set."""
+        profiles = {
+            "base": SubagentProfile(
+                name="base", description="Base",
+                apparmor_fragments=["jaato-kb-enablement-2"],
+            ),
+            "host_validator": SubagentProfile(
+                name="host_validator", description="Host validator",
+                inherits=["base"],
+                apparmor_fragments=["host_validator"],
+            ),
+        }
+        resolved, errors = resolve_profiles(profiles)
+        assert not errors
+        # NOT the union with parent's ["jaato-kb-enablement-2"].
+        assert resolved["host_validator"].apparmor_fragments == ["host_validator"]
+
+    def test_child_empty_list_replaces_parent(self):
+        """Explicit ``apparmor_fragments: []`` on the child is the
+        maximally locked-down stage — composes NO fragments, even
+        if the parent declared some."""
+        profiles = {
+            "base": SubagentProfile(
+                name="base", description="Base",
+                apparmor_fragments=["jaato-kb-enablement-2"],
+            ),
+            "locked_down": SubagentProfile(
+                name="locked_down", description="Locked down",
+                inherits=["base"],
+                apparmor_fragments=[],
+            ),
+        }
+        resolved, errors = resolve_profiles(profiles)
+        assert not errors
+        assert resolved["locked_down"].apparmor_fragments == []
+
+    def test_cascade_regression_pin(self):
+        """The load-bearing least-privilege contract for cascades
+        (peer's 2026-05-14 design ask).  Setup mirrors the
+        kb-enablement-2.0 cascade:
+
+        - ``_base`` declares ``[jaato-kb-enablement-2]`` (commons)
+        - ``host_validator`` overrides to ``[host_validator]``
+          (its stack-specific binary-exec grants)
+        - ``codegen`` overrides to ``[]`` (no fragments — pure
+          read of workspace tree)
+
+        Assert that the resolved fragments for ``codegen`` do
+        NOT include ``host_validator`` — i.e. the binary-exec
+        grants stay scoped to the host_validator stage.  Without
+        replace semantics (e.g. if we'd union'd), codegen would
+        inherit the base's set, and the leak that motivated this
+        PR persists.  This test is the contract."""
+        profiles = {
+            "_base": SubagentProfile(
+                name="_base", description="Base",
+                apparmor_fragments=["jaato-kb-enablement-2"],
+            ),
+            "host_validator": SubagentProfile(
+                name="host_validator", description="Host validator",
+                inherits=["_base"],
+                apparmor_fragments=["host_validator"],
+            ),
+            "codegen": SubagentProfile(
+                name="codegen", description="Codegen",
+                inherits=["_base"],
+                apparmor_fragments=[],
+            ),
+            "transform": SubagentProfile(
+                name="transform", description="Transform",
+                inherits=["_base"],
+                # No override — inherits base's [jaato-kb-enablement-2]
+            ),
+        }
+        resolved, errors = resolve_profiles(profiles)
+        assert not errors
+        # host_validator: scoped to its own stage.
+        assert resolved["host_validator"].apparmor_fragments == ["host_validator"]
+        # codegen: locked down completely.
+        assert resolved["codegen"].apparmor_fragments == []
+        # transform: inherits base's commons (no host_validator leak).
+        assert resolved["transform"].apparmor_fragments == ["jaato-kb-enablement-2"]
+        # Sanity: NONE of the children that overrode inherit
+        # host_validator's grants.
+        assert "host_validator" not in (resolved["codegen"].apparmor_fragments or [])
+        assert "host_validator" not in (resolved["transform"].apparmor_fragments or [])
+
+    def test_multi_parent_first_declaration_wins(self):
+        """Two parents both declare; resolution walks parents in
+        order and uses the first non-None.  The current merge order
+        is parents-in-declared-order; child inheriting from
+        [p1, p2] picks p1's value when both declare.  Pin so any
+        future reordering surfaces here."""
+        profiles = {
+            "p1": SubagentProfile(
+                name="p1", description="P1",
+                apparmor_fragments=["a", "b"],
+            ),
+            "p2": SubagentProfile(
+                name="p2", description="P2",
+                apparmor_fragments=["c", "d"],
+            ),
+            "child": SubagentProfile(
+                name="child", description="Child",
+                inherits=["p1", "p2"],
+            ),
+        }
+        resolved, errors = resolve_profiles(profiles)
+        assert not errors
+        # p1 declared first → its value wins.
+        assert resolved["child"].apparmor_fragments == ["a", "b"]

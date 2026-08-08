@@ -61,18 +61,29 @@ def discover_references(
         else:
             project_root = str(resolved_refs.parent)
 
-    if not refs_path.exists():
-        logger.debug("References directory does not exist: %s", refs_path)
-        return []
-
-    if not refs_path.is_dir():
-        logger.warning("References path is not a directory: %s", refs_path)
+    try:
+        if not refs_path.exists():
+            logger.debug("References directory does not exist: %s", refs_path)
+            return []
+        if not refs_path.is_dir():
+            logger.warning("References path is not a directory: %s", refs_path)
+            return []
+        entries = sorted(refs_path.iterdir())
+    except OSError as exc:
+        # Inaccessible directory: a confined session correctly denied this tier
+        # (e.g. ~/.jaato/references under AppArmor — exists() raises
+        # PermissionError, which pathlib does NOT ignore for EACCES).  This is
+        # an OPTIONAL tier: treat as "no references here" rather than aborting
+        # the load, so the workspace tier (resolved by set_workspace_path ->
+        # _reload_catalog) still loads.
+        logger.debug(
+            "References directory %s not scannable (%s); skipping", refs_path, exc)
         return []
 
     sources: List[ReferenceSource] = []
 
     # Scan for reference files
-    for file_path in sorted(refs_path.iterdir()):
+    for file_path in entries:
         if not file_path.is_file():
             continue
 
@@ -164,6 +175,9 @@ class ReferencesConfig:
         embedding_model: Model name used to produce the sidecar embeddings.
         embedding_dimensions: Dimensionality of the sidecar embeddings.
         embedding_sidecar: Filename of the ``.npy`` sidecar file (relative to config dir).
+        embedding_rows: Ordered list of reference ids, one per sidecar row.
+            ``embedding_rows[i]`` is the id of the reference whose vector
+            lives at matrix row ``i``. None when the bundle has no sidecar.
     """
 
     version: str = "1.0"
@@ -186,6 +200,7 @@ class ReferencesConfig:
     embedding_model: Optional[str] = None
     embedding_dimensions: Optional[int] = None
     embedding_sidecar: Optional[str] = None
+    embedding_rows: Optional[List[str]] = None
 
 
 class ConfigValidationError(Exception):
@@ -397,20 +412,17 @@ def validate_reference_file(data: Dict[str, Any]) -> Tuple[bool, List[str], List
                         f"'contents.{key}' must be a string (relative subfolder path) or null"
                     )
 
-    # Validate embedding metadata
+    # Validate embedding metadata.
+    # Row position lives on the bundle's embedding_config.json (in the
+    # 'rows' list), not on the reference itself — so we only check the
+    # source_hash fingerprint here. If a legacy 'index' key is still present
+    # we warn, since it is ignored and stale.
     embedding = data.get("embedding")
     if embedding is not None:
         if not isinstance(embedding, dict):
             errors.append("'embedding' must be an object")
         else:
-            emb_index = embedding.get("index")
             emb_hash = embedding.get("source_hash")
-            if emb_index is None:
-                errors.append("'embedding.index' is required")
-            elif not isinstance(emb_index, int):
-                errors.append("'embedding.index' must be an integer")
-            elif emb_index < 0:
-                errors.append("'embedding.index' must be non-negative")
             if emb_hash is None:
                 errors.append("'embedding.source_hash' is required")
             elif not isinstance(emb_hash, str):
@@ -418,6 +430,11 @@ def validate_reference_file(data: Dict[str, Any]) -> Tuple[bool, List[str], List
             elif not emb_hash.startswith("sha256:"):
                 warnings.append(
                     "'embedding.source_hash' should start with 'sha256:' prefix"
+                )
+            if "index" in embedding:
+                warnings.append(
+                    "'embedding.index' is obsolete — row ordering lives in "
+                    "embedding_config.json under 'rows'. This key is ignored."
                 )
 
     return len(errors) == 0, errors, warnings
@@ -522,6 +539,7 @@ def _load_embedding_config(config: ReferencesConfig, workspace_path: str) -> Non
     model = raw.get("embedding_model")
     dimensions = raw.get("embedding_dimensions")
     sidecar = raw.get("embedding_sidecar")
+    rows = raw.get("rows")
 
     if not model or not dimensions or not sidecar:
         logger.warning(
@@ -531,17 +549,26 @@ def _load_embedding_config(config: ReferencesConfig, workspace_path: str) -> Non
         )
         return
 
+    if not isinstance(rows, list) or not all(isinstance(r, str) for r in rows):
+        logger.warning(
+            "Embedding config 'rows' must be a list of reference ids: %s. "
+            "Semantic matching will be disabled until the bundle is re-indexed.",
+            emb_config_path,
+        )
+        return
+
     config.embedding_model = model
     config.embedding_dimensions = dimensions
     config.embedding_sidecar = sidecar
+    config.embedding_rows = rows
     # Set config_base_path so the plugin can resolve the sidecar path
     if config.config_base_path is None:
         config.config_base_path = str(refs_dir.resolve())
 
     logger.info(
         "Loaded embedding config from '%s': model='%s', dimensions=%d, "
-        "sidecar='%s'",
-        emb_config_path, model, dimensions, sidecar,
+        "sidecar='%s', rows=%d",
+        emb_config_path, model, dimensions, sidecar, len(rows),
     )
 
 
@@ -584,9 +611,16 @@ def load_config(
             default_paths.append(ws / ".references.json")
         default_paths.append(Path.home() / ".config" / "jaato" / "references.json")
         for default_path in default_paths:
-            if default_path.exists():
-                path = str(default_path)
-                break
+            try:
+                if default_path.exists():
+                    path = str(default_path)
+                    break
+            except OSError:
+                # A confined session is correctly denied this default location
+                # (e.g. ~/.config/jaato/references.json under AppArmor — exists()
+                # raises PermissionError for EACCES, it does not return False).
+                # Skip it and try the next candidate.
+                continue
 
     # Start with defaults
     config = ReferencesConfig(
@@ -641,6 +675,7 @@ def load_config(
             embedding_model=raw_config.get("embedding_model"),
             embedding_dimensions=raw_config.get("embedding_dimensions"),
             embedding_sidecar=raw_config.get("embedding_sidecar"),
+            embedding_rows=raw_config.get("rows") if isinstance(raw_config.get("rows"), list) else None,
         )
 
     # Auto-discover references if enabled

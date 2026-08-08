@@ -72,6 +72,27 @@ class TestAuthentication:
 
         assert "GITHUB_TOKEN" in str(exc_info.value)
 
+    def test_verify_auth_reads_config_param_before_initialize(self):
+        """verify_auth must read the ``config`` PARAMETER, not
+        ``self._config``, so it works BEFORE initialize().
+
+        Regression for the in-process runtime path
+        (``JaatoRuntime.verify_auth``) which creates a FRESH provider with
+        ``config=None`` and does NOT call ``initialize()`` — so
+        ``self._config`` is unset.  The no-token fallthrough previously
+        read ``getattr(self._config, 'extra', ...)`` and would raise
+        ``AttributeError`` there instead of the intended
+        ``TokenNotFoundError``.  ``resolve_token`` is patched to force that
+        fallthrough (past the early env/OAuth return).
+        """
+        provider = GitHubModelsProvider()  # fresh — no initialize()
+        cfg = ProviderConfig(extra={"workspace_path": "/ws", "config_root": "/cr"})
+        with patch.dict('os.environ', {}, clear=True), \
+                patch('shared.plugins.model_provider.github_models.provider.'
+                      'resolve_token', return_value=None):
+            with pytest.raises(TokenNotFoundError):
+                provider.verify_auth(allow_interactive=False, config=cfg)
+
     @patch('azure.ai.inference.ChatCompletionsClient')
     def test_initialize_with_api_key(self, mock_client_class):
         """Should initialize with token from config.api_key."""
@@ -503,12 +524,22 @@ class TestTokenManagement:
 
         assert provider.get_context_limit() == 200_000
 
-    def test_get_context_limit_unknown_model(self):
-        """get_context_limit() should return default for unknown."""
+    def test_get_context_limit_unknown_model_raises(self):
+        """No hardcoded fallback: a model with no catalog sizing and not in the
+        fallback table raises rather than returning a guessed default."""
         provider = GitHubModelsProvider()
         provider._model_name = 'unknown/model'
 
-        assert provider.get_context_limit() == 128_000  # Default
+        with pytest.raises(ValueError, match="no known context window"):
+            provider.get_context_limit()
+
+    def test_get_context_limit_override_knob_wins(self):
+        """context_length override beats catalog + fallback table."""
+        provider = GitHubModelsProvider()
+        provider._model_name = 'unknown/model'
+        provider._context_length_knob = 64_000
+
+        assert provider.get_context_limit() == 64_000
 
 
 class TestStructuredOutput:

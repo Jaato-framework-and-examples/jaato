@@ -25,13 +25,12 @@ Evaluator script contract::
 Path resolution: workspace ``.jaato/`` → user ``~/.jaato/`` → absolute.
 """
 
-import importlib.util
 import logging
-import os
 from dataclasses import dataclass, field
 from enum import Enum
-from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Protocol, runtime_checkable
+
+from shared.script_loader import load_script_symbol, resolve_script_path
 
 logger = logging.getLogger(__name__)
 
@@ -109,6 +108,14 @@ class EvalContext:
         model_preamble: Text the model emitted before this tool call
             in the current response.  May be None if the model called
             the tool without any preamble text.
+        execution_log: Read-only snapshot of the session's PRIOR permission
+            decisions, oldest-first — a list of ``{"tool_name", "arguments",
+            "decision", "reason"}`` dicts.  Lets an evaluator decide based on
+            what happened earlier this session (e.g. deny a tool after N prior
+            uses, or escalate once a risky tool has run).  Does NOT include the
+            current call being evaluated (that decision hasn't been made yet).
+            A snapshot, not the live log — mutating it does not affect the
+            plugin's audit trail.  Empty when no evaluator context supplies it.
         extra: Extensible dict for future context fields.
     """
     tool_name: str
@@ -119,6 +126,7 @@ class EvalContext:
     workspace_path: Optional[str] = None
     turn_index: Optional[int] = None
     model_preamble: Optional[str] = None
+    execution_log: List[Dict[str, Any]] = field(default_factory=list)
     extra: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -149,78 +157,6 @@ class PermissionEvaluator(Protocol):
         ...
 
 
-def _resolve_evaluator_path(
-    path: str,
-    workspace_path: Optional[str] = None,
-) -> Optional[Path]:
-    """Resolve an evaluator script path.
-
-    Resolution order:
-    1. Absolute path → use directly
-    2. Relative → ``{workspace}/.jaato/{path}``
-    3. Relative → ``~/.jaato/{path}``
-
-    Args:
-        path: Evaluator file path (absolute or relative).
-        workspace_path: Workspace directory for relative resolution.
-
-    Returns:
-        Resolved Path, or None if not found.
-    """
-    p = Path(path)
-    if p.is_absolute():
-        return p if p.is_file() else None
-
-    # Workspace-relative
-    if workspace_path:
-        ws_path = Path(workspace_path) / ".jaato" / path
-        if ws_path.is_file():
-            return ws_path
-
-    # User-level
-    home_path = Path.home() / ".jaato" / path
-    if home_path.is_file():
-        return home_path
-
-    return None
-
-
-def _load_evaluate_function(file_path: Path) -> Optional[Callable]:
-    """Load the ``evaluate`` function from a Python script.
-
-    Args:
-        file_path: Absolute path to the evaluator script.
-
-    Returns:
-        The ``evaluate`` callable, or None on failure.
-    """
-    module_name = f"_jaato_evaluator_{file_path.stem}"
-    try:
-        spec = importlib.util.spec_from_file_location(module_name, str(file_path))
-        if spec is None or spec.loader is None:
-            logger.warning("Cannot load evaluator module from %s", file_path)
-            return None
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        fn = getattr(module, "evaluate", None)
-        if fn is None:
-            logger.warning(
-                "Evaluator script %s has no 'evaluate' function", file_path
-            )
-            return None
-        if not callable(fn):
-            logger.warning(
-                "Evaluator script %s: 'evaluate' is not callable", file_path
-            )
-            return None
-        return fn
-    except Exception as exc:
-        logger.warning(
-            "Failed to load evaluator from %s: %s", file_path, exc
-        )
-        return None
-
-
 def load_evaluators(
     config: Dict[str, str],
     workspace_path: Optional[str] = None,
@@ -238,7 +174,7 @@ def load_evaluators(
     evaluators: Dict[str, Callable] = {}
 
     for key, path in config.items():
-        resolved = _resolve_evaluator_path(path, workspace_path)
+        resolved = resolve_script_path(path, workspace_path)
         if resolved is None:
             logger.warning(
                 "Evaluator script not found for '%s': %s "
@@ -247,7 +183,11 @@ def load_evaluators(
             )
             continue
 
-        fn = _load_evaluate_function(resolved)
+        fn = load_script_symbol(
+            resolved,
+            symbol="evaluate",
+            module_prefix="_jaato_evaluator",
+        )
         if fn is not None:
             evaluators[key] = fn
             logger.info("Loaded evaluator for '%s' from %s", key, resolved)

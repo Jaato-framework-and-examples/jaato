@@ -8,7 +8,8 @@ from datetime import datetime
 from typing import Dict, List, Any, Callable, Optional
 
 from jaato_sdk.plugins.base import UserCommand
-from jaato_sdk.plugins.model_provider.types import ToolSchema
+from jaato_sdk.plugins.model_provider.types import ToolSchema, TRAIT_UNTRUSTED_CONTENT
+from shared.plugins.runner_forwarding import RunnerForwardingMixin
 from shared.trace import trace as _trace_write
 
 
@@ -16,7 +17,7 @@ DEFAULT_MAX_RESULTS = 10
 DEFAULT_TIMEOUT = 10  # seconds
 
 
-class WebSearchPlugin:
+class WebSearchPlugin(RunnerForwardingMixin):
     """Plugin that provides web search capability using DuckDuckGo.
 
     Searches are serialized via a class-level lock because DuckDuckGo
@@ -83,6 +84,20 @@ class WebSearchPlugin:
         self._ddgs = None
         self._initialized = False
 
+    def reset_for_next_session(self) -> None:
+        """Cascade-sharing reset — NO-OP for this plugin.
+
+        Phase 1 hotfix (server 0.6.148+): added to satisfy the
+        ``ToolPlugin`` / ``EnrichmentPlugin`` protocol's runtime
+        ``isinstance`` check.  Per Daniel's litmus test (see
+        ``docs/design/runner-cascade-sharing.md`` §4.3), this
+        plugin holds no per-session state that the next cascade
+        session would benefit from having cleared.  Override in
+        future PRs if the litmus test changes.
+        """
+        pass
+
+
     def get_config_schema(self) -> dict:
         """Return JSON Schema for this plugin's configuration."""
         return {
@@ -132,11 +147,20 @@ class WebSearchPlugin:
                 "required": ["query"]
             },
             category="search",
+            # Search results are untrusted external content — wrapped in the
+            # untrusted-content boundary to defang injected instructions.
+            traits=frozenset({TRAIT_UNTRUSTED_CONTENT}),
         )]
 
     def get_executors(self) -> Dict[str, Callable[[Dict[str, Any]], Any]]:
-        """Return the executor mapping."""
-        return {'web_search': self._execute}
+        """Return the executor mapping.
+
+        Phase 3 §3.6 wave 3: forwards via runner-RPC when a runner
+        is attached; falls through to in-process otherwise.
+        """
+        return self.wrap_executors_for_runner_forwarding({
+            'web_search': self._execute,
+        })
 
     def get_system_instructions(self) -> Optional[str]:
         """Return system instructions for the web search tool."""

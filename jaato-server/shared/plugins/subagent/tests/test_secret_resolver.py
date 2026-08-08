@@ -13,6 +13,8 @@ from ..config import (
     _resolve_secret_uri,
     _SECRET_URI_RE,
     _discover_secret_resolvers,
+    looks_like_unresolved_secret_uri,
+    looks_like_malformed_secret_uri,
     expand_variables,
     reset_secret_resolvers,
 )
@@ -175,6 +177,52 @@ class TestResolveSecretURI:
         assert _resolve_secret_uri("awssm://prod/key") == "resolved:awssm:prod/key:None"
         assert _resolve_secret_uri("gcpsm://proj/secret#field") == "resolved:gcpsm:proj/secret:field"
 
+    # -- Server 0.6.57+: skip-conditions ------------------------------------
+
+    def test_skip_unresolved_variable_substitution(self):
+        """${VAR} placeholders short-circuit before regex match.
+
+        Empirical regression — handoff_test cascade in 7:4 emitted
+        ``http://127.0.0.1:${ANTIFRAUDE_PORT}`` before the env-file
+        substitution layer resolved the placeholder.  The secret-URI
+        regex matched the ``http://`` prefix and routed the literal
+        through the (empty) resolver registry, returning the unsubstituted
+        URL with the ``${VAR}`` still embedded.  Skip cleanly when a
+        ``${`` is present.
+        """
+        # No resolvers — but skip happens before resolver lookup anyway.
+        assert _resolve_secret_uri("http://localhost:${PORT}") == "http://localhost:${PORT}"
+        assert _resolve_secret_uri("vault://${ENV}/secret") == "vault://${ENV}/secret"
+        assert _resolve_secret_uri("${WHOLE_URL}") == "${WHOLE_URL}"
+
+    def test_skip_network_schemes(self):
+        """Standard network schemes are literal URLs, not secret references.
+
+        Even with a (non-existent) ``http`` resolver, the dispatch must
+        skip — these schemes carry HTTP traffic, not credentials.
+        """
+        from .. import config as config_module
+        # Even pretend there were an http resolver — should still skip.
+        config_module._resolvers = {"http": FakeMultiSchemeResolver()}
+
+        assert _resolve_secret_uri("http://example.com/path") == "http://example.com/path"
+        assert _resolve_secret_uri("https://example.com/path") == "https://example.com/path"
+        assert _resolve_secret_uri("ws://localhost:8080/socket") == "ws://localhost:8080/socket"
+        assert _resolve_secret_uri("wss://example.com/socket") == "wss://example.com/socket"
+        assert _resolve_secret_uri("ftp://files.example.com/data") == "ftp://files.example.com/data"
+        assert _resolve_secret_uri("ftps://files.example.com/data") == "ftps://files.example.com/data"
+
+    def test_secret_schemes_still_resolve_with_resolver(self):
+        """The skip is targeted — non-network schemes (vault, awssm, etc.) still dispatch."""
+        from .. import config as config_module
+        config_module._resolvers = {"vault": FakeVaultResolver()}
+
+        # Vault still works
+        assert (
+            _resolve_secret_uri("vault://secret/myapp#db_password")
+            == "s3cret_from_vault"
+        )
+
 
 # ---------------------------------------------------------------------------
 # Integration with _expand_string and expand_variables
@@ -288,3 +336,89 @@ class TestSecretResolverProtocol:
 
     def test_failing_is_resolver(self):
         assert isinstance(FailingResolver(), SecretResolver)
+
+
+class TestLooksLikeUnresolvedSecretURI:
+    """looks_like_unresolved_secret_uri — the provider-boundary fail-loud gate.
+
+    True only for a non-network ``scheme://`` (an unresolved secret-URI that
+    passed through because no resolver is registered).  Resolved secrets are
+    plain strings (False); network URLs / ${VAR} / non-URIs are False.
+    """
+
+    def test_true_for_secret_scheme_uris(self):
+        assert looks_like_unresolved_secret_uri("pass://jaato/nebius/api-key")
+        assert looks_like_unresolved_secret_uri("vault://secret/x#k")
+        assert looks_like_unresolved_secret_uri("awssm://prod/db")
+        assert looks_like_unresolved_secret_uri("my-vault2://path/to/secret")
+
+    def test_false_for_plain_strings(self):
+        # A resolved credential is a plain string.
+        assert not looks_like_unresolved_secret_uri("nbk-a-real-looking-key")
+        assert not looks_like_unresolved_secret_uri("sk-ant-api03-xyz")
+        assert not looks_like_unresolved_secret_uri("")
+
+    def test_false_for_network_schemes(self):
+        # http/ws are literal URLs, not secret indirections (e.g. self-hosted
+        # base_url) — must not trip the credential gate.
+        assert not looks_like_unresolved_secret_uri("https://api.example.com/v1")
+        assert not looks_like_unresolved_secret_uri("ws://localhost:8080")
+
+    def test_false_for_pending_var_substitution(self):
+        assert not looks_like_unresolved_secret_uri("pass://${ENV}/key")
+        assert not looks_like_unresolved_secret_uri("${WHOLE_KEY}")
+
+    def test_false_for_non_str(self):
+        assert not looks_like_unresolved_secret_uri(None)
+        assert not looks_like_unresolved_secret_uri(12345)
+
+
+class TestLooksLikeMalformedSecretURI:
+    """looks_like_malformed_secret_uri — catches the ``//``-dropped typo.
+
+    A single-colon ``pass:x`` (meant as ``pass://x``) is invisible to the
+    resolver machinery (regex miss → passed through literally) and would leak
+    to the provider as a bearer token, producing the confusing upstream 401 the
+    ``//`` gate exists to prevent.  This detector flags it — but ONLY when the
+    scheme is an actively registered resolver, so there are no false positives
+    on hosts without that resolver and no hardcoded scheme list.
+    """
+
+    def setup_method(self):
+        from .. import config as config_module
+        reset_secret_resolvers()
+        # Register a fake ``pass`` resolver so the scheme is "known".
+        config_module._resolvers = {"pass": FakeVaultResolver()}
+
+    def teardown_method(self):
+        reset_secret_resolvers()
+
+    def test_flags_single_colon_for_registered_scheme(self):
+        # The exact user typo: pass:... instead of pass://...
+        assert looks_like_malformed_secret_uri(
+            "pass:jaato/openrouter/api-key") == "pass"
+
+    def test_none_for_wellformed_double_slash(self):
+        # Well-formed ``scheme://`` is the OTHER predicate's job, not malformed.
+        assert looks_like_malformed_secret_uri(
+            "pass://jaato/openrouter/api-key") is None
+
+    def test_none_for_unregistered_scheme(self):
+        # 'vault' single-colon but no vault resolver registered here → a plain
+        # ``word:word`` value must be left untouched (no false positive).
+        assert looks_like_malformed_secret_uri("vault:secret/x") is None
+
+    def test_none_for_network_scheme(self):
+        assert looks_like_malformed_secret_uri("http:example.com") is None
+        assert looks_like_malformed_secret_uri("https://api.example.com/v1") is None
+
+    def test_none_for_placeholder_and_plain(self):
+        assert looks_like_malformed_secret_uri("pass:${ENV}/key") is None
+        assert looks_like_malformed_secret_uri("sk-or-abcdef") is None
+        # A vendor/model id with a ``:tag`` suffix must not be mistaken for a
+        # scheme (the '/' and '.' aren't valid scheme chars).
+        assert looks_like_malformed_secret_uri("google/gemini-2.5-flash:free") is None
+
+    def test_none_for_non_str(self):
+        assert looks_like_malformed_secret_uri(None) is None
+        assert looks_like_malformed_secret_uri(12345) is None

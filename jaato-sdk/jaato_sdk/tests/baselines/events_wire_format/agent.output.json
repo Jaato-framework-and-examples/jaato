@@ -1,0 +1,8 @@
+{
+  "type": "agent.output",
+  "timestamp": "<TIMESTAMP>",
+  "agent_id": "",
+  "source": "",
+  "text": "",
+  "mode": "write"
+}

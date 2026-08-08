@@ -1,0 +1,791 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>IPCClient - jaato docs</title>
+  <link rel="stylesheet" href="../assets/css/style.css">
+  <link rel="vcs-git" href="https://github.com/Jaato-framework-and-examples/jaato">
+</head>
+<body>
+  <!-- Header -->
+  <header class="header">
+    <a href="../index.html" class="header-logo">
+      jaato <span>docs</span>
+    </a>
+    <nav class="header-nav">
+      <a href="../getting-started/quickstart.html">Quickstart</a>
+      <a href="index.html">API Reference</a>
+      <a href="https://github.com/Jaato-framework-and-examples/jaato" target="_blank">GitHub</a>
+      <div class="header-search">
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+        <input type="text" placeholder="Search docs... (press /)">
+      </div>
+    </nav>
+  </header>
+
+  <!-- Layout -->
+  <div class="layout">
+    <!-- Sidebar -->
+    <aside class="sidebar">
+      <div class="sidebar-section">
+        <div class="sidebar-title">Getting Started</div>
+        <ul class="sidebar-nav">
+          <li><a href="../getting-started/quickstart.html">Quickstart</a></li>
+          <li><a href="../getting-started/typescript-sdk.html">TypeScript SDK</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Core Concepts</div>
+        <ul class="sidebar-nav">
+          <li><a href="../core-concepts/client.html">Client</a></li>
+          <li><a href="../core-concepts/plugins.html">Plugins</a></li>
+          <li><a href="../core-concepts/tools.html">Tools</a></li>
+          <li><a href="../core-concepts/providers.html">Providers</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Guides</div>
+        <ul class="sidebar-nav">
+          <li><a href="../guides/tool-plugins.html">Building Plugins</a></li>
+          <li><a href="../guides/mcp-integration.html">MCP Integration</a></li>
+          <li><a href="../guides/permissions.html">Permissions</a></li>
+          <li><a href="../guides/connection-recovery.html">Connection Recovery</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">API Reference</div>
+        <ul class="sidebar-nav">
+          <li><a href="index.html">Overview</a></li>
+          <li><a href="jaato-client.html">JaatoClient</a></li>
+          <li><a href="jaato-runtime.html">JaatoRuntime</a></li>
+          <li><a href="jaato-session.html">JaatoSession</a></li>
+          <li><a href="ipc-client.html" class="active">IPCClient</a></li>
+          <li><a href="ipc-recovery-client.html">IPCRecoveryClient</a></li>
+          <li><a href="plugin-registry.html">PluginRegistry</a></li>
+          <li><a href="tool-executor.html">ToolExecutor</a></li>
+          <li><a href="types.html">Types</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Provider Reference</div>
+        <ul class="sidebar-nav">
+          <li><a href="providers/index.html">Overview</a></li>
+          <li><a href="providers/anthropic.html">Anthropic</a></li>
+          <li><a href="providers/google-genai.html">Google GenAI</a></li>
+          <li><a href="providers/github-models.html">GitHub Models</a></li>
+          <li><a href="providers/claude-cli.html">Claude CLI</a></li>
+          <li><a href="providers/antigravity.html">Antigravity</a></li>
+          <li><a href="providers/ollama.html">Ollama</a></li>
+          <li><a href="providers/zhipuai.html">Zhipu AI</a></li>
+          <li><a href="providers/nim.html">NVIDIA NIM</a></li>
+          <li><a href="providers/lmstudio.html">LM Studio</a></li>
+          <li><a href="providers/vllm.html">vLLM</a></li>
+          <li><a href="providers/tensorrt-llm.html">TensorRT-LLM</a></li>
+          <li><a href="providers/openrouter.html">OpenRouter</a></li>
+          <li><a href="providers/nebius.html">Nebius</a></li>
+          <li><a href="providers/ovhcloud.html">OVHcloud</a></li>
+          <li><a href="providers/triton.html">Triton</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Plugin Reference</div>
+        <ul class="sidebar-nav">
+          <li><a href="plugins/index.html">Overview</a></li>
+          <li><a href="plugins/cli.html">CLI</a></li>
+          <li><a href="plugins/file-edit.html">File Edit</a></li>
+          <li><a href="plugins/filesystem-query.html">Filesystem Query</a></li>
+          <li><a href="plugins/todo.html">Todo</a></li>
+          <li><a href="plugins/web-search.html">Web Search</a></li>
+          <li><a href="plugins/mcp.html">MCP</a></li>
+          <li><a href="plugins/permission.html">Permission</a></li>
+          <li><a href="plugins/session.html">Session</a></li>
+          <li><a href="plugins/gc.html">GC</a></li>
+          <li><a href="plugins/other.html">Other Plugins</a></li>
+        </ul>
+      </div>
+    </aside>
+
+    <!-- Main content -->
+    <main class="main">
+      <!-- Header -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h1>IPCClient</h1>
+          <p class="lead">
+            The high-level facade for talking to a running jaato
+            <strong>daemon</strong> from Python. <code>IPCClient.session(...)</code>
+            opens a connection and a session, yielding a <a href="#session">Session</a>
+            handle whose <code>ask</code> / <code>complete</code> / <code>stream</code>
+            methods own the send-and-wait recipe — so the common path can never
+            hang or reproduce the low-level event plumbing. This is the
+            <strong>recommended</strong> Python entry point.
+          </p>
+
+          <div class="method-signature">
+            <span class="token-keyword">from</span> jaato_sdk <span class="token-keyword">import</span> IPCClient, Session, ask, AgentError, PermissionUnhandled
+          </div>
+
+          <div class="callout callout-info">
+            <div class="callout-title">Which client?</div>
+            This page documents the Python <code>IPCClient</code>
+            (<code>from jaato_sdk import IPCClient</code>), which talks to a jaato
+            daemon over <strong>IPC</strong>. Don't confuse it with two
+            same-role siblings:
+            <ul>
+              <li>The in-process <a href="jaato-client.html"><code>JaatoClient</code></a>
+                (<code>from jaato import JaatoClient</code>) &mdash; runs the agent
+                runtime <strong>inside your own process</strong>, no daemon.</li>
+              <li>The TypeScript SDK's <code>JaatoClient</code>
+                (<code>import { JaatoClient } from "@jaato/sdk"</code>) &mdash; the
+                <em>same name</em>, but a different package over a
+                <strong>WebSocket</strong> transport.</li>
+            </ul>
+            For automatic reconnection on top of this facade, see
+            <a href="ipc-recovery-client.html"><code>IPCRecoveryClient</code></a>,
+            which exposes the same <code>session(...)</code> entry point.
+          </div>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Quick example</div>
+          <div class="code-block">
+            <pre><code class="language-python">import asyncio
+from jaato_sdk import IPCClient, ask
+
+async def main():
+    # Open a session, ask, tear down on exit.
+    async with IPCClient.session(
+        profile={"model": "gpt-4o", "provider": "openai", "plugins": []},
+    ) as s:
+        print(await s.ask("Who are you? One sentence."))
+
+    # ...or the one-shot module helper, for a throwaway call.
+    print(await ask(
+        "Who are you? One sentence.",
+        profile={"model": "gpt-4o", "provider": "openai", "plugins": []},
+    ))
+
+asyncio.run(main())</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- session() -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="session-classmethod">IPCClient.session()</h2>
+
+          <h3>session <span class="badge badge-property">classmethod</span></h3>
+          <div class="method-signature">
+            <span class="token-keyword">classmethod</span><br>
+            <span class="method-name">IPCClient.session</span>(**<span class="param">kwargs</span>) -> <span class="type">async context manager[Session]</span>
+          </div>
+
+          <p>
+            Returns an <strong>async context manager</strong> that yields a
+            <a href="#session"><code>Session</code></a>. On
+            <code>__aenter__</code> it connects to (or auto-starts) the daemon
+            and creates the session — <strong>failing loud</strong> rather than
+            yielding a dead session. On <code>__aexit__</code> it disconnects.
+            Use it with <code>async with</code>.
+          </p>
+
+          <p>
+            <code>profile</code>, <code>agent</code>, <code>agent_params</code>,
+            and <code>cascade_driver_id</code> are forwarded to
+            <code>create_session</code> unchanged, so both the declarative
+            (named profile) and programmatic (inline-dict spec) styles work.
+            The remaining kwargs are facade and connection knobs with sensible
+            defaults.
+          </p>
+
+          <ul class="param-list">
+            <li>
+              <span class="param-name">profile</span>
+              <span class="param-type">str | dict</span>
+              <span class="param-optional">optional</span>
+              <div class="param-desc">
+                Either a profile <strong>name</strong> (<code>str</code>)
+                referencing a file under <code>.jaato/profiles/</code>,
+                <strong>or</strong> an inline <strong>spec dict</strong> with keys
+                such as <code>model</code>, <code>provider</code>,
+                <code>plugins</code>, <code>system_instructions</code>. An inline
+                spec <strong>requires</strong> a <code>plugins</code> key (use
+                <code>[]</code> for a tool-less session). The two forms are
+                mutually exclusive.
+              </div>
+            </li>
+            <li>
+              <span class="param-name">agent</span>
+              <span class="param-type">str</span>
+              <span class="param-optional">optional</span>
+              <div class="param-desc">
+                Agent name. The agent's rendered markdown becomes the session's
+                system instructions. Composes freely with <code>profile</code>.
+              </div>
+            </li>
+            <li>
+              <span class="param-name">agent_params</span>
+              <span class="param-type">dict</span>
+              <span class="param-optional">optional</span>
+              <div class="param-desc">
+                Parameter values for the agent's <code>{{param}}</code>
+                placeholders. Only used when <code>agent</code> is specified.
+              </div>
+            </li>
+            <li>
+              <span class="param-name">cascade_driver_id</span>
+              <span class="param-type">str</span>
+              <span class="param-optional">optional</span>
+              <div class="param-desc">
+                Cascade-sharing tenant ID. Sessions sharing the same opaque ID
+                reuse a warm pool slot across cascade stages. <code>None</code>
+                (default) = standalone session.
+              </div>
+            </li>
+            <li>
+              <span class="param-name">client_tools</span>
+              <span class="param-type">list</span>
+              <span class="param-optional">optional</span>
+              <div class="param-desc">
+                Host/client tool specs to register after connect but before
+                <code>create_session</code> — so the runner-tier model sees them.
+                Lets host-tool clients use the facade instead of the low-level
+                connect/register/create dance.
+              </div>
+            </li>
+            <li>
+              <span class="param-name">on_permission</span>
+              <span class="param-type">callable</span>
+              <span class="param-optional">optional</span>
+              <div class="param-desc">
+                Callback invoked for each gated-tool permission request,
+                receiving the permission event and returning the response (e.g.
+                <code>"y"</code> / <code>"n"</code>); may be a coroutine. When
+                unset, a gated tool is auto-denied and the in-flight turn raises
+                <a href="#permissionunhandled"><code>PermissionUnhandled</code></a>.
+              </div>
+            </li>
+            <li>
+              <span class="param-name">on_status_change</span>
+              <span class="param-type">callable</span>
+              <span class="param-optional">optional</span>
+              <div class="param-desc">
+                Callback invoked when the connection status changes (e.g.
+                <code>RECONNECTING</code> &rarr; <code>CONNECTED</code>), wired
+                before connect. Most relevant with the auto-reconnect client
+                (<a href="ipc-recovery-client.html"><code>IPCRecoveryClient</code></a>);
+                see <a href="../guides/connection-recovery.html">Connection
+                Recovery</a>.
+              </div>
+            </li>
+            <li>
+              <span class="param-name">socket_path</span>
+              <span class="param-type">str</span>
+              <span class="param-optional">optional</span>
+              <div class="param-desc">
+                Path to the daemon's Unix domain socket (or Windows named pipe).
+                Defaults to the standard socket path.
+              </div>
+            </li>
+            <li>
+              <span class="param-name">env_file</span>
+              <span class="param-type">str</span>
+              <span class="param-optional">optional</span>
+              <div class="param-desc">
+                Path to the <code>.env</code> file passed to an auto-started
+                daemon. Default: <code>".env"</code>.
+              </div>
+            </li>
+            <li>
+              <span class="param-name">workspace_path</span>
+              <span class="param-type">str | Path</span>
+              <span class="param-optional">optional</span>
+              <div class="param-desc">
+                Workspace path so the daemon resolves project-level
+                <code>.jaato/</code> assets (profiles, personas, completion
+                schemas, reactors). Pass this when using a named
+                <code>profile</code> or <code>agent</code>.
+              </div>
+            </li>
+            <li>
+              <span class="param-name">auto_start</span>
+              <span class="param-type">bool</span>
+              <span class="param-optional">optional</span>
+              <div class="param-desc">
+                Whether to auto-start the daemon if it is not already running.
+                Default: <code>True</code>.
+              </div>
+            </li>
+            <li>
+              <span class="param-name">client_type</span>
+              <span class="param-type">ClientType</span>
+              <span class="param-optional">optional</span>
+              <div class="param-desc">
+                Identifies the kind of client for server-side presentation and
+                lifecycle filters. Defaults to <code>ClientType.API</code> for
+                headless orchestrators.
+              </div>
+            </li>
+            <li>
+              <span class="param-name">connect_timeout</span>
+              <span class="param-type">float</span>
+              <span class="param-optional">optional</span>
+              <div class="param-desc">
+                Timeout in seconds for the connect step on
+                <code>__aenter__</code>.
+              </div>
+            </li>
+          </ul>
+
+          <div class="callout callout-info">
+            <div class="callout-title">Inline spec needs <code>plugins</code></div>
+            An inline <code>profile</code> dict <strong>requires</strong> a
+            <code>plugins</code> key (even <code>[]</code>); omitting it is
+            rejected with <code>InvalidSessionSpec</code>.
+          </div>
+
+          <div class="returns">
+            <div class="returns-label">Returns</div>
+            <div class="returns-type">async context manager &mdash; yields a <a href="#session">Session</a>.</div>
+          </div>
+
+          <div class="returns">
+            <div class="returns-label">Raises</div>
+            <div class="returns-type">
+              <code>ConnectionError</code> if the daemon can't be reached or
+              auto-started.<br>
+              <code>RuntimeError</code> if session creation fails (check provider
+              auth / the daemon log).
+            </div>
+          </div>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Inline spec (programmatic)</div>
+          <div class="code-block">
+            <pre><code class="language-python">from jaato_sdk import IPCClient
+
+# An inline spec REQUIRES a `plugins` key.
+# Credentials resolve from a `pass:` knob, never a raw key.
+async with IPCClient.session(profile={
+    "model": "gpt-4o",
+    "provider": "openai",
+    "plugins": [],
+    "plugin_configs": {
+        "openai": {"api_key": "pass://jaato/openai/api-key"},
+    },
+}) as s:
+    print(await s.ask("Hello!"))</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Named profile (declarative)</div>
+          <div class="code-block">
+            <pre><code class="language-python">from pathlib import Path
+from jaato_sdk import IPCClient
+
+# A named profile lives under .jaato/profiles/ — pass
+# workspace_path so the daemon resolves it.
+async with IPCClient.session(
+    profile="person-extractor",
+    workspace_path=Path.cwd(),
+) as s:
+    print(await s.ask("Alice is 30."))</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Reuse one connection across turns</div>
+          <div class="code-block">
+            <pre><code class="language-python">async with IPCClient.session(
+    profile={"model": "gpt-4o", "provider": "openai", "plugins": []},
+) as s:
+    # The session is conversational memory — both turns
+    # share one daemon connection and history.
+    print(await s.ask("My name is Sam."))
+    print(await s.ask("What is my name?"))</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Session -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="session">Session</h2>
+
+          <p>
+            A high-level handle over an open session. Construct it via
+            <a href="#session-classmethod"><code>IPCClient.session</code></a>, not
+            directly. Each method owns the send-and-wait recipe (first-of
+            <code>{TURN_COMPLETED, SESSION_TERMINATED}</code>), so a turn can
+            never hang in user code.
+          </p>
+
+          <h3>ask</h3>
+          <div class="method-signature">
+            <span class="token-keyword">async</span> <span class="method-name">ask</span>(<br>
+            &nbsp;&nbsp;<span class="param">prompt</span>: <span class="type">str</span>,<br>
+            &nbsp;&nbsp;<span class="param">*</span>,<br>
+            &nbsp;&nbsp;<span class="param">sources</span>: <span class="type">Collection[str] | None</span> = <span class="type">("model",)</span>,<br>
+            &nbsp;&nbsp;<span class="param">parallel_tools</span>: <span class="type">Optional[bool]</span> = <span class="type">None</span>,<br>
+            &nbsp;&nbsp;<span class="param">attachments</span>: <span class="type">Optional[list]</span> = <span class="type">None</span><br>
+            ) -> <span class="type">str</span>
+          </div>
+          <p>
+            Send <code>prompt</code>, wait for the turn to finish (first-of
+            <code>{TURN_COMPLETED, SESSION_TERMINATED}</code>), and return the
+            collected text. <code>sources</code> filters
+            <code>AGENT_OUTPUT</code> chunks by their <code>.source</code> — the
+            default <code>("model",)</code> keeps the model's clean answer;
+            <code>None</code> collects everything (tool output included).
+          </p>
+          <ul class="param-list">
+            <li>
+              <span class="param-name">sources</span>
+              <span class="param-type">Collection[str] | None</span>
+              <span class="param-optional">optional</span>
+              <div class="param-desc">
+                Which output sources to keep. Default <code>("model",)</code>;
+                <code>None</code> = all.
+              </div>
+            </li>
+            <li>
+              <span class="param-name">parallel_tools</span>
+              <span class="param-type">bool</span>
+              <span class="param-optional">optional</span>
+              <div class="param-desc">
+                Per-turn override of parallel tool execution.
+                <code>None</code> (default) keeps the configured behavior.
+              </div>
+            </li>
+            <li>
+              <span class="param-name">attachments</span>
+              <span class="param-type">list</span>
+              <span class="param-optional">optional</span>
+              <div class="param-desc">File attachments to include with the message.</div>
+            </li>
+          </ul>
+          <div class="returns">
+            <div class="returns-label">Raises</div>
+            <div class="returns-type">
+              <a href="#agenterror"><code>AgentError</code></a> on an error
+              terminal.<br>
+              <a href="#permissionunhandled"><code>PermissionUnhandled</code></a>
+              if a gated tool went unanswered.
+            </div>
+          </div>
+
+          <h3>complete</h3>
+          <div class="method-signature">
+            <span class="token-keyword">async</span> <span class="method-name">complete</span>(<br>
+            &nbsp;&nbsp;<span class="param">prompt</span>: <span class="type">str</span>,<br>
+            &nbsp;&nbsp;<span class="param">*</span>,<br>
+            &nbsp;&nbsp;<span class="param">parallel_tools</span>: <span class="type">Optional[bool]</span> = <span class="type">None</span>,<br>
+            &nbsp;&nbsp;<span class="param">attachments</span>: <span class="type">Optional[list]</span> = <span class="type">None</span><br>
+            ) -> <span class="type">Optional[dict]</span>
+          </div>
+          <p>
+            For completion-gated profiles: send <code>prompt</code> and return
+            the typed <code>AGENT_COMPLETED.payload</code> (server-validated
+            against the profile's <code>completion_payload_schema</code>).
+            Returns <code>None</code> if the profile declared no completion
+            schema or the model didn't complete.
+          </p>
+          <div class="returns">
+            <div class="returns-label">Raises</div>
+            <div class="returns-type">
+              <a href="#agenterror"><code>AgentError</code></a> on an error terminal.
+            </div>
+          </div>
+
+          <h3>stream</h3>
+          <div class="method-signature">
+            <span class="method-name">stream</span>(<br>
+            &nbsp;&nbsp;<span class="param">prompt</span>: <span class="type">str</span>,<br>
+            &nbsp;&nbsp;<span class="param">*</span>,<br>
+            &nbsp;&nbsp;<span class="param">sources</span>: <span class="type">Collection[str] | None</span> = <span class="type">("model",)</span>,<br>
+            &nbsp;&nbsp;<span class="param">parallel_tools</span>: <span class="type">Optional[bool]</span> = <span class="type">None</span>,<br>
+            &nbsp;&nbsp;<span class="param">attachments</span>: <span class="type">Optional[list]</span> = <span class="type">None</span><br>
+            ) -> <span class="type">AsyncIterator[str]</span>
+          </div>
+          <p>
+            The async-iterator counterpart to <code>ask</code> — yields each
+            text chunk the moment it streams in, then stops at the terminal. Use
+            it with <code>async for chunk in s.stream(...)</code>. Raises
+            <a href="#agenterror"><code>AgentError</code></a> /
+            <a href="#permissionunhandled"><code>PermissionUnhandled</code></a>
+            after the stream drains.
+          </p>
+
+          <h3 id="session-client">client <span class="badge badge-property">property</span></h3>
+          <p>
+            The underlying low-level client
+            (<code>IPCClient</code> / <code>IPCRecoveryClient</code>). The facade
+            is purely additive — drop to the full event API
+            (<code>subscribe</code>, <code>events</code>,
+            <code>respond_to_permission</code>, <code>attach_session</code>, …) on
+            the <strong>same</strong> connection while still using
+            <code>ask</code> / <code>complete</code> / <code>stream</code> for the
+            common turns. Listeners you add via <code>s.client</code> persist
+            across turns; the facade methods only clean up their own
+            subscriptions.
+          </p>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">ask — collect the answer</div>
+          <div class="code-block">
+            <pre><code class="language-python">async with IPCClient.session(
+    profile={"model": "gpt-4o", "provider": "openai", "plugins": []},
+) as s:
+    answer = await s.ask("Who are you? One sentence.")
+    print(answer)</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">stream — print chunks live</div>
+          <div class="code-block">
+            <pre><code class="language-python">async with IPCClient.session(
+    profile={"model": "gpt-4o", "provider": "openai", "plugins": []},
+) as s:
+    async for chunk in s.stream("Tell me a short story."):
+        print(chunk, end="", flush=True)
+    print()</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">complete — typed completion gate</div>
+          <div class="code-block">
+            <pre><code class="language-python"># The "person-extractor" profile declares a
+# completion_payload_schema; the daemon validates the
+# payload server-side and complete() returns the dict.
+async with IPCClient.session(
+    profile="person-extractor",
+    workspace_path=Path.cwd(),
+) as s:
+    person = await s.complete("Alice is 30.")   # dict | None
+    print(person["name"], person["age"])</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">.client — drop to the event API</div>
+          <div class="code-block">
+            <pre><code class="language-python">from jaato_sdk.events import EventType
+
+async with IPCClient.session(profile={
+    "model": "gpt-4o", "provider": "openai", "plugins": [],
+}) as s:
+    # Low-level observer on the SAME connection...
+    s.client.subscribe(EventType.TOOL_CALL_END, observer)
+    # ...while still using the facade for the turn.
+    print(await s.ask("List files in the workspace."))</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Host (client) tools -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="host-tools">Host (client) tools</h2>
+          <p>
+            Pass <code>client_tools</code> to register tools whose
+            <code>handler</code> runs in <strong>your</strong> process: the daemon
+            calls back into the client whenever the model invokes one. Each spec is
+            a plain dict with <code>name</code>, <code>description</code>,
+            <code>parameters</code> (a JSON Schema), and <code>handler</code>.
+          </p>
+          <p>
+            Host tools must be registered <strong>before</strong> the session is
+            created so the runner-tier model sees them — the facade does this for
+            you when you pass <code>client_tools=</code> to
+            <code>IPCClient.session(...)</code>.
+          </p>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">client_tools — a tool handled in your process</div>
+          <div class="code-block">
+            <pre><code class="language-python">from jaato_sdk import IPCClient
+
+async with IPCClient.session(
+    profile={"model": "gpt-4o", "provider": "openai", "plugins": []},
+    client_tools=[{
+        "name": "get_weather",
+        "description": "Return the weather for a city.",
+        "parameters": {
+            "type": "object",
+            "properties": {"city": {"type": "string"}},
+            "required": ["city"],
+        },
+        # handler runs in YOUR process
+        "handler": lambda args: {"weather": f"{args['city']}: sunny, 24C"},
+    }],
+) as s:
+    print(await s.ask("Weather in Paris?"))</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Typed completion gate -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="typed-completion">Typed completion gate</h2>
+          <p>
+            A profile that declares a <code>completion_payload_schema</code> forces
+            the model to call <code>signal_completion</code> with a matching
+            payload. <code>await s.complete(prompt)</code> returns the
+            server-validated <code>dict</code> — or <code>None</code> if the profile
+            declared no schema or the model didn't complete.
+          </p>
+          <p>
+            Because the daemon validates against the schema, the typed result is a
+            contract: a non-<code>None</code> return has already passed
+            server-side validation.
+          </p>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">complete — server-validated payload</div>
+          <div class="code-block">
+            <pre><code class="language-python">from pathlib import Path
+from jaato_sdk import IPCClient
+
+# The "person-extractor" profile declares a
+# completion_payload_schema; the model must call
+# signal_completion with a matching payload.
+async with IPCClient.session(
+    profile="person-extractor",
+    workspace_path=Path.cwd(),
+) as s:
+    person = await s.complete("Alice is 30.")   # dict | None
+    print(person["name"], person["age"])</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Module-level ask() -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="module-ask">Module-level ask()</h2>
+
+          <div class="method-signature">
+            <span class="token-keyword">async</span> <span class="method-name">ask</span>(<br>
+            &nbsp;&nbsp;<span class="param">prompt</span>: <span class="type">str</span>,<br>
+            &nbsp;&nbsp;<span class="param">*</span>,<br>
+            &nbsp;&nbsp;<span class="param">sources</span>: <span class="type">Collection[str] | None</span> = <span class="type">("model",)</span>,<br>
+            &nbsp;&nbsp;**<span class="param">session_kwargs</span><br>
+            ) -> <span class="type">str</span>
+          </div>
+
+          <p>
+            One-shot: open a session, ask, return the answer, tear down. Sugar
+            over <a href="#session-classmethod"><code>IPCClient.session</code></a>
+            — it accepts the <strong>same</strong> kwargs (<code>profile</code>,
+            <code>agent</code>, connection knobs, <code>on_permission</code>).
+            One daemon connect per call, so for repeated calls use the
+            <code>IPCClient.session</code> context manager instead.
+          </p>
+
+          <div class="returns">
+            <div class="returns-label">Returns</div>
+            <div class="returns-type">str &mdash; the collected answer text.</div>
+          </div>
+
+          <div class="returns">
+            <div class="returns-label">Raises</div>
+            <div class="returns-type">
+              <a href="#agenterror"><code>AgentError</code></a> /
+              <a href="#permissionunhandled"><code>PermissionUnhandled</code></a>,
+              same as <code>Session.ask</code>.
+            </div>
+          </div>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">One-shot helper</div>
+          <div class="code-block">
+            <pre><code class="language-python">from jaato_sdk import ask
+
+# A throwaway call — connect, ask, tear down.
+answer = await ask(
+    "Who are you? One sentence.",
+    profile={"model": "gpt-4o", "provider": "openai", "plugins": []},
+)
+print(answer)</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Errors -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="errors">Errors</h2>
+
+          <h3 id="agenterror">AgentError</h3>
+          <div class="method-signature">
+            <span class="token-keyword">class</span> <span class="method-name">AgentError</span>(Exception)
+          </div>
+          <p>
+            Raised when a turn ends in error (an error terminal). Carries the
+            daemon's diagnostics so callers can branch without parsing strings.
+          </p>
+          <ul>
+            <li><code>error_type</code> (<code>str | None</code>) — the daemon's error class.</li>
+            <li><code>error_summary</code> (<code>str | None</code>) — a human-readable summary.</li>
+          </ul>
+
+          <h3 id="permissionunhandled">PermissionUnhandled</h3>
+          <div class="method-signature">
+            <span class="token-keyword">class</span> <span class="method-name">PermissionUnhandled</span>(Exception)
+          </div>
+          <p>
+            Raised when a gated tool requested permission but no
+            <code>on_permission</code> callback was supplied to
+            <code>IPCClient.session</code>. The facade auto-denies (to unstick
+            the daemon) and raises this rather than hang or silently degrade.
+            Pass <code>on_permission=</code> to <code>session(...)</code>, or
+            drop to the low-level <code>subscribe(EventType.PERMISSION_REQUESTED)</code>
+            API via <a href="#session-client"><code>s.client</code></a>.
+          </p>
+          <ul>
+            <li><code>tool_name</code> (<code>str</code>) — the gated tool that went unanswered.</li>
+          </ul>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Handling errors</div>
+          <div class="code-block">
+            <pre><code class="language-python">from jaato_sdk import (
+    IPCClient,
+    AgentError,
+    PermissionUnhandled,
+)
+
+async with IPCClient.session(profile={
+    "model": "gpt-4o", "provider": "openai", "plugins": ["cli"],
+}) as s:
+    try:
+        print(await s.ask("List files in the workspace."))
+    except PermissionUnhandled as e:
+        # A gated tool was auto-denied — supply on_permission=
+        # to session(...) to approve it.
+        print(f"tool {e.tool_name} needed approval")
+    except AgentError as e:
+        print(f"{e.error_type}: {e.error_summary}")</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Approving gated tools</div>
+          <div class="code-block">
+            <pre><code class="language-python"># on_permission receives the request and returns the
+# response ("y"/"n"); it may be a coroutine.
+async with IPCClient.session(
+    profile={"model": "gpt-4o", "provider": "openai", "plugins": ["cli"]},
+    on_permission=lambda ev: "y",
+) as s:
+    print(await s.ask("List files in the workspace."))</code></pre>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="https://unpkg.com/lunr@2.3.9/lunr.min.js"></script>
+
+
+  <script src="../assets/js/docs.js"></script>
+</body>
+</html>

@@ -16,16 +16,23 @@ Features:
 """
 
 import json
+import logging
 import os
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, FrozenSet, List, Optional, Set
+
+logger = logging.getLogger(__name__)
 
 from ..base import (
+    MODALITY_TEXT,
+    ModalityCapabilityMixin,
     FunctionCallDetectedCallback,
     ProviderConfig,
     StreamingCallback,
     ThinkingCallback,
     UsageUpdateCallback,
+    resolve_context_window,
+    resolve_modalities,
 )
 from jaato_sdk.plugins.model_provider.types import (
     CancelToken,
@@ -48,7 +55,6 @@ from .converters import (
     extract_message_start,
     extract_text_from_stream_event,
     extract_thinking_from_stream_event,
-    get_original_tool_name,
     messages_to_anthropic,
     response_from_anthropic,
     serialize_history,
@@ -74,6 +80,7 @@ from .errors import (
 from .oauth import (
     get_valid_access_token,
     load_tokens,
+    try_load_tokens_with_reason,
     login as oauth_login,
     refresh_tokens,
     save_tokens,
@@ -95,7 +102,18 @@ MODEL_CONTEXT_LIMITS: Dict[str, int] = {
     "claude-3-haiku": 200_000,
 }
 
-DEFAULT_CONTEXT_LIMIT = 200_000
+# INPUT modalities per Claude model family.  All shipping Claude API
+# models (3.x, 4.x) accept image input alongside text; Claude 2.x was
+# text-only and isn't listed.  Prefix-matched like MODEL_CONTEXT_LIMITS;
+# a model absent here resolves to the text-only floor in modalities()
+# (never a false image claim).
+MODEL_INPUT_MODALITIES: Dict[str, FrozenSet[str]] = {
+    "claude-opus-4": frozenset({"text", "image", "file"}),
+    "claude-sonnet-4": frozenset({"text", "image", "file"}),
+    "claude-haiku-4": frozenset({"text", "image", "file"}),
+    # claude-3 prefix covers 3.5/3.7 (PDF-capable); 3.0 is EOL.
+    "claude-3": frozenset({"text", "image", "file"}),
+}
 
 # Models that support extended thinking
 THINKING_CAPABLE_MODELS = [
@@ -113,12 +131,18 @@ EXTENDED_MAX_TOKENS = 16000  # When thinking is enabled
 CLAUDE_CODE_IDENTITY = "You are Claude Code, Anthropic's official CLI for Claude."
 
 
-class AnthropicProvider:
+class AnthropicProvider(ModalityCapabilityMixin):
     """Stateless Anthropic Claude provider.
 
     This provider uses a stateless design: the caller (session) owns the
     conversation history and passes it to ``complete()`` on every call.
     The provider does not maintain internal message state.
+
+    Subclasses override the ``_provider_display_name`` /
+    ``_provider_console_url`` class attributes so vendor-targeted error
+    messages from ``_handle_api_error`` name the actual provider
+    (e.g. ZhipuAIProvider sets ``"Zhipu AI"``).  Without an override
+    the defaults are correct for Anthropic.
 
     Features:
     - Multiple Claude model families
@@ -147,15 +171,45 @@ class AnthropicProvider:
         ANTHROPIC_API_KEY: API key for authentication
     """
 
+    # Vendor identity for error messages produced by
+    # ``_handle_api_error``.  Subclasses (ZhipuAIProvider, etc.) override
+    # these class attributes; ``_handle_api_error`` reads them via
+    # ``self`` so dynamic dispatch picks the right vendor for the
+    # subclass instance.
+    _provider_display_name: str = "Anthropic API"
+    _provider_console_url: str = "https://console.anthropic.com/"
+
     def __init__(self):
         """Initialize the provider (not yet connected)."""
         self._client: Optional[Any] = None  # anthropic.Anthropic
         self._model_name: Optional[str] = None
 
+        # Per-profile context-window override (framework_overrides.context_length).
+        # When set, wins over the per-model MODEL_CONTEXT_LIMITS table in
+        # get_context_limit() — the escape hatch for a model not yet in the
+        # table.  None = use the table; unknown model + no override → raise
+        # (no hardcoded fallback, per project rule).
+        self._context_length_knob: Optional[int] = None
+        # INPUT-modality assertion (framework_overrides.modalities) —
+        # the escape hatch layered over MODEL_INPUT_MODALITIES.
+        self._modalities_knob: Optional[List[str]] = None
+
         # Configuration
         self._api_key: Optional[str] = None
         self._enable_thinking: bool = False
         self._thinking_budget: int = 10000
+
+        # Sampling parameters (None = let the API apply its server-side
+        # default — Anthropic Messages API defaults to temperature=1.0).
+        # Wired through to ``messages.create()`` only when set on a
+        # profile, mirroring openrouter's namespaced api_params layer.
+        self._temperature: Optional[float] = None
+        self._top_p: Optional[float] = None
+        self._top_k: Optional[int] = None
+        # Profile-level override of the framework's hard-coded
+        # DEFAULT_MAX_TOKENS / EXTENDED_MAX_TOKENS choice.  ``None``
+        # keeps the existing thinking-aware default selection.
+        self._max_tokens_override: Optional[int] = None
 
         # Per-call accounting (updated after each complete() call)
         self._last_usage: TokenUsage = TokenUsage()
@@ -202,12 +256,20 @@ class AnthropicProvider:
         if config is None:
             config = ProviderConfig()
 
-        # Set workspace path from config.extra if provided
-        # This ensures token resolution can find workspace-specific OAuth tokens
-        # even when JAATO_WORKSPACE_ROOT env var isn't set (e.g., subagent spawning)
+        # Stash the config so post-init helpers (token refresh, status
+        # reporting) can reuse the workspace_path / config_root that
+        # the runtime injected.
+        self._config = config
+
+        # Pull workspace_path / config_root from config.extra (injected
+        # by JaatoRuntime.create_provider).  Threading them explicitly
+        # makes credential lookup independent of the
+        # ``JAATO_WORKSPACE_ROOT`` / ``JAATO_CONFIG_ROOT`` env vars,
+        # which are unreliable for headless reactor-spawned sessions
+        # running in fresh threads outside any active ``_in_workspace``
+        # context.
         workspace_path = config.extra.get('workspace_path')
-        if workspace_path and not os.environ.get('JAATO_WORKSPACE_ROOT'):
-            os.environ['JAATO_WORKSPACE_ROOT'] = workspace_path
+        config_root = config.extra.get('config_root')
 
         # Resolve credentials in priority order:
         # 1. PKCE OAuth tokens (from interactive login, stored in config dir)
@@ -221,7 +283,9 @@ class AnthropicProvider:
 
         # Try PKCE OAuth first (interactive login tokens)
         try:
-            self._pkce_access_token = get_valid_access_token()
+            self._pkce_access_token = get_valid_access_token(
+                workspace_path=workspace_path, config_root=config_root,
+            )
             if self._pkce_access_token:
                 self._use_pkce = True
                 self._auth_info = "PKCE OAuth"
@@ -247,13 +311,96 @@ class AnthropicProvider:
                 checked_locations=get_checked_credential_locations()
             )
 
-        # Parse extra config (config.extra takes precedence over env vars)
-        self._enable_thinking = config.extra.get(
-            "enable_thinking", resolve_enable_thinking()
+        # Parse extra config — namespaced into the same four layers as
+        # the openrouter provider (server 0.6.23+):
+        #
+        #   plugin_configs.anthropic:
+        #     <top-level>           # auth / identity (api_key, oauth_token)
+        #     api_params:           # Anthropic Messages API request body
+        #                           # (temperature, top_p, top_k, max_tokens,
+        #                           #  enable_thinking, thinking_budget)
+        #     framework_overrides:  # rare escape hatches (none defined for
+        #                           # anthropic today; reserved for future use)
+        #
+        # The ``routing`` layer is omitted — Anthropic's API has no gateway
+        # routing extension equivalent to OpenRouter's ``provider`` field.
+        #
+        # Backward compatibility: every key is also read from the legacy
+        # flat position with a one-time deprecation warning per key.  Flat
+        # support will be removed in a future release.
+        api_params = config.extra.get("api_params") or {}
+        framework_overrides = config.extra.get("framework_overrides") or {}
+
+        def _knob(
+            key: str, *, layer: Dict[str, Any], default: Any = None,
+        ) -> Any:
+            """Read a config knob from its nested layer first, falling
+            back to the legacy flat ``config.extra[key]`` position with
+            a deprecation warning when only the flat form is present."""
+            if key in layer:
+                return layer[key]
+            if key in config.extra:
+                logger.warning(
+                    "Anthropic profile uses legacy flat config key %r — "
+                    "move under the appropriate nested layer "
+                    "(api_params / framework_overrides) per the 0.6.24+ "
+                    "namespacing.  Flat-key support will be removed in a "
+                    "future release.",
+                    key,
+                )
+                return config.extra[key]
+            return default
+
+        # Thinking knobs (kept on api_params since they translate to wire
+        # fields — Anthropic's ``thinking`` request body extension).
+        self._enable_thinking = _knob(
+            "enable_thinking", layer=api_params, default=resolve_enable_thinking(),
         )
-        self._thinking_budget = config.extra.get(
-            "thinking_budget", resolve_thinking_budget()
+        self._thinking_budget = _knob(
+            "thinking_budget", layer=api_params, default=resolve_thinking_budget(),
         )
+
+        # Context-window override (framework_overrides.context_length) via the
+        # shared precedence helper.  Anthropic has no live capacity endpoint and
+        # no env var for this, so detect_capacity/env are absent — the knob is
+        # the only override tier, layered over the per-model MODEL_CONTEXT_LIMITS
+        # table consulted in get_context_limit().
+        self._context_length_knob = resolve_context_window(
+            detect_capacity=None,
+            profile_value=_knob("context_length", layer=framework_overrides),
+            env_value=None,
+        )
+
+        # INPUT-modality assertion (framework_overrides.modalities) — the
+        # escape hatch for a model not in MODEL_INPUT_MODALITIES, or to
+        # correct it.  Layered over the table in modalities().
+        modalities_override = _knob("modalities", layer=framework_overrides)
+        if modalities_override is not None:
+            if not isinstance(modalities_override, (list, tuple)) or not all(
+                isinstance(m, str) for m in modalities_override
+            ):
+                raise TypeError(
+                    "Anthropic 'modalities' config must be a list of "
+                    f"strings (e.g. [\"text\", \"image\"]), got "
+                    f"{type(modalities_override).__name__}"
+                )
+            self._modalities_knob = list(modalities_override)
+
+        # Sampling parameters.  ``None`` means "omit from the request and
+        # let Anthropic apply its server-side default" (temperature=1.0).
+        # Profiles wanting determinism set ``api_params.temperature: 0.0``.
+        temp_extra = _knob("temperature", layer=api_params)
+        if temp_extra is not None:
+            self._temperature = float(temp_extra)
+        top_p_extra = _knob("top_p", layer=api_params)
+        if top_p_extra is not None:
+            self._top_p = float(top_p_extra)
+        top_k_extra = _knob("top_k", layer=api_params)
+        if top_k_extra is not None:
+            self._top_k = int(top_k_extra)
+        max_tokens_extra = _knob("max_tokens", layer=api_params)
+        if max_tokens_extra is not None:
+            self._max_tokens_override = int(max_tokens_extra)
 
         # Create the client based on auth method
         # Priority: PKCE OAuth > env var OAuth > API key
@@ -339,11 +486,18 @@ class AnthropicProvider:
         if not self._use_pkce:
             return
 
-        tokens = load_tokens()
+        # Pull the workspace_path / config_root the runtime injected
+        # so refresh writes back to the same credential file we
+        # originally loaded from.
+        extra = getattr(self._config, 'extra', None) or {}
+        ws_path = extra.get('workspace_path')
+        cr = extra.get('config_root')
+
+        tokens = load_tokens(workspace_path=ws_path, config_root=cr)
         if tokens and tokens.is_expired:
             try:
                 new_tokens = refresh_tokens(tokens.refresh_token)
-                save_tokens(new_tokens)
+                save_tokens(new_tokens, workspace_path=ws_path, config_root=cr)
                 self._pkce_access_token = new_tokens.access_token
                 # Recreate client with new token
                 self._client = self._create_client()
@@ -386,11 +540,16 @@ class AnthropicProvider:
     def verify_auth(
         self,
         allow_interactive: bool = False,
-        on_message=None
+        on_message=None,
+        config: Optional["ProviderConfig"] = None,
     ) -> bool:
         """Verify that authentication is configured and optionally trigger interactive login.
 
         This can be called BEFORE initialize() to ensure credentials are available.
+
+        ``config`` is accepted for protocol compatibility but unused: Anthropic
+        resolves credentials from environment, OAuth, and PKCE storage rather
+        than from the profile's ``plugin_configs``.
         For Anthropic, this checks for PKCE OAuth tokens, OAuth env tokens, or API keys.
 
         Args:
@@ -409,15 +568,56 @@ class AnthropicProvider:
 
         # Check existing credentials in priority order
         # 1. PKCE OAuth tokens (from interactive login)
-        try:
-            pkce_token = get_valid_access_token()
-            if pkce_token:
+        #
+        # Before trying a refresh, inspect the on-disk token file so we can
+        # tell "no tokens yet" from "file exists but cannot be parsed".
+        # A broken token file used to look identical to "never logged in",
+        # which is the exact "provider error not being surfaced" bug the
+        # branch name calls out.
+        # Pull workspace_path / config_root from config.extra so
+        # verify_auth surfaces credentials from the same path the
+        # runtime configured the provider with.  Read the ``config``
+        # PARAMETER (not ``self._config``): per the base contract
+        # verify_auth runs BEFORE initialize(), so ``self._config`` is
+        # unset here — reading it raised AttributeError on the
+        # in-process runtime path, which does not initialize() first.
+        extra = getattr(config, 'extra', None) or {}
+        ws_path = extra.get('workspace_path')
+        cr = extra.get('config_root')
+
+        tokens, load_error = try_load_tokens_with_reason(
+            workspace_path=ws_path, config_root=cr,
+        )
+        if tokens:
+            try:
+                pkce_token = get_valid_access_token(
+                    workspace_path=ws_path, config_root=cr,
+                )
+                if pkce_token:
+                    if on_message:
+                        on_message("Found valid PKCE OAuth token")
+                    return True
+            except Exception as refresh_err:
+                # Token refresh failed — surface it so users see the
+                # actual refresh error rather than falling through to a
+                # misleading "no credentials" message.
                 if on_message:
-                    on_message("Found valid PKCE OAuth token")
-                return True
-        except Exception:
-            # Token refresh failed, will try other methods
-            pass
+                    on_message(
+                        f"Stored PKCE OAuth tokens could not be refreshed: "
+                        f"{refresh_err.__class__.__name__}: {refresh_err}"
+                    )
+        elif load_error:
+            # File exists but could not be loaded (corrupt JSON, missing
+            # field, permission error).  Surface the real reason.
+            if on_message:
+                on_message(
+                    f"Anthropic OAuth token file found but could not be loaded: "
+                    f"{load_error}"
+                )
+                on_message(
+                    "Run 'anthropic-auth login' to re-authenticate, or set "
+                    "ANTHROPIC_AUTH_TOKEN / ANTHROPIC_API_KEY."
+                )
 
         # 2. OAuth token from env var
         oauth_token = resolve_oauth_token()
@@ -434,7 +634,10 @@ class AnthropicProvider:
             return True
 
         # No credentials found
-        if on_message:
+        if on_message and not load_error:
+            # Only emit the generic "No credentials found" when we didn't
+            # already surface a specific load error above; otherwise we'd
+            # contradict ourselves.
             on_message("No credentials found.")
 
         if not allow_interactive:
@@ -679,7 +882,7 @@ class AnthropicProvider:
         )
         if is_ssl_error:
             from shared.ssl_helper import log_ssl_guidance
-            log_ssl_guidance("Anthropic API", error)
+            log_ssl_guidance(self._provider_display_name, error)
 
         # Check for authentication errors
         if "authentication" in error_str or "invalid api key" in error_str or "401" in error_str:
@@ -687,27 +890,42 @@ class AnthropicProvider:
                 reason="API key rejected",
                 key_prefix=self._api_key[:15] if self._api_key else None,
                 original_error=str(error),
+                provider_name=self._provider_display_name,
             ) from error
 
         # Check for rate limit errors
         if "rate" in error_str and "limit" in error_str or "429" in error_str:
-            raise RateLimitError(original_error=str(error)) from error
+            raise RateLimitError(
+                original_error=str(error),
+                provider_name=self._provider_display_name,
+            ) from error
 
         # Check for usage limit errors (API spending/quota limits)
         if "usage limit" in error_str or "api usage" in error_str:
-            # Try to extract reset date from error message
+            # Try to extract a reset date or full timestamp from the
+            # error message.  Providers vary in format — Zhipu emits
+            # ``2026-05-15 18:06:38``; Anthropic emits a bare date.  We
+            # capture the optional ``HH:MM:SS`` suffix when present so
+            # the user gets the full reset time rather than just the day.
             reset_date = None
-            date_match = re.search(r'(\d{4}-\d{2}-\d{2})', str(error))
+            date_match = re.search(
+                r'(\d{4}-\d{2}-\d{2}(?:[ T]\d{2}:\d{2}:\d{2})?)', str(error)
+            )
             if date_match:
                 reset_date = date_match.group(1)
             raise UsageLimitError(
                 reset_date=reset_date,
                 original_error=str(error),
+                provider_name=self._provider_display_name,
+                console_url=self._provider_console_url,
             ) from error
 
         # Check for overloaded errors
         if "overloaded" in error_str or "529" in error_str:
-            raise OverloadedError(original_error=str(error)) from error
+            raise OverloadedError(
+                original_error=str(error),
+                provider_name=self._provider_display_name,
+            ) from error
 
         # Check for context length errors
         if any(x in error_str for x in ("context", "token", "too long", "maximum")):
@@ -755,18 +973,61 @@ class AnthropicProvider:
     def get_context_limit(self) -> int:
         """Get the context window size for the current model.
 
+        Resolution precedence (no hardcoded fallback, per project rule):
+        1. ``framework_overrides.context_length`` knob (``_context_length_knob``)
+           — the escape hatch for a model not yet in the table.
+        2. ``MODEL_CONTEXT_LIMITS`` prefix match — the documented per-model
+           window (the authoritative source for closed Claude models).
+        3. else raise — an unknown model with no override is a configuration
+           error, surfaced loudly rather than papered over with a guess.
+
         Returns:
             Maximum tokens the model can handle.
+
+        Raises:
+            ValueError: when neither the knob nor the table yields a value.
         """
-        if not self._model_name:
-            return DEFAULT_CONTEXT_LIMIT
+        if self._context_length_knob:
+            return self._context_length_knob
 
-        # Try prefix match
-        for model_prefix, limit in MODEL_CONTEXT_LIMITS.items():
-            if self._model_name.startswith(model_prefix):
-                return limit
+        if self._model_name:
+            for model_prefix, limit in MODEL_CONTEXT_LIMITS.items():
+                if self._model_name.startswith(model_prefix):
+                    return limit
 
-        return DEFAULT_CONTEXT_LIMIT
+        raise ValueError(
+            f"Anthropic provider: no known context window for model "
+            f"{self._model_name!r}, and no override is set.  Add the model to "
+            f"MODEL_CONTEXT_LIMITS, or set framework_overrides.context_length in "
+            f"the profile.  No hardcoded fallback exists per the project's "
+            f"no-fallback rule."
+        )
+
+    def modalities(self, model: Optional[str] = None) -> Set[str]:
+        """INPUT modalities the active Claude model accepts.
+
+        Precedence mirrors get_context_limit() (no live capacity
+        endpoint, so detect is absent): framework_overrides.modalities
+        knob -> MODEL_INPUT_MODALITIES prefix match -> text-only floor
+        (every Claude model accepts text; image stays unconfirmed, so
+        the content gate / vision-tier validation treats it text-only).
+        """
+        resolved = resolve_modalities(
+            profile_value=self._modalities_knob,
+            table_value=self._lookup_input_modalities(model),
+        )
+        return resolved if resolved is not None else {MODALITY_TEXT}
+
+    def _lookup_input_modalities(
+        self, model: Optional[str] = None
+    ) -> Optional[FrozenSet[str]]:
+        """Table-declared input modalities for ``model`` (or active)."""
+        model = model or self._model_name
+        if model:
+            for prefix, mods in MODEL_INPUT_MODALITIES.items():
+                if model.startswith(prefix):
+                    return mods
+        return None
 
     def get_token_usage(self) -> TokenUsage:
         """Get token usage from the last response.
@@ -893,6 +1154,7 @@ class AnthropicProvider:
         on_usage_update: Optional[UsageUpdateCallback] = None,
         on_function_call: Optional[FunctionCallDetectedCallback] = None,
         on_thinking: Optional[ThinkingCallback] = None,
+        tool_choice: Optional[Dict[str, Any]] = None,
     ) -> TurnResult:
         """Stateless completion: convert messages to provider format, call API, return response.
 
@@ -920,6 +1182,17 @@ class AnthropicProvider:
             on_usage_update: Real-time token usage callback (streaming).
             on_function_call: Callback when function call detected mid-stream.
             on_thinking: Callback for extended thinking content.
+            tool_choice: Per-call lifecycle tool-choice hint (the session
+                passes it generically — see ``ModelProvider.complete``
+                contract in ``base.py``).  AnthropicProvider has no
+                ``force_tool_choice_for_lifecycle``-style wire quirk, so
+                it ACCEPTS and IGNORES this kwarg (the contract's "no-op"
+                half).  Present purely for signature parity so the
+                session can pass ``tool_choice`` to every provider
+                without per-provider branching — without it, the
+                keyword-only signature raised ``TypeError`` and broke any
+                forced-completion stage (host_validator, build_descriptor)
+                on z.ai / GLM-5, which routes through this adapter.
 
         Returns:
             A ``TurnResult`` classifying the outcome.
@@ -933,11 +1206,26 @@ class AnthropicProvider:
         # Build API kwargs from explicit parameters (NOT instance state)
         kwargs: Dict[str, Any] = {}
 
-        # Max tokens (higher if thinking is enabled)
-        if self._enable_thinking and self._is_thinking_capable():
+        # Max tokens.  Profile override (api_params.max_tokens) wins;
+        # otherwise pick the framework default based on whether thinking
+        # is enabled (extended needs more output room for the trace +
+        # the answer).
+        if self._max_tokens_override is not None:
+            kwargs["max_tokens"] = self._max_tokens_override
+        elif self._enable_thinking and self._is_thinking_capable():
             kwargs["max_tokens"] = EXTENDED_MAX_TOKENS
         else:
             kwargs["max_tokens"] = DEFAULT_MAX_TOKENS
+
+        # Sampling parameters (api_params.{temperature, top_p, top_k}).
+        # Only sent when the profile set them — omitting them lets
+        # Anthropic apply its server-side defaults (temperature=1.0).
+        if self._temperature is not None:
+            kwargs["temperature"] = self._temperature
+        if self._top_p is not None:
+            kwargs["top_p"] = self._top_p
+        if self._top_k is not None:
+            kwargs["top_k"] = self._top_k
 
         # System instruction (parameterized)
         system_blocks = self._build_system_blocks_from(system_instruction)
@@ -976,6 +1264,31 @@ class AnthropicProvider:
             validated, cache_breakpoint_index=history_breakpoint
         )
 
+        # Diagnostic: when JAATO_DUMP_PROVIDER_REQUEST is set, dump the
+        # full request payload (tools, system, messages) and the resulting
+        # response (text + function_calls + finish_reason) so we can diff
+        # what the model receives and produces across framework changes.
+        # The marker tokens PROVIDER_REQUEST_DUMP / PROVIDER_RESPONSE_DUMP
+        # make this greppable in mixed daemon logs.
+        _dump_enabled = os.environ.get("JAATO_DUMP_PROVIDER_REQUEST", "").lower() in ("1", "true", "yes", "on")  # env: debug — log full request/response dumps (greppable PROVIDER_*_DUMP markers)
+        if _dump_enabled:
+            try:
+                tools_in_kwargs = kwargs.get("tools") or []
+                tool_names_in_request = [t.get("name") for t in tools_in_kwargs if isinstance(t, dict)]
+                logger.info(
+                    "PROVIDER_REQUEST_DUMP model=%s tool_count=%d tool_names=%s",
+                    self._model_name,
+                    len(tools_in_kwargs),
+                    tool_names_in_request,
+                )
+                logger.info("PROVIDER_REQUEST_DUMP system=%s", json.dumps(kwargs.get("system")))
+                logger.info("PROVIDER_REQUEST_DUMP tools=%s", json.dumps(tools_in_kwargs))
+                logger.info("PROVIDER_REQUEST_DUMP messages=%s", json.dumps(api_messages))
+            except Exception as _dump_err:
+                logger.warning("PROVIDER_REQUEST_DUMP failed: %s", _dump_err)
+
+        provider_response = None
+        complete_exception: Optional[Exception] = None
         try:
             if on_chunk:
                 # Streaming mode
@@ -996,27 +1309,83 @@ class AnthropicProvider:
                     **kwargs,
                 )
                 provider_response = response_from_anthropic(response)
-
-            # Update last_usage (this is per-call accounting, not conversation state)
-            self._last_usage = provider_response.usage
-
-            # Handle structured output via response parsing
-            text = provider_response.get_text()
-            if response_schema and text:
-                try:
-                    provider_response.structured_output = json.loads(text)
-                except json.JSONDecodeError:
-                    pass
-
-            return TurnResult.from_provider_response(provider_response)
         except Exception as e:
-            self._handle_api_error(e)
+            complete_exception = e
+
+        if _dump_enabled:
+            try:
+                if complete_exception is not None:
+                    logger.info(
+                        "PROVIDER_RESPONSE_DUMP outcome=exception exc_type=%s exc_msg=%s",
+                        type(complete_exception).__name__,
+                        str(complete_exception),
+                    )
+                elif provider_response is not None:
+                    fcalls = [
+                        {"name": fc.name, "args": fc.args}
+                        for fc in provider_response.get_function_calls()
+                    ]
+                    logger.info(
+                        "PROVIDER_RESPONSE_DUMP outcome=ok finish_reason=%s text_len=%d function_calls=%s",
+                        getattr(provider_response, "finish_reason", None),
+                        len(provider_response.get_text() or ""),
+                        fcalls,
+                    )
+                    logger.info("PROVIDER_RESPONSE_DUMP text=%s", json.dumps(provider_response.get_text()))
+                else:
+                    logger.info("PROVIDER_RESPONSE_DUMP outcome=unreachable")
+            except Exception as _dump_err:
+                logger.warning("PROVIDER_RESPONSE_DUMP failed: %s", _dump_err)
+
+        if complete_exception is not None:
+            try:
+                self._handle_api_error(complete_exception)
+            except Exception:
+                raise
             # _handle_api_error converts to domain errors. Transient ones
             # (RateLimitError, OverloadedError) must propagate for with_retry.
             from .errors import RateLimitError as _RL, OverloadedError as _OL
-            if isinstance(e, (_RL, _OL)):
-                raise
-            return TurnResult.from_exception(e)
+            if isinstance(complete_exception, (_RL, _OL)):
+                raise complete_exception
+            # PR #177 (2026-05-21): anthropic SDK network-layer errors
+            # (APIConnectionError, APITimeoutError) must ALSO propagate
+            # to with_retry — they're classified as transient by
+            # ANTHROPIC_TRANSIENT_CLASSES post-PR-175.  Without this
+            # re-raise the SDK error gets swallowed into
+            # ``TurnResult.from_exception`` below, ``with_retry`` sees
+            # fn() return normally, no retry fires, the caller
+            # surfaces it as MODEL_THREAD_TERMINAL_ERROR.  Surfaced by
+            # kb-orchestrator v152-retry-11 (Finding C, 2026-05-21):
+            # streaming chunk read raised APIConnectionError ~2s after
+            # the SDK's internal retry succeeded with 200 OK — that
+            # mid-stream disconnect never reached the classifier.
+            #
+            # Mirrors the _RL/_OL pattern above.  Defensive inner
+            # try/except so older anthropic SDK versions (or test envs
+            # without the SDK) don't break the existing _RL/_OL path.
+            try:
+                import anthropic as _anthropic_sdk
+                if isinstance(complete_exception, (
+                    _anthropic_sdk.APIConnectionError,
+                    _anthropic_sdk.APITimeoutError,
+                )):
+                    raise complete_exception
+            except (ImportError, AttributeError):
+                pass
+            return TurnResult.from_exception(complete_exception)
+
+        # Update last_usage (this is per-call accounting, not conversation state)
+        self._last_usage = provider_response.usage
+
+        # Handle structured output via response parsing
+        text = provider_response.get_text()
+        if response_schema and text:
+            try:
+                provider_response.structured_output = json.loads(text)
+            except json.JSONDecodeError:
+                pass
+
+        return TurnResult.from_provider_response(provider_response)
 
     # ==================== Streaming ====================
 
@@ -1145,11 +1514,10 @@ class AnthropicProvider:
                             # Flush text before adding function call
                             flush_text_block()
 
-                            # Restore original tool name if it was sanitized
-                            original_name = get_original_tool_name(tc["name"])
+                            from shared.tool_id_map import id_to_name
                             fc = FunctionCall(
                                 id=tc["id"],
-                                name=original_name,
+                                name=id_to_name(tc["name"]),
                                 args=args,
                             )
                             self._trace(f"STREAM_FUNC_CALL name={fc.name}")
@@ -1228,9 +1596,8 @@ class AnthropicProvider:
                     args = json.loads(json_str) if json_str else {}
                 except json.JSONDecodeError:
                     args = {}
-                # Restore original tool name if it was sanitized
-                original_name = get_original_tool_name(tc["name"])
-                fc = FunctionCall(id=tc["id"], name=original_name, args=args)
+                from shared.tool_id_map import id_to_name
+                fc = FunctionCall(id=tc["id"], name=id_to_name(tc["name"]), args=args)
                 # Notify caller about function call detection
                 if on_function_call:
                     on_function_call(fc)

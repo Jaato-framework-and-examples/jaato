@@ -200,7 +200,12 @@ class WorkspaceMonitor:
         self.baseline: Set[str] = set()
         self.tracked: Dict[str, str] = {}
 
-        self._gitignore: Optional[GitignoreParser] = None
+        # Build gitignore filter eagerly so it's available before start() —
+        # add_sandbox_path() may be called pre-start and needs to filter the
+        # sandbox baseline against the workspace's .gitignore patterns.
+        self._gitignore: Optional[GitignoreParser] = GitignoreParser(
+            Path(self.workspace_path), include_defaults=True
+        )
         self._observer: Optional[Observer] = None
         self._accumulator = _ChangeAccumulator(on_flush=self._handle_flush)
         self._running = False
@@ -228,10 +233,7 @@ class WorkspaceMonitor:
             logger.warning("Workspace path does not exist: %s", self.workspace_path)
             return
 
-        # Build gitignore filter.
-        self._gitignore = GitignoreParser(ws, include_defaults=True)
-
-        # Seed baseline via os.walk.
+        # Gitignore filter is already built in __init__; seed baseline.
         self._seed_baseline()
 
         # Start watchdog observer.
@@ -308,15 +310,24 @@ class WorkspaceMonitor:
             logger.warning("Sandbox path does not exist or is not a directory: %s", abs_path)
             return
 
-        # Seed baseline for this sandbox path
+        # Seed baseline for this sandbox path.  Skip hidden directories and
+        # anything matched by the workspace .gitignore (defaults + user
+        # patterns) so build artefacts, caches, and runtime outputs don't
+        # pollute the workspace panel.
         sandbox_baseline: Set[str] = set()
         for dirpath, dirnames, filenames in os.walk(abs_path):
-            # Skip hidden directories by default for sandbox paths
-            dirnames[:] = [d for d in dirnames if not d.startswith('.')]
+            dirnames[:] = [
+                d for d in dirnames
+                if not d.startswith('.')
+                and not self._is_ignored(os.path.join(dirpath, d), is_dir=True)
+            ]
             for fname in filenames:
-                if not fname.startswith('.'):
-                    full = os.path.join(dirpath, fname)
-                    sandbox_baseline.add(full)
+                if fname.startswith('.'):
+                    continue
+                full = os.path.join(dirpath, fname)
+                if self._is_ignored(full, is_dir=False):
+                    continue
+                sandbox_baseline.add(full)
 
         with self._lock:
             self._sandbox_baselines[abs_path] = sandbox_baseline
@@ -475,16 +486,25 @@ class WorkspaceMonitor:
                     rel = os.path.relpath(full, self.workspace_path)
                     current_files.add(rel)
 
-        # Also scan sandbox paths
+        # Also scan sandbox paths.  Apply the same hidden-file + gitignore
+        # filter used by add_sandbox_path so reconciliation doesn't resurrect
+        # ignored files that have changed while the server was down.
         sandbox_current: Set[str] = set()
         for sandbox_root in self._sandbox_baselines:
             if os.path.isdir(sandbox_root):
                 for dirpath, dirnames, filenames in os.walk(sandbox_root):
-                    dirnames[:] = [d for d in dirnames if not d.startswith('.')]
+                    dirnames[:] = [
+                        d for d in dirnames
+                        if not d.startswith('.')
+                        and not self._is_ignored(os.path.join(dirpath, d), is_dir=True)
+                    ]
                     for fname in filenames:
-                        if not fname.startswith('.'):
-                            full = os.path.join(dirpath, fname)
-                            sandbox_current.add(full)
+                        if fname.startswith('.'):
+                            continue
+                        full = os.path.join(dirpath, fname)
+                        if self._is_ignored(full, is_dir=False):
+                            continue
+                        sandbox_current.add(full)
 
         changes: List[Dict[str, str]] = []
         with self._lock:
@@ -585,6 +605,20 @@ class WorkspaceMonitor:
             return self._gitignore.is_ignored(p)
         return self._gitignore.is_ignored(p)
 
+    def _reload_gitignore(self) -> None:
+        """Rebuild the ``GitignoreParser`` from the current ``.gitignore``.
+
+        Called from ``_on_fs_event`` whenever ``<workspace>/.gitignore``
+        changes (created, modified, or deleted) so that subsequent events
+        see the updated patterns without a server restart.  Files that
+        are already in ``self.tracked`` are *not* retroactively pruned —
+        existing tracking is preserved; only future events are filtered
+        against the new ruleset.
+        """
+        self._gitignore = GitignoreParser(
+            Path(self.workspace_path), include_defaults=True
+        )
+
     def _on_fs_event(
         self,
         abs_path: str,
@@ -620,6 +654,14 @@ class WorkspaceMonitor:
             rel = os.path.relpath(abs_path, self.workspace_path)
         except ValueError:
             return
+
+        # Reload the gitignore parser whenever the workspace ``.gitignore``
+        # changes so user edits (typically from the TUI's gitignore-toggle
+        # binding) take effect immediately for subsequent events.  The
+        # event for ``.gitignore`` itself still falls through to be tracked
+        # normally so the user sees the file appear in the workspace panel.
+        if rel == ".gitignore":
+            self._reload_gitignore()
 
         # Filter ignored paths.
         if self._is_ignored(abs_path, is_dir=False):
@@ -689,9 +731,16 @@ class WorkspaceMonitor:
             event_type: One of ``"created"``, ``"modified"``, ``"deleted"``.
             sandbox_root: Absolute root of the sandbox directory.
         """
-        # Skip hidden files in sandbox paths
+        # Skip hidden files in sandbox paths and anything matched by the
+        # workspace .gitignore (defaults + user patterns).  The basename
+        # check only catches files whose own name starts with ``.``; the
+        # gitignore filter additionally catches files inside ignored
+        # directories (e.g. ``__pycache__/``, ``.jaato/``, ``output/``)
+        # whose own basename is non-dot.
         basename = os.path.basename(abs_path)
         if basename.startswith('.'):
+            return
+        if self._is_ignored(abs_path, is_dir=False):
             return
 
         key = abs_path

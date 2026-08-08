@@ -18,7 +18,11 @@ from typing import Any, AsyncIterator, Callable, Dict, List, Optional
 
 from ..background.mixin import BackgroundCapableMixin
 from jaato_sdk.plugins.base import UserCommand
-from jaato_sdk.plugins.model_provider.types import ToolSchema
+from jaato_sdk.plugins.model_provider.types import (
+    ToolSchema,
+    DISCOVERABILITY_DEFERRED,
+)
+from shared.plugins.runner_forwarding import RunnerForwardingMixin
 from ..streaming import StreamingCapable, StreamChunk, ChunkCallback
 
 logger = logging.getLogger(__name__)
@@ -91,7 +95,7 @@ def _check_ast_grep_available() -> bool:
         return False
 
 
-class ASTSearchPlugin(BackgroundCapableMixin, StreamingCapable):
+class ASTSearchPlugin(BackgroundCapableMixin, StreamingCapable, RunnerForwardingMixin):
     """Plugin providing AST-based structural code search.
 
     This plugin offers semantic code search using ast-grep-py:
@@ -166,6 +170,20 @@ class ASTSearchPlugin(BackgroundCapableMixin, StreamingCapable):
         self._shutdown_bg_executor()
         self._initialized = False
         logger.info("ASTSearchPlugin shutdown")
+
+    def reset_for_next_session(self) -> None:
+        """Cascade-sharing reset — NO-OP for this plugin.
+
+        Phase 1 hotfix (server 0.6.148+): added to satisfy the
+        ``ToolPlugin`` / ``EnrichmentPlugin`` protocol's runtime
+        ``isinstance`` check.  Per Daniel's litmus test (see
+        ``docs/design/runner-cascade-sharing.md`` §4.3), this
+        plugin holds no per-session state that the next cascade
+        session would benefit from having cleared.  Override in
+        future PRs if the litmus test changes.
+        """
+        pass
+
 
     def get_config_schema(self) -> dict:
         """Return JSON Schema for this plugin's configuration."""
@@ -269,15 +287,19 @@ class ASTSearchPlugin(BackgroundCapableMixin, StreamingCapable):
                     "required": ["pattern"],
                 },
                 category="search",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
         ]
 
     def get_executors(self) -> Dict[str, Callable[[Dict[str, Any]], Any]]:
-        """Return the executor functions for each tool."""
-        return {
+        """Return the executor functions for each tool.
+
+        Phase 3 §3.4 wave 1: forwards via runner-RPC when a runner
+        is attached; falls through to in-process otherwise.
+        """
+        return self.wrap_executors_for_runner_forwarding({
             "ast_search": self._execute_ast_search,
-        }
+        })
 
     def get_auto_approved_tools(self) -> List[str]:
         """Return tools that don't require permission (read-only operations)."""

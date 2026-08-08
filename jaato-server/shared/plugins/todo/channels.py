@@ -302,7 +302,7 @@ class WebhookReporter(TodoReporter):
 
         self._timeout = config.get("timeout", 10)
         self._headers = config.get("headers", {})
-        self._auth_token = config.get("auth_token") or os.environ.get("TODO_WEBHOOK_TOKEN")
+        self._auth_token = config.get("auth_token") or os.environ.get("TODO_WEBHOOK_TOKEN")  # env: bearer token for the todo webhook reporter when config lacks auth_token
 
     def _send_event(self, event: ProgressEvent) -> bool:
         """Send event to webhook endpoint."""

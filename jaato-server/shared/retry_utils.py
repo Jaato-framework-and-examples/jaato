@@ -81,10 +81,33 @@ try:
         ContextLimitError as AnthropicContextLimitError,
     )
     ANTHROPIC_RATE_LIMIT_CLASSES: Tuple[Type[Exception], ...] = (AnthropicRateLimitError,)
+    # PR #175 (2026-05-21): include the anthropic SDK's network-layer
+    # exception classes so the framework's outer ``with_retry`` loop
+    # recognises them as transient + applies exponential backoff.
+    # These are bare classes from the ``anthropic`` package — the
+    # SDK raises them when the SDK's INTERNAL retry budget
+    # (max_retries, default 2) is exhausted on a connection failure.
+    # Without these in the transient set, the framework surfaced
+    # APIConnectionError to the model thread as a terminal error;
+    # observed on Zhipu AI's anthropic-compatible endpoint during
+    # 24h of intermittent TCP drops (kb-orchestrator 2026-05-21).
+    _anthropic_sdk_transient: Tuple[Type[Exception], ...] = ()
+    try:
+        import anthropic as _anthropic_sdk
+        _anthropic_sdk_transient = (
+            _anthropic_sdk.APIConnectionError,
+            _anthropic_sdk.APITimeoutError,
+        )
+    except (ImportError, AttributeError):
+        # SDK not installed (test env) OR an older anthropic version
+        # without these classes — leave the SDK-error tuple empty;
+        # jaato-typed transient classes still cover the rate-limit /
+        # overloaded paths.
+        pass
     ANTHROPIC_TRANSIENT_CLASSES: Tuple[Type[Exception], ...] = (
         AnthropicRateLimitError,
         AnthropicOverloadedError,
-    )
+    ) + _anthropic_sdk_transient
     ANTHROPIC_CONTEXT_LIMIT_CLASSES: Tuple[Type[Exception], ...] = (AnthropicContextLimitError,)
 except ImportError:
     ANTHROPIC_RATE_LIMIT_CLASSES = ()
@@ -114,10 +137,10 @@ T = TypeVar('T')
 @dataclass
 class RetryConfig:
     """Configuration for retry behavior."""
-    max_attempts: int = field(default_factory=lambda: int(os.environ.get("AI_RETRY_ATTEMPTS", "5")))
-    base_delay: float = field(default_factory=lambda: float(os.environ.get("AI_RETRY_BASE_DELAY", "1.0")))
-    max_delay: float = field(default_factory=lambda: float(os.environ.get("AI_RETRY_MAX_DELAY", "30.0")))
-    silent: bool = field(default_factory=lambda: os.environ.get("AI_RETRY_LOG_SILENT", "").lower() in ("1", "true", "yes"))
+    max_attempts: int = field(default_factory=lambda: int(os.environ.get("AI_RETRY_ATTEMPTS", "5")))  # env: max retry attempts on rate-limit/transient errors (default 5)
+    base_delay: float = field(default_factory=lambda: float(os.environ.get("AI_RETRY_BASE_DELAY", "1.0")))  # env: initial retry backoff delay in seconds (default 1.0)
+    max_delay: float = field(default_factory=lambda: float(os.environ.get("AI_RETRY_MAX_DELAY", "30.0")))  # env: maximum retry backoff delay in seconds (default 30.0)
+    silent: bool = field(default_factory=lambda: os.environ.get("AI_RETRY_LOG_SILENT", "").lower() in ("1", "true", "yes"))  # env: suppress retry/backoff log chatter
     jitter_factor: float = 0.5  # Random jitter range: [1-jitter, 1+jitter]
 
 
@@ -495,7 +518,7 @@ class RequestPacer:
         if min_interval is not None:
             self._min_interval = min_interval
         else:
-            self._min_interval = float(os.environ.get("AI_REQUEST_INTERVAL", "0"))
+            self._min_interval = float(os.environ.get("AI_REQUEST_INTERVAL", "0"))  # env: minimum seconds between model requests (default 0 = no throttle)
         self._last_request_time: Optional[float] = None
 
     @property

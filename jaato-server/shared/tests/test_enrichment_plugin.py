@@ -15,7 +15,23 @@ from shared.plugins.registry import PluginRegistry
 # ---------- Test fixtures: minimal enrichment plugin implementations ----------
 
 
-class PromptEnrichmentOnly:
+class _ResetNoOpMixin:
+    """Supply the no-op ``reset_for_next_session`` the EnrichmentPlugin
+    protocol requires.
+
+    The method was added to the protocol in the runner cascade-sharing
+    arc (see ``docs/design/runner-cascade-sharing.md``); these fixtures
+    predate it.  Because the protocol is ``@runtime_checkable``, a fixture
+    missing the method fails ``isinstance(obj, EnrichmentPlugin)`` and the
+    registry silently treats it as a non-enrichment plugin.  Mixing the
+    no-op in keeps the fixtures protocol-conformant without repeating it.
+    """
+
+    def reset_for_next_session(self) -> None:
+        pass
+
+
+class PromptEnrichmentOnly(_ResetNoOpMixin):
     """Minimal enrichment plugin that only enriches prompts."""
 
     @property
@@ -38,7 +54,7 @@ class PromptEnrichmentOnly:
         )
 
 
-class SystemInstructionEnrichmentOnly:
+class SystemInstructionEnrichmentOnly(_ResetNoOpMixin):
     """Minimal enrichment plugin that only enriches system instructions."""
 
     @property
@@ -63,7 +79,7 @@ class SystemInstructionEnrichmentOnly:
         )
 
 
-class ToolResultEnrichmentOnly:
+class ToolResultEnrichmentOnly(_ResetNoOpMixin):
     """Minimal enrichment plugin that only enriches tool results."""
 
     @property
@@ -88,7 +104,7 @@ class ToolResultEnrichmentOnly:
         )
 
 
-class MultiEnrichmentPlugin:
+class MultiEnrichmentPlugin(_ResetNoOpMixin):
     """Enrichment plugin subscribing to all three enrichment types."""
 
     @property
@@ -129,7 +145,7 @@ class MultiEnrichmentPlugin:
         return 30
 
 
-class PriorityEnrichmentPlugin:
+class PriorityEnrichmentPlugin(_ResetNoOpMixin):
     """Enrichment plugin with custom priority for ordering tests."""
 
     def __init__(self, plugin_name: str, priority: int, suffix: str):

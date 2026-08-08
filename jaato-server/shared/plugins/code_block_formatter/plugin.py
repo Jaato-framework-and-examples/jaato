@@ -1,18 +1,19 @@
 # shared/plugins/code_block_formatter/plugin.py
-"""Streaming code block formatter plugin for syntax highlighting.
+"""Streaming code block formatter plugin.
 
-This plugin transforms model output text containing markdown code blocks
-into ANSI-escaped text with syntax highlighting. It buffers content inside
-code blocks until they're complete, while passing through regular text
-immediately.
+This plugin detects markdown fenced code blocks in streaming text and
+converts them into semantic ``<j-code>`` markup that clients render
+natively.  The server never emits terminal ANSI or colours for code —
+that's the client's job.  This lets a TUI, a web dashboard, and a chat
+bridge co-attach to the same session without fighting over a single
+shared output format.
 
 Usage:
     from shared.plugins.code_block_formatter import create_plugin
 
     formatter = create_plugin()
-    formatter.initialize({"theme": "monokai", "line_numbers": True})
+    formatter.initialize({"line_numbers": True})
 
-    # Streaming mode
     for chunk in model_output:
         for output in formatter.process_chunk(chunk):
             print(output, end='')
@@ -20,16 +21,9 @@ Usage:
         print(output, end='')
 """
 
-import os
 import re
-from datetime import datetime
 from typing import Any, Dict, Iterator, List, Optional
 
-from rich.console import Console
-from rich.syntax import Syntax
-from rich.text import Text
-
-from shared.plugins.table_formatter.plugin import _display_width
 from shared.trace import trace as _trace_write
 
 
@@ -38,122 +32,8 @@ def _trace(msg: str) -> None:
     _trace_write("CODE_BLOCK_FORMATTER", msg)
 
 
-# Common language aliases mapping
-LANGUAGE_ALIASES = {
-    'js': 'javascript',
-    'ts': 'typescript',
-    'py': 'python',
-    'rb': 'ruby',
-    'yml': 'yaml',
-    'sh': 'bash',
-    'shell': 'bash',
-    'zsh': 'bash',
-    'dockerfile': 'docker',
-    'md': 'markdown',
-    'cs': 'csharp',
-    'c++': 'cpp',
-    'objective-c': 'objectivec',
-    'ipython3': 'ipython',  # IPython with !shell, %magic support
-    'jupyter': 'ipython',  # Jupyter notebooks use IPython kernel
-    'cbl': 'cobol',  # COBOL source files
-    'cob': 'cobol',  # COBOL source files
-}
-
 # Priority for pipeline ordering (40-59 = syntax highlighting)
 DEFAULT_PRIORITY = 40
-
-
-def _get_content_width(line: str) -> int:
-    """Get the display width of actual content in a line (excluding trailing whitespace).
-
-    Args:
-        line: The line (may contain ANSI codes).
-
-    Returns:
-        Display width of content (excluding trailing spaces).
-    """
-    if not line:
-        return 0
-
-    # Parse ANSI codes to get plain text
-    if '\x1b[' in line:
-        text = Text.from_ansi(line)
-        plain = text.plain
-    else:
-        plain = line
-
-    # Strip trailing spaces and measure content width
-    content = plain.rstrip()
-    if not content:
-        return 0
-
-    return _display_width(content)
-
-
-def _trim_line_to_width(line: str, target_width: int, truncation_indicator: str = "") -> str:
-    """Trim a line to target_width, preserving ANSI codes and styling.
-
-    This removes trailing background padding while keeping the actual content
-    and its styling intact. If truncation_indicator is provided and the line's
-    content exceeds target_width, the indicator is appended after truncation.
-
-    Args:
-        line: The line to trim (may contain ANSI codes).
-        target_width: The width to trim to.
-        truncation_indicator: Character(s) to append when content is truncated
-            (e.g. "▸"). Empty string means no indicator.
-
-    Returns:
-        The line trimmed to target_width, as an ANSI string.
-    """
-    if not line:
-        return ""
-
-    # Parse ANSI codes to get styled text
-    if '\x1b[' in line:
-        text = Text.from_ansi(line)
-    else:
-        text = Text(line)
-
-    plain = text.plain
-
-    if target_width <= 0:
-        return ""
-
-    indicator_width = _display_width(truncation_indicator) if truncation_indicator else 0
-    trim_target = target_width - indicator_width if truncation_indicator else target_width
-
-    # Find the character index that corresponds to trim_target display columns
-    current_width = 0
-    char_count = 0
-    for char in plain:
-        char_width = _display_width(char)
-        if current_width + char_width > trim_target:
-            break
-        current_width += char_width
-        char_count += 1
-
-    # Slice the styled text to preserve styling
-    if char_count > 0:
-        result = text[:char_count]
-    else:
-        result = Text()
-
-    if truncation_indicator:
-        result.append(truncation_indicator, style="dim")
-
-    # Convert back to ANSI string
-    # Use a large width to prevent any wrapping during conversion
-    console = Console(width=10000, force_terminal=True, no_color=False, highlight=False)
-    with console.capture() as capture:
-        console.print(result, end="")
-    output = capture.get()
-
-    # Always append ANSI reset code to ensure styling doesn't bleed across lines
-    # when the text is later split by newlines and stored/rendered separately
-    if output and '\x1b[' in output and not output.endswith('\x1b[0m'):
-        output += '\x1b[0m'
-    return output
 
 
 class CodeBlockFormatterPlugin:
@@ -164,20 +44,8 @@ class CodeBlockFormatterPlugin:
     """
 
     def __init__(self):
-        self._theme = "monokai"
         self._line_numbers = False
-        self._word_wrap = True
-        self._background_color: Optional[str] = None
-        self._console_width = 80
         self._priority = DEFAULT_PRIORITY
-
-        # Whether to apply width-based line trimming with the ▸ indicator.
-        # Defaults to True (no trimming) — clients (TUI, dashboard) handle
-        # line width on their own, and the server-side ▸ marker ends up
-        # double-clipping with misleading "more content" indicators.
-        # The presentation context's client_type can override this if a
-        # client explicitly opts in.
-        self._disable_truncation = True
 
         # Streaming state
         self._buffer = ""
@@ -286,157 +154,156 @@ class CodeBlockFormatterPlugin:
 
         Args:
             config: Dict with optional settings:
-                - theme: Syntax highlighting theme (default: "monokai")
-                - line_numbers: Show line numbers (default: False)
-                - word_wrap: Wrap long lines (default: True)
-                - background_color: Background color or None (default: None)
-                - console_width: Width for rendering (default: 80)
+                - line_numbers: Emit ``n="…"`` on ``<j-line>`` (default: False)
                 - priority: Pipeline priority (default: 40)
         """
         config = config or {}
-        self._theme = config.get("theme", "monokai")
         self._line_numbers = config.get("line_numbers", False)
-        self._word_wrap = config.get("word_wrap", True)
-        self._background_color = config.get("background_color", None)
-        self._console_width = config.get("console_width", 80)
         self._priority = config.get("priority", DEFAULT_PRIORITY)
-
-    def set_console_width(self, width: int) -> None:
-        """Update the console width for rendering."""
-        self._console_width = max(20, width)
-
-    def set_disable_truncation(self, disabled: bool) -> None:
-        """Enable or disable width-based line truncation.
-
-        When disabled, code blocks are rendered without per-line trimming
-        and without the ``▸`` indicator.  Used for non-terminal clients
-        (browser dashboards) that re-flow content and don't need fixed-
-        width line trimming.
-
-        Args:
-            disabled: True to skip truncation, False (default) to apply
-                ``console_width``-based trimming.
-        """
-        self._disable_truncation = disabled
-
-    def set_syntax_theme(self, theme_name: str) -> None:
-        """Set the syntax highlighting theme based on UI theme.
-
-        Maps UI theme names to appropriate Pygments syntax themes.
-
-        Args:
-            theme_name: UI theme name ("dark", "light", "high-contrast", etc.)
-        """
-        # Map UI themes to Pygments syntax themes
-        theme_mapping = {
-            "dark": "monokai",
-            "light": "solarized-light",  # Light background, good contrast
-            "high-contrast": "native",  # High contrast dark theme
-        }
-        self._theme = theme_mapping.get(theme_name, "monokai")
 
     def shutdown(self) -> None:
         """Cleanup when plugin is disabled."""
         self.reset()
 
+    def reset_for_next_session(self) -> None:
+        """Cascade-sharing reset — NO-OP for this plugin.
+
+        Phase 1 hotfix (server 0.6.148+): added to satisfy the
+        ``ToolPlugin`` / ``EnrichmentPlugin`` protocol's runtime
+        ``isinstance`` check.  Per Daniel's litmus test (see
+        ``docs/design/runner-cascade-sharing.md`` §4.3), this
+        plugin holds no per-session state that the next cascade
+        session would benefit from having cleared.  Override in
+        future PRs if the litmus test changes.
+        """
+        pass
+
+
     # ==================== Internal Methods ====================
 
     def _render_code_block(self, code: str, language: str) -> str:
-        """Render a code block with syntax highlighting and block indent.
+        """Render a fenced code block as semantic ``<j-code>`` markup.
+
+        Emits one ``<j-line>`` per source line and wraps Pygments-classified
+        token runs in ``<j-tok t="...">``.  The ``t`` attribute carries the
+        Pygments short token name from
+        :data:`pygments.token.STANDARD_TYPES` (walking up the token
+        hierarchy when the specific subtype has no entry).  Whitespace and
+        unclassified text are emitted as bare text inside ``<j-line>``.
+
+        The server emits no colours or inline styles; every attached
+        client (TUI, web dashboard, chat bridge) renders this markup
+        natively into its own format.  This keeps the wire format
+        neutral when heterogeneous clients co-attach to a session.
 
         Args:
             code: The code content (without ``` markers).
-            language: The language identifier.
+            language: The raw language string from the fenced block.
+                The client decides how to normalise it.
 
         Returns:
-            ANSI-escaped string with syntax highlighting, indented as a block.
+            A newline-terminated ``<j-code>…</j-code>`` block.
         """
-        # Map language aliases
-        lang = LANGUAGE_ALIASES.get(language.lower(), language.lower())
+        from pygments import lex
+        from pygments.lexers import get_lexer_by_name
+        from pygments.lexers.special import TextLexer
+        from pygments.token import STANDARD_TYPES
+        from pygments.util import ClassNotFound
 
-        # Block indent for visual distinction
-        indent = "    "  # 4 spaces
-
-        try:
-            # Calculate natural width from raw code to prevent wrapping
-            code_lines = code.split('\n')
-            max_code_width = max((_display_width(line) for line in code_lines), default=0)
-
-            # Account for line numbers if enabled (Rich format: " NUM │ ")
-            if self._line_numbers and code_lines:
-                num_lines = len(code_lines)
-                line_number_width = len(str(num_lines)) + 4  # padding + separator
-                max_code_width += line_number_width
-
-            # Use content width as console width (prevents wrapping)
-            # Add buffer of 2 to account for any padding/formatting Rich may add
-            # (previous buffer of 1 was insufficient in some cases)
-            render_width = max(40, max_code_width + 2)
-
-            # Disable word_wrap during rendering since we've calculated render_width
-            # to be large enough for all content. This prevents any wrapping due to
-            # width calculation discrepancies between our calculation and Rich's.
-            # The self._word_wrap setting is preserved for potential future use.
-            syntax = Syntax(
-                code,
-                lang,
-                theme=self._theme,
-                line_numbers=self._line_numbers,
-                word_wrap=False,
-                background_color=self._background_color,
+        def escape(s: str) -> str:
+            return (
+                s.replace("&", "&amp;")
+                 .replace("<", "&lt;")
+                 .replace(">", "&gt;")
             )
 
-            # Render to ANSI string using a temporary console
-            console = Console(
-                width=render_width,
-                force_terminal=True,
-                no_color=False,
-                highlight=False,
-            )
-            with console.capture() as capture:
-                console.print(syntax, end="")
+        def short_name(token_type) -> str:
+            """Walk up the token hierarchy to find a STANDARD_TYPES entry.
 
-            rendered = capture.get()
-            lines = rendered.split('\n')
+            Mirrors ``pygments.formatters.html.HtmlFormatter._get_css_classes``
+            — Pygments' own HTML formatter uses this same walk-up so
+            specific subtypes fall back to their parent's class.
+            """
+            t = token_type
+            while t is not None:
+                name = STANDARD_TYPES.get(t)
+                if name:
+                    return name
+                t = t.parent
+            return ""
 
-            # Non-terminal clients (browser dashboards) re-flow content,
-            # so emit raw rendered lines with indent only — no width-based
-            # trimming, no ▸ indicator.
-            if self._disable_truncation:
-                indented_lines = [indent + line for line in lines]
-                return '\n' + '\n'.join(indented_lines) + '\x1b[0m\n'
+        # Strip a leading/trailing newline that fenced blocks commonly
+        # carry — they're part of the fence syntax, not the code.
+        stripped = code
+        if stripped.startswith("\n"):
+            stripped = stripped[1:]
+        if stripped.endswith("\n"):
+            stripped = stripped[:-1]
 
-            # Find the natural width of content (max content width across all lines)
-            # This ensures background styling only extends to the widest content line
-            natural_width = max((_get_content_width(line) for line in lines), default=0)
+        # Preserve the raw language string on the <j-code> element.
+        lang_attr = escape(language) if language else ""
+        open_tag = f'<j-code language="{lang_attr}">' if lang_attr else "<j-code>"
 
-            # Calculate maximum allowed width based on terminal width minus indent
-            indent_width = _display_width(indent)
-            max_allowed_width = self._console_width - indent_width
+        # Resolve lexer; fall back to plain text (no tokenisation) if
+        # Pygments doesn't recognise the language.
+        lexer = None
+        if language:
+            try:
+                lexer = get_lexer_by_name(language)
+            except ClassNotFound:
+                lexer = None
+        if lexer is None:
+            lexer = TextLexer()
 
-            # Cap natural width to terminal width so background padding
-            # never extends beyond the visible area
-            trim_width = min(natural_width, max_allowed_width) if max_allowed_width > 0 else natural_width
+        # Group tokens into per-line runs.  Each entry in `lines` is a
+        # list of (short_class, text) pairs.  Empty short_class means
+        # plain text (no <j-tok> wrapper).
+        source_lines = stripped.split("\n")
+        lines: List[List[tuple]] = [[] for _ in source_lines]
 
-            # Trim each line to the capped width, then add indent
-            trimmed_lines = []
-            for line in lines:
-                content_width = _get_content_width(line)
-                if max_allowed_width > 0 and content_width > max_allowed_width:
-                    # Line content exceeds terminal width: truncate with indicator
-                    trimmed = _trim_line_to_width(line, max_allowed_width, truncation_indicator="▸")
+        current_line = 0
+        for token_type, value in lex(stripped, lexer):
+            if not value:
+                continue
+            cls = short_name(token_type)
+            parts = value.split("\n")
+            for i, part in enumerate(parts):
+                if part:
+                    lines[current_line].append((cls, part))
+                if i < len(parts) - 1:
+                    current_line += 1
+                    if current_line >= len(lines):
+                        # Safety: shouldn't exceed, but guard anyway.
+                        lines.append([])
+
+        # Pygments' lexers typically append a trailing newline, producing
+        # one extra empty line entry.  Drop trailing empty lines that
+        # exceed the original source line count.
+        expected = len(source_lines)
+        while len(lines) > expected and not lines[-1]:
+            lines.pop()
+
+        # Assemble the markup.  `n` attribute only when line_numbers enabled.
+        out_lines = [open_tag]
+        for idx, runs in enumerate(lines):
+            # Strip trailing whitespace-only runs to avoid trailing spaces
+            # in the rendered line.
+            while runs and not runs[-1][1].strip():
+                runs.pop()
+            children = []
+            for cls, text in runs:
+                esc = escape(text)
+                if cls:
+                    children.append(f'<j-tok t="{cls}">{esc}</j-tok>')
                 else:
-                    # Line fits: trim trailing background padding to capped width
-                    trimmed = _trim_line_to_width(line, trim_width)
-                trimmed_lines.append(indent + trimmed)
-
-            # Ensure ANSI reset at end to prevent styling from bleeding into subsequent text
-            return '\n' + '\n'.join(trimmed_lines) + '\x1b[0m\n'
-
-        except Exception:
-            # Fallback: return code as-is with indent if highlighting fails
-            indented_lines = [indent + line for line in code.split('\n')]
-            return '\n' + '\n'.join(indented_lines) + '\n'
+                    children.append(esc)
+            body = "".join(children)
+            if self._line_numbers:
+                out_lines.append(f'<j-line n="{idx + 1}">{body}</j-line>')
+            else:
+                out_lines.append(f'<j-line>{body}</j-line>')
+        out_lines.append("</j-code>")
+        return "\n".join(out_lines) + "\n"
 
 
 def create_plugin() -> CodeBlockFormatterPlugin:

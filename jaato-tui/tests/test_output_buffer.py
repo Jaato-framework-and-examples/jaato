@@ -827,5 +827,81 @@ class TestToolsExpandedDefault:
         assert tool_blocks[0].expanded is True, "ToolBlock should be expanded in headless mode"
 
 
+class TestMultiWaveToolFinalization:
+    """Regression tests for multi-wave finalization placeholder reset.
+
+    Scenario: tools start concurrently, complete in waves. The first
+    wave's finalization used to clear ``_tool_placeholder_index`` to
+    ``None`` even when incomplete tools remained, so a later wave
+    crashed in ``_safe_insert_line`` with ``NoneType - int``.
+    """
+
+    def setup_method(self):
+        self.buffer = OutputBuffer()
+        self.buffer.set_width(80)
+
+    def test_two_waves_no_crash(self):
+        """Two tools complete in separate waves — both ToolBlocks land cleanly.
+
+        Reproduces the production crash path: a user message arriving
+        while some tools are complete and others still running. The
+        user-input path at append():922 finalises completed tools
+        regardless of whether siblings are still running, leaving the
+        placeholder needing to be re-established for the second wave.
+        """
+        # Wave 1: tool A starts, B starts (both active).
+        self.buffer.add_active_tool("read", {"path": "a"}, call_id="call_a")
+        self.buffer.add_active_tool("read", {"path": "b"}, call_id="call_b")
+
+        # Tool A completes first.  A user/parent append() in this
+        # state triggers _finalize_completed_tools via the user-input
+        # branch — wave 1 finalises [A], keeps [B] active.
+        self.buffer.mark_tool_completed("read", success=True, call_id="call_a")
+        self.buffer.append("user", "follow-up question", "write")
+
+        # Tool B completes later, then another user message — wave 2
+        # must finalise [B] without crashing on a None placeholder.
+        self.buffer.mark_tool_completed("read", success=True, call_id="call_b")
+        self.buffer.append("user", "another follow-up", "write")
+
+        # Both waves produced a ToolBlock; neither tool dropped on the floor.
+        tool_blocks = [item for item in self.buffer._lines if isinstance(item, ToolBlock)]
+        assert len(tool_blocks) == 2, (
+            f"Expected 2 ToolBlocks (one per finalisation wave), got "
+            f"{len(tool_blocks)}"
+        )
+        # Tool A is in the first block, B in the second — chronological.
+        assert tool_blocks[0].tools[0].call_id == "call_a"
+        assert tool_blocks[1].tools[0].call_id == "call_b"
+
+    def test_placeholder_resets_to_none_when_no_tools_remain(self):
+        """Single-wave finalization (no tools left) clears the placeholder."""
+        self.buffer.add_active_tool("read", {"path": "a"}, call_id="call_a")
+        self.buffer.mark_tool_completed("read", success=True, call_id="call_a")
+        self.buffer.append("model", "after", "write")
+
+        # All tools finalized — nothing remains, so placeholder is None
+        # so the next tool start re-establishes a fresh position.
+        assert self.buffer._tool_placeholder_index is None
+        assert self.buffer._active_tools == []
+
+    def test_placeholder_advances_when_tools_remain(self):
+        """Multi-wave: placeholder tracks the current end so the next wave's
+        ToolBlock lands AFTER text inserted between waves."""
+        self.buffer.add_active_tool("read", {"path": "a"}, call_id="call_a")
+        self.buffer.add_active_tool("read", {"path": "b"}, call_id="call_b")
+
+        self.buffer.mark_tool_completed("read", success=True, call_id="call_a")
+        self.buffer.append("user", "follow-up", "write")
+
+        # Placeholder must be set (not None) and point at the end of
+        # the buffer post-finalisation, ready for wave 2.
+        assert self.buffer._tool_placeholder_index is not None
+        assert self.buffer._tool_placeholder_index >= 0
+        # Tool B must still be active — only A was finalised.
+        assert len(self.buffer._active_tools) == 1
+        assert self.buffer._active_tools[0].call_id == "call_b"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

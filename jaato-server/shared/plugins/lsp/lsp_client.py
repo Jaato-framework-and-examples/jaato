@@ -5,8 +5,47 @@ import json
 import os
 import subprocess
 import sys
+import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set, TextIO, Tuple
+
+
+def _make_pdeathsig_preexec():
+    """Build a ``preexec_fn`` that sets ``PR_SET_PDEATHSIG = SIGKILL``.
+
+    Returns the callable on Linux (so a spawned language server is
+    SIGKILL'd by the kernel the instant its owning runner process dies —
+    graceful exit, SIGKILL, OOM, or crash), or ``None`` elsewhere
+    (``preexec_fn=None`` is a harmless no-op, keeping the spawn portable
+    to platforms without ``prctl``).
+
+    The forked child runs a single ``libc`` syscall between fork and
+    exec — the documented-safe use of ``preexec_fn`` (no Python
+    allocation in the child).  See #284 / #280 (jdtls OOM leak).
+    """
+    if sys.platform != "linux":
+        return None
+    try:
+        import ctypes
+        _libc = ctypes.CDLL("libc.so.6", use_errno=True)
+    except OSError:
+        return None
+
+    import signal as _signal
+    _PR_SET_PDEATHSIG = 1
+
+    def _preexec() -> None:
+        # If the parent already died before this runs, prctl still
+        # succeeds but the signal won't fire — the window between this
+        # spawn and here is negligible.
+        _libc.prctl(_PR_SET_PDEATHSIG, _signal.SIGKILL)
+
+    return _preexec
+
+
+# Resolved once at import: the preexec_fn passed to every language-server
+# spawn (None on non-Linux).
+_set_pdeathsig_sigkill = _make_pdeathsig_preexec()
 
 
 @dataclass
@@ -361,12 +400,32 @@ class LSPClient:
         self._initialized = False
         self._capabilities: Optional[ServerCapabilities] = None
         self._diagnostics: Dict[str, List[Diagnostic]] = {}  # uri -> diagnostics
+        # Per-URI asyncio.Event signalled whenever the server pushes a
+        # `textDocument/publishDiagnostics` notification for that URI.
+        # Used by `await_diagnostics()` so callers can wait for the
+        # first batch instead of sleeping a fixed interval.  The event
+        # is recreated on each `await_diagnostics()` consume cycle so
+        # subsequent didChange + await pairs work correctly.
+        self._diagnostics_events: Dict[str, asyncio.Event] = {}
         self._open_documents: Dict[str, int] = {}  # uri -> version
         self._configured_extra_paths: Set[str] = set()  # paths already sent to server
         self._workspace_folders: Set[str] = set()  # workspace folder URIs added
 
     async def start(self) -> None:
-        """Start the language server process."""
+        """Start the language server process.
+
+        The child is spawned with a kernel-enforced parent-death signal
+        (``PR_SET_PDEATHSIG = SIGKILL``, Linux) so the language server —
+        a heavyweight process (jdtls routinely sits at 0.5-1GB) — is
+        reaped the instant its owning runner dies, no matter HOW it dies:
+        graceful shutdown, SIGKILL, OOM, or crash.  Without this, a
+        runner that's killed (e.g. OOM, pool recycle, mid-cascade abort)
+        leaks its language server, which then re-parents to the daemon
+        (subreaper) and accumulates — one per cascade stage — until the
+        daemon itself OOMs.  This is the kernel backstop; the graceful
+        ``stop()`` path (thread-cleanup → ``disconnect_server``) handles
+        the normal session-end case.  See #284 / #280.
+        """
         env = {**os.environ, **(self.config.env or {})}
 
         self._process = await asyncio.create_subprocess_exec(
@@ -375,7 +434,8 @@ class LSPClient:
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=self._errlog if hasattr(self._errlog, 'fileno') else asyncio.subprocess.DEVNULL,
-            env=env
+            env=env,
+            preexec_fn=_set_pdeathsig_sigkill,
         )
 
         # Start reader task
@@ -533,6 +593,16 @@ class LSPClient:
                 uri = params.get('uri', '')
                 diagnostics = [Diagnostic.from_dict(d) for d in params.get('diagnostics', [])]
                 self._diagnostics[uri] = diagnostics
+                # Signal any caller awaiting first batch via
+                # `await_diagnostics(path, ...)`.  We lazily create the
+                # Event so URIs the server pushes for spontaneously
+                # (e.g. cross-file analysis ripples) also get a signal
+                # if a future awaiter shows up.
+                event = self._diagnostics_events.get(uri)
+                if event is None:
+                    event = asyncio.Event()
+                    self._diagnostics_events[uri] = event
+                event.set()
 
     # Public API methods
 
@@ -967,6 +1037,144 @@ class LSPClient:
         """Get cached diagnostics for a file."""
         uri = self.uri_from_path(path)
         return self._diagnostics.get(uri, [])
+
+    async def await_diagnostics(
+        self,
+        path: str,
+        max_wait: float,
+        min_wait: float = 0.0,
+        convergence_window: float = 0.0,
+    ) -> bool:
+        """Block until the server pushes a `publishDiagnostics` batch for ``path``.
+
+        Returns AS SOON AS the first diagnostic batch arrives — and,
+        when ``convergence_window > 0``, keeps listening for follow-up
+        batches that overwrite the cache until ``convergence_window``
+        seconds pass without one.  Returns ``True`` if at least one
+        ``publishDiagnostics`` notification was observed within the
+        ``max_wait`` budget; ``False`` if the budget expired without
+        any notification.
+
+        ## Why a convergence loop?
+
+        Eclipse JDT LS (jdtls) on a cold Maven workspace publishes
+        multiple batches per URI as its multi-stage analysis pipeline
+        progresses.  Empirically (2026-06-05 instrumented cascade,
+        91 adjacent-publish races over 30 distinct ``.java`` URIs,
+        ``/tmp/converge2.py`` analysis):
+
+        - First publish is often an EMPTY batch (jdtls just accepted
+          ``didOpen``, parsing is in progress).  Median delay from
+          ``didOpen`` to first publish: ~500 ms.
+        - Real analysis (intra-project resolution, import settlement)
+          lands as a follow-up publish at ``+1500 ms`` median, ``+3 s``
+          p75 from the first publish.  ``Customer.java`` in the
+          concrete case study: ``12 errors`` at T+0 → ``0 errors`` at
+          T+2.2 s.  Returning on first-publish reads the cache before
+          jdtls converged — the agent sees phantom errors that don't
+          exist after settling.
+
+        Pre-server-0.6.193 behaviour (``convergence_window=0``) returns
+        on first publish — keeps the legacy fast path for tests and
+        for callers that want raw first-batch semantics.
+
+        Args:
+            path: file path the caller wants diagnostics for.
+            max_wait: upper bound on TOTAL wait time (including
+                ``min_wait`` and any convergence loop).
+            min_wait: floor on the first-publish wait.  See
+                pre-existing behaviour for multi-stage analysis
+                rationale.
+            convergence_window: seconds to keep listening for
+                follow-up publishes AFTER the first publish arrives.
+                Each follow-up resets the window timer (jdtls's
+                re-publish cascade may span multiple cycles).
+                ``0.0`` disables the loop (legacy first-publish
+                semantics).  Recommended ``3.0`` for jdtls on Maven
+                projects (catches the ~75 % cluster of fresh-render
+                races per the 2026-06-05 analysis); raise for stacks
+                with a heavier multi-stage tail.
+
+        Returns:
+            ``True`` if a ``publishDiagnostics`` notification arrived
+            within ``max_wait``; ``False`` if the budget expired
+            without any.  The caller is expected to
+            ``get_diagnostics`` afterwards regardless — ``False``
+            just tells them the cache may be stale.
+
+        Implementation notes:
+            - The Event is cleared on every observed publish so the
+              loop sees only NEW notifications, not the one that
+              ended the prior iteration.  The cache
+              (``self._diagnostics[uri]``) is NOT cleared — readers
+              still want the latest batch via ``get_diagnostics``.
+            - ``max_wait`` of 0 disables the await entirely (legacy
+              "read cache as-is" behavior).
+            - ``max_wait`` is a HARD ceiling.  Even if the convergence
+              loop is still seeing follow-up publishes, the call
+              returns once the cumulative budget elapses — a stack
+              that re-publishes forever won't hang the call site.
+        """
+        uri = self.uri_from_path(path)
+        event = self._diagnostics_events.get(uri)
+        if event is None:
+            event = asyncio.Event()
+            self._diagnostics_events[uri] = event
+
+        if max_wait <= 0:
+            return event.is_set()
+
+        start = time.monotonic()
+        deadline = start + max_wait
+
+        # Phase 1 — min_wait floor.  Multi-stage analysis pipelines
+        # may already have published one or more batches during this
+        # sleep; the cache holds the latest one when we wake.
+        if min_wait > 0:
+            await asyncio.sleep(min_wait)
+
+        # Phase 2 — wait for the first publish (or until the
+        # ``max_wait`` deadline).  When the Event was set during
+        # ``min_wait``, this returns immediately.
+        first_publish_seen = False
+        remaining = deadline - time.monotonic()
+        if event.is_set():
+            first_publish_seen = True
+        elif remaining > 0:
+            try:
+                await asyncio.wait_for(event.wait(), timeout=remaining)
+                first_publish_seen = True
+            except asyncio.TimeoutError:
+                event.clear()
+                return False
+
+        if not first_publish_seen:
+            event.clear()
+            return False
+
+        # Phase 3 — convergence loop.  After the first publish, keep
+        # listening for follow-up publishes that overwrite the cache.
+        # Each observed publish RESETS the window timer because jdtls's
+        # multi-stage cascade may span several re-publishes.  Exits
+        # when ``convergence_window`` elapses without a new publish,
+        # or when the cumulative ``max_wait`` deadline hits.
+        while convergence_window > 0:
+            event.clear()
+            time_to_deadline = deadline - time.monotonic()
+            if time_to_deadline <= 0:
+                break
+            window_budget = min(convergence_window, time_to_deadline)
+            try:
+                await asyncio.wait_for(event.wait(), timeout=window_budget)
+                # Follow-up publish arrived — cache overwritten with
+                # newer state.  Loop to check for more.
+            except asyncio.TimeoutError:
+                # ``convergence_window`` elapsed with no new publish:
+                # jdtls has settled on this URI.
+                break
+
+        event.clear()
+        return True
 
     async def get_code_actions(
         self,

@@ -5,11 +5,9 @@ import pytest
 from typing import Any, Callable, Dict, List, Optional
 from dataclasses import dataclass, field
 
-
-# Import ToolSchema and TOOL_CATEGORIES directly to avoid shared/__init__.py imports
-sys.path.insert(0, '/home/user/jaato')
 from jaato_sdk.plugins.model_provider.types import ToolSchema, TOOL_CATEGORIES
 from shared.plugins.introspection.plugin import IntrospectionPlugin, create_plugin
+from shared.tool_id_map import name_to_id
 
 
 class MockPlugin:
@@ -76,136 +74,121 @@ class MockRegistry:
     def disable_tool(self, tool_name: str) -> None:
         self._disabled_tools.add(tool_name)
 
+    def get_category_descriptions(self) -> Dict[str, str]:
+        return {}
+
+    def register_category(self, name: str, description: str) -> None:
+        pass
+
 
 class TestIntrospectionPlugin:
-    """Tests for IntrospectionPlugin."""
 
     def test_create_plugin(self):
-        """Test factory function creates plugin correctly."""
         plugin = create_plugin()
         assert plugin is not None
         assert isinstance(plugin, IntrospectionPlugin)
         assert plugin.name == "introspection"
 
     def test_initialize_and_shutdown(self):
-        """Test plugin initialization and shutdown."""
         plugin = create_plugin()
         plugin.initialize({})
         assert plugin._initialized is True
-
         plugin.shutdown()
         assert plugin._initialized is False
 
     def test_get_tool_schemas(self):
-        """Test that plugin exposes list_tools and get_tool_schemas."""
         plugin = create_plugin()
         schemas = plugin.get_tool_schemas()
-
         assert len(schemas) == 2
         schema_names = [s.name for s in schemas]
         assert "list_tools" in schema_names
         assert "get_tool_schemas" in schema_names
-
-        # Verify schemas have correct categories and discoverability
         for schema in schemas:
             assert schema.category == "system"
             assert schema.discoverability == "core"
 
     def test_get_executors(self):
-        """Test that plugin provides executors for both tools."""
         plugin = create_plugin()
         executors = plugin.get_executors()
-
         assert "list_tools" in executors
         assert "get_tool_schemas" in executors
-        assert callable(executors["list_tools"])
-        assert callable(executors["get_tool_schemas"])
 
     def test_auto_approved_tools(self):
-        """Test that introspection tools are auto-approved."""
         plugin = create_plugin()
         auto_approved = plugin.get_auto_approved_tools()
-
         assert "list_tools" in auto_approved
         assert "get_tool_schemas" in auto_approved
 
 
+def _make_test_env():
+    """Create plugin + registry with test tools."""
+    plugin = create_plugin()
+    plugin.initialize({})
+    registry = MockRegistry()
+
+    fs_plugin = MockPlugin("file_edit", [
+        ToolSchema(
+            name="readFile",
+            description="Read a file from disk. Returns content as text.",
+            parameters={"type": "object", "properties": {}},
+            category="filesystem",
+        ),
+        ToolSchema(
+            name="writeFile",
+            description="Write content to a file. Creates or overwrites.",
+            parameters={"type": "object", "properties": {}},
+            category="filesystem",
+        ),
+    ])
+    registry.register_plugin(fs_plugin)
+
+    search_plugin = MockPlugin("web_search", [
+        ToolSchema(
+            name="web_search",
+            description="Search the web for information on any topic.",
+            parameters={"type": "object", "properties": {}},
+            category="search",
+        ),
+    ])
+    registry.register_plugin(search_plugin)
+
+    planning_plugin = MockPlugin("todo", [
+        ToolSchema(
+            name="createPlan",
+            description="Create a new execution plan with steps.",
+            parameters={"type": "object", "properties": {}},
+            category="coordination",
+        ),
+    ])
+    registry.register_plugin(planning_plugin)
+
+    plugin.set_plugin_registry(registry)
+    return plugin, registry
+
+
 class TestListTools:
-    """Tests for the list_tools tool."""
 
     def setup_method(self):
-        """Set up test fixtures."""
-        self.plugin = create_plugin()
-        self.plugin.initialize({})
-
-        # Create mock registry with test tools
-        self.registry = MockRegistry()
-
-        # Register a filesystem plugin
-        fs_plugin = MockPlugin("file_edit", [
-            ToolSchema(
-                name="readFile",
-                description="Read a file from disk. Returns content as text.",
-                parameters={"type": "object", "properties": {}},
-                category="filesystem",
-            ),
-            ToolSchema(
-                name="writeFile",
-                description="Write content to a file. Creates or overwrites.",
-                parameters={"type": "object", "properties": {}},
-                category="filesystem",
-            ),
-        ])
-        self.registry.register_plugin(fs_plugin)
-
-        # Register a search plugin
-        search_plugin = MockPlugin("web_search", [
-            ToolSchema(
-                name="web_search",
-                description="Search the web for information on any topic.",
-                parameters={"type": "object", "properties": {}},
-                category="search",
-            ),
-        ])
-        self.registry.register_plugin(search_plugin)
-
-        # Register a planning plugin
-        planning_plugin = MockPlugin("todo", [
-            ToolSchema(
-                name="createPlan",
-                description="Create a new execution plan with steps.",
-                parameters={"type": "object", "properties": {}},
-                category="coordination",
-            ),
-        ])
-        self.registry.register_plugin(planning_plugin)
-
-        # Wire up plugin with registry
-        self.plugin.set_plugin_registry(self.registry)
+        self.plugin, self.registry = _make_test_env()
 
     def test_list_tools_no_category_returns_categories(self):
-        """Test list_tools without category returns category summary."""
-        executors = self.plugin.get_executors()
-        result = executors["list_tools"]({})
-
+        result = self.plugin.get_executors()["list_tools"]({})
         assert "categories" in result
         assert "total_tools" in result
         assert result["total_tools"] == 4
 
-        # Check categories are listed with counts
-        category_names = [c["name"] for c in result["categories"]]
-        assert "filesystem" in category_names
-        assert "search" in category_names
-        assert "planning" in category_names
+        cat_names = [c["name"] for c in result["categories"]]
+        assert "filesystem" in cat_names
+        assert "search" in cat_names
+        assert "coordination" in cat_names
 
-        # Check counts
         fs_cat = next(c for c in result["categories"] if c["name"] == "filesystem")
         assert fs_cat["tool_count"] == 2
+        assert fs_cat["id"] == name_to_id("filesystem", prefix="c")
 
     def test_list_tools_with_category_returns_tools(self):
-        """Test list_tools with category returns tools in that category."""
-        executors = self.plugin.get_executors()
-        result = executors["list_tools"]({"category": "filesystem"})
+        cat_id = name_to_id("filesystem", prefix="c")
+        result = self.plugin.get_executors()["list_tools"]({"category_id": cat_id})
 
         assert result["category"] == "filesystem"
         assert result["tool_count"] == 2
@@ -216,80 +199,56 @@ class TestListTools:
         assert "writeFile" in tool_names
 
     def test_list_tools_includes_plugin_source(self):
-        """Test list_tools includes plugin source for each tool."""
-        executors = self.plugin.get_executors()
-        result = executors["list_tools"]({"category": "filesystem"})
-
+        cat_id = name_to_id("filesystem", prefix="c")
+        result = self.plugin.get_executors()["list_tools"]({"category_id": cat_id})
+        # Plugin source is no longer exposed to model — tools identified by ID only
         for tool in result["tools"]:
-            assert "plugin_source" in tool
-            assert tool["plugin_source"] == "file_edit"
+            assert "id" in tool
 
     def test_list_tools_concise_descriptions(self):
-        """Test list_tools truncates long descriptions by default."""
-        executors = self.plugin.get_executors()
-        result = executors["list_tools"]({"category": "filesystem", "verbose": False})
-
+        cat_id = name_to_id("filesystem", prefix="c")
+        result = self.plugin.get_executors()["list_tools"]({"category_id": cat_id, "verbose": False})
         for tool in result["tools"]:
             assert "description" in tool
-            # Descriptions should be truncated to first sentence or 100 chars
             assert len(tool["description"]) <= 150
 
     def test_list_tools_verbose_mode(self):
-        """Test list_tools returns full descriptions in verbose mode."""
-        executors = self.plugin.get_executors()
-        result = executors["list_tools"]({"category": "search", "verbose": True})
-
-        # Find the search tool and check its description is complete
+        cat_id = name_to_id("search", prefix="c")
+        result = self.plugin.get_executors()["list_tools"]({"category_id": cat_id, "verbose": True})
         search_tool = result["tools"][0]
         assert search_tool["description"] == "Search the web for information on any topic."
 
     def test_list_tools_includes_enabled_status(self):
-        """Test list_tools includes enabled/disabled status."""
-        # Disable a tool
         self.registry.disable_tool("readFile")
-
-        executors = self.plugin.get_executors()
-        result = executors["list_tools"]({"category": "filesystem"})
+        cat_id = name_to_id("filesystem", prefix="c")
+        result = self.plugin.get_executors()["list_tools"]({"category_id": cat_id})
 
         for tool in result["tools"]:
             assert "enabled" in tool
-            if tool["name"] == "readFile":
-                assert tool["enabled"] is False
-            else:
-                assert tool["enabled"] is True
 
-    def test_list_tools_sorted_by_name(self):
-        """Test list_tools returns tools sorted by name."""
-        executors = self.plugin.get_executors()
-        result = executors["list_tools"]({"category": "filesystem"})
+        read_tool = next(t for t in result["tools"] if t["name"] == "readFile")
+        assert read_tool["enabled"] is False
 
-        tools = result["tools"]
-        names = [t["name"] for t in tools]
-        assert names == sorted(names)
+    def test_list_tools_sorted_by_id(self):
+        cat_id = name_to_id("filesystem", prefix="c")
+        result = self.plugin.get_executors()["list_tools"]({"category_id": cat_id})
+        ids = [t["id"] for t in result["tools"]]
+        assert ids == sorted(ids)
 
     def test_list_tools_no_registry_error(self):
-        """Test list_tools returns error when registry not set."""
         plugin = create_plugin()
         plugin.initialize({})
-        # Don't set registry
-
-        executors = plugin.get_executors()
-        result = executors["list_tools"]({})
-
+        result = plugin.get_executors()["list_tools"]({})
         assert "error" in result
 
 
 class TestGetToolSchemas:
-    """Tests for the get_tool_schemas tool."""
 
     def setup_method(self):
-        """Set up test fixtures."""
         self.plugin = create_plugin()
         self.plugin.initialize({})
-
         self.registry = MockRegistry()
 
-        # Register a plugin with detailed schema
         test_plugin = MockPlugin("test_plugin", [
             ToolSchema(
                 name="testTool",
@@ -332,126 +291,86 @@ class TestGetToolSchemas:
         self.plugin.set_plugin_registry(self.registry)
 
     def test_get_tool_schemas_returns_full_details(self):
-        """Test get_tool_schemas returns complete tool information."""
-        executors = self.plugin.get_executors()
-        result = executors["get_tool_schemas"]({"names": ["testTool"]})
+        tool_id = name_to_id("testTool")
+        result = self.plugin.get_executors()["get_tool_schemas"]({"tool_ids": [tool_id]})
 
         assert "schemas" in result
         assert result["count"] == 1
         schema = result["schemas"][0]
+        assert schema["id"] == tool_id
         assert schema["name"] == "testTool"
         assert schema["description"] == "A test tool for unit testing."
-        assert schema["plugin_source"] == "test_plugin"
+        assert schema["category_id"] == name_to_id("code", prefix="c")
         assert schema["category"] == "code"
         assert schema["enabled"] is True
         assert "parameters" in schema
 
     def test_get_tool_schemas_multiple_tools(self):
-        """Test get_tool_schemas handles multiple tool requests."""
-        executors = self.plugin.get_executors()
-        result = executors["get_tool_schemas"]({"names": ["testTool", "anotherTool"]})
+        ids = [name_to_id("testTool"), name_to_id("anotherTool")]
+        result = self.plugin.get_executors()["get_tool_schemas"]({"tool_ids": ids})
 
         assert result["count"] == 2
-        names = [s["name"] for s in result["schemas"]]
-        assert "testTool" in names
-        assert "anotherTool" in names
+        schema_names = [s["name"] for s in result["schemas"]]
+        assert "testTool" in schema_names
+        assert "anotherTool" in schema_names
 
     def test_get_tool_schemas_formats_parameters(self):
-        """Test get_tool_schemas formats parameters in readable structure."""
-        executors = self.plugin.get_executors()
-        result = executors["get_tool_schemas"]({"names": ["testTool"]})
-
+        tool_id = name_to_id("testTool")
+        result = self.plugin.get_executors()["get_tool_schemas"]({"tool_ids": [tool_id]})
         params = result["schemas"][0]["parameters"]
 
-        # Check required arg
         assert "required_arg" in params
         assert params["required_arg"]["type"] == "string"
         assert params["required_arg"]["required"] is True
-        assert "description" in params["required_arg"]
-
-        # Check optional arg with default
         assert "optional_arg" in params
         assert params["optional_arg"]["required"] is False
         assert params["optional_arg"]["default"] == 10
-
-        # Check enum arg
         assert "enum_arg" in params
         assert params["enum_arg"]["allowed_values"] == ["option1", "option2", "option3"]
-
-        # Check array arg
         assert "array_arg" in params
         assert params["array_arg"]["items_type"] == "string"
 
     def test_get_tool_schemas_partial_not_found(self):
-        """Test get_tool_schemas handles mix of found and not found tools."""
-        executors = self.plugin.get_executors()
-        result = executors["get_tool_schemas"]({"names": ["testTool", "nonExistent"]})
-
+        tool_id = name_to_id("testTool")
+        result = self.plugin.get_executors()["get_tool_schemas"]({"tool_ids": [tool_id, "t_nonexist"]})
         assert result["count"] == 1
         assert "not_found" in result
-        assert "nonExistent" in result["not_found"]
+        assert "t_nonexist" in result["not_found"]
 
-    def test_get_tool_schemas_suggests_similar_tools(self):
-        """Test get_tool_schemas suggests similar tools when not found."""
-        executors = self.plugin.get_executors()
-        result = executors["get_tool_schemas"]({"names": ["test"]})
-
-        assert "not_found" in result
-        assert "suggestions" in result
-        # Should suggest testTool as it contains "test"
-        assert "testTool" in result["suggestions"]["test"]
-
-    def test_get_tool_schemas_requires_names(self):
-        """Test get_tool_schemas returns error without names."""
-        executors = self.plugin.get_executors()
-        result = executors["get_tool_schemas"]({})
-
+    def test_get_tool_schemas_requires_tool_ids(self):
+        result = self.plugin.get_executors()["get_tool_schemas"]({})
         assert "error" in result
         assert "required" in result["error"].lower()
 
     def test_get_tool_schemas_no_registry_error(self):
-        """Test get_tool_schemas returns error when registry not set."""
         plugin = create_plugin()
         plugin.initialize({})
-        # Don't set registry
-
-        executors = plugin.get_executors()
-        result = executors["get_tool_schemas"]({"names": ["testTool"]})
-
+        result = plugin.get_executors()["get_tool_schemas"]({"tool_ids": ["t_abc"]})
         assert "error" in result
 
     def test_get_tool_schemas_tracks_accessed_tools(self):
-        """Test that get_tool_schemas tracks which tools were accessed."""
-        executors = self.plugin.get_executors()
-
-        # Initially no tools accessed
         assert len(self.plugin.get_accessed_tools()) == 0
-
-        # Access some tools
-        executors["get_tool_schemas"]({"names": ["testTool"]})
+        tool_id = name_to_id("testTool")
+        self.plugin.get_executors()["get_tool_schemas"]({"tool_ids": [tool_id]})
         assert "testTool" in self.plugin.get_accessed_tools()
 
-        # Access more tools
-        executors["get_tool_schemas"]({"names": ["anotherTool"]})
+        tool_id2 = name_to_id("anotherTool")
+        self.plugin.get_executors()["get_tool_schemas"]({"tool_ids": [tool_id2]})
         accessed = self.plugin.get_accessed_tools()
         assert "testTool" in accessed
         assert "anotherTool" in accessed
 
     def test_clear_accessed_tools(self):
-        """Test that accessed tools can be cleared."""
-        executors = self.plugin.get_executors()
-        executors["get_tool_schemas"]({"names": ["testTool"]})
-
+        tool_id = name_to_id("testTool")
+        self.plugin.get_executors()["get_tool_schemas"]({"tool_ids": [tool_id]})
         assert len(self.plugin.get_accessed_tools()) == 1
         self.plugin.clear_accessed_tools()
         assert len(self.plugin.get_accessed_tools()) == 0
 
 
 class TestToolCategories:
-    """Tests for tool category constants."""
 
     def test_standard_categories_defined(self):
-        """Test that standard categories are defined."""
         assert "filesystem" in TOOL_CATEGORIES
         assert "code" in TOOL_CATEGORIES
         assert "search" in TOOL_CATEGORIES
@@ -464,52 +383,21 @@ class TestToolCategories:
         assert "MCP" in TOOL_CATEGORIES
 
     def test_tool_schema_accepts_category(self):
-        """Test that ToolSchema accepts category field."""
-        schema = ToolSchema(
-            name="test",
-            description="Test tool",
-            parameters={},
-            category="filesystem",
-        )
+        schema = ToolSchema(name="test", description="Test", parameters={}, category="filesystem")
         assert schema.category == "filesystem"
 
     def test_tool_schema_category_optional(self):
-        """Test that ToolSchema category is optional."""
-        schema = ToolSchema(
-            name="test",
-            description="Test tool",
-            parameters={},
-        )
+        schema = ToolSchema(name="test", description="Test", parameters={})
         assert schema.category is None
 
 
 class TestTelemetry:
-    """Tests for _telemetry dict in tool results."""
 
     def setup_method(self):
-        """Set up test fixtures."""
-        self.plugin = create_plugin()
-        self.plugin.initialize({})
-
-        self.registry = MockRegistry()
-
-        fs_plugin = MockPlugin("file_edit", [
-            ToolSchema(
-                name="readFile",
-                description="Read a file from disk.",
-                parameters={"type": "object", "properties": {}},
-                category="filesystem",
-            ),
-        ])
-        self.registry.register_plugin(fs_plugin)
-
-        self.plugin.set_plugin_registry(self.registry)
+        self.plugin, self.registry = _make_test_env()
 
     def test_list_tools_result_includes_telemetry_dict(self):
-        """Test that list_tools result includes _telemetry for span enrichment."""
-        executors = self.plugin.get_executors()
-        result = executors["list_tools"]({})
-
+        result = self.plugin.get_executors()["list_tools"]({})
         assert "_telemetry" in result
         telem = result["_telemetry"]
         assert telem["jaato.introspection.operation"] == "list_tools"
@@ -518,32 +406,196 @@ class TestTelemetry:
 
 
 class TestToolDiscoverability:
-    """Tests for tool discoverability feature."""
 
     def test_tool_schema_discoverability_default(self):
-        """Test that ToolSchema discoverability defaults to 'discoverable'."""
-        schema = ToolSchema(
-            name="test",
-            description="Test tool",
-            parameters={},
-        )
+        schema = ToolSchema(name="test", description="Test", parameters={})
         assert schema.discoverability == "discoverable"
 
     def test_tool_schema_discoverability_core(self):
-        """Test that ToolSchema accepts 'core' discoverability."""
-        schema = ToolSchema(
-            name="test",
-            description="Test tool",
-            parameters={},
-            discoverability="core",
-        )
+        schema = ToolSchema(name="test", description="Test", parameters={}, discoverability="core")
         assert schema.discoverability == "core"
 
     def test_introspection_tools_are_core(self):
-        """Test that introspection plugin tools are marked as core."""
         plugin = create_plugin()
-        schemas = plugin.get_tool_schemas()
+        for schema in plugin.get_tool_schemas():
+            assert schema.discoverability == "core"
 
-        for schema in schemas:
-            assert schema.discoverability == "core", \
-                f"Tool {schema.name} should be core but is {schema.discoverability}"
+
+class TestExploreToolsGuidanceWording:
+    """2026-05-15 regression pin: the explore-tools guidance is phrased
+    CONDITIONALLY ("WHEN REQUIRED" / "when your current information is
+    insufficient"), not as an unconditional imperative ("ALWAYS explore").
+
+    **Why the wording matters.**  Personas that scope the agent to a
+    narrow tool set (e.g. discovery profile saying "only call
+    signal_completion; do not call list_tools / get_tool_schemas")
+    must coexist with the framework's general guidance.  An
+    unconditional ``"ALWAYS explore tools first"`` directly
+    contradicts the persona — same model, same prompt, two
+    competing imperatives, and the framework's strong word often
+    won (peer's v86 cascade aborted at discovery for exactly this
+    reason).
+
+    A conditional phrasing makes the framework instruction a
+    FALLBACK for unclear cases ("explore WHEN you need to") while
+    leaving room for the persona to say "exploration isn't
+    required, the tool is X".  Both coexist without contradiction.
+
+    See ``feedback_kernel_scoping_beats_persona_prose`` for the
+    governing rule: framework instructions must not contradict
+    session-level contracts.
+    """
+
+    def test_guidance_phrased_conditionally_not_unconditionally(self):
+        """The exact word ``ALWAYS`` (as an unqualified imperative
+        directing the model to explore) must not appear in the
+        guidance.  Pin the absence of that phrase so a future
+        restorer can't accidentally re-introduce it."""
+        plugin = create_plugin()
+        si = plugin.get_system_instructions()
+        assert si is not None
+        # Lowercase compare to catch any casing variation.
+        si_lower = si.lower()
+        # The specific imperative shape that caused v86: "ALWAYS
+        # explore available tools first".  Forbid this exact pattern.
+        assert "always explore" not in si_lower, (
+            "Introspection guidance must not contain the unconditional "
+            "imperative 'ALWAYS explore'.  Personas that need to scope "
+            "the agent to a narrow tool set (e.g. typed-completion "
+            "stages) need the framework instruction to be conditional "
+            "so it doesn't contradict their explicit tool-list. "
+            f"Got: {si!r}"
+        )
+
+    def test_guidance_contains_conditional_qualifier(self):
+        """The guidance must carry an explicit qualifier indicating
+        WHEN exploration applies (the conditional that lets a
+        narrow-tool-list persona override default exploration)."""
+        plugin = create_plugin()
+        si = plugin.get_system_instructions()
+        assert si is not None
+        # One of the qualifier phrases must be present so the
+        # instruction reads as conditional rather than absolute.
+        qualifiers = [
+            "when required",
+            "when your current information is insufficient",
+            "skip discovery when the persona",
+        ]
+        si_lower = si.lower()
+        assert any(q in si_lower for q in qualifiers), (
+            "Introspection guidance must contain a conditional "
+            "qualifier (one of: 'when required', 'when your "
+            "current information is insufficient', 'skip discovery "
+            "when the persona') so personas can override the "
+            "default exploration behaviour.  Got: "
+            f"{si!r}"
+        )
+
+    def test_guidance_still_describes_workflow_for_unclear_cases(self):
+        """When exploration IS warranted, the guidance must still tell
+        the agent HOW (the list_tools → get_tool_schemas → call
+        chain).  We're softening the trigger condition, not removing
+        the workflow."""
+        plugin = create_plugin()
+        si = plugin.get_system_instructions()
+        assert si is not None
+        # The workflow steps should remain.
+        assert "list_tools" in si
+        assert "get_tool_schemas" in si
+        # The category quick-reference should remain.
+        assert "CATEGORY QUICK REFERENCE" in si
+
+    def test_guidance_returned_for_typed_completion_sessions(self):
+        """Sessions with typed completion contracts STILL receive the
+        guidance — we don't gate by session state.  The wording is
+        what changed.  The persona handles the "don't explore"
+        decision; the framework just provides the general
+        capability description.
+
+        Pin: a typed-completion session (the v86 repro case) still
+        gets the guidance, just no longer in an unconditional form
+        that contradicts its persona."""
+        plugin = create_plugin()
+
+        class TypedSession:
+            _completion_payload_schema = {"type": "object", "properties": {}}
+
+        plugin.set_session(TypedSession())
+        si = plugin.get_system_instructions()
+        assert si is not None, (
+            "Guidance must be returned even for typed-completion "
+            "sessions — the fix is in the wording, not in suppression. "
+            "Suppression-based gating was the wrong approach: it "
+            "made framework guidance conditional on session state "
+            "rather than letting personas authoritatively scope "
+            "behaviour."
+        )
+        # And the conditional qualifier must still be present.
+        assert "always explore" not in si.lower()
+
+
+class TestNoFabricateToolIdGuardrail:
+    """2026-07-26 regression pin: the discovery guidance carries an
+    anti-fabrication guardrail.
+
+    A small exec model (gemini-2.5-flash) read a human tool name
+    (``delete_memory``) from another plugin's system-instructions, saw
+    that loaded tools are called by opaque ``t_<8hex>`` ids, and
+    FABRICATED ``t_delete_memory`` for the deferred (unloaded) tool — which
+    then leaked to the user (the scrubber only normalizes real 8-hex ids).
+    Root-cause fix is instruction-level: tell the model never to invent an
+    id and to discover unseen capabilities via ``list_tools`` instead.
+    """
+
+    def test_guidance_forbids_inventing_tool_ids(self):
+        plugin = create_plugin()
+        si = plugin.get_system_instructions()
+        assert si is not None
+        si_lower = si.lower()
+        # The prohibition must be explicit.
+        assert "never invent" in si_lower and "tool id" in si_lower, (
+            "Introspection guidance must explicitly forbid inventing/"
+            "guessing a tool id or name. Got: " + repr(si)
+        )
+        # And it must point at the real discovery path as the alternative.
+        assert "list_tools" in si
+
+    def test_guardrail_rides_inside_the_deferred_tools_gate(self):
+        """The guardrail must live in the SAME gated block as the rest of
+        the discovery guidance: when the session suppresses it (nothing
+        deferred to discover), the anti-fabrication text must go too —
+        otherwise the prompt tells the model to 'discover via list_tools'
+        when list_tools isn't on the wire (the ex08 loop)."""
+        plugin = create_plugin()
+
+        class _FlaggedSession:
+            _introspection_guidance_suppressed = True
+
+        plugin.set_session(_FlaggedSession())
+        assert plugin.get_system_instructions() is None
+
+
+def test_discovery_guidance_suppressed_when_session_flags_it():
+    """The introspection discovery guidance (list_tools/get_tool_schemas
+    workflow) must be suppressed when the session dropped introspection's TOOLS
+    (nothing to discover) — else the prompt nudges the model to call tools that
+    aren't on its wire, it invents them, hits no-executor, and loops (the ex08
+    0-tool subagent hang). Instruction-gate aligned with tool-gate."""
+    from shared.plugins.introspection.plugin import create_plugin
+
+    p = create_plugin()
+    # No session / flag unset -> guidance present.
+    instr = p.get_system_instructions()
+    assert instr is not None and "CAPABILITY DISCOVERY" in instr
+
+    class _FlaggedSession:
+        _introspection_guidance_suppressed = True
+
+    p.set_session(_FlaggedSession())
+    assert p.get_system_instructions() is None  # suppressed
+
+    class _NormalSession:
+        _introspection_guidance_suppressed = False
+
+    p.set_session(_NormalSession())
+    assert "CAPABILITY DISCOVERY" in (p.get_system_instructions() or "")

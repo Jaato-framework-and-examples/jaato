@@ -1,0 +1,12 @@
+{
+  "type": "client.config",
+  "timestamp": "<TIMESTAMP>",
+  "trace_log_path": null,
+  "provider_trace_log": null,
+  "working_dir": null,
+  "config_root": null,
+  "env_file": null,
+  "presentation": null,
+  "permission_timeout": null,
+  "apparmor": false
+}

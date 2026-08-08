@@ -1,0 +1,9 @@
+{
+  "type": "clarification.requested",
+  "timestamp": "<TIMESTAMP>",
+  "agent_id": "",
+  "request_id": "",
+  "tool_name": "",
+  "context_lines": [],
+  "total_questions": 0
+}

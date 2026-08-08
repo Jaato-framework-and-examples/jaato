@@ -50,7 +50,22 @@ class EventType(Enum):
     AGENT_CREATED = "agent.created"
     AGENT_STATUS_CHANGED = "agent.status_changed"
     AGENT_COMPLETED = "agent.completed"
+    AGENT_ERROR = "agent.error"            # Recoverable terminal error (post Layer-1 exhaustion)
     AGENT_OUTPUT = "agent.output"          # Model text, system text, plugin text
+
+    # Session lifecycle events (bridged from server events)
+    SESSION_TERMINATED = "session.terminated"  # Server 0.6.162+ / SDK 0.14.3+
+
+    # Cascade stage settled (warm-return / torn-down / cold) — universal
+    # per-stage handoff signal; reactors gate next-stage spawn on it.
+    SLOT_SETTLED = "slot.settled"
+
+    # HandoffGate release (bridged from server events) — lets reactor rules
+    # (e.g. reliability's T3 gate-park resume) fire when a parked session's
+    # gate is approved/denied/timed-out. gate.announced stays a daemon-wide
+    # client-discovery broadcast (not bridged here). See
+    # jaato-premium docs/design/gate-released-bus-delivery.md.
+    GATE_RELEASED = "gate.released"
 
     # Tool execution events (bridged from server events)
     TOOL_CALL_STARTED = "tool.call_started"
@@ -71,6 +86,16 @@ class EventType(Enum):
 
     # Drift monitor events (published by drift monitor plugin)
     DRIFT_MEASURED = "drift.measured"
+
+    # Reliability reactor events (published by a tenant-authored reliability
+    # reactor — the event-driven successor to the in-process reliability
+    # plugin; see docs/design/reliability-event-driven-migration.md).
+    # Observability: emitted on every escalation / behavioral-pattern
+    # detection so traces see the signal even when no steer fires.  A reactor
+    # may also SUBSCRIBE to these (e.g. a T2/T3 headless-approval reactor
+    # reacting to reliability.escalated).
+    RELIABILITY_ESCALATED = "reliability.escalated"
+    RELIABILITY_PATTERN_DETECTED = "reliability.pattern_detected"
 
     # External events (published by plugins, not plan/step lifecycle)
     EXTERNAL_EVENT = "external_event"  # Webhook, WebSocket, or other external ingress

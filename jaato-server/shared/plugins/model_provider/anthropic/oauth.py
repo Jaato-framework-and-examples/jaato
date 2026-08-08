@@ -9,7 +9,9 @@ import base64
 import hashlib
 import http.server
 import json
+import logging
 import os
+from shared.session_context import get_workspace_root, get_config_root
 import secrets
 import threading
 import time
@@ -19,6 +21,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional, Tuple
 import urllib.request
+
+logger = logging.getLogger(__name__)
 
 # OAuth configuration (same as Claude Code CLI)
 OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
@@ -455,29 +459,39 @@ def refresh_tokens(refresh_token: str) -> OAuthTokens:
 
 
 # Token storage location
-def _get_token_storage_path(for_write: bool = False, workspace_path: Optional[str] = None) -> Path:
+def _get_token_storage_path(
+    for_write: bool = False,
+    workspace_path: Optional[str] = None,
+    config_root: Optional[str] = None,
+) -> Path:
     """Get path to token storage file.
 
     Follows jaato convention:
-    1. Project .jaato/ first (project-specific auth)
-    2. Home ~/.jaato/ second (user-level default)
+    1. Project tier — ``<config_root>/anthropic_oauth.json`` when set,
+       else ``<workspace>/.jaato/anthropic_oauth.json``.
+    2. Home tier — ``~/.jaato/anthropic_oauth.json``.
 
     Uses JAATO_WORKSPACE_ROOT env var if set (for subagents), otherwise Path.cwd().
+    Uses JAATO_CONFIG_ROOT env var when ``config_root`` is unset.
     This avoids race conditions when subagents run in thread pools with
     process-wide CWD changes.
 
     Args:
-        for_write: If True, returns the path to write to (prefers project dir
-                   if it exists, otherwise home). If False, returns the first
-                   existing file or the default write location.
+        for_write: If True, returns the path to write to.
+        workspace_path: Optional explicit workspace path override.
+        config_root: Optional explicit read-only-config root override.
 
     Returns:
         Path to token storage file.
     """
     # Use explicit workspace path if set (thread-safe for subagents)
     # Falls back to CWD for main agent
-    workspace = workspace_path or os.environ.get("JAATO_WORKSPACE_ROOT") or os.getcwd()
-    project_path = Path(workspace) / ".jaato" / "anthropic_oauth.json"
+    workspace = workspace_path or get_workspace_root() or os.getcwd()
+    effective_config_root = config_root or get_config_root()
+    if effective_config_root:
+        project_path = Path(effective_config_root).expanduser().resolve() / "anthropic_oauth.json"
+    else:
+        project_path = Path(workspace) / ".jaato" / "anthropic_oauth.json"
     home_path = Path.home() / ".jaato" / "anthropic_oauth.json"
 
     if for_write:
@@ -492,9 +506,15 @@ def _get_token_storage_path(for_write: bool = False, workspace_path: Optional[st
         return home_path
 
 
-def save_tokens(tokens: OAuthTokens, workspace_path: Optional[str] = None) -> None:
+def save_tokens(
+    tokens: OAuthTokens,
+    workspace_path: Optional[str] = None,
+    config_root: Optional[str] = None,
+) -> None:
     """Save tokens to persistent storage."""
-    path = _get_token_storage_path(for_write=True, workspace_path=workspace_path)
+    path = _get_token_storage_path(
+        for_write=True, workspace_path=workspace_path, config_root=config_root,
+    )
     path.parent.mkdir(parents=True, exist_ok=True)
 
     with open(path, "w") as f:
@@ -505,29 +525,90 @@ def save_tokens(tokens: OAuthTokens, workspace_path: Optional[str] = None) -> No
         os.chmod(path, 0o600)
 
 
-def load_tokens(workspace_path: Optional[str] = None) -> Optional[OAuthTokens]:
-    """Load tokens from persistent storage."""
-    path = _get_token_storage_path(workspace_path=workspace_path)
+def load_tokens(
+    workspace_path: Optional[str] = None,
+    config_root: Optional[str] = None,
+) -> Optional[OAuthTokens]:
+    """Load tokens from persistent storage.
+
+    Returns None if the file is absent **or** cannot be parsed.  A broken
+    token file (corrupt JSON, missing field, permission error) is logged
+    at WARNING so it surfaces in the trace log instead of being silently
+    swallowed.  Callers that need to surface the specific failure reason
+    should use :func:`try_load_tokens_with_reason` — this lets
+    ``verify_auth`` distinguish "never logged in" from "auth file is
+    broken".
+    """
+    tokens, _ = try_load_tokens_with_reason(
+        workspace_path=workspace_path, config_root=config_root,
+    )
+    return tokens
+
+
+def try_load_tokens_with_reason(
+    workspace_path: Optional[str] = None,
+    config_root: Optional[str] = None,
+) -> Tuple[Optional["OAuthTokens"], Optional[str]]:
+    """Load OAuth tokens and return a reason string when the load fails.
+
+    Returns ``(tokens, reason)``:
+
+    - ``(OAuthTokens, None)`` — file loaded successfully.
+    - ``(None, None)`` — no token file exists.
+    - ``(None, "<reason>")`` — file exists but could not be loaded.
+
+    Lets ``verify_auth`` differentiate "not logged in" from "logged in
+    but auth file is broken", so users see the real failure (invalid
+    JSON, permission error, missing field) instead of a generic "no
+    credentials" message.
+    """
+    path = _get_token_storage_path(
+        workspace_path=workspace_path, config_root=config_root,
+    )
 
     if not path.exists():
-        return None
+        return None, None
 
     try:
         with open(path) as f:
             data = json.load(f)
-        return OAuthTokens.from_dict(data)
-    except Exception:
-        return None
+    except (OSError, PermissionError) as exc:
+        reason = f"cannot read {path}: {exc}"
+        logger.warning("Failed to read Anthropic OAuth tokens: %s", reason)
+        return None, reason
+    except json.JSONDecodeError as exc:
+        reason = f"invalid JSON at {path}: {exc.msg} (line {exc.lineno}, col {exc.colno})"
+        logger.warning("Failed to parse Anthropic OAuth tokens: %s", reason)
+        return None, reason
+
+    try:
+        return OAuthTokens.from_dict(data), None
+    except (KeyError, TypeError) as exc:
+        reason = f"malformed tokens at {path}: missing or invalid field ({exc})"
+        logger.warning("Malformed Anthropic OAuth tokens: %s", reason)
+        return None, reason
+    except Exception as exc:  # defensive
+        reason = f"unexpected error loading {path}: {exc.__class__.__name__}: {exc}"
+        logger.warning("Unexpected error loading Anthropic OAuth tokens: %s", reason)
+        return None, reason
 
 
-def clear_tokens(workspace_path: Optional[str] = None) -> None:
+def clear_tokens(
+    workspace_path: Optional[str] = None,
+    config_root: Optional[str] = None,
+) -> None:
     """Clear stored tokens."""
-    path = _get_token_storage_path(workspace_path=workspace_path)
+    path = _get_token_storage_path(
+        workspace_path=workspace_path, config_root=config_root,
+    )
     if path.exists():
         path.unlink()
 
 
-def get_valid_access_token() -> Optional[str]:
+def get_valid_access_token(
+    workspace_path: Optional[str] = None,
+    config_root: Optional[str] = None,
+) -> Optional[str]:
     """Get a valid access token, refreshing if needed.
 
     Returns:
@@ -536,14 +617,18 @@ def get_valid_access_token() -> Optional[str]:
     Raises:
         RuntimeError: If refresh fails.
     """
-    tokens = load_tokens()
+    tokens = load_tokens(workspace_path=workspace_path, config_root=config_root)
     if not tokens:
         return None
 
     # Refresh if expired
     if tokens.is_expired:
         tokens = refresh_tokens(tokens.refresh_token)
-        save_tokens(tokens)
+        save_tokens(
+            tokens,
+            workspace_path=workspace_path,
+            config_root=config_root,
+        )
 
     return tokens.access_token
 
@@ -575,11 +660,17 @@ def _get_pending_auth_path(for_write: bool = False) -> Path:
     """Get path to pending auth state file.
 
     Follows same convention as token storage:
-    1. Project .jaato/ first
-    2. Home ~/.jaato/ second
+    1. Project tier — ``<config_root>/anthropic_pending_auth.json`` when
+       ``JAATO_CONFIG_ROOT`` is set, else
+       ``<workspace>/.jaato/anthropic_pending_auth.json``.
+    2. Home tier — ``~/.jaato/anthropic_pending_auth.json``.
     """
-    workspace = os.environ.get("JAATO_WORKSPACE_ROOT") or os.getcwd()
-    project_path = Path(workspace) / ".jaato" / "anthropic_pending_auth.json"
+    workspace = get_workspace_root() or os.getcwd()
+    effective_config_root = get_config_root()
+    if effective_config_root:
+        project_path = Path(effective_config_root).expanduser().resolve() / "anthropic_pending_auth.json"
+    else:
+        project_path = Path(workspace) / ".jaato" / "anthropic_pending_auth.json"
     home_path = Path.home() / ".jaato" / "anthropic_pending_auth.json"
 
     if for_write:
@@ -609,6 +700,11 @@ def save_pending_auth(code_verifier: str, state: str) -> None:
 def load_pending_auth() -> Tuple[Optional[str], Optional[str]]:
     """Load pending auth state.
 
+    Returns ``(code_verifier, state)``, or ``(None, None)`` when the file
+    is absent or cannot be parsed.  Parse errors are logged at WARNING
+    so a broken pending-auth file does not silently block the second
+    half of the OAuth flow.
+
     Returns:
         Tuple of (code_verifier, state), or (None, None) if not found.
     """
@@ -620,7 +716,11 @@ def load_pending_auth() -> Tuple[Optional[str], Optional[str]]:
         with open(path) as f:
             data = json.load(f)
         return data.get("code_verifier"), data.get("state")
-    except Exception:
+    except Exception as exc:
+        logger.warning(
+            "Failed to load Anthropic pending-auth state at %s: %s: %s",
+            path, exc.__class__.__name__, exc,
+        )
         return None, None
 
 

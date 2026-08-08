@@ -27,6 +27,7 @@ Example usage:
 # Plugin kind identifier for registry discovery
 PLUGIN_KIND = "tool"
 
+PLUGIN_TIER = "runner"
 from .plugin import IntrospectionPlugin, create_plugin
 
 __all__ = [

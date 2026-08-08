@@ -13,7 +13,82 @@ from ..plugin import (
     PromptParam,
     PROMPT_ENTRY_FILE,
     SKILL_ENTRY_FILE,
+    COMMAND_TIMEOUT,
+    PARAM_GRAMMAR_DOC,
+    NAMED_PARAM_PATTERN,
+    tokenize_prompt_args,
 )
+
+
+class TestTokenizePromptArgs:
+    """Tests for the shlex-based prompt-args tokenizer.
+
+    The tokenizer powers both the ``%name args...`` text path
+    (session_manager) and the ``/prompt name args...`` slash-command
+    path (this plugin).  The contract differs from default
+    ``shlex.split`` in two important ways: only double quotes are
+    honored (apostrophes are literal so Spanish/French text doesn't
+    blow up), and unterminated quotes degrade to plain
+    whitespace-splitting rather than raising.
+    """
+
+    def test_plain_whitespace_split(self):
+        assert tokenize_prompt_args("a b c") == ["a", "b", "c"]
+
+    def test_empty_returns_empty_list(self):
+        assert tokenize_prompt_args("") == []
+        assert tokenize_prompt_args("   ") == []
+
+    def test_double_quoted_value_kept_as_one_token(self):
+        # Quotes are stripped after tokenization.
+        assert tokenize_prompt_args('"foo bar" baz') == ["foo bar", "baz"]
+
+    def test_named_arg_with_quoted_value(self):
+        # The ``key="value"`` form lands as a single ``key=value`` token
+        # so the downstream partitioner can split on the first ``=``.
+        assert tokenize_prompt_args('key="value with spaces"') == [
+            "key=value with spaces"
+        ]
+
+    def test_apostrophe_is_literal(self):
+        # Default POSIX shlex would treat ``'`` as a quote and choke
+        # on the unterminated single quote — we explicitly disable
+        # single-quote handling so natural-language values work.
+        assert tokenize_prompt_args("Profesor/a d'enseñanza") == [
+            "Profesor/a",
+            "d'enseñanza",
+        ]
+
+    def test_apostrophe_inside_quoted_value(self):
+        assert tokenize_prompt_args('name="O\'Brien"') == ["name=O'Brien"]
+
+    def test_url_token_unchanged(self):
+        # No quoting needed for typical URLs.
+        assert tokenize_prompt_args("https://example.com/x?y=1") == [
+            "https://example.com/x?y=1"
+        ]
+
+    def test_unterminated_quote_falls_back_to_split(self):
+        # Malformed input must not raise — the fallback path returns
+        # what plain ``str.split`` would produce.
+        assert tokenize_prompt_args('foo "unclosed bar') == [
+            "foo",
+            '"unclosed',
+            "bar",
+        ]
+
+    def test_escaped_quote_inside_double_quoted_span(self):
+        assert tokenize_prompt_args(r'msg="he said \"hi\""') == [
+            'msg=he said "hi"'
+        ]
+
+    def test_named_followed_by_positional(self):
+        # Mixed forms must coexist so the existing positional fallback
+        # keeps working when only some values need quoting.
+        assert tokenize_prompt_args('case_id=X tomador_nombre="María García"') == [
+            "case_id=X",
+            "tomador_nombre=María García",
+        ]
 
 
 class TestPromptLibraryPluginInitialization:
@@ -798,6 +873,80 @@ Hello {{$1}}!
 
             assert "not found" in result.lower()
 
+    def test_prompt_command_help_flag_shows_params(self):
+        from jaato_sdk.plugins.base import HelpLines
+
+        plugin = PromptLibraryPlugin()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            plugin.set_workspace_path(tmpdir)
+
+            prompts_dir = Path(tmpdir) / ".jaato" / "prompts"
+            prompts_dir.mkdir(parents=True)
+            (prompts_dir / "forecast.md").write_text("""---
+description: Get a detailed weather forecast
+params:
+  city:
+    required: true
+    description: Spanish city name (e.g., Madrid, Barcelona)
+  days:
+    required: false
+    default: "3"
+    description: Number of forecast days (1-7)
+---
+Forecast for {{city}} over {{days}} days.
+""")
+
+            result = plugin._execute_prompt_command({"args": ["forecast", "--help"]})
+
+            assert isinstance(result, HelpLines)
+            flat = "\n".join(text for text, _style in result.lines)
+            assert "Prompt: forecast" in flat
+            assert "Get a detailed weather forecast" in flat
+            assert "prompt forecast <city> [days]" in flat
+            assert "%forecast <city> [days]" in flat
+            assert "city (required)" in flat
+            assert "Spanish city name" in flat
+            assert "days (optional, default='3')" in flat
+            assert "Number of forecast days" in flat
+            # Must not execute the prompt body
+            assert "Forecast for" not in flat
+
+    def test_prompt_command_short_help_flag(self):
+        from jaato_sdk.plugins.base import HelpLines
+
+        plugin = PromptLibraryPlugin()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            plugin.set_workspace_path(tmpdir)
+
+            prompts_dir = Path(tmpdir) / ".jaato" / "prompts"
+            prompts_dir.mkdir(parents=True)
+            (prompts_dir / "greet.md").write_text("""---
+description: Say hello
+---
+Hello {{$1}}!
+""")
+
+            result = plugin._execute_prompt_command({"args": ["greet", "-h"]})
+
+            assert isinstance(result, HelpLines)
+            flat = "\n".join(text for text, _style in result.lines)
+            assert "Prompt: greet" in flat
+            assert "Say hello" in flat
+            assert "This prompt takes no parameters." in flat
+            assert "Hello {{$1}}" not in flat  # prompt body must not execute
+
+    def test_prompt_command_help_flag_unknown_prompt(self):
+        plugin = PromptLibraryPlugin()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            plugin.set_workspace_path(tmpdir)
+
+            result = plugin._execute_prompt_command({"args": ["nope", "--help"]})
+
+            # Unknown prompt short-circuits to a plain error string so the
+            # caller can surface it as a SystemMessageEvent or plain text.
+            assert isinstance(result, str)
+            assert "not found" in result.lower()
+
 
 class TestCommandCompletions:
     """Tests for command completions."""
@@ -875,6 +1024,47 @@ class TestSystemInstructions:
                 instructions = plugin.get_system_instructions()
 
                 assert instructions is None
+
+
+class TestParamGrammarDoc:
+    """Pins the single-source placeholder-grammar doc cited at BOTH authoring
+    surfaces the model sees.
+
+    Regression guard for the drift that let a model author a prompt with Jinja
+    filter syntax (``{{name | default('x')}}``) — jaato's ``NAMED_PARAM_PATTERN``
+    never matches that form, so it rendered literally and the param went
+    unrecognized.  ``PARAM_GRAMMAR_DOC`` is the one source of truth; these tests
+    assert it (a) is self-consistent with the real grammar and (b) is actually
+    surfaced verbatim at both the ``savePrompt`` tool description and the
+    ``get_system_instructions`` block, so the two cannot silently diverge again.
+    """
+
+    def test_doc_is_self_consistent_with_grammar(self):
+        # The forms the doc advertises must match the real pattern...
+        assert NAMED_PARAM_PATTERN.fullmatch("{{name}}")
+        assert NAMED_PARAM_PATTERN.fullmatch("{{name:default text}}")
+        # ...and the Jinja filter form the doc warns against must NOT match.
+        assert not NAMED_PARAM_PATTERN.search("{{name | default('x')}}")
+        assert "NOT Jinja" in PARAM_GRAMMAR_DOC
+        assert "{{name:default text}}" in PARAM_GRAMMAR_DOC
+
+    def test_save_prompt_description_cites_the_doc(self):
+        plugin = PromptLibraryPlugin()
+        schemas = {s.name: s for s in plugin.get_tool_schemas()}
+        desc = schemas["savePrompt"].parameters["properties"]["content"]["description"]
+        assert PARAM_GRAMMAR_DOC in desc
+        # The bare "{{param}}" wording that invited the over-generalization is gone.
+        assert "optional {{param}} placeholders" not in desc
+
+    def test_system_instructions_cite_the_doc(self):
+        plugin = PromptLibraryPlugin()
+        # Stub discovery so the block is produced regardless of the environment.
+        plugin._discover_prompts = lambda: {"demo": object()}
+        instructions = plugin.get_system_instructions()
+        assert PARAM_GRAMMAR_DOC in instructions
+        # f-string braces rendered, not a literal placeholder leak.
+        assert "{PARAM_GRAMMAR_DOC}" not in instructions
+        assert "{{focus:security}}" in instructions
 
 
 class TestGitHubPathFetch:
@@ -1461,3 +1651,174 @@ class TestDeletePrompt:
         auto_approved = plugin.get_auto_approved_tools()
 
         assert "deletePrompt" not in auto_approved
+
+
+class TestCommandSubstitution:
+    """Tests for {{!command}} command substitution in prompt templates."""
+
+    def test_expand_simple_command(self):
+        """Basic command substitution replaces placeholder with stdout."""
+        plugin = PromptLibraryPlugin()
+        content = "Today is {{!echo hello world}}."
+        result = plugin._expand_commands(content, "/tmp")
+        assert result == "Today is hello world."
+
+    def test_expand_no_commands_passthrough(self):
+        """Content without {{!...}} is returned unchanged."""
+        plugin = PromptLibraryPlugin()
+        content = "No commands here, just {{param}} placeholders."
+        result = plugin._expand_commands(content, "/tmp")
+        assert result == content
+
+    def test_expand_multiple_commands(self):
+        """Multiple command placeholders are all expanded."""
+        plugin = PromptLibraryPlugin()
+        content = "A={{!echo aaa}} B={{!echo bbb}}"
+        result = plugin._expand_commands(content, "/tmp")
+        assert result == "A=aaa B=bbb"
+
+    def test_expand_command_failure_embeds_error(self):
+        """Non-zero exit embeds the error message."""
+        plugin = PromptLibraryPlugin()
+        content = "Result: {{!false}}"
+        result = plugin._expand_commands(content, "/tmp")
+        assert "[command failed: false]" in result
+        assert "[exit code 1]" in result
+
+    def test_expand_command_stderr_in_error(self):
+        """stderr from a failing command is included in the error message."""
+        plugin = PromptLibraryPlugin()
+        content = "{{!bash -c 'echo oops >&2; exit 1'}}"
+        result = plugin._expand_commands(content, "/tmp")
+        assert "oops" in result
+        assert "[command failed:" in result
+
+    def test_expand_command_timeout(self):
+        """Commands exceeding the timeout produce a timeout message."""
+        plugin = PromptLibraryPlugin()
+        content = "{{!sleep 999}}"
+        # Patch COMMAND_TIMEOUT to something tiny for the test
+        with patch("shared.plugins.prompt_library.plugin.COMMAND_TIMEOUT", 1):
+            result = plugin._expand_commands(content, "/tmp")
+        assert "[command timed out" in result
+
+    def test_expand_command_uses_cwd(self):
+        """Commands run in the provided working directory."""
+        plugin = PromptLibraryPlugin()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            content = "{{!pwd}}"
+            result = plugin._expand_commands(content, tmpdir)
+            # pwd output should match the tmpdir (resolve symlinks)
+            assert Path(result.strip()).resolve() == Path(tmpdir).resolve()
+
+    def test_expand_command_multiword(self):
+        """Commands with arguments and pipes work."""
+        plugin = PromptLibraryPlugin()
+        content = "{{!echo hello | tr a-z A-Z}}"
+        result = plugin._expand_commands(content, "/tmp")
+        assert result == "HELLO"
+
+    def test_expand_preserves_surrounding_text(self):
+        """Text around command placeholders is preserved."""
+        plugin = PromptLibraryPlugin()
+        content = "Before\n{{!echo middle}}\nAfter"
+        result = plugin._expand_commands(content, "/tmp")
+        assert result == "Before\nmiddle\nAfter"
+
+    def test_expand_command_nonexistent_binary(self):
+        """Missing binaries produce a command error."""
+        plugin = PromptLibraryPlugin()
+        content = "{{!nonexistent_binary_xyz_12345}}"
+        result = plugin._expand_commands(content, "/tmp")
+        # Should embed an error — either a command failure or exception
+        assert "[command failed:" in result or "[command error:" in result
+
+    def test_expand_with_script_in_skill_dir(self):
+        """Commands can reference scripts relative to the skill directory."""
+        plugin = PromptLibraryPlugin()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            scripts_dir = Path(tmpdir) / "scripts"
+            scripts_dir.mkdir()
+            script = scripts_dir / "greet.sh"
+            script.write_text("#!/bin/bash\necho \"hello from script\"")
+            script.chmod(0o755)
+
+            content = "{{!bash scripts/greet.sh}}"
+            result = plugin._expand_commands(content, tmpdir)
+            assert result == "hello from script"
+
+    def test_expand_before_param_substitution_in_tool(self):
+        """Command expansion runs before param substitution in prompt tool execution."""
+        plugin = PromptLibraryPlugin()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            prompts_dir = Path(tmpdir) / ".jaato" / "prompts"
+            prompts_dir.mkdir(parents=True)
+            (prompts_dir / "test-cmd.md").write_text(
+                "---\nname: test-cmd\ndescription: test\n---\n"
+                "Version: {{!echo 1.2.3}}\nFile: {{file}}"
+            )
+
+            with patch.object(Path, 'home', return_value=Path(tmpdir) / "fake_home"):
+                plugin.initialize({"workspace_path": tmpdir})
+                result = plugin._execute_prompt_tool("test-cmd", {"file": "main.py"})
+
+            assert "1.2.3" in result["content"]
+            assert "main.py" in result["content"]
+
+    def test_expand_before_param_substitution_in_user_command(self):
+        """Command expansion runs before param substitution in user command."""
+        plugin = PromptLibraryPlugin()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            prompts_dir = Path(tmpdir) / ".jaato" / "prompts"
+            prompts_dir.mkdir(parents=True)
+            (prompts_dir / "cmd-test.md").write_text(
+                "---\nname: cmd-test\ndescription: test\n---\n"
+                "Host: {{!hostname}}"
+            )
+
+            with patch.object(Path, 'home', return_value=Path(tmpdir) / "fake_home"):
+                plugin.initialize({"workspace_path": tmpdir})
+                result = plugin._execute_prompt_command({"args": ["cmd-test"]})
+
+            # Should contain actual hostname output, not the placeholder
+            assert "{{!" not in result
+            assert len(result.strip()) > 0
+
+    def test_expand_in_resolve_agent(self):
+        """Command expansion runs when resolving an agent."""
+        plugin = PromptLibraryPlugin()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            agents_dir = Path(tmpdir) / ".jaato" / "agents"
+            agents_dir.mkdir(parents=True)
+            (agents_dir / "test-agent").mkdir()
+            (agents_dir / "test-agent" / "PROMPT.md").write_text(
+                "---\nname: test-agent\ndescription: test agent\n---\n"
+                "System date: {{!date +%Y}}"
+            )
+
+            with patch.object(Path, 'home', return_value=Path(tmpdir) / "fake_home"):
+                plugin.initialize({"workspace_path": tmpdir})
+                result = plugin.resolve_agent("test-agent")
+
+            assert result is not None
+            assert "{{!" not in result["system_instructions"]
+            # Should contain a 4-digit year
+            assert "202" in result["system_instructions"]
+
+    def test_get_skill_cwd_directory(self):
+        """_get_skill_cwd returns the directory itself for directory-based prompts."""
+        plugin = PromptLibraryPlugin()
+        info = PromptInfo(
+            name="test", description="test", source="project",
+            path=Path("/workspace/skills/my-skill"), is_directory=True,
+        )
+        assert plugin._get_skill_cwd(info) == "/workspace/skills/my-skill"
+
+    def test_get_skill_cwd_file(self):
+        """_get_skill_cwd returns the parent for single-file prompts."""
+        plugin = PromptLibraryPlugin()
+        info = PromptInfo(
+            name="test", description="test", source="project",
+            path=Path("/workspace/prompts/review.md"), is_directory=False,
+        )
+        assert plugin._get_skill_cwd(info) == "/workspace/prompts"

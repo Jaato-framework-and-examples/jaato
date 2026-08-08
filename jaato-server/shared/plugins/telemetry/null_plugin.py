@@ -5,7 +5,7 @@ All methods are no-ops that return immediately without any OTel imports.
 """
 
 from contextlib import contextmanager
-from typing import Any, Dict, Generator, List, Optional
+from typing import Any, Callable, Dict, Generator, List, Optional
 
 
 class _NoOpSpan:
@@ -62,6 +62,13 @@ class NullTelemetryPlugin:
         """No-op shutdown."""
         pass
 
+    def reset_for_next_session(self) -> None:
+        """No-op (required by the ``TelemetryPlugin`` protocol).
+
+        The null plugin holds no per-session state, so there is nothing
+        to clear between cascade sessions."""
+        pass
+
     @property
     def enabled(self) -> bool:
         """Always returns False."""
@@ -87,6 +94,7 @@ class NullTelemetryPlugin:
         agent_name: Optional[str] = None,
         turn_index: Optional[int] = None,
         parent_session_id: Optional[str] = None,
+        user_id: Optional[str] = None,
         attributes: Optional[Dict[str, Any]] = None,
     ) -> Generator[_NoOpSpan, None, None]:
         yield _NOOP_SPAN
@@ -156,3 +164,15 @@ class NullTelemetryPlugin:
 
     def get_current_span_id(self) -> Optional[str]:
         return None
+
+    def register_attribute_redactor(
+        self, fn: Callable[[str, Any], Any]
+    ) -> None:
+        """No-op attribute redactor registration.
+
+        The Null plugin produces no spans, so registered redactors
+        would never fire.  Accept and ignore so callers can
+        unconditionally register without checking which plugin is
+        active.
+        """
+        pass

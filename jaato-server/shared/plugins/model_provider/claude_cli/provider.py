@@ -7,17 +7,20 @@ protocol for programmatic access to Claude's agentic capabilities.
 import json
 import logging
 import os
+from shared.session_context import get_workspace_root, get_config_root
 import signal
 import subprocess
 import threading
 from typing import Any, Callable, Dict, Iterator, List, Optional
 
 from ..base import (
+    ModalityCapabilityMixin,
     FunctionCallDetectedCallback,
     ProviderConfig,
     StreamingCallback,
     ThinkingCallback,
     UsageUpdateCallback,
+    resolve_context_window,
 )
 from jaato_sdk.plugins.model_provider.types import (
     CancelToken,
@@ -77,7 +80,7 @@ class CLIProcessError(Exception):
         self.stderr = stderr
 
 
-class ClaudeCLIProvider:
+class ClaudeCLIProvider(ModalityCapabilityMixin):
     """Model provider that uses Claude Code CLI as backend.
 
     This provider spawns the ``claude`` CLI in print mode with stream-json
@@ -107,6 +110,9 @@ class ClaudeCLIProvider:
         self._cli_path: Optional[str] = None
         self._mode: CLIMode = CLIMode.DELEGATED
         self._model_name: Optional[str] = None
+        # Per-profile context-window override (plugin_configs.claude_cli.
+        # context_length); None = use the documented Claude 200K window.
+        self._context_length_knob: Optional[int] = None
         self._max_turns: Optional[int] = None
         self._permission_mode: Optional[str] = None
 
@@ -192,6 +198,16 @@ class ClaudeCLIProvider:
         self._max_turns = resolve_max_turns(extra.get("max_turns"))
         self._permission_mode = resolve_permission_mode(extra.get("permission_mode"))
 
+        # Context-window override (plugin_configs.claude_cli.context_length) via
+        # the shared precedence helper.  The CLI serves Claude models (200K
+        # documented window — see get_context_limit); the knob lets a profile
+        # pin a smaller value for GC budgeting.
+        self._context_length_knob = resolve_context_window(
+            detect_capacity=None,
+            profile_value=extra.get("context_length"),
+            env_value=None,
+        )
+
         # Store tool executor if provided (for passthrough mode)
         if "tool_executor" in extra:
             self._tool_executor = extra["tool_executor"]
@@ -208,10 +224,14 @@ class ClaudeCLIProvider:
         self,
         allow_interactive: bool = False,
         on_message: Optional[Callable[[str], None]] = None,
+        config: Optional["ProviderConfig"] = None,
     ) -> bool:
         """Verify that the CLI is authenticated.
 
         This checks if the claude CLI is installed and can be executed.
+
+        ``config`` is accepted for protocol compatibility but unused — the CLI
+        keeps its own auth state on disk; nothing in the profile influences it.
         The CLI handles its own authentication state.
 
         Note: This method can be called before initialize() to check if
@@ -382,8 +402,16 @@ class ClaudeCLIProvider:
         return True
 
     def supports_stop(self) -> bool:
-        """Check if mid-turn cancellation is supported."""
-        return True
+        """Mid-turn cancellation is NOT honored.
+
+        The CLI subprocess stream loop deliberately ignores the cancel token
+        ("CANCEL_IGNORED ... letting streaming complete") — generation runs to
+        completion regardless.  Advertising ``True`` offered the user a
+        non-working cancel; report ``False`` to match the honest
+        ``cancellation=False`` capability declaration.  (If the CLI gains real
+        mid-stream interrupt, flip both together.)
+        """
+        return False
 
     # ==================== Token Management ====================
 
@@ -396,9 +424,18 @@ class ClaudeCLIProvider:
         return len(content) // 4
 
     def get_context_limit(self) -> int:
-        """Get the context window size."""
-        # Claude models support 200k tokens
-        return 200000
+        """Get the context window size.
+
+        The Claude Code CLI serves Claude models, whose documented context
+        window is 200K tokens — the authoritative value for this provider's
+        entire model space (not a fallback-for-unknown).  A profile may override
+        it via ``plugin_configs.claude_cli.context_length`` (resolved through the
+        shared ``resolve_context_window`` helper at init), e.g. to budget GC
+        against a smaller window.
+        """
+        if self._context_length_knob:
+            return self._context_length_knob
+        return 200_000
 
     def get_token_usage(self) -> TokenUsage:
         """Get token usage from the last response."""
@@ -579,7 +616,7 @@ class ClaudeCLIProvider:
             return resolved
 
         # Priority 2: JAATO_WORKSPACE_ROOT environment variable
-        workspace = os.environ.get('JAATO_WORKSPACE_ROOT')
+        workspace = get_workspace_root()
         if workspace:
             resolved = os.path.realpath(os.path.abspath(workspace))
             logger.debug(f"Using JAATO_WORKSPACE_ROOT: {resolved}")
@@ -792,6 +829,9 @@ class ClaudeCLIProvider:
                         output_tokens=msg.usage.output_tokens,
                         cache_read_tokens=msg.usage.cache_read_tokens,
                         cache_creation_tokens=msg.usage.cache_creation_tokens,
+                        # CLI-reported cost is the fiscal truth — wins
+                        # over any pricing-table estimate in the daemon.
+                        cost_usd=msg.total_cost_usd,
                     )
                 if msg.is_error:
                     finish_reason = FinishReason.ERROR
@@ -944,6 +984,7 @@ class ClaudeCLIProvider:
                             output_tokens=msg.usage.output_tokens,
                             cache_read_tokens=msg.usage.cache_read_tokens,
                             cache_creation_tokens=msg.usage.cache_creation_tokens,
+                            cost_usd=msg.total_cost_usd,
                         )
                         if on_usage_update:
                             on_usage_update(self._last_usage)

@@ -1223,7 +1223,7 @@ classDiagram
 
     class TemplatePlugin {
         +name = "template"
-        +writeFileFromTemplate(template, variables, output_path)
+        +renderTemplateToFile(template, variables, output_path)
         +listAvailableTemplates()
         +subscribes_to_prompt_enrichment() bool
         +enrich_prompt(prompt) PromptEnrichmentResult

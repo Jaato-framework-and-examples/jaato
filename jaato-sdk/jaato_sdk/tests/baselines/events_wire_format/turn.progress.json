@@ -1,0 +1,19 @@
+{
+  "type": "turn.progress",
+  "timestamp": "<TIMESTAMP>",
+  "agent_id": "",
+  "usage": {
+    "prompt_tokens": 0,
+    "output_tokens": 0,
+    "total_tokens": 0,
+    "cache_read_tokens": null,
+    "cache_creation_tokens": null,
+    "reasoning_tokens": null,
+    "thinking_tokens": null,
+    "cost_usd": null
+  },
+  "context_limit": 0,
+  "percent_used": 0.0,
+  "tokens_remaining": 0,
+  "pending_tool_calls": 0
+}

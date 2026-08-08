@@ -535,13 +535,409 @@ response = client.send_message("Spawn a subagent to analyze the code")
 |-------|------|---------|-------------|
 | `name` | string | (required) | Unique identifier for the profile |
 | `description` | string | `""` | Human-readable description |
-| `plugins` | string[] | `[]` | List of plugin names to enable |
+| `plugins` | string[] | `[]` | List of plugin names to enable (suffix `(preload)` to load all of a plugin's tools eagerly into the initial context) |
 | `plugin_configs` | object | `{}` | Per-plugin configuration overrides |
-| `system_instructions` | string | `null` | Additional system instructions |
+| `system_instructions` | string | `null` | **Deprecated.** Use agents (`.jaato/agents/<name>.md`) instead — they support param substitution and dynamic instructions |
 | `model` | string | `null` | Model name (e.g., `"gemini-2.5-flash"`, `"claude-sonnet-4-20250514"`). `null` = inherit from parent |
 | `provider` | string | `null` | Provider name (e.g., `"google_genai"`, `"anthropic"`). `null` = inherit from parent |
 | `max_turns` | int | `10` | Maximum conversation turns |
 | `auto_approved` | bool | `false` | Spawn without permission prompt |
-| `icon` | string[] | `null` | Custom 3-line ASCII art icon |
-| `icon_name` | string | `null` | Name of predefined icon |
 | `gc` | object | `null` | Garbage collection configuration |
+| `env` | object | `{}` | Per-session environment-variable overlay (`${VAULT_ID}` expansion supported) |
+| `inherits` | string[] | `null` | Parent profile names — fields are merged per documented inheritance rules |
+| `runtime_limits` | object | `null` | cgroup-enforced CPU / memory / process limits per session |
+| `model_tiers` | object | `{}` | Per-turn tier switching (planner / dispatcher / executor) — see `shared/model_tiers.py` |
+| `completion_payload_schema` | string \| object | `null` | JSON Schema (path or inline) constraining `signal_completion`'s payload — provider-enforced + jsonschema-validated. See [Typed Completion Payloads](#typed-completion-payloads). |
+| `completion_artifacts` | object[] | `[]` | Files the framework renders deterministically from the validated completion payload. See [Completion Artifacts](#completion-artifacts). |
+
+## The Body-Wired Pattern
+
+Two profile-level features — **dynamic instructions** (input side) and
+**completion artifacts** (output side) — let the framework execute work
+on the agent's behalf so the model never has to reach for tools whose
+purpose has only one acceptable answer. The motivating principle:
+
+> *Whenever a behaviour is mandatory under all valid persona choices,
+> push it from soul-driven (tool call) to body-wired (framework
+> execution). The model loses agency over things it shouldn't have
+> been deciding anyway, and determinism improves automatically — not
+> because the model gets better, but because there's nothing left for
+> it to get wrong.*
+
+The agent's `signal_completion` payload sits in the middle: structured
+data the model **does** uniquely produce. Inputs are body-fetched on
+the way in; outputs are body-rendered on the way out; the model's
+attention focuses on the actual judgment between.
+
+### Dynamic Instructions — `{{!py:script.py}}`
+
+Agent `.md` templates can include `{{!py:scripts/<name>.py args}}`
+placeholders. During `JaatoSession.configure()`, the framework loads
+the named script via `shared/script_loader.py` (resolution chain:
+absolute path → workspace `.jaato/<path>` → user `~/.jaato/<path>`)
+and replaces the placeholder with the script's return value.
+
+Scripts must define:
+
+```python
+def render(context, args: list[str]) -> str:
+    ...
+```
+
+`context` is a `RenderContext` (defined in
+`shared/dynamic_instructions.py`) with handles to:
+
+| Field | Purpose |
+|-------|---------|
+| `session` | The owning `JaatoSession` |
+| `runtime` | The `JaatoRuntime` (provider config, cross-session shared state) |
+| `registry` | The `PluginRegistry` — typical use: `registry.get_plugin("service_connector")._execute_call_service({...})` |
+| `workspace_path` | Session's workspace directory |
+| `config_root` | Read-only-config root override (`<config_root>/profiles/`, etc.) |
+| `agent_params` | The `dict` the supervisor passed via `spawn_subagent(agent_params={...})` — typically forwarded `case_data` fields |
+| `env` | Snapshot of `os.environ` at expansion time |
+| `logger` | Per-script logger |
+
+#### Use cases
+
+- **Mandatory prefetch.** Service calls the agent must have made
+  anyway — push them out of the agent's discretion. Script calls
+  `service_connector` and embeds the structured response in the
+  prompt. Agent receives results as input data with no opportunity
+  to skip the gather.
+- **Live state.** Memory snapshots, ledger usage, recent references —
+  values that should be visible in the system prompt at session start.
+- **Forwarded context.** Snippets pulled from `agent_params` (e.g.
+  forwarded `case_data`) without manual re-formatting.
+
+#### Worked example
+
+A `kyc_aml` specialist's old prompt mandated *"make these two
+`call_service` calls then decide"* — two cognitive jobs, model
+sometimes lost the gather half. New shape:
+
+`.jaato/agents/kyc_aml.md`:
+
+```markdown
+You are the KYC/AML agent.  The framework has already called both
+external services on your behalf — interpret the responses below.
+
+{{!py:scripts/prefetch_kyc_aml.py}}
+
+## Process
+
+1. Validate DNI format (8 digits + control letter).
+2. Read the KYC verify response above — confirm identity match.
+3. Read the AML screen response above — check sanctions/PEP.
+4. Combine into the structured decision.
+```
+
+`.jaato/scripts/prefetch_kyc_aml.py`:
+
+```python
+import json
+
+def render(context, args):
+    p = context.agent_params
+    sc = context.registry.get_plugin("service_connector")
+    kyc = sc._execute_call_service({
+        "service": "kyc",
+        "method": "POST",
+        "path": "/v1/kyc/verify",
+        "body": {"dni": p["tomador_dni"], "nombre": p["tomador_nombre"]},
+    })
+    aml = sc._execute_call_service({
+        "service": "aml",
+        "method": "POST",
+        "path": "/v1/aml/screen",
+        "body": {"dni": p["tomador_dni"]},
+    })
+    return (
+        f"### KYC verify\n```json\n{json.dumps(kyc, indent=2)}\n```\n\n"
+        f"### AML screen\n```json\n{json.dumps(aml, indent=2)}\n```"
+    )
+```
+
+The supervisor must pass the case fields via `agent_params` on the
+spawn call (the spawn schema's `additionalProperties: {"type": "string"}`
+constraint means each field is a string key — case_data isn't a nested
+dict at the spawn level):
+
+```python
+spawn_subagent(
+    profile="kyc_aml",
+    task="Verify identity for the case below.",
+    agent_params={
+        "case_id":           "CASE-LOAD-TEST-001",
+        "tomador_dni":       "12345678Z",
+        "tomador_nombre":    "Juan",
+        "tomador_apellidos": "García López"
+    }
+)
+```
+
+#### Failure modes
+
+`{{!py:...}}` placeholders never raise — they always emit replacement
+content so the agent has *something* to read. Three failure markers:
+
+- `[script not found: <ref>]` — resolution miss
+- `[script load error: <ref>]` — file present but import or symbol-lookup failed
+- `[script error: <ref>: <exception>]` — script raised at runtime
+
+The agent sees the failure as observable evidence and can reason
+about it (similar to today's `{{!command}}` shell expansion).
+
+#### Execution-context contract
+
+Scripts run on the session's model-thread, inside the same
+`_in_workspace()` env stack that wraps tool execution. They inherit:
+
+- Profile `env: {}` overlay (via `os.environ`)
+- `JAATO_WORKSPACE_ROOT` and `JAATO_CONFIG_ROOT`
+- Per-session `.env` content
+- Auth tokens / OAuth artefacts (whatever the runtime's `ProviderConfig`
+  is using for this session)
+- AppArmor confinement scope (per-session profile applied to the
+  model-thread)
+- Sandbox path-scope rules
+
+One-liner: **"if a tool can call it, a script can render it; if a
+tool can't, a script can't either."**
+
+#### Override is preserved
+
+The agent's mind retains the option to call any tool directly even
+when a prefetch has already provided the data — the framework removes
+the *requirement*, not the *capability*. This matches the human
+parallel: a meditator can attend to individual diaphragm movements;
+the override is real, just expensive.
+
+### Typed Completion Payloads
+
+The `completion_payload_schema` profile field declares a JSON Schema
+that constrains `signal_completion`'s `payload` argument. When set:
+
+- The provider-side function signature replaces the legacy `summary: string`
+  parameter with `payload: <your-schema>` — so capable providers (Anthropic,
+  Google GenAI, etc.) enforce the shape at sampling time.
+- `jsonschema.validate` runs server-side as a second-line check.
+- Validation failures return a `validation_failed` error to the model
+  with the specific field path that broke, so the model can self-correct
+  and retry without orchestrator intervention.
+
+Schema sources:
+
+- **String** — relative path resolved under
+  `<config_root>/completion_schemas/<name>.json` (or workspace
+  `.jaato/completion_schemas/`).
+- **Inline dict** — a JSON Schema embedded directly in the profile.
+
+The schema becomes the **contract between the agent's mind and the
+framework's body**. Whatever fields a renderer or downstream consumer
+needs from a completion payload, declare in the schema's `required`
+list. The model has no choice but to produce them.
+
+### Completion Artifacts
+
+`completion_artifacts` declares files the framework renders from the
+validated completion payload — the output-side counterpart to
+dynamic-instructions prefetch. The agent produces the structured
+data; the body deterministically projects it onto disk.
+
+Each entry:
+
+```json
+{
+  "renderer": "scripts/policy_md_renderer.py",
+  "output": "output/{case_id}/policy.md",
+  "on_error": "fail_completion"
+}
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `renderer` | string (required) | — | Script path resolved through standard `script_loader` tier |
+| `output` | string (required) | — | Output file path with `{field}` templating |
+| `on_error` | `"fail_completion"` \| `"warn"` | `"fail_completion"` | What happens if the renderer raises or the file write fails |
+
+#### Renderer signature
+
+```python
+def render(payload: dict, context) -> str | bytes:
+    ...
+```
+
+Note the **different** signature from the input-side `render`:
+output-side renderers receive the **validated payload** as the first
+positional argument (it's the primary input), and the `RenderContext`
+as the second. Bytes return values are written in binary mode; str
+returns get UTF-8 encoding.
+
+#### Output path templating
+
+The `output` field uses Python's `str.format_map` with this lookup
+order:
+
+1. **Payload fields.** `{poliza_id}` from the agent's payload dict.
+2. **`agent_params`.** `{case_id}` from the supervisor's spawn call.
+3. **Session-derived.** `{workspace_path}` for sandbox-relative writes.
+
+Unknown placeholders raise `KeyError` and the artifact is bucketed
+according to `on_error` — silent miss would write to weirdly-named
+paths and is detectably wrong by design.
+
+Relative paths resolve under `context.workspace_path` so a template
+like `output/{case_id}/policy.md` lands inside the session's sandbox.
+
+#### Sequence at signal_completion
+
+1. Agent calls `signal_completion(payload={...})`.
+2. `jsonschema` validates against `completion_payload_schema`.
+3. Framework iterates `completion_artifacts`, loading each renderer
+   via `script_loader` and invoking `render(payload, context)`.
+4. Each artefact written atomically (`.tmp` + `os.replace`) to the
+   templated output path.
+5. Per-entry `on_error` policy decides what happens on failure:
+   - `"fail_completion"` — `signal_completion` returns a structured
+     `artifact_render_failed` error to the model (parallel to
+     `validation_failed`); `on_agent_completed` does **not** fire;
+     `_signal_completion_called` stays `False` so the loop / nudge
+     guard can act; the agent self-corrects and retries.
+   - `"warn"` — logged, completion proceeds.
+6. Successfully written paths are surfaced into the result as
+   `artifacts_written` so the agent (and downstream consumers) know
+   what landed on disk.
+
+#### Worked example
+
+`profiles/policy_admin.json`:
+
+```json
+{
+  "name": "policy_admin",
+  "completion_payload_schema": "completion_schemas/policy_admin.json",
+  "completion_artifacts": [
+    {
+      "renderer": "scripts/policy_md_renderer.py",
+      "output": "output/{case_id}/policy.md",
+      "on_error": "fail_completion",
+      "description": "Renders the issued policy markdown deterministically from the structured payload."
+    }
+  ]
+}
+```
+
+`.jaato/scripts/policy_md_renderer.py`:
+
+```python
+def render(payload, context):
+    case = context.agent_params  # forwarded case_data fields
+    return (
+        f"# Póliza {payload['poliza_id']}\n\n"
+        f"## Tomador\n- DNI: {case['tomador_dni']}\n"
+        f"- Nombre: {case['tomador_nombre']}\n\n"
+        f"## Prima\n- Anual: {payload['prima_anual_eur']:.2f} EUR\n"
+    )
+```
+
+The agent's `signal_completion` produces only the structured payload
+(`poliza_id`, `prima_anual_eur`, etc.) — the body composes the
+markdown file. Two runs of the same approved case produce **byte-
+identical** policy.md files because rendering is deterministic.
+
+#### When NOT to use completion artifacts
+
+If part of the file's content requires **model judgment beyond what's
+in the payload** — e.g. the auditor's narrative findings, a rejection
+dossier's "causes of rejection" prose grounded in upstream evidence —
+that part stays agent-driven. The model still uses `writeNewFile` for
+files whose content can't be deterministically projected from a
+structured payload.
+
+The mental check: **could a non-agent function produce this file
+content from the payload alone?** Yes → declare it as a
+`completion_artifact`. No → leave it to the agent.
+
+#### Path conventions
+
+All path-typed fields in the profile are **config-root-relative** with
+the standard tier resolution (`<config_root>/<path>` →
+`<workspace>/.jaato/<path>` → `~/.jaato/<path>`):
+
+| Field | Example value | Resolves to |
+|---|---|---|
+| `completion_payload_schema` | `"completion_schemas/policy_admin.json"` | `<config_root>/completion_schemas/policy_admin.json` |
+| `spawn_payload_schema` | `"spawn_schemas/pricing.json"` | `<config_root>/spawn_schemas/pricing.json` |
+| `completion_artifacts.renderer` | `"scripts/policy_md_renderer.py"` | `<config_root>/scripts/policy_md_renderer.py` |
+| `completion_artifacts.output` | `"output/{case_id}/policy.md"` | `<workspace>/output/{case_id}/policy.md` (workspace-relative — outputs land where the agent runs, not in `.jaato/`) |
+
+There is **no auto-prefixing** — write the explicit subdir in the
+path. Server `0.6.11+` falls back to legacy bare-filename forms
+(`"policy_admin.json"`) with an INFO-level deprecation log; new
+profiles should use the explicit form.
+
+#### Validator-as-renderer pattern (server `0.6.12+`)
+
+When you want the renderer's *side effect* (validation that consults
+runtime state and raises on bad payloads) without producing an actual
+file, omit `output`:
+
+```json
+{
+  "name": "auto_underwriter",
+  "completion_artifacts": [
+    {
+      "renderer": "scripts/auto_underwriter_spawn_proof.py",
+      "on_error": "fail_completion",
+      "description": "Validator: walks session history for actual spawn_subagent calls; rejects payloads claiming subagent_outcomes for profiles never spawned."
+    }
+  ]
+}
+```
+
+The framework runs the renderer for its raise/return semantics but
+does not write a file. The return string (if non-empty) is logged at
+INFO for audit. `on_error: fail_completion` propagates raises into a
+retry signal for the agent — same as for renderers that DO produce a
+file.
+
+This is how the demo's `auto_underwriter_spawn_proof.py` and
+`pricing_completion_validator.py` close the agent-payload-faithfulness
+gap that schema validation alone can't reach (schema validates
+*shape*; these validators check *semantic correctness* against the
+session's actual spawn history and the deterministic rule-table
+re-computation).
+
+#### `description` field (server `0.6.12+`)
+
+Each `completion_artifacts` entry accepts an optional `description`
+string. Ignored at runtime; consumed by docs / introspection /
+profile-explorer tooling. Use it to document **why** the renderer is
+wired in, so the rationale travels with the wiring instead of living
+in commit messages.
+
+#### Inheritance
+
+`completion_artifacts` lists are concatenated across the inheritance
+chain: a child profile inheriting from a parent receives the parent's
+artifacts plus its own (child entries appear last so they take
+precedence if any future logic compares by output-path uniqueness).
+
+This differs from `completion_payload_schema`, which is scalar-merge
+(parents must agree or the child overrides). The reasoning: each
+artifact entry is independent (different output paths, different
+renderers); concatenating preserves both parent's and child's
+declarations without conflict semantics.
+
+### Symmetry summary
+
+| | Input side | Output side |
+|---|---|---|
+| **Where it lives** | `{{!py:script.py}}` in agent .md | `completion_artifacts: [...]` in profile |
+| **Authored as** | `def render(context, args) -> str` | `def render(payload, context) -> str \| bytes` |
+| **Fires when** | Session setup, before first turn | After `signal_completion` validates |
+| **Inherits session env?** | Yes (via `_in_workspace()`) | Yes (same place — `_execute_signal_completion` runs there) |
+| **Failure semantics** | Inline error marker in prompt | Per-entry `on_error` (`fail_completion` \| `warn`) |
+| **Caching** | Implicit `:once` (rendered once per session at configure time) | One-shot per `signal_completion` |
+| **Override available?** | Yes (model can still call tools directly) | Yes (model can still call `writeNewFile` for non-artifact files) |

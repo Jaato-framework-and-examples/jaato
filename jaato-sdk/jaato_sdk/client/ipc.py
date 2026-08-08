@@ -4,7 +4,7 @@ This module provides a client for connecting to the Jaato server
 via Unix domain socket (Unix/Linux/macOS) or named pipe (Windows).
 
 Usage:
-    from jaato_sdk.client import IPCClient
+    from jaato_sdk import IPCClient, EventType
 
     # On Unix:
     client = IPCClient("/tmp/jaato.sock")
@@ -14,10 +14,17 @@ Usage:
 
     await client.connect()
 
+    # Subscribe to specific event types (typed handlers)
+    client.subscribe(
+        EventType.PERMISSION_REQUESTED,
+        lambda e: print(f"perm: {e.tool_name}"),
+    )
+
     # Send a message
     await client.send_message("Hello, world!")
 
-    # Receive events
+    # Either iterate events directly, or use drain_events() to let
+    # subscribed handlers do the work:
     async for event in client.events():
         print(event)
 """
@@ -31,7 +38,13 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from typing import Any, AsyncIterator, Callable, Dict, Optional
+from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Tuple, Union
+
+from jaato_sdk.client._handler_registry import (
+    EventHandler,
+    Unsubscribe,
+    _HandlerRegistry,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +56,7 @@ from jaato_sdk.events import (
     SendMessageRequest,
     PermissionResponseRequest,
     ClarificationResponseRequest,
+    ClarificationBatchResponseEvent,
     ReferenceSelectionResponseRequest,
     StopRequest,
     CommandRequest,
@@ -56,6 +70,15 @@ from jaato_sdk.events import (
     ClientType,
     PresentationContext,
     SessionInfoEvent,
+    InjectPromptRequest,
+    ReplayMessagesRequest,
+    ResolveForkPointRequest,
+    PermissionAddWhitelistRequest,
+    PermissionAddBlacklistRequest,
+    PermissionRemoveRequest,
+    PermissionClearRequest,
+    PermissionSetDefaultRequest,
+    PermissionPolicySnapshotRequest,
 )
 
 
@@ -75,24 +98,108 @@ else:
     DEFAULT_PID_FILE = "/tmp/jaato.pid"
 
 
-class IncompatibleServerError(Exception):
-    """Raised when the server version is below the client's minimum requirement.
+def _parse_protocol_version(v: str) -> Tuple[int, int]:
+    """Parse a ``"MAJOR.MINOR"`` semver string into a tuple.
 
-    This error is non-retryable: an old server will not become newer on retry.
-    Clients should catch this and display a clear upgrade message.
+    Lenient — extra components ("1.0.5") are tolerated; the trailing
+    parts are dropped.  Non-numeric tokens yield ``ValueError``.
+    """
+    parts = v.split(".")
+    if len(parts) < 2:
+        raise ValueError(f"Protocol version must be MAJOR.MINOR, got {v!r}")
+    return int(parts[0]), int(parts[1])
+
+
+def _protocol_compatible(server_version: str, client_min: str) -> bool:
+    """Return whether ``server_version`` satisfies the client's minimum.
+
+    Compat rule (semver-flavoured):
+
+    - Server's MAJOR must equal the client's MAJOR.  A different major
+      means the server has shape changes the client cannot parse, or
+      uses fields the client expects to find but doesn't.
+    - Server's MINOR must be >= the client's required minor.  Server
+      minor *higher* is fine — additive optional fields the client
+      hasn't been taught about yet.
+
+    Either side malformed (or ``None``) → ``False``.  Refuse rather
+    than risk parsing garbage; the caller treats this as "unknown
+    protocol" and surfaces ``IncompatibleServerError``.
+    """
+    if not isinstance(server_version, str) or not isinstance(client_min, str):
+        return False
+    try:
+        server_major, server_minor = _parse_protocol_version(server_version)
+        client_major, client_minor = _parse_protocol_version(client_min)
+    except (ValueError, TypeError):
+        return False
+    if server_major != client_major:
+        return False
+    return server_minor >= client_minor
+
+
+class IncompatibleServerError(Exception):
+    """Raised when the server's protocol version is incompatible.
+
+    Non-retryable: an old (or wrong-major) server will not become
+    compatible on retry.  Clients should catch this and prompt the
+    operator with the protocol-version mismatch — telling them the
+    *protocol* version is the actionable signal, not the package
+    version (which may not have changed when shapes broke).
 
     Attributes:
-        server_version: The version reported by the server.
-        min_version: The minimum version required by the client.
+        server_protocol: ``ConnectedEvent.protocol_version`` from the
+            daemon — the wire-protocol version it speaks.
+        min_protocol: The client's required minimum protocol version.
+        server_version: The daemon's package version (read from
+            ``server_info["server_version"]``), kept for diagnostics
+            only.  When the field is absent we report ``"unknown"``.
     """
 
-    def __init__(self, server_version: str, min_version: str):
-        self.server_version = server_version
-        self.min_version = min_version
+    def __init__(
+        self,
+        server_protocol: str,
+        min_protocol: str,
+        server_version: Optional[str] = None,
+    ):
+        self.server_protocol = server_protocol
+        self.min_protocol = min_protocol
+        self.server_version = server_version or "unknown"
+        try:
+            sm, sn = _parse_protocol_version(server_protocol)
+            cm, cn = _parse_protocol_version(min_protocol)
+            if sm != cm:
+                hint = (
+                    f"major-version mismatch (server speaks {sm}.x, client "
+                    f"needs {cm}.x) — wire shapes are incompatible"
+                )
+            elif sn < cn:
+                hint = (
+                    f"server minor {sn} is below client's required minor "
+                    f"{cn} — daemon is missing fields the client depends on"
+                )
+            else:
+                hint = "version mismatch"
+        except (ValueError, TypeError):
+            hint = "unparseable protocol version"
         super().__init__(
-            f"Server version {server_version} is not supported by this client "
-            f"(requires >= {min_version}). Please upgrade the server."
+            f"Server protocol {server_protocol} is not supported by this "
+            f"client (requires >= {min_protocol}): {hint}. "
+            f"Daemon package: {self.server_version}."
         )
+
+    # =========================================================================
+    # Backwards-compat properties
+    # =========================================================================
+    # Pre-1.0 callers read ``.min_version`` and used the deprecated
+    # ``server_version``-driven check.  Map them to the new fields so a
+    # ``except IncompatibleServerError as e: print(e.min_version)`` site
+    # keeps working without code changes.
+
+    @property
+    def min_version(self) -> str:
+        """Alias for ``min_protocol`` (pre-1.0 compatibility)."""
+        return self.min_protocol
 
 
 class IPCClient:
@@ -109,12 +216,25 @@ class IPCClient:
     - Windows: Named pipes (\\.\pipe\pipename)
     """
 
+    # Minimum wire-protocol version this client speaks.  See
+    # ``docs/sdk-protocol-versioning.md`` for the bump policy.
+    # Override per-instance via the ``min_protocol_version`` ctor arg
+    # for development against unreleased daemons.
+    MIN_PROTOCOL_VERSION: str = "1.0"
+
     def __init__(
         self,
         socket_path: str = DEFAULT_SOCKET_PATH,
+        *,
+        client_type: ClientType,
         auto_start: bool = True,
         env_file: str = ".env",
         workspace_path: Optional[str] = None,
+        config_root: Optional[str] = None,
+        apparmor: bool = False,
+        min_protocol_version: Optional[str] = None,
+        autostart_timeout: float = 120.0,
+        presentation: Optional[Any] = None,
     ):
         """Initialize the IPC client.
 
@@ -125,11 +245,97 @@ class IPCClient:
             workspace_path: Working directory sent to the server for file
                 operations and sandbox scoping.  Falls back to
                 ``os.getcwd()`` when not provided.
+            config_root: Optional override for where the daemon reads
+                read-only framework config (profiles, agents, prompts,
+                references, completion_schemas, instructions, scripts,
+                services).  When unset, the daemon falls back to
+                ``<workspace_path>/.jaato/``; when set, that
+                workspace-anchored search is replaced with this path.
+                The ``~/.jaato/`` user-tier fallback is always honored.
+                Pair with a ``workspace_path`` that does **not** contain
+                a ``.jaato/`` symlink to give the agent's filesystem
+                tools no visibility into the framework config.  See
+                ``shared/config_resolver.py`` for the resolver contract.
+            apparmor: Opt-in AppArmor confinement for sessions on this
+                connection.  Defaults to ``False`` to preserve the
+                long-standing IPC behavior (sessions run unconfined).
+                Set to ``True`` to ask the daemon to provision a per-
+                session AppArmor profile that confines the agent's
+                tool plugins to ``workspace_path`` (rw),
+                ``config_root`` (read-only), the standard
+                ``~/.jaato/`` config, and the venv / source tree.
+                Useful for orchestrator-driven harnesses where the
+                agent itself is the threat surface, not the local user.
+                When AppArmor is unavailable on the host (non-Linux,
+                kernel module not loaded, ``apparmor_parser`` missing)
+                the session falls back to running unconfined.  This
+                is **not** a silent fallback: the daemon always emits
+                a ``SystemMessageEvent`` to the client describing the
+                outcome (style ``"info"`` with prefix
+                ``[apparmor] confinement applied (...)`` when
+                enforcement is in effect, style ``"warning"`` with
+                prefix ``[apparmor] requested but ...`` otherwise),
+                so the caller can surface it in the event loop and
+                the user knows whether kernel confinement is really
+                active.  See ``docs/apparmor-setup.md``.
+            client_type: **Required.** Identifies the kind of client for
+                server-side presentation / lifecycle filters.  Pass
+                ``ClientType.TERMINAL`` for interactive TUI clients,
+                ``WEB`` / ``CHAT`` for chat-shaped UIs, ``API`` for
+                headless orchestrators / test harnesses / cascade
+                entry-points.  No default — caller must declare intent
+                explicitly so the server can apply the correct
+                interactive-root filter (server 0.6.61+ strips
+                ``signal_completion`` for ``TERMINAL``/``WEB``/``CHAT``
+                root sessions to prevent premature termination in
+                interactive contexts; ``API`` keeps it for cascade
+                completion).  Reactor-spawned headless sessions
+                (server 0.6.67+) automatically default to ``API`` —
+                this requirement only applies to clients connecting
+                via IPC / WS.
+            min_protocol_version: Override the class-level
+                ``MIN_PROTOCOL_VERSION`` for this connection.  Use only
+                for development against unreleased daemons; production
+                deployments should pin a real minimum at the class
+                level so the SDK refuses to talk to incompatible servers.
+            presentation: Override the display-capability context sent to
+                the server at connect (``ClientConfigRequest.presentation``).
+                Accepts a ``PresentationContext`` or a plain ``dict``.  When
+                ``None`` (default) the client auto-derives a TUI-shaped
+                context from the terminal width + ``client_type``.  Pass an
+                explicit context for non-terminal clients (chat / web) whose
+                capabilities differ from a terminal's — e.g. a chat client
+                with ``supports_tables=False`` / ``supports_images=True`` /
+                ``supports_expandable_content=True`` and a fixed narrow
+                ``content_width`` — so the model adapts its output format.
         """
+        if env_file is None:
+            raise ValueError(
+                "IPCClient(env_file=...) must be a path (e.g. '.env'), not "
+                "None — the IPC handshake serializes it, and None raises an "
+                "opaque os.PathLike TypeError mid-connect.  Pass a real .env "
+                "path (a minimal one is fine if the daemon gets provider "
+                "config another way)."
+            )
         self.socket_path = socket_path
         self.auto_start = auto_start
         self.env_file = env_file
+        # Cold-daemon autostart can take ~30-60s (plugin discovery + imports);
+        # the connect ``timeout`` (default 5s) is for an already-running daemon.
+        # When THIS client launches the daemon, the post-launch wait + connect
+        # retry budget uses this longer ``autostart_timeout`` instead.
+        self.autostart_timeout = autostart_timeout
         self.workspace_path = workspace_path
+        self.config_root = config_root
+        self.apparmor = apparmor
+        self.client_type = client_type
+        # Optional caller-supplied presentation override (PresentationContext
+        # or dict).  When set, it REPLACES the auto-derived terminal context at
+        # config-send — the SDK hook for non-terminal (chat/web) clients.
+        self._presentation = presentation
+        self._min_protocol_version: str = (
+            min_protocol_version or self.MIN_PROTOCOL_VERSION
+        )
 
         self._reader: Optional[asyncio.StreamReader] = None
         self._writer: Optional[asyncio.StreamWriter] = None
@@ -137,21 +343,32 @@ class IPCClient:
         self._session_id: Optional[str] = None
         self._client_id: Optional[str] = None
         self._server_version: Optional[str] = None
+        self._server_protocol_version: Optional[str] = None
 
-        # Event callback
-        self._on_event: Optional[Callable[[Event], None]] = None
+        # Event handler registry.  Owned and dispatched from this
+        # client's event loop; not thread-safe.  See _handler_registry
+        # for snapshot/unsubscribe semantics.
+        self._registry = _HandlerRegistry()
 
-        # Buffer for events consumed during request-response operations
-        # (e.g. create_session reads events until SessionInfoEvent; any
-        # other events received in the meantime are buffered here so that
-        # events() can yield them later without data loss).
+        # Drain task + per-consumer subscriber queues (SDK 0.13.0+).
+        # Replaces the previous "single-reader + _events_active gate"
+        # design.  A background drain task reads every event from the
+        # socket exactly once and fans it out to:
+        #
+        #   * each active subscriber queue (one per ``events()``
+        #     iterator and per ``_await_session_info()`` call), and
+        #   * ``_buffered_events`` when no subscribers exist (so a
+        #     later ``events()`` call can replay events that flowed
+        #     while no consumer was attached).
+        #
+        # This removes the deferred-aclose race that ``_events_active``
+        # could not avoid: consumers no longer read the socket
+        # directly, so back-to-back ``create_session`` / ``events()``
+        # patterns are race-free.  See ``_drain_loop``,
+        # ``_subscribe_events``, ``_unsubscribe_events``.
+        self._drain_task: Optional[asyncio.Task] = None
+        self._event_subscribers: list[asyncio.Queue] = []
         self._buffered_events: list[Event] = []
-
-        # True while events() is actively iterating.  When set,
-        # create_session() must NOT read from the socket (concurrent
-        # readers on a StreamReader is a RuntimeError).  It falls back
-        # to fire-and-forget and lets events() pick up the response.
-        self._events_active: bool = False
 
     def _get_pipe_path(self) -> str:
         """Get the full Windows named pipe path."""
@@ -278,8 +495,24 @@ class IPCClient:
         Returns the ``server_version`` string from the ``ConnectedEvent``
         server_info dict, or ``None`` if the server did not report one
         (pre-0.2.28 servers).
+
+        **Diagnostics only** — compat is checked against
+        ``server_protocol_version``.  Two daemons with different
+        package versions can speak the same protocol; package version
+        on its own says nothing about wire compatibility.
         """
         return self._server_version
+
+    @property
+    def server_protocol_version(self) -> Optional[str]:
+        """Get the server's wire-protocol version, available after connect().
+
+        Returns the ``protocol_version`` string from ``ConnectedEvent``,
+        or ``None`` if the connection hasn't completed handshake yet.
+        This is the version the compat check ran against — different
+        from the daemon's package version (see ``server_version``).
+        """
+        return self._server_protocol_version
 
     def supports_reconnection(self) -> bool:
         """Check if this client supports reconnection.
@@ -292,13 +525,74 @@ class IPCClient:
         """
         return self._session_id is not None
 
-    def set_event_callback(self, callback: Callable[[Event], None]) -> None:
-        """Set callback for received events.
+    # =========================================================================
+    # Event Subscription API
+    # =========================================================================
 
-        Args:
-            callback: Function called with each received event.
+    def subscribe(
+        self,
+        event_type: EventType,
+        handler: EventHandler,
+    ) -> Unsubscribe:
+        """Subscribe to events of a specific type.
+
+        Sync handlers run inline; async handlers are scheduled
+        fire-and-forget on the current event loop. Returns an idempotent
+        unsubscribe callable.
         """
-        self._on_event = callback
+        return self._registry.subscribe(event_type, handler)
+
+    def subscribe_once(
+        self,
+        event_type: EventType,
+        handler: EventHandler,
+    ) -> Unsubscribe:
+        """Subscribe to a single event of ``event_type`` then auto-unsubscribe."""
+        return self._registry.subscribe_once(event_type, handler)
+
+    def subscribe_all(self, handler: EventHandler) -> Unsubscribe:
+        """Subscribe to every event regardless of type (catchall firehose)."""
+        return self._registry.subscribe_all(handler)
+
+    def subscribe_many(
+        self,
+        handlers: Dict[EventType, EventHandler],
+    ) -> Unsubscribe:
+        """Register multiple typed handlers in one call.
+
+        Returns a single unsubscribe that removes all of them atomically.
+        """
+        return self._registry.subscribe_many(handlers)
+
+    def _dispatch(self, event: Event) -> None:
+        """Forward to the embedded handler registry."""
+        self._registry.dispatch(event)
+
+    # =========================================================================
+    # High-level convenience facade
+    # =========================================================================
+
+    @classmethod
+    def session(cls, **kwargs):
+        """Open a session with the high-level facade (additive sugar).
+
+        Returns an async context manager yielding a
+        :class:`~jaato_sdk.client.convenience.Session` that owns the
+        send-and-wait recipe — so the common path never reproduces the
+        ``SESSION_TERMINATED``-only hang (PR #399)::
+
+            async with IPCClient.session(profile="researcher", agent="pirate") as s:
+                print(await s.ask("Research tide pools."))
+
+        ``profile`` (str=named / dict=inline spec), ``agent``, ``agent_params``,
+        ``cascade_driver_id`` are forwarded to :meth:`create_session` unchanged
+        — both declarative and programmatic styles are preserved.  Connection
+        knobs (``socket_path``, ``env_file``, ``workspace_path``, ``auto_start``,
+        ``client_type``, ``connect_timeout``) and ``on_permission`` have sensible
+        defaults.  See ``docs/design/sdk-convenience-layer.md``.
+        """
+        from .convenience import open_session
+        return open_session(cls, **kwargs)
 
     # =========================================================================
     # Connection Management
@@ -342,7 +636,8 @@ class IPCClient:
                     # ghost client.  Instead we use the full remaining budget
                     # and only retry on errors that prove no connection was
                     # established (ConnectionRefused, FileNotFound, OSError).
-                    deadline = time.time() + timeout
+                    # Use the cold-start budget: we just launched the daemon.
+                    deadline = time.time() + self.autostart_timeout
                     last_err: Optional[Exception] = None
                     while True:
                         remaining = deadline - time.time()
@@ -406,7 +701,8 @@ class IPCClient:
                     # Only retry on ConnectionRefusedError/OSError (no
                     # transport created).  On TimeoutError, stop to avoid
                     # leaking a transport that the server already accepted.
-                    deadline = time.time() + timeout
+                    # Use the cold-start budget: we just launched the daemon.
+                    deadline = time.time() + self.autostart_timeout
                     last_err: Optional[Exception] = None
                     while True:
                         remaining = deadline - time.time()
@@ -436,6 +732,18 @@ class IPCClient:
                 else:
                     raise ConnectionError(f"Connection failed: {e}")
 
+        return await self._handshake()
+
+    async def _handshake(self) -> bool:
+        """Post-transport handshake — shared by the IPC and WebSocket transports.
+
+        Once the transport is open (Unix socket / Windows pipe / WebSocket),
+        the wire protocol is identical: read the server's unprompted
+        ``ConnectedEvent``, gate on protocol compatibility, send the workspace
+        + client config, and start the single drain reader. Subclasses that
+        swap the transport (see ``WSClient``) reuse this verbatim — only the
+        ``_read_message`` / ``_write_message`` / connection setup differ.
+        """
         # Wait for connected event
         try:
             message = await self._read_message()
@@ -444,6 +752,23 @@ class IPCClient:
                 if isinstance(event, ConnectedEvent):
                     self._client_id = event.server_info.get("client_id")
                     self._server_version = event.server_info.get("server_version")
+                    self._server_protocol_version = event.protocol_version
+
+                    # Wire-protocol compat gate.  Refuse to keep the
+                    # connection alive when the server's protocol
+                    # version is incompatible — the operator's right
+                    # next step is to upgrade one side, not retry.
+                    if not _protocol_compatible(
+                        self._server_protocol_version,
+                        self._min_protocol_version,
+                    ):
+                        await self.disconnect()
+                        raise IncompatibleServerError(
+                            server_protocol=self._server_protocol_version,
+                            min_protocol=self._min_protocol_version,
+                            server_version=self._server_version,
+                        )
+
                     # Send our working directory to the server
                     import os
                     cwd = self.workspace_path or os.getcwd()
@@ -453,7 +778,20 @@ class IPCClient:
                     ))
                     # Send client config with env overrides
                     await self._send_client_config()
+
+                    # Start the drain task — single reader for the
+                    # connection's lifetime.  After this point, no other
+                    # code path should call ``_read_message`` directly
+                    # on this client (the drain task owns it).  Consumers
+                    # use ``events()`` / ``_await_session_info()`` which
+                    # subscribe queues to the drain loop's fan-out.
+                    self._drain_task = asyncio.create_task(
+                        self._drain_loop(),
+                        name=f"jaato-drain-{id(self)}",
+                    )
                     return True
+        except IncompatibleServerError:
+            raise
         except Exception as e:
             await self.disconnect()
             raise ConnectionError(f"Handshake failed: {e}")
@@ -463,6 +801,20 @@ class IPCClient:
     async def disconnect(self) -> None:
         """Disconnect from the server."""
         self._connected = False
+
+        # Stop the drain task BEFORE closing the writer.  Cancelling
+        # the task interrupts its in-flight ``_read_message`` await;
+        # the task's finally block then puts a sentinel into every
+        # subscriber queue so consumers exit cleanly.
+        if self._drain_task is not None:
+            self._drain_task.cancel()
+            try:
+                await self._drain_task
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:
+                logger.debug(f"_drain_task ended with: {exc}")
+            self._drain_task = None
 
         if self._writer:
             try:
@@ -476,6 +828,118 @@ class IPCClient:
         self._session_id = None
         self._client_id = None
         self._server_version = None
+        self._server_protocol_version = None
+
+    # ============================================================
+    # Drain task — single reader, fan-out to subscriber queues
+    # ============================================================
+
+    async def _drain_loop(self) -> None:
+        """Read events from the socket and fan out to subscribers.
+
+        Single reader for the lifetime of the connection.  Started by
+        ``connect()`` after the handshake completes; stopped by
+        ``disconnect()`` (cancelled) or naturally on connection close.
+
+        Each event flows to every active subscriber queue (one per
+        ``events()`` iterator and per ``_await_session_info()`` call).
+        When no subscribers exist, the event is appended to
+        ``_buffered_events`` so a later ``events()`` call can replay
+        it — preserving the prior behaviour where events emitted
+        during ``create_session`` were visible to a subsequent
+        ``async for ev in events()``.
+
+        On exit (cancellation or read failure), every active subscriber
+        queue gets a ``None`` sentinel so consumers wake from
+        ``q.get()`` and exit their loop.
+        """
+        try:
+            while self._connected:
+                try:
+                    message = await self._read_message()
+                except asyncio.IncompleteReadError:
+                    logger.debug("_drain_loop: incomplete read, connection lost")
+                    break
+                except ConnectionResetError:
+                    logger.debug("_drain_loop: connection reset by peer")
+                    break
+
+                if message is None:
+                    # Clean close from server side
+                    logger.debug("_drain_loop: connection closed")
+                    self._connected = False
+                    break
+
+                try:
+                    event = deserialize_event(message)
+                except Exception as exc:
+                    logger.error(f"_drain_loop: deserialize failed: {exc}")
+                    continue
+
+                # Auto-update session_id on SessionInfoEvent.  Done here
+                # in the single reader so both ``events()`` consumers and
+                # ``_await_session_info()`` see the same value.
+                if isinstance(event, SessionInfoEvent) and event.session_id:
+                    self._session_id = event.session_id
+
+                # Handler-based dispatch (subscribe()/unsubscribe()).
+                self._dispatch(event)
+
+                # Iterator-based fan-out.  Snapshot the subscribers list
+                # so a concurrent unsubscribe doesn't break the loop;
+                # ``put_nowait`` is sync and won't block.
+                if self._event_subscribers:
+                    for q in list(self._event_subscribers):
+                        try:
+                            q.put_nowait(event)
+                        except asyncio.QueueFull:
+                            logger.warning(
+                                "_drain_loop: subscriber queue full; "
+                                "dropping %s",
+                                type(event).__name__,
+                            )
+                else:
+                    # No active subscriber — buffer for replay on the
+                    # next ``events()`` / ``_await_session_info()`` call.
+                    self._buffered_events.append(event)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.error(f"_drain_loop: unexpected error: {exc}", exc_info=True)
+        finally:
+            # Wake any active consumers so they observe disconnection.
+            for q in list(self._event_subscribers):
+                try:
+                    q.put_nowait(None)
+                except Exception:
+                    pass
+
+    def _subscribe_events(self) -> asyncio.Queue:
+        """Subscribe a fresh queue to the drain loop's fan-out.
+
+        Drains any pending ``_buffered_events`` into the queue first so
+        the consumer sees events emitted before subscription (typically
+        from a recent ``create_session`` whose response events flowed
+        before ``events()`` was called).
+
+        Returns:
+            A queue that receives events; ``None`` is the disconnect
+            sentinel.  Callers must call ``_unsubscribe_events`` (e.g.
+            in a ``finally`` block) when done.
+        """
+        q: asyncio.Queue = asyncio.Queue()
+        for ev in self._buffered_events:
+            q.put_nowait(ev)
+        self._buffered_events.clear()
+        self._event_subscribers.append(q)
+        return q
+
+    def _unsubscribe_events(self, q: asyncio.Queue) -> None:
+        """Remove a previously-subscribed queue.  Idempotent."""
+        try:
+            self._event_subscribers.remove(q)
+        except ValueError:
+            pass
 
     async def _send_client_config(self) -> None:
         """Send client configuration to the server.
@@ -514,13 +978,23 @@ class IPCClient:
         if os.environ.get('JAATO_DEBUG_LINE_NUMBERS', '').lower() in ('1', 'true', 'yes'):
             content_width -= 6  # debug line number gutter (4-digit num + "│ ")
 
-        # Build presentation context describing TUI terminal capabilities.
-        # This is transmitted to the server so the model can adapt its output
-        # (e.g. avoid wide tables on narrow terminals).
-        presentation = PresentationContext(
-            content_width=content_width,
-            client_type=ClientType.TERMINAL,
-        )
+        # Build the presentation context transmitted to the server so the model
+        # can adapt its output (e.g. avoid wide tables on narrow terminals).
+        # A caller-supplied override (the ``presentation=`` ctor param) wins —
+        # the hook for non-terminal clients (chat/web) whose capabilities differ
+        # from a TUI's.  Accepts a PresentationContext or a plain dict; falls
+        # back to the auto-derived terminal context otherwise.
+        if self._presentation is not None:
+            presentation_payload = (
+                self._presentation.to_dict()
+                if isinstance(self._presentation, PresentationContext)
+                else dict(self._presentation)
+            )
+        else:
+            presentation_payload = PresentationContext(
+                content_width=content_width,
+                client_type=self.client_type,
+            ).to_dict()
 
         # Get client's working directory (for finding config files like .lsp.json)
         working_dir = self.workspace_path or os.getcwd()
@@ -538,9 +1012,35 @@ class IPCClient:
             trace_log_path=trace_log,
             provider_trace_log=provider_trace,
             working_dir=working_dir,
+            config_root=self.config_root,
             env_file=env_file_abs,
-            presentation=presentation.to_dict(),
+            apparmor=self.apparmor,
+            presentation=presentation_payload,
         ))
+
+    def _endpoint_is_live(self) -> bool:
+        """Whether the socket/pipe actually ACCEPTS a connection (not just exists).
+
+        The authoritative "is the daemon up" signal — unlike a pidfile PID
+        (which can be a recycled, unrelated process) or a socket *file* (which
+        can be stale after a crash).  Gates trusting the pidfile in
+        :meth:`_start_server` so a reused PID can't block auto-start on a dead
+        socket.
+        """
+        if self._is_windows_pipe():
+            try:
+                return bool(self._check_pipe_exists())
+            except Exception:
+                return False
+        import socket as _socket
+        s = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+        s.settimeout(1.0)
+        try:
+            return s.connect_ex(self.socket_path) == 0
+        except OSError:
+            return False
+        finally:
+            s.close()
 
     async def _start_server(self) -> bool:
         """Auto-start the server daemon.
@@ -558,11 +1058,28 @@ class IPCClient:
             True if server started (or was already running) and the IPC
             endpoint became available within the timeout.
         """
-        # Check if server is already running
+        # Check if server is already running.  A live pidfile PID alone is NOT
+        # proof the daemon is up: ``os.kill(pid, 0)`` only confirms SOME
+        # process exists at that PID, and PIDs get recycled.  Require the
+        # endpoint to actually accept a connection — otherwise a stale pidfile
+        # (dead daemon whose PID was reused by an unrelated process) makes us
+        # wait on a dead socket forever instead of relaunching.
         pid = self._check_server_running()
         if pid:
-            # Server is running, just wait for socket/pipe
-            return await self._wait_for_socket()
+            if self._endpoint_is_live():
+                # Genuinely running — wait for the socket/pipe and attach.
+                return await self._wait_for_socket()
+            # PID alive but endpoint dead → stale daemon / reused PID.  Clear
+            # the stale pidfile so the relaunch below starts from a clean slate.
+            logger.info(
+                "pidfile %s -> PID %s is alive but the endpoint is not "
+                "listening (stale daemon / reused PID); relaunching",
+                DEFAULT_PID_FILE, pid,
+            )
+            try:
+                Path(DEFAULT_PID_FILE).unlink()
+            except OSError:
+                pass
 
         # On Windows, the PID-file check can fail even when the server IS
         # running (e.g. stale PID, ctypes truncation on 64-bit, or the
@@ -616,8 +1133,10 @@ class IPCClient:
             print(f"Failed to start server: {e}")
             return False
 
-        # Wait for socket/pipe to appear
-        return await self._wait_for_socket()
+        # Wait for the socket/pipe to appear.  We just launched a COLD daemon
+        # (plugin discovery + imports) — use the longer autostart budget, not
+        # the short already-running connect timeout.
+        return await self._wait_for_socket(timeout=self.autostart_timeout)
 
     async def _wait_for_socket(self, timeout: float = 10.0) -> bool:
         """Wait for the IPC endpoint to become available.
@@ -830,9 +1349,10 @@ class IPCClient:
     async def create_session(
         self,
         name: Optional[str] = None,
-        profile: Optional[str] = None,
+        profile: Optional[Union[str, Dict[str, Any]]] = None,
         agent: Optional[str] = None,
         agent_params: Optional[Dict[str, str]] = None,
+        cascade_driver_id: Optional[str] = None,
         timeout: float = 60.0,
     ) -> Optional[str]:
         """Create a new session on the server.
@@ -849,11 +1369,35 @@ class IPCClient:
 
         Args:
             name: Optional session name.
-            profile: Optional runtime profile name (model, plugins, env).
+            profile: Either a profile **name** (str) referencing a
+                file in ``.jaato/profiles/`` on the server, **or** an
+                inline **spec dict** with the same shape — recognised
+                keys include ``model`` (required), ``provider``,
+                ``plugins``, ``plugin_configs``, ``system_instructions``,
+                ``gc``, ``env``, ``max_turns``, ``runtime_limits``,
+                ``model_tiers``, ``completion_payload_schema``.  The
+                server validates the dict and rejects it with a clear
+                ``ErrorEvent`` if ``model`` is missing.  The two forms
+                are mutually exclusive — pass one or the other.
             agent: Optional agent name. The agent's rendered markdown
-                becomes the session's system instructions.
+                becomes the session's system instructions.  Orthogonal
+                to ``profile`` — agent describes the session's persona,
+                profile describes its capabilities; they compose freely.
             agent_params: Parameter values for the agent's ``{{param}}``
                 placeholders.  Only used when *agent* is specified.
+            cascade_driver_id: Phase 2 cascade-sharing (server
+                0.6.144+) tenant ID identifying the cascade this
+                session belongs to.  Opaque UTF-8 string; UUID
+                recommended.  Sessions sharing the same ID reuse
+                the same pool slot — warm imports + warm plugin
+                state + warm LSP server connections survive across
+                cascade stages.  ``None`` (default) = standalone
+                session, no slot reuse.  Generate one ID per
+                cascade (``uuid.uuid4().hex``) and pass it on every
+                ``session.new`` for that cascade.  Subagent sessions
+                inherit automatically via the shared runner — only
+                the top-level cascade-driver supplies the ID.  See
+                ``docs/design/runner-cascade-sharing.md``.
             timeout: Maximum seconds to wait for session creation when
                 blocking.  The server may need time to initialise the
                 provider, so the default is generous.
@@ -861,69 +1405,133 @@ class IPCClient:
         Returns:
             The new session ID, or None if fire-and-forget / failed /
             timed out.
+
+        Raises:
+            TypeError: If ``profile`` is not None, str, or dict.
         """
-        args = [name] if name else []
-        if profile:
+        args: List[str] = [name] if name else []
+        payload: Optional[Dict[str, Any]] = None
+
+        if isinstance(profile, str):
             args.extend(["--profile", profile])
+        elif isinstance(profile, dict):
+            payload = {"spec": profile}
+        elif profile is not None:
+            raise TypeError(
+                f"create_session: 'profile' must be str (profile name) or "
+                f"dict (inline spec), got {type(profile).__name__}"
+            )
+
         if agent:
             args.extend(["--agent", agent])
         if agent_params:
             for key, value in agent_params.items():
                 args.append(f"{key}={value}")
+        # Phase 2 cascade-sharing (server 0.6.144+): forward the
+        # cascade tenant ID so the daemon's PoolManager can reuse a
+        # slot already affined to this cascade.  Append AFTER agent
+        # + agent_params so the argv flag sits at a stable position
+        # for log diffing.  Server-side parser accepts any order.
+        if cascade_driver_id:
+            args.extend(["--cascade-driver-id", cascade_driver_id])
         await self._send_event(CommandRequest(
             command="session.new",
             args=args,
+            payload=payload,
         ))
 
-        # If events() is already consuming the socket, we must not read
-        # here — the SessionInfoEvent will be picked up by events().
-        if self._events_active:
-            return None
-
-        # No active event consumer — read events until we receive a
-        # SessionInfoEvent (success) or an ErrorEvent / timeout (failure).
-        # Intermediate events are buffered for events() to yield later.
+        # Wait for the daemon's SessionInfoEvent via the drain loop.
+        # SDK 0.13.0+: no more ``_events_active`` gate — the drain task
+        # delivers events to every subscriber concurrently, so a
+        # back-to-back ``events() → create_session`` pattern works
+        # race-free even if the previous events() iterator's aclose()
+        # hasn't fully completed yet.
         try:
             return await asyncio.wait_for(
                 self._await_session_info(), timeout=timeout
             )
         except asyncio.TimeoutError:
-            logger.warning("create_session: timed out waiting for SessionInfoEvent")
+            logger.warning(
+                "create_session: timed out after %ss waiting for "
+                "SessionInfoEvent or ErrorEvent",
+                timeout,
+            )
             return None
 
     async def _await_session_info(self) -> Optional[str]:
-        """Read events until a SessionInfoEvent arrives.
+        """Subscribe to the drain loop and wait for SessionInfoEvent.
 
-        Buffers any non-target events in ``_buffered_events`` so they
-        can be replayed by ``events()`` later.
+        Filters the subscriber queue for ``SessionInfoEvent`` (success)
+        or ``ErrorEvent`` (failure — any ``ErrorEvent`` terminates the
+        wait, regardless of its ``recoverable`` flag).  The daemon
+        emits ALL ``session.new`` failures (profile-not-found,
+        agent-not-found, invalid spec, spawn-payload validation) with
+        ``recoverable=True`` so they can be surfaced to the user
+        without forcing a client reconnect, but from the caller's
+        perspective they are still terminal for THIS create_session
+        call.  Pre-fix the SDK silently swallowed them and returned
+        ``None`` only after the asyncio timeout fired, producing the
+        "daemon stalled" symptom (see project_backlog and 2026-06-06
+        Bug-B investigation).
+
+        When an ``ErrorEvent`` arrives, it is logged at WARNING with
+        the daemon-supplied error type + message so the failure cause
+        is visible in the SDK consumer's logs.
+
+        When this method is the only subscriber active, non-target
+        events seen along the way are saved to ``_buffered_events``
+        so a subsequent ``events()`` call can replay them — preserving
+        the pre-0.13.0 behaviour where ``events()`` after
+        ``create_session`` could yield init-progress / system-message
+        events emitted during session creation.  When ``events()`` is
+        concurrently subscribed, those events are already being yielded
+        directly to the consumer's iterator and are NOT re-buffered
+        (avoiding duplicates).
 
         Returns:
-            The session ID from the SessionInfoEvent, or None on error.
+            The session ID from the SessionInfoEvent, or None on
+            error / disconnect / timeout.
         """
-        while self._connected:
-            message = await self._read_message()
-            if message is None:
-                self._connected = False
-                return None
+        q = self._subscribe_events()
+        # Events to re-buffer for a future events() call, but only when
+        # this subscription is solo (no concurrent events() iterator).
+        incidental: list[Event] = []
+        try:
+            while True:
+                event = await q.get()
+                if event is None:
+                    # drain loop signalled disconnection
+                    if len(self._event_subscribers) == 1 and incidental:
+                        self._buffered_events.extend(incidental)
+                    return None
 
-            event = deserialize_event(message)
+                solo = len(self._event_subscribers) == 1
 
-            if isinstance(event, SessionInfoEvent) and event.session_id:
-                self._session_id = event.session_id
-                # Buffer the SessionInfoEvent itself too — downstream
-                # consumers (e.g. IPCRecoveryClient) may need it.
-                self._buffered_events.append(event)
-                return event.session_id
+                if isinstance(event, SessionInfoEvent) and event.session_id:
+                    self._session_id = event.session_id
+                    if solo:
+                        incidental.append(event)
+                        self._buffered_events.extend(incidental)
+                    return event.session_id
 
-            if isinstance(event, ErrorEvent) and not event.recoverable:
-                self._buffered_events.append(event)
-                return None
+                if isinstance(event, ErrorEvent):
+                    logger.warning(
+                        "create_session: daemon reported error "
+                        "(error_type=%s, recoverable=%s): %s",
+                        event.error_type,
+                        event.recoverable,
+                        event.error,
+                    )
+                    if solo:
+                        incidental.append(event)
+                        self._buffered_events.extend(incidental)
+                    return None
 
-            # Any other event (init progress, system messages, …) —
-            # buffer it so events() can yield it later.
-            self._buffered_events.append(event)
-
-        return None
+                # Non-target event — track for re-buffer when solo.
+                if solo:
+                    incidental.append(event)
+        finally:
+            self._unsubscribe_events(q)
 
     async def attach_session(self, session_id: str) -> bool:
         """Attach to an existing session.
@@ -955,6 +1563,38 @@ class IPCClient:
             args=[],
         ))
 
+    async def end_session(self) -> None:
+        """Terminate the currently-attached session.
+
+        Sends ``session.end`` — the server stops the session's
+        in-flight activity and emits a ``[SESSION_TERMINATED]``
+        marker so attached clients know the session is no longer
+        active.  The session record itself stays on disk; use
+        :meth:`delete_session` to purge it.
+        """
+        await self._send_event(CommandRequest(
+            command="session.end",
+            args=[],
+        ))
+
+    async def delete_session(self, session_id: str) -> None:
+        """Permanently delete a session by ID.
+
+        Sends ``session.delete`` — the server removes both
+        in-memory state and the on-disk journal for the named
+        session.  Response arrives via the event stream as a
+        ``SystemMessageEvent`` ("Session 'X' deleted." on success;
+        "Session 'X' not found." otherwise).
+
+        Args:
+            session_id: The session to delete.  Must be a known
+                session ID (visible in :meth:`list_sessions`).
+        """
+        await self._send_event(CommandRequest(
+            command="session.delete",
+            args=[session_id],
+        ))
+
     async def list_profiles(self) -> None:
         """Request list of available agent profiles.
 
@@ -970,20 +1610,65 @@ class IPCClient:
     # Requests
     # =========================================================================
 
+    @staticmethod
+    def _normalize_attachments(attachments: Optional[list]) -> List[Dict[str, Any]]:
+        """Normalize user-message attachments to the canonical wire shape
+        ``{mime_type, data: base64-str, display_name}`` (client-expanded — the
+        daemon/runner can't read client-side paths, esp. cross-host WS).
+
+        Accepts, per item:
+          - a file-path ``str`` → read bytes, base64-encode, guess mime from ext
+          - a ``dict`` with ``bytes`` ``data`` → base64-encode it
+          - a ``dict`` with base64-``str`` ``data`` → pass through unchanged
+        Unknown shapes are skipped (no fabricated content).
+        """
+        import base64
+        import mimetypes
+        import os
+        out: List[Dict[str, Any]] = []
+        for a in attachments or []:
+            if isinstance(a, str):
+                with open(a, "rb") as fh:
+                    raw = fh.read()
+                out.append({
+                    "mime_type": mimetypes.guess_type(a)[0]
+                                 or "application/octet-stream",
+                    "data": base64.b64encode(raw).decode("ascii"),
+                    "display_name": os.path.basename(a),
+                })
+            elif isinstance(a, dict):
+                d = dict(a)
+                data = d.get("data")
+                if isinstance(data, (bytes, bytearray)):
+                    d["data"] = base64.b64encode(bytes(data)).decode("ascii")
+                out.append(d)
+        return out
+
     async def send_message(
         self,
         text: str,
         attachments: Optional[list] = None,
+        parallel_tools: Optional[bool] = None,
     ) -> None:
         """Send a message to the model.
 
         Args:
             text: The message text.
-            attachments: Optional file attachments.
+            attachments: Optional user-message attachments — each a file-path
+                ``str`` OR a ``{mime_type, data, display_name}`` dict (``data``
+                as raw ``bytes`` or a base64 ``str``).  Normalized client-side
+                to the canonical wire shape ``{mime_type, data: base64-str,
+                display_name}`` and delivered to the model's multimodal path
+                (gated by the provider's vision/input modality).
+            parallel_tools: Per-call override for parallel tool execution.
+                ``None`` (default) keeps the env-configured behaviour
+                (``JAATO_PARALLEL_TOOLS``).  ``True`` / ``False`` forces
+                parallel / sequential tool execution for this turn only.
         """
         await self._send_event(SendMessageRequest(
             text=text,
-            attachments=attachments or [],
+            attachments=self._normalize_attachments(attachments),
+            parallel_tools=parallel_tools,
         ))
 
     async def respond_to_permission(
@@ -1021,6 +1706,28 @@ class IPCClient:
             response=response,
         ))
 
+    async def respond_to_clarification_batch(
+        self,
+        request_id: str,
+        answers: List[str],
+    ) -> None:
+        """Respond to a batched clarification — all answers at once.
+
+        The blessed public form for WS/chat clients that receive every
+        question in one ``ClarificationBatchRequestedEvent`` (server PR #411)
+        and answer them together, rather than calling
+        ``respond_to_clarification`` per question.  ``answers`` is an ordered
+        list, one entry per question by index.
+
+        Args:
+            request_id: The clarification request ID.
+            answers: Ordered answers, one per question (by index).
+        """
+        await self._send_event(ClarificationBatchResponseEvent(
+            request_id=request_id,
+            answers=answers,
+        ))
+
     async def respond_to_reference_selection(
         self,
         request_id: str,
@@ -1036,6 +1743,82 @@ class IPCClient:
             request_id=request_id,
             response=response,
         ))
+
+    async def respond_to_tool_execution(
+        self,
+        call_id: str,
+        result: str = "",
+        error: str = "",
+    ) -> None:
+        """Return the result of a client-side tool execution.
+
+        Sends ``ToolExecuteResultEvent`` so the server can resume the
+        model loop with the tool's result.  Caller-side counterpart of
+        the ``ToolExecuteRequestEvent`` the server emits when the
+        model invokes a client-registered tool (see
+        :meth:`register_client_tools`).
+
+        Args:
+            call_id: The ``call_id`` from the originating
+                ``ToolExecuteRequestEvent``.  Server uses this to
+                correlate the response with the in-flight tool call.
+            result: JSON-encoded tool result.  Empty string when
+                ``error`` is set.
+            error: Error message when execution failed.  Empty when
+                ``result`` is set.  Setting both is undefined.
+        """
+        from jaato_sdk.events import ToolExecuteResultEvent
+        await self._send_event(ToolExecuteResultEvent(
+            call_id=call_id,
+            result=result,
+            error=error,
+        ))
+
+    async def register_client_tools(self, tools: List[Dict[str, Any]]) -> None:
+        """Register client-provided ("host") tools the agent can call.
+
+        Each entry: ``{"name", "description", "parameters", "handler"}`` (plus
+        optional ``"timeout"`` ms / ``"auto_approve"``).  ``handler(args) -> Any``
+        runs when the agent invokes the tool; its return (JSON-encoded if not a
+        str) is sent back as the result.  Register **before** ``create_session``
+        so the schema reaches the runner-tier model (mid-session registration
+        isn't seen until a follow-up lands the runner mid-session push).
+        """
+        from jaato_sdk.events import ToolsRegisterClientRequest, EventType
+        if not hasattr(self, "_host_tool_handlers"):
+            self._host_tool_handlers: Dict[str, Any] = {}
+            self.subscribe(
+                EventType.TOOL_EXECUTE_REQUEST, self._on_tool_execute_request)
+        for t in tools:
+            if t.get("handler"):
+                self._host_tool_handlers[t["name"]] = t["handler"]
+        wire = [{k: v for k, v in t.items() if k != "handler"} for t in tools]
+        await self._send_event(
+            ToolsRegisterClientRequest(tools=wire, categories={}))
+
+    def _on_tool_execute_request(self, event: Any) -> None:
+        """Run the registered host-tool handler for an agent tool call and send
+        the result back via :meth:`respond_to_tool_execution`."""
+        import asyncio
+        import json
+        fn = getattr(self, "_host_tool_handlers", {}).get(event.tool_name)
+
+        async def _run() -> None:
+            if fn is None:
+                await self.respond_to_tool_execution(
+                    event.call_id,
+                    error=f"no handler for host tool {event.tool_name!r}")
+                return
+            try:
+                out = fn(event.tool_args)
+                if asyncio.iscoroutine(out):
+                    out = await out
+                result = out if isinstance(out, str) else json.dumps(out)
+                await self.respond_to_tool_execution(event.call_id, result=result)
+            except Exception as exc:  # report the failure to the model
+                await self.respond_to_tool_execution(event.call_id, error=str(exc))
+
+        asyncio.create_task(_run())
 
     async def stop(self) -> None:
         """Stop current operation."""
@@ -1056,6 +1839,28 @@ class IPCClient:
             command=command,
             args=args or [],
         ))
+
+    # ---- typed wake-primitive methods (see _wake_client) ----
+    async def bind_wake(self, wake_ref: str, trust_keys: list, *,
+                        timeout: float = 30.0):
+        """Declare a wake binding for this session; await the typed result.
+        See :func:`jaato_sdk.client._wake_client.bind_wake`."""
+        from ._wake_client import bind_wake
+        return await bind_wake(self, wake_ref, trust_keys, timeout=timeout)
+
+    async def unbind_wake(self, wake_ref: str, *, timeout: float = 30.0):
+        """Remove this session's wake binding; await the typed result.
+        See :func:`jaato_sdk.client._wake_client.unbind_wake`."""
+        from ._wake_client import unbind_wake
+        return await unbind_wake(self, wake_ref, timeout=timeout)
+
+    async def cascade_register(self, cascade_driver_id: str,
+                              role: str = "observer",
+                              event_types: Optional[list] = None) -> None:
+        """Register as a cascade owner/observer (event CLASSES or names).
+        See :func:`jaato_sdk.client._wake_client.cascade_register`."""
+        from ._wake_client import cascade_register
+        await cascade_register(self, cascade_driver_id, role, event_types)
 
     async def disable_tool(self, tool_name: str) -> None:
         """Disable a tool directly via registry.
@@ -1087,92 +1892,416 @@ class IPCClient:
         await self._send_event(HistoryRequest(agent_id=agent_id))
 
     # =========================================================================
+    # SDK feature parity — session-primitive verbs
+    #
+    # Typed methods over the public-side primitives
+    # ``JaatoSession.inject_prompt`` / ``replay_messages`` /
+    # ``resolve_fork_point``.  Premium's ``session_ops`` plugin builds
+    # higher-level model-callable tools on top of these same primitives;
+    # these methods let SDK consumers reach the primitives directly
+    # without going through the model loop.  See
+    # ``project_backlog_sdk_feature_parity.md``.
+    # =========================================================================
+
+    async def inject_prompt(
+        self,
+        text: str,
+        source_type: str = "user",
+        source_id: Optional[str] = None,
+    ) -> None:
+        """Inject a prompt into the session's message queue.
+
+        Single verb covering both "steer" (USER priority — interrupts
+        the model at the next safe point) and "follow-up" (CHILD
+        priority — queued behind in-flight work) patterns via the
+        ``source_type`` dimension.
+
+        Args:
+            text: Prompt text to inject.
+            source_type: Queue priority — ``"user"`` (steer),
+                ``"child"`` (follow-up), or ``"system"`` / ``"event"``
+                / ``"parent"`` for reactor / hook callers.
+            source_id: Caller identifier for telemetry / logs.
+        """
+        await self._send_event(InjectPromptRequest(
+            text=text,
+            source_type=source_type,
+            source_id=source_id,
+        ))
+
+    async def replay_messages(
+        self,
+        request_id: str,
+        messages: Optional[list] = None,
+        timeout_seconds: float = 120.0,
+    ) -> None:
+        """Re-run the model loop against an explicit message list.
+
+        When ``messages`` is omitted, replays the session's current
+        ``get_history()`` — semantically equivalent to "continue from
+        the current state with no new user input".
+
+        The response arrives as a ``ReplayMessagesResultEvent`` via
+        the event stream, correlated by ``request_id``.
+
+        Args:
+            request_id: Caller-chosen ID to correlate the result event.
+            messages: Optional explicit message list (serialised
+                ``List[Message]``).  ``None`` uses session history.
+            timeout_seconds: Provider-exclusion lock acquisition
+                timeout.
+        """
+        await self._send_event(ReplayMessagesRequest(
+            request_id=request_id,
+            messages=messages,
+            timeout_seconds=timeout_seconds,
+        ))
+
+    async def resolve_fork_point(
+        self,
+        request_id: str,
+        after_message: Optional[int] = None,
+        after_tool_call: Optional[str] = None,
+        after_timestamp: Optional[str] = None,
+    ) -> None:
+        """Resolve a fork point in the session's history to a message index.
+
+        Exactly one of ``after_message`` / ``after_tool_call`` /
+        ``after_timestamp`` should be supplied; if none are given,
+        the server returns the last message index (full-history
+        fork).  The session's current ``get_history()`` is used as
+        the search space — clients don't pass history over the wire.
+
+        The response arrives as a ``ResolveForkPointResultEvent`` via
+        the event stream, correlated by ``request_id``.
+
+        Args:
+            request_id: Caller-chosen ID to correlate the result event.
+            after_message: Direct message index specifier.
+            after_tool_call: Tool call ID specifier.
+            after_timestamp: HH:MM:SS or ISO timestamp specifier.
+        """
+        await self._send_event(ResolveForkPointRequest(
+            request_id=request_id,
+            after_message=after_message,
+            after_tool_call=after_tool_call,
+            after_timestamp=after_timestamp,
+        ))
+
+    # =========================================================================
+    # SDK feature parity — permission policy verbs
+    #
+    # Typed methods replacing stringly-typed
+    # ``execute_command("permissions", [...])`` for SDK consumers.
+    # The CLI command path stays for actual users typing.
+    # =========================================================================
+
+    async def add_whitelist_tools(
+        self,
+        tools: Optional[list] = None,
+        patterns: Optional[list] = None,
+    ) -> None:
+        """Add tools / patterns to the session's permission whitelist.
+
+        Args:
+            tools: Tool names to whitelist (exact match, auto-approved).
+            patterns: Glob patterns to add to the session whitelist.
+        """
+        await self._send_event(PermissionAddWhitelistRequest(
+            tools=tools or [],
+            patterns=patterns or [],
+        ))
+
+    async def add_blacklist_tools(
+        self,
+        tools: Optional[list] = None,
+        patterns: Optional[list] = None,
+    ) -> None:
+        """Add tools / patterns to the session's permission blacklist.
+
+        Args:
+            tools: Tool names to blacklist (always denied).
+            patterns: Glob patterns to add to the session blacklist.
+        """
+        await self._send_event(PermissionAddBlacklistRequest(
+            tools=tools or [],
+            patterns=patterns or [],
+        ))
+
+    async def remove_permission_rules(
+        self,
+        target: str,
+        tools: Optional[list] = None,
+        patterns: Optional[list] = None,
+    ) -> None:
+        """Remove tools / patterns from a permission list.
+
+        Args:
+            target: ``"whitelist"`` or ``"blacklist"``.
+            tools: Tool names to remove.
+            patterns: Patterns to remove.
+        """
+        await self._send_event(PermissionRemoveRequest(
+            target=target,
+            tools=tools or [],
+            patterns=patterns or [],
+        ))
+
+    async def clear_permission_rules(self, target: str = "all") -> None:
+        """Clear the session-level permission lists.
+
+        Does NOT affect the base policy declared in
+        ``permissions.json``; only the session-level overrides.
+
+        Args:
+            target: ``"whitelist"``, ``"blacklist"``, or ``"all"``
+                (clears both lists and the session default).
+        """
+        await self._send_event(PermissionClearRequest(target=target))
+
+    async def set_default_policy(self, policy: str) -> None:
+        """Set the session-level default permission policy.
+
+        Overrides the base default for this session only.
+
+        Args:
+            policy: ``"allow"``, ``"deny"``, or ``"ask"``.
+        """
+        await self._send_event(PermissionSetDefaultRequest(policy=policy))
+
+    async def request_policy_snapshot(self, request_id: str = "") -> None:
+        """Request a structured snapshot of the current permission policy.
+
+        The response arrives as a ``PermissionPolicySnapshotEvent``
+        via the event stream, correlated by ``request_id``.
+
+        Args:
+            request_id: Caller-chosen ID to correlate the snapshot.
+        """
+        await self._send_event(PermissionPolicySnapshotRequest(
+            request_id=request_id,
+        ))
+
+    # =========================================================================
     # Event Stream
     # =========================================================================
+
+    def open_event_stream(self) -> "_SyncSubscribedStream":
+        """Subscribe SYNCHRONOUSLY (at call time) and return an event iterator.
+
+        Unlike :meth:`events` — an async generator that subscribes lazily on its
+        first ``__anext__`` — this registers the subscriber queue NOW, before it
+        returns.  Use it when the subscription must be established before an
+        action that triggers server-side output, e.g.::
+
+            stream = client.open_event_stream()   # queue registered now
+            await client.attach(session_id)        # driven output can't be missed
+            async for ev in stream:
+                ...
+
+        This removes any need to reach into ``_subscribe_events`` /
+        ``_event_subscribers`` to force + prove registration.  Same fan-out and
+        ``None``-sentinel disconnect semantics as :meth:`events` (buffered events
+        are replayed into the queue first).  Lifetime is caller-managed: the
+        stream unsubscribes on disconnect, on ``aclose()``, or on ``async with``
+        exit — a long-lived consumer should ``aclose()`` at teardown.
+        """
+        from ._event_stream import _SyncSubscribedStream
+        return _SyncSubscribedStream(self, self._subscribe_events())
 
     async def events(self) -> AsyncIterator[Event]:
         """Async iterator for receiving events.
 
-        Yields events from the server until the connection is closed or
-        an error occurs. When the connection is lost, the iterator exits
-        cleanly (stops yielding) rather than raising an exception.
+        SDK 0.13.0+: subscribes a queue to the connection's drain task
+        and yields events as they arrive.  Buffered events (those that
+        flowed before any consumer subscribed — typically during
+        ``create_session``) are replayed first.
 
-        Any events buffered by request-response methods (e.g.
-        ``create_session``) are yielded first before reading from the
-        socket.
+        Multiple iterators can be active concurrently: each gets its
+        own subscriber queue and the drain task fans events out to all
+        of them.  Re-entrant ``create_session`` / ``events()``
+        sequences no longer race on a shared ``_events_active`` flag —
+        the drain task is the single reader regardless of how many
+        consumers are listening.
 
-        Connection loss can be detected by:
-        1. The iterator stopping (connection closed cleanly)
-        2. Receiving an ErrorEvent (error during read)
+        When the connection is lost (drain task ends), every
+        subscriber queue receives a ``None`` sentinel and this
+        iterator exits cleanly without raising.
 
         Yields:
             Events from the server.
         """
-        logger.debug("events(): starting event loop")
-        self._events_active = True
-
+        logger.debug("events(): subscribing")
+        q = self._subscribe_events()
         try:
-            # Drain events that were buffered during request-response
-            # operations (e.g. create_session consuming init-progress events).
-            while self._buffered_events:
-                event = self._buffered_events.pop(0)
-                logger.debug(f"events(): yielding buffered {type(event).__name__}")
-                if self._on_event:
-                    self._on_event(event)
+            while True:
+                event = await q.get()
+                if event is None:
+                    # drain loop signalled disconnection
+                    logger.debug("events(): drain loop ended; iterator exiting")
+                    break
                 yield event
-
-            while self._connected:
-                try:
-                    message = await self._read_message()
-                    if message is None:
-                        # Connection closed cleanly (server shutdown, network loss)
-                        logger.debug("events(): connection closed (received None)")
-                        self._connected = False
-                        break
-
-                    event = deserialize_event(message)
-                    logger.debug(f"events(): received {type(event).__name__}")
-
-                    # Auto-update session_id when receiving SessionInfoEvent
-                    if isinstance(event, SessionInfoEvent) and event.session_id:
-                        self._session_id = event.session_id
-                        logger.debug(f"events(): session_id updated to {event.session_id}")
-
-                    # Call callback if set
-                    if self._on_event:
-                        self._on_event(event)
-
-                    yield event
-
-                except asyncio.IncompleteReadError:
-                    # Connection lost mid-message
-                    logger.debug("events(): incomplete read, connection lost")
-                    self._connected = False
-                    break
-
-                except ConnectionResetError:
-                    # Connection reset by peer
-                    logger.debug("events(): connection reset by peer")
-                    self._connected = False
-                    break
-
-                except asyncio.CancelledError:
-                    logger.debug("events(): cancelled")
-                    raise
-
-                except Exception as e:
-                    logger.error(f"events(): error: {e}")
-                    yield ErrorEvent(
-                        error=str(e),
-                        error_type=type(e).__name__,
-                    )
         finally:
-            self._events_active = False
+            self._unsubscribe_events(q)
+            logger.debug("events(): unsubscribed")
 
-    async def receive_events(self) -> None:
-        """Receive events and call the callback.
+    async def cascade_events(
+        self,
+        cascade_driver_id: str,
+        event_types: Optional[List[str]] = None,
+        role: str = "observer",
+    ) -> AsyncIterator[Event]:
+        """Phase 2 cascade-as-client (server 0.6.156+, SDK 0.13.2+):
+        async iterator over events from any session stamped with
+        ``cascade_driver_id``.
 
-        Runs until disconnected. Use set_event_callback() first.
+        Sends ``cascade.register`` to the daemon at iterator start;
+        yields matching events received via the existing event
+        channel; sends ``cascade.unregister`` on iterator close
+        (``break``, exception, or natural completion).
+
+        Server-side filtering: only events from sessions whose
+        ``cascade_driver_id`` matches AND whose type-name is in
+        ``event_types`` reach this iterator.  Other events on the
+        connection (e.g., from sessions the same client also
+        created interactively) still flow to ``events()`` but are
+        NOT yielded by this iterator — caveat: if the same client
+        subscribes to both ``events()`` AND ``cascade_events()``,
+        cascade events arrive on BOTH channels (both subscribers
+        see them).
+
+        Args:
+            cascade_driver_id: The cid this iterator observes.
+                Sessions stamped with this cid will route their
+                events to the iterator.
+            event_types: Optional list of event type-names to
+                filter for (e.g., ``["SessionTerminatedEvent",
+                "AgentCompletedEvent"]``).  ``None`` (default)
+                subscribes to all event types.  Empty list also
+                subscribes to all (no filter).
+            role: ``"owner"`` (lifecycle authority; single per cid)
+                or ``"observer"`` (read-only; multiple allowed).
+                Default ``"observer"`` for the common observe-only
+                case.  See ``docs/design/cascade-as-client.md``
+                Decision 5.
+
+        Yields:
+            Events received by this connection that originated from
+            a session stamped with ``cascade_driver_id`` and whose
+            type matches the ``event_types`` filter.
+
+        Raises:
+            ValueError: when the server rejects the registration
+                (duplicate owner, invalid role, etc.).  Surfaced
+                via an ``ErrorEvent`` from the daemon; this
+                iterator translates it into ValueError + exits.
+
+        Example::
+
+            import uuid
+            cid = uuid.uuid4().hex
+            async for event in client.cascade_events(
+                cid,
+                event_types=["SessionTerminatedEvent"],
+            ):
+                if event.reason == "error":
+                    logger.error(f"Cascade failed at session {event.session_id}")
+                    break  # see "Cleanup contract" below
+
+        **Cleanup contract**: the iterator sends ``cascade.unregister``
+        in its ``finally`` block, but Python's async-generator
+        semantics mean ``finally`` only runs when the generator is
+        explicitly closed (``await gen.aclose()``) OR garbage-
+        collected.  ``async for ... break`` does NOT trigger
+        ``aclose()`` synchronously.  For deterministic cleanup the
+        user can:
+
+        - Use ``async with contextlib.aclosing(client.cascade_events(...))``
+        - Or rely on the server-side disconnect-cleanup backstop
+          (Phase 2.2): when the IPC connection drops, the daemon
+          removes ALL cascade-client registrations for that
+          connection within 50ms.
+
+        For typical kb-cascade smoke-driver use, the server-side
+        backstop is sufficient — the driver disconnects when the
+        cascade ends + cleanup fires automatically.
         """
-        async for event in self.events():
-            pass  # Callback is called in events()
+        logger.debug(
+            "cascade_events(): subscribing cid=%s role=%s event_types=%s",
+            cascade_driver_id, role, event_types,
+        )
+        # Build CommandRequest args: [cid, role, *event_types].
+        # Server-side _handle_cascade_register parses this shape.
+        args = [cascade_driver_id, role]
+        if event_types:
+            args.extend(event_types)
+        # Subscribe to the event queue BEFORE sending the register
+        # command so we don't miss the confirmation SystemMessageEvent
+        # or any early events for fast-arriving sessions.
+        q = self._subscribe_events()
+        try:
+            await self._send_event(CommandRequest(
+                command="cascade.register",
+                args=args,
+            ))
+            # SDK 0.14.4+: client-side type-name filter honors the
+            # docstring contract.  Server-side dispatch via the
+            # cascade-client callback path already filters on
+            # ``event_types`` (session_manager.py:217-222
+            # ``event_type_match``), but the SDK's
+            # ``_subscribe_events()`` queue receives EVERY event on
+            # this IPC connection — including events arriving via
+            # other paths (e.g. normal session events the client also
+            # observes).  Without this filter, multi-event-subscription
+            # callers saw events of types they didn't subscribe to
+            # leak through (peer 7:1 empirical: 42 AGENT_CREATED
+            # arrived despite registering only SessionTerminatedEvent).
+            filter_set = set(event_types) if event_types else None
+            while True:
+                event = await q.get()
+                if event is None:
+                    # Connection drain loop ended.
+                    logger.debug(
+                        "cascade_events(): drain loop ended; "
+                        "iterator exiting cid=%s", cascade_driver_id,
+                    )
+                    break
+                if filter_set is not None and (
+                    type(event).__name__ not in filter_set
+                ):
+                    continue
+                yield event
+        finally:
+            self._unsubscribe_events(q)
+            # Best-effort unregister.  If the connection is already
+            # gone (drain loop ended), the send is a no-op; the
+            # server-side disconnect handler already cleaned up the
+            # registration via
+            # ``unregister_all_cascade_clients_for_connection``.
+            try:
+                await self._send_event(CommandRequest(
+                    command="cascade.unregister",
+                    args=[cascade_driver_id],
+                ))
+            except Exception as exc:  # noqa: BLE001 — cleanup boundary
+                logger.debug(
+                    "cascade_events(): unregister send failed "
+                    "(connection likely closed): %s", exc,
+                )
+            logger.debug(
+                "cascade_events(): unsubscribed cid=%s",
+                cascade_driver_id,
+            )
+
+    async def drain_events(self) -> None:
+        """Drive the event loop, dispatching to subscribed handlers.
+
+        Runs until disconnected. Convenience wrapper for callers that
+        only want handler-based delivery and don't need to iterate
+        ``events()`` manually. Equivalent to::
+
+            async for _ in client.events():
+                pass
+        """
+        async for _ in self.events():
+            pass

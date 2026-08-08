@@ -34,7 +34,12 @@ import logging
 from typing import Any, Callable, Dict, List, Optional
 
 from ..anthropic.provider import AnthropicProvider
-from ..base import ProviderConfig
+from ..base import (
+    ProviderConfig,
+    resolve_context_window,
+    resolve_modalities,
+    MODALITY_TEXT,
+)
 from .env import (
     DEFAULT_ZHIPUAI_BASE_URL,
     DEFAULT_ZHIPUAI_MODEL,
@@ -51,6 +56,7 @@ from .auth import (
     login_interactive,
     logout,
     status as auth_status,
+    try_load_credentials_with_reason,
 )
 
 
@@ -76,12 +82,31 @@ MODEL_CONTEXT_LIMITS = {
     "glm-4.5-airx": 131072,
     "glm-4.5-flash": 131072,
     "glm-4.5-x": 131072,
+    # GLM-4 generation — 128K context (legacy / largely deprecated; not in the
+    # live /models catalog, retained for backward compat).  The whole GLM-4
+    # generation, including the 4V vision variant, is 128K.
+    # Source: Z.AI docs; models.dev; Zhipu GLM-4.6V 128K announcement.
+    "glm-4": 131072,
+    "glm-4v": 131072,
 }
 
-# Fallback for unknown models (matches GLM-5/4.7 generation default)
-DEFAULT_CONTEXT_LIMIT = 204800
+# No blanket default for unknown models — context is resolved from the override
+# (framework_overrides.context_length / ZHIPUAI_CONTEXT_LENGTH) then the table
+# (exact then longest-prefix), else get_context_limit raises (project
+# no-fallback rule).  The Z.AI /models endpoint is id-only (no context field,
+# verified live), so there is no auto-detect tier.
 
 KNOWN_MODELS = sorted(MODEL_CONTEXT_LIMITS.keys())
+
+# GLM input-modality table (longest-prefix match).  The 4V / 4.5V family accepts
+# images; the text/coding GLMs are text-only.  This replaces the inherited
+# Anthropic ``MODEL_INPUT_MODALITIES`` table, whose ``claude-*`` prefixes never
+# match a GLM model name — so the inherited modalities() override was inert and
+# images were silently gated off even for the vision models.
+GLM_INPUT_MODALITIES = {
+    "glm-4.5v": frozenset({"text", "image"}),
+    "glm-4v": frozenset({"text", "image"}),
+}
 
 
 # GLM models that support extended thinking (chain-of-thought reasoning).
@@ -184,6 +209,15 @@ class ZhipuAIProvider(AnthropicProvider):
     AnthropicProvider since Zhipu AI uses the same API format.
     """
 
+    # Vendor identity overrides for error messages.  The base class's
+    # ``_handle_api_error`` raises domain errors that read these via
+    # ``self`` — so when ``ZhipuAIProvider._handle_api_error`` falls
+    # through to ``super()`` (for usage-limit, overloaded, context-limit
+    # etc.) the error's user-facing text names "Zhipu AI" rather than
+    # the inherited "Anthropic API".
+    _provider_display_name: str = "Zhipu AI"
+    _provider_console_url: str = "https://open.bigmodel.cn/usercenter/apikeys"
+
     def __init__(self):
         """Initialize the provider (not yet connected)."""
         super().__init__()
@@ -237,6 +271,15 @@ class ZhipuAIProvider(AnthropicProvider):
         if config is None:
             config = ProviderConfig()
 
+        # Pull the workspace_path / config_root that the runtime injected
+        # into ``config.extra``.  Threading them through the auth
+        # resolver makes credential lookup independent of the
+        # ``JAATO_CONFIG_ROOT`` env var, which is unreliable for
+        # headless reactor-spawned sessions running in fresh threads
+        # outside any active ``_in_workspace`` context.
+        _ws_path = config.extra.get('workspace_path') if config.extra else None
+        _config_root = config.extra.get('config_root') if config.extra else None
+
         # Resolve API key from config, environment, or stored credentials.
         # Track which source was used for the "Connected to" message.
         self._auth_info: str = ""
@@ -246,10 +289,14 @@ class ZhipuAIProvider(AnthropicProvider):
         elif resolve_api_key():
             self._api_key = resolve_api_key()
             self._auth_info = "API key (env ZHIPUAI_API_KEY)"
-        elif get_stored_api_key():
-            self._api_key = get_stored_api_key()
+        elif get_stored_api_key(workspace_path=_ws_path, config_root=_config_root):
+            self._api_key = get_stored_api_key(
+                workspace_path=_ws_path, config_root=_config_root,
+            )
             from .auth import get_credential_file_path
-            cred_path = get_credential_file_path()
+            cred_path = get_credential_file_path(
+                workspace_path=_ws_path, config_root=_config_root,
+            )
             self._auth_info = f"API key from {cred_path}" if cred_path else "API key (stored)"
         else:
             self._api_key = None
@@ -260,14 +307,53 @@ class ZhipuAIProvider(AnthropicProvider):
 
         self._trace(f"[INIT] API key resolved (len={len(self._api_key)})")
 
-        # Resolve base URL from config, environment, or stored credentials
+        # Parse extra config — namespaced into the same layers as the
+        # anthropic provider (server 0.6.24+):
+        #
+        #   plugin_configs.zhipuai:
+        #     <top-level>           # auth / identity (api_key)
+        #     api_params:           # Anthropic-compatible request body
+        #                           # (temperature, top_p, top_k, max_tokens,
+        #                           #  enable_thinking, thinking_budget)
+        #     framework_overrides:  # rare escape hatches (base_url, context_length)
+        #
+        # Backward compatibility: every key is also read from the legacy
+        # flat position with a one-time deprecation warning per key.
+        api_params = config.extra.get("api_params") or {}
+        framework_overrides = config.extra.get("framework_overrides") or {}
+
+        def _knob(
+            key: str, *, layer: Dict[str, Any], default: Any = None,
+        ) -> Any:
+            """Read a config knob from its nested layer first, falling
+            back to the legacy flat ``config.extra[key]`` position with
+            a deprecation warning when only the flat form is present."""
+            if key in layer:
+                return layer[key]
+            if key in config.extra:
+                logger.warning(
+                    "Zhipuai profile uses legacy flat config key %r — "
+                    "move under the appropriate nested layer "
+                    "(api_params / framework_overrides) per the 0.6.24+ "
+                    "namespacing.  Flat-key support will be removed in a "
+                    "future release.",
+                    key,
+                )
+                return config.extra[key]
+            return default
+
+        # Resolve base URL from config, environment, or stored credentials.
+        # (framework_overrides — base URL is a deployment escape hatch,
+        # not a per-request knob.)
         self._base_url = (
-            config.extra.get("base_url")
+            _knob("base_url", layer=framework_overrides)
             or resolve_base_url()
         )
         # Check stored base_url only if using default (not overridden)
         if self._base_url == DEFAULT_ZHIPUAI_BASE_URL:
-            stored_base_url = get_stored_base_url()
+            stored_base_url = get_stored_base_url(
+                workspace_path=_ws_path, config_root=_config_root,
+            )
             if stored_base_url:
                 self._base_url = stored_base_url
 
@@ -275,20 +361,45 @@ class ZhipuAIProvider(AnthropicProvider):
         self._base_url = self._base_url.rstrip("/")
         self._trace(f"[INIT] base_url={self._base_url}")
 
-        # Optional context length override
-        self._context_length_override = (
-            config.extra.get("context_length") or resolve_context_length()
+        # Context-window override (framework_overrides.context_length / env) via
+        # the shared precedence helper.  GLM model windows are documented in
+        # MODEL_CONTEXT_LIMITS (consulted in get_context_limit); the Z.AI
+        # /models endpoint carries no context field (verified), so there is no
+        # auto-detect tier.  The override, when set, wins over the table.
+        self._context_length_override = resolve_context_window(
+            detect_capacity=None,
+            profile_value=_knob("context_length", layer=framework_overrides),
+            env_value=resolve_context_length(),
         )
         if self._context_length_override:
             self._trace(f"[INIT] context_length_override={self._context_length_override}")
 
-        # Extended thinking: configurable for GLM-4.7 which has native CoT reasoning
-        self._enable_thinking = config.extra.get(
-            "enable_thinking", resolve_enable_thinking()
+        # Extended thinking: configurable for GLM-4.7+ which has native
+        # CoT reasoning (api_params layer — these translate to wire fields).
+        self._enable_thinking = _knob(
+            "enable_thinking", layer=api_params, default=resolve_enable_thinking(),
         )
-        self._thinking_budget = config.extra.get(
-            "thinking_budget", resolve_thinking_budget()
+        self._thinking_budget = _knob(
+            "thinking_budget", layer=api_params, default=resolve_thinking_budget(),
         )
+
+        # Sampling parameters (api_params layer).  ``None`` means "omit
+        # from the request and let GLM apply its server-side default"
+        # (Anthropic-compat → temperature=1.0).  These reach
+        # ``messages.create()`` via the inherited ``complete()`` method
+        # in AnthropicProvider, which reads ``self._temperature`` etc.
+        temp_extra = _knob("temperature", layer=api_params)
+        if temp_extra is not None:
+            self._temperature = float(temp_extra)
+        top_p_extra = _knob("top_p", layer=api_params)
+        if top_p_extra is not None:
+            self._top_p = float(top_p_extra)
+        top_k_extra = _knob("top_k", layer=api_params)
+        if top_k_extra is not None:
+            self._top_k = int(top_k_extra)
+        max_tokens_extra = _knob("max_tokens", layer=api_params)
+        if max_tokens_extra is not None:
+            self._max_tokens_override = int(max_tokens_extra)
 
         # Zhipu AI doesn't use OAuth/PKCE - set to disabled
         self._use_pkce = False
@@ -327,12 +438,23 @@ class ZhipuAIProvider(AnthropicProvider):
     def verify_auth(
         self,
         allow_interactive: bool = False,
-        on_message=None
+        on_message=None,
+        config: Optional["ProviderConfig"] = None,
     ) -> bool:
         """Verify Zhipu AI API key is available.
 
+        ``config`` is accepted for protocol compatibility but unused — Z.AI
+        reads its credentials from the environment / stored auth file.
+
         This can be called BEFORE initialize() to check that credentials
         exist. Checks environment variable and stored credentials.
+
+        When the stored credential file exists but cannot be loaded
+        (corrupt JSON, permission error, missing ``api_key`` field), the
+        failure reason is surfaced via ``on_message`` instead of being
+        swallowed as a generic "No credentials found".  Without this,
+        a broken auth file produces the same message as a missing one,
+        hiding the real problem from the user.
 
         Args:
             allow_interactive: Ignored (no interactive auth for Zhipu AI).
@@ -342,12 +464,35 @@ class ZhipuAIProvider(AnthropicProvider):
             True if an API key is available.
         """
         self._trace("[AUTH] Verifying credentials")
-        api_key = resolve_api_key() or get_stored_api_key()
-        if api_key:
-            self._trace("[AUTH] API key found")
+        env_key = resolve_api_key()
+        if env_key:
+            self._trace("[AUTH] API key found in environment")
             if on_message:
-                on_message("Found Zhipu AI API key")
+                on_message("Found Zhipu AI API key (env ZHIPUAI_API_KEY)")
             return True
+
+        creds, load_error = try_load_credentials_with_reason()
+        if creds and creds.api_key:
+            self._trace("[AUTH] API key loaded from stored credentials")
+            if on_message:
+                on_message("Found Zhipu AI API key (stored credentials)")
+            return True
+
+        if load_error:
+            # File exists but could not be parsed — surface the reason so
+            # users can distinguish "never logged in" from "auth file is
+            # broken / unreadable".
+            self._trace(f"[AUTH] Stored credentials unusable: {load_error}")
+            if on_message:
+                on_message(
+                    f"Zhipu AI credentials file found but could not be loaded: "
+                    f"{load_error}"
+                )
+                on_message(
+                    "Run 'zhipuai-auth key <your_api_key>' to re-authenticate, "
+                    "or set ZHIPUAI_API_KEY."
+                )
+            return False
 
         self._trace("[AUTH] No credentials found")
         if on_message:
@@ -413,15 +558,58 @@ class ZhipuAIProvider(AnthropicProvider):
         self._trace(f"[_fetch_remote_models] Got {len(models)} models")
         return models
 
+    def modalities(self, model: Optional[str] = None):
+        """INPUT modalities — GLM-4V / 4.5V accept images; other GLMs text-only.
+
+        Overrides the inherited Anthropic ``modalities()`` (whose ``claude-*``
+        prefix table never matches a GLM name, so it was inert and silently
+        gated images off for the vision models).  Precedence: profile
+        ``modalities`` knob → GLM table → text floor.
+        """
+        model = (model or self._model_name or "").lower()
+        table = None
+        for prefix, mods in GLM_INPUT_MODALITIES.items():
+            if model.startswith(prefix):
+                table = mods
+                break
+        resolved = resolve_modalities(
+            profile_value=self._modalities_knob,
+            table_value=table,
+        )
+        return resolved if resolved is not None else {MODALITY_TEXT}
+
     def get_context_limit(self) -> int:
         """Get context window size.
 
-        Returns context_length_override if set, otherwise looks up the
-        per-model limit from MODEL_CONTEXT_LIMITS.
+        Resolution precedence (no hardcoded fallback, per project rule):
+        1. ``context_length_override`` (framework_overrides knob / env) — wins.
+        2. ``MODEL_CONTEXT_LIMITS`` exact match.
+        3. ``MODEL_CONTEXT_LIMITS`` LONGEST-prefix match — so a dated variant
+           (e.g. ``glm-4.7-20250601``) resolves to its family (``glm-4.7``)
+           rather than a shorter, wrong prefix (``glm-4``).
+        4. else raise — unknown model with no override is a configuration error.
+
+        Raises:
+            ValueError: when neither the override nor the table yields a value.
         """
         if self._context_length_override:
             return self._context_length_override
-        return MODEL_CONTEXT_LIMITS.get(self._model_name, DEFAULT_CONTEXT_LIMIT)
+        model = self._model_name
+        if model:
+            if model in MODEL_CONTEXT_LIMITS:
+                return MODEL_CONTEXT_LIMITS[model]
+            # Longest-prefix match (GLM model names nest: glm-4 is a prefix of
+            # glm-4.5/4.7 — exact match above handles those; here we take the
+            # most specific prefix so dated variants land on the right family).
+            prefixes = [p for p in MODEL_CONTEXT_LIMITS if model.startswith(p)]
+            if prefixes:
+                return MODEL_CONTEXT_LIMITS[max(prefixes, key=len)]
+        raise ValueError(
+            f"ZhipuAI provider: no known context window for model {model!r}, and "
+            f"no override is set.  Add the model to MODEL_CONTEXT_LIMITS, or set "
+            f"framework_overrides.context_length / ZHIPUAI_CONTEXT_LENGTH.  No "
+            f"hardcoded fallback exists per the project's no-fallback rule."
+        )
 
     def _is_thinking_capable(self) -> bool:
         """Check if the current model supports extended thinking.

@@ -581,12 +581,45 @@ class TestCLIPluginPathSandboxing:
         assert result is None
 
     def test_validate_command_paths_blocked(self, tmp_path):
-        """Test validation returns blocked path for paths outside workspace."""
+        """Test validation returns a not-found result for paths outside workspace."""
         plugin = CLIToolPlugin()
         plugin.initialize({"workspace_root": str(tmp_path)})
 
         result = plugin._validate_command_paths("cat /etc/passwd")
-        assert result == "/etc/passwd"
+        # New contract: a ready-to-return result dict mimicking "not found".
+        assert isinstance(result, dict)
+        assert result["returncode"] == 1
+        assert "No such file or directory" in result["stderr"]
+        assert "/etc/passwd" in result["stderr"]
+
+    def test_validate_command_paths_unparseable_fails_closed(self, tmp_path):
+        """An un-tokenisable command is refused, not degraded to str.split().
+
+        Unbalanced quotes make ``shlex.split`` raise; the validator must
+        refuse rather than fall back to a naive split that parses
+        differently than the shell (which could let an out-of-workspace
+        path slip through).
+        """
+        plugin = CLIToolPlugin()
+        plugin.initialize({"workspace_root": str(tmp_path)})
+
+        result = plugin._validate_command_paths('cat "/etc/passwd')
+        assert isinstance(result, dict)
+        assert result["returncode"] == 2
+        assert "could not be parsed" in result["stderr"]
+        assert result["stdout"] == ""
+
+    def test_validate_command_paths_unparseable_no_sandbox_allowed(self, monkeypatch):
+        """Without a workspace_root the fail-closed gate does not apply."""
+        monkeypatch.delenv("JAATO_WORKSPACE_ROOT", raising=False)
+        monkeypatch.delenv("workspaceRoot", raising=False)
+
+        plugin = CLIToolPlugin()
+        plugin.initialize()
+
+        # No sandboxing configured -> validator is a no-op even for
+        # commands shlex can't parse.
+        assert plugin._validate_command_paths('cat "/etc/passwd') is None
 
     def test_make_not_found_result(self):
         """Test generation of not-found error result."""
@@ -695,9 +728,11 @@ class TestCLIPluginPathSandboxing:
         plugin = CLIToolPlugin()
         plugin.initialize({"workspace_root": str(tmp_path)})
 
-        # Path in arg_list should be validated
+        # Path in arg_list should be validated -> not-found result dict
         result = plugin._validate_command_paths("cat", arg_list=["/etc/passwd"])
-        assert result == "/etc/passwd"
+        assert isinstance(result, dict)
+        assert result["returncode"] == 1
+        assert "/etc/passwd" in result["stderr"]
 
         # Path inside workspace should pass
         result = plugin._validate_command_paths("cat", arg_list=[f"{tmp_path}/file.txt"])
@@ -763,3 +798,45 @@ class TestCLIPluginPathSandboxing:
         plugin.initialize()
 
         assert plugin._workspace_root is None
+
+
+class TestCLIPluginRuntimeLimits:
+    """Tests for the per-session runtime-limits wiring (cgroup attach +
+    app-layer caps).  See ``set_runtime_limits`` and the Popen branches
+    in ``CLIToolPlugin``.
+    """
+
+    def test_default_state_has_no_attach_no_limits(self):
+        # Plugins start with no per-session limits; the Popen branches
+        # must treat this as "behave like before".
+        plugin = CLIToolPlugin()
+        assert plugin._cgroup_attach is None
+        assert plugin._runtime_limits is None
+
+    def test_set_runtime_limits_stores_values(self):
+        from shared.runtime_limits import RuntimeLimits
+
+        attach_calls = []
+
+        def fake_attach():
+            attach_calls.append(True)
+
+        plugin = CLIToolPlugin()
+        limits = RuntimeLimits(memory_max_mb=512, tool_timeout_seconds=30)
+        plugin.set_runtime_limits(fake_attach, limits)
+
+        assert plugin._cgroup_attach is fake_attach
+        assert plugin._runtime_limits is limits
+        # Sanity: the attach is callable with no args (the preexec_fn
+        # contract) and our fake records the invocation.
+        plugin._cgroup_attach()
+        assert attach_calls == [True]
+
+    def test_clear_runtime_limits_with_none(self):
+        from shared.runtime_limits import RuntimeLimits
+
+        plugin = CLIToolPlugin()
+        plugin.set_runtime_limits(lambda: None, RuntimeLimits(memory_max_mb=128))
+        plugin.set_runtime_limits(None, None)
+        assert plugin._cgroup_attach is None
+        assert plugin._runtime_limits is None

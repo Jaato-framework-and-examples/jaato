@@ -1,0 +1,15 @@
+{
+  "type": "peer.spawn_request",
+  "timestamp": "<TIMESTAMP>",
+  "request_id": "",
+  "origin_server": "",
+  "agent_name": "",
+  "task": "",
+  "context": "",
+  "profile_json": "",
+  "inline_config_json": "",
+  "workspace_git_url": "",
+  "workspace_branch": "",
+  "workspace_commit": "",
+  "workspace_temp_branch": ""
+}

@@ -15,6 +15,7 @@ subject to force-include overrides.
 import json
 import logging
 import os
+from shared.session_context import get_workspace_root, get_config_root
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple
@@ -330,7 +331,7 @@ def load_config(
             config_path = Path(env_path)
         else:
             # Try default locations
-            cwd = Path(base_path) if base_path else Path(os.environ.get('JAATO_WORKSPACE_ROOT') or Path.cwd())
+            cwd = Path(base_path) if base_path else Path(get_workspace_root() or Path.cwd())
             default_paths = [
                 cwd / ".jaato" / "filesystem_query.json",
                 cwd / "filesystem_query.json",

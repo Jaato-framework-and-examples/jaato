@@ -971,3 +971,139 @@ class TestOpenInferenceMessages:
         assert resource_attrs["service.name"] == "jaato"
 
         plugin.shutdown()
+
+
+@pytest.mark.skipif(not OTEL_AVAILABLE, reason="OpenTelemetry not installed")
+class TestOTLPProtocolSelection:
+    """The OTLP exporter honors a protocol preference.
+
+    Default is gRPC-first (backward compatible). An explicit ``http/protobuf``
+    preference (config key or OTEL_EXPORTER_OTLP_PROTOCOL) selects the HTTP
+    exporter, which is required for HTTP-only backends like Langfuse.
+
+    Both exporter packages are installed in the telemetry test env, so
+    selection is deterministic (no ImportError fallback masks the choice).
+    """
+
+    _GRPC_MOD = "opentelemetry.exporter.otlp.proto.grpc.trace_exporter"
+    _HTTP_MOD = "opentelemetry.exporter.otlp.proto.http.trace_exporter"
+
+    def _exporter(self, config, monkeypatch, env=None):
+        from shared.plugins.telemetry.otel_plugin import OTelPlugin
+
+        monkeypatch.delenv("OTEL_EXPORTER_OTLP_PROTOCOL", raising=False)
+        if env is not None:
+            monkeypatch.setenv("OTEL_EXPORTER_OTLP_PROTOCOL", env)
+        return OTelPlugin()._create_exporter("otlp", config)
+
+    def test_default_is_grpc(self, monkeypatch):
+        exp = self._exporter({"endpoint": "http://localhost:4317"}, monkeypatch)
+        assert type(exp).__module__ == self._GRPC_MOD
+
+    def test_config_protocol_http_selects_http(self, monkeypatch):
+        exp = self._exporter(
+            {"endpoint": "https://cloud.langfuse.com/api/public/otel",
+             "protocol": "http/protobuf"},
+            monkeypatch,
+        )
+        assert type(exp).__module__ == self._HTTP_MOD
+
+    def test_env_protocol_http_selects_http(self, monkeypatch):
+        exp = self._exporter(
+            {"endpoint": "https://cloud.langfuse.com/api/public/otel"},
+            monkeypatch,
+            env="http/protobuf",
+        )
+        assert type(exp).__module__ == self._HTTP_MOD
+
+    def test_config_protocol_overrides_env(self, monkeypatch):
+        # Explicit config key wins over the environment variable.
+        exp = self._exporter(
+            {"endpoint": "http://localhost:4317", "protocol": "grpc"},
+            monkeypatch,
+            env="http/protobuf",
+        )
+        assert type(exp).__module__ == self._GRPC_MOD
+
+
+@pytest.mark.skipif(not OTEL_AVAILABLE, reason="OpenTelemetry not installed")
+class TestSessionIdPropagation:
+    """session.id must appear on child llm/tool spans, not just the turn root.
+
+    Langfuse (and other OTLP backends) filter/aggregate per observation, so a
+    trace-level attribute like session.id has to be present on every span, not
+    only the AGENT root. Langfuse's ingestion reads the OpenInference
+    ``session.id`` key directly.
+    """
+
+    def _spans_by_kind(self, exporter):
+        return {
+            s.attributes.get("openinference.span.kind"): s
+            for s in exporter.get_finished_spans()
+        }
+
+    def test_child_spans_inherit_turn_session_id(self):
+        plugin, exporter = _create_test_plugin()
+        with plugin.turn_span(session_id="sess-xyz", agent_type="main",
+                              agent_name="main"):
+            with plugin.llm_span("m", "p"):
+                pass
+            with plugin.tool_span("cli", "call-1"):
+                pass
+        plugin.shutdown()
+
+        spans = self._spans_by_kind(exporter)
+        assert spans["AGENT"].attributes["session.id"] == "sess-xyz"
+        assert spans["LLM"].attributes["session.id"] == "sess-xyz"
+        assert spans["TOOL"].attributes["session.id"] == "sess-xyz"
+
+    def test_llm_span_without_turn_context_omits_session_id(self):
+        # Outside a turn there is no session id to attach — no crash, no key.
+        plugin, exporter = _create_test_plugin()
+        with plugin.llm_span("m", "p"):
+            pass
+        plugin.shutdown()
+
+        llm = self._spans_by_kind(exporter)["LLM"]
+        assert "session.id" not in llm.attributes
+
+
+@pytest.mark.skipif(not OTEL_AVAILABLE, reason="OpenTelemetry not installed")
+class TestUserIdPropagation:
+    """user.id (Langfuse User Tracking) rides the turn span and propagates
+    to child llm/tool spans, so per-observation usage/cost attributes to the
+    user. Langfuse's ingestion reads the OpenInference ``user.id`` key.
+    """
+
+    def _spans_by_kind(self, exporter):
+        return {
+            s.attributes.get("openinference.span.kind"): s
+            for s in exporter.get_finished_spans()
+        }
+
+    def test_user_id_stamped_on_turn_and_children(self):
+        plugin, exporter = _create_test_plugin()
+        with plugin.turn_span(session_id="s", agent_type="main",
+                              agent_name="main", user_id="user-42"):
+            with plugin.llm_span("m", "p"):
+                pass
+            with plugin.tool_span("cli", "call-1"):
+                pass
+        plugin.shutdown()
+
+        spans = self._spans_by_kind(exporter)
+        assert spans["AGENT"].attributes["user.id"] == "user-42"
+        assert spans["LLM"].attributes["user.id"] == "user-42"
+        assert spans["TOOL"].attributes["user.id"] == "user-42"
+
+    def test_no_user_id_when_absent(self):
+        plugin, exporter = _create_test_plugin()
+        with plugin.turn_span(session_id="s", agent_type="main",
+                              agent_name="main"):
+            with plugin.llm_span("m", "p"):
+                pass
+        plugin.shutdown()
+
+        spans = self._spans_by_kind(exporter)
+        assert "user.id" not in spans["AGENT"].attributes
+        assert "user.id" not in spans["LLM"].attributes

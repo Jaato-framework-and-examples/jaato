@@ -33,6 +33,7 @@ from shared.path_utils import (
     normalize_result_path,
     normalized_equals,
 )
+from shared.plugins.runner_forwarding import RunnerForwardingMixin
 from shared.trace import trace as _trace_write
 
 
@@ -59,7 +60,7 @@ class SandboxConfig:
     denied_paths: List[SandboxPath] = field(default_factory=list)
 
 
-class SandboxManagerPlugin:
+class SandboxManagerPlugin(RunnerForwardingMixin):
     """Plugin for managing sandbox path permissions at runtime.
 
     This plugin provides user commands (not model tools) for managing
@@ -183,6 +184,40 @@ class SandboxManagerPlugin:
         self._pending_programmatic_paths.clear()
         self._profile_paths.clear()
         self._initialized = False
+
+    def reset_for_next_session(self) -> None:
+        """Cascade-sharing reset (Phase 1b, server 0.6.143+).
+
+        Per Daniel's litmus test: sandbox profile path declarations are
+        per-session — each cascade stage's profile YAML declares its
+        own paths.  Pending programmatic adds (paths the agent added
+        at runtime via tools) are per-session too.
+
+        Per-session state CLEARED:
+        - ``_session_id``: re-set by next session's ``initialize()``.
+        - ``_profile_paths``: declared by next session's profile YAML.
+        - ``_pending_programmatic_paths``: runtime-added paths from
+          the previous session.  Each new session starts with a
+          clean slate.
+
+        Survives the reset:
+        - ``_registry``: workspace-tier authorized/denied paths
+          registry (sessions share it; sandbox_manager.shutdown
+          clears its OWN namespace from the registry, but for the
+          cascade-sharing case we leave the registry intact across
+          sessions — paths authorized by session A may legitimately
+          benefit session B).
+        - ``_workspace_path``: constant within cascade.
+        - ``_config``: workspace-tier config.
+        - ``_initialized``: True (next session's initialize will be a
+          no-op for the workspace-tier portion).
+        - ``_on_readwrite_paths_changed``: callback re-wired by next
+          session.
+        """
+        self._trace("reset_for_next_session: clearing per-session profile paths")
+        self._session_id = None
+        self._profile_paths.clear()
+        self._pending_programmatic_paths.clear()
 
     def set_on_readwrite_paths_changed(
         self,
@@ -730,10 +765,14 @@ class SandboxManagerPlugin:
         return []
 
     def get_executors(self) -> Dict[str, Callable[[Dict[str, Any]], Any]]:
-        """Return executors for user commands."""
-        return {
+        """Return executors for user commands.
+
+        Phase 3 §3.10 wave 4: forwards via runner-RPC when a runner
+        is attached; falls through to in-process otherwise.
+        """
+        return self.wrap_executors_for_runner_forwarding({
             "sandbox": self._execute_sandbox_command,
-        }
+        })
 
     def get_system_instructions(self) -> Optional[str]:
         """No system instructions needed - this is a user-only plugin."""

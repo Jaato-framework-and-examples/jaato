@@ -350,6 +350,16 @@ class EnrichmentPlugin(Protocol):
         """Called when the plugin is disabled. Clean up resources here."""
         ...
 
+    def reset_for_next_session(self) -> None:
+        """Clear per-session state in preparation for the next session
+        of the same cascade.
+
+        See :class:`ToolPlugin.reset_for_next_session` for the full
+        contract.  Default is no-op; override when the plugin holds
+        per-session state that the litmus test says should be cleared.
+        """
+        ...
+
     # ==================== Optional Extensions ====================
     #
     # Configuration Schema:
@@ -437,6 +447,45 @@ class ToolPlugin(Protocol):
 
     def shutdown(self) -> None:
         """Called when the plugin is disabled. Clean up resources here."""
+        ...
+
+    def reset_for_next_session(self) -> None:
+        """Clear per-session state in preparation for the next session
+        of the same cascade.
+
+        Introduced for the runner cascade-sharing arc (Phase 1, server
+        0.6.142+ / see ``docs/design/runner-cascade-sharing.md``).
+        When the pool slot survives across multiple sessions of one
+        cascade (cascade-driver-id slot affinity), the framework calls
+        this method between sessions so per-session state is wiped
+        BUT warm imports + across-session-by-design state survive.
+
+        **Litmus test for what to clear vs keep** (Daniel rule
+        2026-05-20):
+
+            A plugin's state should SURVIVE this call if a
+            subsequent session within the SAME cascade might benefit
+            from it.
+
+        Examples (per-attribute application):
+
+        - ``conversation_history`` — clear (next session writes its own)
+        - ``LSP server connections`` — keep (whole point of sharing)
+        - ``cached config files`` — keep (workspace doesn't change)
+        - ``per-turn telemetry counters`` — clear (next session starts fresh)
+        - ``model memories written to disk`` — KEEP (next stage reads them)
+        - ``artifact dependency graph`` — KEEP (cross-session validation)
+
+        **Default contract**: no-op.  Most plugins are
+        stateless-after-initialize or hold only across-session-by-design
+        state.  Override only when the plugin holds per-session state
+        that the litmus test says should be cleared.
+
+        Called by the pool slot's session-teardown path, AFTER
+        ``shutdown()`` would have been called in the pre-cascade-sharing
+        architecture.  ``shutdown()`` is reserved for the FINAL
+        teardown at slot-end (cascade idle timeout).
+        """
         ...
 
     def get_system_instructions(self) -> Optional[str]:
@@ -930,5 +979,61 @@ class ToolPlugin(Protocol):
     #             self._current_plan_ids = state.get("agent_plan_ids", {})
     #             # Re-register callbacks that can't be serialized
     #             self._setup_hooks()
+    #     """
+    #     ...
+    #
+    # AppArmor Contribution:
+    #
+    # Plugins that need host-tier filesystem paths (ML model caches,
+    # vendor-specific config dirs, etc.) should contribute their own
+    # AppArmor rules instead of relying on the framework's PROFILE_TEMPLATE
+    # hardcoding the paths.  See ``docs/design/plugin-apparmor-contribution.md``.
+    #
+    # @classmethod
+    # def get_apparmor_rules(
+    #     cls,
+    #     *,
+    #     workspace_path: str,
+    #     session_id: str,
+    #     config_root: Optional[str],
+    #     plugin_config: Dict[str, Any],
+    # ) -> List[str]:
+    #     """Return AppArmor rule lines this plugin needs in the session profile.
+    #
+    #     Called daemon-side at profile-render time, BEFORE the runner self-
+    #     confines.  Default: not implemented (treated as ``[]``).  Plugins
+    #     opt in by overriding.
+    #
+    #     The classmethod shape is mandatory — the daemon resolves rules
+    #     before any plugin instance exists in the runner.  Implementations
+    #     must work without ``self``.
+    #
+    #     Returned strings are spliced into the profile body verbatim, one
+    #     rule per string (no trailing newline; the daemon handles
+    #     formatting + indentation).  Each string must be valid AppArmor
+    #     rule syntax — syntax errors surface at ``apparmor_parser -r``
+    #     load time, not at Python import.  Comments via ``#`` are allowed.
+    #
+    #     Args:
+    #         workspace_path: Absolute path to the session workspace.
+    #         session_id: Session identifier (useful for /tmp/<plugin>-{id}
+    #             style scoping).
+    #         config_root: Optional client-supplied config_root override.
+    #             ``None`` when the workspace's own ``.jaato/`` is in use.
+    #         plugin_config: Per-plugin config dict from
+    #             ``SubagentProfile.plugin_configs.get(plugin_name, {})``.
+    #             Plugins reading a config-driven host path (e.g., a custom
+    #             HF_HOME, a vendor cache path) extract it here.
+    #
+    #     Returns:
+    #         List of AppArmor rule strings.  Empty list = no contribution.
+    #
+    #     Example:
+    #         @classmethod
+    #         def get_apparmor_rules(cls, *, workspace_path, session_id, config_root, plugin_config):
+    #             return [
+    #                 "@{HOME}/.cache/huggingface/   rw,",
+    #                 "@{HOME}/.cache/huggingface/** rwk,",
+    #             ]
     #     """
     #     ...

@@ -757,3 +757,178 @@ class TestInitializationClearsStaleState:
         # Should start clean — no artifacts from previous session
         result2 = plugin2._execute_list_artifacts({})
         assert result2["total"] == 0
+
+
+class TestStoragePathWorkspaceResolution:
+    """Tests that ``_storage_path`` resolves against ``_workspace_root``,
+    not process CWD.  Server X.Y.Z+ — closes the AppArmor write-denial
+    bug surfaced by 7:3's kb-enablement-2.0 cascade 2026-05-06.
+
+    Memory plugin's pattern: relative storage_path resolves against
+    workspace at ``set_workspace_path`` time so writes land under the
+    AppArmor-permitted sandbox subtree.  Without this, ``open()``
+    resolves the relative path against process CWD and writes land
+    outside the sandbox under confined sessions.
+    """
+
+    def test_set_workspace_path_updates_workspace_root(self, monkeypatch, tmp_path):
+        """The registry broadcast updates ``_workspace_root``."""
+        monkeypatch.delenv("JAATO_WORKSPACE_ROOT", raising=False)
+        monkeypatch.delenv("workspaceRoot", raising=False)
+
+        plugin = create_plugin()
+        plugin.initialize({"auto_load": False})
+        # No workspace_root set yet
+        ws = str(tmp_path / "ws")
+        os.makedirs(ws, exist_ok=True)
+
+        plugin.set_workspace_path(ws)
+
+        assert plugin._workspace_root == os.path.realpath(ws)
+
+    def test_relative_storage_path_resolved_against_workspace(self, monkeypatch, tmp_path):
+        """Relative storage_path lands under workspace, not under process CWD.
+
+        The empirical 7:3 failure: confined session has CWD outside
+        workspace, so ``os.path.abspath('.jaato/.artifact_tracker.json')``
+        resolved into the AppArmor-denied tree.  After the fix, the
+        relative template resolves against ``_workspace_root`` (set
+        either via init config or via ``set_workspace_path``) and lands
+        under the sandbox.
+        """
+        monkeypatch.delenv("JAATO_WORKSPACE_ROOT", raising=False)
+        monkeypatch.delenv("workspaceRoot", raising=False)
+
+        workspace = str(tmp_path / "ws")
+        os.makedirs(workspace, exist_ok=True)
+
+        # CWD pointed somewhere completely unrelated to workspace.
+        unrelated = str(tmp_path / "unrelated_cwd")
+        os.makedirs(unrelated, exist_ok=True)
+        monkeypatch.chdir(unrelated)
+
+        plugin = create_plugin()
+        plugin.initialize({
+            "workspace_root": workspace,
+            "storage_path": ".jaato/.artifact_tracker.json",
+            "auto_load": False,
+        })
+
+        resolved = plugin._resolve_storage_path()
+        # Resolved path lives under workspace, not under unrelated CWD.
+        assert resolved.startswith(os.path.realpath(workspace))
+        assert "unrelated_cwd" not in resolved
+
+    def test_save_state_writes_under_workspace_when_cwd_diverges(self, monkeypatch, tmp_path):
+        """``_save_state`` writes the actual state file under workspace."""
+        monkeypatch.delenv("JAATO_WORKSPACE_ROOT", raising=False)
+        monkeypatch.delenv("workspaceRoot", raising=False)
+
+        workspace = str(tmp_path / "ws")
+        os.makedirs(workspace, exist_ok=True)
+
+        unrelated = str(tmp_path / "unrelated_cwd")
+        os.makedirs(unrelated, exist_ok=True)
+        monkeypatch.chdir(unrelated)
+
+        plugin = create_plugin()
+        plugin.initialize({
+            "workspace_root": workspace,
+            "storage_path": ".jaato/.artifact_tracker.json",
+            "auto_load": False,
+        })
+
+        plugin._execute_track_artifact({
+            "path": os.path.join(workspace, "x.md"),
+            "artifact_type": "document",
+            "description": "x",
+        })
+        plugin._save_state()
+
+        # State file must be under workspace, not under CWD.
+        expected = os.path.join(workspace, ".jaato", ".artifact_tracker.json")
+        assert os.path.exists(expected), (
+            f"State file should be at {expected} (under workspace), "
+            f"but isn't.  Listing: workspace={os.listdir(workspace)}, "
+            f"cwd={os.listdir(unrelated)}"
+        )
+        # And must NOT be under the unrelated CWD.
+        wrong_path = os.path.join(unrelated, ".jaato", ".artifact_tracker.json")
+        assert not os.path.exists(wrong_path)
+
+    def test_set_workspace_path_after_init_redirects_save(self, monkeypatch, tmp_path):
+        """When set_workspace_path arrives after init (registry broadcast),
+        subsequent saves use the new workspace.
+        """
+        monkeypatch.delenv("JAATO_WORKSPACE_ROOT", raising=False)
+        monkeypatch.delenv("workspaceRoot", raising=False)
+
+        workspace = str(tmp_path / "ws")
+        os.makedirs(workspace, exist_ok=True)
+
+        plugin = create_plugin()
+        plugin.initialize({
+            "storage_path": ".jaato/.artifact_tracker.json",
+            "auto_load": False,
+        })
+        # Init didn't supply workspace_root.  Broadcast arrives now.
+        plugin.set_workspace_path(workspace)
+
+        plugin._execute_track_artifact({
+            "path": os.path.join(workspace, "x.md"),
+            "artifact_type": "document",
+            "description": "x",
+        })
+        plugin._save_state()
+
+        expected = os.path.join(workspace, ".jaato", ".artifact_tracker.json")
+        assert os.path.exists(expected)
+
+    def test_absolute_storage_path_unchanged_by_set_workspace_path(self, monkeypatch, tmp_path):
+        """Absolute storage_path is respected verbatim — no workspace prefix.
+
+        Tenants that pass an absolute path (the workaround 7:3 used) keep
+        getting their path used as-is even after the registry's broadcast.
+        """
+        monkeypatch.delenv("JAATO_WORKSPACE_ROOT", raising=False)
+        monkeypatch.delenv("workspaceRoot", raising=False)
+
+        workspace = str(tmp_path / "ws")
+        os.makedirs(workspace, exist_ok=True)
+        custom_dir = str(tmp_path / "custom")
+        os.makedirs(custom_dir, exist_ok=True)
+        custom_path = os.path.join(custom_dir, "tracker.json")
+
+        plugin = create_plugin()
+        plugin.initialize({
+            "storage_path": custom_path,  # absolute
+            "auto_load": False,
+        })
+        plugin.set_workspace_path(workspace)
+
+        # Absolute path is returned unchanged regardless of workspace.
+        assert plugin._resolve_storage_path() == custom_path
+
+    def test_no_workspace_no_abs_falls_back_to_cwd(self, monkeypatch, tmp_path):
+        """When neither ``_workspace_root`` nor an absolute path is set,
+        legacy CWD-based resolution kicks in.  This is the diagnostic
+        fallback path — under AppArmor it likely fails, but it shouldn't
+        crash the plugin.
+        """
+        monkeypatch.delenv("JAATO_WORKSPACE_ROOT", raising=False)
+        monkeypatch.delenv("workspaceRoot", raising=False)
+        monkeypatch.chdir(tmp_path)
+
+        plugin = create_plugin()
+        plugin.initialize({
+            "storage_path": ".jaato/.artifact_tracker.json",
+            "auto_load": False,
+        })
+
+        # No workspace_root from config or env.
+        assert plugin._workspace_root is None
+
+        resolved = plugin._resolve_storage_path()
+        assert resolved is not None
+        # Falls back to abspath against CWD — that's tmp_path.
+        assert resolved.startswith(os.path.realpath(str(tmp_path)))

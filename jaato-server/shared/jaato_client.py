@@ -35,7 +35,7 @@ def get_default_provider() -> Optional[str]:
 
     Checks JAATO_PROVIDER env var, returns None if not set.
     """
-    return os.environ.get("JAATO_PROVIDER")
+    return os.environ.get("JAATO_PROVIDER")  # env: default model provider when no profile/CLI override (e.g. anthropic, google_genai)
 
 
 def get_default_model() -> Optional[str]:
@@ -43,7 +43,7 @@ def get_default_model() -> Optional[str]:
 
     Checks MODEL_NAME env var, returns None if not set.
     """
-    return os.environ.get("MODEL_NAME")
+    return os.environ.get("MODEL_NAME")  # env: default model when no profile/CLI override (e.g. gemini-2.5-flash)
 
 if TYPE_CHECKING:
     from .plugins.registry import PluginRegistry
@@ -92,6 +92,7 @@ class JaatoClient:
 
     def __init__(self, provider_name: Optional[str] = None,
                  workspace_path: Optional[str] = None,
+                 config_root: Optional[str] = None,
                  instruction_token_cache: Optional[InstructionTokenCache] = None,
                  daemon_session_id: Optional[str] = None):
         """Initialize JaatoClient with specified provider.
@@ -102,6 +103,13 @@ class JaatoClient:
             workspace_path: Explicit workspace directory path. When running as
                 a daemon, the process cwd differs from the client's workspace.
                 Passed through to ``JaatoRuntime`` for instruction loading.
+            config_root: Optional override for the read-only framework-config
+                root.  When ``None``, the runtime falls back to
+                ``<workspace_path>/.jaato/`` for instruction discovery and
+                anything else that consults
+                :func:`shared.config_resolver.resolve_config_search_path`.
+                When set, that workspace-anchored search is replaced with
+                this path.  See ``shared/config_resolver.py``.
             instruction_token_cache: Optional shared cache for instruction token
                 counts.  When provided (e.g. from ``SessionManager``), cached
                 counts survive across session creates/restores.
@@ -113,6 +121,7 @@ class JaatoClient:
         self._session: Optional[JaatoSession] = None
         self._provider_name: Optional[str] = provider_name or get_default_provider()
         self._workspace_path: Optional[str] = workspace_path
+        self._config_root: Optional[str] = config_root
         self._instruction_token_cache: Optional[InstructionTokenCache] = instruction_token_cache
 
         # Store model name for session creation
@@ -316,6 +325,48 @@ class JaatoClient:
             )
             # Note: Don't set status to "active" here - that happens when user sends input
 
+    def set_agent_identity(
+        self,
+        agent_id: str,
+        agent_name: Optional[str] = None,
+    ) -> None:
+        """Set the client's agent identity (id + optional display name).
+
+        Public surface for the daemon to push the resolved
+        ``agent_id`` / ``agent_name`` into the client BEFORE
+        :meth:`set_ui_hooks` runs — ``set_ui_hooks`` reads
+        ``self._agent_id`` to register the AgentState (via
+        ``on_agent_created``) and forwards the id to the session
+        (via ``session.set_ui_hooks``).  Pre-§7c-step-3 the daemon
+        reached into private attributes (``self._agent_id`` /
+        ``self._agent_name``) directly; this method replaces that
+        encapsulation violation.
+
+        Args:
+            agent_id: Logical agent identifier (e.g. ``"main"``,
+                ``"coordinator"``).  Always replaces the prior id.
+            agent_name: Optional display name.  If ``None``, the
+                prior name is preserved (useful when the caller
+                only wants to update the id and let the framework
+                default ``"Main Agent"`` stand for displays).
+        """
+        self._agent_id = agent_id
+        if agent_name is not None:
+            self._agent_name = agent_name
+
+    def get_tool_schemas(self) -> List['ToolSchema']:
+        """Forward to :meth:`JaatoSession.get_tool_schemas`.
+
+        Phase 3 §7c step 3b: public surface so daemon-side callers
+        can read the session's resolved tool schemas without
+        reaching into ``client._session._tools`` (the private
+        attribute).  Returns an empty list when no session is
+        attached (i.e. before :meth:`connect`).
+        """
+        if self._session is None:
+            return []
+        return self._session.get_tool_schemas()
+
     def list_available_models(self, prefix: Optional[str] = None) -> List[str]:
         """List models from the provider.
 
@@ -376,6 +427,7 @@ class JaatoClient:
         self._runtime = JaatoRuntime(
             provider_name=self._provider_name,
             workspace_path=ws,
+            config_root=self._config_root,
             instruction_token_cache=self._instruction_token_cache,
         )
         self._runtime.connect(project, location)
@@ -388,7 +440,8 @@ class JaatoClient:
     def verify_auth(
         self,
         allow_interactive: bool = False,
-        on_message: Optional[Callable[[str], None]] = None
+        on_message: Optional[Callable[[str], None]] = None,
+        plugin_configs: Optional[Dict[str, Dict[str, Any]]] = None,
     ) -> bool:
         """Verify authentication before loading tools.
 
@@ -400,6 +453,11 @@ class JaatoClient:
             allow_interactive: If True and auth is not configured, attempt
                 interactive login (e.g., browser-based OAuth).
             on_message: Optional callback for status messages during login.
+            plugin_configs: Optional profile plugin_configs dict.  Forwarded
+                to ``JaatoRuntime.verify_auth`` so providers that read
+                credentials from ``plugin_configs[provider_name]`` (e.g. an
+                LM Studio bearer token) see the same config they will see
+                during ``initialize()``.
 
         Returns:
             True if authentication is configured and valid.
@@ -426,7 +484,8 @@ class JaatoClient:
 
         return self._runtime.verify_auth(
             allow_interactive=allow_interactive,
-            on_message=on_message
+            on_message=on_message,
+            plugin_configs=plugin_configs,
         )
 
     def configure_tools(
@@ -616,6 +675,7 @@ class JaatoClient:
                 function_calls=last_turn.get('function_calls', []),
                 cache_read_tokens=last_turn.get('cache_read'),
                 cache_creation_tokens=last_turn.get('cache_creation'),
+                finish_reason=last_turn.get('finish_reason', 'stop'),
             )
 
             # Update context usage
@@ -661,15 +721,24 @@ class JaatoClient:
     def get_context_limit(self) -> int:
         """Get the context window limit for the current model.
 
+        Returns ``0`` (honest "unknown") when no session exists yet, rather
+        than a hardcoded default.  See ``JaatoSession.get_context_limit`` for
+        why a fake non-zero value is harmful (it poisons the daemon-side
+        context-limit cache, which only refreshes on ``0``).
+
         Returns:
-            The context window size in tokens.
+            The context window size in tokens, or ``0`` when unknown.
         """
         if not self._session:
-            return 1_048_576
+            return 0
         return self._session.get_context_limit()
 
     def get_context_usage(self) -> Dict[str, Any]:
         """Get context window usage statistics.
+
+        When no session exists yet, ``context_limit`` / ``tokens_remaining``
+        are ``0`` (honest "unknown") rather than a hardcoded default — see
+        ``get_context_limit`` above.
 
         Returns:
             Dict with context usage information.
@@ -677,13 +746,13 @@ class JaatoClient:
         if not self._session:
             return {
                 'model': self._model_name or 'unknown',
-                'context_limit': 1_048_576,
+                'context_limit': 0,
                 'total_tokens': 0,
                 'prompt_tokens': 0,
                 'output_tokens': 0,
                 'turns': 0,
                 'percent_used': 0,
-                'tokens_remaining': 1_048_576,
+                'tokens_remaining': 0,
             }
         return self._session.get_context_usage()
 

@@ -1,8 +1,11 @@
 # shared/plugins/environment/plugin.py
 
 from typing import Dict, List, Optional, Any, TYPE_CHECKING
-from jaato import ToolSchema
-from jaato_sdk.plugins.model_provider.types import TRAIT_REPLAY_SAFE
+from jaato_sdk.plugins.model_provider.types import (
+    ToolSchema,
+    TRAIT_REPLAY_SAFE,
+    DISCOVERABILITY_EAGER,
+)
 from datetime import datetime, timezone
 from shared.terminal_caps import detect as detect_terminal_caps
 import json
@@ -14,6 +17,7 @@ import threading
 import time
 
 from shared.path_utils import is_msys2_environment, normalize_path, get_display_separator
+from shared.plugins.runner_forwarding import RunnerForwardingMixin
 
 if TYPE_CHECKING:
     from shared.jaato_session import JaatoSession
@@ -23,7 +27,7 @@ if TYPE_CHECKING:
 _thread_local = threading.local()
 
 
-class EnvironmentPlugin:
+class EnvironmentPlugin(RunnerForwardingMixin):
     """Plugin that provides environment awareness tools.
 
     Supports querying both external environment (OS, shell, architecture)
@@ -63,6 +67,20 @@ class EnvironmentPlugin:
         # Clear thread-local session for current thread
         if hasattr(_thread_local, 'session'):
             _thread_local.session = None
+
+    def reset_for_next_session(self) -> None:
+        """Cascade-sharing reset — NO-OP for this plugin.
+
+        Phase 1 hotfix (server 0.6.148+): added to satisfy the
+        ``ToolPlugin`` / ``EnrichmentPlugin`` protocol's runtime
+        ``isinstance`` check.  Per Daniel's litmus test (see
+        ``docs/design/runner-cascade-sharing.md`` §4.3), this
+        plugin holds no per-session state that the next cascade
+        session would benefit from having cleared.  Override in
+        future PRs if the litmus test changes.
+        """
+        pass
+
 
     def set_workspace_path(self, path: str) -> None:
         """Set the workspace root path for CWD reporting.
@@ -109,16 +127,20 @@ class EnvironmentPlugin:
                     "required": []
                 },
                 category="system",
-                discoverability="core",
+                discoverability=DISCOVERABILITY_EAGER,
                 traits=frozenset({TRAIT_REPLAY_SAFE}),
             )
         ]
 
     def get_executors(self) -> Dict[str, Any]:
-        """Map tool names to executor functions."""
-        return {
-            "get_environment": self._get_environment
-        }
+        """Map tool names to executor functions.
+
+        Phase 3 §3.4 wave 1: forwards via runner-RPC when a runner
+        is attached; falls through to in-process otherwise.
+        """
+        return self.wrap_executors_for_runner_forwarding({
+            "get_environment": self._get_environment,
+        })
 
     def _get_environment(self, args: Dict[str, Any]) -> str:
         """
@@ -435,7 +457,7 @@ class EnvironmentPlugin:
             result["agent_name"] = agent_name
 
         # Also expose via environment variable if set
-        env_session_id = os.environ.get("JAATO_SESSION_ID")
+        env_session_id = os.environ.get("JAATO_SESSION_ID")  # env: internal — session id injected into the process env; surfaced in environment info
         if env_session_id:
             result["env_session_id"] = env_session_id
 
@@ -585,10 +607,10 @@ class EnvironmentPlugin:
         # --- Proxy configuration ---
         proxy_info: Dict[str, Any] = {
             "http_proxy": self._mask_proxy_url(
-                os.environ.get("HTTP_PROXY") or os.environ.get("http_proxy")
+                os.environ.get("HTTP_PROXY") or os.environ.get("http_proxy")  # env: standard proxy URL for outbound HTTP (both spellings honored)
             ),
             "https_proxy": self._mask_proxy_url(
-                os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy")
+                os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy")  # env: standard proxy URL for outbound HTTPS (both spellings honored)
             ),
             "configured": False,
         }
@@ -623,7 +645,7 @@ class EnvironmentPlugin:
         result["proxy_auth"] = auth_info
 
         # --- SSL / TLS ---
-        ssl_verify_raw = os.environ.get("JAATO_SSL_VERIFY")
+        ssl_verify_raw = os.environ.get("JAATO_SSL_VERIFY")  # env: verify TLS certs (default true); false only as an escape hatch for SSL-intercepting proxies
         if ssl_verify_raw is not None:
             ssl_verify = ssl_verify_raw.lower() not in ("false", "0", "no")
         else:
@@ -645,7 +667,7 @@ class EnvironmentPlugin:
         # --- No-proxy rules ---
         no_proxy_info: Dict[str, Any] = {}
 
-        no_proxy = os.environ.get("NO_PROXY") or os.environ.get("no_proxy")
+        no_proxy = os.environ.get("NO_PROXY") or os.environ.get("no_proxy")  # env: standard no-proxy hosts, suffix matching (both spellings honored)
         if no_proxy:
             no_proxy_info["no_proxy"] = no_proxy
 

@@ -1,0 +1,374 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Triton Inference Server Provider - jaato docs</title>
+  <link rel="stylesheet" href="../../assets/css/style.css">
+  <link rel="vcs-git" href="https://github.com/Jaato-framework-and-examples/jaato">
+</head>
+<body>
+  <header class="header">
+    <a href="../../index.html" class="header-logo">
+      jaato <span>docs</span>
+    </a>
+    <nav class="header-nav">
+      <a href="../../getting-started/quickstart.html">Quickstart</a>
+      <a href="../index.html">API Reference</a>
+      <a href="https://github.com/Jaato-framework-and-examples/jaato" target="_blank">GitHub</a>
+      <div class="header-search">
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+        <input type="text" placeholder="Search docs... (press /)">
+      </div>
+    </nav>
+  </header>
+
+  <div class="layout">
+    <aside class="sidebar">
+      <div class="sidebar-section">
+        <div class="sidebar-title">Getting Started</div>
+        <ul class="sidebar-nav">
+          <li><a href="../../getting-started/quickstart.html">Quickstart</a></li>
+          <li><a href="../../getting-started/typescript-sdk.html">TypeScript SDK</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Core Concepts</div>
+        <ul class="sidebar-nav">
+          <li><a href="../../core-concepts/client.html">Client</a></li>
+          <li><a href="../../core-concepts/plugins.html">Plugins</a></li>
+          <li><a href="../../core-concepts/tools.html">Tools</a></li>
+          <li><a href="../../core-concepts/providers.html">Providers</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">API Reference</div>
+        <ul class="sidebar-nav">
+          <li><a href="../index.html">Overview</a></li>
+          <li><a href="../jaato-client.html">JaatoClient</a></li>
+          <li><a href="../jaato-runtime.html">JaatoRuntime</a></li>
+          <li><a href="../jaato-session.html">JaatoSession</a></li>
+          <li><a href="../plugin-registry.html">PluginRegistry</a></li>
+          <li><a href="../tool-executor.html">ToolExecutor</a></li>
+          <li><a href="../types.html">Types</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Provider Reference</div>
+        <ul class="sidebar-nav">
+          <li><a href="index.html">Overview</a></li>
+          <li><a href="anthropic.html">Anthropic</a></li>
+          <li><a href="google-genai.html">Google GenAI</a></li>
+          <li><a href="github-models.html">GitHub Models</a></li>
+          <li><a href="claude-cli.html">Claude CLI</a></li>
+          <li><a href="antigravity.html">Antigravity</a></li>
+          <li><a href="ollama.html">Ollama</a></li>
+          <li><a href="zhipuai.html">Zhipu AI</a></li>
+          <li><a href="nim.html">NVIDIA NIM</a></li>
+          <li><a href="lmstudio.html">LM Studio</a></li>
+          <li><a href="vllm.html">vLLM</a></li>
+          <li><a href="tensorrt-llm.html">TensorRT-LLM</a></li>
+          <li><a href="openrouter.html">OpenRouter</a></li>
+          <li><a href="nebius.html">Nebius</a></li>
+          <li><a href="ovhcloud.html">OVHcloud</a></li>
+          <li><a href="triton.html" class="active">Triton</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Plugin Reference</div>
+        <ul class="sidebar-nav">
+          <li><a href="../plugins/index.html">Overview</a></li>
+          <li><a href="../plugins/cli.html">CLI</a></li>
+          <li><a href="../plugins/file-edit.html">File Edit</a></li>
+          <li><a href="../plugins/filesystem-query.html">Filesystem Query</a></li>
+          <li><a href="../plugins/todo.html">Todo</a></li>
+          <li><a href="../plugins/web-search.html">Web Search</a></li>
+          <li><a href="../plugins/mcp.html">MCP</a></li>
+          <li><a href="../plugins/permission.html">Permission</a></li>
+          <li><a href="../plugins/session.html">Session</a></li>
+          <li><a href="../plugins/gc.html">GC</a></li>
+          <li><a href="../plugins/other.html">Other Plugins</a></li>
+        </ul>
+      </div>
+    </aside>
+
+    <main class="main">
+      <!-- Overview -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h1>Triton Inference Server Provider</h1>
+          <p class="lead">
+            Serves models through NVIDIA Triton's two cooperating HTTP surfaces &mdash; an
+            OpenAI-compatible chat frontend and the KServe v2 control plane (model
+            repository + load/unload). Self-hosted; the provider drives both.
+          </p>
+
+          <table>
+            <tbody>
+              <tr><td><strong>Provider Name</strong></td><td><code>triton</code></td></tr>
+              <tr><td><strong>Module</strong></td><td><code>shared.plugins.model_provider.triton</code></td></tr>
+              <tr><td><strong>SDK</strong></td><td><code>openai</code> (chat) + <code>httpx</code> (KServe v2 control)</td></tr>
+              <tr><td><strong>Auth</strong></td><td>Optional bearer token (Triton has no native auth &mdash; sent on both surfaces for fronting proxies)</td></tr>
+              <tr><td><strong>Mode</strong></td><td>Passive &mdash; the operator launches Triton and manages its model repository</td></tr>
+            </tbody>
+          </table>
+
+          <h2 id="highlights">Highlights</h2>
+          <ul>
+            <li><strong>Dual surface</strong> &mdash; OpenAI chat frontend (default port 9000) + KServe v2 control plane (default port 8000)</li>
+            <li><strong>Model repository</strong> &mdash; <code>connect()</code> validates the model against <code>POST /v2/repository/index</code></li>
+            <li><strong>Optional load</strong> &mdash; a <code>load</code> body triggers <code>POST /v2/repository/models/&lt;name&gt;/load</code> at connect; omit it for passive mode</li>
+            <li><strong>Self-hosted</strong> &mdash; no API costs, data never leaves your hardware</li>
+            <li><strong>Function calling</strong> &mdash; via the OpenAI-compatible tool-calling API</li>
+          </ul>
+
+          <div class="callout callout-warning">
+            <div class="callout-title">Context Length Is Required</div>
+            Triton's model config carries <strong>no</strong> standard context-length field
+            (it's backend-specific &mdash; TRT-LLM <code>max_seq_len</code>, vLLM
+            <code>max_model_len</code>, &hellip;), so the framework can't auto-discover it.
+            You <strong>must</strong> set a context length
+            (<code>plugin_configs.triton.context_length</code>, or its env-var equivalent &mdash;
+            see <code>jaato-scaffold explain provider triton</code>). The provider raises if unset.
+          </div>
+
+          <div class="callout callout-info">
+            <div class="callout-title">Passive Provider</div>
+            The provider does not start Triton or build the model repository. Launching
+            <code>tritonserver</code> + its OpenAI frontend and populating the repository
+            live at the deployment boundary. The provider only validates and, when given a
+            <code>load</code> body, loads.
+          </div>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Discover config + verify</div>
+          <div class="code-block">
+            <pre><code class="language-bash"># Triton needs both URLs (chat + control) and a context length — the live
+# registry is the source of truth, so list them from there rather than here:
+jaato-scaffold explain provider triton        # typed knobs (URLs, context, load)
+jaato-doctor --workspace . --env-file .env    # confirm both surfaces resolve</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Python quick start</div>
+          <div class="code-block">
+            <pre><code class="language-python">from jaato import JaatoClient
+
+client = JaatoClient(provider_name="triton")
+client.connect(
+    project=None,
+    location=None,
+    model="llama-3.1-8b"
+)
+client.configure_tools(registry)
+
+response = client.send_message(
+    "Hello from Triton!",
+    on_output=on_output
+)</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Configuration -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="configuration">Configuration</h2>
+
+          <p>
+            jaato doesn't duplicate Triton's environment variables here &mdash; they drift.
+            Run <code>jaato-scaffold explain provider triton</code> for the full typed list
+            (the two surface URLs, context length, bearer token), and
+            <code>jaato-doctor</code> to verify your environment resolves them. The profile
+            knobs below are the in-YAML equivalents.
+          </p>
+
+          <h3>Profile Knobs (<code>plugin_configs.triton</code>)</h3>
+          <table>
+            <thead>
+              <tr><th>Key</th><th>Type</th><th>Description</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>host</code></td>
+                <td>str</td>
+                <td>Host shorthand (canonical ports)</td>
+              </tr>
+              <tr>
+                <td><code>openai_url</code> / <code>control_url</code></td>
+                <td>str</td>
+                <td>Explicit per-surface URL overrides</td>
+              </tr>
+              <tr>
+                <td><code>context_length</code></td>
+                <td>int</td>
+                <td>Context window (required)</td>
+              </tr>
+              <tr>
+                <td><code>api_token</code></td>
+                <td>str</td>
+                <td>Bearer token override</td>
+              </tr>
+              <tr>
+                <td><code>load</code></td>
+                <td>dict</td>
+                <td>Body passed to <code>/v2/repository/models/&lt;name&gt;/load</code> at connect. Omit (<code>None</code>) for passive mode.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Inspect config + verify</div>
+          <div class="code-block">
+            <pre><code class="language-bash">jaato-scaffold explain provider triton        # typed knobs + env, from the live registry
+jaato-doctor --workspace . --env-file .env</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Profile (YAML, with load)</div>
+          <div class="code-block">
+            <pre><code class="language-yaml">name: triton-llama31
+model: llama-3.1-8b
+provider: triton
+
+plugins:
+  - cli
+  - file_edit
+
+plugin_configs:
+  triton:
+    host: "http://gpu-server"
+    context_length: 131072
+    # Optional: load the model at connect (omit for passive mode)
+    load: {}</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Engine Build -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="model-repository">Model Repository &amp; Loading</h2>
+          <p>
+            Triton serves from a <strong>model repository</strong> &mdash; a directory of
+            model configs Triton tracks. The provider talks to the KServe v2 control plane
+            to validate and (optionally) load:
+          </p>
+          <ul>
+            <li><code>connect()</code> validates the requested model against
+              <code>POST /v2/repository/index</code> (a top-level array, distinct from
+              OpenAI's <code>/v1/models</code> shape).</li>
+            <li>When a <code>load</code> body is supplied,
+              <code>POST /v2/repository/models/&lt;name&gt;/load</code> runs at connect (600s
+              timeout for engine deserialization + KV-cache init). Triton's load is
+              idempotent at the protocol level, so &mdash; unlike LM Studio &mdash; there is
+              no pre-query for a matching instance.</li>
+            <li>The connectivity probe targets the <strong>control</strong> surface
+              (<code>GET /v2/health/live</code>), which load/unload depend on.</li>
+          </ul>
+
+          <h3>The two surfaces</h3>
+          <table>
+            <thead>
+              <tr><th>Surface</th><th>Default port</th><th>Used for</th></tr>
+            </thead>
+            <tbody>
+              <tr><td>OpenAI chat frontend</td><td><code>9000</code></td><td><code>POST /v1/chat/completions</code> (generation)</td></tr>
+              <tr><td>KServe v2 control plane</td><td><code>8000</code></td><td>repository index, load/unload, <code>/v2/health/live</code></td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Verify both surfaces</div>
+          <div class="code-block">
+            <pre><code class="language-bash"># Control-plane liveness (the provider's probe)
+curl http://localhost:8000/v2/health/live
+
+# Repository index — the model list connect() validates against
+curl -X POST http://localhost:8000/v2/repository/index -d '{}'
+
+# Chat frontend (generation)
+curl http://localhost:9000/v1/models</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Load body passthrough</div>
+          <div class="code-block">
+            <pre><code class="language-yaml">plugin_configs:
+  triton:
+    # Forwarded verbatim to /v2/repository/models/&lt;name&gt;/load.
+    # {} = "load with the stored config".
+    load: {}</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Error Handling -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="errors">Error Handling</h2>
+
+          <table>
+            <thead>
+              <tr><th>Exception</th><th>Cause</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>TritonConnectionError</code></td>
+                <td>A surface is unreachable (carries <code>surface="openai"</code> for runtime, <code>surface="control"</code> for the probe / load)</td>
+              </tr>
+              <tr>
+                <td><code>TritonAuthenticationError</code></td>
+                <td>Bearer token rejected (HTTP 401)</td>
+              </tr>
+              <tr>
+                <td><code>TritonModelNotFoundError</code></td>
+                <td>Model not in the repository index</td>
+              </tr>
+              <tr>
+                <td><code>TritonLoadError</code></td>
+                <td><code>/load</code> returned a non-2xx (carries status + body + the load config)</td>
+              </tr>
+              <tr>
+                <td><code>TritonMidStreamError</code></td>
+                <td>Connection dropped mid-response (engine error after HTTP 200 committed &mdash; check Triton logs)</td>
+              </tr>
+              <tr>
+                <td><code>ValueError</code> (at initialize)</td>
+                <td>OpenAI/control URL or context length not set (no hardcoded fallback)</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Handle errors</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared.plugins.model_provider.triton.errors import (
+    TritonConnectionError,
+    TritonLoadError,
+    TritonMidStreamError,
+)
+
+try:
+    provider.initialize(config)
+    provider.connect("llama-3.1-8b")
+except ValueError as e:
+    # Missing URLs or context length
+    print(f"Configuration error: {e}")
+except TritonConnectionError as e:
+    print(f"Triton unreachable on the {e.surface} surface")
+except TritonLoadError:
+    print("Model load failed — check the repository config")
+except TritonMidStreamError:
+    print("Engine dropped mid-response. Check Triton logs.")</code></pre>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="https://unpkg.com/lunr@2.3.9/lunr.min.js"></script>
+  <script src="../../assets/js/docs.js"></script>
+</body>
+</html>

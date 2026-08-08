@@ -12,7 +12,14 @@ The plugin supports deferred tool loading for token economy:
 import threading
 from typing import Any, Callable, Dict, List, Optional, Set
 
-from jaato_sdk.plugins.model_provider.types import ToolSchema, TRAIT_REPLAY_SAFE
+from jaato_sdk.plugins.model_provider.types import (
+    ToolSchema,
+    TRAIT_REPLAY_SAFE,
+    DISCOVERABILITY_EAGER,
+    DISCOVERABILITY_DEFERRED,
+)
+from shared.plugins.runner_forwarding import RunnerForwardingMixin
+from shared.tool_id_map import name_to_id
 from ..streaming import StreamingCapable
 
 # Thread-local storage for session reference per agent context
@@ -20,7 +27,7 @@ from ..streaming import StreamingCapable
 _thread_local = threading.local()
 
 
-class IntrospectionPlugin:
+class IntrospectionPlugin(RunnerForwardingMixin):
     """Plugin that provides tool discovery and introspection capabilities.
 
     This plugin exposes tools for the LLM to:
@@ -71,6 +78,20 @@ class IntrospectionPlugin:
         """Shutdown the introspection plugin."""
         self._initialized = False
 
+    def reset_for_next_session(self) -> None:
+        """Cascade-sharing reset — NO-OP for this plugin.
+
+        Phase 1 hotfix (server 0.6.148+): added to satisfy the
+        ``ToolPlugin`` / ``EnrichmentPlugin`` protocol's runtime
+        ``isinstance`` check.  Per Daniel's litmus test (see
+        ``docs/design/runner-cascade-sharing.md`` §4.3), this
+        plugin holds no per-session state that the next cascade
+        session would benefit from having cleared.  Override in
+        future PRs if the litmus test changes.
+        """
+        pass
+
+
     def set_plugin_registry(self, registry) -> None:
         """Receive the plugin registry for tool discovery.
 
@@ -107,16 +128,16 @@ class IntrospectionPlugin:
             ToolSchema(
                 name="list_tools",
                 description="Discover available tools. "
-                           "Without arguments: returns available categories with tool counts and indices. "
-                           "With category_index: returns tools in that category.",
+                           "Without arguments: returns available categories with tool counts and IDs. "
+                           "With category_id: returns tools in that category.",
                 parameters={
                     "type": "object",
                     "properties": {
-                        "category_index": {
-                            "type": "integer",
+                        "category_id": {
+                            "type": "string",
                             "description": (
-                                "1-based index of the category to list tools from "
-                                "(from the 'index' field in the category summary). "
+                                "The 'id' field (NOT the 'name') from the category summary. "
+                                "Must be obtained from a prior list_tools() call. "
                                 "If omitted, returns the category summary."
                             ),
                         },
@@ -129,7 +150,7 @@ class IntrospectionPlugin:
                     "required": []
                 },
                 category="system",
-                discoverability="core",
+                discoverability=DISCOVERABILITY_EAGER,
                 traits=frozenset({TRAIT_REPLAY_SAFE}),
             ),
             ToolSchema(
@@ -141,26 +162,30 @@ class IntrospectionPlugin:
                 parameters={
                     "type": "object",
                     "properties": {
-                        "names": {
+                        "tool_ids": {
                             "type": "array",
                             "items": {"type": "string"},
-                            "description": "Names of the tools to get schemas for."
+                            "description": "The 'id' field (NOT the 'name') of tools. Must be obtained from a prior list_tools() call."
                         }
                     },
-                    "required": ["names"]
+                    "required": ["tool_ids"]
                 },
                 category="system",
-                discoverability="core",
+                discoverability=DISCOVERABILITY_EAGER,
                 traits=frozenset({TRAIT_REPLAY_SAFE}),
             ),
         ]
 
     def get_executors(self) -> Dict[str, Callable[[Dict[str, Any]], Any]]:
-        """Return the executors for introspection tools."""
-        return {
+        """Return the executors for introspection tools.
+
+        Phase 3 §3.10 wave 4: forwards via runner-RPC when a runner
+        is attached; falls through to in-process otherwise.
+        """
+        return self.wrap_executors_for_runner_forwarding({
             "list_tools": self._execute_list_tools,
             "get_tool_schemas": self._execute_get_tool_schemas,
-        }
+        })
 
     def get_accessed_tools(self) -> Set[str]:
         """Get the set of tools the model has requested schemas for.
@@ -224,14 +249,85 @@ class IntrospectionPlugin:
         return GCPolicy.EPHEMERAL
 
     def get_system_instructions(self) -> Optional[str]:
-        """Return system instructions for the introspection plugin."""
+        """Return system instructions for the introspection plugin.
+
+        2026-05-15 fix: reframe the explore-tools guidance from
+        unconditional (``"ALWAYS explore"``) to conditional
+        (``"WHEN REQUIRED, explore"``).
+
+        **Why the wording change matters.**  The prior text was an
+        absolute imperative.  Personas that need to scope the
+        agent to a narrow tool set (e.g. a typed-completion stage
+        that says "only call signal_completion; do not call
+        list_tools / get_tool_schemas") had to FIGHT the framework
+        instruction.  Same model, same persona, two contradictory
+        directives — the model has to weigh them, and the
+        framework's strong "ALWAYS" word often won.
+
+        Reframed as conditional ("WHEN REQUIRED"), the framework
+        instruction becomes a fallback for unclear cases: explore
+        WHEN your current information is insufficient.  The
+        persona's explicit "your only tool is X" statement
+        satisfies the qualifier — exploration isn't required, the
+        agent doesn't explore.  Both instructions coexist without
+        contradiction.
+
+        See ``feedback_kernel_scoping_beats_persona_prose``:
+        framework-level guidance should not unconditionally
+        contradict session-level contracts.  Personas already
+        narrow the tool surface via the persona text; the
+        framework just needs to not override that.
+
+        Profiles that want NO framework prompt at all retain the
+        ``suppress_base_instructions: true`` flag — the
+        documented escape hatch.  This change is for the typical
+        case where the persona is the authority on tool scoping
+        and the framework defers.
+
+        2026-07-26 addition: an anti-fabrication guardrail
+        ("only call tools in your list by their exact ids; NEVER
+        invent a ``t_<name>`` id; discover unseen capabilities via
+        ``list_tools`` instead of guessing").  It rides INSIDE the
+        same deferred-tools gate on purpose — the guidance to
+        discover-don't-guess is only coherent when discovery tools
+        are actually on the wire.  When the gate suppresses this
+        block (nothing deferred), every real tool is already loaded
+        with its real id, so there is nothing to discover and the
+        prompt must not nudge toward absent ``list_tools`` (the
+        ex08 loop).  Motivated by a live leak where a small exec
+        model read a human tool name (``delete_memory``) from
+        another plugin's instructions and fabricated
+        ``t_delete_memory`` for the deferred (unloaded) tool.
+        """
+        # Align with the TOOL gate: when the session dropped introspection's
+        # tools because nothing is deferred to discover (jaato_session.configure
+        # -> _introspection_guidance_suppressed), suppress this discovery
+        # guidance too. Otherwise the prompt nudges the model to call list_tools
+        # / get_tool_schemas that aren't on its wire -> it invents them, hits
+        # no-executor, and loops (the ex08 0-tool subagent hang). Tool-gate and
+        # instruction-gate must stay aligned.
+        session = self._session
+        if session is not None and getattr(
+            session, "_introspection_guidance_suppressed", False
+        ):
+            return None
         return (
             "You have a DYNAMIC tool system with discoverable capabilities.\n\n"
-            "CRITICAL: Before saying 'I cannot do X', ALWAYS explore available tools first!\n\n"
-            "TOOL DISCOVERY WORKFLOW:\n"
-            "1. `list_tools()` - See all categories with descriptions and tool counts\n"
-            "2. `list_tools(category='...')` - See tools in a specific category\n"
-            "3. `get_tool_schemas(names=[...])` - Get full schemas for tools you need\n"
+            "CAPABILITY DISCOVERY:\n"
+            "When your current information is insufficient to act, explore "
+            "available tools before concluding 'I cannot do X'.  Skip discovery "
+            "when the persona has already named the tool(s) to call.\n"
+            "Only call tools that appear in your available tool list, using "
+            "their exact ids.  NEVER invent, guess, or construct a tool id or "
+            "name (e.g. do not turn a human name you saw in prose into "
+            "`t_<name>`) — the opaque ids come only from your tool list and "
+            "from `get_tool_schemas`.  If you need a capability you don't "
+            "currently see, DISCOVER it via `list_tools(category_id=...)` to "
+            "load the real tool and its id, rather than guessing.\n\n"
+            "TOOL DISCOVERY WORKFLOW (when required):\n"
+            "1. `list_tools()` - See all categories with IDs and tool counts\n"
+            "2. `list_tools(category_id='...')` - See tools in a specific category\n"
+            "3. `get_tool_schemas(tool_ids=[...])` - Get full schemas for tools you need\n"
             "4. Call the tools using the schema information\n\n"
             "CATEGORY QUICK REFERENCE:\n"
             "- coordination: Task tracking, TODO, DELEGATE work, SUBAGENTS, parallel execution\n"
@@ -300,20 +396,41 @@ class IntrospectionPlugin:
         """Execute the list_tools tool.
 
         Args:
-            args: Dictionary with optional 'category_index' and 'verbose' keys.
+            args: Dictionary with optional 'category_id' and 'verbose' keys.
 
         Returns:
-            - If no category_index: returns available categories with tool counts
-            - If category_index specified: returns tools in that category
+            - If no category_id: returns available categories with tool counts
+            - If category_id specified: returns tools in that category
         """
         if not self._registry:
             return {"error": "Registry not available. Plugin not properly initialized."}
 
-        category_index = args.get("category_index")
+        category_id = args.get("category_id")
         verbose = args.get("verbose", False)
 
         # Get tool schemas filtered by session's allowed plugins
         all_schemas = self._get_session_allowed_schemas()
+
+        # ── Soft-nudge for preloaded tools ──────────────────────────────
+        # When a profile preloads a plugin (e.g. ``service_connector(preload)``
+        # in policy_admin.json), that plugin's tools land in the session's
+        # initial tool schema — they don't need ``list_tools`` discovery.
+        # But agents (especially smaller models) habitually call
+        # ``list_tools`` to "verify" a tool exists, then conclude
+        # "absent from list_tools result → tool unavailable" because
+        # list_tools by design returns only deferred tools.
+        #
+        # Surface the preloaded tools in the response as a hint so the
+        # agent doesn't draw the wrong inference from absence-from-list.
+        # Per memory ``project_backlog_introspection_soft_nudge_for_preloaded``.
+        preloaded_tools_hint: List[str] = []
+        if self._session is not None:
+            preloaded_plugins = getattr(self._session, "_preloaded_plugins", None) or set()
+            if preloaded_plugins and self._registry is not None:
+                for tool_schema in self._registry.get_exposed_tool_schemas():
+                    plugin = self._registry.get_plugin_for_tool(tool_schema.name)
+                    if plugin and plugin.name in preloaded_plugins:
+                        preloaded_tools_hint.append(tool_schema.name)
 
         # Read category descriptions from the registry — needed by both
         # the summary path and the category-detail path.
@@ -323,23 +440,21 @@ class IntrospectionPlugin:
             else {}
         )
 
-        # Build the sorted category list (same order as the summary).
-        # Used for index resolution and unknown-category validation.
+        # Build the set of all known categories.
         global_cats: Set[str] = set(category_hints.keys())
         for schema in self._registry.get_exposed_tool_schemas():
             global_cats.add(schema.category or "uncategorized")
-        sorted_cats = sorted(global_cats)
 
-        # Resolve category_index → category name (1-based).
+        # Build reverse lookup: category hash ID → category name.
+        cat_id_to_name = {name_to_id(c, prefix="c"): c for c in global_cats}
+
+        # Resolve category_id → category name.
         category: Optional[str] = None
-        if category_index is not None:
-            idx = int(category_index) - 1
-            if 0 <= idx < len(sorted_cats):
-                category = sorted_cats[idx]
-            else:
+        if category_id is not None:
+            category = cat_id_to_name.get(str(category_id))
+            if category is None:
                 return {
-                    "error": f"Invalid category_index {category_index} "
-                             f"(valid range: 1–{len(sorted_cats)}).",
+                    "error": f"Unknown category_id '{category_id}'.",
                 }
 
         # If no category specified, return category summary only
@@ -370,7 +485,7 @@ class IntrospectionPlugin:
                     allowed_plugins = set(raw)
                     allowed_plugins.add("introspection")
 
-            # Merge all known categories: from schemas + registered descriptions
+            # Merge all known categories: from schemas + registered descriptions.
             all_categories = dict.fromkeys(
                 sorted(
                     set(session_counts.keys())
@@ -380,53 +495,88 @@ class IntrospectionPlugin:
             )
 
             categories_list = []
-            for idx, cat in enumerate(all_categories, 1):
+            for cat in all_categories:
                 available = session_counts.get(cat, 0)
                 total = global_counts.get(cat, 0)
 
+                # Skip categories the session has zero access to.  When
+                # a profile's plugin list excludes a plugin, that plugin's
+                # registered category (e.g. ``"MCP"`` from
+                # ``mcp.plugin.set_plugin_registry``) and any category
+                # description still live in the registry — but listing
+                # them in introspection output leaks plugin/protocol
+                # names the model cannot actually invoke and primes
+                # hallucinations ("MCP server failed", etc.).  Two
+                # exceptions:
+                #   1. No allowed-plugin filter is in effect — caller
+                #      has unrestricted view (e.g. an admin-tier session
+                #      enumerating the daemon).
+                #   2. The category is intrinsically empty for everyone
+                #      (``total == 0``) AND has no description hint —
+                #      nothing to leak.
+                if available == 0 and allowed_plugins is not None:
+                    if total > 0:
+                        # Session-invisible plugin contributes tools to
+                        # this category — hide entirely.  Don't surface
+                        # the plugin name in an "enable X" hint either.
+                        continue
+                    # total == 0: only a category description hint
+                    # references this category.  If a hint is registered
+                    # AND the category isn't part of the session's
+                    # plugin set, hide it too — that's exactly the MCP
+                    # leak path (registered description with no tools).
+                    if cat in category_hints:
+                        continue
+
                 entry: Dict[str, Any] = {
-                    "index": idx,
+                    "id": name_to_id(cat, prefix="c"),
                     "name": cat,
                     "tool_count": available,
                     "description": category_hints.get(cat, ""),
                 }
 
-                # Add availability hint when the session doesn't have
-                # access to all tools in the category, including which
-                # plugins would need to be enabled.
+                # Annotate partial availability only when the session
+                # already sees SOME tools in this category — the
+                # all-zero case is filtered out above.
                 if available == 0 and total == 0:
                     entry["availability"] = "no tools loaded"
                 elif available < total and allowed_plugins is not None:
                     missing = sorted(
                         category_plugins.get(cat, set()) - allowed_plugins
                     )
-                    if available == 0:
+                    if missing:
                         entry["availability"] = (
-                            f"not enabled ({total} tools available "
-                            f"via plugins: {', '.join(missing)})"
-                            if missing
-                            else f"not enabled ({total} tools)"
+                            f"partial ({available}/{total} tools — "
+                            f"{', '.join(missing)} not enabled for this profile)"
                         )
                     else:
                         entry["availability"] = (
-                            f"partial ({available}/{total} tools — "
-                            f"enable {', '.join(missing)} for full access)"
-                            if missing
-                            else f"partial ({available}/{total} tools)"
+                            f"partial ({available}/{total} tools)"
                         )
                 # else: fully available — no extra annotation needed
 
                 categories_list.append(entry)
 
-            return {
+            response: Dict[str, Any] = {
                 "categories": categories_list,
                 "total_tools": len(all_schemas),
-                "hint": "Call list_tools(category_index=<N>) to see tools in a specific category.",
+                "hint": "Call list_tools(category_id='<id>') to see tools in a specific category.",
                 "_telemetry": {
                     "jaato.introspection.operation": "list_tools",
                     "jaato.introspection.total_tools": len(all_schemas),
                 },
             }
+            if preloaded_tools_hint:
+                response["preloaded_tools_already_in_schema"] = sorted(
+                    set(preloaded_tools_hint)
+                )
+                response["preloaded_tools_note"] = (
+                    "These tools are PRELOADED in your initial tool schema "
+                    "and intentionally do NOT appear in the categories above. "
+                    "list_tools returns only deferred (discoverable) tools. "
+                    "Call preloaded tools directly without further discovery."
+                )
+            return response
 
         # Category specified - return tools in that category.
         # No string-based validation needed — category was resolved from
@@ -463,8 +613,8 @@ class IntrospectionPlugin:
 
             # Build tool entry
             tool_entry = {
+                "id": name_to_id(schema.name),
                 "name": schema.name,
-                "plugin_source": plugin_source,
                 "enabled": is_enabled,
                 "streaming": supports_streaming,
             }
@@ -472,7 +622,6 @@ class IntrospectionPlugin:
             # Mark tools the session can't call
             if schema.name not in session_tool_names:
                 tool_entry["available"] = False
-                tool_entry["reason"] = f"requires plugin '{plugin_source}'"
 
             if verbose:
                 tool_entry["description"] = schema.description
@@ -489,8 +638,8 @@ class IntrospectionPlugin:
 
             tools.append(tool_entry)
 
-        # Sort by name for consistent output
-        tools.sort(key=lambda t: t["name"])
+        # Sort by ID for consistent output
+        tools.sort(key=lambda t: t["id"])
 
         result = {
             "category": category,
@@ -499,14 +648,14 @@ class IntrospectionPlugin:
         }
 
         if tools:
-            result["hint"] = "Call get_tool_schemas(names=['<tool_name>']) to get full parameter details."
+            result["hint"] = "Call get_tool_schemas(tool_ids=['<id>']) to get full parameter details."
 
             # Add streaming hint if any tools support streaming
-            streaming_tools = [t["name"] for t in tools if t.get("streaming")]
+            streaming_tools = [t["id"] for t in tools if t.get("streaming")]
             if streaming_tools:
                 result["streaming_hint"] = (
                     f"Tools with streaming=true support incremental results. "
-                    f"Call '<tool_name>:stream' (e.g., '{streaming_tools[0]}:stream') "
+                    f"Call '<tool_id>:stream' (e.g., '{streaming_tools[0]}:stream') "
                     f"to receive results as they're found. Use dismiss_stream(stream_id) when done."
                 )
 
@@ -522,25 +671,26 @@ class IntrospectionPlugin:
         """Execute the get_tool_schemas tool.
 
         Args:
-            args: Dictionary with required 'names' key (array of tool names).
+            args: Dictionary with required 'tool_ids' key (array of tool IDs).
 
         Returns:
             Dictionary with schemas for requested tools and tracking info.
         """
+        from shared.tool_id_map import id_to_name as _id_to_name
+
         if not self._registry:
             return {"error": "Registry not available. Plugin not properly initialized."}
 
-        names = args.get("names", [])
-        if not names:
-            return {"error": "names is required (array of tool names)"}
+        tool_ids = args.get("tool_ids", [])
+        if not tool_ids:
+            return {"error": "tool_ids is required (array of tool IDs)"}
 
-        if not isinstance(names, list):
-            names = [names]  # Handle single name as array
+        if not isinstance(tool_ids, list):
+            tool_ids = [tool_ids]
 
         # Get schemas filtered by session's allowed plugins
         all_schemas = self._get_session_allowed_schemas()
         schema_map = {s.name: s for s in all_schemas}
-        available_tools = list(schema_map.keys())
 
         # Build results
         schemas = []
@@ -549,7 +699,8 @@ class IntrospectionPlugin:
         # Collect tools that need activation (discoverable tools not yet in provider)
         tools_to_activate = []
 
-        for tool_name in names:
+        for tool_id in tool_ids:
+            tool_name = _id_to_name(tool_id)
             if tool_name in schema_map:
                 target_schema = schema_map[tool_name]
 
@@ -557,22 +708,22 @@ class IntrospectionPlugin:
                 self._accessed_tools.add(tool_name)
 
                 # Check if this is a discoverable tool that needs activation
-                if getattr(target_schema, 'discoverability', 'discoverable') == 'discoverable':
+                if getattr(target_schema, 'discoverability', DISCOVERABILITY_DEFERRED) == DISCOVERABILITY_DEFERRED:
                     tools_to_activate.append(tool_name)
 
                 # Find plugin source
                 plugin = self._registry.get_plugin_for_tool(tool_name)
-                plugin_source = plugin.name if plugin else "unknown"
 
                 # Build detailed schema response
                 schema_entry = {
+                    "id": name_to_id(target_schema.name),
                     "name": target_schema.name,
                     "description": target_schema.description,
-                    "plugin_source": plugin_source,
                     "enabled": self._registry.is_tool_enabled(tool_name),
                 }
 
                 if target_schema.category:
+                    schema_entry["category_id"] = name_to_id(target_schema.category, prefix="c")
                     schema_entry["category"] = target_schema.category
 
                 # Format parameters in a more readable way
@@ -582,7 +733,7 @@ class IntrospectionPlugin:
 
                 schemas.append(schema_entry)
             else:
-                not_found.append(tool_name)
+                not_found.append(tool_id)
 
         # Build response
         result = {
@@ -591,17 +742,8 @@ class IntrospectionPlugin:
         }
 
         if not_found:
-            # Provide helpful suggestions for not found tools
-            suggestions = {}
-            for tool_name in not_found:
-                similar = [t for t in available_tools if tool_name.lower() in t.lower()]
-                if similar:
-                    suggestions[tool_name] = similar[:3]
-
             result["not_found"] = not_found
-            if suggestions:
-                result["suggestions"] = suggestions
-            result["hint"] = "Use list_tools() to see available tools."
+            result["hint"] = "Use list_tools() to see available tool IDs."
 
         # Activate discovered tools so the model can actually call them
         # This adds the tool schemas to the provider's declared tools

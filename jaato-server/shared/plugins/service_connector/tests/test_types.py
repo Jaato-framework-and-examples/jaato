@@ -134,6 +134,49 @@ class TestParameter:
         data = param.to_dict()
         assert data["enum"] == ["active", "inactive", "pending"]
 
+    def test_oas2_body_parameter_deserializes(self):
+        """Regression: OAS 2.0 specs use ``in: body`` for request body
+        parameters (and flattened body fields in some stored schemas).
+        ParameterLocation must accept this value or deserialization of
+        stored schemas crashes with
+        ``ValueError: 'body' is not a valid ParameterLocation`` — which
+        breaks ``list_schemas`` and any endpoint lookup that crosses
+        such entries."""
+        param = Parameter.from_dict({
+            "name": "description",
+            "in": "body",
+            "type": "string",
+            "required": False,
+        })
+        assert param.location == ParameterLocation.BODY
+        assert param.name == "description"
+
+    def test_oas2_form_data_parameter_deserializes(self):
+        """OAS 2.0 form-encoded uploads use ``in: formData``."""
+        param = Parameter.from_dict({
+            "name": "upload",
+            "in": "formData",
+            "type": "string",
+        })
+        assert param.location == ParameterLocation.FORM_DATA
+
+    def test_oas3_cookie_parameter_deserializes(self):
+        """OAS 3.0 added ``in: cookie`` for cookie parameters."""
+        param = Parameter.from_dict({
+            "name": "session_id",
+            "in": "cookie",
+            "type": "string",
+        })
+        assert param.location == ParameterLocation.COOKIE
+
+    def test_all_spec_locations_roundtrip(self):
+        """Round-trip every supported location so serialization stays
+        in sync with deserialization across the full OpenAPI vocabulary."""
+        for loc in ParameterLocation:
+            param = Parameter(name="x", location=loc, param_type="string")
+            restored = Parameter.from_dict(param.to_dict())
+            assert restored.location == loc
+
 
 class TestEndpointSchema:
     """Tests for EndpointSchema."""

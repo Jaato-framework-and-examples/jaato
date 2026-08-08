@@ -1,0 +1,11 @@
+{
+  "type": "clarification.question",
+  "timestamp": "<TIMESTAMP>",
+  "agent_id": "",
+  "request_id": "",
+  "question_index": 0,
+  "total_questions": 0,
+  "question_type": "",
+  "question_text": "",
+  "options": null
+}

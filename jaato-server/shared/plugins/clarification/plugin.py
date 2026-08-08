@@ -6,7 +6,11 @@ import threading
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from jaato_sdk.plugins.model_provider.types import ToolSchema, TRAIT_REPLAY_SAFE
+from jaato_sdk.plugins.model_provider.types import (
+    ToolSchema,
+    TRAIT_REPLAY_SAFE,
+    DISCOVERABILITY_EAGER,
+)
 
 from jaato_sdk.plugins.base import UserCommand
 from .channels import ClarificationChannel, create_channel
@@ -16,10 +20,11 @@ from .models import (
     Question,
     QuestionType,
 )
+from shared.plugins.runner_forwarding import RunnerForwardingMixin
 from shared.trace import trace as _trace_write
 
 
-class ClarificationPlugin:
+class ClarificationPlugin(RunnerForwardingMixin):
     """Plugin that allows the model to request clarifications from the user.
 
     This plugin provides a tool for the AI model to ask the user multiple
@@ -51,6 +56,8 @@ class ClarificationPlugin:
         self._on_question_answered: Optional[Callable[[str, int, str], None]] = None
         # Batch hook for WS clients: receives full parsed request before channel loop
         self._on_batch_requested: Optional[Callable] = None
+        # Plugin registry ref (for runner_rpc_client lookup — runner-tier relay)
+        self._plugin_registry = None
 
     def _get_channel(self) -> Optional[ClarificationChannel]:
         """Get the channel for the current thread.
@@ -89,13 +96,57 @@ class ClarificationPlugin:
 
     def set_plugin_registry(self, registry) -> None:
         """Called during expose_tool(). Registers the communication category."""
+        self._plugin_registry = registry
         registry.register_category("communication", "Ask user questions, request clarification, get input")
+
+    def _get_runner_rpc_channel(self) -> Optional[ClarificationChannel]:
+        """Resolve a runner→daemon relay channel when running runner-tier.
+
+        Returns a ``RunnerRPCClarificationChannel`` when the registry has
+        a ``runner_rpc_client`` (post-seat-flip runner session — confined
+        / pool), else ``None`` (daemon-local sessions keep the configured
+        channel).  Resolved PER-CALL (no caching) so a re-attach /
+        warm-slot rebind of ``runner_rpc_client`` is always picked up —
+        deliberately avoiding the stale-bound-channel risk that a cached
+        relay would carry.
+        """
+        registry = self._plugin_registry
+        if registry is None:
+            return None
+        rpc_client = getattr(registry, "runner_rpc_client", None)
+        if rpc_client is None:
+            return None
+        fn = getattr(rpc_client, "request_clarification", None)
+        if fn is None:
+            return None
+        from .channels import RunnerRPCClarificationChannel
+        return RunnerRPCClarificationChannel(fn, agent_id=self._agent_name or "")
 
     def shutdown(self) -> None:
         """Clean up plugin resources."""
         self._trace("shutdown: cleaning up")
         self._channel = None
         self._initialized = False
+
+    def reset_for_next_session(self) -> None:
+        """Cascade-sharing reset (Phase 1, server 0.6.142+) — NO-OP.
+
+        Per Daniel's litmus test: this plugin holds no per-session
+        state that warrants clearing.  The plugin is a routing layer
+        between agent code and the active clarification channel:
+
+        - ``_channel``: ClarificationChannel object — re-wired by the
+          next session's ``initialize()`` call (which creates a fresh
+          channel from config).
+        - ``_agent_name``: re-set by next session's ``initialize()``.
+        - Callbacks: re-wired by next session's
+          ``set_clarification_hooks()`` lifecycle invocation.
+        - ``_thread_local.channel``: per-thread, auto-cleaned.
+
+        No Q&A history accumulates in the plugin instance — the
+        channel manages pending questions and clears them on answer.
+        """
+        self._trace("reset_for_next_session: NO-OP (no per-session state)")
 
     def get_config_schema(self) -> Dict[str, Any]:
         """Return JSON Schema for this plugin's configuration."""
@@ -220,14 +271,20 @@ class ClarificationPlugin:
                     "required": ["context", "questions"],
                 },
                 category="communication",
-                discoverability="core",
+                discoverability=DISCOVERABILITY_EAGER,
                 traits=frozenset({TRAIT_REPLAY_SAFE}),
             )
         ]
 
     def get_executors(self) -> Dict[str, Callable[[Dict[str, Any]], Any]]:
-        """Return the mapping of tool names to executor functions."""
-        return {"request_clarification": self._execute_clarification}
+        """Return the mapping of tool names to executor functions.
+
+        Phase 3 §3.10 wave 4: forwards via runner-RPC when a runner
+        is attached; falls through to in-process otherwise.
+        """
+        return self.wrap_executors_for_runner_forwarding({
+            "request_clarification": self._execute_clarification,
+        })
 
     def get_system_instructions(self) -> Optional[str]:
         """Return system instructions for the AI model."""
@@ -367,6 +424,15 @@ The tool returns responses keyed by question number (1-based):
 
         # Get channel for current thread (may be thread-local for subagents)
         channel = self._get_channel()
+        # Prefer the runner→daemon relay for the MAIN runner session so a
+        # confined / pool (runner-tier) session can actually deliver the
+        # clarification to the connected client.  Without it the runner-side
+        # QueueChannel has no input_queue (that wiring is daemon-side only)
+        # and cancels immediately.  Subagents keep their thread-local channel.
+        if getattr(self._thread_local, 'channel', None) is None:
+            relay = self._get_runner_rpc_channel()
+            if relay is not None:
+                channel = relay
         if not self._initialized or not channel:
             return {"error": "Plugin not initialized"}
 

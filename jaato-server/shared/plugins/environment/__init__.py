@@ -11,6 +11,7 @@ from .plugin import EnvironmentPlugin, create_plugin
 # Plugin kind identifier for registry discovery
 PLUGIN_KIND = "tool"
 
+PLUGIN_TIER = "runner"
 __all__ = [
     "EnvironmentPlugin",
     "create_plugin",

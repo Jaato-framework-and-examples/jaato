@@ -11,6 +11,7 @@ import logging
 import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from shared.safe_pool import SafeThreadPoolExecutor
 from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 from datetime import datetime
 
@@ -20,8 +21,13 @@ from .config import (
     expand_variables, _find_workspace_root, gc_profile_to_plugin_config,
     validate_profile,
 )
+from shared.instruction_suppression import suppression_to_wire
 from jaato_sdk.plugins.base import UserCommand, CommandCompletion, CommandParameter, HelpLines
-from jaato_sdk.plugins.model_provider.types import ToolSchema, TRAIT_FRAMEWORK_LEVEL
+from jaato_sdk.plugins.model_provider.types import (
+    ToolSchema,
+    TRAIT_FRAMEWORK_LEVEL,
+    DISCOVERABILITY_DEFERRED,
+)
 from ..gc import load_gc_plugin, GCConfig
 from ...message_queue import SourceType
 
@@ -44,6 +50,32 @@ def _get_env_connection() -> Dict[str, str]:
         'location': os.environ.get('LOCATION', ''),
         'model': os.environ.get('MODEL_NAME', 'gemini-2.5-flash'),
     }
+
+
+def _is_isolated_optin(agent_params: Optional[Dict[str, Any]]) -> bool:
+    """Detect the §3.11 isolated-runner opt-in flag in spawn-time agent_params.
+
+    Per parent design §4.3 (``docs/design/per_session_confined_runner.md``),
+    supervisors can request that a spawned subagent run in its own runner
+    subprocess — with a fresh AppArmor sub-profile
+    (``jaato-ws-{session}//{subagent}``) and its own cgroup — by passing
+    ``agent_params={"isolated": True}`` to ``spawn_subagent``.  Without
+    the flag, subagents share the parent's runner (the §4.3 default).
+
+    Returns True only when the flag is explicitly truthy.  Any falsy
+    value (False, missing, ``None``, empty dict, empty string) returns
+    False — preserving the default-share contract bit-exact.
+
+    Phase 4 §4.3.1 status: detection seam is wired here as the
+    tracer-bullet API surface.  The actual isolated-runner spawn
+    machinery (runner→daemon RPC primitive, sub-profile generation,
+    sub-cgroup nesting, cross-runner forwarding) lands incrementally in
+    §4.3.2-§4.3.7 of the Phase 4 sub-track.  Until that arc completes,
+    a True return from this helper triggers a synchronous error response
+    from ``spawn_subagent`` — the caller is told to omit the flag or
+    set it to False and use the default-share path.
+    """
+    return bool((agent_params or {}).get("isolated", False))
 
 
 class SubagentPlugin:
@@ -114,20 +146,50 @@ class SubagentPlugin:
         self._subagent_counter: int = 0  # Global counter for generating unique subagent IDs (fallback)
         self._owner_counters: Dict[int, int] = {}  # owner id(session) -> per-owner counter
         self._parent_agent_id: str = "main"  # Parent agent ID for nested subagents
+        # Phase 3 §3.11 + peer-review M4: subagent-termination
+        # callbacks.  When a subagent finishes — normal completion,
+        # error, or operator cancel — registered callbacks run so
+        # plugins keying state by session-id can drop the
+        # finished subagent's entries.  Without this, a long-lived
+        # parent session accumulates unbounded reliability
+        # counters / permission state / memory entries from
+        # completed subagents.  Callbacks receive
+        # ``(agent_id, session_id)``; agent_id is the subagent's
+        # identifier in this plugin's registry, session_id is the
+        # underlying JaatoSession's id (the key plugins like
+        # reliability index by).  Plugins opt in by implementing an
+        # ``on_subagent_terminated(agent_id, session_id)`` method —
+        # ``set_runtime`` auto-registers any such plugin found in
+        # the registry.
+        self._termination_callbacks: List[
+            Callable[[str, Optional[str]], None]
+        ] = []
         # Session registry for multi-turn conversations and bidirectional communication
         # Each entry includes an 'owner_id' (id() of the parent session) for isolation.
         self._active_sessions: Dict[str, Dict[str, Any]] = {}  # agent_id -> session info
         self._sessions_lock = threading.Lock()  # Protect session registry access
         # Parent session reference for output forwarding and cancellation propagation
         self._parent_session: Optional[Any] = None  # JaatoSession reference
-        # Thread pool for async subagent execution
-        self._executor: ThreadPoolExecutor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="subagent")
+        # Thread pool for async subagent execution.
+        # SafeThreadPoolExecutor (server 0.6.47+) runs the AppArmor
+        # defensive-reset pre-task hook on every submission so subagent
+        # workers don't carry a prior session's stuck-confinement state
+        # into a fresh subagent session — particularly important since
+        # subagent sessions create their own AppArmor profile.
+        self._executor: ThreadPoolExecutor = SafeThreadPoolExecutor(max_workers=4, thread_name_prefix="subagent")
         # Retry callback for subagent sessions (propagated from parent)
         self._retry_callback: Optional['RetryCallback'] = None
         # Plan reporter for subagent TodoPlugins (propagated from parent)
         self._plan_reporter: Optional[Any] = None  # TodoReporter instance
         # Workspace path (set by registry broadcast in server mode)
         self._workspace_path: Optional[str] = None
+        # Config-root override (set by registry broadcast in server mode).
+        # Profile discovery during ``initialize()`` runs before this
+        # broadcast fires, so headless reactor-spawned sessions miss the
+        # workspace-tier profiles.  ``set_config_root()`` re-discovers
+        # with the override so spawn_subagent finds project-tier
+        # profiles after the broadcast lands.
+        self._config_root: Optional[str] = None
         # Remote spawn handler registered by a daemon extension (e.g., gossip).
         # See ``register_remote_handler()`` for the protocol.
         self._remote_spawn_handler: Optional[Any] = None
@@ -136,6 +198,43 @@ class SubagentPlugin:
     def name(self) -> str:
         """Unique identifier for this plugin."""
         return "subagent"
+
+    @classmethod
+    def get_apparmor_rules(
+        cls,
+        *,
+        workspace_path: str,
+        session_id: str,
+        config_root: Optional[str],
+        plugin_config: Dict[str, Any],
+    ) -> List[str]:
+        """Contribute subagent-plugin host paths to the AppArmor profile.
+
+        Phase 4 of the plugin-apparmor-contribution refactor
+        (template v26, 2026-05-16).  Previously hardcoded in
+        ``apparmor.py:PROFILE_TEMPLATE``; sessions without the
+        subagent plugin in ``profile.plugins`` no longer carry the
+        grants (least-privilege).
+
+        The plugin reads agent personas (``~/.jaato/agents/*.md``) for
+        ``--agent`` spawns and subagent profile definitions
+        (``~/.jaato/profiles/*.{json,yaml}``) for resolving subagent
+        profiles at spawn time.  Both are user-tier reads; the
+        workspace tier is covered by the framework template's
+        workspace rule.
+
+        Note: ``~/.jaato/agents/`` is also independently declared by
+        ``PromptLibraryPlugin.get_apparmor_rules`` because
+        prompt_library discovers agents as prompts.  The resolver
+        unions both contributions; AppArmor parsing is idempotent on
+        duplicate rules.
+        """
+        return [
+            "@{HOME}/.jaato/agents/    r,",
+            "@{HOME}/.jaato/agents/**  r,",
+            "@{HOME}/.jaato/profiles/  r,",
+            "@{HOME}/.jaato/profiles/** r,",
+        ]
 
     def initialize(self, config: Optional[Dict[str, Any]] = None) -> None:
         """Initialize the plugin with configuration.
@@ -185,7 +284,11 @@ class SubagentPlugin:
                 self._config.default_model = env_conn['model']
                 logger.debug("Using MODEL_NAME from environment: %s", env_conn['model'])
 
-        # Auto-discover profiles from profiles_dir if enabled
+        # Auto-discover profiles from profiles_dir if enabled.  discover_profiles
+        # scans three tiers (workspace / ~/.jaato/profiles / premium) and skips
+        # any tier that's missing or inaccessible — so a confined session denied
+        # the HOME tier still discovers the workspace tier (set_config_root
+        # re-runs this per session).  See _scan_profiles_dir's OSError handling.
         if self._config.auto_discover_profiles:
             discovery = discover_profiles(self._config.profiles_dir)
             # Merge discovered profiles, with explicit profiles taking precedence
@@ -205,6 +308,18 @@ class SubagentPlugin:
         self._client_class = JaatoClient
 
         self._initialized = True
+
+        # Register the bundle entry handler so the top-level 'bundle'
+        # command can list / find / remove profiles alongside other
+        # registered kinds. Idempotent within a process — re-init
+        # replaces the prior handler with one bound to the new state.
+        try:
+            from ..bundle_common.handler import registry as _bundle_registry
+            from .entry_handler import ProfilesEntryHandler
+            _bundle_registry.register(ProfilesEntryHandler(self))
+        except Exception as e:  # pragma: no cover - defensive
+            logger.debug("Failed to register profiles bundle handler: %s", e)
+
         logger.info(
             "Subagent plugin initialized with %d profiles (connection: %s)",
             len(self._config.profiles) if self._config else 0,
@@ -222,12 +337,63 @@ class SubagentPlugin:
         """
         # Preserve _active_sessions and _sessions_lock — running
         # subagents continue independently.
+        # Unregister the bundle entry handler so the global registry
+        # doesn't hold a stale plugin reference. Idempotent.
+        try:
+            from ..bundle_common.handler import registry as _bundle_registry
+            _bundle_registry.unregister("profiles")
+        except Exception as e:  # pragma: no cover - defensive
+            logger.debug("Failed to unregister profiles bundle handler: %s", e)
         self._owner_counters.clear()
         self._subagent_counter = 0
         self._parent_session = None
         self._config = None
         self._initialized = False
         logger.info("Subagent plugin shutdown (running subagents preserved)")
+
+    def reset_for_next_session(self) -> None:
+        """Cascade-sharing reset (Phase 1b, server 0.6.143+).
+
+        Per Daniel's litmus test: subagent registry tracks the
+        parent→child relationships of the CURRENT session.  Cascade-
+        sharing means session B has a different parent agent context
+        than session A; carrying A's active_sessions into B's view
+        would be confusing.
+
+        Per-session state CLEARED:
+        - ``_active_sessions``: subagent registry (parent's view of
+          its spawned children).  Next session has its own parent
+          identity and tracks its own spawns.
+        - ``_owner_counters``: per-owner sub-counters (owner =
+          session id).  Next session has a different owner id.
+        - ``_subagent_counter``: global counter for ID generation.
+        - ``_parent_session``: JaatoSession reference (re-wired by
+          next session's lifecycle hooks).
+        - ``_parent_agent_id``: defaults back to "main".
+        - ``_termination_callbacks``: re-registered per session.
+
+        Survives the reset:
+        - ``_config``, ``_runtime``, ``_ui_hooks``, ``_registry_class``,
+          ``_client_class``: workspace-tier / framework wiring.
+        - ``_executor``: ThreadPoolExecutor — re-used across sessions.
+        - ``_termination_callbacks`` retains its container; if those
+          are needed cleared, that's handled per-session via the
+          set-callback lifecycle, not reset_for_next_session.
+        - ``_permission_plugin``, ``_retry_callback``: re-wired by
+          next session as needed.
+
+        Note: per ``shutdown()``'s docstring, RUNNING subagents are
+        preserved (they're independent sessions).  Same here — we
+        don't kill their underlying JaatoSession objects, just clear
+        the parent-side bookkeeping.  Subagents finish naturally.
+        """
+        logger.info("Subagent plugin reset_for_next_session: clearing per-session bookkeeping")
+        with self._sessions_lock:
+            self._active_sessions.clear()
+        self._owner_counters.clear()
+        self._subagent_counter = 0
+        self._parent_session = None
+        self._parent_agent_id = "main"
 
     def get_config_schema(self) -> Dict[str, Any]:
         """Return JSON Schema for this plugin's configuration."""
@@ -370,6 +536,19 @@ class SubagentPlugin:
                         effective_plugin_configs[plugin_name] = {}
                     effective_plugin_configs[plugin_name]["agent_name"] = profile.name
 
+                # Quirks injection (server 0.6.194+).  See
+                # ``SubagentProfile.quirks`` + the root-session
+                # mirror in ``server/core.py``.  Threaded via the
+                # provider's plugin_configs namespace so it reaches
+                # ``ProviderConfig.extra["quirks"]`` at session
+                # bootstrap without new framework plumbing.
+                if profile.quirks and provider:
+                    provider_cfg = dict(
+                        effective_plugin_configs.get(provider) or {}
+                    )
+                    provider_cfg["quirks"] = dict(profile.quirks)
+                    effective_plugin_configs[provider] = provider_cfg
+
                 # Save parent session before create_session because configure() on
                 # the new session will overwrite self._parent_session
                 parent_session = self._parent_session
@@ -377,11 +556,19 @@ class SubagentPlugin:
                 # Create session using runtime
                 session = runtime.create_session(
                     model=model,
-                    tools=profile.plugins,
+                    plugins=profile.plugins,
                     system_instructions=profile.system_instructions,
                     plugin_configs=effective_plugin_configs if effective_plugin_configs else None,
                     provider_name=provider,
                     preloaded_plugins=profile.preloaded_plugins or None,
+                    completion_payload_schema=profile.completion_payload_schema,
+                    completion_processors=profile.completion_processors or None,
+                    # Per-plugin tool allow-lists (profile ``tools:[...]``).
+                    # In-process subagents share the parent's registry, so
+                    # the scope MUST be per-session (the session applies it
+                    # to its own ``self._tools``; the registry is never
+                    # mutated) — siblings keep their own scopes.
+                    tool_scopes=getattr(profile, "tool_scopes", None) or None,
                 )
 
                 # Restore parent session reference (was overwritten by configure())
@@ -610,7 +797,7 @@ class SubagentPlugin:
                     "required": ["task"]
                 },
                 category="coordination",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
                 # Subagent initialization needs broad filesystem read
                 # access (plugin discovery, agent definitions, skill
                 # files) that the workspace AppArmor profile doesn't
@@ -650,7 +837,7 @@ class SubagentPlugin:
                     "required": ["subagent_id", "message"]
                 },
                 category="coordination",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
             ToolSchema(
                 name='close_subagent',
@@ -677,7 +864,7 @@ class SubagentPlugin:
                     "required": ["subagent_id"]
                 },
                 category="coordination",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
             ToolSchema(
                 name='cancel_subagent',
@@ -706,7 +893,7 @@ class SubagentPlugin:
                     "required": ["subagent_id"]
                 },
                 category="coordination",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
             ToolSchema(
                 name='list_active_subagents',
@@ -738,7 +925,7 @@ class SubagentPlugin:
                     "required": []
                 },
                 category="coordination",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
             ToolSchema(
                 name='list_subagent_profiles',
@@ -752,7 +939,7 @@ class SubagentPlugin:
                     "required": []
                 },
                 category="coordination",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
             ToolSchema(
                 name='validateProfile',
@@ -772,7 +959,7 @@ class SubagentPlugin:
                     "required": ["path"]
                 },
                 category="coordination",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
         ]
         return declarations
@@ -1149,10 +1336,83 @@ class SubagentPlugin:
         instead of creating new JaatoClient instances, sharing the provider
         connection and plugin configuration.
 
+        Phase 3 §3.11 + peer-review M4: also walks the runtime's
+        plugin registry and auto-registers any plugin that
+        implements ``on_subagent_terminated(agent_id, session_id)``
+        as a termination callback.  Discovery is duck-typed so
+        plugins opt in without import-coupling to SubagentPlugin.
+
         Args:
             runtime: JaatoRuntime instance from the parent agent.
         """
         self._runtime = runtime
+        # M4: scan registry for plugins that opt in to termination
+        # notifications and stash a bound-method callback for each.
+        registry = getattr(runtime, "registry", None)
+        if registry is None:
+            return
+        list_exposed = getattr(registry, "list_exposed", None)
+        get_plugin = getattr(registry, "get_plugin", None)
+        if list_exposed is None or get_plugin is None:
+            return
+        for plugin_name in list_exposed():
+            plugin = get_plugin(plugin_name)
+            if plugin is None:
+                continue
+            handler = getattr(plugin, "on_subagent_terminated", None)
+            if callable(handler) and handler not in self._termination_callbacks:
+                self._termination_callbacks.append(handler)
+                logger.debug(
+                    "subagent: registered termination callback from "
+                    "plugin %r", plugin_name,
+                )
+
+    def register_termination_callback(
+        self,
+        callback: Callable[[str, Optional[str]], None],
+    ) -> None:
+        """Register a callback to fire when a subagent terminates.
+
+        Phase 3 §3.11 + peer-review M4.  Plugins that key state by
+        session-id (reliability counters, memory cache, permission
+        per-session policy etc.) register here so completed
+        subagents don't leak state into the parent's plugin
+        registries.
+
+        Most plugins should rely on the duck-typed auto-discovery
+        in :meth:`set_runtime` instead — implement
+        ``on_subagent_terminated(agent_id, session_id)`` and the
+        runtime hookup picks it up automatically.  This explicit
+        registration is for ad-hoc / test scenarios.
+
+        Args:
+            callback: Callable invoked with ``(agent_id, session_id)``
+                each time a subagent finishes.  ``session_id`` may
+                be ``None`` if the subagent never had a JaatoSession
+                attached (very early-failure cases).
+        """
+        if callback not in self._termination_callbacks:
+            self._termination_callbacks.append(callback)
+
+    def _fire_termination_callbacks(
+        self, agent_id: str, session_id: Optional[str],
+    ) -> None:
+        """Invoke each registered termination callback.
+
+        Failures in one callback don't block others — each runs
+        under its own try/except so a buggy plugin can't block the
+        rest of the cleanup chain.  Failures are logged at WARNING
+        level (the cleanup is best-effort).
+        """
+        for cb in list(self._termination_callbacks):
+            try:
+                cb(agent_id, session_id)
+            except Exception as exc:  # noqa: BLE001 — best-effort cleanup
+                logger.warning(
+                    "subagent termination callback %r raised %s "
+                    "(agent_id=%s, session_id=%s); ignoring",
+                    cb, exc, agent_id, session_id, exc_info=True,
+                )
 
     def set_parent_session(self, session: Any) -> None:
         """Set the parent session reference for cancellation propagation.
@@ -1178,6 +1438,55 @@ class SubagentPlugin:
         self._workspace_path = path
         logger.debug("SubagentPlugin: workspace path set to %s", path)
 
+    def set_config_root(self, path: Optional[str]) -> None:
+        """Set the read-only framework-config root override.
+
+        Broadcast by ``PluginRegistry.set_config_root`` after plugin
+        initialisation, which runs without ``JAATO_CONFIG_ROOT`` exported
+        in the env (the ``_in_workspace`` context manager doesn't wrap
+        ``_run_load_plugins``).  As a result, the initial
+        ``discover_profiles()`` call in :meth:`initialize` only sees
+        user-tier (``~/.jaato/profiles/``) and premium-tier profiles;
+        workspace-tier profiles (``<config_root>/profiles/``) are
+        invisible.  Re-discover here, with the now-known config_root,
+        so ``spawn_subagent`` can resolve workspace-defined profile
+        names — essential for reactor-spawned headless sessions whose
+        config_root only becomes available after init.
+
+        Workspace-tier profiles take precedence over user/premium tiers
+        (matches the precedence in :func:`discover_profiles`).
+        Explicit profiles passed in the original ``SubagentConfig`` are
+        preserved and continue to win against discovered ones.
+
+        Args:
+            path: Absolute path to the read-only config root (e.g.
+                ``<project>/.jaato``), or None to clear.
+        """
+        self._config_root = path
+        if not self._initialized or self._config is None:
+            return
+        if not self._config.auto_discover_profiles:
+            return
+        try:
+            discovery = discover_profiles(
+                self._config.profiles_dir, config_root=path,
+            )
+        except Exception:
+            logger.exception(
+                "SubagentPlugin: re-discovery with config_root=%s failed", path,
+            )
+            return
+        added = 0
+        for name, profile in discovery.profiles.items():
+            if name not in self._config.profiles:
+                self._config.profiles[name] = profile
+                added += 1
+        logger.debug(
+            "SubagentPlugin: re-discovered profiles with config_root=%s "
+            "(added %d, total %d)",
+            path, added, len(self._config.profiles),
+        )
+
     def register_remote_handler(self, handler: Any) -> None:
         """Register a handler for remote subagent delegation.
 
@@ -1191,20 +1500,37 @@ class SubagentPlugin:
 
         The handler must be a callable with the following keyword arguments:
 
-        ================ ====== ========================================
-        Argument         Type   Description
-        ================ ====== ========================================
-        ``server``       str    Name of the target peer server.
-        ``task``         str    The prompt/task for the subagent.
-        ``profile_name`` str    Profile name (empty for inline).
-        ``context``      Any    Context string or structured dict.
-        ``inline_config``dict|None  Optional inline config overrides.
-        ``custom_name``  str    Optional custom agent name.
-        ================ ====== ========================================
+        ==================== ====== ====================================
+        Argument             Type   Description
+        ==================== ====== ====================================
+        ``server``           str    Name of the target peer server.
+        ``task``             str    The prompt/task for the subagent.
+        ``profile_name``     str    Profile name (empty for inline).
+        ``context``          Any    Context string or structured dict.
+        ``inline_config``    dict|None  Optional inline config overrides.
+        ``custom_name``      str    Optional custom agent name.
+        ``parent_session_id``str|None  Daemon session id of the invoking
+                                    session — the key
+                                    ``SessionManager.inject_prompt_to_session``
+                                    uses to deliver the remote subagent's
+                                    output back.  Post-seat-flip this is
+                                    threaded runner→daemon: stamped into
+                                    the forwarded args from
+                                    ``get_current_session()._daemon_session_id``
+                                    (server 0.6.x / PR #311).
+        ==================== ====== ====================================
 
         The handler must return a dict with at least ``success`` (bool).
         On failure, include ``error`` (str).  On success, include
         ``subagent_id``, ``status``, ``remote_server``, ``message``.
+
+        Post-seat-flip the handler is registered on the DAEMON-side
+        subagent instance, but ``spawn_subagent`` executes runner-side;
+        the runner-side ``server=`` branch bridges the call to the
+        daemon-side instance via ``daemon.plugin_execute`` (see
+        :meth:`_execute_spawn_subagent`).  Register on the daemon-side
+        ``JaatoServer.registry`` so the forward reaches the instance
+        carrying this handler.
 
         Without this handler, the ``server`` parameter returns a clear
         error asking the user to install jaato-premium.
@@ -1942,6 +2268,14 @@ class SubagentPlugin:
     def _close_session_unlocked(self, agent_id: str) -> None:
         """Close and cleanup a subagent session (caller must hold lock).
 
+        Phase 3 §3.11 + peer-review M4: fires registered termination
+        callbacks AFTER pulling the agent_id out of the active-
+        sessions registry, so plugins keying state by session-id
+        (reliability counters, memory cache, permission per-session
+        policy) can drop their entries.  Without the callbacks a
+        long-lived parent session accumulates unbounded state from
+        completed subagents.
+
         Args:
             agent_id: ID of the session to close.
         """
@@ -1949,6 +2283,20 @@ class SubagentPlugin:
             return
 
         session_info = self._active_sessions[agent_id]
+
+        # Resolve the JaatoSession's id BEFORE the dict deletion so
+        # the callback sees the same session-id the plugin registries
+        # would have indexed by.  ``session_info['session']`` is the
+        # JaatoSession instance; ``session_id`` lookup is best-effort
+        # since older session objects may not have a stable id.
+        session = session_info.get('session')
+        session_id: Optional[str] = None
+        if session is not None:
+            for attr in ("session_id", "id", "_session_id"):
+                value = getattr(session, attr, None)
+                if isinstance(value, str) and value:
+                    session_id = value
+                    break
 
         # Notify UI hooks of completion
         if self._ui_hooks:
@@ -1967,6 +2315,343 @@ class SubagentPlugin:
         # Remove from registry
         del self._active_sessions[agent_id]
         logger.info(f"Closed subagent session: {agent_id}")
+
+        # M4: fire termination callbacks so plugin registries drop
+        # their session-id-keyed entries.  Done AFTER the dict
+        # deletion so a callback re-entering this method (e.g., via
+        # close_session) sees the agent already gone.
+        self._fire_termination_callbacks(agent_id, session_id)
+
+    def _dispatch_isolated_spawn(
+        self,
+        *,
+        agent_id: str,
+        profile: SubagentProfile,
+        task: str,
+        workspace_path: str,
+        agent_params: Optional[Dict[str, Any]],
+        display_name: str,
+    ) -> Dict[str, Any]:
+        """Dispatch an isolated-subagent spawn via the runner→daemon
+        RPC (Phase 4 §4.3.7).
+
+        Called from ``_execute_spawn_subagent`` when
+        ``_is_isolated_optin(agent_params)`` returns True.  Builds the
+        profile_payload from the resolved SubagentProfile (per Audit
+        5's wire shape) and calls
+        ``RunnerRPCClient.spawn_isolated_runner`` (the wrapper added
+        in §4.3.2).
+
+        Always returns a result dict — never ``None``.  The supervisor
+        explicitly opted into isolation by setting
+        ``agent_params.isolated=true``; a missing
+        ``runner_rpc_client`` (no runner subprocess wired) is a
+        configuration error that must be surfaced, NOT silently
+        downgraded to the default-share path.  Per peer-review
+        finding: "the supervisor asked for kernel-level isolation
+        and got none" was a security-violating fallback.
+
+        Returns:
+            On RPC success (helper returned ok=True): a dict matching
+            the existing spawn_subagent success-shape so the model's
+            tool-loop sees identical UX (other than the
+            ``jaato.subagent.isolated`` telemetry flag).
+            On RPC failure (helper returned ok=False): a
+            SubagentResult error dict surfacing the stage + error
+            message.
+            On missing ``runner_rpc_client``: a SubagentResult error
+            dict with ``stage="rpc_unavailable"`` — caller can
+            choose to retry with ``agent_params.isolated=false`` or
+            surface to the operator.
+        """
+        # Locate the runner-side RPC client via the registry-attribute
+        # pattern (same as references / permission plugins use).
+        registry = (
+            self._runtime.registry
+            if self._runtime is not None else None
+        )
+        rpc_client = (
+            getattr(registry, "runner_rpc_client", None)
+            if registry is not None else None
+        )
+        if rpc_client is None:
+            logger.error(
+                "_dispatch_isolated_spawn: runner_rpc_client not wired "
+                "for subagent %s — isolated spawn cannot proceed; "
+                "supervisor explicitly opted in via "
+                "agent_params.isolated=true",
+                agent_id,
+            )
+            return SubagentResult(
+                success=False,
+                response='',
+                error=(
+                    "isolated-runner spawn unavailable: "
+                    "runner_rpc_client not wired on this session.  "
+                    "The supervisor requested agent_params.isolated="
+                    "true but the daemon-runner RPC channel isn't "
+                    "available — typically because the parent session "
+                    "wasn't spawned under the confined-runner path "
+                    "(no apparmor opt-in, daemon-side legacy "
+                    "execution).  Two recovery options: "
+                    "(1) re-create the parent session with apparmor "
+                    "opt-in so the runner subprocess is spawned, then "
+                    "retry; (2) retry with agent_params.isolated="
+                    "false to use the default-share path (subagent "
+                    "shares the parent's runner).  Stage: "
+                    "rpc_unavailable."
+                ),
+            ).to_dict()
+
+        # Build profile_payload per Audit 5's wire shape.  Mirror the
+        # build_inline_profile field set so daemon-side reconstruction
+        # round-trips.
+        profile_payload: Dict[str, Any] = {
+            "name": profile.name,
+            "description": profile.description,
+            "model": profile.model,
+            "provider": profile.provider,
+            "plugins": list(profile.plugins),
+            "plugin_configs": dict(profile.plugin_configs),
+            "system_instructions": profile.system_instructions,
+            "suppress_base_instructions": suppression_to_wire(
+                profile.suppress_base_instructions),
+            "max_turns": profile.max_turns,
+            "env": dict(profile.env),
+        }
+        # GC config (optional).
+        if profile.gc is not None:
+            gc_obj = profile.gc
+            gc_dict: Dict[str, Any] = {}
+            gc_type = getattr(gc_obj, "type", None)
+            if gc_type:
+                gc_dict["type"] = gc_type
+            gc_config = getattr(gc_obj, "config", None)
+            if gc_config:
+                gc_dict["config"] = dict(gc_config)
+            if gc_dict:
+                profile_payload["gc"] = gc_dict
+        # Runtime limits (optional).
+        if profile.runtime_limits is not None:
+            try:
+                if hasattr(profile.runtime_limits, "to_dict"):
+                    profile_payload["runtime_limits"] = (
+                        profile.runtime_limits.to_dict()
+                    )
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "_dispatch_isolated_spawn: runtime_limits "
+                    "serialization failed; dropping",
+                )
+        # Preload annotations.
+        if profile.preloaded_plugins:
+            preload_set = set(profile.preloaded_plugins)
+            profile_payload["plugins"] = [
+                f"{name}(preload)" if name in preload_set else name
+                for name in profile_payload["plugins"]
+            ]
+
+        # Get parent session_id — confused-deputy echo per Audit 5.
+        parent_session_id = (
+            getattr(self._parent_session, "_session_id", None)
+            or getattr(self._parent_session, "session_id", None)
+            or ""
+        )
+
+        try:
+            rpc_result = rpc_client.spawn_isolated_runner(
+                parent_session_id=parent_session_id,
+                subagent_id=agent_id,
+                profile_payload=profile_payload,
+                task=task,
+                workspace_path=workspace_path,
+                agent_params=agent_params,
+                display_name=display_name,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception(
+                "_dispatch_isolated_spawn: RPC failed for subagent %s",
+                agent_id,
+            )
+            return SubagentResult(
+                success=False,
+                response='',
+                error=(
+                    f"isolated-runner spawn RPC failed: "
+                    f"{type(exc).__name__}: {exc}.  Caller may retry "
+                    f"with agent_params.isolated=false to use the "
+                    f"default-share path."
+                ),
+            ).to_dict()
+
+        # Branch on the helper's stage envelope.
+        if rpc_result.get("ok"):
+            # Mirror the default-share spawn-success shape so the
+            # supervisor model's tool-loop sees identical UX.
+            return {
+                "success": True,
+                "subagent_id": agent_id,
+                "status": "spawned",
+                "message": (
+                    f"Isolated subagent {agent_id} spawned and running "
+                    f"in its own runner (sub-AppArmor profile "
+                    f"{rpc_result.get('apparmor_profile', '?')!r}, "
+                    f"pid={rpc_result.get('runner_pid', '?')}).  "
+                    f"END YOUR TURN NOW. Real events will be injected "
+                    f"as the sub-runner streams output."
+                ),
+                "_telemetry": {
+                    "jaato.subagent.operation": "spawn",
+                    "jaato.subagent.id": agent_id,
+                    "jaato.subagent.profile": profile.name,
+                    "jaato.subagent.model": profile.model or "",
+                    "jaato.subagent.provider": profile.provider or "",
+                    "jaato.subagent.isolated": True,
+                    "jaato.subagent.apparmor_profile": (
+                        rpc_result.get("apparmor_profile", "")
+                    ),
+                    "jaato.subagent.cgroup_path": (
+                        rpc_result.get("cgroup_path", "")
+                    ),
+                },
+            }
+
+        # ok=False — domain failure.  Surface the stage + error.
+        return SubagentResult(
+            success=False,
+            response='',
+            error=(
+                f"isolated-runner spawn failed at "
+                f"stage={rpc_result.get('stage', '?')}: "
+                f"{rpc_result.get('error', 'no error message')}"
+            ),
+        ).to_dict()
+
+    def receive_forwarded_event(
+        self,
+        subagent_id: str,
+        event_kind: str,
+        event_payload: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Receive a cross-runner-forwarded event from an isolated
+        sub-runner (Phase 4 §4.3.6b).
+
+        Called runner-side by the ``subagent.forward_event`` RPC
+        handler when the daemon dispatches an event from a sub-runner
+        belonging to a subagent this plugin spawned with
+        ``agent_params.isolated=true``.
+
+        Mirrors the default-share path's ``_parent_session.inject_prompt``
+        contract — translates the forwarded event into a prompt
+        injection so the parent model sees the subagent's output in
+        its conversation, identically to in-runner subagents.
+
+        Args:
+            subagent_id: The subagent id (matches the id from the
+                spawn-time response).  Used to look up the subagent's
+                entry in ``_active_sessions`` if present (isolated
+                subagents may not have a local entry — that's fine,
+                the inject still fires on the parent session).
+            event_kind: Discriminator for the event type.  Recognized
+                values:
+                - ``"output"``: streaming text from the subagent's
+                  conversation.  ``event_payload`` carries ``text``
+                  (str) and ``source`` (str, e.g. "assistant").
+                - ``"status"``: lifecycle status update (running,
+                  done, error).  ``event_payload`` carries
+                  ``status`` (str).
+                - ``"error"``: error event.  ``event_payload``
+                  carries ``message`` (str).
+                Unknown kinds log a warning and return ok=False;
+                the wire shape is open for forward-compat.
+            event_payload: Event-kind-specific payload dict.  See
+                ``event_kind`` enum above.
+
+        Returns:
+            ``{"ok": True}`` on success.  ``{"ok": False, "error":
+            "..."}`` when no parent session is wired (plugin not
+            attached to a session) or the event_kind is unrecognized.
+
+        Phase 4 §4.3.6b: this is the runner-side endpoint that the
+        daemon dispatches to after receiving an event from a sub-
+        runner.  §4.3.6c will wire the daemon-side subscription that
+        triggers this method via the first-turn ``session.send_message``
+        call's ``on_notification`` callback.
+        """
+        if self._parent_session is None:
+            logger.warning(
+                "receive_forwarded_event: no parent session wired; "
+                "dropping event for subagent_id=%s kind=%s",
+                subagent_id, event_kind,
+            )
+            return {
+                "ok": False,
+                "error": "no parent session wired in subagent plugin",
+            }
+
+        if event_kind == "output":
+            text = str(event_payload.get("text", ""))
+            source = str(event_payload.get("source", "assistant"))
+            # Mirror default-share's format so the parent model sees
+            # isolated + in-runner subagents identically.
+            self._parent_session.inject_prompt(
+                f"[SUBAGENT agent_id={subagent_id} source={source}]\n{text}",
+                source_id=subagent_id,
+                source_type=SourceType.CHILD,
+            )
+            return {"ok": True}
+
+        if event_kind == "status":
+            status = str(event_payload.get("status", ""))
+            # Mirror default-share's ui-hook signal (line 3030 in this file).
+            if self._ui_hooks:
+                try:
+                    self._ui_hooks.on_agent_status_changed(
+                        agent_id=subagent_id,
+                        status=status,
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.exception(
+                        "receive_forwarded_event: ui_hooks callback raised",
+                    )
+            # Status events also surface as inject_prompt so the parent
+            # model sees lifecycle transitions in its conversation.
+            self._parent_session.inject_prompt(
+                f"[SUBAGENT agent_id={subagent_id} event={status}]",
+                source_id=subagent_id,
+                source_type=SourceType.CHILD,
+            )
+            return {"ok": True}
+
+        if event_kind == "error":
+            message = str(event_payload.get("message", ""))
+            self._parent_session.inject_prompt(
+                f"[SUBAGENT agent_id={subagent_id} event=ERROR]\n"
+                f"Subagent execution failed: {message}",
+                source_id=subagent_id,
+                source_type=SourceType.CHILD,
+            )
+            if self._ui_hooks:
+                try:
+                    self._ui_hooks.on_agent_status_changed(
+                        agent_id=subagent_id,
+                        status="error",
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.exception(
+                        "receive_forwarded_event: ui_hooks callback raised",
+                    )
+            return {"ok": True}
+
+        logger.warning(
+            "receive_forwarded_event: unrecognized event_kind=%r for "
+            "subagent_id=%s",
+            event_kind, subagent_id,
+        )
+        return {
+            "ok": False,
+            "error": f"unrecognized event_kind: {event_kind!r}",
+        }
 
     def _execute_spawn_subagent(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Spawn a subagent to handle a task.
@@ -2026,6 +2711,43 @@ class SubagentPlugin:
         # ── Remote spawn path ──────────────────────────────────────────
         if server:
             if self._remote_spawn_handler is None:
+                # Post-seat-flip the gossip remote-spawn handler is
+                # registered (by jaato-premium) on the DAEMON-side
+                # subagent instance, but this tool executes RUNNER-side,
+                # where ``_remote_spawn_handler`` is None — the "Gap #1
+                # trap" (shared/plugins/CLAUDE.md).  Bridge runner→daemon:
+                # forward the call via ``daemon.plugin_execute`` to the
+                # daemon-side instance (where the handler IS set).  Stamp
+                # ``parent_session_id`` (this session's daemon id — the
+                # invoking session IS the parent) into the forwarded args
+                # so the daemon-side handler can inject results back via
+                # ``inject_prompt_to_session``.
+                registry = (
+                    self._runtime.registry
+                    if self._runtime is not None else None
+                )
+                rpc_client = getattr(
+                    registry, "runner_rpc_client", None,
+                ) if registry is not None else None
+                if rpc_client is not None:
+                    from shared.plugins.daemon_forwarding import (
+                        _forward_via_daemon,
+                    )
+                    from shared.session_context import get_current_session
+                    try:
+                        parent_session_id = getattr(
+                            get_current_session(), "_daemon_session_id", None,
+                        )
+                    except LookupError:
+                        parent_session_id = None
+                    forwarded = dict(args)
+                    forwarded["parent_session_id"] = parent_session_id
+                    return _forward_via_daemon(
+                        rpc_client, "subagent", "spawn_subagent", forwarded,
+                    )
+                # No runner→daemon channel AND no handler → premium
+                # genuinely isn't installed (or this is a non-runner
+                # context).  Surface the actionable error.
                 return SubagentResult(
                     success=False,
                     response='',
@@ -2034,6 +2756,10 @@ class SubagentPlugin:
                         'Install it to enable the "server" parameter on spawn_subagent.'
                     ),
                 ).to_dict()
+            # Handler is registered (daemon-side instance, reached via the
+            # forward above; or legacy in-process pre-seat-flip).
+            # ``parent_session_id`` is present on the daemon-side re-entry
+            # (stamped into args by the runner-side forward).
             return self._remote_spawn_handler(
                 server=server,
                 task=task,
@@ -2041,14 +2767,44 @@ class SubagentPlugin:
                 context=context,
                 inline_config=inline_config,
                 custom_name=custom_name,
+                parent_session_id=args.get('parent_session_id'),
             )
 
-        # Resolve workspace path early — needed for tech stack detection on inline profiles
+        # ── Isolated-runner opt-in (Phase 4 §4.3.1 stub) ───────────────
+        # Parent design §4.3 (``per_session_confined_runner.md``) defines
+        # an opt-in for spawning the subagent in its own runner
+        # subprocess with a fresh AppArmor sub-profile + sub-cgroup.  The
+        # detection seam is wired here as the tracer-bullet API surface
+        # (§4.3.1); the full machinery — runner→daemon RPC primitive,
+        # sub-profile generation, sub-cgroup nesting, cross-runner
+        # forwarding — lands incrementally in §4.3.2-§4.3.7 of the Phase
+        # 4 sub-track.  Until §4.3.7 wires the opt-in branch, a True
+        # detection returns a clear synchronous error pointing the
+        # caller back to the default-share path.  Placement after the
+        # remote-spawn block is deliberate: remote-spawn is its own form
+        # of isolation (separate process on a separate host), so the
+        # local isolated-runner flag is irrelevant there.
+        #
+        # Phase 4 §4.3.7: the actual isolated-runner routing happens
+        # AFTER profile resolution (need the resolved SubagentProfile
+        # to build profile_payload for the RPC).  See the branch
+        # near self._executor.submit below.
+
+        # Resolve workspace path early — needed for tech stack detection on inline
+        # profiles.  Import get_workspace_root UNCONDITIONALLY here, NOT inside the
+        # ``workspace_path is None`` branch: a conditional import binds the name
+        # function-local, so when the workspace resolves early (self._workspace_path
+        # or registry.get_workspace_path() non-None — the common case, ALWAYS true
+        # for an embedded session) the branch is skipped and the later uses (the
+        # spawn-schema workspace fallback at ``or get_workspace_root()`` and the
+        # debug line) raise UnboundLocalError. Binding it once up-front keeps the
+        # name a proper local for every path.
+        from shared.session_context import get_workspace_root
         workspace_path = self._workspace_path
         if workspace_path is None and self._runtime and self._runtime.registry:
             workspace_path = self._runtime.registry.get_workspace_path()
         if workspace_path is None:
-            workspace_path = os.environ.get("JAATO_WORKSPACE_ROOT")
+            workspace_path = get_workspace_root()
         parent_cwd = workspace_path or os.getcwd()
 
         # Resolve the profile or create inline
@@ -2142,6 +2898,7 @@ class SubagentPlugin:
             from server.session_manager import SessionManager
             agent_result = SessionManager._resolve_agent(
                 agent_name_arg, agent_params_arg, parent_cwd,
+                config_root=self._config_root,
             )
             if agent_result is None:
                 return SubagentResult(
@@ -2154,6 +2911,72 @@ class SubagentPlugin:
                 logger.warning(
                     "Subagent agent '%s' has unresolved params: %s",
                     agent_name_arg, agent_result["missing_params"],
+                )
+
+        # ── Spawn-payload schema validation ──────────────────────────
+        # Symmetric to ``signal_completion``'s ``completion_payload_schema``:
+        # when the profile declares ``spawn_payload_schema``, validate
+        # ``agent_params`` against it BEFORE creating the session, so
+        # missing-field bugs surface at the spawn boundary (where the
+        # caller can fix them in a retry) instead of at the body-wired
+        # prefetch's runtime check.  The detector for rewind-with-hint
+        # picks up the error message and lets the supervisor re-call
+        # spawn_subagent with the missing fields populated.
+        if profile.spawn_payload_schema is not None:
+            try:
+                from shared.spawn_schema_loader import resolve_spawn_schema
+                workspace_for_schema = (
+                    parent_cwd
+                    or (self._runtime.registry.get_workspace_path()
+                        if self._runtime and self._runtime.registry else None)
+                    or get_workspace_root()
+                )
+                resolved_schema = resolve_spawn_schema(
+                    profile.spawn_payload_schema,
+                    workspace_path=workspace_for_schema,
+                    config_root=self._config_root,
+                )
+                if resolved_schema is not None:
+                    import jsonschema
+                    try:
+                        jsonschema.validate(
+                            instance=agent_params_arg or {},
+                            schema=resolved_schema,
+                        )
+                    except jsonschema.ValidationError as exc:
+                        # Collect every required field that's still
+                        # missing so the supervisor can fix them all in
+                        # one retry instead of hammering the spawn-loop.
+                        required = list(resolved_schema.get('required') or [])
+                        missing = [
+                            f for f in required
+                            if not agent_params_arg or f not in agent_params_arg
+                        ]
+                        details = (
+                            f"missing required fields: {missing}. "
+                            if missing
+                            else f"first failure: {exc.message}. "
+                        )
+                        return SubagentResult(
+                            success=False,
+                            response='',
+                            error=(
+                                f"spawn_subagent({profile_name!r}) failed "
+                                f"agent_params validation: {details}"
+                                f"The '{profile_name}' profile requires "
+                                f"agent_params matching its spawn_payload_schema "
+                                f"({profile.spawn_payload_schema!r}). "
+                                f"Re-call spawn_subagent with the missing "
+                                f"fields populated from the prompt's case data — "
+                                f"do not paraphrase or omit."
+                            ),
+                        ).to_dict()
+            except Exception as exc:
+                # Schema-loader bug or jsonschema crash — degrade gracefully:
+                # log and skip validation rather than blocking the spawn.
+                logger.warning(
+                    "spawn_payload_schema validation skipped for profile "
+                    "%s: %s", profile_name, exc,
                 )
 
         # Build the full prompt
@@ -2199,7 +3022,7 @@ class SubagentPlugin:
             "SubagentPlugin.spawn_subagent: workspace resolution: "
             f"self._workspace_path={self._workspace_path}, "
             f"registry={self._runtime.registry.get_workspace_path() if self._runtime and self._runtime.registry else None}, "
-            f"env={os.environ.get('JAATO_WORKSPACE_ROOT')}, "
+            f"env={get_workspace_root()}, "
             f"cwd={os.getcwd()}, "
             f"result={parent_cwd}"
         )
@@ -2207,7 +3030,36 @@ class SubagentPlugin:
         # Display name: prefer custom_name over profile.name
         display_name = custom_name or profile.name
 
-        # Submit to thread pool (always async)
+        # ── Phase 4 §4.3.7 isolated-runner opt-in routing ─────────
+        # When agent_params.isolated=true, route through the
+        # daemon's _spawn_isolated_runner helper instead of the
+        # in-runtime executor.  Profile is now resolved (we have
+        # the SubagentProfile) so profile_payload can be serialized
+        # to the wire shape Audit 5 defines.
+        #
+        # Always returns immediately — _dispatch_isolated_spawn
+        # returns a dict (success or failure envelope) for every
+        # outcome including "RPC channel unavailable".  Peer review
+        # eliminated the earlier silent-downgrade-to-default-share
+        # fallback: the supervisor asked for kernel-level isolation,
+        # so the framework must either honor it or audibly refuse —
+        # never quietly substitute.
+        if _is_isolated_optin(agent_params_arg):
+            return self._dispatch_isolated_spawn(
+                agent_id=agent_id,
+                profile=profile,
+                task=full_prompt,
+                workspace_path=parent_cwd,
+                agent_params=agent_params_arg,
+                display_name=display_name,
+            )
+
+        # Submit to thread pool (always async).  ``agent_params_arg``
+        # comes from the spawn_subagent tool args (a dict the
+        # supervisor passed for {{name}} substitution and forwarded
+        # case data); thread it through so the subagent's
+        # dynamic-instructions render scripts see it as
+        # ``RenderContext.agent_params``.
         self._executor.submit(
             self._run_subagent_async,
             agent_id,
@@ -2216,6 +3068,7 @@ class SubagentPlugin:
             parent_cwd,
             owner_id,
             display_name,
+            agent_params_arg,
         )
 
         # Return immediately with subagent_id (matches parameter name for close/cancel/send tools)
@@ -2242,6 +3095,7 @@ class SubagentPlugin:
         parent_cwd: str,
         owner_id: int = 0,
         display_name: Optional[str] = None,
+        agent_params: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Run a subagent asynchronously with output forwarding to parent.
 
@@ -2256,6 +3110,10 @@ class SubagentPlugin:
             owner_id: ``id()`` of the parent session that owns this subagent.
             display_name: Custom display name for the agent (from spawn_subagent's
                 ``name`` parameter). Falls back to ``profile.name`` when ``None``.
+            agent_params: Spawn-time parameters dict (forwarded ``case_data``,
+                etc.) — passed through to ``runtime.create_session()`` so the
+                child session's dynamic-instructions render scripts can read
+                ``RenderContext.agent_params``.
         """
         # Get workspace path from runtime registry as authoritative source
         # The parent_cwd parameter might be wrong if spawn_subagent couldn't resolve it correctly
@@ -2292,11 +3150,11 @@ class SubagentPlugin:
 
         # Resolve trace paths to absolute so they work even if CWD changes later
         # (e.g., when parent's _in_workspace() context exits and restores CWD)
-        trace_log = os.environ.get("JAATO_TRACE_LOG")
+        trace_log = os.environ.get("JAATO_TRACE_LOG")  # env: debug — path of the shared trace log plugins and servers append diagnostic lines to
         if trace_log and not os.path.isabs(trace_log):
             os.environ["JAATO_TRACE_LOG"] = os.path.abspath(trace_log)
 
-        provider_trace_env = os.environ.get("JAATO_PROVIDER_TRACE")
+        provider_trace_env = os.environ.get("JAATO_PROVIDER_TRACE")  # env: debug — path of the provider request/response trace log (set via client config)
         if provider_trace_env and not os.path.isabs(provider_trace_env):
             os.environ["JAATO_PROVIDER_TRACE"] = os.path.abspath(provider_trace_env)
 
@@ -2380,20 +3238,52 @@ class SubagentPlugin:
                 if plugin_name == "template":
                     effective_plugin_configs[plugin_name]["base_path"] = parent_cwd
 
+            # Quirks injection (server 0.6.194+).  See
+            # ``SubagentProfile.quirks`` + the root-session mirror in
+            # ``server/core.py``.  Threaded via the provider's
+            # plugin_configs namespace so it reaches
+            # ``ProviderConfig.extra["quirks"]`` at session bootstrap
+            # without new framework plumbing.
+            if profile.quirks and provider:
+                provider_cfg = dict(
+                    effective_plugin_configs.get(provider) or {}
+                )
+                provider_cfg["quirks"] = dict(profile.quirks)
+                effective_plugin_configs[provider] = provider_cfg
+
             # Save parent session reference BEFORE create_session, because
             # create_session calls session.configure() which overwrites
             # self._parent_session to the new session (see line 514 in jaato_session.py)
             parent_session = self._parent_session
             logger.debug(f"SUBAGENT_DEBUG: Saved parent_session={parent_session} (is None={parent_session is None})")
 
-            # Create session
+            # Fail closed: this is the IN-PROCESS spawn path (shared runtime,
+            # no runner subprocess — the isolated-runner opt-in routes
+            # elsewhere).  A profile declaring kernel runtime_limits cannot be
+            # confined here, and silently ignoring them would run the subagent
+            # unconfined while the author believes it is bounded.  Reject
+            # instead — spawn as an isolated runner, or drop runtime_limits.
+            from shared.runtime_limits import assert_inprocess_can_honor
+            assert_inprocess_can_honor(profile)
+
+            # Create session.  Pass ``agent_params`` through so the
+            # spawned subagent's dynamic-instructions render scripts
+            # (the ``{{!py:scripts/X.py}}`` placeholders) can read the
+            # forwarded ``case_data`` from the spawn call.
             session = self._runtime.create_session(
                 model=model,
-                tools=profile.plugins,
+                plugins=profile.plugins,
                 system_instructions=profile.system_instructions,
                 plugin_configs=effective_plugin_configs if effective_plugin_configs else None,
                 provider_name=provider,
                 preloaded_plugins=profile.preloaded_plugins or None,
+                agent_params=agent_params,
+                completion_payload_schema=profile.completion_payload_schema,
+                completion_processors=profile.completion_processors or None,
+                suppress_base_instructions=getattr(profile, 'suppress_base_instructions', False),
+                # Per-plugin tool allow-lists (profile ``tools:[...]``) —
+                # per-session, never mutates the shared registry.
+                tool_scopes=getattr(profile, "tool_scopes", None) or None,
             )
             logger.debug(f"SUBAGENT_DEBUG: After create_session, self._parent_session={self._parent_session}")
 
@@ -2579,6 +3469,41 @@ class SubagentPlugin:
             # or queued for mid-turn processing if the session is busy.
             # No polling loop needed.
 
+            # Completion-nudge guard.  If the model loop exited without
+            # the agent ever calling ``signal_completion``, inject a
+            # framework reminder telling the model to either continue
+            # the work or signal completion now — and re-enter the
+            # loop with that prompt.  Bounded by ``MAX_COMPLETION_NUDGES``
+            # so a model that keeps narrating refusal eventually halts.
+            # The flag ``session._signal_completion_called`` is flipped
+            # in ``LifecycleTools._execute_signal_completion`` on
+            # successful invocation.
+            MAX_COMPLETION_NUDGES = 2
+            while (
+                not getattr(session, '_signal_completion_called', False)
+                and getattr(session, '_completion_nudges_fired', 0) < MAX_COMPLETION_NUDGES
+            ):
+                session._completion_nudges_fired += 1
+                logger.info(
+                    "COMPLETION_NUDGE [%s]: agent ended its loop without "
+                    "signal_completion (nudge %d/%d) — re-prompting",
+                    agent_id, session._completion_nudges_fired, MAX_COMPLETION_NUDGES,
+                )
+                nudge = (
+                    "Your session is about to end without calling "
+                    "`signal_completion`. The loop cannot close cleanly "
+                    "until you either continue the work with another "
+                    "tool call, or call `signal_completion` per your "
+                    "profile's payload schema with the appropriate "
+                    "decision and evidence. Please proceed with one of "
+                    "those two paths."
+                )
+                response = session.send_message(
+                    nudge,
+                    on_output=subagent_output_callback,
+                    on_usage_update=subagent_usage_callback
+                )
+
             # Update session info after completion
             usage = session.get_context_usage()
             # Debug: Log full usage info to trace token accounting issues
@@ -2611,6 +3536,7 @@ class SubagentPlugin:
                         function_calls=turn.get('function_calls', []),
                         cache_read_tokens=turn.get('cache_read'),
                         cache_creation_tokens=turn.get('cache_creation'),
+                        finish_reason=turn.get('finish_reason', 'stop'),
                     )
 
                 self._ui_hooks.on_agent_context_updated(
@@ -2631,6 +3557,22 @@ class SubagentPlugin:
                 # Note: "idle" status is emitted automatically by the
                 # running-state callback wired in set_running_state_callback
                 # when send_message() returns and the session phase goes IDLE.
+                #
+                # Emit the terminal "done" status here, mirroring what
+                # JaatoServer's model_thread does at ``core.py``'s
+                # finally block for top-level sessions.  Top-level and
+                # subagent agents now publish the same canonical
+                # loop-terminated signal, so a single subscriber (e.g.
+                # the completion-nudge guard) can detect "agent's
+                # lifecycle ended without ever calling
+                # signal_completion" uniformly across both layers.
+                # Distinct from "idle" (paused, may resume) — "done"
+                # fires once at the genuine end of the subagent's
+                # ``_run_subagent_async`` call.
+                self._ui_hooks.on_agent_status_changed(
+                    agent_id=agent_id,
+                    status="done",
+                )
 
             clear_trace_agent_context()
 

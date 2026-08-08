@@ -13,6 +13,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from jaato_sdk.plugins.base import ToolPlugin, UserCommand, CommandParameter, CommandCompletion, PromptEnrichmentResult
 from jaato_sdk.plugins.model_provider.types import ToolSchema
+from shared.session_id import validate_session_id
 from .base import SessionPlugin, SessionConfig, SessionState, SessionInfo
 from .serializer import (
     serialize_session_state,
@@ -132,6 +133,38 @@ class FileSessionPlugin:
         """Clean up resources."""
         pass
 
+    def reset_for_next_session(self) -> None:
+        """Clear per-session state for the cascade-sharing arc (Phase 1).
+
+        Per Daniel's litmus test (2026-05-20): a plugin's state should
+        SURVIVE this call if a subsequent session within the SAME cascade
+        might benefit from it.  For the session plugin, the
+        session-specific identity / counters do NOT benefit the next
+        session — each cascade stage has its own session id and turn
+        count.  The workspace-tier config DOES survive.
+
+        Per-session attributes (CLEAR — next session has its own):
+        - ``_current_session_id``: identifies the current session.
+        - ``_description_requested``: per-session description flow flag.
+        - ``_turn_count``: per-session turn counter.
+        - ``_session_description``: per-session display string.
+
+        Survives the reset (workspace/cascade-scoped):
+        - ``_storage_path``: workspace-tier path, constant within cascade.
+        - ``_config``: plugin config from profile YAML.
+        - ``_client``: re-wired by next session's ``set_client()`` hook.
+        - callbacks (``_on_description_changed``): re-wired by next session.
+
+        Note: ``initialize()`` already resets these same attributes; this
+        method exists as a NAMED contract for the cascade-sharing pool
+        slot to call between sessions WITHOUT re-running config-loading
+        (which ``initialize()`` does).
+        """
+        self._current_session_id = None
+        self._description_requested = False
+        self._turn_count = 0
+        self._session_description = None
+
     # ==================== SessionPlugin: Core Persistence ====================
 
     def save(
@@ -157,6 +190,9 @@ class FileSessionPlugin:
 
         target_dir = storage_dir or self._storage_path
         target_dir.mkdir(parents=True, exist_ok=True)
+        # Fail-closed: never build a path from an unsafe session id (a traversal
+        # id would write outside the sessions directory).
+        validate_session_id(state.session_id)
         file_path = target_dir / f"{state.session_id}.json"
         data = serialize_session_state(state)
 
@@ -216,6 +252,9 @@ class FileSessionPlugin:
             ValueError: If the session data is corrupted.
         """
         target_dir = storage_dir or self._storage_path
+        # Fail-closed: a client can supply session_id when attaching, so refuse
+        # a traversal id (``../../etc/foo``) before it reaches the filesystem.
+        validate_session_id(session_id)
         file_path = target_dir / f"{session_id}.json"
 
         if not file_path.exists():
@@ -429,8 +468,11 @@ class FileSessionPlugin:
                 with open(file_path, 'r', encoding='utf-8') as f:
                     data = json.load(f)
                 data['description'] = description
-                with open(file_path, 'w', encoding='utf-8') as f:
-                    json.dump(data, f, indent=2, ensure_ascii=False)
+                # Phase 3 §3.14: atomic write so a SIGTERM mid-update
+                # can't leave the session record with truncated /
+                # corrupt JSON the loader can't parse.
+                from shared.atomic_write import atomic_write_json
+                atomic_write_json(file_path, data)
             except (json.JSONDecodeError, IOError):
                 pass
 

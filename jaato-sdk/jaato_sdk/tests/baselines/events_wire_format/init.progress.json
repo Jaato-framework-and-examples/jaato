@@ -1,0 +1,9 @@
+{
+  "type": "init.progress",
+  "timestamp": "<TIMESTAMP>",
+  "step": "",
+  "status": "running",
+  "message": "",
+  "step_number": 0,
+  "total_steps": 0
+}

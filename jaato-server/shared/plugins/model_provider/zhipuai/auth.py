@@ -15,13 +15,17 @@ Storage follows jaato convention:
 """
 
 import json
+import logging
 import os
+from shared.session_context import get_workspace_root, get_config_root
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Optional, Tuple
 
 from .env import DEFAULT_ZHIPUAI_BASE_URL
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -49,26 +53,43 @@ class ZhipuAICredentials:
         )
 
 
-def _get_token_storage_path(for_write: bool = False, workspace_path: Optional[str] = None) -> Path:
+def _get_token_storage_path(
+    for_write: bool = False,
+    workspace_path: Optional[str] = None,
+    config_root: Optional[str] = None,
+) -> Path:
     """Get path to credentials storage file.
 
     Follows jaato convention:
-    1. Project .jaato/ first (project-specific auth)
-    2. Home ~/.jaato/ second (user-level default)
+    1. Project tier — ``<config_root>/zhipuai_auth.json`` when
+       ``config_root`` is set, else
+       ``<workspace>/.jaato/zhipuai_auth.json``.  Project-specific auth.
+    2. Home tier — ``~/.jaato/zhipuai_auth.json``.  User-level default.
 
     Uses JAATO_WORKSPACE_ROOT env var if set (for subagents), otherwise Path.cwd().
+    Uses JAATO_CONFIG_ROOT env var as a fallback for ``config_root``,
+    so subagents and long-lived plugins inherit the override that
+    ``JaatoServer`` exported on session activation.
 
     Args:
         for_write: If True, returns the path to write to (prefers project dir
                    if it exists, otherwise home). If False, returns the first
                    existing file or the default write location.
+        workspace_path: Optional explicit workspace path override.
+        config_root: Optional explicit read-only-config root override.
+            When set, replaces the workspace-anchored project tier.
+            See :mod:`shared.config_resolver`.
 
     Returns:
         Path to credentials storage file.
     """
     # Use explicit workspace path if set (thread-safe for subagents)
-    workspace = workspace_path or os.environ.get("JAATO_WORKSPACE_ROOT") or os.getcwd()
-    project_path = Path(workspace) / ".jaato" / "zhipuai_auth.json"
+    workspace = workspace_path or get_workspace_root() or os.getcwd()
+    effective_config_root = config_root or get_config_root()
+    if effective_config_root:
+        project_path = Path(effective_config_root).expanduser().resolve() / "zhipuai_auth.json"
+    else:
+        project_path = Path(workspace) / ".jaato" / "zhipuai_auth.json"
     home_path = Path.home() / ".jaato" / "zhipuai_auth.json"
 
     if for_write:
@@ -96,41 +117,111 @@ def save_credentials(credentials: ZhipuAICredentials, workspace_path: Optional[s
         os.chmod(path, 0o600)
 
 
-def load_credentials(workspace_path: Optional[str] = None) -> Optional[ZhipuAICredentials]:
-    """Load credentials from persistent storage."""
-    path = _get_token_storage_path(workspace_path=workspace_path)
+def load_credentials(
+    workspace_path: Optional[str] = None,
+    config_root: Optional[str] = None,
+) -> Optional[ZhipuAICredentials]:
+    """Load credentials from persistent storage.
+
+    Returns None if the file is absent **or** if it cannot be parsed.  When
+    the file exists but fails to load (corrupt JSON, missing ``api_key``
+    field, permission error, etc.) the failure is logged at WARNING so it
+    is visible in the provider trace log instead of being silently
+    swallowed.  Callers that need to surface the specific failure reason
+    should use :func:`try_load_credentials_with_reason` instead.
+
+    See :func:`_get_token_storage_path` for the resolver chain;
+    ``config_root`` overrides the workspace tier when set.
+    """
+    creds, _ = try_load_credentials_with_reason(
+        workspace_path=workspace_path, config_root=config_root,
+    )
+    return creds
+
+
+def try_load_credentials_with_reason(
+    workspace_path: Optional[str] = None,
+    config_root: Optional[str] = None,
+) -> Tuple[Optional[ZhipuAICredentials], Optional[str]]:
+    """Load credentials and return a reason string when the load fails.
+
+    Unlike :func:`load_credentials`, this does not collapse errors to
+    ``None``.  It returns a ``(credentials, reason)`` tuple:
+
+    - ``(ZhipuAICredentials, None)`` — file loaded successfully.
+    - ``(None, None)`` — no credential file exists.
+    - ``(None, "<reason>")`` — file exists but could not be loaded.
+      ``reason`` is a short human-readable string such as
+      ``"invalid JSON at <path>: ..."`` or ``"missing 'api_key' field in <path>"``.
+
+    This helper lets ``verify_auth`` and the status command distinguish
+    "not configured" from "configured but broken" and surface the actual
+    error instead of reporting "No credentials found".
+    """
+    path = _get_token_storage_path(
+        workspace_path=workspace_path, config_root=config_root,
+    )
 
     if not path.exists():
-        return None
+        return None, None
 
     try:
         with open(path) as f:
             data = json.load(f)
-        return ZhipuAICredentials.from_dict(data)
-    except Exception:
-        return None
+    except (OSError, PermissionError) as exc:
+        reason = f"cannot read {path}: {exc}"
+        logger.warning("Failed to read Zhipu AI credentials: %s", reason)
+        return None, reason
+    except json.JSONDecodeError as exc:
+        reason = f"invalid JSON at {path}: {exc.msg} (line {exc.lineno}, col {exc.colno})"
+        logger.warning("Failed to parse Zhipu AI credentials: %s", reason)
+        return None, reason
+
+    try:
+        return ZhipuAICredentials.from_dict(data), None
+    except (KeyError, TypeError) as exc:
+        reason = f"malformed credentials at {path}: missing or invalid field ({exc})"
+        logger.warning("Malformed Zhipu AI credentials: %s", reason)
+        return None, reason
+    except Exception as exc:  # defensive — don't mask unexpected failures
+        reason = f"unexpected error loading {path}: {exc.__class__.__name__}: {exc}"
+        logger.warning("Unexpected error loading Zhipu AI credentials: %s", reason)
+        return None, reason
 
 
-def clear_credentials(workspace_path: Optional[str] = None) -> None:
+def clear_credentials(
+    workspace_path: Optional[str] = None,
+    config_root: Optional[str] = None,
+) -> None:
     """Clear stored credentials."""
-    path = _get_token_storage_path(workspace_path=workspace_path)
+    path = _get_token_storage_path(
+        workspace_path=workspace_path, config_root=config_root,
+    )
     if path.exists():
         path.unlink()
 
 
-def get_stored_api_key(workspace_path: Optional[str] = None) -> Optional[str]:
+def get_stored_api_key(
+    workspace_path: Optional[str] = None,
+    config_root: Optional[str] = None,
+) -> Optional[str]:
     """Get stored API key if available.
 
     Returns:
         API key string, or None if not stored.
     """
-    creds = load_credentials(workspace_path=workspace_path)
+    creds = load_credentials(
+        workspace_path=workspace_path, config_root=config_root,
+    )
     if creds:
         return creds.api_key
     return None
 
 
-def get_credential_file_path(workspace_path: Optional[str] = None) -> Optional[str]:
+def get_credential_file_path(
+    workspace_path: Optional[str] = None,
+    config_root: Optional[str] = None,
+) -> Optional[str]:
     """Return the path of the credential file that would be loaded.
 
     Used by the provider to report which credential source was used
@@ -141,7 +232,9 @@ def get_credential_file_path(workspace_path: Optional[str] = None) -> Optional[s
         String path like ``"~/.jaato/zhipuai_auth.json"`` or
         ``".jaato/zhipuai_auth.json"``, or None.
     """
-    path = _get_token_storage_path(workspace_path=workspace_path)
+    path = _get_token_storage_path(
+        workspace_path=workspace_path, config_root=config_root,
+    )
     if not path.exists():
         return None
     home = Path.home()
@@ -150,13 +243,18 @@ def get_credential_file_path(workspace_path: Optional[str] = None) -> Optional[s
     return str(path)
 
 
-def get_stored_base_url() -> Optional[str]:
+def get_stored_base_url(
+    workspace_path: Optional[str] = None,
+    config_root: Optional[str] = None,
+) -> Optional[str]:
     """Get stored custom base URL if available.
 
     Returns:
         Base URL string, or None if not stored.
     """
-    creds = load_credentials()
+    creds = load_credentials(
+        workspace_path=workspace_path, config_root=config_root,
+    )
     if creds:
         return creds.base_url
     return None
@@ -179,6 +277,18 @@ def _create_validation_client():
     return get_httpx_client(**kwargs)
 
 
+def _extract_body_snippet(response, limit: int = 300) -> str:
+    """Return a short, safe snippet of a response body for error detail."""
+    try:
+        text = response.text or ""
+    except Exception:
+        return ""
+    text = text.strip().replace("\n", " ")
+    if len(text) > limit:
+        return text[:limit] + "…"
+    return text
+
+
 def validate_api_key(
     api_key: str,
     base_url: Optional[str] = None,
@@ -196,9 +306,28 @@ def validate_api_key(
             ``https://api.z.ai/api/anthropic``).
 
     Returns:
-        A ``(valid, error_detail)`` tuple.  ``valid`` is True when the key
-        is accepted.  ``error_detail`` is a human-readable hint when
-        ``valid`` is False (empty string on success).
+        A ``(valid, detail)`` tuple.  ``valid`` is True when the test
+        request authenticates successfully (2xx or a 400 "bad request"
+        that still went through auth).  ``detail`` carries a structured
+        hint so callers can report the real reason for failure or
+        partial success instead of silently treating provider errors as
+        "key accepted":
+
+        - ``""`` — key is valid (success path).
+        - ``"authentication_error: <HTTP status>: <body>"`` — key rejected
+          by the provider (401/403).
+        - ``"rate_limit: <HTTP status>: <body>"`` — quota or rate limit
+          exceeded (429).  **Key was not saved**; the provider refused the
+          request before authenticating.
+        - ``"payment_required: <HTTP status>: <body>"`` — billing/quota
+          exhausted (402).  Key was not saved.
+        - ``"server_error: <HTTP status>: <body>"`` — provider is
+          temporarily unavailable (5xx).  Caller should decide whether
+          to retry.
+        - ``"http_error: <HTTP status>: <body>"`` — any other unexpected
+          status the caller should surface verbatim.
+        - ``"network_error: <details>"`` — request never reached the
+          provider (connection refused, timeout, SSL handshake failure).
     """
     import httpx
 
@@ -220,16 +349,39 @@ def validate_api_key(
     try:
         client = _create_validation_client()
         response = client.post(test_url, headers=headers, json=body, timeout=30)
-        if response.status_code in (401, 403):
-            return (False, "authentication_error")
-        # Any other status (200, 400, etc.) means the key was accepted
-        return (True, "")
     except httpx.HTTPStatusError as e:
-        if e.response.status_code in (401, 403):
-            return (False, "authentication_error")
-        return (True, "")
+        # Rare for direct .post() (httpx does not raise_for_status
+        # automatically), but keep the branch for defensive parity.
+        status = getattr(e.response, "status_code", None)
+        snippet = _extract_body_snippet(e.response) if e.response is not None else ""
+        if status in (401, 403):
+            return (False, f"authentication_error: {status}: {snippet}")
+        if status == 429:
+            return (False, f"rate_limit: {status}: {snippet}")
+        if status == 402:
+            return (False, f"payment_required: {status}: {snippet}")
+        if status is not None and 500 <= status < 600:
+            return (False, f"server_error: {status}: {snippet}")
+        return (False, f"http_error: {status}: {snippet}")
     except Exception as e:
         return (False, f"network_error: {e}")
+
+    status = response.status_code
+    if 200 <= status < 300 or status == 400:
+        # 2xx succeeded outright; 400 means the request reached the model
+        # after auth (e.g. "model not found" for the test payload), so
+        # the key itself is accepted.
+        return (True, "")
+    snippet = _extract_body_snippet(response)
+    if status in (401, 403):
+        return (False, f"authentication_error: {status}: {snippet}")
+    if status == 429:
+        return (False, f"rate_limit: {status}: {snippet}")
+    if status == 402:
+        return (False, f"payment_required: {status}: {snippet}")
+    if 500 <= status < 600:
+        return (False, f"server_error: {status}: {snippet}")
+    return (False, f"http_error: {status}: {snippet}")
 
 
 def login_interactive(

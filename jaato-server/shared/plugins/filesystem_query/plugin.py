@@ -13,6 +13,7 @@ Both tools return structured JSON output and support:
 import asyncio
 import logging
 import os
+from shared.session_context import get_workspace_root, get_config_root
 import re
 import stat
 from datetime import datetime
@@ -22,9 +23,14 @@ from typing import Any, AsyncIterator, Callable, Dict, List, Optional
 
 from ..background.mixin import BackgroundCapableMixin
 from jaato_sdk.plugins.base import UserCommand
-from jaato_sdk.plugins.model_provider.types import ToolSchema, TRAIT_REPLAY_SAFE
+from jaato_sdk.plugins.model_provider.types import (
+    ToolSchema,
+    TRAIT_REPLAY_SAFE,
+    DISCOVERABILITY_DEFERRED,
+)
 from ..sandbox_utils import check_path_with_jaato_containment, detect_jaato_symlink
 from shared.path_utils import msys2_to_windows_path, normalize_result_path
+from shared.plugins.runner_forwarding import RunnerForwardingMixin
 from shared.utils.gitignore import GitignoreParser
 from ..streaming.protocol import StreamingCapable, StreamChunk, ChunkCallback
 from .config_loader import (
@@ -65,7 +71,7 @@ def _detect_workspace_root() -> Optional[str]:
     Returns:
         Absolute path to workspace root, or None if not configured.
     """
-    workspace = os.environ.get('JAATO_WORKSPACE_ROOT')
+    workspace = get_workspace_root()
     if workspace:
         return os.path.realpath(os.path.abspath(workspace))
     workspace = os.environ.get('workspaceRoot')
@@ -74,7 +80,7 @@ def _detect_workspace_root() -> Optional[str]:
     return None
 
 
-class FilesystemQueryPlugin(BackgroundCapableMixin, StreamingCapable):
+class FilesystemQueryPlugin(BackgroundCapableMixin, StreamingCapable, RunnerForwardingMixin):
     """Plugin providing filesystem query tools (glob and grep).
 
     This plugin offers read-only, auto-approved tools for exploring codebases:
@@ -157,6 +163,20 @@ class FilesystemQueryPlugin(BackgroundCapableMixin, StreamingCapable):
         self._allow_tmp = True
         self._plugin_registry = None
         logger.info("FilesystemQueryPlugin shutdown")
+
+    def reset_for_next_session(self) -> None:
+        """Cascade-sharing reset — NO-OP for this plugin.
+
+        Phase 1 hotfix (server 0.6.148+): added to satisfy the
+        ``ToolPlugin`` / ``EnrichmentPlugin`` protocol's runtime
+        ``isinstance`` check.  Per Daniel's litmus test (see
+        ``docs/design/runner-cascade-sharing.md`` §4.3), this
+        plugin holds no per-session state that the next cascade
+        session would benefit from having cleared.  Override in
+        future PRs if the litmus test changes.
+        """
+        pass
+
 
     def get_config_schema(self) -> Dict[str, Any]:
         """Return JSON Schema for this plugin's configuration."""
@@ -347,7 +367,7 @@ class FilesystemQueryPlugin(BackgroundCapableMixin, StreamingCapable):
                     "required": ["pattern"],
                 },
                 category="search",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
                 traits=frozenset({TRAIT_REPLAY_SAFE}),
             ),
             ToolSchema(
@@ -409,17 +429,21 @@ class FilesystemQueryPlugin(BackgroundCapableMixin, StreamingCapable):
                     "required": ["pattern"],
                 },
                 category="search",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
                 traits=frozenset({TRAIT_REPLAY_SAFE}),
             ),
         ]
 
     def get_executors(self) -> Dict[str, Callable[[Dict[str, Any]], Any]]:
-        """Return the executor functions for each tool."""
-        return {
+        """Return the executor functions for each tool.
+
+        Phase 3 §3.4 wave 1: forwards via runner-RPC when a runner
+        is attached; falls through to in-process otherwise.
+        """
+        return self.wrap_executors_for_runner_forwarding({
             "glob_files": self._execute_glob_files,
             "grep_content": self._execute_grep_content,
-        }
+        })
 
     def get_auto_approved_tools(self) -> List[str]:
         """Return tools that don't require permission (read-only operations)."""

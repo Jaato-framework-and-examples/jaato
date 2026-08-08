@@ -22,6 +22,7 @@ from .plugin import SandboxManagerPlugin, SandboxPath, SandboxConfig, create_plu
 # Plugin kind identifier for registry discovery
 PLUGIN_KIND = "tool"
 
+PLUGIN_TIER = "runner"
 __all__ = [
     'SandboxManagerPlugin',
     'SandboxPath',

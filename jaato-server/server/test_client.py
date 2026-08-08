@@ -18,6 +18,7 @@ Usage:
 import argparse
 import asyncio
 import json
+import os
 import sys
 from datetime import datetime, timezone
 from typing import Optional
@@ -231,6 +232,7 @@ async def run_client(
     port: int,
     message: Optional[str] = None,
     interactive: bool = True,
+    token: Optional[str] = None,
 ) -> None:
     """Run the test client.
 
@@ -239,12 +241,20 @@ async def run_client(
         port: Server port.
         message: Optional single message to send (non-interactive).
         interactive: Whether to run in interactive mode.
+        token: Bearer token for WS auth, sent as ``Authorization: Bearer
+            <token>``. Required when the server enforces auth.
     """
     uri = f"ws://{host}:{port}"
     print(colorize(f"Connecting to {uri}...", Colors.DIM))
 
+    connect_kwargs: dict = {}
+    if token:
+        connect_kwargs["additional_headers"] = {
+            "Authorization": f"Bearer {token}",
+        }
+
     try:
-        async with websockets.connect(uri) as websocket:
+        async with websockets.connect(uri, **connect_kwargs) as websocket:
             if message:
                 # Single message mode
                 request = {
@@ -323,7 +333,27 @@ def main():
         action="store_true",
         help="Monitor mode - only receive events, don't send"
     )
+    parser.add_argument(
+        "--token",
+        type=str,
+        default=None,
+        help="Bearer token for WS auth (sent as 'Authorization: Bearer'). "
+             "Falls back to $JAATO_WS_TOKEN, then to ~/.jaato/ws.token "
+             "(the daemon's default token file)."
+    )
     args = parser.parse_args()
+
+    # Resolve token: explicit flag > env > well-known file.
+    if args.token is None:
+        args.token = os.environ.get("JAATO_WS_TOKEN")  # env: bearer token for WS auth (falls back to ~/.jaato/ws.token, the daemon's default token file)
+    if args.token is None:
+        from pathlib import Path
+        default_path = Path.home() / ".jaato" / "ws.token"
+        if default_path.exists():
+            try:
+                args.token = default_path.read_text().splitlines()[0].strip() or None
+            except OSError:
+                pass
 
     try:
         asyncio.run(run_client(
@@ -331,6 +361,7 @@ def main():
             port=args.port,
             message=args.message,
             interactive=not args.monitor and not args.message,
+            token=args.token,
         ))
     except KeyboardInterrupt:
         print(colorize("\nGoodbye!", Colors.DIM))

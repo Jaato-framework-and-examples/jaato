@@ -7,6 +7,7 @@ execution with support for:
 - Output callbacks for real-time feedback
 """
 
+import contextlib
 import json
 import logging
 import os
@@ -15,7 +16,8 @@ import threading
 import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
-from typing import Any, Callable, Dict, Optional, Tuple, TYPE_CHECKING
+from shared.safe_pool import SafeThreadPoolExecutor
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple, TYPE_CHECKING
 
 logger = logging.getLogger(__name__)
 
@@ -56,11 +58,83 @@ def get_current_cancel_token():
     """
     return getattr(_thread_local, 'cancel_token', None)
 
+
+def in_trusted_bridge_context() -> bool:
+    """Whether the current thread is executing inside a trusted tool bridge.
+
+    A "trusted bridge" is a plugin-provided interpreter (today only the
+    notebook plugin's Python tool bindings) whose **outer** invocation was
+    already permission-approved by the user.  When the flag is set, tool
+    calls made through the bridge inherit that approval — permission
+    prompts for individual inner calls would be redundant because the user
+    already saw and approved the full code (including all ``tools.X(...)``
+    calls) when they approved the outer tool.
+
+    Plugins enter the trusted context via
+    :func:`push_trusted_bridge_context` before dispatching inner tool calls
+    and exit via :func:`pop_trusted_bridge_context` after the outer call
+    returns.  The context manager
+    :func:`trusted_bridge_context` wraps both in a ``with`` block.
+
+    Consumers (currently the permission plugin) call this from
+    ``check_permission`` to short-circuit the approval check with an
+    ALLOW decision when inside a trusted context.
+
+    Returns:
+        True if the current thread is inside a trusted bridge scope,
+        False otherwise.
+    """
+    return bool(getattr(_thread_local, 'trusted_bridge_depth', 0))
+
+
+def push_trusted_bridge_context() -> None:
+    """Enter a trusted bridge scope on the current thread.
+
+    Increments a per-thread depth counter so that nested entries (e.g. a
+    bridge cell that itself uses another bridge) are correctly balanced.
+    Callers MUST pair every ``push`` with a ``pop`` — prefer
+    :func:`trusted_bridge_context` to guarantee cleanup on exceptions.
+    """
+    current = getattr(_thread_local, 'trusted_bridge_depth', 0)
+    _thread_local.trusted_bridge_depth = current + 1
+
+
+def pop_trusted_bridge_context() -> None:
+    """Exit a trusted bridge scope on the current thread.
+
+    Decrements the per-thread depth counter.  Underflow is silently
+    clamped to zero — callers that ``pop`` without a matching ``push``
+    indicate a bug but we prefer defensive clamping over exception noise
+    in exit paths.
+    """
+    current = getattr(_thread_local, 'trusted_bridge_depth', 0)
+    _thread_local.trusted_bridge_depth = max(0, current - 1)
+
+
+@contextlib.contextmanager
+def trusted_bridge_context():
+    """Context manager form of push/pop for safe nested use.
+
+    Example::
+
+        with trusted_bridge_context():
+            # Tool calls dispatched here skip permission prompts.
+            result = backend.execute(cell_code)
+
+    The scope is thread-local; other threads are unaffected.
+    """
+    push_trusted_bridge_context()
+    try:
+        yield
+    finally:
+        pop_trusted_bridge_context()
+
 if TYPE_CHECKING:
     from shared.plugins.registry import PluginRegistry
     from shared.plugins.permission import PermissionPlugin
     from shared.plugins.background.protocol import BackgroundCapable
     from shared.plugins.reliability import ReliabilityPlugin
+    from shared.runtime_limits import RuntimeLimits
 
 
 class ToolExecutor:
@@ -118,6 +192,144 @@ class ToolExecutor:
         # Set via set_apparmor_context() from the server layer.
         self._apparmor_context: Optional[Callable] = None
 
+        # Per-session runtime limits surfaced to subprocess-launching
+        # plugins (cli, interactive_shell).  Set via the server layer
+        # in the same hook that installs ``_apparmor_context``.
+        #
+        # ``_cgroup_attach`` is a zero-argument callable suitable for
+        # ``subprocess.Popen(preexec_fn=...)``: it writes the forked
+        # child's PID to the session's cgroup ``cgroup.procs`` between
+        # fork() and exec(), so the new program comes up already inside
+        # the cgroup with the kernel-enforced limits in effect.
+        #
+        # ``_runtime_limits`` carries the *application-layer* caps
+        # (``tool_timeout_seconds``, ``max_output_bytes``) that have no
+        # cgroup equivalent — plugins read them via ``get_runtime_limits()``
+        # and apply them at the Python layer.  Both fields stay ``None``
+        # when no profile-level runtime_limits is configured, leaving
+        # the host's defaults in effect.
+        self._cgroup_attach: Optional[Callable[[], None]] = None
+        self._runtime_limits: Optional['RuntimeLimits'] = None
+
+        # Phase 5 §5.10c: AppArmor child-profile transition callback
+        # for subprocess-spawning plugins (cli, interactive_shell).
+        # Zero-arg callable suitable for ``Popen(preexec_fn=...)`` that
+        # writes ``changeprofile {profile}//child`` to
+        # /proc/self/attr/current between fork() and exec(), so the
+        # forked child enters the per-session ``//child`` sub-profile
+        # before the new program starts.  ``//child`` drops the three
+        # escape-vector rules the parent keeps for
+        # ``apparmor_confine.__exit__`` — closes the verified escape at
+        # apparmor.py:413-449.  ``None`` when the runner isn't confined
+        # (e.g. JAATO_RUNNER_DISABLE_CONFINE=1, or daemon-side legacy
+        # paths that never installed a session profile).
+        #
+        # Forwarded to plugins through the same channel as
+        # ``_cgroup_attach`` (plugins that implement
+        # ``set_apparmor_child_transition_callback`` get the callable;
+        # the rest stay unchanged).  See
+        # docs/design/phase5_5_10_apparmor_child_subprofile_audit.md.
+        self._apparmor_child_transition: Optional[Callable[[], None]] = None
+
+        # Zero-arg event-snapshot callable for cgroup.events (oom_kill,
+        # populated, ...).  Used by ``execute()`` to take before/after
+        # snapshots around each tool call and inject deltas into the
+        # result's ``_telemetry`` dict, where the session's tool span
+        # auto-forwards them as OTel attributes.  Returns ``None`` when
+        # cgroups are unavailable, so the wrapper is safe to invoke
+        # unconditionally.
+        self._cgroup_event_reader: Optional[Callable[[], Optional[Dict[str, int]]]] = None
+
+        # Plug-in transformer chains for the tool-dispatch boundary
+        # (seat 2 of the four-seat pseudonymization design — see
+        # docs/design/daemon-extensions.md and
+        # project_backlog_pseudonymization_plugin_surface.md).
+        # Each list entry is registered via ``register_*_transformer``;
+        # ``execute()`` runs the args chain before ``_execute_impl`` and
+        # the result chain on the returned value.  Empty lists = no-op
+        # (full backwards-compat).  Per-transformer ``trusted_tools``
+        # set lets a registration skip specific tool names so the
+        # transformer applies only to *untrusted* tools.
+        self._args_transformers: List[
+            Tuple[Callable[[str, Dict[str, Any]], Dict[str, Any]],
+                  Optional[Set[str]]]
+        ] = []
+        self._result_transformers: List[Callable[[str, Any], Any]] = []
+
+
+    def register_args_transformer(
+        self,
+        fn: Callable[[str, Dict[str, Any]], Dict[str, Any]],
+        *,
+        trusted_tools: Optional[Set[str]] = None,
+    ) -> None:
+        """Register a transformer for tool args before ``_execute_impl``.
+
+        Plug-in surface for redaction / content-filter / audit consumers
+        that need to inspect or mutate args before the tool runs.
+        Multiple transformers stack — registered in order, applied as
+        a chain.
+
+        Args:
+            fn: Callable receiving ``(tool_name, args)`` and returning
+                the args dict to actually pass to the tool.  Must
+                always return a dict (returning ``None`` would silently
+                strip args).
+            trusted_tools: Optional set of tool names this transformer
+                should NOT touch — when provided, ``fn`` is invoked
+                only for tools whose name is **not** in the set.  Use
+                this to give a redaction transformer an allowlist of
+                tools that legitimately need raw values (e.g. a tool
+                that sends an email needs the real address, not a
+                placeholder).  Default ``None`` = transformer applies
+                to every tool.
+        """
+        self._args_transformers.append((fn, trusted_tools))
+
+    def register_result_transformer(
+        self, fn: Callable[[str, Any], Any]
+    ) -> None:
+        """Register a transformer for tool results before they return.
+
+        Plug-in surface for re-redacting tool outputs (e.g. a tool
+        returns a database query result that contains PII; the
+        transformer pseudonymizes those values before the result is
+        appended to history).  Multiple transformers stack — registered
+        in order, applied as a chain.
+
+        Args:
+            fn: Callable receiving ``(tool_name, result)`` and returning
+                the value to actually surface.  ``result`` is whatever
+                the tool's executor returned (typically dict or str).
+                Must return a value of the same shape; returning
+                ``None`` would silently drop the result.
+        """
+        self._result_transformers.append(fn)
+
+    def _apply_args_transformers(
+        self, name: str, args: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Run the args transformer chain in registration order.
+
+        Each transformer's ``trusted_tools`` set determines whether it
+        runs for this tool name.  Result of one transformer feeds the
+        next.  Empty chain returns args unchanged (cheap fast path).
+        """
+        if not self._args_transformers:
+            return args
+        for fn, trusted in self._args_transformers:
+            if trusted is not None and name in trusted:
+                continue
+            args = fn(name, args)
+        return args
+
+    def _apply_result_transformers(self, name: str, result: Any) -> Any:
+        """Run the result transformer chain in registration order."""
+        if not self._result_transformers:
+            return result
+        for fn in self._result_transformers:
+            result = fn(name, result)
+        return result
 
     def register(self, name: str, fn: Callable[[Dict[str, Any]], Any]) -> None:
         self._map[name] = fn
@@ -188,6 +400,129 @@ class ToolExecutor:
                 manager, or ``None`` to disable confinement.
         """
         self._apparmor_context = context_factory
+
+    def set_runtime_limits(
+        self,
+        attach_callback: Optional[Callable[[], None]],
+        limits: Optional['RuntimeLimits'],
+        event_reader: Optional[Callable[[], Optional[Dict[str, int]]]] = None,
+    ) -> None:
+        """Install per-session cgroup attach + app-layer limits + event reader.
+
+        Called by the server layer after the cgroup has been provisioned
+        (or, for sessions without kernel limits, with ``attach_callback``
+        set to a no-op).  Subprocess-launching plugins read attach +
+        limits via :meth:`get_cgroup_attach` and :meth:`get_runtime_limits`,
+        OR via the forwarded ``set_runtime_limits`` method on the plugin
+        if it implements one — same pattern as ``set_tool_output_callback``.
+
+        The ``event_reader`` is consumed *here* in :meth:`execute` rather
+        than forwarded to plugins: snapshotting before/after each tool
+        call and injecting deltas into the result's ``_telemetry`` dict
+        means the existing OTel forwarder picks up
+        ``jaato.cgroup.oom_kill_delta`` etc. without any plugin needing
+        to know about cgroup telemetry.
+
+        Args:
+            attach_callback: Zero-argument callable suitable for use as
+                ``Popen(preexec_fn=...)``.  Migrates the forked child
+                into the session's cgroup before ``exec``.  ``None``
+                means no attach (host defaults).
+            limits: :class:`RuntimeLimits` carrying the app-layer caps
+                (``tool_timeout_seconds``, ``max_output_bytes``).  May
+                be ``None`` when no profile-level runtime_limits is set.
+            event_reader: Zero-arg callable returning the current
+                ``cgroup.events`` snapshot dict, or ``None`` when no
+                cgroup is available.  Used by :meth:`execute` to compute
+                per-tool deltas.
+        """
+        self._cgroup_attach = attach_callback
+        self._runtime_limits = limits
+        self._cgroup_event_reader = event_reader
+
+        # Forward attach + limits to exposed plugins that support it.
+        # event_reader is intentionally NOT forwarded — it's owned by
+        # the executor's wrapper, not by individual plugins.
+        if self._registry:
+            for plugin_name in self._registry.list_exposed():
+                plugin = self._registry.get_plugin(plugin_name)
+                if plugin and hasattr(plugin, 'set_runtime_limits'):
+                    plugin.set_runtime_limits(attach_callback, limits)
+
+    def set_apparmor_child_transition_callback(
+        self,
+        callback: Optional[Callable[[], None]],
+    ) -> None:
+        """Install the AppArmor child-profile transition callback
+        (Phase 5 §5.10c).
+
+        Called once at runner-side bootstrap with a zero-arg callable
+        built by
+        :func:`server.apparmor.make_child_transition_callback`.  The
+        callable writes ``changeprofile <session>//child`` to
+        /proc/self/attr/current, suitable for use as
+        ``Popen(preexec_fn=...)`` — runs between fork() and exec()
+        so the forked child enters the per-session ``//child``
+        sub-profile before the new program starts.
+
+        Forwarded to plugins that implement
+        ``set_apparmor_child_transition_callback`` (cli,
+        interactive_shell) via the same mechanism as
+        :meth:`set_runtime_limits`'s forwarding loop.  Plugins that
+        don't implement the method (file_edit, todo, etc.) stay
+        unaffected — only subprocess-spawning plugins care.
+
+        Args:
+            callback: Zero-arg ``preexec_fn``-style callable, or
+                ``None`` when the runner isn't AppArmor-confined
+                (e.g., JAATO_RUNNER_DISABLE_CONFINE=1 or a daemon-
+                side legacy path).  ``None`` is forwarded too — a
+                plugin that previously had a callback installed
+                gets it cleared.
+        """
+        self._apparmor_child_transition = callback
+
+        if self._registry:
+            for plugin_name in self._registry.list_exposed():
+                plugin = self._registry.get_plugin(plugin_name)
+                if plugin and hasattr(
+                    plugin, "set_apparmor_child_transition_callback",
+                ):
+                    plugin.set_apparmor_child_transition_callback(callback)
+
+    def get_apparmor_child_transition_callback(
+        self,
+    ) -> Optional[Callable[[], None]]:
+        """Return the AppArmor child-profile transition callback, or
+        ``None`` if not set.
+
+        Companion of :meth:`get_cgroup_attach`.  Subprocess-launching
+        plugins compose this with the cgroup attach in their
+        ``preexec_fn`` — AppArmor transition first, then cgroup
+        attach, then exec (the new profile must apply during the
+        cgroup write).
+        """
+        return self._apparmor_child_transition
+
+    def get_cgroup_attach(self) -> Optional[Callable[[], None]]:
+        """Return the cgroup-attach callable, or ``None`` if not set.
+
+        Subprocess-launching plugins pass the result as
+        ``Popen(preexec_fn=...)``; passing ``None`` is identical to not
+        attaching, which is the correct behaviour when the session has
+        no kernel-enforced limits.
+        """
+        return self._cgroup_attach
+
+    def get_runtime_limits(self) -> Optional['RuntimeLimits']:
+        """Return the per-session :class:`RuntimeLimits`, or ``None``.
+
+        Plugins consult this to read app-layer caps such as
+        ``tool_timeout_seconds`` and ``max_output_bytes``; the kernel
+        portion has already been written to the cgroup at provision
+        time and need not be re-read here.
+        """
+        return self._runtime_limits
 
     def set_output_callback(self, callback: Optional[OutputCallback]) -> None:
         """Set the output callback for real-time plugin output.
@@ -270,9 +605,16 @@ class ToolExecutor:
         return self._tool_output_callback
 
     def _get_auto_background_pool(self) -> ThreadPoolExecutor:
-        """Get or create the thread pool for auto-background execution."""
+        """Get or create the thread pool for auto-background execution.
+
+        Server 0.6.47+: uses :class:`SafeThreadPoolExecutor` so every
+        submitted task starts with the registered AppArmor pre-task
+        hook (defensive ``changeprofile unconfined``).  Closes the
+        residual gap where workers stuck in a prior session's profile
+        would EACCES on non-tool work scheduled here.
+        """
         if self._auto_background_pool is None:
-            self._auto_background_pool = ThreadPoolExecutor(
+            self._auto_background_pool = SafeThreadPoolExecutor(
                 max_workers=self._auto_background_pool_size
             )
         return self._auto_background_pool
@@ -325,7 +667,7 @@ class ToolExecutor:
             if name in self._registry.get_core_executors():
                 return True
         # Generic executor fallback
-        if os.environ.get('AI_EXECUTE_TOOLS', '').lower() in ('1', 'true', 'yes'):
+        if os.environ.get('AI_EXECUTE_TOOLS', '').lower() in ('1', 'true', 'yes'):  # env: treat unregistered tools as executable via the generic executor fallback
             return True
         return False
 
@@ -513,7 +855,7 @@ class ToolExecutor:
         """
         debug = False
         try:
-            debug = os.environ.get('AI_TOOL_RUNNER_DEBUG', '').lower() in ('1', 'true', 'yes')
+            debug = os.environ.get('AI_TOOL_RUNNER_DEBUG', '').lower() in ('1', 'true', 'yes')  # env: verbose tool-executor debug logging
         except Exception as exc:
             logger.debug(f"Error checking debug env var: {exc}")
             debug = False
@@ -526,13 +868,77 @@ class ToolExecutor:
         if cancel_token is not None:
             _thread_local.cancel_token = cancel_token
 
+        # Snapshot cgroup.events so we can attribute kernel-killed
+        # exits to *this* tool call.  No-op when cgroups are unavailable
+        # — the no-op reader returns None and the post-call comparison
+        # short-circuits.
+        before_events: Optional[Dict[str, int]] = None
+        if self._cgroup_event_reader is not None:
+            before_events = self._cgroup_event_reader()
+
+        # Apply args transformer chain (seat 2 of pseudonymization
+        # design).  Untrusted tools see redacted args; trusted tools
+        # (per each transformer's trusted_tools set) see raw args.  No
+        # transformers registered = identity, no overhead.
+        args = self._apply_args_transformers(name, args)
+
         try:
-            return self._execute_impl(name, args, debug, call_id)
+            success, result = self._execute_impl(name, args, debug, call_id)
         finally:
             if tool_output_callback is not None:
                 _thread_local.tool_output_callback = None
             if cancel_token is not None:
                 _thread_local.cancel_token = None
+
+        # Apply result transformer chain — re-redact (or otherwise
+        # transform) what the tool returned before it reaches the
+        # session's history-append path or its caller.
+        result = self._apply_result_transformers(name, result)
+
+        # Compute event-counter deltas and inject into result's
+        # ``_telemetry`` dict.  The session's tool span already
+        # auto-forwards every key in ``_telemetry`` as an OTel
+        # attribute (jaato_session.py:4914), so adding the deltas here
+        # is the only step needed to surface them as
+        # ``jaato.cgroup.oom_kill_delta`` etc. on the span.
+        if before_events is not None and self._cgroup_event_reader is not None:
+            after_events = self._cgroup_event_reader()
+            if after_events is not None and isinstance(result, dict):
+                self._inject_cgroup_deltas(result, before_events, after_events)
+
+        return success, result
+
+    @staticmethod
+    def _inject_cgroup_deltas(
+        result: Dict[str, Any],
+        before: Dict[str, int],
+        after: Dict[str, int],
+    ) -> None:
+        """Add cgroup.events deltas to a tool result's ``_telemetry`` dict.
+
+        Only deltas > 0 are emitted — the common case (no kernel events
+        during the tool call) produces no extra attributes, keeping
+        spans clean.  ``populated`` is monotonic only in transitions
+        and isn't useful as a delta, so it's skipped.
+
+        Attribution caveat: when multiple tool calls run concurrently
+        in the same per-session cgroup, an OOM in tool A also shows up
+        as a non-zero delta on a parallel tool B that happened to
+        straddle the event.  The heuristic is good enough for
+        telemetry — operators correlating spans with dmesg can
+        disambiguate when needed.
+        """
+        # Skip 'populated' — it's a level, not a counter; deltas are
+        # noisy and uninteresting (the cgroup is "populated" while
+        # any process exists in it).
+        for key in ("oom", "oom_kill"):
+            before_val = before.get(key, 0)
+            after_val = after.get(key, 0)
+            delta = after_val - before_val
+            if delta > 0:
+                telem = result.setdefault("_telemetry", {})
+                if isinstance(telem, dict):
+                    telem[f"jaato.cgroup.{key}_delta"] = delta
 
     def _execute_impl(
         self,

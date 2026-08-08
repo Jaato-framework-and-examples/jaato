@@ -122,6 +122,20 @@ class BudgetGCPlugin:
         self._config = {}
         self._initialized = False
 
+    def reset_for_next_session(self) -> None:
+        """Cascade-sharing reset — NO-OP for this plugin.
+
+        Phase 1 hotfix (server 0.6.148+): added to satisfy the
+        ``ToolPlugin`` / ``EnrichmentPlugin`` protocol's runtime
+        ``isinstance`` check.  Per Daniel's litmus test (see
+        ``docs/design/runner-cascade-sharing.md`` §4.3), this
+        plugin holds no per-session state that the next cascade
+        session would benefit from having cleared.  Override in
+        future PRs if the litmus test changes.
+        """
+        pass
+
+
     def get_config_schema(self) -> Dict[str, Any]:
         """Return JSON Schema for this plugin's configuration."""
         return {
@@ -726,27 +740,93 @@ class BudgetGCPlugin:
     ) -> List[Message]:
         """Remove messages from history based on removal list.
 
-        Uses message IDs for precise removal.
+        Distinguishes between two removal classes:
+
+        * **Direct removal** — items whose ``reason`` is anything OTHER than
+          ``"tool_call_pair"`` (ephemeral / preservable_under_pressure /
+          partial_turn / etc.).  The message is dropped entirely.
+        * **Orphan-pair removal** — items whose ``reason`` is
+          ``"tool_call_pair"``, added by ``_expand_removal_pairs`` to
+          maintain valid tool_use/tool_result pairing when the SIBLING
+          message is being removed directly.  Here we strip the
+          ``function_call`` parts (which is what the pairing constraint
+          actually requires) but PRESERVE the text parts (narration the
+          agent emitted alongside the tool call).
+
+        Why this matters: persona patterns that instruct agents to
+        "narrate what you extracted after each read so subsequent turns
+        retain the gist if GC trims the raw tool result" depend on
+        the narration surviving GC.  Without this surgical removal the
+        narration was bundled into the same model message as the
+        tool_call, so it got evicted whenever the paired tool_result
+        was trimmed for context budget.  The downstream serializer
+        (``message_to_openai`` and equivalents) handles model
+        messages with only text parts cleanly — emits
+        ``{"role": "assistant", "content": "..."}`` without
+        ``tool_calls``.  Verified across all OpenAI-format providers
+        (vllm, openrouter, nim, lmstudio, zhipuai, tensorrt_llm,
+        github_models).
 
         Args:
             history: Current conversation history.
             removal_list: Items to remove.
 
         Returns:
-            New history with removed messages filtered out.
+            New history with removed messages filtered out and
+            orphan-paired messages stripped to their text parts.
         """
-        # Collect all message IDs to remove
-        ids_to_remove: set = set()
+        # Partition removal IDs by reason: direct-drop vs pair-strip.
+        directly_removed_ids: set = set()
+        orphan_paired_ids: set = set()
         for item in removal_list:
-            if item.message_ids:
-                ids_to_remove.update(item.message_ids)
+            if not item.message_ids:
+                continue
+            if item.reason == "tool_call_pair":
+                orphan_paired_ids.update(item.message_ids)
+            else:
+                directly_removed_ids.update(item.message_ids)
 
-        if not ids_to_remove:
-            # No message IDs to remove, fall back to keeping all
+        if not directly_removed_ids and not orphan_paired_ids:
             return history
 
-        # Filter history
-        return [msg for msg in history if msg.message_id not in ids_to_remove]
+        result: List[Message] = []
+        for msg in history:
+            mid = msg.message_id
+            # Direct removal wins on overlap (ephemeral/partial/preservable
+            # trumps the orphan-pair preserve-text path).
+            if mid in directly_removed_ids:
+                continue
+            if mid in orphan_paired_ids:
+                # Strip function_call AND function_response parts; keep
+                # text parts (narration).  function_response shouldn't
+                # appear on the same message as function_call (different
+                # roles), but the predicate covers it defensively.
+                text_parts = [
+                    p for p in msg.parts
+                    if p.text is not None
+                    and p.function_call is None
+                    and p.function_response is None
+                ]
+                if text_parts:
+                    stripped = Message(
+                        role=msg.role,
+                        parts=text_parts,
+                        message_id=msg.message_id,
+                    )
+                    result.append(stripped)
+                    self._trace(
+                        f"orphan-pair strip: kept {len(text_parts)} text "
+                        f"part(s) on message_id={mid} (function_calls dropped)"
+                    )
+                else:
+                    self._trace(
+                        f"orphan-pair strip: dropped message_id={mid} "
+                        f"(no text parts to retain)"
+                    )
+                continue
+            result.append(msg)
+
+        return result
 
     def _fallback_truncate(
         self,

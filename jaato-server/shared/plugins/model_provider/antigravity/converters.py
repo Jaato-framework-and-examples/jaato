@@ -26,6 +26,8 @@ from jaato_sdk.plugins.model_provider.types import (
     ToolSchema,
 )
 
+from shared.tool_id_map import id_to_name, name_to_id
+
 
 # ==================== Role Conversion ====================
 
@@ -55,7 +57,7 @@ def role_from_api(role: str) -> Role:
 def tool_schema_to_api(schema: ToolSchema) -> Dict[str, Any]:
     """Convert ToolSchema to API function declaration format."""
     return {
-        "name": schema.name,
+        "name": name_to_id(schema.name),
         "description": schema.description,
         "parameters": schema.parameters,
     }
@@ -85,17 +87,31 @@ def part_to_api(part: Part) -> Optional[Dict[str, Any]]:
         fc = part.function_call
         return {
             "functionCall": {
-                "name": fc.name,
+                "name": name_to_id(fc.name),
                 "args": fc.args,
             }
         }
 
     if part.function_response is not None:
         fr = part.function_response
-        response = fr.result if isinstance(fr.result, dict) else {"result": fr.result}
+        if fr.untrusted:
+            # Untrusted external content (web_fetch/web_search/MCP): wrap in the
+            # boundary so the model treats it as data, not instructions.
+            from jaato_sdk.plugins.model_provider.types import wrap_untrusted_content
+            _text = fr.result if isinstance(fr.result, str) else json.dumps(fr.result)
+            response = {"untrusted_external_content":
+                        wrap_untrusted_content(_text, fr.untrusted_source)}
+        else:
+            response = fr.result if isinstance(fr.result, dict) else {"result": fr.result}
+        # Dict-response provider: deliver the model-facing steering suffix as a
+        # reserved key so the model still sees it, while the structured result
+        # (and the ledger, which reads history not this converter output) stays
+        # clean.  See ToolResult.model_suffix.
+        if fr.model_suffix:
+            response = {**response, "_agent_guidance": fr.model_suffix}
         return {
             "functionResponse": {
-                "name": fr.name,
+                "name": name_to_id(fr.name),
                 "response": response,
             }
         }
@@ -130,7 +146,7 @@ def part_from_api(part_data: Dict[str, Any]) -> Part:
         call_id = str(uuid.uuid4())[:8]
         return Part(function_call=FunctionCall(
             id=call_id,
-            name=fc.get("name", ""),
+            name=id_to_name(fc.get("name", "")),
             args=fc.get("args", {}),
         ))
 
@@ -139,7 +155,7 @@ def part_from_api(part_data: Dict[str, Any]) -> Part:
         fr = part_data["functionResponse"]
         return Part(function_response=ToolResult(
             call_id="",
-            name=fr.get("name", ""),
+            name=id_to_name(fr.get("name", "")),
             result=fr.get("response", {}),
         ))
 
@@ -461,7 +477,7 @@ def extract_function_calls_from_stream_chunk(
             call_id = str(uuid.uuid4())[:8]
             calls.append(FunctionCall(
                 id=call_id,
-                name=fc.get("name", ""),
+                name=id_to_name(fc.get("name", "")),
                 args=fc.get("args", {}),
             ))
 
@@ -556,6 +572,7 @@ def build_generation_config(
     temperature: Optional[float] = None,
     top_p: Optional[float] = None,
     top_k: Optional[int] = None,
+    seed: Optional[int] = None,
     thinking_config: Optional[Dict[str, Any]] = None,
     response_schema: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
@@ -566,6 +583,7 @@ def build_generation_config(
         temperature: Sampling temperature.
         top_p: Top-p sampling parameter.
         top_k: Top-k sampling parameter.
+        seed: Deterministic-sampling seed.
         thinking_config: Thinking/reasoning configuration.
         response_schema: JSON schema for structured output.
 
@@ -585,6 +603,9 @@ def build_generation_config(
 
     if top_k is not None:
         config["topK"] = top_k
+
+    if seed is not None:
+        config["seed"] = seed
 
     if thinking_config is not None:
         config["thinkingConfig"] = thinking_config

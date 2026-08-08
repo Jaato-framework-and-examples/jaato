@@ -22,6 +22,7 @@ Usage:
 # Plugin kind identifier for registry discovery
 PLUGIN_KIND = "gc"
 
+PLUGIN_TIER = "daemon"
 from .plugin import SummarizeGCPlugin, create_plugin, DEFAULT_SUMMARIZE_PROMPT
 
 __all__ = ["SummarizeGCPlugin", "create_plugin", "DEFAULT_SUMMARIZE_PROMPT"]

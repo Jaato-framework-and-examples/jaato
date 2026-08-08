@@ -172,16 +172,37 @@ def deserialize_message(data: Dict[str, Any]) -> Message:
     )
 
 
-def serialize_history(history: List[Message]) -> List[Dict[str, Any]]:
+def serialize_history(history: List[Any]) -> List[Dict[str, Any]]:
     """Serialize a conversation history to a list of dictionaries.
 
+    Path E (cycle 6) idempotency contract: accepts either a list
+    of :class:`Message` objects (canonical input — the historical
+    contract) OR a list of already-serialized dicts (from the
+    runner-RPC ``session_get_history`` wire — produced by the
+    canonical ``serialize_message`` since Path E).  Dict elements
+    pass through unchanged; ``Message`` elements are serialized.
+    Mixed lists are tolerated.
+
+    Pre-Path-E this function crashed with ``'dict' object has no
+    attribute 'role'`` when given the wire dicts, breaking both
+    ``session_manager._save_session`` (via
+    ``serialize_session_state``) and the replay path (via
+    ``session_replay_messages_threadsafe``).  Idempotency closes
+    both crashes without requiring callers to pre-deserialize.
+
     Args:
-        history: List of Message objects.
+        history: List of Message objects OR already-serialized dicts.
 
     Returns:
         List of dictionary representations.
     """
-    return [serialize_message(m) for m in (history or [])]
+    result: List[Dict[str, Any]] = []
+    for m in (history or []):
+        if isinstance(m, dict):
+            result.append(m)
+        else:
+            result.append(serialize_message(m))
+    return result
 
 
 def deserialize_history(data: List[Dict[str, Any]]) -> List[Message]:
@@ -206,7 +227,7 @@ def serialize_session_state(state: SessionState) -> Dict[str, Any]:
         JSON-compatible dictionary.
     """
     return {
-        'version': '2.1',  # Bumped for budget_state and interrupted_turn
+        'version': '2.7',  # Bumped for profile_spec (inline-profile resume)
         'session_id': state.session_id,
         'description': state.description,
         'created_at': state.created_at.isoformat(),
@@ -215,15 +236,16 @@ def serialize_session_state(state: SessionState) -> Dict[str, Any]:
         'turn_accounting': state.turn_accounting,
         'user_inputs': state.user_inputs,
         'metadata': state.metadata,
-        'connection': {
-            'project': state.project,
-            'location': state.location,
-            'model': state.model,
-        },
+        'profile_name': state.profile_name,
+        'profile_spec': state.profile_spec,  # unresolved inline recipe (2.7+)
         'workspace_path': state.workspace_path,
+        'config_root': state.config_root,
+        'sandbox_mode': state.sandbox_mode,
+        'agent_name': state.agent_name,
         'history': serialize_history(state.history),
         'budget_state': state.budget_state,
         'interrupted_turn': state.interrupted_turn,
+        'session_state': state.session_state,
     }
 
 
@@ -240,11 +262,13 @@ def deserialize_session_state(data: Dict[str, Any]) -> SessionState:
         ValueError: If required fields are missing or version is incompatible.
     """
     version = data.get('version', '1.0')
-    # Support both 1.x (legacy) and 2.x (new Message type) versions
+    # Support 1.x (legacy) + 2.x (new Message type).  2.3+ retires
+    # the Google-coupled ``connection`` dict (project/location/model);
+    # legacy data carrying ``connection`` is tolerated but silently
+    # ignored — the profile (not state.model) is the post-multi-
+    # provider source of truth for model + provider binding.
     if not (version.startswith('1.') or version.startswith('2.')):
         raise ValueError(f"Unsupported session version: {version}")
-
-    connection = data.get('connection', {})
 
     return SessionState(
         session_id=data['session_id'],
@@ -256,12 +280,15 @@ def deserialize_session_state(data: Dict[str, Any]) -> SessionState:
         turn_accounting=data.get('turn_accounting', []),
         user_inputs=data.get('user_inputs', []),
         metadata=data.get('metadata', {}),
-        project=connection.get('project'),
-        location=connection.get('location'),
-        model=connection.get('model'),
+        profile_name=data.get('profile_name'),
+        profile_spec=data.get('profile_spec'),  # None on pre-2.7 records
         workspace_path=data.get('workspace_path'),
+        config_root=data.get('config_root'),
+        sandbox_mode=data.get('sandbox_mode'),
+        agent_name=data.get('agent_name'),
         budget_state=data.get('budget_state'),
         interrupted_turn=data.get('interrupted_turn'),
+        session_state=data.get('session_state'),
     )
 
 
@@ -282,7 +309,7 @@ def serialize_session_info(state: SessionState) -> Dict[str, Any]:
         'created_at': state.created_at.isoformat(),
         'updated_at': state.updated_at.isoformat(),
         'turn_count': state.turn_count,
-        'model': state.model,
+        'profile_name': state.profile_name,
         'workspace_path': state.workspace_path,
     }
 
@@ -302,6 +329,9 @@ def deserialize_session_info(data: Dict[str, Any]) -> SessionInfo:
         created_at=_naive(datetime.fromisoformat(data['created_at'])),
         updated_at=_naive(datetime.fromisoformat(data['updated_at'])),
         turn_count=data.get('turn_count', 0),
-        model=data.get('model'),
+        # Pre-2.3 sessions wrote 'model' instead of 'profile_name'.
+        # Old indexes deserialize with profile_name=None; consumers
+        # that need the model resolve via the profile registry.
+        profile_name=data.get('profile_name'),
         workspace_path=data.get('workspace_path'),
     )

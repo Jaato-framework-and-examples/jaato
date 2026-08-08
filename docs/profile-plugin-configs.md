@@ -90,10 +90,34 @@ Settings with `env_var` can be overridden by environment variables.
     "extra_paths": ["/opt/tools/bin"],
     "max_output_chars": 100000,
     "auto_background_threshold": 30.0,
-    "background_max_workers": 2
+    "background_max_workers": 2,
+    "scrub_secret_env": ["*_API_KEY", "*_TOKEN", "*_SECRET", "ANTHROPIC_AUTH_TOKEN"]
   }
 }
 ```
+
+`scrub_secret_env` (secrets broker, #10) strips declared env-var names (case-insensitive
+`fnmatch` globs) from the environment of commands this tool runs, so a model-driven
+command can't read raw credentials the runner holds (`echo $GITHUB_TOKEN`). Empty/omitted
+= off.
+
+### mcp
+
+```json
+"plugin_configs": {
+  "mcp": {
+    "config_path": "/path/to/.mcp.json",
+    "scrub_secret_env": ["*_API_KEY", "*_TOKEN", "*_SECRET", "ANTHROPIC_AUTH_TOKEN"]
+  }
+}
+```
+
+An MCP server is model-invokable, possibly third-party code named in `.mcp.json`, and a
+stdio server subprocess otherwise inherits the runner's **full** environment.
+`scrub_secret_env` strips declared secrets from that **inherited** environment. A secret
+listed in a server's own `env` (in `.mcp.json`) is an explicit operator grant and is **not**
+scrubbed. Empty/omitted = off. Pairs with the egress proxy (#1: *where* a server connects)
+— this limits *what secrets* it can read to send.
 
 ### web_search
 
@@ -119,6 +143,44 @@ Settings with `env_var` can be overridden by environment variables.
   }
 }
 ```
+
+**Security knobs.** `web_fetch` also exposes guards against credential
+exfiltration and SSRF. A `${VAR}` in a request header is expanded only when the
+var is bound to the request's host; `${VAR}` in the URL is refused; and fetches
+to loopback / link-local (cloud metadata) / private addresses are blocked. The
+two dangerous per-request flags — `insecure` (skip TLS verify) and `no_proxy`
+(bypass the egress proxy) — are operator-gated: they are refused unless the
+matching `allow_insecure` / `allow_no_proxy` config is enabled, so an untrusted
+fetched page cannot make the model turn them on. In YAML:
+
+```yaml
+plugin_configs:
+  web_fetch:
+    # Refuse ${VAR} in the URL (default). Credentials belong in headers.
+    allow_url_var_expansion: false
+    # SSRF guard (default true): block loopback / 169.254.169.254 / private.
+    block_private_networks: true
+    # Bind each secret to the host(s) it may be sent to. Fail-closed: an
+    # unlisted var, a wrong host, or an unset env var refuses the fetch.
+    secret_host_bindings:
+      GITHUB_TOKEN: ["api.github.com", "*.github.com"]
+      COMPANY_API_TOKEN: ["api.internal.company.com"]
+    # Extra hosts exempt from the SSRF private-address block (internal APIs on
+    # private IPs). Binding hosts are already exempt automatically.
+    allowed_internal_hosts: ["api.internal.company.com"]
+    # Operator-gated dangerous knobs (default false, code-enforced): a request
+    # setting insecure=true (skip TLS verify) or no_proxy=true (bypass the
+    # egress proxy) is REFUSED unless enabled here. A fetched (untrusted) page
+    # cannot make the model turn them on — this is a hard boundary, not prose.
+    allow_insecure: false
+    allow_no_proxy: false
+```
+
+A complete, validatable profile lives at
+[`docs/examples/profiles/web-fetch-secure.yaml`](examples/profiles/web-fetch-secure.yaml).
+Introspect the knobs against the live registry with
+`jaato-scaffold explain plugin web_fetch` (add `--json` for the machine-readable
+schema), and lint the profile with `jaato-scaffold validate <file>`.
 
 ### references
 

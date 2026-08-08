@@ -24,28 +24,25 @@ class TestSessionProfilesEvent:
     def test_session_profiles_event_serialization(self):
         """SessionProfilesEvent serializes and deserializes correctly."""
         from jaato_sdk.events import (
+            ProfileSummary,
             SessionProfilesEvent,
             serialize_event,
             deserialize_event,
         )
 
         profiles = [
-            {
-                "name": "researcher",
-                "description": "Research profile",
-                "model": "claude-sonnet-4-20250514",
-                "provider": "anthropic",
-                "icon_name": "search",
-                "plugins": ["cli", "web_search"],
-            },
-            {
-                "name": "coder",
-                "description": "Coding profile",
-                "model": None,
-                "provider": None,
-                "icon_name": "code",
-                "plugins": ["cli", "file_edit", "lsp"],
-            },
+            ProfileSummary(
+                name="researcher",
+                description="Research profile",
+                model="claude-sonnet-4-20250514",
+                provider="anthropic",
+                plugins=["cli", "web_search"],
+            ),
+            ProfileSummary(
+                name="coder",
+                description="Coding profile",
+                plugins=["cli", "file_edit", "lsp"],
+            ),
         ]
 
         event = SessionProfilesEvent(profiles=profiles)
@@ -54,8 +51,11 @@ class TestSessionProfilesEvent:
 
         assert isinstance(restored, SessionProfilesEvent)
         assert len(restored.profiles) == 2
-        assert restored.profiles[0]["name"] == "researcher"
-        assert restored.profiles[1]["plugins"] == ["cli", "file_edit", "lsp"]
+        assert restored.profiles[0].name == "researcher"
+        assert restored.profiles[0].model == "claude-sonnet-4-20250514"
+        assert restored.profiles[1].plugins == ["cli", "file_edit", "lsp"]
+        # New: parse_errors is its own field, defaults empty
+        assert restored.parse_errors == []
 
     def test_session_profiles_event_empty(self):
         """SessionProfilesEvent works with no profiles."""
@@ -71,6 +71,7 @@ class TestSessionProfilesEvent:
 
         assert isinstance(restored, SessionProfilesEvent)
         assert restored.profiles == []
+        assert restored.parse_errors == []
 
 
 class TestSessionInfoProfileName:
@@ -188,13 +189,16 @@ class TestBuildProfileSessionKwargs:
         # Simulate _build_profile_session_kwargs logic
         kwargs = {}
         if profile.plugins:
-            clean_plugins, preloaded = parse_plugin_list(profile.plugins)
+            clean_plugins, preloaded, tool_scopes = parse_plugin_list(profile.plugins)
             kwargs["tools"] = clean_plugins
             if preloaded:
                 kwargs["preloaded_plugins"] = preloaded
+            if tool_scopes:
+                kwargs["tool_scopes"] = tool_scopes
 
         assert kwargs["tools"] == ["cli", "todo", "web_search"]
         assert "preloaded_plugins" not in kwargs
+        assert "tool_scopes" not in kwargs
 
     def test_profile_with_preload_annotations(self):
         """Profile with (preload) annotations produces preloaded_plugins."""
@@ -461,3 +465,116 @@ class TestProfilePermissionConfig:
                 permission_init_config.update(profile_perm_config)
 
         assert permission_init_config["policy"]["defaultPolicy"] == "ask"
+
+
+class TestParsePluginEntryToolScope:
+    """Tests for the ``plugin(mode:..., tools:[...])`` modifier grammar.
+
+    Covers the implicit (positional, by token-shape) form, the explicit
+    (tagged ``key:value``) form, free mixing of the two, order
+    independence, legacy ``(preload)`` back-compat, and error handling.
+    """
+
+    def test_bare_name(self):
+        from shared.plugins.subagent.config import parse_plugin_entry
+        assert parse_plugin_entry("cli") == ("cli", False, None)
+
+    def test_legacy_preload_flag_still_parses(self):
+        from shared.plugins.subagent.config import parse_plugin_entry
+        assert parse_plugin_entry("file_edit(preload)") == ("file_edit", True, None)
+
+    def test_legacy_preload_with_space(self):
+        from shared.plugins.subagent.config import parse_plugin_entry
+        assert parse_plugin_entry("file_edit (preload)") == ("file_edit", True, None)
+
+    def test_explicit_mode_preload(self):
+        from shared.plugins.subagent.config import parse_plugin_entry
+        assert parse_plugin_entry("file_edit(mode:preload)") == ("file_edit", True, None)
+
+    def test_explicit_mode_discover_is_default(self):
+        from shared.plugins.subagent.config import parse_plugin_entry
+        assert parse_plugin_entry("file_edit(mode:discover)") == ("file_edit", False, None)
+
+    def test_implicit_tools_allowlist(self):
+        from shared.plugins.subagent.config import parse_plugin_entry
+        assert parse_plugin_entry("file_edit([readFile])") == (
+            "file_edit", False, ["readFile"]
+        )
+
+    def test_explicit_tools_allowlist(self):
+        from shared.plugins.subagent.config import parse_plugin_entry
+        assert parse_plugin_entry("file_edit(tools:[readFile,writeFile])") == (
+            "file_edit", False, ["readFile", "writeFile"]
+        )
+
+    def test_explicit_tools_bare_single_value(self):
+        from shared.plugins.subagent.config import parse_plugin_entry
+        assert parse_plugin_entry("file_edit(tools:readFile)") == (
+            "file_edit", False, ["readFile"]
+        )
+
+    def test_combined_mode_and_tools_tagged(self):
+        from shared.plugins.subagent.config import parse_plugin_entry
+        assert parse_plugin_entry(
+            "file_edit(mode:preload, tools:[readFile,writeFile])"
+        ) == ("file_edit", True, ["readFile", "writeFile"])
+
+    def test_combined_implicit(self):
+        from shared.plugins.subagent.config import parse_plugin_entry
+        assert parse_plugin_entry("file_edit(preload, [readFile])") == (
+            "file_edit", True, ["readFile"]
+        )
+
+    def test_order_independent(self):
+        from shared.plugins.subagent.config import parse_plugin_entry
+        # tools-then-mode parses identically to mode-then-tools
+        assert parse_plugin_entry("file_edit([readFile], preload)") == (
+            "file_edit", True, ["readFile"]
+        )
+
+    def test_whitespace_in_tool_list(self):
+        from shared.plugins.subagent.config import parse_plugin_entry
+        assert parse_plugin_entry("file_edit(tools:[readFile, writeFile])") == (
+            "file_edit", False, ["readFile", "writeFile"]
+        )
+
+    def test_invalid_mode_raises(self):
+        from shared.plugins.subagent.config import parse_plugin_entry
+        with pytest.raises(ValueError):
+            parse_plugin_entry("file_edit(mode:eager)")
+
+    def test_unknown_key_raises(self):
+        from shared.plugins.subagent.config import parse_plugin_entry
+        with pytest.raises(ValueError):
+            parse_plugin_entry("file_edit(foo:bar)")
+
+    def test_unrecognised_bareword_raises(self):
+        from shared.plugins.subagent.config import parse_plugin_entry
+        with pytest.raises(ValueError):
+            parse_plugin_entry("file_edit(bogus)")
+
+    def test_parse_plugin_list_aggregates_scopes(self):
+        from shared.plugins.subagent.config import parse_plugin_list
+        names, preloaded, scopes = parse_plugin_list(
+            ["cli", "file_edit(preload, [readFile])", "todo(mode:discover)"]
+        )
+        assert names == ["cli", "file_edit", "todo"]
+        assert preloaded == {"file_edit"}
+        assert scopes == {"file_edit": ["readFile"]}
+
+    def test_parse_plugin_list_no_scopes(self):
+        from shared.plugins.subagent.config import parse_plugin_list
+        names, preloaded, scopes = parse_plugin_list(["cli", "todo"])
+        assert names == ["cli", "todo"]
+        assert preloaded == set()
+        assert scopes == {}
+
+    def test_from_dict_carries_tool_scopes(self):
+        from shared.plugins.subagent.config import build_inline_profile
+        profile = build_inline_profile(
+            {"plugins": ["file_edit([readFile])", "todo"]},
+            name="scoped",
+            description="Scoped",
+        )
+        assert profile.tool_scopes == {"file_edit": ["readFile"]}
+        assert profile.plugins == ["file_edit", "todo"]

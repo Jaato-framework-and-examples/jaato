@@ -1,0 +1,12 @@
+{
+  "type": "auth.setup",
+  "timestamp": "<TIMESTAMP>",
+  "request_id": "",
+  "provider_name": "",
+  "provider_display_name": "",
+  "available_models": [],
+  "has_active_session": false,
+  "current_provider": "",
+  "current_model": "",
+  "workspace_path": ""
+}

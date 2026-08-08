@@ -923,14 +923,125 @@ pip install -e "jaato-server/.[telemetry]"
 
 ### 12.1 Langfuse
 
+[Langfuse](https://langfuse.com) ingests jaato's OpenInference spans directly
+over OTLP, so no jaato-side code is required — it's a configuration path.
+
+Three things distinguish Langfuse from a generic OTLP collector:
+
+1. **Endpoint is the `/api/public/otel` path** (not the bare host).
+2. **HTTP-only** — Langfuse does not accept OTLP/gRPC. jaato defaults to
+   gRPC-first, so the transport must be pinned to HTTP. Without this the
+   exporter silently sends gRPC to an endpoint that never accepts it.
+3. **Basic auth** over `base64("<public_key>:<secret_key>")` (not Bearer).
+
+The **`langfuse` telemetry backend** handles all three for you — configure it
+with just your Langfuse keys:
+
+```bash
+export JAATO_TELEMETRY_ENABLED=true
+export LANGFUSE_PUBLIC_KEY=pk-lf-...
+export LANGFUSE_SECRET_KEY=sk-lf-...
+# LANGFUSE_HOST defaults to https://cloud.langfuse.com; set it for
+# self-hosted or the EU/US regional clouds.
+```
+
+Backend selection: the `langfuse` backend is chosen automatically when
+`LANGFUSE_PUBLIC_KEY` is set and no generic `OTEL_EXPORTER_OTLP_ENDPOINT` is
+configured. Force it explicitly with `JAATO_TELEMETRY_BACKEND=langfuse`
+(`=otel` opts back out even when Langfuse keys are present). The backend is
+`LangfusePlugin` — an `OTelPlugin` subclass that derives the endpoint,
+`http/protobuf` protocol, and Basic-auth header from the keys, then reuses all
+of the parent's span logic. Any explicit `endpoint` / `protocol` / `headers`
+(config key or standard OTLP env var) wins over the derived default, so the
+backend is safe to select behind a custom collector/proxy too.
+
+**Manual OTLP equivalent** (if you prefer the generic exporter over the
+backend — e.g. to keep all telemetry config in standard OTel env vars):
+
+```bash
+export JAATO_TELEMETRY_ENABLED=true
+export JAATO_TELEMETRY_EXPORTER=otlp
+export OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
+export OTEL_EXPORTER_OTLP_ENDPOINT=https://cloud.langfuse.com/api/public/otel
+export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Basic $(echo -n "$LANGFUSE_PUBLIC_KEY:$LANGFUSE_SECRET_KEY" | base64)"
+```
+
+**Programmatic equivalent:**
+
 ```python
+from shared.plugins.telemetry import create_langfuse_plugin
+
+telemetry = create_langfuse_plugin()
 telemetry.initialize({
-    "endpoint": "https://cloud.langfuse.com",
-    "headers": {
-        "Authorization": f"Bearer {os.environ['LANGFUSE_SECRET_KEY']}"
-    }
+    "enabled": True,
+    "public_key": "pk-lf-...",
+    "secret_key": "sk-lf-...",
+    # "host": "https://lf.internal:3000",  # optional, self-hosted
 })
 ```
+
+**What renders:** the agent/turn graph, per-LLM-call token counts
+(`llm.token_count.*`), tool spans, and message I/O. **Trace-level Input/Output:**
+the turn (AGENT) root span carries `input.value` (the user prompt) and
+`output.value` (the final response), which is what populates the Input/Output
+columns in Langfuse's trace table — Langfuse derives a trace's I/O from its root
+observation, so without these the columns render blank even though child
+`llm`/`tool` spans carry their own content. Both are subject to redaction (see
+below). **Cost:** jaato stamps
+`gen_ai.usage.cost` (the key Langfuse reads) with per-call cost resolved in the
+same precedence as `UsageBreakdown` — provider-reported `TokenUsage.cost_usd`
+(e.g. `claude_cli`, OpenRouter) first, then the operator pricing table
+(`.jaato/pricing.json`, computed from model + token counts) for providers that
+don't report cost. When neither supplies a number, Langfuse falls back to its
+own model-pricing catalog (model name + token counts). See §5 for the cost
+resolution path.
+
+**Best-practice alignment.** Langfuse recommends that trace-level attributes be
+present on *every* span (not only the root) so its per-observation filters and
+aggregations work. jaato stamps the OpenInference `session.id` on the turn
+(AGENT) span **and** propagates it onto the child `llm` / `tool` spans — so
+Langfuse groups the whole conversation into one Session and per-observation
+session filters resolve. All the attribute keys jaato emits are ones Langfuse's
+OTLP ingestion reads directly: `session.id`, `llm.token_count.*`,
+`gen_ai.usage.cost` / `llm.cost.total`, `llm.model_name`, and the OpenInference
+`input.value` / `llm.input_messages.*` message attributes.
+
+**Two knobs worth setting:**
+
+- **Prompt/response content is redacted by default.** jaato sets
+  `JAATO_TELEMETRY_REDACT_CONTENT=true`, so out of the box Langfuse shows
+  `[REDACTED: N chars]` instead of message text. Set
+  `JAATO_TELEMETRY_REDACT_CONTENT=false` to send full input/output (mind your
+  data-governance posture — this ships prompts and completions to Langfuse).
+- **Environment separation.** Langfuse reads `deployment.environment.name`.
+  It's a resource attribute, so no jaato flag is needed — the OTel SDK merges
+  `OTEL_RESOURCE_ATTRIBUTES` into every span's resource:
+  `export OTEL_RESOURCE_ATTRIBUTES=deployment.environment.name=production`.
+- **User tracking.** jaato emits the OpenInference `user.id` attribute on the
+  turn (AGENT) span and propagates it to child `llm`/`tool` spans, powering
+  Langfuse's [Users view](https://langfuse.com/docs/observability/features/users).
+  The id resolves in precedence: the authenticated client user when the daemon
+  wires it via `JaatoSession.set_client_user_id()` (WS/SSO deployments;
+  `get_client_user(client_id)`), else the per-session `JAATO_TELEMETRY_USER_ID`
+  env (workspace `.env` / profile env) for keyless/local setups. Unset → no
+  `user.id` (Langfuse per-user views stay empty):
+
+  ```bash
+  export JAATO_TELEMETRY_USER_ID=alice@example.com
+  ```
+
+  > **Note:** automatic propagation of the authenticated WS user into a
+  > confined runner (via the bootstrap envelope, like `jaato.session_id`) is a
+  > follow-up; today multi-user WS deployments set `set_client_user_id()`
+  > daemon-side or inject `JAATO_TELEMETRY_USER_ID` into the per-session env.
+- **Prompt → trace linking.** `JaatoSession.set_llm_span_attributes({...})` is a
+  vendor-neutral hook to stamp custom attributes on every LLM (generation) span
+  — external code with a session handle (a `{{!py:}}` prefetch via
+  `context.session`, or a plugin) can attach them. For Langfuse prompt
+  management, a prefetch that resolves a managed prompt records
+  `langfuse.observation.prompt.name` / `langfuse.observation.prompt.version`, so
+  Langfuse links the generation to that prompt version and reports per-version
+  performance. Core stays vendor-neutral — the keys are the caller's choice.
 
 ### 12.2 Arize Phoenix
 

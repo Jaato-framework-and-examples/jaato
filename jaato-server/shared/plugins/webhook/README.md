@@ -119,7 +119,8 @@ Call in a loop after subscribing. Blocks up to `timeout` seconds waiting for eve
       "metadata": { "source": "github" }
     },
     "generic": {
-      "path": "/webhook"
+      "path": "/webhook",
+      "allow_unauthenticated": true
     }
   },
   "max_body_size": 1048576,
@@ -145,7 +146,7 @@ Each layer is deep-merged, not replaced — a profile can override just `port` w
 | `port` | int | `9100` | HTTP listener port |
 | `host` | str | `127.0.0.1` | Bind address (localhost only by default) |
 | `secret` | str | `null` | Global HMAC secret. Use `${ENV_VAR}` syntax. |
-| `routes` | object | `{"generic": {"path": "/webhook"}}` | Named routes |
+| `routes` | object | `{}` | Named routes. **No default route** — empty means the listener 404s every path (fail-closed; a zero-config open endpoint was removed). |
 | `max_body_size` | int | `1048576` | Maximum request body in bytes (1 MB) |
 | `response_timeout` | float | `5.0` | Seconds before responding to sender |
 | `tls` | object | `{"enabled": false}` | TLS/SSL configuration (see below) |
@@ -161,6 +162,14 @@ Each layer is deep-merged, not replaced — a profile can override just `port` w
 | `secret_algo` | str | No | Algorithm — only `hmac-sha256` supported |
 | `event_type_header` | str | No | Header to extract event type from |
 | `metadata` | object | No | Static metadata merged into every event |
+| `allow_unauthenticated` | bool | No | Accept **unsigned** requests on this route (default `false`, fail-closed). A route with no `secret_header` is refused unless mutual TLS or an IP allowlist is configured, or this is set. |
+
+> **Authentication (fail-closed).** A route is accepted only when it is
+> authenticated by one of: an HMAC secret (`secret_header` + `secret_algo`),
+> mutual TLS (`tls.ca_certfile` set), a non-empty `allowed_ips` allowlist, or an
+> explicit `allow_unauthenticated: true`. A matched route with none of these
+> returns **401** — an untrusted caller can never drive agent sessions through an
+> unsigned endpoint left open by omission.
 
 ### TLS Configuration
 

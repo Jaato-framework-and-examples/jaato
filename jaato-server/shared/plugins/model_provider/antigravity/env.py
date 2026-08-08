@@ -17,7 +17,7 @@ def resolve_project_id() -> Optional[str]:
     Returns:
         Project ID if found, None otherwise.
     """
-    return os.environ.get("JAATO_ANTIGRAVITY_PROJECT_ID")
+    return os.environ.get("JAATO_ANTIGRAVITY_PROJECT_ID")  # env: GCP project ID override for the Antigravity backend
 
 
 def resolve_endpoint() -> Optional[str]:
@@ -29,7 +29,7 @@ def resolve_endpoint() -> Optional[str]:
     Returns:
         Endpoint URL if found, None otherwise.
     """
-    return os.environ.get("JAATO_ANTIGRAVITY_ENDPOINT")
+    return os.environ.get("JAATO_ANTIGRAVITY_ENDPOINT")  # env: override the Antigravity backend endpoint URL
 
 
 def resolve_quota_type() -> str:
@@ -41,7 +41,7 @@ def resolve_quota_type() -> str:
     Returns:
         Quota type: "antigravity" (default) or "gemini-cli"
     """
-    val = os.environ.get("JAATO_ANTIGRAVITY_QUOTA", "").lower()
+    val = os.environ.get("JAATO_ANTIGRAVITY_QUOTA", "").lower()  # env: quota pool to consume: antigravity (default) or gemini-cli
     if val in ("gemini-cli", "gemini_cli", "cli"):
         return "gemini-cli"
     return "antigravity"
@@ -56,7 +56,7 @@ def resolve_thinking_level() -> Optional[str]:
     Returns:
         Thinking level ("minimal", "low", "medium", "high") if set.
     """
-    val = os.environ.get("JAATO_ANTIGRAVITY_THINKING_LEVEL", "").lower()
+    val = os.environ.get("JAATO_ANTIGRAVITY_THINKING_LEVEL", "").lower()  # env: Gemini 3 thinking level: minimal/low/medium/high
     if val in ("minimal", "low", "medium", "high"):
         return val
     return None
@@ -71,7 +71,7 @@ def resolve_thinking_budget() -> int:
     Returns:
         Thinking budget in tokens (default: 8192).
     """
-    val = os.environ.get("JAATO_ANTIGRAVITY_THINKING_BUDGET", "8192")
+    val = os.environ.get("JAATO_ANTIGRAVITY_THINKING_BUDGET", "8192")  # env: Claude thinking budget in tokens (default 8192, clamped to 8192-32768)
     try:
         budget = int(val)
         # Clamp to valid range
@@ -93,7 +93,7 @@ def resolve_auto_rotate() -> bool:
     Returns:
         True if enabled (default), False otherwise.
     """
-    val = os.environ.get("JAATO_ANTIGRAVITY_AUTO_ROTATE", "true").lower()
+    val = os.environ.get("JAATO_ANTIGRAVITY_AUTO_ROTATE", "true").lower()  # env: rotate across authed Google accounts on rate limit (default true)
     return val in ("1", "true", "yes", "on")
 
 
@@ -106,7 +106,7 @@ def resolve_retry_empty() -> bool:
     Returns:
         True if enabled (default), False otherwise.
     """
-    val = os.environ.get("JAATO_ANTIGRAVITY_RETRY_EMPTY", "true").lower()
+    val = os.environ.get("JAATO_ANTIGRAVITY_RETRY_EMPTY", "true").lower()  # env: retry when the backend returns an empty response (default true)
     return val in ("1", "true", "yes", "on")
 
 
@@ -119,7 +119,7 @@ def resolve_session_recovery() -> bool:
     Returns:
         True if enabled (default), False otherwise.
     """
-    val = os.environ.get("JAATO_ANTIGRAVITY_SESSION_RECOVERY", "true").lower()
+    val = os.environ.get("JAATO_ANTIGRAVITY_SESSION_RECOVERY", "true").lower()  # env: auto-recover the session on tool_result_missing errors (default true)
     return val in ("1", "true", "yes", "on")
 
 

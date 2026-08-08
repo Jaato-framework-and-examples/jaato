@@ -50,6 +50,18 @@ class Waypoint:
     user_message_preview: Optional[str] = None
     owner: WaypointOwner = "user"
     parent_id: Optional[str] = None  # None only for w0 (root)
+    session_state_snapshot: Optional[str] = None
+    """JSON-serialised dict of session-attached state at waypoint
+    creation time.  Captured from
+    :meth:`JaatoSession.get_all_session_state` (so registered
+    providers are invoked and the snapshot is live).  When a fork-
+    from-waypoint primitive lands (see
+    ``project_backlog_waypoint_fork_to_session.md``) it threads this
+    snapshot through to the new session via ``initial_session_state``
+    so consumer hooks (e.g. premium pseudonymization) can rebuild
+    runtime structure.  ``None`` for legacy waypoints created before
+    the session-attached-state facility, or when the session had no
+    state to snapshot."""
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for serialization."""
@@ -64,6 +76,7 @@ class Waypoint:
             "user_message_preview": self.user_message_preview,
             "owner": self.owner,
             "parent_id": self.parent_id,
+            "session_state_snapshot": self.session_state_snapshot,
         }
 
     @classmethod
@@ -80,6 +93,7 @@ class Waypoint:
             user_message_preview=data.get("user_message_preview"),
             owner=data.get("owner", "user"),  # Default to user for backwards compat
             parent_id=data.get("parent_id"),  # None for w0 or legacy waypoints
+            session_state_snapshot=data.get("session_state_snapshot"),
         )
 
 

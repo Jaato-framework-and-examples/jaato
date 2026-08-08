@@ -13,7 +13,10 @@ from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 
 logger = logging.getLogger(__name__)
 
-from jaato_sdk.plugins.model_provider.types import ToolSchema
+from jaato_sdk.plugins.model_provider.types import (
+    ToolSchema,
+    DISCOVERABILITY_DEFERRED,
+)
 
 from jaato_sdk.plugins.base import ToolPlugin, UserCommand
 from .protocol import BackgroundCapable, TaskHandle, TaskResult, TaskStatus
@@ -103,6 +106,20 @@ class BackgroundPlugin:
                 logger.debug(f"Failed to cleanup plugin during shutdown: {exc}")
         self._initialized = False
 
+    def reset_for_next_session(self) -> None:
+        """Cascade-sharing reset — NO-OP for this plugin.
+
+        Phase 1 hotfix (server 0.6.148+): added to satisfy the
+        ``ToolPlugin`` / ``EnrichmentPlugin`` protocol's runtime
+        ``isinstance`` check.  Per Daniel's litmus test (see
+        ``docs/design/runner-cascade-sharing.md`` §4.3), this
+        plugin holds no per-session state that the next cascade
+        session would benefit from having cleared.  Override in
+        future PRs if the litmus test changes.
+        """
+        pass
+
+
     def get_tool_schemas(self) -> List[ToolSchema]:
         """Return tool schemas for background task management tools."""
         return [
@@ -134,7 +151,7 @@ Returns a task_id you can use to check status or get results later.""",
                     "required": ["tool_name", "arguments"]
                 },
                 category="system",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
             ToolSchema(
                 name="getBackgroundTask",
@@ -175,7 +192,7 @@ Response fields:
                     "required": ["task_id"]
                 },
                 category="system",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
             ToolSchema(
                 name="cancelBackgroundTask",
@@ -191,7 +208,7 @@ Response fields:
                     "required": ["task_id"]
                 },
                 category="system",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
             ToolSchema(
                 name="listBackgroundTasks",
@@ -206,7 +223,7 @@ Response fields:
                     },
                 },
                 category="system",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
             ToolSchema(
                 name="listBackgroundCapableTools",
@@ -218,7 +235,7 @@ Use this to discover which tools can be run in background mode.""",
                     "properties": {},
                 },
                 category="system",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
         ]
 

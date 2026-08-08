@@ -9,7 +9,6 @@ from ..provider import (
     ZhipuAIAPIKeyNotFoundError,
     ZhipuAIConnectionError,
     ZhipuAIRateLimitError,
-    DEFAULT_CONTEXT_LIMIT,
     MODEL_CONTEXT_LIMITS,
     KNOWN_MODELS,
     THINKING_CAPABLE_MODELS,
@@ -119,6 +118,94 @@ class TestInitialization:
         assert provider._base_url == "https://api.example.com"
 
 
+class TestConfigNamespacing:
+    """Tests for the four-layer config namespacing introduced in 0.6.24.
+
+    Layers (under ``plugin_configs.zhipuai``):
+      - Top-level: api_key (auth identity)
+      - api_params: temperature / top_p / top_k / max_tokens /
+                    enable_thinking / thinking_budget
+      - framework_overrides: base_url, context_length
+
+    Sampling params reach ``messages.create()`` via the inherited
+    ``complete()`` method in AnthropicProvider, which reads
+    ``self._temperature`` etc.
+
+    Backward compatibility: same keys are also read from the legacy
+    flat position with a deprecation warning per key.
+    """
+
+    @patch('anthropic.Anthropic')
+    def test_new_shape_no_deprecation_warning(self, mock_anthropic, caplog):
+        provider = ZhipuAIProvider()
+        with caplog.at_level("WARNING"):
+            provider.initialize(ProviderConfig(
+                api_key="zhipuai-test",
+                extra={
+                    "api_params": {
+                        "temperature": 0.0,
+                        "top_p": 0.95,
+                        "top_k": 40,
+                        "max_tokens": 4096,
+                        "enable_thinking": False,
+                        "thinking_budget": 3000,
+                    },
+                    "framework_overrides": {
+                        "context_length": 131072,
+                        "base_url": "https://api.z.ai/api/anthropic",
+                    },
+                },
+            ))
+        assert provider._temperature == 0.0
+        assert provider._top_p == 0.95
+        assert provider._top_k == 40
+        assert provider._max_tokens_override == 4096
+        assert provider._enable_thinking is False
+        assert provider._thinking_budget == 3000
+        assert provider._context_length_override == 131072
+        assert provider._base_url == "https://api.z.ai/api/anthropic"
+        legacy_warnings = [r for r in caplog.records if "legacy" in r.getMessage().lower()]
+        assert legacy_warnings == [], (
+            f"new shape should not emit deprecation warnings, got: "
+            f"{[r.getMessage() for r in legacy_warnings]}"
+        )
+
+    @patch('anthropic.Anthropic')
+    def test_legacy_flat_shape_still_works_with_warnings(
+        self, mock_anthropic, caplog,
+    ):
+        provider = ZhipuAIProvider()
+        with caplog.at_level("WARNING"):
+            provider.initialize(ProviderConfig(
+                api_key="zhipuai-test",
+                extra={
+                    "temperature": 0.0,
+                    "top_p": 0.95,
+                    "enable_thinking": False,
+                    "thinking_budget": 3000,
+                    "context_length": 131072,
+                },
+            ))
+        assert provider._temperature == 0.0
+        assert provider._top_p == 0.95
+        assert provider._enable_thinking is False
+        assert provider._thinking_budget == 3000
+        assert provider._context_length_override == 131072
+        legacy_warnings = [r for r in caplog.records if "legacy" in r.getMessage().lower()]
+        assert len(legacy_warnings) >= 5, (
+            f"expected ≥5 deprecation warnings, got {len(legacy_warnings)}"
+        )
+
+    @patch('anthropic.Anthropic')
+    def test_no_sampling_config_means_none(self, mock_anthropic):
+        provider = ZhipuAIProvider()
+        provider.initialize(ProviderConfig(api_key="zhipuai-test"))
+        assert provider._temperature is None
+        assert provider._top_p is None
+        assert provider._top_k is None
+        assert provider._max_tokens_override is None
+
+
 class TestConnection:
     """Tests for model connection."""
 
@@ -212,13 +299,42 @@ class TestContextLimit:
     """Tests for context limit handling."""
 
     @patch('anthropic.Anthropic')
-    def test_default_context_limit(self, mock_anthropic):
-        """Should return fallback 200K when no model connected."""
+    def test_no_model_no_override_raises(self, mock_anthropic):
+        """No hardcoded fallback: no model connected + no override → raise."""
         provider = ZhipuAIProvider()
         provider.initialize(ProviderConfig(api_key="test-key"))
 
-        assert provider.get_context_limit() == DEFAULT_CONTEXT_LIMIT
-        assert provider.get_context_limit() == 204800
+        with pytest.raises(ValueError, match="no known context window"):
+            provider.get_context_limit()
+
+    @patch('anthropic.Anthropic')
+    def test_dated_variant_resolves_via_longest_prefix(self, mock_anthropic):
+        """A dated variant lands on its family (glm-4.7), not a shorter prefix."""
+        provider = ZhipuAIProvider()
+        provider.initialize(ProviderConfig(api_key="test-key"))
+        provider.connect("glm-4.7-20250601")
+        assert provider.get_context_limit() == 204800  # glm-4.7 family, not glm-4
+
+    @patch('anthropic.Anthropic')
+    def test_legacy_glm4_family_resolved(self, mock_anthropic):
+        """Legacy GLM-4 generation (128K) is in the table, not fail-loud."""
+        provider = ZhipuAIProvider()
+        provider.initialize(ProviderConfig(api_key="test-key"))
+        provider.connect("glm-4")
+        assert provider.get_context_limit() == 131072
+        provider.connect("glm-4v")
+        assert provider.get_context_limit() == 131072
+
+    @patch('anthropic.Anthropic')
+    def test_override_knob_covers_unknown_model(self, mock_anthropic):
+        """context_length override is the escape hatch for an unlisted model."""
+        provider = ZhipuAIProvider()
+        provider.initialize(ProviderConfig(
+            api_key="test-key",
+            extra={"framework_overrides": {"context_length": 65536}},
+        ))
+        provider.connect("glm-99-future")
+        assert provider.get_context_limit() == 65536
 
     @patch('anthropic.Anthropic')
     def test_model_specific_context_limit(self, mock_anthropic):
@@ -265,9 +381,14 @@ class TestVerifyAuth:
         assert any("Found" in m for m in messages)
 
     @patch.dict('os.environ', {}, clear=True)
-    @patch('shared.plugins.model_provider.zhipuai.provider.get_stored_api_key', return_value='stored-key')
-    def test_verify_auth_with_stored_key(self, mock_stored):
+    @patch('shared.plugins.model_provider.zhipuai.provider.try_load_credentials_with_reason')
+    def test_verify_auth_with_stored_key(self, mock_try_load):
         """Should return True when API key is stored."""
+        from ..auth import ZhipuAICredentials
+        mock_try_load.return_value = (
+            ZhipuAICredentials(api_key='stored-key', created_at=0.0),
+            None,
+        )
         provider = ZhipuAIProvider()  # NOT initialized
 
         messages = []
@@ -276,16 +397,46 @@ class TestVerifyAuth:
         assert result is True
 
     @patch.dict('os.environ', {}, clear=True)
-    @patch('shared.plugins.model_provider.zhipuai.provider.get_stored_api_key', return_value=None)
-    def test_verify_auth_no_credentials(self, mock_stored):
-        """Should return False when no credentials are available."""
+    @patch(
+        'shared.plugins.model_provider.zhipuai.provider.try_load_credentials_with_reason',
+        return_value=(None, None),
+    )
+    def test_verify_auth_no_credentials(self, mock_try_load):
+        """Should return False with "No credentials" when nothing is configured."""
         provider = ZhipuAIProvider()  # NOT initialized
 
         messages = []
         result = provider.verify_auth(on_message=messages.append)
 
         assert result is False
-        assert any("No" in m for m in messages)
+        assert any("No Zhipu AI credentials found" in m for m in messages)
+
+    @patch.dict('os.environ', {}, clear=True)
+    @patch('shared.plugins.model_provider.zhipuai.provider.try_load_credentials_with_reason')
+    def test_verify_auth_broken_credentials_surfaces_reason(self, mock_try_load):
+        """Broken credential file must surface the reason, not a generic
+        "No credentials found" message.
+
+        This is the bug the user flagged: a provider error (in this case a
+        credential file that couldn't be loaded) was being masked as a
+        missing token.  The fix exposes the real reason through
+        ``on_message`` so the user can fix the actual problem.
+        """
+        mock_try_load.return_value = (
+            None,
+            "invalid JSON at /tmp/zhipuai_auth.json: Expecting value (line 1, col 1)",
+        )
+        provider = ZhipuAIProvider()  # NOT initialized
+
+        messages = []
+        result = provider.verify_auth(on_message=messages.append)
+
+        assert result is False
+        joined = "\n".join(messages)
+        assert "could not be loaded" in joined
+        assert "invalid JSON" in joined
+        # Must NOT emit the old misleading "No credentials found" message.
+        assert "No Zhipu AI credentials found" not in joined
 
 
 class TestErrorHandling:

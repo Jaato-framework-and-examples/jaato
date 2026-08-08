@@ -1,0 +1,10 @@
+{
+  "type": "permission.resolved",
+  "timestamp": "<TIMESTAMP>",
+  "agent_id": "",
+  "request_id": "",
+  "tool_name": "",
+  "granted": false,
+  "method": "",
+  "comment": ""
+}

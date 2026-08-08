@@ -39,14 +39,21 @@ import random
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any, AsyncIterator, Callable, Dict, Optional
+from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Union
 
+from jaato_sdk.client._handler_registry import (
+    EventHandler,
+    Unsubscribe,
+    _HandlerRegistry,
+)
 from jaato_sdk.client.config import RecoveryConfig
 from jaato_sdk.client.ipc import DEFAULT_SOCKET_PATH, IPCClient, IncompatibleServerError
+from jaato_sdk.events import ClientType
 from jaato_sdk.events import (
     ConnectedEvent,
     ErrorEvent,
     Event,
+    EventType,
     SessionInfoEvent,
     SystemMessageEvent,
 )
@@ -147,11 +154,15 @@ class IPCRecoveryClient:
     def __init__(
         self,
         socket_path: str = DEFAULT_SOCKET_PATH,
+        *,
+        client_type: ClientType,
         config: Optional[RecoveryConfig] = None,
         auto_start: bool = True,
         env_file: str = ".env",
         workspace_path: Optional[Path] = None,
         on_status_change: Optional[StatusCallback] = None,
+        min_protocol_version: Optional[str] = None,
+        presentation: Optional[Any] = None,
     ):
         """Initialize the recovery client.
 
@@ -164,12 +175,27 @@ class IPCRecoveryClient:
             workspace_path: Workspace path for loading project-level config.
             on_status_change: Callback invoked on connection status changes.
                 Receives a ConnectionStatus object.
+            client_type: **Required.** Forwarded to the inner IPCClient —
+                see ``IPCClient.__init__`` for semantics.  Pass
+                ``ClientType.TERMINAL`` for the TUI, ``API`` for
+                headless / batch / cascade harnesses.
+            min_protocol_version: Override the inner IPCClient's
+                ``MIN_PROTOCOL_VERSION``. Forwarded verbatim — see
+                ``IPCClient.__init__`` for semantics.
+            presentation: Display-capability override forwarded verbatim to
+                each inner IPCClient the recovery client constructs (initial
+                connect + every reconnect), so a non-terminal (chat/web)
+                presentation survives reconnection.  See
+                ``IPCClient.__init__`` for semantics.
         """
         self._socket_path = socket_path
+        self._client_type = client_type
         self._auto_start = auto_start
         self._env_file = env_file
         self._workspace_path = workspace_path
         self._on_status_change = on_status_change
+        self._min_protocol_version = min_protocol_version
+        self._presentation = presentation
 
         # Load config if not provided
         if config is None:
@@ -187,6 +213,9 @@ class IPCRecoveryClient:
         # Session tracking (for reattachment)
         self._session_id: Optional[str] = None
         self._client_id: Optional[str] = None
+        # Host ("client") tools remembered so they're re-registered on the
+        # fresh inner client after a reconnect (see register_client_tools).
+        self._registered_client_tools: List[Dict[str, Any]] = []
 
         # Reconnection state
         self._reconnect_attempt = 0
@@ -197,6 +226,20 @@ class IPCRecoveryClient:
         self._event_queue: asyncio.Queue[Event] = asyncio.Queue()
         self._event_task: Optional[asyncio.Task] = None
         self._events_running = False
+
+        # Subscribers live at this layer so they survive reconnections
+        # (the inner IPCClient is recreated on each reconnect, but the
+        # recovery wrapper keeps the same registry).
+        self._registry = _HandlerRegistry()
+
+        # Fan-out plumbing (mirror of IPCClient's drain loop).  The background
+        # event PUMP — started in ``connect`` — is the SINGLE reader of the
+        # inner client's events: it dispatches every event to ``_registry``
+        # (so ``subscribe()`` handlers fire WITHOUT anyone iterating
+        # ``events()`` — the gap that hung the convenience facade over a
+        # recovery client) AND fans out to ``events()`` consumer queues.
+        self._event_subscribers: "list[asyncio.Queue]" = []
+        self._event_pump_task: Optional[asyncio.Task] = None
 
     # =========================================================================
     # Properties
@@ -254,8 +297,53 @@ class IPCRecoveryClient:
         return None
 
     # =========================================================================
+    # High-level convenience facade
+    # =========================================================================
+
+    @classmethod
+    def session(cls, **kwargs):
+        """Open a session with the high-level facade (auto-reconnect variant).
+
+        Same surface and semantics as :meth:`IPCClient.session` — returns an
+        async context manager yielding a
+        :class:`~jaato_sdk.client.convenience.Session` — but backed by an
+        ``IPCRecoveryClient`` so the session survives daemon restarts.  Adds an
+        ``on_status_change=`` kwarg (the reconnection-status callback) on top of
+        the shared knobs::
+
+            async with IPCRecoveryClient.session(profile="researcher",
+                                                 on_status_change=print) as s:
+                print(await s.ask("Long task…"))
+
+        See ``docs/design/sdk-convenience-layer.md``.
+        """
+        from .convenience import open_session
+        return open_session(cls, **kwargs)
+
+    # =========================================================================
     # Connection Management
     # =========================================================================
+
+    def _make_client(self, *, auto_start: bool) -> IPCClient:
+        """Construct the inner transport client.
+
+        The recovery state machine, reconnect loop, session reattachment, and
+        event pump are all transport-agnostic — they only ``connect`` /
+        ``disconnect`` / read events off whatever this returns.  Override in a
+        transport subclass (e.g. ``WSRecoveryClient``) to bind a different
+        transport while reusing all of that.  ``auto_start`` is
+        ``self._auto_start`` on the initial connect and ``False`` on reconnect
+        (a restart is never auto-started).
+        """
+        return IPCClient(
+            socket_path=self._socket_path,
+            client_type=self._client_type,
+            auto_start=auto_start,
+            env_file=self._env_file,
+            workspace_path=str(self._workspace_path) if self._workspace_path else None,
+            min_protocol_version=self._min_protocol_version,
+            presentation=self._presentation,
+        )
 
     async def connect(self, timeout: float = 5.0) -> bool:
         """Connect to the server.
@@ -276,12 +364,7 @@ class IPCRecoveryClient:
             self._transition_to(ConnectionState.CONNECTING)
 
         try:
-            self._client = IPCClient(
-                socket_path=self._socket_path,
-                auto_start=self._auto_start,
-                env_file=self._env_file,
-                workspace_path=str(self._workspace_path) if self._workspace_path else None,
-            )
+            self._client = self._make_client(auto_start=self._auto_start)
 
             # When auto-start is enabled, the inner connect() may need to:
             # 1. Try initial connection (timeout seconds)
@@ -306,6 +389,13 @@ class IPCRecoveryClient:
                 self._client_id = self._client.client_id
                 async with self._state_lock:
                     self._transition_to(ConnectionState.CONNECTED)
+                # Start the background event pump (single reader → registry
+                # dispatch + events() fan-out).  It owns ``_events_running``
+                # and survives reconnections (the loop re-reads the recreated
+                # inner client), so start it once.
+                if self._event_pump_task is None or self._event_pump_task.done():
+                    self._events_running = True
+                    self._event_pump_task = asyncio.create_task(self._event_pump())
                 return True
 
             raise ConnectionError("Connection failed")
@@ -339,8 +429,9 @@ class IPCRecoveryClient:
         # Cancel any reconnection in progress
         await self._cancel_reconnection()
 
-        # Stop event loop
+        # Stop event loop + the background event pump
         self._events_running = False
+        await self._stop_event_pump()
 
         # Disconnect underlying client
         if self._client:
@@ -368,8 +459,9 @@ class IPCRecoveryClient:
         # Cancel any reconnection in progress
         await self._cancel_reconnection()
 
-        # Stop event loop
+        # Stop event loop + the background event pump
         self._events_running = False
+        await self._stop_event_pump()
 
         # Disconnect underlying client
         if self._client:
@@ -421,19 +513,33 @@ class IPCRecoveryClient:
     async def create_session(
         self,
         name: Optional[str] = None,
-        profile: Optional[str] = None,
+        profile: Optional[Union[str, Dict[str, Any]]] = None,
         agent: Optional[str] = None,
         agent_params: Optional[Dict[str, str]] = None,
+        cascade_driver_id: Optional[str] = None,
+        timeout: float = 60.0,
     ) -> Optional[str]:
         """Create a new session.
 
         Args:
             name: Optional name for the session.
-            profile: Optional runtime profile name (model, plugins, env).
+            profile: Either a profile **name** (str) referencing a file
+                under ``.jaato/profiles/``, **or** an inline **spec dict**
+                (``model``, ``plugins``, ``system_instructions``, ...).
+                See ``IPCClient.create_session`` for the full list.
+                Mutually exclusive forms — pass one or the other.
             agent: Optional agent name. The agent's rendered markdown
                 becomes the session's system instructions.
             agent_params: Parameter values for the agent's ``{{param}}``
                 placeholders.
+            cascade_driver_id: Phase 2 cascade-sharing tenant ID; see
+                ``IPCClient.create_session`` for the contract.  Pass
+                the same opaque ID across every session of one cascade.
+            timeout: Seconds to wait for the ``SessionInfoEvent`` — mirrors
+                ``IPCClient.create_session`` so a plain→recovery swap is
+                drop-in (forwarded to the underlying client).  The recovery
+                client's own reconnect timing is governed separately (recovery
+                config + ``connect(timeout=)``).
 
         Returns:
             Session ID if created, None otherwise.
@@ -441,12 +547,16 @@ class IPCRecoveryClient:
         Raises:
             ReconnectingError: If currently reconnecting.
             ConnectionClosedError: If connection is closed.
+            TypeError: If ``profile`` is not None, str, or dict.
         """
         self._check_can_send()
 
         if self._client:
             session_id = await self._client.create_session(
-                name, profile=profile, agent=agent, agent_params=agent_params,
+                name, profile=profile, agent=agent,
+                agent_params=agent_params,
+                cascade_driver_id=cascade_driver_id,
+                timeout=timeout,
             )
             if session_id:
                 self._session_id = session_id
@@ -483,12 +593,17 @@ class IPCRecoveryClient:
         self,
         text: str,
         attachments: Optional[list] = None,
+        parallel_tools: Optional[bool] = None,
     ) -> None:
         """Send a message to the model.
 
         Args:
             text: The message text.
             attachments: Optional file attachments.
+            parallel_tools: Per-call override for parallel tool execution.
+                ``None`` (default) keeps the env-configured behaviour
+                (``JAATO_PARALLEL_TOOLS``); ``True`` / ``False`` forces
+                parallel / sequential tool execution for this turn only.
 
         Raises:
             ReconnectingError: If currently reconnecting.
@@ -497,7 +612,7 @@ class IPCRecoveryClient:
         self._check_can_send()
 
         if self._client:
-            await self._client.send_message(text, attachments)
+            await self._client.send_message(text, attachments, parallel_tools=parallel_tools)
 
     async def respond_to_permission(
         self,
@@ -523,6 +638,41 @@ class IPCRecoveryClient:
         if self._client:
             await self._client.respond_to_clarification(request_id, response)
 
+    async def respond_to_clarification_batch(
+        self,
+        request_id: str,
+        answers: List[str],
+    ) -> None:
+        """Respond to a batched clarification (all answers at once) — proxied
+        to the inner client (see ``IPCClient.respond_to_clarification_batch``)."""
+        self._check_can_send()
+
+        if self._client:
+            await self._client.respond_to_clarification_batch(request_id, answers)
+
+    async def register_client_tools(self, tools: List[Dict[str, Any]]) -> None:
+        """Register client-provided ("host") tools — proxied to the inner client.
+
+        The tool set is REMEMBERED so it is re-registered automatically after a
+        reconnect: a reconnect builds a fresh inner client (``_make_client``)
+        that would otherwise lose the host-tool handlers, breaking a recoverable
+        host-tool client on the first daemon restart.  See
+        ``IPCClient.register_client_tools`` for the entry contract (register
+        before ``create_session``).
+        """
+        self._check_can_send()
+        self._registered_client_tools = list(tools)
+
+        if self._client:
+            await self._client.register_client_tools(tools)
+
+    async def list_sessions(self) -> None:
+        """Request the session list — proxied to the inner client."""
+        self._check_can_send()
+
+        if self._client:
+            await self._client.list_sessions()
+
     async def respond_to_reference_selection(
         self,
         request_id: str,
@@ -533,6 +683,38 @@ class IPCRecoveryClient:
 
         if self._client:
             await self._client.respond_to_reference_selection(request_id, response)
+
+    async def respond_to_tool_execution(
+        self,
+        call_id: str,
+        result: str = "",
+        error: str = "",
+    ) -> None:
+        """Return the result of a client-side tool execution.
+
+        See :meth:`IPCClient.respond_to_tool_execution` for full docs.
+        """
+        self._check_can_send()
+        if self._client:
+            await self._client.respond_to_tool_execution(call_id, result, error)
+
+    async def end_session(self) -> None:
+        """Terminate the currently-attached session.
+
+        See :meth:`IPCClient.end_session` for full docs.
+        """
+        self._check_can_send()
+        if self._client:
+            await self._client.end_session()
+
+    async def delete_session(self, session_id: str) -> None:
+        """Permanently delete a session by ID.
+
+        See :meth:`IPCClient.delete_session` for full docs.
+        """
+        self._check_can_send()
+        if self._client:
+            await self._client.delete_session(session_id)
 
     async def respond_to_post_auth_setup(
         self,
@@ -570,6 +752,30 @@ class IPCRecoveryClient:
         if self._client:
             await self._client.execute_command(command, args)
 
+    # ---- typed wake-primitive methods (see _wake_client) ----
+    async def bind_wake(self, wake_ref: str, trust_keys: list, *,
+                        timeout: float = 30.0):
+        """Declare a wake binding for this session; await the typed result.
+        See :func:`jaato_sdk.client._wake_client.bind_wake`.  Subscribes on the
+        recovery wrapper's registry (survives reconnects), so the result
+        handler is armed before the command is sent."""
+        from ._wake_client import bind_wake
+        return await bind_wake(self, wake_ref, trust_keys, timeout=timeout)
+
+    async def unbind_wake(self, wake_ref: str, *, timeout: float = 30.0):
+        """Remove this session's wake binding; await the typed result.
+        See :func:`jaato_sdk.client._wake_client.unbind_wake`."""
+        from ._wake_client import unbind_wake
+        return await unbind_wake(self, wake_ref, timeout=timeout)
+
+    async def cascade_register(self, cascade_driver_id: str,
+                              role: str = "observer",
+                              event_types: Optional[list] = None) -> None:
+        """Register as a cascade owner/observer (event CLASSES or names).
+        See :func:`jaato_sdk.client._wake_client.cascade_register`."""
+        from ._wake_client import cascade_register
+        await cascade_register(self, cascade_driver_id, role, event_types)
+
     async def disable_tool(self, tool_name: str) -> None:
         """Disable a tool directly via registry.
 
@@ -596,65 +802,269 @@ class IPCRecoveryClient:
             await self._client.request_history(agent_id)
 
     # =========================================================================
+    # SDK feature parity — session-primitive verbs
+    # =========================================================================
+
+    async def inject_prompt(
+        self,
+        text: str,
+        source_type: str = "user",
+        source_id: Optional[str] = None,
+    ) -> None:
+        """Inject a prompt into the session's message queue.
+
+        See :meth:`IPCClient.inject_prompt` for full docs.
+        """
+        self._check_can_send()
+        if self._client:
+            await self._client.inject_prompt(text, source_type, source_id)
+
+    async def replay_messages(
+        self,
+        request_id: str,
+        messages: Optional[list] = None,
+        timeout_seconds: float = 120.0,
+    ) -> None:
+        """Re-run the model loop against an explicit message list.
+
+        See :meth:`IPCClient.replay_messages` for full docs.
+        """
+        self._check_can_send()
+        if self._client:
+            await self._client.replay_messages(request_id, messages, timeout_seconds)
+
+    async def resolve_fork_point(
+        self,
+        request_id: str,
+        after_message: Optional[int] = None,
+        after_tool_call: Optional[str] = None,
+        after_timestamp: Optional[str] = None,
+    ) -> None:
+        """Resolve a fork point in the session's history.
+
+        See :meth:`IPCClient.resolve_fork_point` for full docs.
+        """
+        self._check_can_send()
+        if self._client:
+            await self._client.resolve_fork_point(
+                request_id,
+                after_message=after_message,
+                after_tool_call=after_tool_call,
+                after_timestamp=after_timestamp,
+            )
+
+    # =========================================================================
+    # SDK feature parity — permission policy verbs
+    # =========================================================================
+
+    async def add_whitelist_tools(
+        self,
+        tools: Optional[list] = None,
+        patterns: Optional[list] = None,
+    ) -> None:
+        """Add tools / patterns to the session's permission whitelist."""
+        self._check_can_send()
+        if self._client:
+            await self._client.add_whitelist_tools(tools, patterns)
+
+    async def add_blacklist_tools(
+        self,
+        tools: Optional[list] = None,
+        patterns: Optional[list] = None,
+    ) -> None:
+        """Add tools / patterns to the session's permission blacklist."""
+        self._check_can_send()
+        if self._client:
+            await self._client.add_blacklist_tools(tools, patterns)
+
+    async def remove_permission_rules(
+        self,
+        target: str,
+        tools: Optional[list] = None,
+        patterns: Optional[list] = None,
+    ) -> None:
+        """Remove tools / patterns from a permission list."""
+        self._check_can_send()
+        if self._client:
+            await self._client.remove_permission_rules(target, tools, patterns)
+
+    async def clear_permission_rules(self, target: str = "all") -> None:
+        """Clear the session-level permission lists."""
+        self._check_can_send()
+        if self._client:
+            await self._client.clear_permission_rules(target)
+
+    async def set_default_policy(self, policy: str) -> None:
+        """Set the session-level default permission policy."""
+        self._check_can_send()
+        if self._client:
+            await self._client.set_default_policy(policy)
+
+    async def request_policy_snapshot(self, request_id: str = "") -> None:
+        """Request a structured snapshot of the current permission policy."""
+        self._check_can_send()
+        if self._client:
+            await self._client.request_policy_snapshot(request_id)
+
+    # =========================================================================
     # Event Stream
     # =========================================================================
 
+    # =========================================================================
+    # Event Subscription API (mirrors IPCClient; survives reconnections)
+    # =========================================================================
+
+    def subscribe(
+        self,
+        event_type: EventType,
+        handler: EventHandler,
+    ) -> Unsubscribe:
+        """Subscribe to events of a specific type.
+
+        Subscriptions live on the recovery wrapper, so they keep working
+        across reconnections without the caller re-registering anything.
+        """
+        return self._registry.subscribe(event_type, handler)
+
+    def subscribe_once(
+        self,
+        event_type: EventType,
+        handler: EventHandler,
+    ) -> Unsubscribe:
+        """Subscribe to one event of ``event_type`` then auto-unsubscribe."""
+        return self._registry.subscribe_once(event_type, handler)
+
+    def subscribe_all(self, handler: EventHandler) -> Unsubscribe:
+        """Subscribe to every event regardless of type."""
+        return self._registry.subscribe_all(handler)
+
+    def subscribe_many(
+        self,
+        handlers: Dict[EventType, EventHandler],
+    ) -> Unsubscribe:
+        """Register multiple typed handlers; single unsub removes all."""
+        return self._registry.subscribe_many(handlers)
+
+    def open_event_stream(self) -> "_SyncSubscribedStream":
+        """Subscribe SYNCHRONOUSLY (at call time) and return an event iterator.
+
+        The recovery-client counterpart to :meth:`IPCClient.open_event_stream`.
+        Unlike :meth:`events` (an async generator that subscribes lazily on its
+        first ``__anext__``), this registers the subscriber queue NOW, before it
+        returns — so a caller can guarantee the subscription is live BEFORE it
+        triggers server-side output (e.g. ``attach`` a session the daemon will
+        immediately drive a woken turn on).  Critical here because the recovery
+        client has NO zero-subscriber replay buffer, so a not-yet-registered
+        queue silently drops that output::
+
+            stream = client.open_event_stream()   # queue registered now
+            await client.attach(session_id)        # driven output can't be missed
+            async for ev in stream:
+                ...
+
+        Removes any need to poll ``_event_subscribers`` to prove registration.
+        Same fan-out + ``None``-sentinel semantics as :meth:`events`, and the
+        queue survives transient reconnects (the pump keeps fanning out to it).
+        Lifetime is caller-managed — ``aclose()`` at teardown.
+        """
+        from ._event_stream import _SyncSubscribedStream
+        return _SyncSubscribedStream(self, self._subscribe_events())
+
     async def events(self) -> AsyncIterator[Event]:
-        """Async iterator for receiving events with automatic reconnection.
+        """Async iterator for receiving events.
 
-        Yields events from the server. If the connection is lost and
-        recovery is enabled, automatically attempts to reconnect.
-        During reconnection, yields SystemMessageEvents with status updates.
-
-        Yields:
-            Events from the server.
+        Fan-out model (mirror of ``IPCClient.events``): the background
+        :meth:`_event_pump` is the SINGLE reader of the inner client's events;
+        ``events()`` subscribes a queue to its fan-out and yields what arrives.
+        Multiple iterators can run concurrently, and ``subscribe()`` handlers
+        fire from the pump regardless of whether anyone iterates here — which
+        is what lets the convenience facade (``subscribe`` + ``await done``)
+        work over a recovery client instead of hanging.  On disconnect the
+        pump pushes a ``None`` sentinel and this iterator exits cleanly.
 
         Example:
             async for event in client.events():
                 if isinstance(event, AgentOutputEvent):
                     print(event.text)
         """
-        self._events_running = True
+        q = self._subscribe_events()
+        try:
+            while True:
+                event = await q.get()
+                if event is None:  # pump signalled disconnect/close
+                    break
+                yield event
+        finally:
+            self._unsubscribe_events(q)
 
-        while self._events_running and self._state != ConnectionState.CLOSED:
-            if self._state == ConnectionState.CONNECTED and self._client:
-                try:
-                    async for event in self._client.events():
-                        # Track session ID from session events
-                        if isinstance(event, SessionInfoEvent):
-                            if event.session_id:
+    async def _event_pump(self) -> None:
+        """Background single reader: drain the inner client's events, dispatch
+        to ``_registry`` (so ``subscribe()`` handlers fire without anyone
+        iterating :meth:`events`), fan out to ``events()`` consumers, and drive
+        reconnection across recreated inner clients.  Mirror of
+        ``IPCClient._drain_loop`` for the recovery wrapper.
+        """
+        try:
+            while self._events_running and self._state != ConnectionState.CLOSED:
+                if self._state == ConnectionState.CONNECTED and self._client:
+                    try:
+                        async for event in self._client.events():
+                            if isinstance(event, SessionInfoEvent) and event.session_id:
                                 self._session_id = event.session_id
+                            self._registry.dispatch(event)
+                            self._fanout(event)
 
-                        yield event
-
-                    # If we get here, the event stream ended (connection lost)
-                    if self._events_running and self._state == ConnectionState.CONNECTED:
-                        logger.info("Connection lost, starting recovery...")
-                        await self._start_reconnection()
-
-                except asyncio.CancelledError:
-                    logger.debug("Event stream cancelled")
-                    break
-
-                except Exception as e:
-                    logger.error(f"Error in event stream: {e}")
-                    if self._events_running and self._state == ConnectionState.CONNECTED:
-                        await self._start_reconnection()
-
-            elif self._state == ConnectionState.RECONNECTING:
-                # Wait for reconnection or yield status updates
-                try:
-                    # Check periodically for state changes
+                        # Inner stream ended → connection lost.
+                        if self._events_running and self._state == ConnectionState.CONNECTED:
+                            logger.info("Connection lost, starting recovery...")
+                            await self._start_reconnection()
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as e:  # noqa: BLE001 — keep the pump alive
+                        logger.error(f"Error in event pump: {e}")
+                        if self._events_running and self._state == ConnectionState.CONNECTED:
+                            await self._start_reconnection()
+                else:
+                    # RECONNECTING / transient: poll for a state change.
                     await asyncio.sleep(0.1)
-                except asyncio.CancelledError:
-                    break
+        except asyncio.CancelledError:
+            pass
+        finally:
+            # Release any events() consumers blocked on their queue.
+            self._fanout(None)
 
-            else:
-                # Not connected and not reconnecting, wait a bit
-                try:
-                    await asyncio.sleep(0.1)
-                except asyncio.CancelledError:
-                    break
+    # ---- fan-out helpers (mirror IPCClient's drain fan-out) ----
+    def _subscribe_events(self) -> "asyncio.Queue":
+        q: asyncio.Queue = asyncio.Queue()
+        self._event_subscribers.append(q)
+        return q
+
+    def _unsubscribe_events(self, q: "asyncio.Queue") -> None:
+        try:
+            self._event_subscribers.remove(q)
+        except ValueError:
+            pass
+
+    def _fanout(self, event) -> None:
+        for q in list(self._event_subscribers):
+            try:
+                q.put_nowait(event)
+            except asyncio.QueueFull:
+                logger.warning(
+                    "recovery events fan-out: subscriber queue full; dropping event"
+                )
+
+    async def _stop_event_pump(self) -> None:
+        """Cancel the background pump and release ``events()`` consumers."""
+        task = self._event_pump_task
+        self._event_pump_task = None
+        if task is not None:
+            task.cancel()
+            try:
+                await task
+            except BaseException:  # noqa: BLE001 — best-effort teardown
+                pass
+        self._fanout(None)
 
     # =========================================================================
     # Status
@@ -875,13 +1285,8 @@ class IPCRecoveryClient:
                 pass
             self._client = None
 
-        # Create new client
-        self._client = IPCClient(
-            socket_path=self._socket_path,
-            auto_start=False,  # Don't auto-start during reconnection
-            env_file=self._env_file,
-            workspace_path=str(self._workspace_path) if self._workspace_path else None,
-        )
+        # Create new client (never auto-start a restart)
+        self._client = self._make_client(auto_start=False)
 
         # Connect with timeout
         try:
@@ -896,6 +1301,17 @@ class IPCRecoveryClient:
             raise ConnectionError("Connection failed")
 
         self._client_id = self._client.client_id
+
+        # Re-register host ("client") tools on the fresh inner client BEFORE
+        # reattaching.  The reconnect built a new inner client with no host-tool
+        # handlers; the reattached session still exposes those tools, so without
+        # this the agent's next host-tool call would dangle.  Calls the inner
+        # client directly (not the guarded proxy) since we're mid-reconnect.
+        if self._registered_client_tools:
+            try:
+                await self._client.register_client_tools(self._registered_client_tools)
+            except Exception as e:
+                logger.warning(f"Failed to re-register client tools on reconnect: {e}")
 
         # Reattach to session if configured and we have a session ID
         if self._config.reattach_session and self._session_id:

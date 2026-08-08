@@ -21,6 +21,7 @@ from jaato_sdk.plugins.base import (
     UserCommand,
 )
 from jaato_sdk.plugins.model_provider.types import ThinkingConfig
+from shared.plugins.runner_forwarding import RunnerForwardingMixin
 from .config import (
     ThinkingPluginConfig,
     ThinkingPreset,
@@ -36,7 +37,7 @@ if TYPE_CHECKING:
 _thread_local = threading.local()
 
 
-class ThinkingPlugin:
+class ThinkingPlugin(RunnerForwardingMixin):
     """Plugin for controlling extended thinking/reasoning modes.
 
     This plugin provides the /thinking command for users to control
@@ -104,6 +105,34 @@ class ThinkingPlugin:
         _thread_local.session = None
         _thread_local.output_callback = None
 
+    def reset_for_next_session(self) -> None:
+        """Cascade-sharing reset (Phase 1, server 0.6.142+).
+
+        Per-session state CLEARED:
+        - ``_current_config``: re-loaded from default preset.  Per
+          Daniel's litmus test: if session A enabled a non-default
+          thinking config (via ``enter_tier`` or similar), session B
+          starting fresh should NOT inherit that choice — each
+          cascade stage starts at the configured default and makes
+          its own preset decision.
+        - ``_thread_local.session``: re-wired by next session's
+          ``set_session()`` lifecycle hook (re-set on next entry).
+        - ``_thread_local.output_callback``: same — re-wired per
+          session.
+
+        Survives the reset:
+        - ``_config``: the workspace-tier preset definitions
+          (immutable within a cascade — same operator-authored YAML).
+        """
+        default_preset = self._config.get_default_preset() if self._config else None
+        if default_preset:
+            self._current_config = default_preset.to_config()
+        else:
+            from .config import ThinkingConfig
+            self._current_config = ThinkingConfig()
+        _thread_local.session = None
+        _thread_local.output_callback = None
+
     def set_session(self, session: 'JaatoSession') -> None:
         """Set the session for applying thinking configuration.
 
@@ -161,10 +190,14 @@ class ThinkingPlugin:
         return []
 
     def get_executors(self) -> Dict[str, Callable[[Dict[str, Any]], Any]]:
-        """Return executors for user commands."""
-        return {
+        """Return executors for user commands.
+
+        Phase 3 §3.10 wave 4: forwards via runner-RPC when a runner
+        is attached; falls through to in-process otherwise.
+        """
+        return self.wrap_executors_for_runner_forwarding({
             "thinking": self._execute_thinking_command,
-        }
+        })
 
     def get_system_instructions(self) -> Optional[str]:
         """Return system instructions - none for this plugin."""

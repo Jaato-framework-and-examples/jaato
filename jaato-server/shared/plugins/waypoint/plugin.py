@@ -36,6 +36,7 @@ from jaato_sdk.plugins.base import (
 )
 from jaato_sdk.plugins.model_provider.types import ToolSchema
 
+from shared.plugins.runner_forwarding import RunnerForwardingMixin
 from shared.trace import trace as _trace_write
 
 if TYPE_CHECKING:
@@ -43,7 +44,7 @@ if TYPE_CHECKING:
     from jaato_sdk.plugins.model_provider.types import Message
 
 
-class WaypointPlugin:
+class WaypointPlugin(RunnerForwardingMixin):
     """Plugin for marking and restoring session waypoints.
 
     This plugin provides BOTH user-facing commands AND model tools with an
@@ -80,6 +81,7 @@ class WaypointPlugin:
         self._backup_manager: Optional["BackupManager"] = None
         self._plugin_registry = None
         self._storage_path: Optional[Path] = None
+        self._workspace_path: Optional[Path] = None
         self._session_id: Optional[str] = None
         self._initialized = False
 
@@ -87,6 +89,14 @@ class WaypointPlugin:
         self._get_history: Optional[Callable[[], List["Message"]]] = None
         self._serialize_history: Optional[Callable[[List["Message"]], str]] = None
         self._get_turn_index: Optional[Callable[[], int]] = None
+        # Optional snapshotter for session-attached state (extension-owned
+        # opaque dict).  Wired from JaatoSession alongside the history
+        # callbacks so the manager can capture session_state_snapshot on
+        # waypoint create — required for fork-from-waypoint to carry
+        # extension state across the fork (e.g. premium pseudonymization
+        # lookup table).  None means the manager skips state capture
+        # (legacy callers / tests that don't wire this).
+        self._get_session_state: Optional[Callable[[], Dict[str, Any]]] = None
 
         # Pending restore notification for prompt enrichment
         self._pending_restore_notification: Optional[Dict[str, Any]] = None
@@ -136,6 +146,43 @@ class WaypointPlugin:
         self._plugin_registry = registry
         registry.register_category("coordination", "Task tracking, TODO, DELEGATE work, SUBAGENTS, PARALLEL execution")
 
+    def set_workspace_path(self, path: str) -> None:
+        """Receive the workspace_path broadcast from PluginRegistry.
+
+        Mirrors the memory plugin's pattern (``shared/plugins/memory/plugin.py:155``).
+        ``WaypointManager`` defaults its storage_path to
+        ``Path(".jaato/...").resolve()`` which resolves against process
+        CWD — fragile under AppArmor confinement when CWD diverges from
+        workspace_root.  Capturing the workspace path here lets the
+        manager (lazily created in ``_ensure_manager``) resolve a
+        relative storage_path against the workspace instead.
+
+        When the manager is already created (storage_path was supplied
+        explicitly via config and lazy creation already fired), the
+        workspace update is recorded but the manager's storage_path is
+        not retroactively rewritten.  That's the pattern memory follows
+        too — explicit absolute paths are honored verbatim.
+
+        Args:
+            path: Workspace root path broadcast by ``PluginRegistry``
+                after ``initialize``.
+        """
+        if path:
+            self._workspace_path = Path(path)
+            self._trace(f"set_workspace_path: workspace_path={self._workspace_path}")
+            # If manager hasn't been created yet AND no explicit storage_path
+            # was supplied, prefix the default template with the workspace
+            # so lazy manager creation lands the file under the sandbox.
+            if self._manager is None and self._storage_path is None:
+                if self._session_id:
+                    self._storage_path = (
+                        self._workspace_path
+                        / ".jaato" / "sessions" / self._session_id / "waypoints.json"
+                    )
+                else:
+                    self._storage_path = self._workspace_path / ".jaato" / "waypoints.json"
+                self._trace(f"set_workspace_path: defaulted storage_path={self._storage_path}")
+
     def _ensure_manager(self) -> bool:
         """Ensure the manager is created, lazily initializing if needed.
 
@@ -174,6 +221,12 @@ class WaypointPlugin:
                 serialize_history=self._serialize_history,
             )
 
+        # Wire up the session-state callback if it was set before the manager
+        # was created.  Required for waypoints to capture extension-owned
+        # session-attached state.
+        if self._get_session_state is not None:
+            self._manager.set_session_state_callback(self._get_session_state)
+
         return True
 
     def shutdown(self) -> None:
@@ -182,11 +235,49 @@ class WaypointPlugin:
         self._plugin_registry = None
         self._initialized = False
 
+    def reset_for_next_session(self) -> None:
+        """Cascade-sharing reset (Phase 1b, server 0.6.143+).
+
+        Per Daniel's litmus test: waypoints themselves are persisted
+        to disk by ``_manager``; the IN-MEMORY plugin state has minor
+        per-session bits worth clearing but the bulk of state survives
+        naturally.
+
+        Per-session state CLEARED:
+        - ``_session_id``: re-set by next session's ``initialize()``.
+        - ``_pending_restore_notification``: per-session restore
+          signal — only meaningful for the session that requested it.
+        - Session-callback function refs (``_get_history``,
+          ``_serialize_history``, ``_get_turn_index``,
+          ``_get_session_state``): re-wired by next session's
+          ``set_session_callbacks()`` lifecycle call.  Clearing
+          defensively to avoid stale refs invoking previous
+          session's accessors.
+
+        Survives the reset:
+        - ``_manager`` (WaypointManager): owns the persisted waypoint
+          collection — cross-session by-design (operators may use
+          waypoints for cross-stage debug / replay).
+        - ``_backup_manager``: cross-session backup state.
+        - ``_storage_path``, ``_workspace_path``: workspace-tier
+          constants.
+        - ``_plugin_registry``: re-wired by next session's hook.
+        - ``_initialized``: True (manager + backup_manager survive).
+        """
+        self._trace("reset_for_next_session: clearing per-session bookkeeping")
+        self._session_id = None
+        self._pending_restore_notification = None
+        self._get_history = None
+        self._serialize_history = None
+        self._get_turn_index = None
+        self._get_session_state = None
+
     def set_session_callbacks(
         self,
         get_history: Callable[[], List["Message"]],
         serialize_history: Callable[[List["Message"]], str],
         get_turn_index: Optional[Callable[[], int]] = None,
+        get_session_state: Optional[Callable[[], Dict[str, Any]]] = None,
     ) -> None:
         """Set callbacks for session state access.
 
@@ -197,16 +288,30 @@ class WaypointPlugin:
             get_history: Returns current conversation history.
             serialize_history: Converts history to JSON string.
             get_turn_index: Returns current turn index (optional).
+            get_session_state: Returns the session's currently-attached
+                opaque state as a JSON-serialisable dict (typically
+                ``JaatoSession.get_all_session_state``, which invokes
+                registered providers so the snapshot is live).  When
+                provided, the waypoint manager captures the dict into
+                ``Waypoint.session_state_snapshot`` at create time so
+                a fork-from-waypoint primitive can replay extension-
+                owned state (e.g. premium pseudonymization lookup
+                table) across the fork.  When ``None``, the manager
+                skips state capture — backward-compatible for
+                callers that haven't been updated.
         """
         self._get_history = get_history
         self._serialize_history = serialize_history
         self._get_turn_index = get_turn_index
+        self._get_session_state = get_session_state
 
         if self._manager:
             self._manager.set_history_callbacks(
                 get_history=get_history,
                 serialize_history=serialize_history,
             )
+            if get_session_state is not None:
+                self._manager.set_session_state_callback(get_session_state)
 
     def get_tool_schemas(self) -> List[ToolSchema]:
         """Return tool schemas for model waypoint access.
@@ -317,8 +422,12 @@ class WaypointPlugin:
         ]
 
     def get_executors(self) -> Dict[str, Callable[[Dict[str, Any]], Any]]:
-        """Return command executors for both user commands and model tools."""
-        return {
+        """Return command executors for both user commands and model tools.
+
+        Phase 3 §3.10 wave 4: forwards via runner-RPC when a runner
+        is attached; falls through to in-process otherwise.
+        """
+        return self.wrap_executors_for_runner_forwarding({
             # User command
             "waypoint": self._execute_waypoint,
             # Model tools
@@ -327,7 +436,7 @@ class WaypointPlugin:
             "create_waypoint": self._execute_create_waypoint,
             "restore_waypoint": self._execute_restore_waypoint,
             "delete_waypoint": self._execute_delete_waypoint,
-        }
+        })
 
     def get_system_instructions(self) -> Optional[str]:
         """Return system instructions explaining waypoint ownership model."""

@@ -1,0 +1,6 @@
+{
+  "type": "permission.status",
+  "timestamp": "<TIMESTAMP>",
+  "effective_default": "ask",
+  "suspension_scope": null
+}

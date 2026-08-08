@@ -1,0 +1,529 @@
+"""Session-init envelope for the daemon → runner handshake +
+SessionManager-level bootstrap envelope.
+
+Phase 3 §3.3a + §3.12.0.
+
+When the daemon spawns a runner subprocess (Phase 2 task 2.3) and
+the runner reports ready (``RunnerReadyEvent``), the daemon sends a
+:class:`SessionInitEnvelope` as the first frame after ready.  The
+runner's ``runner.session.bootstrap_session(envelope)`` (§3.3b)
+constructs a live :class:`JaatoSession`, runs ``configure()``, and
+hosts the session for the duration of the runner's lifetime.
+
+The :class:`BootstrapEnvelope` (Phase 3 §3.12.0) is the
+SessionManager-level envelope above the JaatoSession-level
+``SessionInitEnvelope``.  It aggregates every input the per-session
+``SessionManager._bootstrap_session`` helper needs across the four
+session-creation paths (IPC, disk-restore, ephemeral subagent
+fan-out, WS standalone) into a single typed payload, replacing the
+ad-hoc kwarg-bag previously inlined in each call site.
+
+This module defines ONLY the schemas.  The serialization
+(``to_dict`` / ``from_dict``) is plain JSON-friendly — wraps primitive
+types + dicts + lists.  Anything richer (callable references, file
+descriptors, etc.) is NOT permitted in the envelope; all session
+state needed runner-side must be reducible to JSON.
+
+Versioning: ``schema_version`` is incremented when fields are added
+or semantics change.  Phase 3 ships v1.  Phase 4+ may bump.  The
+runner reads the version on receipt and refuses to bootstrap if the
+daemon advertises a higher version than the runner supports — this
+catches mid-deploy version skew (operator restarted the daemon to
+0.6.X but a long-running runner is still 0.6.X-1).
+
+:class:`BootstrapEnvelope` is daemon-internal — it never crosses the
+RPC wire — so it doesn't carry a ``schema_version`` and may hold
+non-JSON-serializable fields (Callable references, plugin instances,
+profile objects).
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Any, Callable, Dict, FrozenSet, List, Optional
+
+from .instruction_suppression import normalize_suppression, suppression_to_wire
+
+
+# Bumped per schema change.  Runners refuse a higher-version
+# envelope from the daemon (forward-compat is opt-in, not free).
+#
+# v3 (2026-05-14): added ``model_tiers``.  Phase 3 §3.3a/§3.12 moved
+# session state from daemon-tier to runner-tier; the
+# ``profile.model_tiers`` field (server 0.5.20) was never migrated and
+# the runner therefore left ``JaatoSession._tier_config = None``,
+# suppressing ``enter_tier`` tool registration for every pool-served
+# session.  v3 carries the tier mapping on the envelope so the runner
+# can resolve ``ModelTierConfig`` and register the tool.
+#
+# v4 (2026-05-20): added ``cascade_driver_id``.  Phase 2 of the
+# cascade-sharing arc (docs/design/runner-cascade-sharing.md): IPC
+# client supplies an opaque cascade tenant ID at session.new; the
+# daemon threads it through to ``pool_manager.acquire_slot`` so the
+# slot can reuse a previously-affined pool slot when one is idle.
+# Runner-side bootstrap stashes the value onto ``JaatoSession`` so
+# subagent spawns can inherit the parent cascade via the existing
+# ``runtime.create_session()`` path.
+SESSION_ENVELOPE_VERSION = 4
+
+
+@dataclass
+class SessionInitEnvelope:
+    """Daemon → runner session-bootstrap payload.
+
+    Carries everything the runner needs to construct a live
+    :class:`JaatoSession` against the configured profile + plugin
+    set.  Daemon-resolved fields (plugin list, plugin configs, agent
+    instructions) are sent as already-resolved dicts so the runner
+    doesn't re-walk profile / agent / config_root paths
+    independently — single source of truth, single resolution path.
+
+    Attributes:
+        schema_version: Echoes :data:`SESSION_ENVELOPE_VERSION`.
+            Runner refuses higher-than-known versions.
+        session_id: Stable session identifier; matches the AppArmor
+            profile name suffix (``jaato-ws-{session_id}``).
+        workspace_path: Absolute path to the session's workspace
+            root, or ``None`` for headless / no-workspace sessions.
+        profile_name: Name of the profile JSON the daemon resolved
+            (e.g. ``"cli_test"``).  Informational; the resolved
+            plugin list + configs are authoritative.
+        provider_name: Model provider this session uses
+            (``"anthropic"``, ``"openrouter"``, etc.).  The runner
+            doesn't talk to the provider directly — daemon-tier per
+            §4.2 — but knows the name for telemetry attribution.
+        model_name: Model identifier (e.g.
+            ``"claude-sonnet-4-6"``).
+        plugins: Ordered list of plugin specifications the runner
+            should instantiate.  Each entry is a dict carrying
+            ``name`` (str) + ``preload`` (bool — Phase 2 carries
+            this via ``"name(preload)"`` syntax; Phase 3 normalizes
+            to typed dict).  Per-plugin configs live in
+            ``plugin_configs`` (Phase 4 §C) — a top-level dict that
+            carries the full ``profile.plugin_configs`` map so
+            auto-loaded plugins (``permission``, ``gc_*``, etc.) that
+            aren't in this list still receive their profile overrides.
+        plugin_configs: Map of plugin name → config dict, mirroring
+            ``profile.plugin_configs``.  Carries configs for **all**
+            plugins the profile names — including ones the runner
+            auto-loads without them appearing in ``plugins``.  Pre-§C
+            the per-plugin config lived in ``plugins[i].config`` and
+            was dropped for non-listed plugins; this field closes that
+            gap (backlog §3.3c.X).  Schema v2.
+        system_instructions: Resolved system-instructions text the
+            runner installs onto the JaatoSession.  ``None`` for
+            sessions that compose instructions on-the-fly via
+            dynamic-instructions render scripts; non-None for the
+            simple opaque-string path.
+        agent_id: Logical agent identifier (defaults to ``"main"``
+            for top-level sessions).  Carried in event emissions
+            for cascade attribution.
+        gc: Optional GC strategy config dict (``{"type": "budget",
+            "threshold_percent": 80.0}`` etc.).  ``None`` falls back
+            to the runtime default.
+        completion_payload_schema: Profile-declared JSON Schema for
+            ``signal_completion``'s ``payload`` parameter.  Inline
+            dict or string path resolved via
+            ``.jaato/completion_schemas/``.  ``None`` = legacy
+            untyped completion.
+        completion_processors: Profile-declared completion processors
+            (server 0.6.125+).  Each entry is a serialised
+            ``CompletionProcessor`` dict (``script`` / ``output`` /
+            ``on_error`` / ``description``).  Runner-side
+            ``LifecycleTools`` invokes them after
+            ``signal_completion`` validates; processors expose
+            ``render`` and/or ``validate`` symbols (probe-by-symbol).
+            Empty list = no processors.
+        agent_params: Spawn-time parameters from the parent caller
+            (``agent_params={...}`` on ``spawn_subagent``).  Carried
+            into dynamic-instructions render-context.  Empty for
+            top-level sessions whose prompt carries case data
+            inline.
+        config_root: Override for the framework config root
+            (``.jaato/`` typically).  Set when a client passed
+            ``ClientConfigRequest.config_root`` at handshake.
+            ``None`` = use the workspace's ``.jaato/``.
+        env_overrides: Environment-variable overrides applied during
+            session-init (e.g. provider env from a post-auth wizard
+            response).  Layered atop the workspace's ``.env``.
+
+            **Deprecated:** post-Y the runner consumes ``session_env``
+            (which already includes the layered + resolved overrides).
+            Carried for backward compat with older runner versions
+            until schema_version bumps; new code should not rely on
+            this field reaching the runner.
+        session_env: Fully-resolved per-session environment (workspace
+            ``.env`` + profile.env + env_overrides, all ``${VAR}`` and
+            secret-URI resolved daemon-side).  **Carries plaintext
+            secrets** (decoded ``pass://`` / ``vault://`` values).
+            Wire-only — never persisted, never logged, never forwarded
+            to clients.  Runner applies these to ``os.environ``
+            verbatim during ``bootstrap_session`` without further
+            resolution.
+
+            This is the load-bearing channel for confined-runner
+            secret access: the daemon (unconfined) does the resolver
+            exec; the runner (AppArmor-confined and unable to exec
+            ``pass``) consumes pre-resolved literals.  See
+            ``project_backlog_env_propagation_seat_flip_gap`` history
+            + the PR #91 retrospective for context.
+        model_tiers: Profile-declared per-turn model-tier mapping
+            (``{"planner": "...", "dispatcher": "...", "executor":
+            "...", "initial": "...", "fallback": "..."}``) or ``None``
+            when the session runs in single-model mode.  Carried on the
+            envelope so the runner can resolve a
+            :class:`shared.model_tiers.ModelTierConfig` and pass it to
+            ``runtime.create_session(tier_config=...)``; that in turn
+            registers the ``enter_tier`` lifecycle tool so the model
+            can switch tiers mid-turn.  Schema v3.
+    """
+
+    session_id: str
+    workspace_path: Optional[str]
+    profile_name: Optional[str]
+    provider_name: str
+    model_name: str
+    plugins: List[Dict[str, Any]] = field(default_factory=list)
+    # Phase 4 §C: top-level plugin configs map (replaces per-entry
+    # ``plugins[i].config`` which only carried configs for plugins
+    # named in ``plugins``).  Carries the full ``profile.plugin_configs``
+    # so auto-loaded plugins like ``permission`` receive their profile
+    # overrides too.  Schema v2 — old runners refuse v2 envelopes.
+    plugin_configs: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    system_instructions: Optional[str] = None
+    agent_id: str = "main"
+    gc: Optional[Dict[str, Any]] = None
+    completion_payload_schema: Optional[Any] = None
+    # Profile-declared completion processors (server 0.6.125+).  Each
+    # entry is a serialised ``CompletionProcessor`` dict shaped like
+    # ``{"script": ..., "output": ..., "on_error": ..., "description": ...}``.
+    # Runner-side ``LifecycleTools._execute_signal_completion`` runs
+    # each processor after ``jsonschema.validate`` passes — modules
+    # may expose ``render`` (produces output content) and/or
+    # ``validate`` (returns error strings).  Replaces the prior split
+    # between ``completion_artifacts`` and ``completion_validators``
+    # — see ``shared/completion_processors.py`` for the loader,
+    # ledger builder, and per-processor invocation pipeline.
+    completion_processors: List[Dict[str, Any]] = field(default_factory=list)
+    agent_params: Dict[str, str] = field(default_factory=dict)
+    config_root: Optional[str] = None
+    env_overrides: Dict[str, str] = field(default_factory=dict)
+    # PR #91 Y fix: fully-resolved per-session env carrying plaintext
+    # secrets.  Wire-only — daemon → runner over the socketpair, never
+    # persisted, logged, or forwarded to clients.  See field docstring
+    # above for the full security contract.
+    session_env: Dict[str, str] = field(default_factory=dict)
+    # Phase 3 post-Step-7 Path C: provider-connect args.  Carried in
+    # the envelope so the runner-side ``bootstrap_session`` can call
+    # ``runtime.connect(project, location)`` before
+    # ``runtime.create_session`` (which guards on ``_connected``).
+    # Non-Vertex providers (anthropic, openrouter, ollama, etc.)
+    # leave these as empty strings — the provider plugin's
+    # ``initialize()`` ignores them.  Vertex AI / Google GenAI
+    # sessions populate from ``PROJECT_ID`` / ``LOCATION`` env
+    # daemon-side.  Defaults preserve backward compat with earlier
+    # callers and the envelope schema_version stays unchanged.
+    project: str = ""
+    location: str = ""
+    # v3 (2026-05-14): per-turn model-tier mapping forwarded from
+    # ``profile.model_tiers``.  Empty dict / None means single-model
+    # mode (no ``enter_tier`` tool, no per-tier system-prompt line).
+    # See ``shared/model_tiers.py`` for the resolver and schema.
+    model_tiers: Optional[Dict[str, Any]] = None
+    # v4 (2026-05-20): cascade-sharing tenant ID.  Opaque UTF-8
+    # string supplied by the IPC client at session.new (or
+    # auto-inherited from parent for subagent sessions).  ``None``
+    # = standalone session (no slot reuse).  Runner stashes onto
+    # JaatoSession so subagent spawns can inherit via existing
+    # runtime.create_session() path.  See
+    # docs/design/runner-cascade-sharing.md §4.1.
+    cascade_driver_id: Optional[str] = None
+    # 2026-06-06: profile-level ``suppress_base_instructions`` flag,
+    # ferried across the daemon → runner seat-flip.  Pre-fix the field
+    # existed on BootstrapEnvelope (daemon-internal) and on the
+    # daemon-side ``JaatoServer._suppress_base_instructions`` attribute,
+    # but the wire envelope had no field for it — so the runner-side
+    # JaatoSession always built its system instructions with the BASE
+    # layer included (``include_base=True`` default), and the profile
+    # knob was a silent no-op.  The empirical fingerprint was identical
+    # prompt-token counts before and after setting the flag in the
+    # profile JSON (40,953 tokens in both runs of the openrouter smoke,
+    # 36,005 in the trtllm smoke — the runtime's
+    # ``get_system_instructions(include_base=False)`` probe showed the
+    # drop WOULD be ~24K if honored).  See
+    # ``project_backlog_suppress_base_instructions_not_honored``
+    # memory for the falsification recipe + full evidence chain.
+    # ``suppress_base_instructions`` (2026-07-08 made granular): the
+    # canonical frozenset of framework instruction pieces to drop
+    # (subset of {disk, constants, security}; see ``instruction_
+    # suppression``).  Serialized on the wire as a sorted list; the
+    # deserializer normalizes a legacy bool (``true`` → {disk,
+    # constants}) too, so older daemons/envelopes stay compatible.
+    # Empty default keeps backward compat with envelopes built before
+    # this field landed.
+    suppress_base_instructions: FrozenSet[str] = field(default_factory=frozenset)
+    # 2026-06-06: symmetric fix for ``system_instruction_override`` —
+    # same shape of bug as ``suppress_base_instructions``.  The
+    # daemon-side ``JaatoServer._system_instruction_override`` was set
+    # correctly from BootstrapEnvelope, but the wire envelope had no
+    # field for it, so the runner-side JaatoSession always assembled
+    # its system instructions normally even when a client passed
+    # ``system_instruction_override`` via IPC ``create_session``.
+    # ``None`` default = no override (runner assembles instructions
+    # normally from profile + agent + plugins + framework).  Empty
+    # string is a legitimate value meaning "send no system message at
+    # all" (mirrors ``JaatoServer._build_session_overrides`` at
+    # core.py:2504, where ``override is not None`` is the gate).
+    system_instruction_override: Optional[str] = None
+    # 2026-06-21: client-provided ("host") tools registered by the client
+    # BEFORE session.new (e.g. a WS telegram client's send_to_telegram).  Each
+    # entry is a schema dict (name/description/parameters).  Carried so the
+    # RUNNER-tier model can SEE them in list_tools — pre-fix they registered only
+    # on the daemon registry (websocket._register_client_tools) and the runner's
+    # model never received the schema (the #344-sibling daemon-vs-runner split).
+    # Execution forwards back to the daemon's existing proxy executor via
+    # daemon.plugin_execute (sentinel plugin name).  Empty default = backward
+    # compat; same-build daemon+runner so no schema_version bump needed.
+    client_tools: List[Dict[str, Any]] = field(default_factory=list)
+    schema_version: int = SESSION_ENVELOPE_VERSION
+
+    def __post_init__(self) -> None:
+        """Normalize ``suppress_base_instructions`` to the canonical frozenset.
+
+        The field is a frozenset invariant, but callers (and legacy
+        ``getattr(server, ..., False)`` defaults / test stubs) may hand it a
+        bool.  Normalizing here — the type boundary — keeps ``to_dict``'s
+        ``suppression_to_wire`` total and mirrors ``SubagentProfile``.
+        """
+        self.suppress_base_instructions = normalize_suppression(
+            self.suppress_base_instructions
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialize to a JSON-friendly dict for the wire.
+
+        Field-order is fixed (matches the dataclass declaration) so
+        log output across versions is comparable.
+        """
+        return {
+            "schema_version": self.schema_version,
+            "session_id": self.session_id,
+            "workspace_path": self.workspace_path,
+            "profile_name": self.profile_name,
+            "provider_name": self.provider_name,
+            "model_name": self.model_name,
+            "plugins": [dict(p) for p in self.plugins],
+            "plugin_configs": {k: dict(v) for k, v in self.plugin_configs.items()},
+            "system_instructions": self.system_instructions,
+            "agent_id": self.agent_id,
+            "gc": dict(self.gc) if self.gc is not None else None,
+            "completion_payload_schema": self.completion_payload_schema,
+            "completion_processors": [dict(p) for p in self.completion_processors],
+            "agent_params": dict(self.agent_params),
+            "config_root": self.config_root,
+            "env_overrides": dict(self.env_overrides),
+            "session_env": dict(self.session_env),
+            "project": self.project,
+            "location": self.location,
+            "model_tiers": (
+                dict(self.model_tiers) if self.model_tiers else None
+            ),
+            "cascade_driver_id": self.cascade_driver_id,
+            # 2026-06-06: both knobs serialized on the wire so the
+            # runner-side from_dict() receives them.  See field
+            # docstrings for the bug history (silent no-op pre-fix).
+            "suppress_base_instructions": suppression_to_wire(
+                self.suppress_base_instructions
+            ),
+            "system_instruction_override": self.system_instruction_override,
+            "client_tools": [dict(t) for t in self.client_tools],
+        }
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "SessionInitEnvelope":
+        """Deserialize from a wire dict.
+
+        Raises:
+            ValueError: when ``schema_version`` is missing OR exceeds
+                :data:`SESSION_ENVELOPE_VERSION`.  Forward-compat is
+                opt-in — runners refuse newer envelopes.
+            KeyError: when required fields are missing.
+        """
+        version = d.get("schema_version")
+        if version is None:
+            raise ValueError(
+                "SessionInitEnvelope: missing 'schema_version' — "
+                "are you decoding a Phase 2 frame against the "
+                "Phase 3 schema?"
+            )
+        if version > SESSION_ENVELOPE_VERSION:
+            raise ValueError(
+                f"SessionInitEnvelope: envelope schema_version "
+                f"{version} > runner-supported "
+                f"{SESSION_ENVELOPE_VERSION}; runner is older than "
+                f"daemon (mid-deploy skew?)"
+            )
+
+        return cls(
+            schema_version=int(version),
+            session_id=str(d["session_id"]),
+            workspace_path=d.get("workspace_path"),
+            profile_name=d.get("profile_name"),
+            provider_name=str(d.get("provider_name", "")),
+            model_name=str(d.get("model_name", "")),
+            plugins=[dict(p) for p in (d.get("plugins") or [])],
+            plugin_configs={
+                k: dict(v)
+                for k, v in (d.get("plugin_configs") or {}).items()
+            },
+            system_instructions=d.get("system_instructions"),
+            agent_id=str(d.get("agent_id", "main")),
+            gc=dict(d["gc"]) if d.get("gc") else None,
+            completion_payload_schema=d.get("completion_payload_schema"),
+            completion_processors=[
+                dict(p) for p in (d.get("completion_processors") or [])
+                if isinstance(p, dict)
+            ],
+            agent_params=dict(d.get("agent_params") or {}),
+            config_root=d.get("config_root"),
+            env_overrides=dict(d.get("env_overrides") or {}),
+            session_env=dict(d.get("session_env") or {}),
+            project=str(d.get("project", "")),
+            location=str(d.get("location", "")),
+            model_tiers=(
+                dict(d["model_tiers"]) if d.get("model_tiers") else None
+            ),
+            cascade_driver_id=d.get("cascade_driver_id"),
+            # 2026-06-06: defaults preserve backward compat with
+            # older daemons that don't carry these fields on the wire.
+            suppress_base_instructions=normalize_suppression(
+                d.get("suppress_base_instructions", False)
+            ),
+            system_instruction_override=d.get("system_instruction_override"),
+            client_tools=[
+                dict(t) for t in (d.get("client_tools") or [])
+                if isinstance(t, dict)
+            ],
+        )
+
+
+# ----------------------------------------------------------------------
+# §3.12.0 — SessionManager-level bootstrap envelope
+# ----------------------------------------------------------------------
+
+
+@dataclass
+class BootstrapEnvelope:
+    """SessionManager-level bootstrap envelope (Phase 3 §3.12.0).
+
+    Aggregates every input the per-session
+    :meth:`SessionManager._bootstrap_session` helper needs across
+    the four session-creation paths (IPC, disk-restore, ephemeral
+    subagent fan-out, WS standalone) into a single typed payload.
+
+    Fields are grouped by purpose:
+
+    1. **Identity** — ``session_id``, ``workspace_path``, ``name``,
+       ``description``.
+    2. **Path discriminators** (per the §3.12.0 spec):
+
+       - ``client_id`` — ``None`` for disk-restore + ephemeral.
+       - ``parent_runner_handle`` — set only on ephemeral subagent
+         fan-out per §4.3 default share; else ``None``.
+       - ``sandbox_mode`` — the planned-sandbox-mode value the IPC
+         apparmor pre-init hook stashed into Phase 2's
+         ``_planned_sandbox_mode``.  Pre-resolved by the caller (the
+         IPC path's pre-init hook runs to completion before the
+         envelope is built); ``None`` for paths without an apparmor
+         opt-in.
+       - ``restore_state`` — populated only on disk-restore.
+
+    3. **JaatoServer construction** — ``env_file``, ``profile``,
+       ``agent_name``, ``system_instruction_override``,
+       ``env_overrides``, ``suppress_base_instructions``,
+       ``config_root``, ``instruction_token_cache``.
+    4. **Session record** — ``provisioned``, ``created_by``,
+       ``timestamp``.
+    5. **Bootstrap-time event sink** — ``on_event_during_init`` for
+       error reporting BEFORE the client is attached to the
+       session.
+
+    Daemon-internal only — never crosses the RPC wire.  Holds
+    non-JSON-serializable fields (Callable references, profile
+    objects, plugin instances) and therefore exposes no
+    ``to_dict`` / ``from_dict`` serializer.
+
+    Subsequent §3.12 commits extend this dataclass with path-
+    specific fields as the disk-restore / ephemeral / WS-standalone
+    migrations land.  New fields default to ``None`` / empty so the
+    existing IPC migration stays byte-identical.
+    """
+
+    # -- Identity ---------------------------------------------------------
+    session_id: str
+    workspace_path: Optional[str]
+    name: str
+    description: Optional[str] = None
+
+    # -- Path discriminators ---------------------------------------------
+    client_id: Optional[str] = None
+    parent_runner_handle: Optional[Any] = None
+    sandbox_mode: Optional[str] = None
+    restore_state: Optional[Dict[str, Any]] = None
+
+    # -- JaatoServer construction ----------------------------------------
+    env_file: Optional[str] = None
+    profile: Optional[Any] = None
+    # The UNRESOLVED inline-profile spec dict, when ``profile`` was built
+    # from an inline spec (``build_inline_profile``).  Carried daemon-
+    # internal so the created Session can stash it for disk-restore
+    # (persisted as ``SessionState.profile_spec``).  None for named-profile
+    # / no-profile sessions.
+    inline_profile_spec: Optional[Dict[str, Any]] = None
+    agent_name: str = "main"
+    system_instruction_override: Optional[str] = None
+    # Canonical frozenset of framework instruction pieces to drop (see
+    # ``instruction_suppression``); daemon-internal, never crosses the wire.
+    suppress_base_instructions: FrozenSet[str] = field(default_factory=frozenset)
+    env_overrides: Dict[str, str] = field(default_factory=dict)
+    config_root: Optional[str] = None
+    instruction_token_cache: Optional[Any] = None
+    # Phase 4 §D: agent_params from the originating IPC ``create_session``
+    # request (or ``spawn_subagent`` fan-out).  Carried daemon-internal
+    # so ``build_session_envelope`` can forward them through the
+    # SessionInitEnvelope to the runner, where the JaatoSession applies
+    # them to its ``{{!py:...}}`` prefetch render context.  Pre-§D this
+    # field was missing and ``runner_spawn.build_session_envelope``
+    # hard-coded ``agent_params={}`` on the wire envelope — prefetch
+    # scripts reading ``context.agent_params`` on the runner saw empty
+    # dicts and emitted their "missing required keys" error block,
+    # which caused the documenter agent to hallucinate tmux pane ids.
+    agent_params: Dict[str, str] = field(default_factory=dict)
+
+    # PR-A (2026-05-14): explicit AppArmor confinement override from the
+    # session-creation caller (``SessionManager.create_headless_session``
+    # ``apparmor=`` kwarg; reactor surface through ``ActionContext``).
+    # ``None`` means "no caller override — consult the IPC
+    # client_config, then the profile field, then the legacy default".
+    # ``True`` / ``False`` short-circuit that chain.  See backlog
+    # ``project_backlog_apparmor_kwarg_for_headless_sessions`` for the
+    # two-PR migration plan (PR-A: surface + back-compat False default;
+    # PR-B: flip profile default to True).
+    apparmor: Optional[bool] = None
+
+    # Phase 2 cascade-sharing (server 0.6.144+): opaque tenant ID
+    # identifying the cascade this session belongs to.  Daemon
+    # threads it to ``pool_manager.acquire_slot`` so a prior
+    # session of the same cascade's slot (with its warm plugin
+    # state + LSP connections) is reused.  ``None`` = standalone
+    # session, no slot reuse.  See
+    # ``docs/design/runner-cascade-sharing.md`` §4.1.
+    cascade_driver_id: Optional[str] = None
+
+    # -- Session record --------------------------------------------------
+    provisioned: bool = False
+    created_by: Optional[str] = None
+    timestamp: Optional[Any] = None
+
+    # -- Bootstrap-time event sink ---------------------------------------
+    on_event_during_init: Optional[Callable[[Any], None]] = None

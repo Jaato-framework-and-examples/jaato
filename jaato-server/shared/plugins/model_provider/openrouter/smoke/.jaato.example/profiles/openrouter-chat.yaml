@@ -1,0 +1,22 @@
+name: openrouter-chat
+description: >
+  Pure chat smoke for the openrouter provider — sends one user message,
+  expects one text response, no tools.  No completion_payload_schema
+  declared → signal_completion is HIDDEN from the model's tool
+  surface (2026-06-07 schema gate).  The turn ends naturally when
+  the provider's response has no function calls.
+
+model: anthropic/claude-sonnet-4.5
+provider: openrouter
+
+max_turns: 1
+
+suppress_base_instructions: true
+
+plugins: []
+
+plugin_configs:
+  openrouter:
+    api_key: "${JAATO_OPENROUTER_API_KEY}"
+    api_params:
+      max_tokens: 256

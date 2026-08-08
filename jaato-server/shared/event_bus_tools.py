@@ -21,7 +21,7 @@ import threading
 from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 
 from jaato_sdk.event_bus import Event, EventFilter, EventType
-from jaato_sdk.plugins.model_provider.types import ToolSchema
+from jaato_sdk.plugins.model_provider.types import ToolSchema, DISCOVERABILITY_EAGER
 
 if TYPE_CHECKING:
     from shared.jaato_session import JaatoSession
@@ -184,7 +184,7 @@ class EventBusTools:
                     "required": ["event_types"],
                 },
                 category="coordination",
-                discoverability="core",
+                discoverability=DISCOVERABILITY_EAGER,
             ),
             ToolSchema(
                 name="getEvents",
@@ -230,7 +230,7 @@ class EventBusTools:
                     "required": [],
                 },
                 category="coordination",
-                discoverability="core",
+                discoverability=DISCOVERABILITY_EAGER,
             ),
             ToolSchema(
                 name="listSubscriptions",
@@ -241,7 +241,7 @@ class EventBusTools:
                     "required": [],
                 },
                 category="coordination",
-                discoverability="core",
+                discoverability=DISCOVERABILITY_EAGER,
             ),
             ToolSchema(
                 name="unsubscribe",
@@ -257,7 +257,7 @@ class EventBusTools:
                     "required": ["subscription_id"],
                 },
                 category="coordination",
-                discoverability="core",
+                discoverability=DISCOVERABILITY_EAGER,
             ),
         ]
 

@@ -16,7 +16,7 @@ from jaato_sdk.plugins.base import (
     ToolPlugin,
     UserCommand,
 )
-from jaato_sdk.plugins.model_provider.types import ToolSchema
+from jaato_sdk.plugins.model_provider.types import ToolSchema, tool_result_is_error
 from .types import (
     BehavioralPattern,
     BehavioralPatternType,
@@ -48,6 +48,7 @@ from .persistence import (
 )
 from .patterns import PatternDetector
 from .nudge import NudgeInjector, NudgeStrategy
+from shared.plugins.runner_forwarding import RunnerForwardingMixin
 from .policy_config import (
     generate_default_config_safe,
     get_default_policy_config_path,
@@ -59,7 +60,7 @@ from .policy_config import (
 logger = logging.getLogger(__name__)
 
 
-class ReliabilityPlugin:
+class ReliabilityPlugin(RunnerForwardingMixin):
     """Plugin that tracks tool failures and adjusts trust dynamically.
 
     This plugin monitors tool execution results and maintains reliability
@@ -167,10 +168,14 @@ class ReliabilityPlugin:
         return []
 
     def get_executors(self) -> Dict[str, Callable]:
-        """Return executors for user commands."""
-        return {
+        """Return executors for user commands.
+
+        Phase 3 §3.10 wave 4: forwards via runner-RPC when a runner
+        is attached; falls through to in-process otherwise.
+        """
+        return self.wrap_executors_for_runner_forwarding({
             "reliability": self._execute_user_command,
-        }
+        })
 
     def get_auto_approved_tools(self) -> List[str]:
         """User commands don't need permission checks."""
@@ -447,6 +452,20 @@ class ReliabilityPlugin:
         """Shutdown the plugin."""
         logger.info("Reliability plugin shutdown")
 
+    def reset_for_next_session(self) -> None:
+        """Cascade-sharing reset — NO-OP for this plugin.
+
+        Phase 1 hotfix (server 0.6.148+): added to satisfy the
+        ``ToolPlugin`` / ``EnrichmentPlugin`` protocol's runtime
+        ``isinstance`` check.  Per Daniel's litmus test (see
+        ``docs/design/runner-cascade-sharing.md`` §4.3), this
+        plugin holds no per-session state that the next cascade
+        session would benefit from having cleared.  Override in
+        future PRs if the litmus test changes.
+        """
+        pass
+
+
     # -------------------------------------------------------------------------
     # Session Persistence
     # -------------------------------------------------------------------------
@@ -541,6 +560,46 @@ class ReliabilityPlugin:
     def set_session_context(self, session_id: str) -> None:
         """Set session context for failure tracking."""
         self._session_id = session_id
+
+    def on_subagent_terminated(
+        self,
+        agent_id: str,
+        session_id: Optional[str],
+    ) -> None:
+        """Phase 3 §3.11 + peer-review M4: drop session-id-keyed
+        state for a finished subagent.
+
+        Auto-discovered by :meth:`SubagentPlugin.set_runtime` and
+        invoked from :meth:`SubagentPlugin._close_session_unlocked`
+        when a subagent finishes — normal completion, error
+        termination, or operator cancel.  Without this teardown,
+        a long-lived parent session accumulates unbounded
+        ``(session_id, tool_name)`` entries in
+        ``self._session_tool_successes`` from completed subagents.
+
+        Args:
+            agent_id: The subagent's identifier in
+                :class:`SubagentPlugin`'s registry (unused here).
+            session_id: The underlying JaatoSession's id — the key
+                this plugin's session-tool-success counters are
+                indexed by.  ``None`` means the subagent never had
+                a session attached; nothing to drop.
+        """
+        if not session_id:
+            return
+        # Drop every (session_id, *) entry from the success counter.
+        stale_keys = [
+            key for key in self._session_tool_successes
+            if isinstance(key, tuple) and len(key) == 2 and key[0] == session_id
+        ]
+        for key in stale_keys:
+            self._session_tool_successes.pop(key, None)
+        if stale_keys:
+            logger.debug(
+                "reliability: dropped %d session-tool-success entries "
+                "for terminated subagent session_id=%s",
+                len(stale_keys), session_id,
+            )
 
     def set_turn_index(self, turn_index: int) -> None:
         """Update current turn index."""
@@ -1192,10 +1251,13 @@ class ReliabilityPlugin:
             return self._handle_success(state)
 
     def _is_error_result(self, result: Any) -> bool:
-        """Check if a result indicates an error even if execution 'succeeded'."""
-        if not isinstance(result, dict):
-            return False
-        return "error" in result or result.get("status_code", 200) >= 400
+        """Check if a result indicates an error even if execution 'succeeded'.
+
+        Delegates to the canonical ``tool_result_is_error`` helper so there is a
+        single source of truth shared with the ``tool.call_completed`` event
+        populate.
+        """
+        return tool_result_is_error(result)
 
     def _get_or_create_state(self, key_str: str, tool_name: str) -> ToolReliabilityState:
         """Get existing state or create new one."""
@@ -2671,7 +2733,7 @@ class ReliabilityPlugin:
             config_path.parent.mkdir(parents=True, exist_ok=True)
             config_path.write_text(generate_default_config_safe(), encoding="utf-8")
 
-        editor = os.environ.get("EDITOR") or os.environ.get("VISUAL") or "vi"
+        editor = os.environ.get("EDITOR") or os.environ.get("VISUAL") or "vi"  # env: external editor for interactive edits (EDITOR, then VISUAL, else vi)
 
         try:
             result = subprocess.run([editor, str(config_path)], check=False)

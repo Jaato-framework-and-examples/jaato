@@ -1,0 +1,10 @@
+{
+  "type": "peer.agent_completed",
+  "timestamp": "<TIMESTAMP>",
+  "request_id": "",
+  "remote_agent_id": "",
+  "success": true,
+  "summary": "",
+  "error": "",
+  "workspace_modified": false
+}

@@ -1,0 +1,1 @@
+Hello from targeted-edit mode writeNewFile!

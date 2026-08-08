@@ -12,8 +12,14 @@ from ..tool_stubs import (
     _build_docstring,
     _make_tool_function,
 )
-from ..backends.local import LocalJupyterBackend
+from ..backends.local import LocalJupyterBackend, INPROCESS_OPT_IN_ENV
 from ..types import ExecutionStatus, OutputType
+
+
+@pytest.fixture(autouse=True)
+def _allow_inprocess_exec(monkeypatch):
+    """Opt into in-process cell execution (the test runner is unconfined)."""
+    monkeypatch.setenv(INPROCESS_OPT_IN_ENV, "1")
 
 
 # ---------------------------------------------------------------------------

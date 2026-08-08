@@ -309,11 +309,11 @@ own plans?" — completion rates, failure rates, and plan sizes.
 
 ### 11. Template Plugin (`template/plugin.py`)
 
-**Tools:** `writeFileFromTemplate`, `listAvailableTemplates`,
+**Tools:** `renderTemplateToFile`, `listAvailableTemplates`,
 `listTemplateVariables`, `validateTemplateIndex`
 
 ```python
-# writeFileFromTemplate
+# renderTemplateToFile
 "_telemetry": {
     "jaato.template.operation": "write",
     "jaato.template.name": template_name,

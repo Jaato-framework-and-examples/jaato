@@ -32,6 +32,7 @@
         <div class="sidebar-title">Getting Started</div>
         <ul class="sidebar-nav">
           <li><a href="../../getting-started/quickstart.html">Quickstart</a></li>
+          <li><a href="../../getting-started/typescript-sdk.html">TypeScript SDK</a></li>
         </ul>
       </div>
 
@@ -70,6 +71,13 @@
           <li><a href="../providers/ollama.html">Ollama</a></li>
           <li><a href="../providers/zhipuai.html">Zhipu AI</a></li>
           <li><a href="../providers/nim.html">NVIDIA NIM</a></li>
+          <li><a href="../providers/lmstudio.html">LM Studio</a></li>
+          <li><a href="../providers/vllm.html">vLLM</a></li>
+          <li><a href="../providers/tensorrt-llm.html">TensorRT-LLM</a></li>
+          <li><a href="../providers/openrouter.html">OpenRouter</a></li>
+          <li><a href="../providers/nebius.html">Nebius</a></li>
+          <li><a href="../providers/ovhcloud.html">OVHcloud</a></li>
+          <li><a href="../providers/triton.html">Triton</a></li>
         </ul>
       </div>
 
@@ -118,7 +126,8 @@
                 <td><strong>Tools Provided</strong></td>
                 <td>
                   <strong>Core:</strong> <code>createPlan</code>, <code>startPlan</code>, <code>setStepStatus</code>, <code>getPlanStatus</code>, <code>completePlan</code>, <code>addStep</code><br>
-                  <strong>Cross-Agent:</strong> <code>subscribeToTasks</code>, <code>addDependentStep</code>, <code>completeStepWithOutput</code>, <code>getBlockedSteps</code>, <code>getTaskEvents</code>, <code>listSubscriptions</code>, <code>unsubscribe</code>
+                  <strong>Cross-Agent:</strong> <code>addDependentStep</code>, <code>completeStepWithOutput</code>, <code>getBlockedSteps</code>
+                  <br><em>Total: 9 tools</em>
                 </td>
               </tr>
               <tr>
@@ -127,10 +136,19 @@
               </tr>
               <tr>
                 <td><strong>Auto-approved</strong></td>
-                <td>All except <code>startPlan</code></td>
+                <td><code>setStepStatus</code>, <code>getPlanStatus</code>, <code>completePlan</code>, <code>addStep</code>, <code>addDependentStep</code>, <code>completeStepWithOutput</code>, <code>getBlockedSteps</code>, <code>plan</code> (all except <code>createPlan</code> and <code>startPlan</code>)</td>
               </tr>
             </tbody>
           </table>
+
+          <div class="callout callout-info">
+            <div class="callout-title">Event-subscription tools are session-level core tools</div>
+            Cross-agent event-subscription tools (<code>subscribeToEvents</code>, <code>getTaskEvents</code>,
+            <code>listSubscriptions</code>, <code>unsubscribe</code>) were moved to session-level core tools
+            in <code>shared/event_bus_tools.py</code>. They are <strong>not</strong> provided by the todo plugin
+            and must not be listed here. The todo plugin's 9 tools are exactly those returned by
+            <code>get_tool_schemas()</code> above.
+          </div>
 
           <h2 id="workflow">Workflow</h2>
           <ol>
@@ -541,27 +559,35 @@ setStepStatus(
             <pre><code class="language-python"># === PARENT AGENT ===
 
 # 1. Subscribe to events BEFORE spawning subagents
-subscribeToTasks(
+#    (subscribeToEvents is a session-level core tool, not a todo tool)
+subscribeToEvents(
     event_types=['plan_created', 'step_completed']
 )
 
-# 2. Spawn subagent (subagent creates its own plan)
+# 2. Create your master plan (include a step for awaiting results)
+createPlan(title="Main Task", steps=[
+    "Spawn implementer",
+    "Await and integrate results",  # will get dependency added
+])
+startPlan()
+
+# 3. Spawn subagent (subagent creates its own plan)
 # ... spawn_subagent('implementer', task="...")
 
-# 3. When you see plan_created event, add dependent step
+# 4. When you see plan_created event, link existing step to subagent work
 addDependentStep(
-    description="Review implementation results",
+    step_id="<your_await_step_id>",  # existing step in YOUR plan
     depends_on=[
         {"agent_id": "implementer", "step_id": "final_step"}
     ]
 )
-# → Step created as BLOCKED
+# → Your existing step is now BLOCKED
 
-# 4. Wait... step auto-unblocks when subagent completes
+# 5. Wait... step auto-unblocks when subagent completes
 
-# 5. Check received outputs
+# 6. Check received outputs
 status = getPlanStatus()
-# status.received_outputs = {'implementer': {...}}</code></pre>
+# status.steps[await_step].received_outputs = {'implementer:final_step': {...}}</code></pre>
           </div>
 
           <div class="code-label" style="margin-top: 24px;">Subagent completing with output</div>
@@ -589,28 +615,25 @@ completeStepWithOutput(
         <div class="panel-explanation">
           <h2 id="cross-agent-tools">Cross-Agent Tool Reference</h2>
 
-          <h3>subscribeToTasks</h3>
-          <p>Subscribe to task events from other agents. Call this BEFORE spawning subagents.</p>
-          <table>
-            <thead><tr><th>Parameter</th><th>Type</th><th>Required</th></tr></thead>
-            <tbody>
-              <tr><td><code>agent_id</code></td><td><code>string</code></td><td>No (use <code>*</code> for any)</td></tr>
-              <tr><td><code>event_types</code></td><td><code>string[]</code></td><td>Yes</td></tr>
-              <tr><td><code>plan_id</code></td><td><code>string</code></td><td>No</td></tr>
-              <tr><td><code>step_id</code></td><td><code>string</code></td><td>No</td></tr>
-            </tbody>
-          </table>
-          <p><strong>Event types:</strong> <code>plan_created</code>, <code>plan_started</code>, <code>plan_completed</code>, <code>plan_failed</code>, <code>plan_cancelled</code>, <code>step_added</code>, <code>step_started</code>, <code>step_completed</code>, <code>step_failed</code>, <code>step_skipped</code>, <code>step_blocked</code>, <code>step_unblocked</code></p>
+          <div class="callout callout-warning">
+            <div class="callout-title">Event-subscription tools are NOT todo tools</div>
+            <code>subscribeToEvents</code>, <code>getTaskEvents</code>, <code>listSubscriptions</code>,
+            and <code>unsubscribe</code> are session-level core tools defined in
+            <code>shared/event_bus_tools.py</code>. They are not provided by the todo plugin.
+            The todo plugin exposes exactly 9 tools.
+          </div>
 
           <h3>addDependentStep</h3>
-          <p>Add a step that waits for tasks from other agents. Auto-unblocks when all dependencies complete.</p>
+          <p>Add cross-agent dependencies to an <strong>existing step</strong> in your plan. The step
+            is BLOCKED until all dependencies complete, then auto-unblocks. Unlike
+            <code>addStep</code>, this does NOT create a new step — it modifies an existing one
+            by attaching dependency references.</p>
           <table>
             <thead><tr><th>Parameter</th><th>Type</th><th>Required</th></tr></thead>
             <tbody>
-              <tr><td><code>description</code></td><td><code>string</code></td><td>Yes</td></tr>
-              <tr><td><code>depends_on</code></td><td><code>{agent_id, step_id}[]</code></td><td>Yes</td></tr>
-              <tr><td><code>after_step_id</code></td><td><code>string</code></td><td>No</td></tr>
-              <tr><td><code>provides</code></td><td><code>string</code></td><td>No</td></tr>
+              <tr><td><code>step_id</code></td><td><code>string</code></td><td>Yes — ID of an existing step in your plan</td></tr>
+              <tr><td><code>depends_on</code></td><td><code>{agent_id, step_id, plan_id?, agent_name?, step_sequence?, step_description?}[]</code></td><td>Yes</td></tr>
+              <tr><td><code>provides</code></td><td><code>string</code></td><td>No — named output key for this step</td></tr>
             </tbody>
           </table>
 
@@ -631,17 +654,6 @@ completeStepWithOutput(
             <thead><tr><th>Parameter</th><th>Type</th><th>Required</th></tr></thead>
             <tbody>
               <tr><td><code>plan_id</code></td><td><code>string</code></td><td>No</td></tr>
-            </tbody>
-          </table>
-
-          <h3>getTaskEvents</h3>
-          <p>Review recent cross-agent activity.</p>
-          <table>
-            <thead><tr><th>Parameter</th><th>Type</th><th>Required</th></tr></thead>
-            <tbody>
-              <tr><td><code>agent_id</code></td><td><code>string</code></td><td>No</td></tr>
-              <tr><td><code>event_types</code></td><td><code>string[]</code></td><td>No</td></tr>
-              <tr><td><code>limit</code></td><td><code>number</code></td><td>No (default: 20)</td></tr>
             </tbody>
           </table>
         </div>

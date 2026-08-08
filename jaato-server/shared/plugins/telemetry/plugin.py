@@ -6,7 +6,7 @@ span creation to ensure proper cleanup and timing.
 """
 
 from contextlib import contextmanager
-from typing import Any, Dict, Generator, List, Optional, Protocol, runtime_checkable
+from typing import Any, Callable, Dict, Generator, List, Optional, Protocol, runtime_checkable
 
 
 class SpanContext(Protocol):
@@ -137,6 +137,20 @@ class TelemetryPlugin(Protocol):
         """
         ...
 
+    def reset_for_next_session(self) -> None:
+        """Cascade-sharing reset — NO-OP for this plugin.
+
+        Phase 1 hotfix (server 0.6.148+): added to satisfy the
+        ``ToolPlugin`` / ``EnrichmentPlugin`` protocol's runtime
+        ``isinstance`` check.  Per Daniel's litmus test (see
+        ``docs/design/runner-cascade-sharing.md`` §4.3), this
+        plugin holds no per-session state that the next cascade
+        session would benefit from having cleared.  Override in
+        future PRs if the litmus test changes.
+        """
+        pass
+
+
     @property
     def enabled(self) -> bool:
         """Check if telemetry is enabled."""
@@ -185,6 +199,7 @@ class TelemetryPlugin(Protocol):
         agent_name: Optional[str] = None,
         turn_index: Optional[int] = None,
         parent_session_id: Optional[str] = None,
+        user_id: Optional[str] = None,
         attributes: Optional[Dict[str, Any]] = None,
     ) -> Generator[SpanContext, None, None]:
         """Create root span for a turn (send_message call).
@@ -202,6 +217,9 @@ class TelemetryPlugin(Protocol):
             parent_session_id: Optional parent session ID for subagents.
                 Populates ``graph.node.parent_id`` for DAG visualization.
                 Empty string or None means root node.
+            user_id: Optional end-user identifier. Stamped as the
+                OpenInference ``user.id`` attribute (Langfuse User Tracking)
+                on this span and propagated to child llm/tool spans.
             attributes: Optional additional attributes
 
         Yields:
@@ -371,5 +389,33 @@ class TelemetryPlugin(Protocol):
 
         Returns:
             Hex-encoded span ID or None if no active span
+        """
+        ...
+
+    def register_attribute_redactor(
+        self, fn: Callable[[str, Any], Any]
+    ) -> None:
+        """Register a redactor for every span attribute set via the wrapper.
+
+        Plug-in surface (seat 4 of the four-seat pseudonymization
+        design — see ``project_backlog_pseudonymization_plugin_surface.md``)
+        for redaction / pseudonymization / content-filter consumers
+        that need to inspect or rewrite span attribute values before
+        they reach the OTel exporter.
+
+        The redactor receives ``(attribute_key, value)`` and returns
+        the value to actually set.  Multiple redactors stack —
+        registered in order, applied as a chain.
+
+        Single registration covers every ``set_attribute`` call site
+        in the codebase (~20+ in ``jaato_session.py`` plus per-plugin
+        sites) without per-site instrumentation, because all attribute
+        paths in the span wrapper route through the single
+        ``set_attribute`` chokepoint.
+
+        Args:
+            fn: ``Callable[[str, Any], Any]`` taking
+                ``(attribute_key, value)`` and returning the
+                transformed value.
         """
         ...

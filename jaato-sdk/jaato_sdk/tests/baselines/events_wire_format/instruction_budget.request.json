@@ -1,0 +1,5 @@
+{
+  "type": "instruction_budget.request",
+  "timestamp": "<TIMESTAMP>",
+  "agent_id": null
+}

@@ -224,9 +224,11 @@ class ServiceHttpClient:
 
         if auth_config and auth_config.type != AuthType.NONE:
             try:
-                auth_headers, auth_query = self._auth_manager.get_auth_headers(
-                    auth_config,
-                    service_config.name if service_config else None
+                auth_headers, auth_query, _attempts = (
+                    self._auth_manager.get_auth_headers(
+                        auth_config,
+                        service_config.name if service_config else None,
+                    )
                 )
                 request_headers.update(auth_headers)
                 if auth_query:
@@ -351,10 +353,17 @@ class ServiceHttpClient:
 
         full_url = preview.url
 
+        # Track auth attempts so the call_service plugin can attach
+        # diagnostic provenance to 401/403 responses.  Empty when auth
+        # is NONE — successful responses won't surface this either.
+        auth_attempts: List[Any] = []
+
         if auth_config and auth_config.type != AuthType.NONE:
-            auth_headers, auth_query = self._auth_manager.get_auth_headers(
-                auth_config,
-                service_config.name if service_config else None
+            auth_headers, auth_query, auth_attempts = (
+                self._auth_manager.get_auth_headers(
+                    auth_config,
+                    service_config.name if service_config else None,
+                )
             )
             request_headers.update(auth_headers)
             if auth_query and "?" not in full_url:
@@ -509,6 +518,7 @@ class ServiceHttpClient:
             full_length=full_length,
             request_validation=request_validation,
             response_validation=response_validation,
+            auth_attempts=auth_attempts,
         )
 
     def get_auth_manager(self) -> AuthManager:

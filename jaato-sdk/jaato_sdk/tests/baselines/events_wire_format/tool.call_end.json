@@ -1,0 +1,15 @@
+{
+  "type": "tool.call_end",
+  "timestamp": "<TIMESTAMP>",
+  "agent_id": "",
+  "tool_name": "",
+  "call_id": null,
+  "success": true,
+  "is_error_result": false,
+  "duration_seconds": 0.0,
+  "error_message": null,
+  "backgrounded": false,
+  "continuation_id": null,
+  "show_output": null,
+  "show_popup": null
+}

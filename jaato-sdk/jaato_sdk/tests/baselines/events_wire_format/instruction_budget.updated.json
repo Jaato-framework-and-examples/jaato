@@ -1,0 +1,6 @@
+{
+  "type": "instruction_budget.updated",
+  "timestamp": "<TIMESTAMP>",
+  "agent_id": "",
+  "budget_snapshot": {}
+}

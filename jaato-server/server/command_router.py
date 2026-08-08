@@ -10,6 +10,7 @@ responses through the ``EventSink`` protocol.
 import json
 import logging
 import os
+import pathlib
 import uuid
 from typing import Any, Dict, List, Optional
 
@@ -17,6 +18,7 @@ from jaato_sdk.events import Event
 from server.event_sink import EventSink
 from server.session_manager import SessionManager
 from server.session_logging import set_logging_context, clear_logging_context
+from shared.session_id import is_safe_session_id
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +65,32 @@ class CommandRouter:
 
         # Pending post-auth setup requests: client_id -> {request_id, provider_name}
         self._pending_post_auth: dict = {}
+
+    def handle_client_disconnect(self, client_id: str) -> None:
+        """Notify the router that a transport client has disconnected.
+
+        Detaches ``client_id`` from any session it was attached to.
+        ``SessionManager.detach_client`` also calls
+        ``_maybe_unload_session`` which releases per-session resources
+        (workspace monitor inotify handle, etc.) once no other clients
+        are attached.
+
+        Called by transport servers (IPC, WS) from their disconnect
+        handlers.  Per-transport cleanup (e.g. WS
+        ``workspace_manager.remove_client`` /
+        ``event_sink_adapter.remove_client``) stays in the transport
+        server — only the session-detachment step is transport-agnostic.
+
+        Phase 2 cascade-as-client (server 0.6.156+): also clean up
+        any cascade-client registrations this client made.  Without
+        this, IPC client crash → registrations leak until the GC
+        sweep timeout (300s default).  Explicit cleanup ensures
+        immediate resource release.
+        """
+        self._session_manager.detach_client(client_id)
+        self._session_manager.unregister_all_cascade_clients_for_connection(
+            client_id
+        )
 
     def handle_request(
         self,
@@ -140,7 +168,12 @@ class CommandRouter:
             workspace_path = self._event_sink.get_client_workspace(client_id)
 
             if cmd == "session.new":
-                self._handle_session_new(client_id, event.args, workspace_path)
+                self._handle_session_new(
+                    client_id,
+                    event.args,
+                    workspace_path,
+                    payload=event.payload,
+                )
                 return
 
             elif cmd == "session.attach":
@@ -153,10 +186,13 @@ class CommandRouter:
 
             elif cmd == "session.profiles":
                 from jaato_sdk.events import SessionProfilesEvent
-                profiles = self._session_manager.list_profiles(
+                profiles, parse_errors = self._session_manager.list_profiles(
                     workspace_path=workspace_path,
                 )
-                self._event_sink.send_event(client_id, SessionProfilesEvent(profiles=profiles))
+                self._event_sink.send_event(client_id, SessionProfilesEvent(
+                    profiles=profiles,
+                    parse_errors=parse_errors,
+                ))
                 return
 
             elif cmd == "session.default":
@@ -177,6 +213,30 @@ class CommandRouter:
 
             elif cmd == "session.snapshot_workspace":
                 self._handle_snapshot_workspace(client_id, event.args, workspace_path)
+                return
+
+            elif cmd == "session.wake":
+                self._handle_session_wake(client_id, event.args, event.payload)
+                return
+
+            elif cmd == "session.bind_wake":
+                self._handle_session_bind_wake(client_id, event.args, event.payload)
+                return
+
+            elif cmd == "session.unbind_wake":
+                self._handle_session_unbind_wake(client_id, event.args, event.payload)
+                return
+
+            elif cmd == "cascade.register":
+                self._handle_cascade_register(client_id, event.args)
+                return
+
+            elif cmd == "cascade.unregister":
+                self._handle_cascade_unregister(client_id, event.args)
+                return
+
+            elif cmd == "cascade.cancel":
+                self._handle_cascade_cancel(client_id, event.args)
                 return
 
             # Tools commands - handled per-session
@@ -219,31 +279,96 @@ class CommandRouter:
     # ------------------------------------------------------------------
 
     def _handle_session_new(
-        self, client_id: str, args: list, workspace_path: Optional[str],
+        self,
+        client_id: str,
+        args: list,
+        workspace_path: Optional[str],
+        payload: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Handle ``session.new`` command.
 
-        Accepts ``--agent <name>`` and/or ``--profile <name>`` flags.
-        When ``--agent`` is provided, the agent's rendered markdown
-        becomes the session's system instructions.  When ``--profile``
-        is provided, it supplies runtime config (model, plugins, etc.).
-        Remaining key=value pairs are passed as agent parameters.
+        Accepted flags (CLI argv path, used by the TUI):
+            --profile <name>            Runtime config (model, plugins, GC, etc.)
+            --agent <name>              Agent whose rendered markdown becomes
+                                        the session's system instructions
+            --instructions <text|@path> FULL OVERRIDE — replace the assembled
+                                        system instruction with the supplied
+                                        text (or the contents of @path).
+                                        Drops the agent's own prompt and
+                                        plugin tool hints too.  Use when you
+                                        need a specific, minimal system
+                                        prompt and nothing else.
+            --no-instructions           PARTIAL SUPPRESSION — drop only the
+                                        BASE layer (``.jaato/instructions/*``
+                                        + premium baseline).  Agent prompt,
+                                        plugin instructions, and framework
+                                        constants still reach the model.
+                                        The usual choice for fitting a
+                                        session into a small context window.
+            key=value                   Agent parameters (substituted into the
+                                        agent's ``{{param}}`` placeholders)
+
+        Remaining bare arguments are treated as the session name.
+
+        SDK-only path (not exposed in TUI argv):
+            ``payload['spec']``  — Inline profile spec dict (model, provider,
+                                  plugins, plugin_configs, system_instructions,
+                                  gc, etc.).  Mutually exclusive with the
+                                  ``--profile`` flag above.  Lets SDK clients
+                                  create sessions with custom config without
+                                  writing a profile JSON to disk.  Validation
+                                  and parsing happen in
+                                  ``SessionManager.create_session``.
         """
         name = None
         profile_name = None
         agent_name = None
+        system_instruction_override: Optional[str] = None
+        suppress_base_instructions: bool = False
         agent_params: Dict[str, str] = {}
+        cascade_driver_id: Optional[str] = None
         args_iter = iter(args)
         for arg in args_iter:
             if arg == "--profile":
                 profile_name = next(args_iter, None)
             elif arg == "--agent":
                 agent_name = next(args_iter, None)
+            elif arg == "--instructions":
+                from jaato_sdk.events import ErrorEvent
+                raw = next(args_iter, None)
+                if raw is None:
+                    self._event_sink.send_event(client_id, ErrorEvent(
+                        error="--instructions requires a value (text or @filepath)",
+                        error_type="UsageError",
+                        recoverable=True,
+                    ))
+                    return
+                system_instruction_override = self._resolve_instructions_value(
+                    raw, workspace_path, client_id,
+                )
+                if system_instruction_override is None:
+                    return  # error already emitted
+            elif arg == "--no-instructions":
+                suppress_base_instructions = True
+            elif arg == "--cascade-driver-id":
+                # Phase 2 cascade-sharing (server 0.6.144+): opaque
+                # tenant ID identifying the cascade this session
+                # belongs to.  Subsequent sessions of the same cascade
+                # can reuse this session's pool slot (warm plugin
+                # state + warm LSP server connections) — see
+                # docs/design/runner-cascade-sharing.md.
+                cascade_driver_id = next(args_iter, None)
             elif "=" in arg:
                 key, _, value = arg.partition("=")
                 agent_params[key] = value
             elif name is None:
                 name = arg
+
+        # Inline profile spec — SDK-only escape hatch carried in
+        # CommandRequest.payload (no argv equivalent).  Validation
+        # (mutual exclusion with profile_name, required fields) lives
+        # in SessionManager.create_session so both paths share it.
+        inline_profile_data = (payload or {}).get("spec")
 
         created_by = self._event_sink.get_client_user(client_id)
         new_session_id = self._session_manager.create_session(
@@ -252,6 +377,10 @@ class CommandRouter:
             agent_name=agent_name,
             agent_params=agent_params if agent_params else None,
             created_by=created_by,
+            system_instruction_override=system_instruction_override,
+            suppress_base_instructions=suppress_base_instructions,
+            inline_profile_data=inline_profile_data,
+            cascade_driver_id=cascade_driver_id,
         )
         if new_session_id:
             # Update logging context now that session_id is known.
@@ -281,6 +410,18 @@ class CommandRouter:
             return
 
         target_session_id = args[0]
+        # Client-supplied id — reject a traversal / injection id before it
+        # reaches the persistence / cgroup / apparmor sinks (defense in depth
+        # with the sink-side validation; this gives a clean early error).
+        if not is_safe_session_id(target_session_id):
+            from jaato_sdk.events import ErrorEvent
+            self._event_sink.send_event(client_id, ErrorEvent(
+                error="invalid session_id: must match [A-Za-z0-9._-] "
+                      "(1-256 chars) with no '..'",
+                error_type="UsageError",
+                recoverable=True,
+            ))
+            return
         # Check for workspace mismatch
         mismatch = self._session_manager.check_workspace_mismatch(
             target_session_id, workspace_path
@@ -337,6 +478,133 @@ class CommandRouter:
                 )
             self._event_sink.set_client_session(client_id, target_session_id)
 
+    def _handle_session_wake(
+        self, client_id: str, args: list, payload: Optional[dict],
+    ) -> None:
+        """Handle ``session.wake`` — start a USER turn on a session, reviving it
+        if cold, for the client-agnostic wake primitive.
+
+        Accepts a structured ``payload`` (SDK callers) —
+        ``{session_id, text, source?, event_id?}`` — or positional ``args``
+        ``[session_id, text, source?, event_id?]``.  Authentication is the
+        transport's boundary (IPC socket-mode / WS bearer token / the HTTP
+        shim's #498 fail-closed check); this handler runs only for callers
+        already past that gate.  On refusal it emits an ``ErrorEvent`` with the
+        reason; on success the woken turn's output flows to the session's
+        attached clients (the caller need not be one).
+        """
+        from jaato_sdk.events import ErrorEvent
+        p = payload or {}
+        session_id = p.get("session_id") or (args[0] if len(args) > 0 else None)
+        text = p.get("text") or (args[1] if len(args) > 1 else None)
+        source = p.get("source") or (args[2] if len(args) > 2 else "user")
+        event_id = p.get("event_id") or (args[3] if len(args) > 3 else None)
+        if not session_id or not text:
+            self._event_sink.send_event(client_id, ErrorEvent(
+                error="session.wake requires session_id and text",
+                error_type="UsageError",
+                recoverable=True,
+            ))
+            return
+        outcome, detail = self._session_manager.wake_session(
+            session_id, text, source=source, event_id=event_id,
+        )
+        # Only genuine failures surface as an error.  OK and DUPLICATE are both
+        # successes — a redelivered event_id is an idempotent no-op, not a
+        # failed delivery (an HTTP shim maps both to 2xx; erroring here would
+        # make every at-least-once redelivery look failed + trigger retries).
+        if not outcome.is_success:
+            self._event_sink.send_event(client_id, ErrorEvent(
+                error=f"session.wake refused ({outcome.value}): {detail}",
+                error_type="WakeError",
+                recoverable=True,
+            ))
+
+    def _handle_session_bind_wake(
+        self, client_id: str, args: list, payload: Optional[dict],
+    ) -> None:
+        """Handle ``session.bind_wake`` — declare a wake binding for the CALLER'S
+        OWN session (the SESSION-owned half of the wake contract).
+
+        The bound session is always the caller's current session (resolved from
+        ``client_id``), so a caller can only bind ITSELF — hijack-proof by
+        construction.  Accepts a structured ``payload``
+        ``{wake_ref, trust_keys: [PEM...], ttl_seconds?}`` (the real path —
+        PEM keys are multi-line) or positional ``args`` ``[wake_ref, key...]``.
+        Always replies with a :class:`WakeBindResultEvent` carrying the
+        ``BindOutcome`` (route on it), and on success the echoed ``wake_ref`` +
+        binding ``expires_at``.
+        """
+        from jaato_sdk.events import WakeBindResultEvent
+        p = payload or {}
+        wake_ref = p.get("wake_ref") or (args[0] if len(args) > 0 else "")
+        raw_keys = p.get("trust_keys")
+        if raw_keys is None:
+            raw_keys = list(args[1:]) if len(args) > 1 else []
+        # Normalize trust_keys so a malformed payload never crashes the handler
+        # or silently splits a key: a lone PEM string → one-element list; a
+        # list → keep only str items; anything else → empty (the registry then
+        # returns NO_KEYS / MALFORMED_KEY, a clean outcome).
+        if isinstance(raw_keys, str):
+            trust_keys = [raw_keys]
+        elif isinstance(raw_keys, (list, tuple)):
+            trust_keys = [k for k in raw_keys if isinstance(k, str)]
+        else:
+            trust_keys = []
+        # Coerce ttl to int-or-None so a bad type (e.g. a JSON string) never
+        # reaches the registry's arithmetic; on failure fall back to the default.
+        raw_ttl = p.get("ttl_seconds")
+        ttl_seconds: Optional[int] = None
+        if raw_ttl is not None:
+            try:
+                ttl_seconds = int(raw_ttl)
+            except (TypeError, ValueError):
+                ttl_seconds = None
+
+        session = self._session_manager.get_client_session(client_id)
+        if session is None or not session.session_id:
+            self._event_sink.send_event(client_id, WakeBindResultEvent(
+                wake_ref=wake_ref or "", outcome="no_session",
+                detail="caller has no active session to bind"))
+            return
+
+        outcome = self._session_manager.bind_wake(
+            wake_ref, session.session_id, session.workspace_path,
+            list(trust_keys), ttl_seconds,
+            # Capture the caller session's cid so a deferred wake reaches its
+            # cascade observers and the observer survives the session going cold.
+            cascade_driver_id=getattr(session, "cascade_driver_id", None))
+        expires_at = 0.0
+        if outcome.is_ok:
+            b = self._session_manager.resolve_wake_binding(wake_ref)
+            if b is not None:
+                expires_at = b.expires_at
+        self._event_sink.send_event(client_id, WakeBindResultEvent(
+            wake_ref=wake_ref or "", outcome=outcome.value,
+            detail=f"bind_wake: {outcome.value}", expires_at=expires_at,
+            # Surface the daemon's public wake endpoint so the caller can embed
+            # it as the relay's routing marker (no bot-side URL config).
+            endpoint=self._session_manager.wake_public_url))
+
+    def _handle_session_unbind_wake(
+        self, client_id: str, args: list, payload: Optional[dict],
+    ) -> None:
+        """Handle ``session.unbind_wake`` — remove the caller's own wake binding
+        (owner-guarded).  ``{wake_ref}`` payload or ``[wake_ref]`` args."""
+        from jaato_sdk.events import WakeBindResultEvent
+        p = payload or {}
+        wake_ref = p.get("wake_ref") or (args[0] if len(args) > 0 else "")
+        session = self._session_manager.get_client_session(client_id)
+        if session is None or not session.session_id:
+            self._event_sink.send_event(client_id, WakeBindResultEvent(
+                wake_ref=wake_ref or "", outcome="no_session",
+                detail="caller has no active session"))
+            return
+        outcome = self._session_manager.unbind_wake(wake_ref, session.session_id)
+        self._event_sink.send_event(client_id, WakeBindResultEvent(
+            wake_ref=wake_ref or "", outcome=outcome.value,
+            detail=f"unbind_wake: {outcome.value}"))
+
     def _handle_session_list(self, client_id: str, session_id: str) -> None:
         """Handle ``session.list`` command."""
         sessions = self._session_manager.list_sessions()
@@ -383,16 +651,245 @@ class CommandRouter:
             # Session creation failed (e.g., missing MODEL_NAME).
             self._hint_available_auth_providers(client_id)
 
+    def _handle_cascade_register(self, client_id: str, args: list) -> None:
+        """Handle ``cascade.register`` command (Phase 2 cascade-as-client).
+
+        Wire format: ``args = [cascade_driver_id, role, *event_types]``
+        where role is ``"owner"`` or ``"observer"`` and event_types is
+        a list of event type-names (empty list = subscribe to all).
+
+        Server-side: registers an in-process cascade-client via
+        SessionManager whose callback routes matching events back to
+        this connected client via the existing event_sink.  The
+        registration entry uses a namespaced client_id
+        ``_cascade:{cid}:{connection_client_id}`` so disconnect
+        cleanup can match by suffix.
+
+        Errors (bad args / duplicate registration / owner conflict)
+        surface as ErrorEvent to the requesting client and the
+        registration is dropped.
+        """
+        from jaato_sdk.events import ErrorEvent, SystemMessageEvent
+
+        if not args or len(args) < 2:
+            self._event_sink.send_event(client_id, ErrorEvent(
+                error=(
+                    "cascade.register requires args: "
+                    "[cascade_driver_id, role, *event_types]"
+                ),
+                error_type="UsageError",
+                recoverable=True,
+            ))
+            return
+
+        cascade_driver_id = args[0]
+        role = args[1]
+        event_types = set(args[2:]) if len(args) > 2 else None
+
+        # The cascade-client registration identifier — namespaced so
+        # disconnect cleanup can match by suffix (one client may
+        # register for multiple cids).
+        cascade_client_id = f"_cascade:{cascade_driver_id}:{client_id}"
+
+        # Callback closure routes events back to this connected
+        # client via the existing event_sink.  Capture client_id by
+        # value so multiple registrations don't shadow each other.
+        connection_client_id = client_id
+
+        def _cascade_event_callback(event):
+            self._event_sink.send_event(connection_client_id, event)
+
+        try:
+            self._session_manager.register_in_process_client(
+                client_id=cascade_client_id,
+                callback=_cascade_event_callback,
+                cascade_driver_id=cascade_driver_id,
+                role=role,
+                event_types=event_types,
+                # server 0.6.178+: pass the raw connection id so the
+                # routing-layer dedup at
+                # ``_dispatch_to_cascade_clients_by_cid`` can skip
+                # this entry when ``_route_bootstrap_event`` is
+                # already delivering via the direct-IPC path to the
+                # same connection.  Without this, the bootstrap-time
+                # AgentCreatedEvent arrives twice on cascade_develop
+                # walker's SDK queue (kb-side report 2026-06-03,
+                # 0.6.177 falsification: PR-207 compared the wrong
+                # identifier, ``cascade_client_id`` is the namespaced
+                # registration id, NOT the raw connection id this
+                # callback delivers to).
+                delivery_target_id=connection_client_id,
+            )
+        except ValueError as exc:
+            self._event_sink.send_event(client_id, ErrorEvent(
+                error=str(exc),
+                error_type="CascadeRegistrationError",
+                recoverable=True,
+            ))
+            return
+
+        # Confirm registration so the SDK iterator can start yielding.
+        # Uses SystemMessageEvent (existing typed event) to avoid a
+        # new event class for Phase 2 — Phase 3 may upgrade to a
+        # typed CascadeRegisteredEvent if downstream code wants it.
+        self._event_sink.send_event(client_id, SystemMessageEvent(
+            message=(
+                f"cascade.register: registered cid={cascade_driver_id} "
+                f"role={role} event_types="
+                f"{sorted(event_types) if event_types else 'ALL'}"
+            ),
+            style="system",
+        ))
+        logger.info(
+            "cascade.register: client=%s cid=%s role=%s event_types=%s",
+            client_id, cascade_driver_id, role,
+            sorted(event_types) if event_types else "ALL",
+        )
+
+    def _handle_cascade_unregister(self, client_id: str, args: list) -> None:
+        """Handle ``cascade.unregister`` command (Phase 2).
+
+        Wire format: ``args = [cascade_driver_id]``.
+
+        Removes this client's registration for the given cid.
+        Idempotent — silent no-op if already unregistered (e.g., the
+        SDK iterator's auto-cleanup fired after disconnect cleanup
+        already ran).
+        """
+        from jaato_sdk.events import ErrorEvent, SystemMessageEvent
+
+        if not args:
+            self._event_sink.send_event(client_id, ErrorEvent(
+                error="cascade.unregister requires args: [cascade_driver_id]",
+                error_type="UsageError",
+                recoverable=True,
+            ))
+            return
+
+        cascade_driver_id = args[0]
+        cascade_client_id = f"_cascade:{cascade_driver_id}:{client_id}"
+        removed = self._session_manager.unregister_cascade_client(
+            cascade_driver_id, cascade_client_id,
+        )
+        self._event_sink.send_event(client_id, SystemMessageEvent(
+            message=(
+                f"cascade.unregister: cid={cascade_driver_id} "
+                f"{'removed' if removed else 'not-found (idempotent)'}"
+            ),
+            style="system",
+        ))
+        logger.info(
+            "cascade.unregister: client=%s cid=%s removed=%s",
+            client_id, cascade_driver_id, removed,
+        )
+
+    def _handle_cascade_cancel(self, client_id: str, args: list) -> None:
+        """Handle ``cascade.cancel`` command.
+
+        Wire format: ``args = [cascade_driver_id]``.
+
+        Cancels every loaded session whose ``cascade_driver_id``
+        matches.  Reactor extensions consult
+        :meth:`SessionManager.is_cid_cancelled` before firing on
+        ``AgentCompletedEvent`` so the cascade stops spawning new
+        sessions.  Designed for kb-side ^C → IPC verb ergonomic
+        (cascade_develop.py SIGINT handler).
+
+        Idempotent — re-cancelling an already-cancelled cid returns
+        zero counts but keeps the marker set so reactor suppression
+        stays active.
+
+        Args:
+            client_id: The IPC/WS client that sent the command.
+                Receives the SystemMessageEvent confirmation.
+            args: Single-element list containing the cascade_driver_id.
+        """
+        from jaato_sdk.events import ErrorEvent, SystemMessageEvent
+
+        if not args:
+            self._event_sink.send_event(client_id, ErrorEvent(
+                error="cascade.cancel requires args: [cascade_driver_id]",
+                error_type="UsageError",
+                recoverable=True,
+            ))
+            return
+
+        cascade_driver_id = args[0]
+        result = self._session_manager.cancel_cascade(cascade_driver_id)
+
+        # Confirmation message back to the caller — operator sees what
+        # got reaped without grepping logs.
+        if result["stopped_count"] == 0:
+            msg = (
+                f"cascade.cancel: cid={cascade_driver_id} "
+                f"no loaded sessions matched (cid marked cancelled — "
+                f"reactor suppression engaged)"
+            )
+        else:
+            msg = (
+                f"cascade.cancel: cid={cascade_driver_id} "
+                f"cancelled {result['stopped_count']} session(s): "
+                f"{result['cancelled_session_ids']}"
+            )
+        self._event_sink.send_event(client_id, SystemMessageEvent(
+            message=msg,
+            style="system",
+        ))
+        logger.info(
+            "cascade.cancel: client=%s cid=%s stopped_count=%d",
+            client_id, cascade_driver_id, result["stopped_count"],
+        )
+
     def _handle_session_end(self, client_id: str, session_id: str) -> None:
-        """Handle ``session.end`` command."""
+        """Handle ``session.end`` command.
+
+        Cancellation-aware semantics (server 0.6.27+):
+
+        - If the session is NOT currently processing (the agent already
+          completed and the turn wrap-up has settled, OR the session is
+          idle), this is a clean termination — no in-flight work to
+          cancel, no spurious ``user_cancelled`` log marker.
+        - If the session IS processing, stop() cancels via the cancel
+          token (existing behavior).  This path is for explicit
+          mid-turn cancellation.
+
+        After either path, emits ``SessionTerminatedEvent`` (the new
+        first-class event) AND the legacy
+        ``SystemMessageEvent("[SESSION_TERMINATED]")`` for backward
+        compatibility with clients that haven't migrated to the typed
+        event yet.
+
+        ``reason`` field distinguishes:
+        - ``"client_request"`` — session was idle, end_session called
+          cleanly.
+        - ``"stopped"`` — session was processing, end_session cancelled.
+        """
         session = self._session_manager.get_client_session(client_id)
+        was_stopped = False
+        agent_id = None
         if session and session.server:
-            session.server.stop()
-        # Signal termination to all clients attached to this session
-        from jaato_sdk.events import SystemMessageEvent
+            agent_id = getattr(session.server, "_main_agent_id", None) or "main"
+            # stop() returns True only when it actually cancelled
+            # in-flight work.  An idle session returns False — the
+            # close is graceful and produces no user_cancelled marker.
+            was_stopped = bool(session.server.stop())
+
+        from jaato_sdk.events import SystemMessageEvent, SessionTerminatedEvent
+        # Typed event — the canonical signal for clients.
         self._session_manager._emit_to_session(
             session_id,
-            SystemMessageEvent(message="[SESSION_TERMINATED]", style="system")
+            SessionTerminatedEvent(
+                session_id=session_id,
+                agent_id=agent_id,
+                reason="stopped" if was_stopped else "client_request",
+            ),
+        )
+        # Legacy string-based marker — kept for backward compatibility.
+        # Clients reading the typed event can ignore this.  Will be
+        # deprecated in a future release.
+        self._session_manager._emit_to_session(
+            session_id,
+            SystemMessageEvent(message="[SESSION_TERMINATED]", style="system"),
         )
 
     def _handle_session_delete(self, client_id: str, args: list) -> None:
@@ -772,6 +1269,54 @@ class CommandRouter:
             if hasattr(plugin, 'set_output_callback'):
                 plugin.set_output_callback(None)
 
+    def _resolve_instructions_value(
+        self,
+        raw: str,
+        workspace_path: Optional[str],
+        client_id: str,
+    ) -> Optional[str]:
+        """Resolve a ``--instructions`` value into the literal text the session sees.
+
+        Two forms accepted:
+
+        - **Literal text** — e.g. ``--instructions "You are terse."``.
+          The value is returned verbatim.
+        - **File reference** — e.g. ``--instructions @prompts/min.md``.
+          A leading ``@`` is stripped and the rest is read from disk.
+          Relative paths resolve against ``workspace_path``; absolute
+          paths are honoured as-is.  ``~`` expands.
+
+        Returns the resolved text, or ``None`` if the file reference
+        could not be read (an ``ErrorEvent`` has been emitted to the
+        client in that case).
+        """
+        from jaato_sdk.events import ErrorEvent
+
+        if not raw.startswith("@"):
+            return raw
+
+        path_str = raw[1:]
+        if not path_str:
+            self._event_sink.send_event(client_id, ErrorEvent(
+                error="--instructions @ requires a path after the @",
+                error_type="UsageError",
+                recoverable=True,
+            ))
+            return None
+
+        path = pathlib.Path(path_str).expanduser()
+        if not path.is_absolute() and workspace_path:
+            path = pathlib.Path(workspace_path) / path
+        try:
+            return path.read_text(encoding="utf-8").rstrip("\n")
+        except (OSError, UnicodeDecodeError) as exc:
+            self._event_sink.send_event(client_id, ErrorEvent(
+                error=f"--instructions @{path_str}: {exc}",
+                error_type="UsageError",
+                recoverable=True,
+            ))
+            return None
+
     def _hint_available_auth_providers(self, client_id: str) -> None:
         """Send a hint listing available auth providers after session creation fails.
 
@@ -924,6 +1469,9 @@ class CommandRouter:
             {"name": "session list", "description": "List all sessions"},
             {"name": "session new", "description": "Create a new session"},
             {"name": "session attach", "description": "Attach to an existing session"},
+            {"name": "session wake", "description": "Wake a session by id (revive if cold) and start a turn"},
+            {"name": "session bind_wake", "description": "Declare a wake binding (wake_ref + trust keys) for this session"},
+            {"name": "session unbind_wake", "description": "Remove a wake binding for this session"},
             {"name": "session delete", "description": "Delete a session"},
             {"name": "session help", "description": "Show detailed help for session command"},
         ]
@@ -971,10 +1519,23 @@ class CommandRouter:
                         # Get commands from server (with model subcommand expansion)
                         server_cmds = session.server.get_available_commands()
                         for name, description in server_cmds.items():
-                            if name == "model" and hasattr(session.server, '_jaato'):
-                                jaato = session.server._jaato
-                                if jaato and hasattr(jaato, 'get_model_completions'):
-                                    model_subs = jaato.get_model_completions([])
+                            # Phase 3 §7c step 6.6.4.5c.4: route through
+                            # runner-RPC.  Pivots the gate from ``_jaato``
+                            # to ``_runner_rpc`` and reconstructs
+                            # CommandCompletion NamedTuples daemon-side
+                            # (wrapper preserves the ``.value`` /
+                            # ``.description`` attr-access pattern).
+                            if name == "model" and getattr(
+                                session.server, '_runner_rpc', None,
+                            ) is not None:
+                                try:
+                                    model_subs = (
+                                        session.server._runner_rpc
+                                        .session_get_model_completions_threadsafe([])
+                                    )
+                                except Exception:
+                                    model_subs = []
+                                if model_subs:
                                     for sub in model_subs:
                                         commands.append({
                                             "name": f"model {sub.value}",

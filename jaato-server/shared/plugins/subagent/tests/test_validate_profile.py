@@ -275,7 +275,58 @@ class TestValidateProfile:
             "icon": None,
             "icon_name": None,
             "gc": None,
+            "runtime_limits": None,
         }
         is_valid, errors, warnings = validate_profile(data)
         assert is_valid is True
         assert errors == []
+
+    def test_runtime_limits_not_dict(self):
+        data = {"name": "test", "description": "test", "runtime_limits": "512mb"}
+        is_valid, errors, warnings = validate_profile(data)
+        assert is_valid is False
+        assert any("'runtime_limits' must be an object" in e for e in errors)
+
+    def test_runtime_limits_valid(self):
+        data = {
+            "name": "test", "description": "test",
+            "runtime_limits": {
+                "memory_max_mb": 512,
+                "pids_max": 256,
+                "cpu_weight": 200,
+                "tool_timeout_seconds": 60,
+                "max_output_bytes": 1048576,
+            },
+        }
+        is_valid, errors, warnings = validate_profile(data)
+        assert is_valid is True, f"unexpected errors: {errors}"
+
+    def test_runtime_limits_invalid_memory(self):
+        data = {
+            "name": "test", "description": "test",
+            "runtime_limits": {"memory_max_mb": -1},
+        }
+        is_valid, errors, warnings = validate_profile(data)
+        assert is_valid is False
+        assert any("memory_max_mb" in e for e in errors)
+
+    def test_runtime_limits_invalid_cpu_weight(self):
+        # cpu_weight bounds are [1, 10000]
+        data = {
+            "name": "test", "description": "test",
+            "runtime_limits": {"cpu_weight": 99999},
+        }
+        is_valid, errors, warnings = validate_profile(data)
+        assert is_valid is False
+        assert any("cpu_weight" in e for e in errors)
+
+    def test_runtime_limits_app_layer_only_is_valid(self):
+        # tool_timeout_seconds and max_output_bytes alone (no kernel
+        # limits) is a legitimate config — the cgroup is skipped, but
+        # the limits still apply at the app layer.
+        data = {
+            "name": "test", "description": "test",
+            "runtime_limits": {"tool_timeout_seconds": 30},
+        }
+        is_valid, errors, warnings = validate_profile(data)
+        assert is_valid is True

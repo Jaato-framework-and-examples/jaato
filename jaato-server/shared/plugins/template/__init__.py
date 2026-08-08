@@ -6,6 +6,7 @@ conditionals, and loops for generating files from templates.
 
 PLUGIN_KIND = "tool"
 
+PLUGIN_TIER = "runner"
 from .plugin import TemplatePlugin
 
 def create_plugin() -> TemplatePlugin:

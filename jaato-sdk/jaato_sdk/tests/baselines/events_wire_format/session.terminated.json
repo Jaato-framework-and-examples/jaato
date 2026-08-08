@@ -1,0 +1,9 @@
+{
+  "type": "session.terminated",
+  "timestamp": "<TIMESTAMP>",
+  "session_id": "",
+  "agent_id": null,
+  "reason": "natural",
+  "error_summary": null,
+  "error_type": null
+}

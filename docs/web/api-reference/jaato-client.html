@@ -32,6 +32,7 @@
         <div class="sidebar-title">Getting Started</div>
         <ul class="sidebar-nav">
           <li><a href="../getting-started/quickstart.html">Quickstart</a></li>
+          <li><a href="../getting-started/typescript-sdk.html">TypeScript SDK</a></li>
         </ul>
       </div>
 
@@ -62,6 +63,7 @@
           <li><a href="jaato-client.html" class="active">JaatoClient</a></li>
           <li><a href="jaato-runtime.html">JaatoRuntime</a></li>
           <li><a href="jaato-session.html">JaatoSession</a></li>
+          <li><a href="ipc-client.html">IPCClient</a></li>
           <li><a href="ipc-recovery-client.html">IPCRecoveryClient</a></li>
           <li><a href="plugin-registry.html">PluginRegistry</a></li>
           <li><a href="tool-executor.html">ToolExecutor</a></li>
@@ -81,6 +83,13 @@
           <li><a href="providers/ollama.html">Ollama</a></li>
           <li><a href="providers/zhipuai.html">Zhipu AI</a></li>
           <li><a href="providers/nim.html">NVIDIA NIM</a></li>
+          <li><a href="providers/lmstudio.html">LM Studio</a></li>
+          <li><a href="providers/vllm.html">vLLM</a></li>
+          <li><a href="providers/tensorrt-llm.html">TensorRT-LLM</a></li>
+          <li><a href="providers/openrouter.html">OpenRouter</a></li>
+          <li><a href="providers/nebius.html">Nebius</a></li>
+          <li><a href="providers/ovhcloud.html">OVHcloud</a></li>
+          <li><a href="providers/triton.html">Triton</a></li>
         </ul>
       </div>
 
@@ -114,6 +123,27 @@
             (per-agent state), providing a unified interface for connecting to AI providers,
             configuring tools, and managing multi-turn conversations.
           </p>
+
+          <div class="callout callout-info">
+            <div class="callout-title">Which "JaatoClient"?</div>
+            This page documents the <strong>in-process</strong> Python
+            <code>JaatoClient</code> (<code>from jaato import JaatoClient</code>),
+            which runs the agent runtime inside your own process. Two other clients
+            fill the same role &mdash; don't confuse them:
+            <ul>
+              <li><code>IPCClient</code> / <code>IPCRecoveryClient</code>
+                (<code>from jaato_sdk import IPCClient</code>) &mdash; the Python
+                client that talks to a running jaato <strong>daemon</strong> over
+                IPC, through the <code>IPCClient.session(...)</code> +
+                <code>ask</code> / <code>complete</code> / <code>stream</code>
+                facade. Most applications use this.</li>
+              <li>The <a href="../getting-started/typescript-sdk.html">TypeScript SDK</a>'s <code>JaatoClient</code>
+                (<code>import { JaatoClient } from "@jaato/sdk"</code>) &mdash; the
+                <em>same name</em>, but a different package and a
+                <strong>WebSocket</strong> transport
+                (<code>JaatoClient.session(...)</code>).</li>
+            </ul>
+          </div>
 
           <div class="method-signature">
             <span class="token-keyword">from</span> jaato <span class="token-keyword">import</span> JaatoClient<br>

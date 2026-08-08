@@ -1,0 +1,21 @@
+name: tensorrt-llm-chat
+description: >
+  Pure chat smoke for the tensorrt_llm provider — sends one user message,
+  expects one text response, no tools.  No completion_payload_schema
+  declared → signal_completion is HIDDEN from the model's tool
+  surface (2026-06-07 schema gate).  The turn ends naturally when
+  the provider's response has no function calls.
+
+model: Qwen/Qwen2.5-7B-Instruct
+provider: tensorrt_llm
+
+max_turns: 1
+
+suppress_base_instructions: true
+
+plugins: []
+
+plugin_configs:
+  tensorrt_llm:
+    host: "${TENSORRT_LLM_HOST}"
+    context_length: 8192

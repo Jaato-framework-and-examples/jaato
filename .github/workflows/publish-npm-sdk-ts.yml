@@ -1,0 +1,107 @@
+name: "Publish @jaato/sdk to npm"
+
+# Mirror of publish-testpypi-{sdk,server,tui}.yml — manual trigger,
+# tests gate, version-already-on-registry check, then publish.
+#
+# Setup once on the npm side:
+#   - The @jaato org owns @jaato/sdk on npmjs.com.
+#   - A granular access token with read+write on @jaato/* lives in
+#     the GitHub repo's `npm-sdk` environment as NPM_TOKEN.
+#
+# Migrating to npm Trusted Publishing (OIDC) later is a one-step
+# change: replace the NODE_AUTH_TOKEN env wiring with `permissions:
+# id-token: write` and `npm publish --provenance` after configuring
+# the trusted publisher on npmjs.com.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "20"
+
+      - name: Install jaato-sdk (so events.py is importable for codegen check)
+        run: pip install -e jaato-sdk/
+
+      - name: Install jaato-sdk-ts dependencies
+        working-directory: jaato-sdk-ts
+        run: npm install --no-audit --no-fund
+
+      - name: Verify events.ts is up to date with events.py
+        # Same staleness gate the codegen-ts-events workflow runs on PRs,
+        # repeated here so a manual publish from a stale branch fails fast.
+        run: python scripts/codegen_ts_events.py --check
+
+      - name: Build
+        working-directory: jaato-sdk-ts
+        run: npm run build
+
+      - name: Test
+        working-directory: jaato-sdk-ts
+        run: npm test
+
+  publish:
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: npm-sdk
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Read package version
+        id: version
+        working-directory: jaato-sdk-ts
+        run: |
+          version=$(node -p "require('./package.json').version")
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "Package @jaato/sdk version: ${version}"
+
+      - name: Check version not already on npm
+        # 200 → version already published, 404 → ours to publish.
+        # Anything else (rate-limited, registry transient) → fail loudly
+        # so we don't accidentally re-publish or skip.
+        run: |
+          version="${{ steps.version.outputs.version }}"
+          status=$(curl -s -o /dev/null -w '%{http_code}' \
+            "https://registry.npmjs.org/@jaato/sdk/${version}")
+          if [ "$status" = "200" ]; then
+            echo "::error::Version ${version} of @jaato/sdk already exists on npm"
+            exit 1
+          fi
+          if [ "$status" != "404" ]; then
+            echo "::error::Unexpected status ${status} from registry — refusing to publish"
+            exit 1
+          fi
+          echo "Version ${version} is available for publishing"
+
+      - name: Install dependencies
+        working-directory: jaato-sdk-ts
+        run: npm install --no-audit --no-fund
+
+      - name: Build
+        working-directory: jaato-sdk-ts
+        run: npm run build
+
+      - name: Publish to npm
+        # --access public: scoped packages default to restricted on npm;
+        # we want @jaato/sdk to be installable without auth.
+        working-directory: jaato-sdk-ts
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

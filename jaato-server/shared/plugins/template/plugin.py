@@ -37,18 +37,82 @@ import json
 import os
 import re
 import tempfile
+import threading
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
-from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from pathlib import Path, PurePath
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
-from jaato_sdk.plugins.base import UserCommand, SystemInstructionEnrichmentResult, ToolResultEnrichmentResult, PermissionDisplayInfo
-from jaato_sdk.plugins.model_provider.types import EditableContent, ToolSchema, TRAIT_FILE_WRITER
+# pybars3's ``Compiler`` class holds CLASS-LEVEL mutable state
+# (``_handlebars``, ``_builder``, ``_compiler`` defined at class scope
+# in pybars/_compiler.py) — all instances share the same parser grammar
+# and CodeBuilder.  Per the upstream docstring: "The compiler is not
+# threadsafe: you need one per thread because of the state in
+# CodeBuilder."  Even creating a fresh ``Compiler()`` per call doesn't
+# isolate, because the class attributes are still process-wide.
+#
+# Symptoms when this races: ``'list' object has no attribute 'grow'``
+# or ``list indices must be integers, not str`` mid-compile, because
+# CodeBuilder.stack gets clobbered by another thread's reset.  Errors
+# typically recover on retry (no contention next time), but each
+# error-then-retry cycle perturbs agent output (the model resamples
+# its tool args, diverging across runs).
+#
+# This module-level lock serialises the ``_render_mustache`` critical
+# section across all TemplatePlugin instances in the process.  Cost:
+# pybars3 renders are fast (~50ms each); even 22 serialised renders
+# take ~1.1s vs theoretical 8-worker parallel ~140ms — but the
+# retry-storm savings from no contention typically amortise the
+# difference.  Other tool calls in the same parallel batch (file
+# operations, prefetch, etc.) are unaffected.
+_PYBARS_RENDER_LOCK = threading.Lock()
+
+from jaato_sdk.plugins.base import (
+    PermissionDisplayInfo,
+    PromptEnrichmentResult,
+    SystemInstructionEnrichmentResult,
+    ToolResultEnrichmentResult,
+    UserCommand,
+)
+from jaato_sdk.plugins.model_provider.types import EditableContent, ToolSchema, TRAIT_FILE_WRITER, DISCOVERABILITY_DEFERRED
+from shared.plugins.runner_forwarding import RunnerForwardingMixin
+from shared.tool_id_map import name_to_id, id_to_name
 from shared.trace import trace as _trace_write
+
+
+def _template_id(name: str) -> str:
+    """Return the LLM-facing hash id for a template name.
+
+    Mirrors ``shared.tool_id_map.name_to_id`` for tools (server 0.6.119+,
+    2026-05-17).  The hash is the surface the LLM sees; human names
+    remain authoritative inside the plugin's ``_template_index`` and on
+    disk.  Closes the semantic-prior class that v112 evidence exposed
+    (codegen agent skipped ``listTemplateVariables`` calls on templates
+    whose name matched Spring Boot training priors).
+    """
+    return name_to_id(name, prefix="tpl")
+
+
+def _template_name_from_id(template_id: str) -> str:
+    """Resolve an LLM-emitted hash id back to its human template name.
+
+    Returns the id unchanged when not recognized (mirrors
+    :func:`shared.tool_id_map.id_to_name`).  The plugin's executors
+    then fall through to the normal "template not found" error path.
+    """
+    return id_to_name(template_id)
 
 
 # File extensions recognized as standalone template files
 TEMPLATE_FILE_EXTENSIONS = {'.tpl', '.tmpl'}
+
+# Auto-discovered path-routing config (server 0.6.40+).  When present
+# at ``<config_root>/template_routing.yaml`` (or workspace-tier
+# fallback ``<workspace>/.jaato/template_routing.yaml``), the plugin
+# applies the declared (glob, prefix) rules to every renderTemplateToFile
+# call's resolved output_path BEFORE writing.  See ``_apply_path_routing``
+# for semantics.  Absent file = no-op (current behaviour preserved).
+PATH_ROUTING_FILENAME = "template_routing.yaml"
 
 
 @dataclass
@@ -66,12 +130,115 @@ class TemplateIndexEntry:
         syntax: Detected template syntax ("jinja2" or "mustache").
         variables: Sorted list of variable names required by the template.
         origin: How the template was discovered ("embedded" or "standalone").
+        tags: Topical tags driving prompt/tool-result enrichment matching.
+            Produced upstream by the gen-references agent and persisted in
+            ``index.json``; runtime-discovered entries have an empty list
+            and remain accessible via ``listAvailableTemplates``/``renderTemplateToFile``
+            tools but do not surface contextually.
+        description: Optional human-readable description (used in enrichment
+            hints when present).
     """
     name: str
     source_path: str  # String for JSON serialization; resolved to Path at lookup
     syntax: str
     variables: List[str] = field(default_factory=list)
     origin: str = "embedded"  # "embedded" or "standalone"
+    tags: List[str] = field(default_factory=list)
+    description: str = ""
+    # Optional ``// Output: <path-with-{{vars}}>`` directive extracted
+    # from the template's first comment lines.  Captures the canonical
+    # output location declared by the template author, with Mustache
+    # placeholders intact (e.g. ``{{basePackagePath}}/domain/model/{{Entity}}.java``).
+    # When ``renderTemplateToFile`` is called without an explicit
+    # ``output_path``, this template gets substituted with the agent's
+    # ``variables`` dict and used as the destination path — eliminating
+    # the agent-invents-the-path drift class.  Empty string means no
+    # ``// Output:`` directive was found (template doesn't declare its
+    # destination, so the agent must supply ``output_path`` explicitly).
+    output_path_template: str = ""
+    # Optional variant axis for templates that represent one option of
+    # a multi-option choice the agent's caller selected upstream
+    # (server 0.6.42+).  Two fields:
+    #
+    # - ``variant_key``: the kb-declared concept name for the axis
+    #   (e.g. ``"http_client"``) — stack-neutral, comes from the kb's
+    #   ``variants:`` declaration in MODULE.md.  When empty (most
+    #   templates), the template participates in no variant filtering.
+    # - ``variant``: the option name FOR THIS template within that axis
+    #   (e.g. ``"restclient"``, ``"feign"``, ``"resttemplate"``).  When
+    #   empty, the template doesn't represent a specific option (or
+    #   the kb-side walker hasn't populated this yet).
+    #
+    # Together they let consumers filter templates: render this
+    # template only when ``selected_variants[variant_key] == variant``.
+    # Without the filter, multi-option axes (e.g. three HTTP-client
+    # implementations all targeting the same target file) cause
+    # last-write-wins or stochastic skip behaviour.  Each consumer
+    # populates these from its own metadata source — the framework
+    # just plumbs them through to listAvailableTemplates.
+    #
+    # The walker also opportunistically extracts ``variant`` from a
+    # ``// Variant: <option>`` header in the template body using the
+    # same polyglot comment-style infrastructure as ``// Output:``.
+    # When both signals are present, the kb-side authoritative
+    # mapping (passed in via index.json) wins.
+    variant_key: str = ""
+    variant: str = ""
+    # Optional config-flag-driven skip rules for templates that
+    # subscribe to OTHER modules' boolean flags (server 0.6.56+).
+    # Maps flag name → expected flag value: when the consumer's
+    # ``generation_context.config_flags[flag] == expected``, the
+    # template is skipped at render selection time.
+    #
+    # Asymmetric counterpart to ``variant_key``/``variant``:
+    #
+    # - ``variant_key`` is symmetric (one wins per axis; all options
+    #   declare which axis they're on; cross-module agreement on the
+    #   axis name is required).
+    # - ``skip_when_flags`` is asymmetric (a subscriber template
+    #   declares its own skip rule against a publisher's flag; the
+    #   publisher's templates declare nothing).  Useful for
+    #   pub/sub mutual-exclusion patterns where modules don't share
+    #   axis vocabularies (e.g. mod-015's ``Response.java.tpl``
+    #   subscribes to mod-019's ``hateoas`` flag and steps aside
+    #   when ``hateoas == true``, so mod-019's
+    #   ``Response-hateoas.java.tpl`` renders alone).
+    #
+    # Empty dict (the default) means the template participates in no
+    # flag-driven skipping.  Plugin treats the field as opaque
+    # metadata and plumbs it through to ``listAvailableTemplates``;
+    # the consumer-side codegen agent persona honors it via the
+    # filter rule:
+    #
+    #   any (flag, skip_when) in template.skip_when_flags where
+    #     generation_context.config_flags[flag] == skip_when
+    #   → SKIP
+    #
+    # Authoritative source is the kb-side ``subscribes_to_flags:``
+    # block in MODULE.md (DEC-035 pub/sub).  The kb walker extracts
+    # it and writes per-template entries into ``index.json``.
+    skip_when_flags: Dict[str, bool] = field(default_factory=dict)
+    # Coarse evaluation-kind classification for the template
+    # (server 0.6.44+).  Two values:
+    #
+    # - ``"substitution"`` (default): template is pure variable
+    #   substitution — no Handlebars conditional helpers
+    #   (``{{#if X}}``, ``{{#unless X}}``, ``{{#with X}}``).  The
+    #   agent's job is straight echo-the-values into renderTemplateToFile.
+    #   Most code-gen templates fit this shape (Entity, Repository,
+    #   Request/Response DTOs).
+    # - ``"helpers"``: template uses Handlebars conditional helpers
+    #   anywhere (top-level OR inside section bodies).  The agent
+    #   may need to evaluate per-item branch logic — e.g. mod-017's
+    #   SystemApiMapper.java.tpl with ``{{#if isString}}...{{/if}} /
+    #   {{#if isEnum}}...{{/if}}`` mutually-exclusive sibling helpers.
+    #
+    # Lets agents fast-path pure-substitution templates without
+    # enumerating item_keys to detect helper presence.  Computed
+    # at parse time from the parser's ``_seen_helper_invocation``
+    # flag — fires whenever ``_looks_like_helper`` matches anywhere
+    # in the template body.
+    template_evaluation_kind: str = "substitution"
 
 
 # Regex patterns for detecting Jinja2 template syntax in code blocks
@@ -91,6 +258,16 @@ MUSTACHE_CURRENT_ITEM_PATTERN = re.compile(r'\{\{\s*\.\s*\}\}')  # {{.}} or {{ .
 
 # Jinja2 specific patterns (distinguish from Mustache)
 JINJA2_FILTER_PATTERN = re.compile(r'\{\{.*\|.*\}\}')  # {{ var | filter }}
+
+# Handlebars helper keywords + the public classifier are owned by
+# the SDK (server 0.6.58+) — re-imported here for in-module use.
+# The SDK is the public surface; walkers depend on jaato-sdk and
+# import directly.  The server plugin uses the same function so
+# walker output and framework discovery agree byte-for-byte.
+from jaato_sdk.templates import (
+    HELPER_KEYWORDS,
+    classify_template_evaluation_kind,
+)
 
 # Spring Boot property placeholder collision protection.
 #
@@ -134,7 +311,7 @@ FRONTMATTER_ID_PATTERN = re.compile(r'^id:\s*(.+)$', re.MULTILINE)
 _GENERATED_ANNOTATION_RE = re.compile(r'^[/*#\s]*@generated\b.*$', re.MULTILINE)
 
 
-class TemplatePlugin:
+class TemplatePlugin(RunnerForwardingMixin):
     """Plugin for template-based file generation.
 
     Maintains a unified template index that maps template names to their actual
@@ -147,7 +324,7 @@ class TemplatePlugin:
     .jaato/templates/index.json for inspectability.
 
     Tools provided:
-    - writeFileFromTemplate: Render a template with variables and write to file
+    - renderTemplateToFile: Render a template with variables and write to file
     - listAvailableTemplates: List all templates in the unified index
     - listTemplateVariables: List all variables required by a template
 
@@ -176,6 +353,15 @@ class TemplatePlugin:
         self._initialized = False
         self._agent_name: Optional[str] = None
         self._base_path: Optional[Path] = None
+        # Optional override for the read-only framework-config root,
+        # set by ``PluginRegistry.set_config_root``.  When non-None,
+        # ``_templates_dir`` is resolved as ``<config_root>/templates``
+        # rather than ``<workspace>/.jaato/templates`` — supporting
+        # the sandbox + config_root pattern where the workspace is the
+        # ephemeral runtime sandbox but the framework config (incl.
+        # the template index) lives at the repo root.  Mirrors the
+        # references plugin's ``_config_root`` field.
+        self._config_root: Optional[str] = None
         self._templates_dir: Optional[Path] = None
         # Track extracted templates in this session: hash -> path
         self._extracted_templates: Dict[str, Path] = {}
@@ -184,9 +370,45 @@ class TemplatePlugin:
         # templates (left in original location). The model refers to templates
         # by name; the system resolves actual paths via this index.
         self._template_index: Dict[str, TemplateIndexEntry] = {}
+        # Tag-based indexer over the template catalog.  Drives prompt and
+        # tool-result enrichment via shared.tag_coherence (same matcher
+        # used by memory and references plugins).  Re-built whenever the
+        # catalog mutates; see ``_rebuild_indexer``.
+        from .indexer import TemplateIndexer
+        self._indexer = TemplateIndexer()
         # Plugin registry for cross-plugin communication (e.g., querying
         # the references plugin for selected directory sources).
         self._plugin_registry = None
+        # Template names whose contextual "📦 Available Templates" hint
+        # bullet has already been injected into the model's context
+        # during this session.  Prevents the same block from being
+        # re-surfaced on every tool call.  Cleared by
+        # on_history_cleared() when the session history is wiped.
+        # Note: this only guards the *contextual surfacing* pass — the
+        # embedded-template extraction pass in enrich_tool_result() has
+        # its own content-hash dedup via ``_extracted_templates``.
+        self._surfaced_template_names: Set[str] = set()
+
+        # Auto-discovered path-routing rules from
+        # ``<config_root>/template_routing.yaml`` — server 0.6.40+.
+        # ``None`` means "not yet loaded for the current
+        # workspace/config_root"; an empty list means "loaded but no
+        # rules found" (file absent or empty).  Cleared by
+        # ``set_workspace_path`` / ``set_config_root`` / ``initialize``
+        # so the next call re-loads from the new location.
+        self._path_routing_rules: Optional[List[Tuple[str, str]]] = None
+
+        # Thread-local storage for ``//``-stripped-line numbers from the
+        # most recent ``_parse_mustache_structure`` call on THIS thread.
+        # Read by ``_execute_list_template_variables`` to surface a
+        # warning naming the stripped lines.  Stored thread-locally
+        # (rather than as a plain instance attribute) so concurrent
+        # listTemplateVariables calls from a parallel-tool batch don't
+        # clobber each other's stripped-lines list.  ``threading.local``
+        # is sufficient here because the writer and reader run on the
+        # SAME worker thread; we don't want propagation to nested
+        # contexts (which would re-introduce the race).
+        self._tls = threading.local()
 
     @property
     def name(self) -> str:
@@ -206,13 +428,189 @@ class TemplatePlugin:
         if "base_path" in config:
             self._base_path = Path(config["base_path"])
 
-        # Templates directory under .jaato
-        if self._base_path is not None:
-            self._templates_dir = self._base_path / ".jaato" / "templates"
+        # Templates directory: prefer config_root when set, else fall
+        # back to <workspace>/.jaato/templates.
+        self._templates_dir = self._compute_templates_dir()
 
         self._initialized = True
         self._load_persisted_index()
-        self._trace(f"initialized: base_path={self._base_path}, templates_dir={self._templates_dir}")
+        self._indexer.build_index(list(self._template_index.values()))
+        self._trace(f"initialized: base_path={self._base_path}, config_root={self._config_root}, templates_dir={self._templates_dir}")
+
+    def _compute_templates_dir(self) -> Optional[Path]:
+        """Resolve where the template index + standalone templates live.
+
+        Priority chain (mirrors the references plugin's resolution):
+
+        1. ``self._config_root`` if set (via ``set_config_root``) — the
+           sandbox + config_root pattern where the workspace is the
+           ephemeral sandbox but the framework's `.jaato/templates/`
+           lives at the repo root.  Resolves to
+           ``<config_root>/templates``.
+        2. ``self._base_path`` (workspace) — single-dir workspaces.
+           Resolves to ``<workspace>/.jaato/templates`` (legacy default).
+        3. None when neither is set — returned so callers can guard.
+        """
+        if self._config_root is not None:
+            return Path(self._config_root) / "templates"
+        if self._base_path is not None:
+            return self._base_path / ".jaato" / "templates"
+        return None
+
+    def _resolve_path_routing_path(self) -> Optional[Path]:
+        """Return the canonical ``template_routing.yaml`` location for
+        the current workspace / config_root, or None if neither is set.
+        Mirrors ``_compute_templates_dir``'s priority chain: prefer
+        ``<config_root>/template_routing.yaml`` when config_root is
+        set, otherwise ``<workspace>/.jaato/template_routing.yaml``.
+        """
+        if self._config_root is not None:
+            return Path(self._config_root) / PATH_ROUTING_FILENAME
+        if self._base_path is not None:
+            return self._base_path / ".jaato" / PATH_ROUTING_FILENAME
+        return None
+
+    def _load_path_routing(self) -> List[Tuple[str, str]]:
+        """Load + cache the path-routing rules from
+        ``<config_root>/template_routing.yaml`` (or the workspace-tier
+        fallback).  Returns the list of ``(glob, prefix)`` tuples in
+        declared order; empty list when the file is absent, malformed,
+        or carries no rules.
+
+        Cached on ``self._path_routing_rules``; cleared by
+        ``set_workspace_path`` / ``set_config_root`` / ``initialize``.
+
+        YAML schema (server 0.6.40+ — minimal first cut):
+
+            file_conventions:
+              output_path_routing:
+                - glob: "pom.xml"
+                  prefix: ""                 # workspace-root anchor
+                - glob: "**/*Test.java"
+                  prefix: "src/test/java"
+                - glob: "**/*.java"
+                  prefix: "src/main/java"
+                - glob: "**/*.yml"
+                  prefix: "src/main/resources"
+
+        Rule semantics handled by ``_apply_path_routing``:
+
+        - First-match-wins: rules iterated in declared order.
+        - Empty ``prefix``: match-and-no-op (useful as an explicit
+          "leave these paths as-is" entry before catch-all rules).
+        - Idempotent strip-and-prepend: when the path already starts
+          with the matched rule's prefix, the prefix is not duplicated.
+
+        Glob library: ``pathlib.PurePath.match`` (stdlib) — supports
+        ``*``/``?``/``[seq]``/``**`` per the standard semantics.  Brace
+        expansion (``{yml,yaml}``) is NOT supported — write separate
+        rules for each extension.
+
+        File auto-discovery is the convention-over-configuration
+        ergonomic; the env-var pointer is the kb-driven escape hatch
+        and ships in a follow-up if needed.  When the file is absent
+        the plugin behaves exactly as it did pre-0.6.40 — full
+        back-compat preserved.
+        """
+        if self._path_routing_rules is not None:
+            return self._path_routing_rules
+
+        path = self._resolve_path_routing_path()
+        if path is None or not path.exists():
+            self._path_routing_rules = []
+            return []
+
+        try:
+            import yaml  # imported lazily — only loaded when routing is in use
+            data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        except (yaml.YAMLError, IOError, OSError) as e:
+            self._trace(f"path_routing load error from {path}: {e}")
+            self._path_routing_rules = []
+            return []
+
+        rules_raw = (
+            (data.get("file_conventions") or {}).get("output_path_routing")
+            or []
+        )
+        rules: List[Tuple[str, str]] = []
+        for rule in rules_raw:
+            if not isinstance(rule, dict):
+                continue
+            glob = rule.get("glob")
+            prefix = rule.get("prefix", "")
+            if isinstance(glob, str) and isinstance(prefix, str):
+                # Normalise: strip any trailing slash from prefix so the
+                # join logic below is uniform.
+                rules.append((glob, prefix.rstrip("/")))
+        self._trace(
+            f"path_routing loaded {len(rules)} rule(s) from {path}"
+        )
+        self._path_routing_rules = rules
+        return rules
+
+    def _apply_path_routing(self, output_path: str) -> str:
+        """Apply path-routing rules to a resolved ``output_path``.
+
+        Rule iteration is first-match-wins on
+        ``pathlib.PurePath(output_path).match(glob)``.  When matched:
+
+        - If the rule's ``prefix`` is empty, return the path unchanged
+          (the rule's role is to whitelist that path against the
+          catch-all rules below it; explicit "leave as-is").
+        - If the path already starts with the rule's prefix, return
+          the path unchanged (idempotent — strip-then-prepend is a
+          no-op).
+        - Otherwise prepend the prefix.
+
+        When NO rule matches (or the rules list is empty / file
+        absent), return the path unchanged.  This means the
+        post-0.6.40 behaviour with no ``template_routing.yaml`` is
+        identical to pre-0.6.40 — full back-compat preserved.
+
+        Strict per-rule strip semantics (option 1 of the implementation
+        questions): only the matched rule's own prefix is checked
+        for the idempotent no-op; we do NOT strip prefixes belonging
+        to other rules.  Cleaner, fewer surprises.  If a path already
+        carries a wrongly-placed prefix from another rule, that's a
+        kb-author bug to fix in the directive, not a heuristic the
+        framework should silently paper over.
+
+        Args:
+            output_path: The fully-resolved (post-auto-derive or
+                explicit) path the agent or framework computed.  May
+                be relative or absolute; rules see it verbatim.
+
+        Returns:
+            The post-routing path, ready for workspace-relative
+            resolution and the file-write that follows.
+        """
+        rules = self._load_path_routing()
+        if not rules:
+            return output_path
+
+        ppath = PurePath(output_path)
+        for glob, prefix in rules:
+            # Glob-match with a zero-depth fallback: ``**/*.yml`` in
+            # Python 3.12's PurePath.match requires AT LEAST one parent
+            # directory component, so it doesn't match top-level
+            # ``application.yml``.  Users intuitively expect ``**/*``
+            # to mean "any depth including zero" (gitignore-style).
+            # When the glob starts with ``**/`` and the strict match
+            # fails, try the same glob with ``**/`` stripped — that
+            # catches the top-level case without affecting nested
+            # paths.
+            matched = ppath.match(glob)
+            if not matched and glob.startswith("**/"):
+                matched = ppath.match(glob[3:])
+            if matched:
+                if not prefix:
+                    return output_path
+                normalised = output_path.lstrip("/")
+                if normalised.startswith(prefix + "/") or normalised == prefix:
+                    # Already prefixed — idempotent no-op.
+                    return output_path
+                return prefix + "/" + normalised
+        return output_path
 
     def set_plugin_registry(self, registry) -> None:
         """Receive the plugin registry for cross-plugin communication.
@@ -235,17 +633,56 @@ class TemplatePlugin:
         so template resolution uses the workspace, not the server CWD.
         Also loads the persisted template index from disk so templates are
         available immediately — without depending on the references plugin.
+
+        When ``set_config_root`` has already been called with a non-None
+        value, the templates_dir resolution uses config_root instead of
+        the workspace path (see ``_compute_templates_dir``).
         """
         self._base_path = Path(path)
-        self._templates_dir = self._base_path / ".jaato" / "templates"
+        self._templates_dir = self._compute_templates_dir()
+        self._path_routing_rules = None  # invalidate; lazy reload on next render
         self._load_persisted_index()
-        self._trace(f"set_workspace_path: base_path={self._base_path}, templates_dir={self._templates_dir}")
+        self._indexer.build_index(list(self._template_index.values()))
+        self._trace(f"set_workspace_path: base_path={self._base_path}, config_root={self._config_root}, templates_dir={self._templates_dir}")
+
+    def set_config_root(self, path: Optional[str]) -> None:
+        """Adopt the registry-broadcast config_root override.
+
+        Called by :meth:`PluginRegistry.set_config_root` whenever the
+        session's ``config_root`` changes.  Re-resolves ``_templates_dir``
+        to use the new override (or fall back to the workspace tier
+        when ``path`` is ``None``) and reloads the persisted template
+        index from the new location.
+
+        This enables the sandbox + config_root pattern (handoff_test +
+        kb-enablement-2.0): the workspace is the ephemeral runtime
+        sandbox, but the framework's ``.jaato/templates/index.json``
+        lives at the repo root.  Without this method, the template
+        plugin would be pinned to the sandbox and miss the committed
+        template catalog.
+
+        Mirrors the references plugin's ``set_config_root`` (lines
+        241-253 of ``shared/plugins/references/plugin.py``).
+
+        Args:
+            path: The config_root to adopt, or ``None`` to fall back
+                to the workspace tier.
+        """
+        self._config_root = path
+        self._templates_dir = self._compute_templates_dir()
+        self._path_routing_rules = None  # invalidate; lazy reload on next render
+        # Reload the index from the (potentially) new location so
+        # listAvailableTemplates / renderTemplateToFile pick up the
+        # right catalog without requiring a session restart.
+        self._load_persisted_index()
+        self._indexer.build_index(list(self._template_index.values()))
+        self._trace(f"set_config_root: {path}, templates_dir={self._templates_dir}")
 
     def _load_persisted_index(self) -> None:
         """Load the template index from .jaato/templates/index.json if it exists.
 
         Seeds ``_template_index`` so that ``listAvailableTemplates`` and
-        ``writeFileFromTemplate`` work immediately, even before the
+        ``renderTemplateToFile`` work immediately, even before the
         references plugin discovers template directories.  Entries loaded
         here are overwritten if the references plugin later discovers the
         same template name (runtime discovery takes precedence).
@@ -257,18 +694,54 @@ class TemplatePlugin:
             return
         try:
             data = json.loads(index_path.read_text(encoding="utf-8"))
-            templates = data.get("templates", {})
+            # Two on-disk schemas exist:
+            # 1. Runtime persist: ``{"templates": {name: entry, ...}}``
+            # 2. gen-references:  ``{"entries": [entry, ...], "schema": ...}``
+            # Normalise both into an iterable of (name, entry_dict) pairs.
+            if "entries" in data:
+                pairs = ((e.get("name", ""), e) for e in data.get("entries", []))
+            else:
+                pairs = data.get("templates", {}).items()
+
             loaded = 0
-            for name, entry_data in templates.items():
-                if name not in self._template_index:
-                    self._template_index[name] = TemplateIndexEntry(
-                        name=entry_data.get("name", name),
-                        source_path=entry_data.get("source_path", ""),
-                        syntax=entry_data.get("syntax", "jinja2"),
-                        variables=entry_data.get("variables", []),
-                        origin=entry_data.get("origin", "standalone"),
-                    )
-                    loaded += 1
+            for name, entry_data in pairs:
+                if not name or name in self._template_index:
+                    continue
+                self._template_index[name] = TemplateIndexEntry(
+                    name=entry_data.get("name", name),
+                    # gen-references writes "source"; runtime persist writes
+                    # "source_path".  Accept either so both schemas load.
+                    source_path=entry_data.get("source_path") or entry_data.get("source", ""),
+                    syntax=entry_data.get("syntax", "jinja2"),
+                    variables=entry_data.get("variables", []),
+                    origin=entry_data.get("origin", "standalone"),
+                    tags=entry_data.get("tags", []),
+                    description=entry_data.get("description") or entry_data.get("display_name", ""),
+                    # Default to "" when missing so older index.json files
+                    # (pre-0.6.34) load cleanly and the field is treated as
+                    # "no declared output path" — falling back to the
+                    # agent-provided ``output_path`` like before.
+                    output_path_template=entry_data.get("output_path_template", ""),
+                    # Variant axis (server 0.6.42+).  Both default to ""
+                    # so older index.json files load cleanly with no
+                    # variant filtering applied.
+                    variant_key=entry_data.get("variant_key", ""),
+                    variant=entry_data.get("variant", ""),
+                    # Server 0.6.56+: empty dict default so older
+                    # index.json files load cleanly with no flag-driven
+                    # skip rules applied.
+                    skip_when_flags=entry_data.get("skip_when_flags", {}),
+                    # Server 0.6.44+: default "substitution" preserves
+                    # back-compat for older index.json files (no
+                    # false-positive helpers tag).  Tooling that
+                    # writes the index can populate this from a
+                    # fresh _parse_mustache_structure run on the
+                    # template body.
+                    template_evaluation_kind=entry_data.get(
+                        "template_evaluation_kind", "substitution",
+                    ),
+                )
+                loaded += 1
             if loaded:
                 self._trace(f"_load_persisted_index: loaded {loaded} templates from {index_path}")
         except (json.JSONDecodeError, OSError, KeyError) as exc:
@@ -279,6 +752,35 @@ class TemplatePlugin:
         self._initialized = False
         self._extracted_templates.clear()
         self._template_index.clear()
+        self._surfaced_template_names.clear()
+
+    def reset_for_next_session(self) -> None:
+        """Cascade-sharing reset — NO-OP for this plugin.
+
+        Phase 1 hotfix (server 0.6.148+): added to satisfy the
+        ``ToolPlugin`` / ``EnrichmentPlugin`` protocol's runtime
+        ``isinstance`` check.  Per Daniel's litmus test (see
+        ``docs/design/runner-cascade-sharing.md`` §4.3), this
+        plugin holds no per-session state that the next cascade
+        session would benefit from having cleared.  Override in
+        future PRs if the litmus test changes.
+        """
+        pass
+
+
+    def on_history_cleared(self) -> None:
+        """Reset per-session enrichment tracking when history is wiped.
+
+        Called by ``JaatoSession.reset_session()`` on a true history clear.
+        Clears the ``_surfaced_template_names`` set so previously hinted
+        templates can surface again in the fresh conversation.
+
+        Does NOT clear ``_extracted_templates`` (content-hash → path) or
+        ``_template_index`` — those are durable on-disk artifacts whose
+        lifetime is orthogonal to the conversation.
+        """
+        self._surfaced_template_names.clear()
+        self._trace("on_history_cleared: cleared surfaced template tracking")
 
     def get_config_schema(self) -> Dict[str, Any]:
         """Return JSON Schema for this plugin's configuration."""
@@ -318,7 +820,7 @@ class TemplatePlugin:
                         NudgeType.DIRECT_INSTRUCTION,
                         "NOTICE: You called {tool_name} without checking templates first. "
                         "Call listAvailableTemplates before writing files to check if a template "
-                        "can produce or contribute to the target file (directly via writeFileFromTemplate "
+                        "can produce or contribute to the target file (directly via renderTemplateToFile "
                         "or indirectly as a patch source)."
                     ),
                     PatternSeverity.MODERATE: (
@@ -346,31 +848,47 @@ class TemplatePlugin:
         """Return tool schemas for template tools."""
         return [
             ToolSchema(
-                name="writeFileFromTemplate",
+                name="renderTemplateToFile",
                 description=(
                     "**PREFERRED OVER MANUAL CODING**: Render a template with variable substitution "
-                    "and write the result to a file. When a template exists for your task (check "
-                    ".jaato/templates/ or use listAvailableTemplates), you MUST use this tool instead "
+                    "and write the result to a file. When a template exists for your task (use "
+                    "listAvailableTemplates to discover them), you MUST use this tool instead "
                     "of writing code manually. Templates ensure consistency and reduce errors. "
                     "Supports BOTH Jinja2 and Mustache/Handlebars syntax (auto-detected). "
                     "Jinja2: {{name}}, {% if %}, {% for %}, {{ name | filter }}. "
                     "Mustache: {{name}}, {{#items}}...{{/items}}, {{^empty}}...{{/empty}}, {{.}}. "
-                    "Provide either 'template' for inline content or 'template_name' for a registered template."
+                    "Provide either 'template' for inline content or 'template_id' for a registered template."
                 ),
                 parameters={
                     "type": "object",
                     "properties": {
                         "output_path": {
                             "type": "string",
-                            "description": "Path where rendered content will be written."
+                            "description": (
+                                "OPTIONAL — defaults to the template's declared "
+                                "// Output: directive (substituted with your `variables`). "
+                                "When using `template_id`, omit this field unless you "
+                                "specifically need to redirect the output away from the "
+                                "template's canonical location. When using inline `template` "
+                                "OR when the template has no `// Output:` directive, you must "
+                                "supply this. NEVER include unsubstituted `{` or `}` placeholders."
+                            )
                         },
-                        "template_name": {
+                        "template_id": {
                             "type": "string",
-                            "description": "Template name from the annotation (e.g., 'Entity.java.tpl'). Resolved via the template index. Mutually exclusive with 'template'."
+                            "description": (
+                                "Opaque template identifier (e.g. 'tpl_a8f0e2b1') obtained "
+                                "from the 'id' field of a listAvailableTemplates response entry. "
+                                "Resolved internally to the template file. Mutually exclusive "
+                                "with 'template'. Do NOT pass human template filenames "
+                                "(e.g. 'Entity.java.tpl') — the framework hashes those at the "
+                                "LLM boundary to keep tool calls grounded in the listed catalog "
+                                "rather than training-distribution priors."
+                            )
                         },
                         "template": {
                             "type": "string",
-                            "description": "Inline template string. Mutually exclusive with 'template_name'."
+                            "description": "Inline template string. Mutually exclusive with 'template_id'."
                         },
                         "variables": {
                             "type": "object",
@@ -382,10 +900,10 @@ class TemplatePlugin:
                             "description": "Allow overwriting existing file. Default is false."
                         }
                     },
-                    "required": ["output_path", "variables"]
+                    "required": ["variables"]
                 },
                 category="code",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
                 editable=EditableContent(
                     parameters=["template", "variables"],
                     format="yaml",
@@ -397,9 +915,13 @@ class TemplatePlugin:
                 name="listAvailableTemplates",
                 description=(
                     "**CHECK THIS BEFORE WRITING CODE**: List all templates available in this "
-                    "session. If a template exists for your task, you MUST use writeFileFromTemplate "
+                    "session. If a template exists for your task, you MUST use renderTemplateToFile "
                     "instead of writing code manually. Shows both standalone templates (from "
-                    "referenced directories) and embedded templates (extracted from documentation)."
+                    "referenced directories) and embedded templates (extracted from documentation). "
+                    "Each entry carries a stable opaque 'id' (e.g. 'tpl_a8f0e2b1') — pass this "
+                    "id to renderTemplateToFile and listTemplateVariables. The human template "
+                    "filename is reported on 'source_path' for human audit only; never pass it "
+                    "as a tool argument."
                 ),
                 parameters={
                     "type": "object",
@@ -407,7 +929,7 @@ class TemplatePlugin:
                     "required": []
                 },
                 category="code",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
             ToolSchema(
                 name="validateTemplateIndex",
@@ -428,38 +950,61 @@ class TemplatePlugin:
                     "required": ["path"]
                 },
                 category="code",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
             ToolSchema(
                 name="listTemplateVariables",
                 description=(
-                    "List all variables required by a template. Call this before writeFileFromTemplate "
-                    "to know exactly what variables to provide. Analyzes the template and returns "
-                    "all variable names that need to be substituted."
+                    "List all variables required by a template, with structural type info "
+                    "for each one. Call this before renderTemplateToFile to know exactly "
+                    "what variables to provide AND what shape each variable needs.\n\n"
+                    "Returns ``variables: list[{name, kind, item_keys?}]`` where:\n"
+                    "  - ``kind == 'scalar'``: provide a string/number/bool — used as ``{{name}}``.\n"
+                    "  - ``kind == 'section'``: provide a list of dicts — used as "
+                    "    ``{{#name}}...{{/name}}``. Each dict in the list MUST contain the "
+                    "    keys listed in ``item_keys`` (these are the field names the "
+                    "    template's body references inside the section). Example: "
+                    "    ``apiEndpoints`` with ``item_keys: ['methodName', 'path']`` means "
+                    "    pass ``[{'methodName': 'getCustomer', 'path': '/customers/{id}'}, ...]``.\n"
+                    "  - ``kind == 'inverted_section'``: provide a falsy value (empty list, "
+                    "    None, False) — block renders only when the value is empty/missing. "
+                    "    Used as ``{{^name}}...{{/name}}``.\n\n"
+                    "If you guess the wrong kind (e.g. pass a section as flat scalar, or a list "
+                    "of strings instead of list of dicts), pybars3 will raise a render error. "
+                    "Read the structural info from this tool's output rather than guessing."
                 ),
                 parameters={
                     "type": "object",
                     "properties": {
-                        "template_name": {
+                        "template_id": {
                             "type": "string",
-                            "description": "Template name from the annotation (e.g., 'Entity.java.tpl')"
+                            "description": (
+                                "Opaque template identifier (e.g. 'tpl_a8f0e2b1') obtained "
+                                "from the 'id' field of a listAvailableTemplates response "
+                                "entry. Do NOT pass human template filenames — see "
+                                "listAvailableTemplates description."
+                            )
                         }
                     },
-                    "required": ["template_name"]
+                    "required": ["template_id"]
                 },
                 category="code",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
         ]
 
     def get_executors(self) -> Dict[str, Callable[[Dict[str, Any]], Any]]:
-        """Return executor functions for each tool."""
-        return {
-            "writeFileFromTemplate": self._execute_write_file_from_template,
+        """Return executor functions for each tool.
+
+        Phase 3 §3.4 wave 1: forwards via runner-RPC when a runner
+        is attached; falls through to in-process otherwise.
+        """
+        return self.wrap_executors_for_runner_forwarding({
+            "renderTemplateToFile": self._execute_render_template_to_file,
             "listAvailableTemplates": self._execute_list_available,
             "listTemplateVariables": self._execute_list_template_variables,
             "validateTemplateIndex": self._execute_validate_template_index,
-        }
+        })
 
     def get_system_instructions(self) -> Optional[str]:
         """Return system instructions for template tools."""
@@ -469,27 +1014,44 @@ class TemplatePlugin:
 manually writing code. Templates ensure consistency, reduce errors, and follow established
 patterns. Manual coding when a template exists is NOT acceptable.
 
+### IMPORTANT: Template Identifiers Are Opaque Hashes
+
+Templates are identified by stable opaque ids (e.g. `tpl_a8f0e2b1`).  You
+discover ids from `listAvailableTemplates`; you pass ids to
+`renderTemplateToFile` and `listTemplateVariables`.  Do NOT pass human
+template filenames as tool arguments — the framework hashes them so that
+your tool calls are grounded in the listed catalog rather than in
+training-distribution priors on filenames like `RestController.java.tpl`.
+
 ### IMPORTANT: Variable Names Are Provided Automatically
 
 When a template is detected, the system automatically injects an annotation
-showing the **exact variable names** required. Look for annotations like:
+showing the template's id AND the **exact variable names** required.  Look
+for annotations like:
 
 ```
-[!] **TEMPLATE AVAILABLE - MANDATORY USAGE**: Entity.java.tpl
+[!] **TEMPLATE AVAILABLE - MANDATORY USAGE**: tpl_a8f0e2b1
   Syntax: mustache
   Required variables: [Entity, basePackage, entityFields]
   ...
 ```
 
-**USE THESE EXACT VARIABLE NAMES** when calling writeFileFromTemplate. Do NOT guess or
-invent variable names - use the ones shown in the annotation.
+**USE THESE EXACT VARIABLE NAMES** when calling renderTemplateToFile.  Do
+NOT guess or invent variable names — use the ones shown in the
+annotation.  When in doubt about a variable's structural kind (scalar /
+section / inverted_section), call `listTemplateVariables(template_id=...)`.
 
 ### TEMPLATE TOOLS:
 
-**writeFileFromTemplate(output_path, template_name, variables)** - PREFERRED tool for file generation
-  - template_name: Use the template **name** from the annotation (e.g., "Entity.java.tpl")
-  - The system resolves the name to the actual file location via the template index
+**renderTemplateToFile(template_id, variables, output_path=optional)** - PREFERRED tool for file generation
+  - template_id: Use the `id` from the annotation or from `listAvailableTemplates`
+    (e.g. `"tpl_a8f0e2b1"`).  Do NOT pass `"Entity.java.tpl"`.
+  - The system resolves the id to the actual file location via the template index
   - Use the EXACT variable names from the template annotation
+  - **output_path is OPTIONAL** when the template declares a `// Output:` directive at the top:
+    the framework substitutes `{{vars}}` in the directive with your `variables` and uses
+    that as the destination. Omit `output_path` for kb-faithful paths.
+  - Override `output_path` only when downstream tooling needs the file at a different location
   - Automatically creates parent directories - NO mkdir needed!
   - Supports both Jinja2 and Mustache/Handlebars syntax (auto-detected)
   - Checks if file exists (use overwrite=true to replace)
@@ -497,14 +1059,17 @@ invent variable names - use the ones shown in the annotation.
 
 **listAvailableTemplates()** - List all available templates
   - Shows all templates discovered in this session (embedded + standalone)
-  - Each entry shows: name, origin, syntax, variables, source path
+  - Each entry: `{id, origin, syntax, variables, source_path, output_path_template, ...}`
+  - The `id` is the opaque hash you pass to other template tools
+  - The `source_path` is for human audit only — never pass it as a tool argument
   - Auto-approved (no permission required)
 
-**listTemplateVariables(template_name)** - Get required variables for a template (OPTIONAL)
-  - Use this if you need to re-check the variables for a template
-  - Helpful if the original annotation is no longer visible in context
+**listTemplateVariables(template_id)** - Get required variables for a template
+  - Use this when you need structural-type info (scalar / section / inverted_section)
+    or when the original annotation is no longer visible in context
+  - Pass the `id` from `listAvailableTemplates` (e.g. `"tpl_a8f0e2b1"`)
   - Auto-approved (no permission required)
-  - Returns: {"variables": ["var1", "var2", ...], "syntax": "jinja2|mustache", "count": N}
+  - Returns: {"variables": [{"name": "...", "kind": "...", ...}, ...], "syntax": "...", ...}
 
 ### CRITICAL: Directory Creation Rules
 
@@ -515,33 +1080,47 @@ create all necessary parent directories when writing files.
 ```
 # NEVER DO THIS - mkdir with template notation creates literal garbage directories
 cli_based_tool: mkdir -p src/main/java/{{package}}/domain/{model,service}
-writeFileFromTemplate: ...
+renderTemplateToFile: ...
 ```
 
-**CORRECT approach:**
+**CORRECT approach (preferred — let the template declare its path):**
 ```
-# Just call writeFileFromTemplate for each file - directories are created automatically
-writeFileFromTemplate(
-    output_path="customer-service/src/main/java/com/bank/customer/domain/model/Customer.java",
-    template_name="Entity.java.tpl",
-    variables={"Entity": "Customer", "basePackage": "com.bank.customer"}
+# Most templates declare their output path on a `// Output:` line at the top.
+# Omit output_path and the framework substitutes the directive with your variables.
+renderTemplateToFile(
+    template_id="tpl_a8f0e2b1",   # from listAvailableTemplates response
+    variables={"Entity": "Customer", "basePackage": "com.bank.customer", "basePackagePath": "com/bank/customer"}
+)
+# Resulting file lands at the template-declared path with {{vars}} substituted.
+```
+
+**Override only when needed (downstream tooling redirects):**
+```
+renderTemplateToFile(
+    template_id="tpl_a8f0e2b1",
+    variables={"Entity": "Customer", "basePackage": "com.bank.customer"},
+    output_path="custom/redirected/path/Customer.java"
 )
 ```
 
 ### File Path Rules
 
-1. **output_path must be a CONCRETE path** - all variables must be substituted BEFORE calling the tool
-2. **NEVER include `{` or `}` in output_path** - these are for template CONTENT only, not file paths
-3. **NEVER use shell brace expansion** like `{model,service,repository}` in paths
-4. **Generate ONE file at a time** - call writeFileFromTemplate once per output file
+1. **Prefer omitting output_path** — let the template's `// Output:` directive drive
+   the destination.  Use `listAvailableTemplates` to see each template's
+   `output_path_template`.
+2. **When you DO supply output_path**, all variables must be substituted BEFORE calling
+3. **NEVER include unsubstituted `{` or `}` in output_path** — those are for template
+   CONTENT only.  If you see them in your computed path, you forgot to substitute.
+4. **NEVER use shell brace expansion** like `{model,service,repository}` in paths
+5. **Generate ONE file at a time** — call renderTemplateToFile once per output file
 
-**Example - Generating multiple files:**
+**Example - Generating multiple files (preferred form):**
 ```
-# For each entity, call writeFileFromTemplate with concrete paths:
-writeFileFromTemplate(output_path="src/main/java/com/bank/customer/domain/model/Customer.java", ...)
-writeFileFromTemplate(output_path="src/main/java/com/bank/customer/domain/model/CustomerId.java", ...)
-writeFileFromTemplate(output_path="src/main/java/com/bank/customer/domain/service/CustomerDomainService.java", ...)
-writeFileFromTemplate(output_path="src/main/java/com/bank/customer/domain/repository/CustomerRepository.java", ...)
+# Call listAvailableTemplates first to get each template's id, then:
+renderTemplateToFile(template_id="tpl_a8f0e2b1", variables={"Entity": "Customer", ...})
+renderTemplateToFile(template_id="tpl_4d3c91f0", variables={"Entity": "Customer", ...})
+renderTemplateToFile(template_id="tpl_77b2eea5", variables={"Entity": "Customer", ...})
+renderTemplateToFile(template_id="tpl_e016cc8a", variables={"Entity": "Customer", ...})
 ```
 
 ### Template Priority Rule (PREREQUISITE FOR FILE TOOLS)
@@ -555,14 +1134,14 @@ call `listAvailableTemplates` at least once in the current or recent turns:
 
 **The workflow is always:**
 1. Call `listAvailableTemplates` to check what templates are available
-2. If a template matches your task **directly** → use `writeFileFromTemplate`
+2. If a template matches your task **directly** → use `renderTemplateToFile`
 3. If a template matches your task **indirectly** (the template provides content
    that should be layered onto an existing file) → render it mentally, then apply
    the relevant sections via `updateFile` or `multiFileEdit` as a patch
 4. If NO template matches → proceed freely with file-writing tools
 
 **Direct vs. Indirect Template Usage:**
-- **Direct**: Template produces a complete new file → `writeFileFromTemplate`
+- **Direct**: Template produces a complete new file → `renderTemplateToFile`
 - **Indirect**: Template provides a pattern or code fragment that must be merged
   into an existing file (e.g., adding resilience annotations to a Java class).
   The template is the **source of truth** for the new code — render it to
@@ -578,7 +1157,7 @@ mandatory corrections — call `listAvailableTemplates` and re-evaluate before p
 Do NOT read `.tpl`/`.tmpl` template files with file-reading tools and then pass the content
 to `writeNewFile`. This bypasses the template engine's variable substitution, syntax
 detection, and validation. The ONLY correct way to use a template is:
-- `writeFileFromTemplate(template_name="...", variables={...}, output_path="...")`
+- `renderTemplateToFile(template_id="tpl_xxx", variables={...}, output_path="...")`
 
 The template engine resolves the file location, detects syntax (Jinja2/Mustache),
 substitutes variables, and writes the result. Manual reading and writing skips all of this.
@@ -645,7 +1224,7 @@ Template rendering writes files to the workspace."""
     ) -> Optional[PermissionDisplayInfo]:
         """Format permission request for file writing tools.
 
-        Provides custom display formatting for writeFileFromTemplate to show
+        Provides custom display formatting for renderTemplateToFile to show
         the user what file will be created and with what content.
 
         Args:
@@ -656,12 +1235,19 @@ Template rendering writes files to the workspace."""
         Returns:
             PermissionDisplayInfo with formatted content, or None to use default.
         """
-        if tool_name != "writeFileFromTemplate":
+        if tool_name != "renderTemplateToFile":
             return None
 
         output_path = arguments.get("output_path", "")
         template = arguments.get("template")
-        template_name = arguments.get("template_name")
+        # Server 0.6.119+: the LLM passes a hash id; resolve it back to
+        # the human name for human-readable permission display.  Unknown
+        # ids round-trip unchanged so the display falls back to showing
+        # the id itself rather than an empty string.
+        template_id = arguments.get("template_id")
+        template_name = (
+            _template_name_from_id(template_id) if template_id else None
+        )
         variables = arguments.get("variables", {})
         overwrite = arguments.get("overwrite", False)
 
@@ -755,53 +1341,44 @@ Template rendering writes files to the workspace."""
         instructions_preview = instructions[:100].replace('\n', '\\n') + ('...' if len(instructions) > 100 else '')
         self._trace(f"enrich_system_instructions called: {len(instructions)} chars, preview: {instructions_preview}")
 
-        annotations: List[str] = []
-
-        # Discover standalone templates from referenced directories
+        # Discover standalone templates from referenced directories and
+        # merge them into the unified index.
         standalone_entries = self._discover_from_references()
         for entry in standalone_entries:
             self._template_index[entry.name] = entry
 
-            # Build annotation for each standalone template
-            if entry.variables:
-                var_list = ", ".join(entry.variables)
-                var_dict_example = ", ".join(f'"{v}": <value>' for v in entry.variables[:3])
-                if len(entry.variables) > 3:
-                    var_dict_example += ", ..."
-            else:
-                var_list = "(none detected)"
-                var_dict_example = ""
-
-            annotations.append(
-                f"[!] **TEMPLATE AVAILABLE - MANDATORY USAGE**: {entry.name}\n"
-                f"  Syntax: {entry.syntax}\n"
-                f"  Required variables: [{var_list}]\n"
-                f"  **YOU MUST USE THIS TEMPLATE** instead of writing code manually.\n"
-                f"  Call: writeFileFromTemplate(\n"
-                f"      template_name=\"{entry.name}\",\n"
-                f"      variables={{{var_dict_example}}},\n"
-                f"      output_path=\"<your-output-file>\"\n"
-                f"  )"
-            )
-
-        # Persist the unified index to disk
+        # Persist the unified index to disk and rebuild the tag indexer
+        # so contextual surfacing reflects the latest catalog.
         self._persist_index()
+        self._indexer.build_index(list(self._template_index.values()))
 
-        if not annotations:
+        total = len(self._template_index)
+        if total == 0:
             return SystemInstructionEnrichmentResult(instructions=instructions)
 
-        # Append annotations to instructions
-        annotation_block = "\n\n---\n[!] **MANDATORY TEMPLATES AVAILABLE - USE THESE INSTEAD OF MANUAL CODING:**\n" + "\n\n".join(annotations) + "\n---"
-        enriched_instructions = instructions + annotation_block
+        # Compact pointer in lieu of per-template MANDATORY-USAGE blocks.
+        # Per-template enumeration scaled linearly with the catalog size,
+        # nagged the model about templates unrelated to the task, and
+        # invalidated the cacheable system-instruction prefix on every
+        # catalog change.  Relevant templates now surface contextually
+        # via enrich_prompt / enrich_tool_result using tag-coherence
+        # matching (see TemplateIndexer); the catalog stays discoverable
+        # via listAvailableTemplates.
+        pointer = (
+            f"\n\n---\n"
+            f"📦 {total} template{'s' if total != 1 else ''} available "
+            f"in the unified index.  Relevant ones surface in-context per "
+            f"prompt; call `listAvailableTemplates` for the full catalog "
+            f"or `renderTemplateToFile(template_id=..., variables={{...}}, "
+            f"output_path=...)` to use one.\n---"
+        )
+        enriched_instructions = instructions + pointer
 
         return SystemInstructionEnrichmentResult(
             instructions=enriched_instructions,
             metadata={
+                "template_count": total,
                 "standalone_count": len(standalone_entries),
-                "standalone_templates": [
-                    {"name": e.name, "path": e.source_path, "variables": e.variables}
-                    for e in standalone_entries
-                ]
             }
         )
 
@@ -829,6 +1406,111 @@ Template rendering writes files to the workspace."""
 
         return all_entries
 
+    # ==================== Prompt Enrichment ====================
+
+    def get_enrichment_priority(self) -> int:
+        """Return prompt enrichment priority (lower = earlier).
+
+        Templates run after memory/references contributions so the
+        relevance hints sit close to the bottom of the assembled prompt.
+        """
+        return 60
+
+    def subscribes_to_prompt_enrichment(self) -> bool:
+        """Subscribe so user prompts are scanned for tag-coherent template matches."""
+        return True
+
+    def enrich_prompt(self, prompt: str) -> PromptEnrichmentResult:
+        """Surface templates whose tags are coherent with the user prompt.
+
+        Mirrors the memory and references plugins' ``enrich_prompt``
+        contract: scans *prompt* with :class:`TemplateIndexer`, formats
+        a compact hint listing matched templates, and appends it to the
+        prompt the model receives.  Untagged templates never surface here
+        — they remain reachable via ``listAvailableTemplates``.
+        """
+        enriched, metadata = self._enrich_text_with_template_hints(prompt)
+        return PromptEnrichmentResult(prompt=enriched, metadata=metadata)
+
+    # ==================== Shared enrichment core ====================
+
+    def _enrich_text_with_template_hints(self, text: str) -> Tuple[str, Dict[str, Any]]:
+        """Compute template hints for arbitrary text (prompt or tool result).
+
+        Returns ``(enriched_text, metadata)``.  The same hint format is
+        used on both surfaces so the model sees a consistent block
+        whether the trigger was a user prompt or a tool's output.
+        """
+        if not self._indexer or self._indexer.get_template_count() == 0:
+            return text, {"template_matches": 0}
+
+        matches = self._indexer.find_matches_in_text(text, limit=5)
+        if not matches:
+            return text, {"template_matches": 0}
+
+        # Dedup: drop templates whose hint bullet was already injected in
+        # this session — otherwise every tool call re-appends the same
+        # "📦 Available Templates" block for the same matches.  When every
+        # match has already surfaced, return the text unchanged so no
+        # "surfaced N templates" notification fires either.
+        new_matches = [e for e in matches if e.name not in self._surfaced_template_names]
+        if not new_matches:
+            return text, {
+                "template_matches": 0,
+                "suppressed_duplicates": [e.name for e in matches],
+            }
+        matches = new_matches
+
+        triggering_tags = self._indexer.triggering_tags(text, matches)
+
+        # Build the hint block.  Each bullet shows the template's
+        # LLM-facing id (the actionable handle), its description (when
+        # known), and the literal call form so the model can copy-paste
+        # rather than reconstruct argument shape.  Human filename is
+        # shown as "audit" so the kb author / human reader can correlate
+        # — the LLM passes id only.
+        hint_lines = ["", "📦 **Available Templates** — call by `template_id`:"]
+        for entry in matches:
+            desc = entry.description.strip() if entry.description else ""
+            tail = f" — {desc}" if desc else ""
+            entry_id = _template_id(entry.name)
+            hint_lines.append(f"  - `{entry_id}` (audit name: {entry.name}){tail}")
+            if entry.variables:
+                var_preview = ", ".join(entry.variables[:5])
+                if len(entry.variables) > 5:
+                    var_preview += f", … (+{len(entry.variables) - 5} more)"
+                hint_lines.append(f"    variables: [{var_preview}]")
+        hint_lines.append(
+            "  Use: `renderTemplateToFile(template_id=<id>, "
+            "variables={...}, output_path=...)`"
+        )
+
+        enriched_text = text + "\n" + "\n".join(hint_lines)
+
+        tag_summary = ", ".join(f'"{t}"' for t in triggering_tags[:3])
+        if len(triggering_tags) > 3:
+            tag_summary += f" +{len(triggering_tags) - 3} more"
+
+        metadata = {
+            "template_matches": len(matches),
+            "matched_names": [e.name for e in matches],
+            "trigger_tags": triggering_tags,
+            "notification": {
+                "message": (
+                    f"surfaced {len(matches)} relevant template"
+                    f"{'s' if len(matches) != 1 else ''}"
+                    + (f" (tags: {tag_summary})" if tag_summary else "")
+                ),
+            },
+            "_telemetry": {
+                "jaato.enrichment.template.contextual_matches": len(matches),
+            },
+        }
+        # Remember what we injected so the same bullet doesn't reappear
+        # on the next tool call within this session.
+        self._surfaced_template_names.update(e.name for e in matches)
+        return enriched_text, metadata
+
     # ==================== Tool Result Enrichment ====================
 
     def get_tool_result_enrichment_priority(self) -> int:
@@ -836,7 +1518,8 @@ Template rendering writes files to the workspace."""
         return 40
 
     def subscribes_to_tool_result_enrichment(self) -> bool:
-        """Subscribe to tool result enrichment for template extraction."""
+        """Subscribe to tool result enrichment for template extraction
+        and for contextual template surfacing on tool output."""
         return True
 
     def enrich_tool_result(
@@ -870,7 +1553,7 @@ Template rendering writes files to the workspace."""
         # Suppress extraction when file belongs to a reference with standalone templates
         if tool_args and self._should_suppress_extraction(tool_args):
             self._trace("  suppressed: file belongs to reference with contents.templates")
-            return ToolResultEnrichmentResult(result=result)
+            return self._finalize_tool_result(result)
 
         # Find all code blocks in the result
         code_blocks = self._find_code_blocks(result)
@@ -885,7 +1568,7 @@ Template rendering writes files to the workspace."""
                 code_blocks = [("", result, 0, len(result))]
             else:
                 self._trace("  no code blocks found in tool result")
-                return ToolResultEnrichmentResult(result=result)
+                return self._finalize_tool_result(result)
 
         # Filter to blocks that contain template syntax
         template_blocks = [
@@ -902,7 +1585,7 @@ Template rendering writes files to the workspace."""
                 has_section = bool(MUSTACHE_SECTION_PATTERN.search(content))
                 self._trace(f"  block {i+1}/{len(code_blocks)} lang={lang!r}: var={has_var} section={has_section} preview={preview}")
             self._trace(f"  found {len(code_blocks)} code blocks but none with template syntax")
-            return ToolResultEnrichmentResult(result=result)
+            return self._finalize_tool_result(result)
 
         self._trace(f"enrich_tool_result: found {len(template_blocks)} template blocks")
 
@@ -948,13 +1631,18 @@ Template rendering writes files to the workspace."""
                     var_list = "(none detected)"
                     var_dict_example = ""
 
+                # Compute the LLM-facing opaque id for this template
+                # (server 0.6.119+, the cutover surface).  The annotation
+                # shows it as the call argument; the human filename
+                # remains on the first line for kb-author audit.
+                _id = _template_id(template_path.name)
                 annotations.append(
-                    f"[!] **TEMPLATE AVAILABLE - MANDATORY USAGE**: {rel_path}\n"
+                    f"[!] **TEMPLATE AVAILABLE - MANDATORY USAGE**: {_id} (audit name: {rel_path})\n"
                     f"  Syntax: {syntax}\n"
                     f"  Required variables: [{var_list}]\n"
                     f"  **YOU MUST USE THIS TEMPLATE** instead of writing code manually.\n"
-                    f"  Call: writeFileFromTemplate(\n"
-                    f"      template_name=\"{rel_path}\",\n"
+                    f"  Call: renderTemplateToFile(\n"
+                    f"      template_id=\"{_id}\",\n"
                     f"      variables={{{var_dict_example}}},\n"
                     f"      output_path=\"<your-output-file>\"\n"
                     f"  )"
@@ -964,29 +1652,57 @@ Template rendering writes files to the workspace."""
         for content_hash, template_path, variables in extracted:
             index_name = template_path.name
             if index_name not in self._template_index:
-                syntax = self._detect_template_syntax(
-                    template_path.read_text(encoding="utf-8") if template_path.exists() else ""
+                content = (
+                    template_path.read_text(encoding="utf-8")
+                    if template_path.exists() else ""
                 )
+                syntax = self._detect_template_syntax(content)
+                output_path_template = self._extract_output_path_template(
+                    content, filename=index_name,
+                )
+                variant = self._extract_variant(content, filename=index_name)
+                # Compute template_evaluation_kind via a parser pass
+                # — the parser sets self._tls.last_evaluation_kind as
+                # a side-effect, which we read back below (server
+                # 0.6.44+).
+                if syntax == "mustache" and content:
+                    self._parse_mustache_structure(content)
+                    eval_kind = getattr(
+                        self._tls, "last_evaluation_kind", "substitution",
+                    )
+                else:
+                    eval_kind = "substitution"
                 self._template_index[index_name] = TemplateIndexEntry(
                     name=index_name,
                     source_path=str(template_path),
                     syntax=syntax,
                     variables=variables,
                     origin="embedded",
+                    output_path_template=output_path_template,
+                    variant=variant,
+                    # variant_key stays "" — embedded templates carry
+                    # no axis-mapping context (kb-side walker is the
+                    # authoritative source for variant_key).
+                    template_evaluation_kind=eval_kind,
                 )
 
         # Persist the unified index to disk
         self._persist_index()
 
         if not annotations:
-            return ToolResultEnrichmentResult(result=result)
+            return self._finalize_tool_result(result)
 
         annotation_block = "\n\n---\n[!] **MANDATORY TEMPLATES AVAILABLE - USE THESE INSTEAD OF MANUAL CODING:**\n" + "\n\n".join(annotations) + "\n---"
         enriched_result = result + annotation_block
 
-        return ToolResultEnrichmentResult(
-            result=enriched_result,
-            metadata={
+        # Embedded extraction added new entries to the catalog — refresh
+        # the tag indexer so subsequent prompts see them.
+        if extracted:
+            self._indexer.build_index(list(self._template_index.values()))
+
+        return self._finalize_tool_result(
+            enriched_result,
+            base_metadata={
                 "extracted_count": len(extracted),
                 "templates": [
                     {"hash": h, "path": str(p), "variables": v}
@@ -995,8 +1711,29 @@ Template rendering writes files to the workspace."""
                 "_telemetry": {
                     "jaato.enrichment.template.extracted_count": len(extracted),
                 },
-            }
+            },
         )
+
+    def _finalize_tool_result(
+        self,
+        result_text: str,
+        base_metadata: Optional[Dict[str, Any]] = None,
+    ) -> ToolResultEnrichmentResult:
+        """Layer contextual template hints on top of any extraction-stage output.
+
+        Every return path of :meth:`enrich_tool_result` routes through here
+        so contextual surfacing (driven by the tag indexer) is consistent
+        across the early-exit paths and the extraction success path.
+
+        ``base_metadata`` carries any extraction-stage telemetry the caller
+        wants to preserve; contextual hint metadata is merged on top
+        (contextual keys never overwrite extraction keys).
+        """
+        enriched, ctx_meta = self._enrich_text_with_template_hints(result_text)
+        metadata: Dict[str, Any] = dict(base_metadata or {})
+        for k, v in ctx_meta.items():
+            metadata.setdefault(k, v)
+        return ToolResultEnrichmentResult(result=enriched, metadata=metadata)
 
     # ==================== Standalone Template Discovery ====================
 
@@ -1073,6 +1810,38 @@ Template rendering writes files to the workspace."""
 
             syntax = self._detect_template_syntax(content)
             variables = self._extract_variables(content)
+            # Pass the filename so the polyglot extractor dispatches to
+            # the correct comment-prefix regex (e.g. ``//`` for Java,
+            # ``<!--`` for XML, ``#`` for YAML).  See helper docstring.
+            output_path_template = self._extract_output_path_template(
+                content, filename=filename,
+            )
+            # ``// Variant: <option>`` header — server 0.6.42+.  The
+            # walker reads the option name from the template body as
+            # one signal; the kb-side walker (running before the
+            # framework's discovery) MAY also write the
+            # ``variant_key`` + ``variant`` mapping into the
+            # persisted index.json from MODULE.md's ``variants:``
+            # block, in which case the index loader takes precedence
+            # via ``_load_persisted_index``.  Here we only have the
+            # body-side signal so ``variant_key`` is unset; consumers
+            # filtering by axis still need the kb-side mapping for
+            # full correctness.
+            variant = self._extract_variant(content, filename=filename)
+            # Compute template_evaluation_kind via a parser pass
+            # — server 0.6.44+.  The parser sets
+            # self._tls.last_evaluation_kind as a side-effect when it
+            # encounters helper invocations; we read it back here.
+            # Skipped for non-Mustache syntaxes (Jinja2 has its own
+            # AST-based variable extraction; helper-kind classification
+            # is a future addition there if demand surfaces).
+            if syntax == "mustache":
+                self._parse_mustache_structure(content)
+                eval_kind = getattr(
+                    self._tls, "last_evaluation_kind", "substitution",
+                )
+            else:
+                eval_kind = "substitution"
 
             entry = TemplateIndexEntry(
                 name=index_name,
@@ -1080,9 +1849,17 @@ Template rendering writes files to the workspace."""
                 syntax=syntax,
                 variables=variables,
                 origin="standalone",
+                output_path_template=output_path_template,
+                variant=variant,
+                template_evaluation_kind=eval_kind,
             )
             entries.append(entry)
-            self._trace(f"  discovered: {index_name} ({syntax}, {len(variables)} vars)")
+            self._trace(
+                f"  discovered: {index_name} ({syntax}, {len(variables)} vars, "
+                f"output={output_path_template or '<none>'}, "
+                f"variant={variant or '<none>'}, "
+                f"eval_kind={eval_kind})"
+            )
 
         return entries
 
@@ -1393,6 +2170,371 @@ Template rendering writes files to the workspace."""
             Content with ``@generated`` lines removed.
         """
         return _GENERATED_ANNOTATION_RE.sub('', content)
+
+    # Comment-prefix → host language family.  Used to pick the correct
+    # syntax for ``Output:`` directive extraction across polyglot
+    # templates.  Each entry maps the file's INNER extension (after
+    # stripping ``.tpl``/``.tmpl``) to the comment prefix.  Block-
+    # comment closers (``-->``, ``*/``) are stripped from the captured
+    # path at extraction time.
+    #
+    # Coverage decisions:
+    # - Single-line ``//``: C-family (Java, JS/TS, Go, Rust, C/C++,
+    #   Kotlin, Swift, Scala, Dart).
+    # - Block ``<!--``: XML / HTML / SVG.
+    # - Single-line ``#``: Python, Shell, YAML, Ruby, TOML,
+    #   .properties, .gitignore, Dockerfile, Makefile.
+    # - Block ``/*``: CSS / SCSS / multiline-C-style.
+    # - Single-line ``--``: SQL, Lua, Haskell, Ada.
+    # - Single-line ``%``: Erlang, LaTeX, Prolog, MATLAB.
+    #
+    # When the inner extension isn't in this map (e.g. ``Dockerfile.tpl``
+    # — no suffix at all), ``_extract_output_path_template`` falls back
+    # to a universal multi-prefix scan trying all known prefixes in
+    # most-specific-first order; first match wins.
+    _COMMENT_PREFIX_BY_EXT = {
+        # C-family (single-line //)
+        '.java': '//', '.js': '//', '.ts': '//', '.tsx': '//', '.jsx': '//',
+        '.go': '//', '.rs': '//', '.c': '//', '.cpp': '//', '.cc': '//',
+        '.h': '//', '.hpp': '//', '.kt': '//', '.kts': '//', '.swift': '//',
+        '.scala': '//', '.dart': '//', '.cs': '//', '.groovy': '//',
+        # XML-family (block <!--)
+        '.xml': '<!--', '.html': '<!--', '.htm': '<!--', '.svg': '<!--',
+        '.xhtml': '<!--', '.xsl': '<!--', '.xsd': '<!--',
+        # Hash-family (single-line #)
+        '.py': '#', '.sh': '#', '.bash': '#', '.zsh': '#', '.fish': '#',
+        '.yml': '#', '.yaml': '#', '.rb': '#', '.toml': '#',
+        '.properties': '#', '.gitignore': '#', '.env': '#',
+        '.dockerfile': '#', '.r': '#', '.pl': '#',
+        # CSS-family (block /*)
+        '.css': '/*', '.scss': '/*', '.sass': '/*', '.less': '/*',
+        # SQL-family (single-line --)
+        '.sql': '--', '.lua': '--', '.hs': '--', '.adb': '--', '.ads': '--',
+        # Latex-family (single-line %)
+        '.erl': '%', '.tex': '%', '.cls': '%', '.sty': '%', '.m': '%',
+        '.pl_prolog': '%',
+    }
+
+    # Comment prefixes by precedence for the universal fallback scan.
+    # Order is "most specific first" so that, e.g., ``<!--`` is tried
+    # before ``-`` would be interpreted ambiguously.  We don't actually
+    # match ``-`` alone — only the full prefixes — but listing in this
+    # order keeps the regex alternation behaviour deterministic.
+    _UNIVERSAL_PREFIXES = ['<!--', '/*', '//', '--', '#', '%']
+
+    def _build_directive_regex(
+        self, prefix: str, keyword: str = "Output",
+    ) -> 're.Pattern[str]':
+        """Build a regex matching ``<prefix> <keyword>: <value> [<closer>]``
+        for a specific comment prefix.  Block-comment closers are
+        stripped non-greedily from the captured value so directives
+        like ``<!-- Output: pom.xml -->`` and ``/* Output: foo.css */``
+        capture only ``pom.xml`` / ``foo.css``.
+
+        ``keyword`` defaults to ``"Output"`` to preserve existing
+        behaviour for the path-template extractor.  Server 0.6.42+
+        also uses this with ``keyword="Variant"`` for the variant-
+        axis extractor; future per-template directives (``// X: <val>``)
+        can reuse the same machinery by passing a different keyword.
+
+        Match span includes the optional trailing newline (server
+        0.6.41+) so the same regex serves both extraction (uses
+        ``match.group(1)`` — newline irrelevant) and stripping (uses
+        ``regex.subn(...)`` — newline must be consumed to remove the
+        whole line cleanly).  Behavior of existing extraction
+        callers is unchanged: they read the captured group, not the
+        match span.
+        """
+        # Escape the prefix for regex; close-marker handling depends on
+        # whether the prefix is block-style.
+        if prefix == '<!--':
+            closer = r'\s*-->\s*'
+        elif prefix == '/*':
+            closer = r'\s*\*/\s*'
+        else:
+            closer = r'\s*'  # line-style: no closer to match
+        return re.compile(
+            rf'^\s*{re.escape(prefix)}\s*{re.escape(keyword)}\s*:\s*(\S.*?){closer}$\n?',
+            re.MULTILINE,
+        )
+
+    # Match every ``{{...}}`` reference in a path string.  Captures
+    # the inner content; used to enumerate path-only variables that
+    # must be supplied to ``renderTemplateToFile`` for auto-derivation
+    # to succeed.  The path syntax is much simpler than full Mustache
+    # — sections (``{{#}}``) and inverted sections (``{{^}}``) don't
+    # appear in paths, so we don't need the full structural parser.
+    # Triple-brace ``{{{x}}}`` is structurally identical to ``{{x}}``;
+    # we match either form.
+    _PATH_REFERENCE_RE = re.compile(r'\{\{\{?\s*([^{}]+?)\s*\}?\}\}')
+
+    def _extract_path_variables(self, path_template: str) -> List[str]:
+        """Enumerate variable names referenced in an output-path template.
+
+        The output_path_template stored on each TemplateIndexEntry
+        (extracted from the ``// Output:`` directive) may carry
+        ``{{var}}`` placeholders that must be substituted at render
+        time — e.g. ``{{basePackagePath}}/domain/model/{{Entity}}.java``.
+        For ``listTemplateVariables`` to give the agent a complete
+        variable list, those path-only vars need to be enumerated and
+        merged with the body-parsed vars.
+
+        Path syntax rules (much simpler than full Mustache):
+        - Only plain interpolation (``{{name}}`` / ``{{{name}}}``).
+        - No sections, inverted sections, or comments.
+        - Dotted paths (``{{module.name}}``) treated the same way as
+          the body parser: only the LEFTMOST token is reported (the
+          actual variable; the rest is field navigation).
+        - Triple-brace is structurally identical — same variable, just
+          the unescaped-output form (irrelevant for path use).
+
+        Returns a sorted, de-duplicated list of variable names.
+        Empty list when the path is plain text or is itself empty.
+
+        Args:
+            path_template: The path-template string (may be empty).
+
+        Returns:
+            Sorted unique list of variable names referenced.
+        """
+        if not path_template:
+            return []
+        seen: Set[str] = set()
+        for match in self._PATH_REFERENCE_RE.finditer(path_template):
+            raw = match.group(1).strip()
+            # Drop anything that looks like a section/comment/closing
+            # marker — these aren't valid in paths but we defend
+            # against malformed directives anyway.
+            if raw and raw[0] in '#^/!':
+                continue
+            # Leftmost token of a dotted path; matches body-parser
+            # convention so a var used in both body and path resolves
+            # to the same name.
+            name = raw.split('.', 1)[0].strip()
+            if name:
+                seen.add(name)
+        return sorted(seen)
+
+    def _extract_output_path_template(
+        self, content: str, filename: Optional[str] = None,
+    ) -> str:
+        """Extract the ``Output:`` directive from template content.
+
+        Templates declare their canonical output location on a comment
+        line near the top — but the COMMENT PREFIX varies by host
+        language.  Java, JS, Go, Rust et al. use ``// Output: <path>``;
+        XML/HTML use ``<!-- Output: <path> -->``; Python/Shell/YAML
+        use ``# Output: <path>``; CSS uses ``/* Output: <path> */``;
+        SQL/Lua use ``-- Output: <path>``; Erlang/LaTeX use
+        ``% Output: <path>``.
+
+        Strategy (server 0.6.35+):
+
+        1. **Extension-keyed dispatch** [primary path]: when
+           ``filename`` is supplied AND its inner extension (after
+           stripping ``.tpl``/``.tmpl``) is in ``_COMMENT_PREFIX_BY_EXT``,
+           use the precise per-language regex.  Most precise; no
+           ambiguity.
+
+        2. **Universal multi-prefix scan** [fallback]: when ``filename``
+           is omitted, the inner extension is empty, or the extension
+           isn't recognised, try all known prefixes in
+           most-specific-first order.  First match wins.  Handles
+           extension-less templates (``Dockerfile.tpl``,
+           ``Makefile.tpl``) and unfamiliar languages.
+
+        Both paths preserve ``{{var}}`` placeholders in the captured
+        path verbatim — substitution happens at render time.  Block-
+        comment closers (``-->``, ``*/``) are stripped from the
+        capture so the path is clean.
+
+        Coverage decisions:
+
+        - Mustache's native ``{{! ... }}`` comment is not scanned: it
+          gets stripped by Mustache before render, so directives
+          authored in Mustache-comment form would be invisible at
+          runtime anyway.  Use the host-language comment style.
+        - Only the FIRST directive matched is returned.  Multiple
+          ``Output:`` lines indicate authoring error; we ignore extras.
+        - Block-comment open without close on the same line is
+          allowed (``-->`` / ``*/`` are optional in the regex).  This
+          is forgiving for badly-formatted XML/CSS templates.
+
+        Args:
+            content: Template content string.
+            filename: Optional template filename (e.g.
+                ``Entity.java.tpl``, ``pom.xml.tpl``,
+                ``application.yml.tpl``).  Used to dispatch to the
+                correct comment-prefix regex.  Can be ``None`` for
+                inline / extension-less templates — falls back to
+                universal scan.
+
+        Returns:
+            The path-template string (possibly with ``{{...}}``
+            placeholders), or empty string if no directive found.
+        """
+        # Path 1: extension-keyed dispatch when filename is supplied
+        # and recognised.  Strip the outermost ``.tpl``/``.tmpl``
+        # suffix to get the file's inner extension.
+        if filename:
+            inner_ext = ""
+            stem = filename
+            for tpl_suffix in ('.tpl', '.tmpl'):
+                if stem.endswith(tpl_suffix):
+                    stem = stem[:-len(tpl_suffix)]
+                    break
+            # ``Path('pom.xml').suffix == '.xml'``; ``Path('Dockerfile').suffix == ''``
+            inner_ext = Path(stem).suffix.lower()
+            prefix = self._COMMENT_PREFIX_BY_EXT.get(inner_ext)
+            if prefix is not None:
+                regex = self._build_directive_regex(prefix)
+                match = regex.search(content)
+                return match.group(1).strip() if match else ""
+
+        # Path 2: universal fallback — try every known comment prefix
+        # in most-specific-first order.  Stop at the first match so
+        # block-comment forms aren't mis-interpreted as line-comment
+        # forms (e.g. ``<!--`` won't accidentally fall through to
+        # something looser).
+        for prefix in self._UNIVERSAL_PREFIXES:
+            regex = self._build_directive_regex(prefix)
+            match = regex.search(content)
+            if match:
+                return match.group(1).strip()
+        return ""
+
+    def _extract_variant(
+        self, content: str, filename: Optional[str] = None,
+    ) -> str:
+        """Extract the ``Variant: <option>`` directive from template
+        content — server 0.6.42+.
+
+        Templates representing one option of a multi-option axis can
+        declare which option they are with a comment header, e.g.::
+
+            // Variant: restclient
+            package {{basePackage}}.client;
+            ...
+
+        Mirrors ``_extract_output_path_template``'s polyglot dispatch
+        (extension-keyed primary, universal multi-prefix fallback);
+        captures only the option name (e.g. ``"restclient"``).  Use
+        case: kb declares the axis-to-template mapping in MODULE.md
+        (e.g. ``variants.http_client.options.restclient.templates``);
+        the per-template header redundantly declares which option
+        each template implements.  When the kb's authoritative
+        mapping populates the index entry's ``variant`` field, the
+        header is redundant; when only the header is present (e.g.
+        kb-omission, agent-authored templates), the header is the
+        sole source.
+
+        Returns the option string (whitespace-stripped) or empty
+        string when no header is present.
+
+        Args:
+            content: Template content string.
+            filename: Optional template filename — drives extension-keyed
+                comment-style dispatch.  When omitted, falls back to
+                the universal multi-prefix scan.
+
+        Returns:
+            The variant option name, or ``""`` when no Variant directive
+            was found.
+        """
+        # Extension-keyed dispatch
+        if filename:
+            stem = filename
+            for tpl_suffix in ('.tpl', '.tmpl'):
+                if stem.endswith(tpl_suffix):
+                    stem = stem[:-len(tpl_suffix)]
+                    break
+            inner_ext = Path(stem).suffix.lower()
+            prefix = self._COMMENT_PREFIX_BY_EXT.get(inner_ext)
+            if prefix is not None:
+                regex = self._build_directive_regex(prefix, keyword="Variant")
+                match = regex.search(content)
+                if match:
+                    return match.group(1).strip()
+
+        # Universal fallback
+        for prefix in self._UNIVERSAL_PREFIXES:
+            regex = self._build_directive_regex(prefix, keyword="Variant")
+            match = regex.search(content)
+            if match:
+                return match.group(1).strip()
+        return ""
+
+    def _strip_output_directive(
+        self, content: str, filename: Optional[str] = None,
+    ) -> str:
+        """Remove the ``Output: <path>`` directive line from template
+        content — server 0.6.41+.
+
+        The directive is **metadata** (declares where the rendered
+        file belongs); when the framework reads template content from
+        disk and renders it, the directive line would otherwise leak
+        into the rendered output.  For Java that's harmless noise
+        (the line is a valid ``// Output: ...`` comment).  For XML it
+        breaks parsing — the XML spec requires ``<?xml ?>`` to be the
+        first character in the document, before any whitespace or
+        comments, and a ``<!-- Output: pom.xml -->`` preamble violates
+        that.  Other formats with strict-header rules face similar
+        problems.
+
+        Strategy mirrors ``_extract_output_path_template``:
+
+        1. **Extension-keyed dispatch** [primary]: when ``filename``
+           is supplied AND its inner extension is in
+           ``_COMMENT_PREFIX_BY_EXT``, build the directive regex for
+           that comment style and remove the first match (with its
+           trailing newline — see ``_build_directive_regex``).
+        2. **Universal multi-prefix scan** [fallback]: try each known
+           prefix in most-specific-first order; first match wins.
+
+        After successful removal, also strips a single immediately-
+        following blank line (common kb convention: directive on
+        line 1, blank line, then content).  Any remaining structure
+        is preserved.
+
+        Returns the stripped content.  When no directive is matched,
+        returns the input unchanged — full back-compat for templates
+        without a directive (e.g. kb-omissions handled via index
+        override, where the directive lives only in the index entry's
+        ``output_path_template`` field).
+
+        Used by ``_execute_render_template_to_file`` after loading
+        content from ``template_name``'s resolved source path.
+        Inline templates (passed via the ``template`` arg) skip this
+        path — the agent has full control over inline content shape.
+        """
+        # Extension-keyed dispatch
+        if filename:
+            stem = filename
+            for tpl_suffix in ('.tpl', '.tmpl'):
+                if stem.endswith(tpl_suffix):
+                    stem = stem[:-len(tpl_suffix)]
+                    break
+            inner_ext = Path(stem).suffix.lower()
+            prefix = self._COMMENT_PREFIX_BY_EXT.get(inner_ext)
+            if prefix is not None:
+                regex = self._build_directive_regex(prefix)
+                new_content, count = regex.subn('', content, count=1)
+                if count > 0:
+                    # Strip a single immediately-following blank line
+                    # if the kb's convention left one.
+                    if new_content.startswith('\n'):
+                        new_content = new_content[1:]
+                    return new_content
+
+        # Universal fallback
+        for prefix in self._UNIVERSAL_PREFIXES:
+            regex = self._build_directive_regex(prefix)
+            new_content, count = regex.subn('', content, count=1)
+            if count > 0:
+                if new_content.startswith('\n'):
+                    new_content = new_content[1:]
+                return new_content
+        return content
 
     def _extract_variables(self, content: str) -> List[str]:
         """Extract variable names from template content.
@@ -1722,9 +2864,15 @@ Template rendering writes files to the workspace."""
             variables = self._inject_list_metadata(variables)
             protected = self._protect_spring_placeholders(template)
             preprocessed = self._preprocess_mustache_dotted_paths(protected)
-            compiler = Compiler()
-            compiled_template = compiler.compile(preprocessed)
-            rendered = compiled_template(variables)
+            # pybars3 has process-wide shared state on the ``Compiler``
+            # class — the compile + render must run under the
+            # module-level lock to avoid concurrent mutation of
+            # CodeBuilder.stack between threads.  See the lock's
+            # docstring at module top for full rationale.
+            with _PYBARS_RENDER_LOCK:
+                compiler = Compiler()
+                compiled_template = compiler.compile(preprocessed)
+                rendered = compiled_template(variables)
             rendered = self._restore_spring_placeholders(rendered)
             return rendered, None
         except Exception as e:
@@ -1898,7 +3046,7 @@ Template rendering writes files to the workspace."""
         standalone templates (discovered in referenced directories, left
         in their original location).
 
-        Each entry includes the template name (used for writeFileFromTemplate),
+        Each entry includes the template name (used for renderTemplateToFile),
         its origin, syntax, required variables, and source path.
         """
         if not self._template_index:
@@ -1919,16 +3067,56 @@ Template rendering writes files to the workspace."""
                 display_path = str(source_path)
 
             templates.append({
-                "name": name,
+                # ``id`` is the LLM-facing opaque identifier; server
+                # 0.6.119+ replaces the human ``name`` field with this
+                # hash so the model never sees template filenames that
+                # could trigger training-distribution priors (see
+                # ``_template_id`` + ``feedback_semantic_identifiers_invite_training_prior``).
+                "id": _template_id(name),
                 "origin": entry.origin,
                 "syntax": entry.syntax,
                 "variables": entry.variables,
                 "source_path": display_path,
                 "exists": exists,
+                # Surface the template-declared canonical output path
+                # so the agent has visibility for narration/diagnostic.
+                # When non-empty, ``renderTemplateToFile`` defaults to
+                # this (substituted with the agent's ``variables``) when
+                # ``output_path`` isn't supplied — see the tool schema.
+                "output_path_template": entry.output_path_template,
+                # Variant axis (server 0.6.42+).  ``variant_key`` is the
+                # kb-declared concept name (e.g. ``"http_client"`` —
+                # stack-neutral); ``variant`` is the option THIS
+                # template represents within that axis (e.g.
+                # ``"restclient"``, ``"feign"``).  Both empty for
+                # templates outside any variant axis.  Consumers can
+                # filter: render template only when
+                # ``selected_variants[variant_key] == variant``.
+                "variant_key": entry.variant_key,
+                "variant": entry.variant,
+                # Config-flag-driven skip rules (server 0.6.56+).  Maps
+                # flag name → expected flag value; the consumer's
+                # codegen agent skips this template at render selection
+                # time when ``generation_context.config_flags[flag] ==
+                # expected``.  Empty dict = no flag-driven skipping.
+                # See DEC-035 pub/sub authoring on the kb side.
+                "skip_when_flags": entry.skip_when_flags,
+                # Coarse evaluation-kind classification (server 0.6.44+).
+                # ``"substitution"`` (default) — pure variable
+                # substitution, no Handlebars conditional helpers.
+                # ``"helpers"`` — template uses ``{{#if X}}`` /
+                # ``{{#unless X}}`` / ``{{#with X}}`` somewhere; agent
+                # may need per-item branch resolution (e.g. mod-017's
+                # SystemApiMapper.java.tpl).  Lets agents fast-path
+                # substitution-only templates without enumerating
+                # item_keys to detect helper presence.
+                "template_evaluation_kind": entry.template_evaluation_kind,
             })
 
-        # Sort: standalone first (they're the primary templates), then embedded
-        templates.sort(key=lambda t: (0 if t["origin"] == "standalone" else 1, t["name"]))
+        # Sort: standalone first (they're the primary templates), then embedded.
+        # Secondary sort key is the source_path (server 0.6.119+; previously
+        # sorted on ``name`` which was removed for the cutover to ``id``).
+        templates.sort(key=lambda t: (0 if t["origin"] == "standalone" else 1, t["source_path"]))
 
         return {
             "templates": templates,
@@ -1939,36 +3127,800 @@ Template rendering writes files to the workspace."""
             },
         }
 
-    def _execute_write_file_from_template(self, args: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute writeFileFromTemplate tool.
+    def _check_item_against_item_keys(
+        self,
+        var_name: str,
+        item: Any,
+        item_keys: List[Any],
+        item_idx: int,
+        path_prefix: Optional[str],
+        errors: List[str],
+    ) -> None:
+        """Validate one dict ``item`` against the section's ``item_keys``
+        metadata.  Recursive — server 0.6.171+.
+
+        Drives three checks on the item:
+          1. **Type-check**: item must be a dict (non-dict items can't
+             carry the section's per-item fields).
+          2. **Required-key coverage** (server 0.6.43+): every item_key
+             with ``source ∈ {scalar, section}`` must be present in
+             the item; missing → silent corruption mode in Mustache,
+             surfaced loudly here.
+          3. **Helper-exclusivity** (server 0.6.170+): helper-source
+             item_keys must be Python bool, and within each sibling-
+             family AT MOST ONE may be True (A2 contract).
+
+        After all three checks, **recurses** into nested item_keys
+        (server 0.6.171+).  For each item_key K declared on this
+        section whose value in ``item`` is a list AND whose own
+        ``item_keys`` is non-empty, drill into each inner element of
+        that list and apply the same three checks again.  This is the
+        load-bearing closure of the iter-3 visibility gap: the parser
+        already produces nested item_keys metadata (verify with
+        ``_parse_mustache_structure``); pre-0.6.171 the validator
+        stopped at the outermost section and never consumed the
+        nested layer.
+
+        Empirical motivation: cascade iter-3 (2026-06-01, mod-019
+        ControllerTest-hateoas.java.tpl).  Template
+        ``{{#hasRequestBody}}.content(...{{#testBodyFields}}Map.entry(
+        "{{name}}", "{{value}}"){{^last}},{{/last}}{{/testBodyFields}}
+        )){{/hasRequestBody}}`` —
+        ``hasRequestBody`` is a Mustache section with one nested
+        required item_key ``testBodyFields`` (which itself has
+        required scalars ``name`` / ``value``).  Agent emitted
+        ``hasRequestBody = [{name, value, last, first, @index} × 4]``
+        — 4 dicts missing ``testBodyFields``.  Pre-fix: validator
+        passed (no nested traversal); Mustache iterated the section
+        body 4 times, each time ``{{#testBodyFields}}`` looked up
+        ``testBodyFields`` in the current dict context (absent),
+        rendered nothing → 4 cascading ``.content(Map.ofEntries())``
+        empties → 4 cascading javac errors.
+
+        Args:
+            var_name: Top-level section variable name (e.g.
+                ``"apiEndpoints"``).  Used in error messages to
+                identify the outermost variable the agent supplied.
+            item: The dict being validated (one element of a list-of-
+                dicts iteration).
+            item_keys: The section's per-item metadata from
+                :meth:`_parse_mustache_structure`.
+            item_idx: Zero-based index of ``item`` within its list.
+            path_prefix: ``None`` at the top level (preserves
+                pre-0.6.171 error message format for back-compat with
+                existing test assertions); set to a breadcrumb like
+                ``"apiEndpoints[0].hasRequestBody"`` for recursive
+                calls so the agent sees the full path to the failing
+                location.
+            errors: List to append validation error strings to.
+        """
+        # Recompute required_names / all_names from item_keys.  Same
+        # logic as the pre-0.6.171 inline code: required = source in
+        # {scalar, section}; helper / inverted / dotted are optional
+        # Mustache idioms whose absence is part of the contract.
+        required_names: List[str] = []
+        all_names: List[str] = []
+        for k in item_keys:
+            if isinstance(k, dict):
+                all_names.append(k.get("name", ""))
+                if k.get("required"):
+                    required_names.append(k["name"])
+            else:
+                # Legacy flat-string entry — treat as required by
+                # default for forward-compat with pre-0.6.43 tooling.
+                all_names.append(str(k))
+                required_names.append(str(k))
+
+        # Error-message prefix.  Top-level keeps pre-0.6.171 wording
+        # so the kb-enablement-2.0 chunk-3 v3 regression test (and
+        # every other existing test on this validator) stays green.
+        # Recursive calls use a breadcrumb so the agent can locate
+        # nested failures without crawling the whole payload.
+        if path_prefix is None:
+            location = f"variable {var_name!r} kind=section item[{item_idx}]"
+            helper_path_prefix = f"variable {var_name!r}"
+        else:
+            location = f"{path_prefix}[{item_idx}]"
+            helper_path_prefix = path_prefix
+
+        # 1. Type-check.
+        if not isinstance(item, dict):
+            errors.append(
+                f"{location} is {type(item).__name__}, "
+                f"expected dict (each list item must be a dict "
+                f"carrying the section's per-item fields: "
+                f"{all_names})"
+            )
+            return  # can't run inner checks on a non-dict
+
+        # 2. Required-key coverage.
+        missing = [k for k in required_names if k not in item]
+        if missing:
+            got = sorted(item.keys())
+            errors.append(
+                f"{location} missing required keys "
+                f"{missing}.  Required item_keys "
+                f"(source = scalar / section): "
+                f"{required_names}.  Got: {got}.  "
+                f"Mustache would render empty for "
+                f"missing keys (silent corruption); "
+                f"provide all required keys or the "
+                f"call must fail loudly."
+            )
+
+        # 3. Helper-exclusivity (A2 — at-most-one True).  See full
+        # contract documented at the helper_keys_in_row check in
+        # _validate_render_inputs_against_structure.
+        helper_keys_in_row = [
+            k for k in item_keys
+            if isinstance(k, dict)
+            and k.get("source") == "helper"
+            and k.get("name") in item
+        ]
+        if helper_keys_in_row:
+            checked_families: Set[Tuple[str, ...]] = set()
+            for hk in helper_keys_in_row:
+                name_h = hk["name"]
+                siblings = hk.get("helper_siblings") or []
+                family = tuple(sorted([name_h] + list(siblings)))
+                if family in checked_families:
+                    continue
+                checked_families.add(family)
+
+                truthy_members: List[str] = []
+                type_errors: List[str] = []
+                for member in family:
+                    if member not in item:
+                        continue
+                    v = item[member]
+                    if not isinstance(v, bool):
+                        type_errors.append(
+                            f"{helper_path_prefix} "
+                            f"item[{item_idx}].{member} = "
+                            f"{v!r} (type "
+                            f"{type(v).__name__}); "
+                            f"helper-source "
+                            f"variables MUST be "
+                            f"Python bool (True or "
+                            f"False).  Mustache "
+                            f"accepts ``[]`` and "
+                            f"``[True]`` silently "
+                            f"but with unstable "
+                            f"truthiness — emit the "
+                            f"bool explicitly."
+                        )
+                    elif v is True:
+                        truthy_members.append(member)
+                errors.extend(type_errors)
+
+                if not type_errors and len(truthy_members) > 1:
+                    errors.append(
+                        f"{helper_path_prefix} "
+                        f"item[{item_idx}] has multiple "
+                        f"helper-source variables "
+                        f"set True: "
+                        f"{sorted(truthy_members)}. "
+                        f"Helper siblings encode a "
+                        f"discriminated union "
+                        f"(exactly one branch "
+                        f"fires per row); set AT "
+                        f"MOST ONE of "
+                        f"{list(family)} to True "
+                        f"and all others to False."
+                    )
+
+        # 4. Recursive descent into nested item_keys (server 0.6.171+).
+        # For each declared item_key K with non-empty nested item_keys,
+        # AND the value in ``item`` for K is a list, drill into each
+        # inner element and apply the same three checks again.
+        #
+        # Scope limit: only list-of-dicts recursion is supported.
+        # Dict-context (Mustache "render once with dict as context")
+        # and bool-context (Mustache conditional idiom) do not iterate
+        # — the section body fires once or zero times against the
+        # outer context.  The required-key check at this level
+        # already accepts non-list values; no nested traversal needed
+        # for those forms.  Future enhancement if a dict-context
+        # bug surfaces: extend recursion to handle isinstance(value,
+        # dict).
+        #
+        # Breadcrumb construction: the next level's path_prefix is
+        # ``{current_location}.{nested_key_name}`` so the agent sees
+        # the full path on a nested failure (e.g.
+        # ``apiEndpoints[0].hasRequestBody[2] missing required keys
+        # ['testBodyFields']``).
+        for k in item_keys:
+            if not isinstance(k, dict):
+                continue
+            nested_item_keys = k.get("item_keys")
+            if not nested_item_keys:
+                continue
+            nested_name = k.get("name")
+            if not nested_name or nested_name not in item:
+                continue
+            nested_value = item[nested_name]
+            if not isinstance(nested_value, list):
+                continue
+            # Build the next-level breadcrumb.
+            next_path_prefix = f"{location}.{nested_name}"
+            for j, inner_item in enumerate(nested_value[:5]):
+                self._check_item_against_item_keys(
+                    var_name=var_name,
+                    item=inner_item,
+                    item_keys=nested_item_keys,
+                    item_idx=j,
+                    path_prefix=next_path_prefix,
+                    errors=errors,
+                )
+
+    def _validate_render_inputs_against_structure(
+        self, template_content: str, variables: Dict[str, Any]
+    ) -> Optional[Dict[str, Any]]:
+        """Validate the agent's ``variables`` dict against the template's
+        structural metadata (kind + item_keys) — server 0.6.31+.
+
+        Why this exists: Mustache silently renders garbage on shape
+        mismatches.  If a variable declared ``kind=section`` is passed
+        as a string, Mustache treats the string as truthy and renders
+        the section body ONCE with the string as context — ``{{innerKey}}``
+        lookups inside resolve to empty, file lands on disk with one
+        blob instead of N repeated blocks.  No error returned.  The
+        agent's retry loop never fires because the tool call appeared
+        to succeed.
+
+        This validator hard-fails before render when:
+
+        - ``kind=scalar`` and value is not str / int / float / bool / None
+          (catches dict / list passed for a flat scalar).
+        - ``kind=section`` body references inner fields (non-empty
+          ``item_keys``) AND the value is a bare ``str`` / ``int`` /
+          ``float`` (the silent-garbage failure mode — Mustache renders
+          body once with the scalar as context, inner-field lookups
+          all resolve to empty).
+        - ``kind=section`` body references inner fields (non-empty
+          ``item_keys``) AND the value is a list whose items are not
+          dicts — body needs ``{{innerKey}}`` lookups, items can't
+          satisfy them.
+        - ``kind=section`` value is a list of dicts AND any item
+          dict is missing a key declared as ``required: True`` in
+          item_keys (server 0.6.43+).  Required = source ∈ {scalar,
+          section} per the parser's source taxonomy.  Catches the
+          chunk-3 v3 jsonField drift where the agent reconstructed
+          field items dropping the JSON-property name; Mustache
+          would render ``@JsonProperty("")`` silently → semantically
+          broken Java; validator now hard-fails with a clean
+          actionable error naming the missing key.
+
+        Notably allowed (valid Mustache idioms):
+
+        - ``kind=section`` with ``item_keys=[]`` and value is a
+          list-of-scalars.  The body uses either ``{{.}}`` (current-
+          context iteration over scalars) or has no inner refs at
+          all (plain text repeated per item).  Rejecting list-of-
+          strings here was the 0.6.31 corner-case regression that
+          forced agents into ``[{"_": s}, {"_": s}]`` workarounds
+          and caused MORE variance than the original validator
+          eliminated.
+        - Item dict missing an ``inverted`` source key (e.g. ``last``
+          from ``{{^last}}, {{/last}}``).  Mustache idiom: absence
+          IS the trigger condition; the validator must not treat it
+          as missing.  Source ``inverted`` = required: False per
+          the parser.
+        - Item dict missing a ``dotted`` source key (e.g. head of
+          ``{{a.b.c}}``).  Mustache silently descends; missing nested
+          renders empty without erroring.  Source ``dotted`` =
+          required: False.
+        - Item dict missing a ``helper`` source key (argument of
+          ``{{#if X}}`` / ``{{#unless X}}`` / ``{{#with X}}``).
+          Conditionals fire only when the value resolves; absent
+          means body doesn't render — the Mustache contract.  Source
+          ``helper`` = required: False.
+        - Boolean / None passed for a section.  Mustache treats
+          ``True`` / non-empty values as "render body once with
+          current context" — the conditional idiom.  Allowed.
+
+        Per-item required-key coverage (server 0.6.43+) closes the
+        gap the original 0.6.31 docstring deferred: the parser now
+        tags each item_key with ``required`` derived from its
+        ``source``, so the false-positive concern (treating dotted
+        and inverted keys as required) is structurally resolved.
+        Only ``scalar`` and ``section`` sources flag missing keys
+        as errors.
+
+        Returns ``None`` on success, an error dict on failure.  Only
+        validates Mustache templates; Jinja2 path is skipped (its
+        kind detection is a follow-up).
+        """
+        # Dispatch to the engine-specific structural parser (server
+        # 0.6.173+).  Pre-0.6.173 only Mustache was validated; the
+        # Jinja2 path returned None unconditionally, leaving the
+        # iter-49 class (bare-only templates → agent ships
+        # ``variables: {}`` → silent empty render → 12+ min/iter
+        # downstream compile error) wide open.  Daniel auth'd the
+        # combined Mustache + Jinja2 strict-required enforcement
+        # 2026-06-02.
+        syntax = self._detect_template_syntax(template_content)
+        if syntax == "mustache":
+            structured = self._parse_mustache_structure(template_content)
+        elif syntax == "jinja2":
+            structured = self._parse_jinja2_structure(template_content)
+        else:
+            return None
+
+        if not isinstance(variables, dict):
+            # Type-check the top-level: variables MUST be a dict.
+            # Stricter than Mustache itself (which would silently treat
+            # non-dict as no-context); makes the failure mode visible.
+            return {
+                "error": (
+                    f"variables must be a dict, got "
+                    f"{type(variables).__name__} — pass a JSON object "
+                    f"with one key per template variable"
+                ),
+                "validation_layer": "shape_check",
+            }
+
+        # ``structured`` already populated above via syntax-dispatched
+        # parser call.
+        errors: List[str] = []
+
+        for var in structured:
+            name = var["name"]
+            kind = var["kind"]
+
+            if name not in variables:
+                # Top-level required-scalar enforcement (server 0.6.173+).
+                # Pre-0.6.173 the validator skipped missing top-level
+                # variables on the theory "Mustache renders missing as
+                # empty for scalars / empty list for sections, opt-in
+                # validation."  Empirical evidence (v152-retry-49,
+                # 2026-06-02, mod-019 codegen agent shipped
+                # ``variables: {}`` for all 8 files; cascade burned 12+
+                # min/iter to surface as a javac error) showed that
+                # default is wrong for cascade-grade work.
+                #
+                # The principled fix per Mustache structural-optionality
+                # semantics: ``{{var}}`` (kind=scalar) has NO Mustache
+                # syntax for "may be empty" — author committed to
+                # supplying.  Optionality is expressed via section
+                # idioms ``{{#var}}...{{/var}}`` (kind=section) and
+                # ``{{^var}}...{{/var}}`` (kind=inverted_section), which
+                # remain "skip when absent" per the polymorphic Mustache
+                # section / inverted-section contract.
+                #
+                # So: scalar → must be present.  Sections /
+                # inverted-sections / conditional-test /
+                # iterable / scalar_with_default → absence is the
+                # engine-specific idiom for "branch doesn't fire",
+                # skip silently.
+                if kind == "scalar":
+                    if syntax == "mustache":
+                        errors.append(
+                            f"variable {name!r} (kind=scalar) is "
+                            f"referenced by the template body but "
+                            f"absent from the variables payload.  "
+                            f"Mustache has no syntax for 'may be "
+                            f"empty' bare interpolation — "
+                            f"``{{{{{name}}}}}`` semantically MEANS "
+                            f"'always supplied'.  Either supply a "
+                            f"non-empty value, or wrap the reference "
+                            f"in a section "
+                            f"(``{{{{#{name}}}}}...{{{{/{name}}}}}``) "
+                            f"to signal the variable is optional and "
+                            f"the block should render only when "
+                            f"present."
+                        )
+                    else:
+                        # Jinja2 missing-scalar message (server
+                        # 0.6.173+).  Jinja2 has TWO optionality
+                        # idioms (default filter + if-control-flow);
+                        # surface both as actionable alternatives so
+                        # the agent picks the one matching the
+                        # template author's intent.
+                        errors.append(
+                            f"variable {name!r} (kind=scalar) is "
+                            f"referenced by the Jinja2 template body "
+                            f"as bare ``{{{{ {name} }}}}`` but absent "
+                            f"from the variables payload.  Bare Jinja2 "
+                            f"interpolation has no built-in 'may be "
+                            f"empty' semantics — author committed to "
+                            f"supplying.  Either supply a non-empty "
+                            f"value, OR (if the template author "
+                            f"intends optionality) edit the template "
+                            f"to use ``{{{{ {name} | default('...') "
+                            f"}}}}`` (filter-based default) or wrap "
+                            f"the reference in "
+                            f"``{{% if {name} %}}...{{% endif %}}`` "
+                            f"(control-flow gate)."
+                        )
+                continue
+
+            actual = variables[name]
+
+            if kind == "scalar":
+                if actual is None:
+                    # None-equivalent rejection (server 0.6.174+).
+                    # Closes the third empty-equivalent state:
+                    # Mustache + Jinja2 both render ``None`` identically
+                    # to absent and to ``""`` (silent zero-length
+                    # output).  Pre-0.6.174 the kind=scalar branch
+                    # accepted None as a valid value type — empirically
+                    # falsified by v152-retry-49-on-0.6.173:
+                    # mod-019 codegen agent shipped
+                    # ``{"selfLinkMethod": null, ...}``; validator
+                    # passed; Mustache rendered the bare
+                    # ``{{selfLinkMethod}}`` reference as empty; javac
+                    # errored 12+ min later.  Option A contract
+                    # requires REJECTING all three empty-equivalents
+                    # (absent | "" | None) at the tool boundary.
+                    if syntax == "mustache":
+                        errors.append(
+                            f"variable {name!r} (kind=scalar) was "
+                            f"supplied as None / null.  Mustache "
+                            f"renders this identically to a missing "
+                            f"variable or empty string (silent zero-"
+                            f"length output).  Either supply a non-"
+                            f"empty value, or wrap the reference in "
+                            f"a section "
+                            f"(``{{{{#{name}}}}}...{{{{/{name}}}}}``) "
+                            f"to signal the variable is optional and "
+                            f"the block should render only when "
+                            f"present and non-empty."
+                        )
+                    else:
+                        errors.append(
+                            f"variable {name!r} (kind=scalar) was "
+                            f"supplied as None / null.  Jinja2 "
+                            f"renders bare ``{{{{ {name} }}}}`` "
+                            f"identically to a missing variable or "
+                            f"empty string (silent zero-length "
+                            f"output).  Either supply a non-empty "
+                            f"value, OR use "
+                            f"``{{{{ {name} | default('...') }}}}`` "
+                            f"in the template to signal optionality."
+                        )
+                elif not isinstance(actual, (str, int, float, bool)):
+                    errors.append(
+                        f"variable {name!r} declared kind=scalar but "
+                        f"received {type(actual).__name__} — expected "
+                        f"str / int / float / bool"
+                    )
+                elif isinstance(actual, str) and actual == "":
+                    # Empty-string check (server 0.6.173+).  Mirrors the
+                    # path-template side at ``_validate_resolved_output_path``
+                    # which already rejects empty-substitution for path
+                    # variables.  Empty body interpolation renders
+                    # identically to absent (both produce silent zero-
+                    # length output), so apply the same gate.  The agent
+                    # cannot ship ``{"selfLinkMethod": ""}`` and rely on
+                    # the engine rendering empty — that's the exact
+                    # silent-failure mode this validator exists to
+                    # close.  Optional engine idioms (Mustache section
+                    # ``{{#var}}``, Jinja2 ``default()`` filter or
+                    # ``{% if var %}``) are unaffected because they
+                    # would have classified the entry as something
+                    # other than kind=scalar.
+                    if syntax == "mustache":
+                        errors.append(
+                            f"variable {name!r} (kind=scalar) was "
+                            f"supplied as an empty string.  Mustache "
+                            f"renders this identically to a missing "
+                            f"variable (silent zero-length output).  "
+                            f"Either supply a non-empty value, or "
+                            f"wrap the reference in a section "
+                            f"(``{{{{#{name}}}}}...{{{{/{name}}}}}``) "
+                            f"to signal the variable is optional and "
+                            f"the block should render only when "
+                            f"present and non-empty."
+                        )
+                    else:
+                        errors.append(
+                            f"variable {name!r} (kind=scalar) was "
+                            f"supplied as an empty string.  Jinja2 "
+                            f"renders bare ``{{{{ {name} }}}}`` "
+                            f"identically to a missing variable "
+                            f"(silent zero-length output).  Either "
+                            f"supply a non-empty value, OR use "
+                            f"``{{{{ {name} | default('...') }}}}`` "
+                            f"in the template to signal optionality."
+                        )
+            elif kind == "section":
+                # Mustache treats section markers polymorphically:
+                #   - list           → iterate body once per item
+                #   - bool / None    → render body 0/1 times (the
+                #                      conditional idiom)
+                #   - dict           → render body once with dict as context
+                #   - str / number   → renders body once with the value
+                #                      as current context (silent-garbage
+                #                      mode when body references inner fields)
+                #
+                # Validation focuses on the silent-garbage modes:
+                #   1. list of non-dicts — body assumes per-item field
+                #      access, items aren't dicts, every reference
+                #      resolves empty.
+                #   2. bare str / int / float passed for a section
+                #      with inner-field references (non-empty item_keys)
+                #      — body wants ``{{innerKey}}`` but context is
+                #      a scalar, all lookups empty.
+                #
+                # bool / None / dict are all allowed (valid Mustache
+                # idioms).  Item_keys coverage is NOT enforced — see
+                # method docstring for rationale.
+                item_keys = var.get("item_keys") or []
+                # Compute the required-key subset from item_keys'
+                # per-key metadata (server 0.6.43+).  Required = source
+                # in {scalar, section}; inverted/dotted/helper sources
+                # are optional Mustache idioms whose absence is part
+                # of the contract.  The list comprehension is cheap
+                # (~5 items typical) and tolerates both old-style
+                # flat strings and new-style dict shapes for forward-
+                # compat with index.json files written by tooling
+                # that hasn't migrated yet.
+                required_names: List[str] = []
+                all_names: List[str] = []
+                for k in item_keys:
+                    if isinstance(k, dict):
+                        all_names.append(k.get("name", ""))
+                        if k.get("required"):
+                            required_names.append(k["name"])
+                    else:
+                        # Legacy flat-string entry — treat as required
+                        # by default (the conservative choice for
+                        # tooling that hasn't migrated to the richer
+                        # shape yet).
+                        all_names.append(str(k))
+                        required_names.append(str(k))
+
+                if isinstance(actual, list):
+                    # When item_keys is empty the body has no
+                    # inner-field references — either the body is
+                    # plain text (renders once per item) or it uses
+                    # the current-context reference ``{{.}}`` to
+                    # render each scalar item as-is.  Both idioms
+                    # accept list-of-scalars; rejecting them was the
+                    # 0.6.31 corner-case regression that forced agents
+                    # into incorrect dict-wrapping workarounds.
+                    if item_keys:
+                        # Inspect up to first 5 items.  Sectioned
+                        # inputs in code-gen are typically uniform
+                        # shape, so checking the first few catches
+                        # systemic shape errors without expensive
+                        # iteration.
+                        for i, item in enumerate(actual[:5]):
+                            self._check_item_against_item_keys(
+                                var_name=name,
+                                item=item,
+                                item_keys=item_keys,
+                                item_idx=i,
+                                path_prefix=None,
+                                errors=errors,
+                            )
+                elif isinstance(actual, (bool, dict)) or actual is None:
+                    # bool / None — boolean-conditional idiom.
+                    # dict — single-context render idiom.
+                    # All valid Mustache; let render decide.
+                    pass
+                elif item_keys:
+                    # str / int / float passed for a section whose
+                    # body references inner fields — silent garbage.
+                    errors.append(
+                        f"variable {name!r} declared kind=section "
+                        f"with body referencing inner fields "
+                        f"({item_keys}) but received "
+                        f"{type(actual).__name__} — expected list "
+                        f"of dicts"
+                    )
+                # else: bare scalar passed for a body with no
+                # inner-field references — Mustache renders body
+                # once with scalar as context, no garbage.  Allow.
+            elif kind == "inverted_section":
+                # Any value works (truthy/falsy distinction handled by
+                # Mustache at render time).  No type check needed.
+                pass
+            elif kind == "conditional_test":
+                # Jinja2 ``{% if var %}...{% endif %}`` test position
+                # (server 0.6.173+).  Analog of the Mustache section
+                # gate — any value is acceptable, jinja2 evaluates
+                # truthiness at render time.  No type check needed.
+                pass
+            elif kind == "iterable":
+                # Jinja2 ``{% for x in items %}`` iter position
+                # (server 0.6.173+).  Required-source semantically,
+                # but the missing-variable branch above already fires
+                # when absent (this path runs only when the variable
+                # IS present).  No additional type check — jinja2
+                # accepts strings, lists, dicts, generators, etc. as
+                # iterables; rejecting non-iterable here would be
+                # stricter than jinja2 itself.
+                pass
+            elif kind == "scalar_with_default":
+                # Jinja2 ``{{ var | default(fallback) }}`` (server
+                # 0.6.173+).  Author explicitly opted into the
+                # "may be empty" idiom via the ``default()`` filter.
+                # Any value (including empty / None) is acceptable
+                # because the filter substitutes the fallback.  No
+                # type check.
+                pass
+
+        if errors:
+            return {
+                "error": "Variable shape validation failed",
+                "validation_layer": "shape_check",
+                "validation_errors": errors,
+                "hint": (
+                    "Call listTemplateVariables for this template to see "
+                    "each variable's expected kind (scalar / section / "
+                    "inverted_section).  Sections expecting iteration "
+                    "must receive list-of-dicts; scalars must receive "
+                    "str/int/float/bool/None."
+                ),
+            }
+
+        return None
+
+    def _validate_resolved_output_path(
+        self,
+        resolved_path: str,
+        path_template: str,
+        variables: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        """Validate that auto-derived ``output_path`` has no malformed
+        segments — server 0.6.37+.
+
+        Catches the silent-malformed-path failure mode where one of the
+        path-template's ``{{var}}`` placeholders substituted to empty
+        string and the framework happily produced a malformed file path
+        (typical signatures: ``//`` from an empty intermediate segment,
+        ``.java`` basename from an empty stem, trailing ``/`` from a
+        missing final segment).
+
+        Surfaced empirically by kb-enablement-2.0 chunk-1 v22 run 3:
+        agent's stochastic 1:N skip judgment passed
+        ``ValueObjectName=""`` to a template whose directive was
+        ``{{basePackagePath}}/domain/model/{{ValueObjectName}}.java``
+        — resolved to ``com/example/customer/domain/model/.java``,
+        wrote a hidden dotfile, polluted the workspace.
+
+        Two complementary checks:
+
+        1. **Empty-substitution check** [primary, most informative]:
+           re-extract the variable references from
+           ``output_path_template`` and report any that mapped to empty
+           string in ``variables``.  This is the strongest signal — kb
+           authors don't write optional path placeholders.  When the
+           agent leaves a path variable empty / missing, that's the
+           agent forgetting to skip the render entirely (1:N skip
+           violation) or forgetting to supply a required variable.
+
+        2. **Structural check** [defensive belt-and-suspenders]: catches
+           malformed paths produced by other failure modes (kb-author
+           typo in the directive, multi-variable path with collapsing
+           segments, etc.).  Three patterns flagged:
+             - ``//`` anywhere in the path
+             - basename of the form ``.<ext>`` with no stem (e.g.
+               ``.java``, ``.yml``).  An ``.gitignore``-style file
+               (no extension after the dot) is allowed.
+             - trailing ``/``
+
+        Both checks return the same error envelope shape so callers
+        can present a unified failure surface to the agent.
+
+        Returns ``None`` on success, an error dict on failure.
+        """
+        # Check 1: which template variables resolved to empty?
+        path_var_names = self._extract_path_variables(path_template)
+        empty_subs = []
+        for name in path_var_names:
+            value = variables.get(name)
+            if value is None or (isinstance(value, str) and value == ""):
+                empty_subs.append(name)
+
+        if empty_subs:
+            return {
+                "error": "Output path has empty segment from missing variable",
+                "validation_layer": "path_check",
+                "validation_errors": [
+                    f"Variable {name!r} substituted to empty string in "
+                    f"output_path_template"
+                    for name in empty_subs
+                ],
+                "output_path_template": path_template,
+                "resolved_output_path": resolved_path,
+                "hint": (
+                    "If this template should not render in the current "
+                    "context (e.g. 1:N template with no items in the "
+                    "source collection), do not call renderTemplateToFile "
+                    "for it.  Otherwise supply a non-empty value for the "
+                    "named variable(s)."
+                ),
+            }
+
+        # Check 2: structural malformations not caught by check 1.
+        # Scope deliberately narrow to two unambiguously-bad patterns:
+        # ``//`` (empty intermediate segment) and trailing ``/`` (empty
+        # final segment).  We do NOT flag ``.X``-style basenames as
+        # malformed — that would false-positive on legitimate dotfile
+        # names (`.gitignore`, `.env`, `.bashrc`, `.dockerignore`...)
+        # which look syntactically identical to ``.java`` but aren't a
+        # malformation.  The empty-substitution check (Check 1 above)
+        # is the strong catch for the v22 run-3 ``.java`` case anyway;
+        # this structural pass is just defensive.
+        structural_errors: List[str] = []
+        if "//" in resolved_path:
+            structural_errors.append(
+                f"Resolved path contains empty intermediate segment "
+                f"('//'): {resolved_path!r}"
+            )
+        if resolved_path.endswith('/'):
+            structural_errors.append(
+                f"Resolved path ends with trailing '/' (empty final "
+                f"segment): {resolved_path!r}"
+            )
+
+        if structural_errors:
+            return {
+                "error": "Output path is structurally malformed",
+                "validation_layer": "path_check",
+                "validation_errors": structural_errors,
+                "output_path_template": path_template,
+                "resolved_output_path": resolved_path,
+                "hint": (
+                    "The path template likely has a typo, a placeholder "
+                    "with no variable reference, or two adjacent "
+                    "separators.  Inspect the // Output: directive in "
+                    "the template source."
+                ),
+            }
+
+        return None
+
+    def _execute_render_template_to_file(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute renderTemplateToFile tool.
 
         Renders a template and writes the result to a file.
         Supports both Jinja2 and Mustache template syntax (auto-detected).
+
+        ``output_path`` is OPTIONAL when ``template_name`` is supplied
+        AND the template declares a ``// Output: <path>`` directive at
+        the top.  In that case the directive is substituted with
+        ``variables`` and used as the destination — eliminating the
+        agent-invents-the-path drift class.  When the agent does
+        supply ``output_path`` explicitly, it overrides the directive
+        (for the rare cases where downstream tooling needs to redirect).
         """
         output_path = args.get("output_path", "")
         template = args.get("template")
-        template_name_arg = args.get("template_name")
+        template_id_arg = args.get("template_id")
+        # Resolve the LLM-facing hash id back to the human template name
+        # used by the internal index and on disk (server 0.6.119+).
+        # ``id_to_name`` round-trips unknown ids unchanged; the resulting
+        # name then fails ``_resolve_template_path`` below with a clear
+        # "template not found" error.
+        template_name_arg = (
+            _template_name_from_id(template_id_arg) if template_id_arg else None
+        )
         variables = self._coerce_variables(args.get("variables"))
         overwrite = args.get("overwrite", False)
 
-        # Validation
-        if not output_path:
-            return {"error": "output_path is required"}
-
-        if not template and not template_name_arg:
+        # Mutual-exclusion checks on template / template_id come first
+        # because they're cheaper than path resolution.
+        if not template and not template_id_arg:
             return {
-                "error": "Exactly one of 'template' or 'template_name' must be provided"
+                "error": "Exactly one of 'template' or 'template_id' must be provided"
             }
 
-        if template and template_name_arg:
+        if template and template_id_arg:
             return {
-                "error": "Provide either 'template' or 'template_name', not both"
+                "error": "Provide either 'template' or 'template_id', not both"
             }
 
         # Determine template source
         template_source = "inline" if template else "file"
 
-        # Load template from file if template_name provided
+        # Load template content + index entry if template_name supplied.
+        # The index entry is needed below for auto-deriving output_path
+        # from the template's ``// Output:`` directive.
+        template_entry: Optional[TemplateIndexEntry] = None
         if template_name_arg:
             resolved_path, paths_tried = self._resolve_template_path(template_name_arg)
             if resolved_path is None:
@@ -1985,6 +3937,105 @@ Template rendering writes files to the workspace."""
                     "resolved_path": str(resolved_path),
                     "template_name": template_name_arg
                 }
+            template_entry = self._template_index.get(template_name_arg)
+            # Strip the ``// Output: ...`` (or polyglot equivalent)
+            # directive line from the loaded content — server 0.6.41+.
+            # The directive is metadata declaring where the rendered
+            # file belongs; leaving it in the content makes it leak
+            # into the rendered file.  For Java that's harmless noise;
+            # for XML (``<?xml ?>`` must be the first character) it
+            # breaks parsing.  Inline templates (passed via the
+            # ``template`` arg) skip this path — the agent owns inline
+            # content shape.  See ``_strip_output_directive`` docstring.
+            template = self._strip_output_directive(
+                template, filename=template_name_arg,
+            )
+
+        # Auto-derive ``output_path`` when the agent didn't supply one.
+        # Resolution order:
+        # 1. Explicit ``output_path`` from the agent — used as-is (override).
+        # 2. Template's ``// Output: <path-with-{{vars}}>`` directive
+        #    captured in the index entry — substituted with ``variables``.
+        # 3. Otherwise hard-fail with a path_check validation error.
+        #
+        # Case (2) is the load-bearing change: the kb-author declares
+        # the canonical output location once on the ``// Output:`` line;
+        # the agent reads ``listAvailableTemplates`` for context but
+        # doesn't need to compute (and so cannot drift on) the path.
+        if not output_path:
+            if template_entry and template_entry.output_path_template:
+                # Pre-fill any path-template variable that's absent from
+                # ``variables`` with empty string.  This converts the
+                # render-layer ``Undefined variable`` error into an
+                # empty-segment outcome that the empty-substitution
+                # validator catches with a clean, agent-actionable
+                # error message.  Without this, missing-vs-empty would
+                # produce two different error shapes for what is
+                # semantically the same failure (the path-only var
+                # wasn't supplied).
+                path_var_names = self._extract_path_variables(
+                    template_entry.output_path_template,
+                )
+                substitution_vars = dict(variables)
+                for name in path_var_names:
+                    if name not in substitution_vars:
+                        substitution_vars[name] = ""
+                rendered_path, render_err = self._render_template(
+                    template_entry.output_path_template, substitution_vars,
+                )
+                if render_err:
+                    return {
+                        "error": (
+                            f"Failed to substitute output_path_template "
+                            f"{template_entry.output_path_template!r}: "
+                            f"{render_err.get('error', render_err)}"
+                        ),
+                        "validation_layer": "path_check",
+                        "template_name": template_name_arg,
+                        "output_path_template": template_entry.output_path_template,
+                    }
+                output_path = rendered_path.strip()
+                # Empty-segment validation (server 0.6.37+).  Catches the
+                # silent-malformed-path failure mode where a path-template
+                # variable substituted to empty string and the framework
+                # happily wrote a malformed file (e.g. ``com/x/.java`` —
+                # hidden dotfile, empty class name, polluted workspace).
+                # Surfaced by kb-enablement-2.0 chunk-1 v22 run 3 where
+                # the agent's stochastic 1:N skip judgment passed
+                # ``ValueObjectName=""`` instead of skipping the call.
+                path_err = self._validate_resolved_output_path(
+                    output_path,
+                    template_entry.output_path_template,
+                    variables,
+                )
+                if path_err is not None:
+                    if template_name_arg:
+                        path_err["template_name"] = template_name_arg
+                    return path_err
+            else:
+                err: Dict[str, Any] = {
+                    "error": (
+                        "output_path is required when the template has no "
+                        "'// Output:' directive (or when using inline 'template'). "
+                        "Either supply output_path explicitly, or use a "
+                        "template_name pointing at a template that declares "
+                        "'// Output: <path-with-{{vars}}>' at the top."
+                    ),
+                    "validation_layer": "path_check",
+                }
+                if template_name_arg:
+                    err["template_name"] = template_name_arg
+                return err
+
+        # Apply path-routing rules from .jaato/template_routing.yaml
+        # (server 0.6.40+).  No-op when the file is absent or carries
+        # no rules — full back-compat with pre-0.6.40 behaviour.
+        # Applied AFTER all validation (auto-derive substitution +
+        # empty-segment check) so the rules see the same resolved
+        # path the validators just blessed.  Also applied to explicit
+        # ``output_path`` calls — agent says WHAT, kb's routing rules
+        # say WHERE-IN-LAYOUT.
+        output_path = self._apply_path_routing(output_path)
 
         # Check if output path already exists
         out_path = Path(output_path)
@@ -2001,6 +4052,34 @@ Template rendering writes files to the workspace."""
                 "error": f"Output file already exists: {output_path}. Set overwrite=true to replace.",
                 "output_path": str(out_path)
             }
+
+        # Strip @generated annotation lines BEFORE shape validation
+        # (server 0.6.173+).  The strip removes lines like
+        # ``@generated {{skillId}} v{{skillVersion}}`` that the
+        # generator pipeline injects; these reference variables the
+        # agent is not expected to supply.  Pre-0.6.173 the strip
+        # ran only inside ``_render_template``, but the new strict-
+        # required-scalar enforcement at the validator layer needs
+        # the stripped template too — otherwise it would reject
+        # legitimate calls for missing ``skillId`` / ``skillVersion``
+        # before the renderer even gets a chance to strip them.
+        # Applying the strip once here (and again redundantly inside
+        # ``_render_template`` for callers that don't go through this
+        # path) is the simplest fix; the strip is idempotent.
+        template = self._strip_generated_annotations(template)
+
+        # Validate variables shape against template structure
+        # (Mustache + Jinja2 since server 0.6.173+).  Catches the
+        # silent-garbage failure modes (Mustache: section variable
+        # passed as scalar; Jinja2: bare interpolation absent or
+        # empty-string).
+        shape_error = self._validate_render_inputs_against_structure(
+            template, variables
+        )
+        if shape_error is not None:
+            if template_name_arg:
+                shape_error["template_name"] = template_name_arg
+            return shape_error
 
         # Detect syntax and render using appropriate engine
         syntax = self._detect_template_syntax(template)
@@ -2035,7 +4114,7 @@ Template rendering writes files to the workspace."""
                 "output_path": str(out_path)
             }
 
-        self._trace(f"writeFileFromTemplate: wrote {bytes_written} bytes to {out_path} (syntax: {syntax})")
+        self._trace(f"renderTemplateToFile: wrote {bytes_written} bytes to {out_path} (syntax: {syntax})")
 
         return {
             "success": True,
@@ -2187,28 +4266,956 @@ Template rendering writes files to the workspace."""
             "warnings": warnings,
         }
 
+    def _strip_host_comment_lines(self, content: str) -> tuple[str, List[int]]:
+        """Strip lines whose first non-whitespace chars are ``//``.
+
+        Code-generation templates target host languages (Java, C/C++,
+        JavaScript, Go, Rust, etc.) whose single-line comment marker
+        is ``//``.  Conventional code-gen template authoring places a
+        documentation metadata block at the top of each file using
+        host-language comment syntax::
+
+            // Template: Customer.java.tpl
+            // Module: mod-code-015-hexagonal-base-java-spring
+            // REQUIRED VARIABLES: {{Entity}} {{basePackage}} {{fieldName}}
+            // PURPOSE: Domain entity for {{Entity}} aggregate.
+
+        References inside these lines are documentation for human
+        readers, not live Mustache references — they describe the
+        template's contract.  Without stripping, the parser sees
+        ``{{fieldName}}`` etc. OUTSIDE any section and reports them
+        as top-level scalars — even when the template body uses them
+        ONLY inside ``{{#fields}}...{{/fields}}`` (item-keys, not
+        top-level).  Net effect: false top-level scalars cause agents
+        to look up names that don't exist in their context, emit
+        warnings, and produce per-run content drift.
+
+        Scope decisions:
+        - ``//`` (C-family single-line) IS stripped — the dominant
+          comment style in code-gen templates.
+        - ``/* ... */`` (block comments) are NOT stripped — they
+          often carry legitimate Javadoc-with-live-refs like
+          ``@param {{paramName}}`` that's meant to render.
+        - ``#`` (Python/Shell/YAML/Markdown line comments) are NOT
+          stripped — risk of over-stripping Markdown headers etc.
+          If a template-set targeting Python emerges and needs ``#``
+          handling, add it then with explicit consideration for
+          Markdown / shebang edge cases.
+        - Tenants needing parser-directive docs in non-stripped
+          comment styles can use Mustache's native ``{{! ... }}``
+          which the parser correctly ignores.
+
+        Returns the cleaned content AND the 1-indexed line numbers
+        that were stripped, so the tool can surface a warning.
+        """
+        lines = content.splitlines(keepends=True)
+        stripped_line_numbers: List[int] = []
+        result: List[str] = []
+        for idx, line in enumerate(lines, start=1):
+            if line.lstrip().startswith('//'):
+                # Replace with bare newline (preserve line structure
+                # for any line-number-based diagnostics later).
+                result.append('\n' if line.endswith('\n') else '')
+                stripped_line_numbers.append(idx)
+            else:
+                result.append(line)
+        return ''.join(result), stripped_line_numbers
+
+    def _parse_jinja2_structure(self, content: str) -> List[Dict[str, Any]]:
+        """Walk a Jinja2 template, classify each variable by AST context.
+
+        Jinja2 analog of ``_parse_mustache_structure`` (server 0.6.173+).
+        Produces the same ``[{name, kind, ...}]`` shape so the
+        ``_validate_render_inputs_against_structure`` loop can consume
+        both engines uniformly.
+
+        Returns a deduplicated list of variable descriptors per the
+        following kind taxonomy:
+
+        - ``"scalar"``: variable appears as bare ``{{ var }}`` Output
+          (no ``default()`` filter).  Per Jinja2 spec semantics, a
+          bare interpolation REQUIRES the variable to be supplied;
+          the only "may be empty" idiom available in Jinja2 syntax
+          is ``{{ var | default(...) }}`` (filter) or wrapping in
+          ``{% if var %}{{ var }}{% endif %}`` (control flow).
+          Maps onto the same Mustache ``scalar`` enforcement applied
+          by ``_validate_render_inputs_against_structure``: REQUIRED
+          + non-empty.
+        - ``"conditional_test"``: variable appears in ``{% if var %}``
+          test position.  Analog of the Mustache section gate
+          (``{{#var}}...{{/var}}``).  Optional — absence means the
+          branch doesn't fire.
+        - ``"iterable"``: variable appears in ``{% for x in var %}``
+          iter position.  Analog of the Mustache list-iterating
+          section.  Required at the iterable source, but the
+          per-iteration loop variable (``x``) is locally bound and
+          NOT surfaced as a top-level variable.
+        - ``"scalar_with_default"``: variable appears with a
+          ``| default(...)`` filter.  Jinja2 idiom for "may be
+          empty".  Optional — the filter substitutes the fallback
+          when the variable is absent.
+
+        Merge policy when one name appears in multiple contexts:
+        ``scalar`` always wins (the strictest classification).
+        Example: ``{{ x }}{% if x %}gated{% endif %}`` — ``x`` is
+        classified as ``scalar`` (the bare interpolation locks it
+        in as required), not ``conditional_test``.
+
+        Loop variables (e.g. ``item`` in ``{% for item in items %}``)
+        are excluded from the result — they're locally scoped and
+        not part of the agent's variables payload contract.
+
+        Args:
+            content: Jinja2 template source.
+
+        Returns:
+            List of ``{"name": str, "kind": str}`` dicts, sorted by
+            name for stable ordering.  Empty list when the template
+            fails to parse (jinja2's own parser is the source of
+            truth; if it can't read the template, no validation is
+            possible — surface as zero entries and let the renderer
+            raise the parse error at render time).
+        """
+        try:
+            from jinja2 import Environment, nodes as jnodes
+        except ImportError:
+            # Jinja2 not installed (shouldn't happen in production —
+            # it's a hard dep — but defensive for unit tests with
+            # minimal envs).
+            return []
+
+        env = Environment()
+        try:
+            ast = env.parse(content)
+        except Exception:
+            # Template doesn't parse.  Renderer would also fail; let
+            # it surface the error there with the proper context.
+            return []
+
+        # Step 1: collect loop-bound variable names.  Jinja2's
+        # ``{% for x in items %}`` binds ``x`` locally; references
+        # to ``x`` inside the loop body are not agent-payload
+        # contributions.  ``find_undeclared_variables`` already
+        # excludes these but we re-derive here because we classify
+        # via Name nodes directly (find_undeclared returns just
+        # names, no AST positions).  Tuple-unpacking forms
+        # (``{% for a, b in pairs %}``) are also handled.
+        loop_bound: set = set()
+        for for_node in ast.find_all(jnodes.For):
+            target = for_node.target
+            if isinstance(target, jnodes.Name):
+                loop_bound.add(target.name)
+            elif isinstance(target, jnodes.Tuple):
+                for inner in target.items:
+                    if isinstance(inner, jnodes.Name):
+                        loop_bound.add(inner.name)
+
+        # Step 2: build a parent map so each Name can walk up to its
+        # semantic context (If.test / For.iter / Filter[default] /
+        # plain Output).  Jinja2 AST nodes don't carry parent
+        # references natively.
+        parent_map: Dict[int, Any] = {}
+
+        def build_parent_map(node: Any, parent: Any = None) -> None:
+            parent_map[id(node)] = parent
+            for child in node.iter_child_nodes():
+                build_parent_map(child, node)
+
+        build_parent_map(ast)
+
+        # Step 3: walk every Name node, classify by context, merge.
+        # ``scalar`` is the strictest kind and wins on merge.
+        by_name: Dict[str, str] = {}
+
+        for name_node in ast.find_all(jnodes.Name):
+            name = name_node.name
+            if name in loop_bound:
+                continue
+
+            kind = self._classify_jinja2_name_context(
+                name_node, parent_map,
+            )
+
+            existing = by_name.get(name)
+            if existing is None:
+                by_name[name] = kind
+            elif kind == "scalar":
+                # Scalar wins — strictest classification.
+                by_name[name] = "scalar"
+            # else: keep existing (already at the equal-or-stricter
+            # level).
+
+        return [
+            {"name": n, "kind": k}
+            for n, k in sorted(by_name.items())
+        ]
+
+    def _classify_jinja2_name_context(
+        self,
+        name_node: Any,
+        parent_map: Dict[int, Any],
+    ) -> str:
+        """Determine the semantic kind of a Jinja2 Name reference by
+        walking up the parent chain (server 0.6.173+).
+
+        Walks from the Name node toward the AST root, returning the
+        first semantically-meaningful ancestor's contribution:
+
+        - ``If.test`` ancestor → ``"conditional_test"``: the Name
+          is part of the conditional gate (e.g.
+          ``{% if user.is_admin and flag %}`` — both ``user`` and
+          ``flag`` walk up through ``And`` to find ``If.test``).
+        - ``For.iter`` ancestor → ``"iterable"``: the Name is the
+          loop's source iterable (e.g. ``{% for x in items %}`` —
+          ``items`` walks up to find ``For.iter``).
+        - ``Filter`` ancestor with ``name == "default"`` →
+          ``"scalar_with_default"``: the Name is being defaulted
+          (e.g. ``{{ x | default('fallback') }}``).
+        - Otherwise → ``"scalar"``: bare Output reference or any
+          other context not covered above.
+
+        Args:
+            name_node: A ``jinja2.nodes.Name`` node from the AST.
+            parent_map: Pre-built ``id(node) -> parent`` map from
+                ``_parse_jinja2_structure``.
+
+        Returns:
+            One of ``"scalar"``, ``"conditional_test"``,
+            ``"iterable"``, ``"scalar_with_default"``.
+        """
+        from jinja2 import nodes as jnodes
+
+        current = name_node
+        while True:
+            parent = parent_map.get(id(current))
+            if parent is None:
+                # Reached the AST root.  Default to scalar — bare
+                # interpolation in an Output node OR a Name used in
+                # some other position we haven't explicitly mapped.
+                return "scalar"
+
+            # Inside an If node's test expression?
+            if isinstance(parent, jnodes.If) and current is parent.test:
+                return "conditional_test"
+
+            # Inside a For node's iter expression?
+            if isinstance(parent, jnodes.For) and current is parent.iter:
+                return "iterable"
+
+            # Inside a Filter node?  Check filter name for the
+            # ``default()`` "may be empty" idiom.
+            if isinstance(parent, jnodes.Filter):
+                if parent.name == "default":
+                    return "scalar_with_default"
+                # Other filters (e.g. ``upper``, ``trim``) don't
+                # grant optionality — keep walking up to see if
+                # we're in a larger gated context.
+
+            current = parent
+
+    def _parse_mustache_structure(self, content: str) -> List[Dict[str, Any]]:
+        """Walk a Mustache template, classify each variable by kind.
+
+        Returns a list of variable descriptors.  Item_keys for sections
+        carry per-key metadata (server 0.6.43+, breaking change from
+        the prior ``List[str]`` shape):
+
+            [
+              {"name": "Entity", "kind": "scalar"},
+              {"name": "apiEndpoints", "kind": "section",
+               "item_keys": [
+                 {"name": "methodName", "required": True,  "source": "scalar"},
+                 {"name": "path",       "required": True,  "source": "scalar"},
+                 {"name": "returnType", "required": True,  "source": "scalar"},
+                 {"name": "isVoid",     "required": False, "source": "inverted"},
+                 ...
+               ],
+               "has_inverted_branch": false},
+              {"name": "isEmpty", "kind": "inverted_section"},
+            ]
+
+        Source taxonomy on item_keys:
+
+        - ``"scalar"``: plain ``{{key}}`` reference inside a section
+          body.  Required: True.  Missing → Mustache silently renders
+          empty for that interpolation; with the validator hard-failing
+          we surface the corruption at the call boundary.
+        - ``"section"``: nested ``{{#key}}...{{/key}}`` or
+          ``{{#each key}}`` inside a section body.  Required: True.
+          The kb-author authored an iteration that needs to fire.
+        - ``"inverted"``: nested ``{{^key}}...{{/key}}`` inside a
+          section body.  Required: False.  The Mustache idiom is
+          "render the inverted body when the key is absent/falsy" —
+          the absence itself is the trigger condition.
+        - ``"dotted"``: head of a dotted-path reference
+          (``{{a.b.c}}`` → head ``a``).  Required: False.  Mustache
+          silently descends into nested dicts; a missing intermediate
+          renders empty without erroring.
+        - ``"helper"``: argument of a Handlebars conditional helper
+          (``{{#if X}}``, ``{{#unless X}}``, ``{{#with X}}``).
+          Required: False.  Conditionals fire only when the value
+          resolves; absent argument means body doesn't render —
+          that's the Mustache contract for these helpers.
+
+        Kinds:
+        - ``"scalar"``: ``{{name}}`` or ``{{{name}}}`` — replaced
+          verbatim with the value (triple-brace == unescaped output;
+          same variable shape, normalised here so the model isn't
+          misled by escaping syntax).
+        - ``"section"``: ``{{#name}}...{{/name}}`` — when ``name`` is
+          a list, the body renders once per item with each item as
+          context; ``item_keys`` collects the field names referenced
+          ANYWHERE inside the iteration (incl. through nested boolean
+          sections like ``{{#item.flag}}...{{/item.flag}}``) so the
+          agent knows the full inner shape required.  When the same
+          identifier ALSO appears as ``{{^name}}`` (Mustache if/else
+          idiom), ``has_inverted_branch`` is set so the agent knows
+          there's an else-branch that fires when the value is
+          falsy/empty.
+        - ``"inverted_section"``: ``{{^name}}...{{/name}}`` —
+          standalone, body renders only when ``name`` is falsy/empty
+          (no iteration); inner references aren't item-keys.
+
+        Top-level scalars are emitted ONLY for references that occur
+        OUTSIDE any section; references inside sections become
+        item_keys of the OUTERMOST iteration section, never top-level.
+        Without this rule, deeply-nested per-item references (typical
+        ``{{#apiEndpoints}}...{{#isVoid}}...{{/isVoid}}{{^isVoid}}...
+        {{/isVoid}}...{{/apiEndpoints}}`` patterns) leaked to top
+        level, polluting the agent's variable dict.
+
+        Triple-brace ``{{{x}}}`` is normalised to ``{{x}}`` before
+        parsing — they're the same variable from a structural
+        perspective; only the render-time escaping differs.
+
+        Spring Boot ``${{{X}}:default}`` placeholders (server 0.6.173+)
+        are protected by the same sentinel mechanism the renderer uses
+        (see ``_protect_spring_placeholders``) BEFORE parsing.  Without
+        this, the parser mis-tokenises the ``${`` outer brace into the
+        Mustache identifier (e.g., extracting ``"{BASE_URL_ENV"`` —
+        leading-``{`` garbage entry — for
+        ``${{{BASE_URL_ENV}}:http://localhost}``).  Pre-0.6.173 the
+        garbage entry was invisible because no consumer of parser
+        metadata enforced top-level required-scalar presence; today's
+        strict enforcement (Daniel-auth'd 2026-06-02) surfaces the
+        latent parser bug.  The sentinel substitution closes both
+        at the same layer.
+        """
+        # Spring Boot placeholder collision protection (server
+        # 0.6.173+).  Same mechanism the renderer uses at
+        # ``_protect_spring_placeholders``: substitute ``${{{`` →
+        # ``$<sentinel>{{`` so the Mustache parser sees a clean double-
+        # brace.  Restoration is unnecessary because parser output is
+        # structural metadata, not rendered content — the substituted
+        # input produces the same kind / item_keys / source taxonomy
+        # for the legitimate Mustache variables INSIDE the Spring
+        # placeholder, without emitting a garbage top-level entry for
+        # the mis-tokenised ``${`` outer brace.
+        content = self._protect_spring_placeholders(content)
+
+        # Strip ``//`` host-language comment lines first.  References
+        # inside such lines are documentation, not live Mustache
+        # references — see ``_strip_host_comment_lines`` docstring.
+        # Stash stripped line numbers in thread-local storage so the
+        # tool can surface a warning naming them — see ``self._tls``
+        # docstring at __init__ for the race rationale.
+        content, stripped = self._strip_host_comment_lines(content)
+        self._tls.last_stripped_comment_lines = stripped
+        # Reset the per-call helper-invocation flag (server 0.6.44+).
+        # Set to "helpers" the first time _looks_like_helper matches
+        # anywhere in the template body — top-level OR nested.  Walker
+        # / listAvailableTemplates read this after the parse completes
+        # to populate ``template_evaluation_kind`` on the index entry.
+        # Pure-substitution templates (no helpers) keep the
+        # "substitution" default; templates with any helper bump to
+        # "helpers".
+        self._tls.last_evaluation_kind = "substitution"
+
+        # Mustache triple-brace ``{{{x}}}`` is the unescaped-output
+        # form.  Structurally it's identical to ``{{x}}`` — same
+        # variable, same kind.  Normalise here so the regex below
+        # doesn't include the inner ``{`` in the captured name.
+        content = re.sub(r'\{\{\{([^}]+)\}\}\}', r'{{\1}}', content)
+
+        # Match all {{...}} constructs in order so we can build a
+        # section stack and attribute scalar references to their
+        # enclosing sections.  Capture the optional prefix
+        # (``#`` / ``^`` / ``/`` / ``!``) and the name.
+        pattern = re.compile(r'\{\{([#^/!]?)([^}]+)\}\}')
+
+        # Pre-scan: identify sections that have BOTH ``{{#name}}`` and
+        # ``{{^name}}`` companions (server 0.6.46+).  These are
+        # "boolean-like" — the Mustache if/else idiom — and their body
+        # refs should attribute to the OUTER iteration, not to the
+        # boolean's own scope.  Without this distinction the kb-author's
+        # ``{{#apiEndpoints}}{{#isVoid}}{{controllerSignature}}{{/isVoid}}{{^isVoid}}...``
+        # pattern would mis-attribute ``controllerSignature`` to
+        # ``isVoid.item_keys`` (treating isVoid as an iteration over
+        # mappings) when in reality isVoid is a boolean field on each
+        # apiEndpoint and ``controllerSignature`` is at the apiEndpoint
+        # level via Mustache's outer-context fallback.
+        #
+        # Pure-iteration sections (``{{#statusMappings}}...{{/statusMappings}}``
+        # with no companion ``{{^statusMappings}}``) keep the new
+        # nested-scope semantics — their body refs land in the
+        # iteration's own item_keys, with ``inherited_from_outer_scope``
+        # marking refs that shadow outer-scope variables.
+        _pre_scan_pattern = re.compile(r'\{\{([#^])([^}]+)\}\}')
+        _positive_section_names: set = set()
+        _inverted_section_names: set = set()
+        for _m in _pre_scan_pattern.finditer(content):
+            _pre = _m.group(1)
+            _nm = _m.group(2).strip()
+            # Skip helpers — they're not real sections.
+            if ' ' in _nm:
+                _kw = _nm.split(' ', 1)[0]
+                if _kw in {'if', 'unless', 'each', 'with', 'lookup'}:
+                    continue
+            if _pre == '#':
+                _positive_section_names.add(_nm)
+            else:
+                _inverted_section_names.add(_nm)
+        boolean_like_names: set = _positive_section_names & _inverted_section_names
+
+        variables: Dict[str, Dict[str, Any]] = {}
+        # Stack of frames for currently-open sections (server 0.6.46+).
+        # Each frame is a dict carrying its OWN item_keys accumulator,
+        # so nested iterations no longer flatten their inner refs into
+        # the outermost iteration's item_keys.  Replaces the old
+        # 3-tuple frame shape; ``_innermost_iteration_frame()`` returns
+        # the innermost section frame (the iteration that owns
+        # currently-encountered refs).
+        #
+        # Frame shape:
+        #   {
+        #     "kind":          "section" | "inverted_section" | "helper",
+        #     "name":          str,
+        #     "close_marker":  str,
+        #     "item_keys":     Dict[str, Dict[str, Any]],
+        #         # name -> {"source": str, ["inherited_from_outer_scope": True]}
+        #   }
+        #
+        # Only ``section`` frames accumulate item_keys; helper and
+        # inverted-section frames keep an empty dict for shape
+        # consistency but refs inside them are credited to the
+        # innermost ENCLOSING section frame instead.
+        section_stack: List[Dict[str, Any]] = []
+
+        def _innermost_iteration_frame() -> Optional[Dict[str, Any]]:
+            """Return the innermost ``section`` frame that owns
+            currently-encountered refs, or None.
+
+            Walks the stack from top down; helper and inverted_section
+            frames are transparent.  Boolean-like (has both ``#``+``^``
+            companions) section frames are ALSO transparent — but
+            ONLY when there is a non-boolean iteration above them.
+            A top-level boolean-like section keeps its own scope
+            (refs DO land in its item_keys), since there is no
+            enclosing iteration for refs to flow through to.
+
+            Server 0.6.46+: this heuristic preserves the legacy
+            attribution for the
+            ``{{#flag}}body{{/flag}}{{^flag}}else{{/flag}}`` idiom
+            (Mustache if/else over a boolean field) while letting
+            pure-iteration sections accumulate their own item_keys.
+            """
+            iteration_frames = [
+                f for f in section_stack if f["kind"] == "section"
+            ]
+            if not iteration_frames:
+                return None
+            # First non-boolean iteration found walking from innermost
+            # outward — that's where refs accumulate.
+            for frame in reversed(iteration_frames):
+                if frame["name"] not in boolean_like_names:
+                    return frame
+            # All iteration frames on the stack are boolean-like:
+            # there's no outer iteration to flow to, so refs stay
+            # with the innermost.
+            return iteration_frames[-1]
+
+        def _structural_innermost_section_frame() -> Optional[Dict[str, Any]]:
+            """Return the innermost ``section`` frame WITHOUT the
+            boolean-skipping rule.  Used by the close-marker matcher
+            when popping frames — the literal stack top is what closes,
+            regardless of boolean-like classification.  Server 0.6.46+.
+            """
+            for frame in reversed(section_stack):
+                if frame["kind"] == "section":
+                    return frame
+            return None
+
+        def _name_in_outer_iteration(name: str, inner_frame: Dict[str, Any]) -> bool:
+            """True if ``name`` already exists in any iteration frame
+            OUTSIDE ``inner_frame`` (i.e. an enclosing section's
+            item_keys).  Used to set the ``inherited_from_outer_scope``
+            flag when an inner-iteration ref shadows an outer one.
+
+            The flag is the load-bearing signal that closes the
+            scope-walking variance class:  pybars3's outer-scope
+            lookup is engine-inconsistent across nested-iteration
+            boundaries, so the agent (or framework) needs to know
+            which inner refs are actually shadowing outer-scope
+            variables.  Without the signal, ``{{StatusEnum}}``
+            inside ``{{#statusMappings}}`` silently renders empty
+            when the inner mapping dict doesn't carry it.
+            """
+            for frame in section_stack:
+                if frame is inner_frame:
+                    return False
+                if frame["kind"] == "section" and name in frame["item_keys"]:
+                    return True
+            return False
+
+        # Handlebars helper keywords + iteration-metadata identifiers
+        # (server 0.6.38+).  pybars3 supports Handlebars helpers
+        # ({{#if cond}}, {{#unless cond}}, {{#each xs}}, {{#with x}})
+        # and iteration metadata (@first, @last, @index, @key) which
+        # the Mustache-strict regex above captures naively, leaking
+        # keyword-prefixed identifiers ("if required", "unless @last")
+        # into item_keys.  Surfaced empirically by chunk-1 v22 run 4
+        # where the agent literally created dict keys named
+        # "if validation.maxLength" because that's what
+        # listTemplateVariables reported.  Recognise the helpers here
+        # and unwrap to the bare argument; filter metadata entirely.
+        # Server 0.6.58+: HELPER_KEYWORDS is now defined at module
+        # level so the public ``classify_template_evaluation_kind``
+        # helper and this internal parser share a single source of
+        # truth.  Local rebind kept for in-function readability.
+        # See module docstring + the ``classify_…`` helper above.
+        # (Note: the public helper currently does not surface
+        # ``ITERATION_METADATA`` — engine-populated context vars are
+        # an internal-parser concern.)
+        # Iteration-metadata: identifiers populated by the engine,
+        # never user-provided.  Skip whenever they appear (whether as
+        # a helper argument or a standalone ref).
+        ITERATION_METADATA = {'@first', '@last', '@index', '@key', 'this', '.'}
+        # Required-vs-optional source classes (server 0.6.43+).
+        # ``scalar`` and ``section`` declare the kb-author's intent
+        # that the per-item dict carries that field; missing → silent
+        # empty render → the validator's hard-fail surface.
+        # ``inverted``, ``dotted``, ``helper`` are Mustache idioms
+        # whose absence is part of the contract — never enforced.
+        REQUIRED_SOURCES = {"scalar", "section"}
+
+        def _add_item_key_to_frame(
+            frame: Dict[str, Any], name: str, source: str
+        ) -> None:
+            """Insert ``(name → {source, inherited?})`` into a section
+            frame's item_keys dict (server 0.6.46+; replaces the older
+            ``_add_item_key`` which operated on a flat dict).
+
+            Stricter-source-wins rule preserved from 0.6.43+: if the
+            key already exists with a less-required source, an
+            incoming stricter source upgrades it.  Handles bodies
+            that reference the same key both as ``{{X}}`` (scalar,
+            required) and ``{{#X}}{{/X}}`` (section, required) —
+            the second mention doesn't downgrade.
+
+            The ``inherited_from_outer_scope`` flag is computed at
+            insertion time by ``_name_in_outer_iteration``.  Once set
+            on a key, it sticks even if a later same-name reference
+            in the same scope wouldn't trigger the check (the flag
+            is "this name is also in an outer scope" — once true,
+            always true within this frame).
+            """
+            inherited = _name_in_outer_iteration(name, frame)
+            existing = frame["item_keys"].get(name)
+            if existing is None:
+                entry: Dict[str, Any] = {"source": source}
+                if inherited:
+                    entry["inherited_from_outer_scope"] = True
+                frame["item_keys"][name] = entry
+                return
+            # Existing wins unless incoming is stricter.
+            if source in REQUIRED_SOURCES and existing["source"] not in REQUIRED_SOURCES:
+                existing["source"] = source
+            if inherited and not existing.get("inherited_from_outer_scope"):
+                existing["inherited_from_outer_scope"] = True
+
+        def _make_frame(kind: str, name: str, close_marker: str) -> Dict[str, Any]:
+            """Construct a fresh stack frame (server 0.6.46+)."""
+            return {
+                "kind": kind,
+                "name": name,
+                "close_marker": close_marker,
+                "item_keys": {},
+            }
+
+        def _build_item_keys_list(
+            item_keys_dict: Dict[str, Dict[str, Any]],
+        ) -> List[Dict[str, Any]]:
+            """Convert a frame's internal item_keys accumulator into the
+            sorted list-of-dicts shape callers see (server 0.6.46+).
+
+            Computes ``helper_siblings`` (mutual-exclusivity intent —
+            server 0.6.44+) and surfaces the inheritance flag and any
+            attached nested item_keys (for sub-sections).
+            """
+            helper_names = sorted([
+                n for n, e in item_keys_dict.items() if e["source"] == "helper"
+            ])
+            out: List[Dict[str, Any]] = []
+            for n in sorted(item_keys_dict.keys()):
+                e = item_keys_dict[n]
+                item_entry: Dict[str, Any] = {
+                    "name": n,
+                    "source": e["source"],
+                    "required": e["source"] in REQUIRED_SOURCES,
+                }
+                if e.get("inherited_from_outer_scope"):
+                    item_entry["inherited_from_outer_scope"] = True
+                if e["source"] == "helper":
+                    item_entry["helper_siblings"] = [
+                        other for other in helper_names if other != n
+                    ]
+                # Sub-section's nested item_keys (attached when the
+                # sub-section closed via ``_attach_closed_section``).
+                if "nested_item_keys" in e:
+                    item_entry["item_keys"] = e["nested_item_keys"]
+                    item_entry["has_inverted_branch"] = e.get(
+                        "nested_has_inverted_branch", False,
+                    )
+                out.append(item_entry)
+            return out
+
+        def _merge_item_keys_lists(
+            existing: List[Dict[str, Any]],
+            incoming: List[Dict[str, Any]],
+        ) -> List[Dict[str, Any]]:
+            """Merge two item_keys lists by name (server 0.6.46+).
+
+            Used when a section opens-and-closes more than once in a
+            template; the accumulators are per-frame, so each closing
+            attaches its own list and the second close must merge into
+            the first.  Stricter-source-wins; inheritance flags
+            sticky-OR; nested item_keys recursively merged.
+            """
+            by_name = {e["name"]: dict(e) for e in existing}
+            for entry in incoming:
+                if entry["name"] not in by_name:
+                    by_name[entry["name"]] = dict(entry)
+                    continue
+                cur = by_name[entry["name"]]
+                if (entry["source"] in REQUIRED_SOURCES
+                        and cur["source"] not in REQUIRED_SOURCES):
+                    cur["source"] = entry["source"]
+                    cur["required"] = True
+                if entry.get("inherited_from_outer_scope") \
+                        and not cur.get("inherited_from_outer_scope"):
+                    cur["inherited_from_outer_scope"] = True
+                if "item_keys" in entry:
+                    if "item_keys" in cur:
+                        cur["item_keys"] = _merge_item_keys_lists(
+                            cur["item_keys"], entry["item_keys"],
+                        )
+                    else:
+                        cur["item_keys"] = entry["item_keys"]
+            return sorted(by_name.values(), key=lambda e: e["name"])
+
+        def _attach_closed_section(closed_frame: Dict[str, Any]) -> None:
+            """Take a just-closed section frame's accumulated item_keys,
+            build the list shape, and attach it either to the parent
+            iteration's item_keys[name] entry (nested case) or to the
+            top-level variables[name].item_keys (top-level case).
+
+            Server 0.6.46+: this is what makes nested-iteration
+            item_keys flow recursively into the outer structure.
+            Multi-occurrence (same section name opened twice) merges
+            via ``_merge_item_keys_lists``.
+            """
+            section_name = closed_frame["name"]
+            nested_list = _build_item_keys_list(closed_frame["item_keys"])
+            parent_inner = _innermost_iteration_frame()
+            if parent_inner is None:
+                # Top-level section closing.
+                top_entry = variables.get(section_name)
+                if top_entry is None or top_entry["kind"] != "section":
+                    return
+                if "item_keys" in top_entry:
+                    top_entry["item_keys"] = _merge_item_keys_lists(
+                        top_entry["item_keys"], nested_list,
+                    )
+                else:
+                    top_entry["item_keys"] = nested_list
+            else:
+                # Nested section closing: attach to parent's item_keys[name].
+                outer_entry = parent_inner["item_keys"].get(section_name)
+                if outer_entry is None:
+                    # Defensive — would mean we never recorded the
+                    # opening (e.g. dotted-name path).  Skip silently.
+                    return
+                if "nested_item_keys" in outer_entry:
+                    outer_entry["nested_item_keys"] = _merge_item_keys_lists(
+                        outer_entry["nested_item_keys"], nested_list,
+                    )
+                else:
+                    outer_entry["nested_item_keys"] = nested_list
+
+        def _looks_like_helper(name_str: str) -> Optional[Tuple[str, str]]:
+            """If ``name_str`` is a helper invocation (e.g. ``"if x"``,
+            ``"unless validation.maxLength"``), return ``(keyword, arg)``.
+            Otherwise return None.
+
+            Matches when:
+            - The first space-delimited token is a known helper keyword.
+            - There IS a second token (no bare ``"if"`` — that would be
+              a Mustache section named "if", a kb-author choice).
+            """
+            if ' ' not in name_str:
+                return None
+            kw, _, arg = name_str.partition(' ')
+            if kw in HELPER_KEYWORDS and arg.strip():
+                return kw, arg.strip()
+            return None
+
+        for match in pattern.finditer(content):
+            prefix = match.group(1)
+            name = match.group(2).strip()
+
+            # Skip Mustache comments and current-context markers.
+            if prefix == '!':
+                continue
+            if name in ITERATION_METADATA:
+                # Plain ``{{@last}}`` etc. — engine populates these.
+                continue
+
+            inner = _innermost_iteration_frame()
+
+            # Handlebars helper detection — runs before the prefix
+            # dispatch.  Three cases by prefix:
+            #
+            # - ``#``/``^`` with a helper invocation: register the
+            #   helper's ARGUMENT as the relevant variable (item_key
+            #   when nested, top-level scalar/section when not), then
+            #   push a synthetic ``helper`` frame on the section
+            #   stack so the matching ``{{/keyword}}`` close can pop
+            #   cleanly.
+            # - ``/`` of a helper keyword: pop the helper frame.
+            # - No prefix with a helper-shaped name: not real (would
+            #   be ``{{if x}}`` plain interp, not valid Handlebars);
+            #   fall through to the existing scalar branch.
+            if prefix in ('#', '^'):
+                helper_match = _looks_like_helper(name)
+                if helper_match is not None:
+                    self._tls.last_evaluation_kind = "helpers"
+                    kw, arg = helper_match
+                    if arg in ITERATION_METADATA:
+                        section_stack.append(_make_frame("helper", kw, kw))
+                        continue
+                    arg_root = arg.split('.', 1)[0].strip()
+                    if not arg_root:
+                        section_stack.append(_make_frame("helper", kw, kw))
+                        continue
+                    if kw == 'each':
+                        # ``{{#each xs}}`` is structurally an iteration
+                        # over ``xs``.  Register at the appropriate
+                        # scope (top-level or innermost iteration), then
+                        # push a section frame whose close-marker is
+                        # ``each`` (matching ``{{/each}}``) so the
+                        # iteration is treated as a real iteration
+                        # boundary by ``_innermost_iteration_frame``.
+                        if inner is None:
+                            entry = variables.get(arg_root)
+                            if entry is None:
+                                variables[arg_root] = {
+                                    "name": arg_root, "kind": "section",
+                                }
+                            elif entry["kind"] == "scalar":
+                                entry["kind"] = "section"
+                        else:
+                            _add_item_key_to_frame(inner, arg_root, "section")
+                        section_stack.append(
+                            _make_frame("section", arg_root, "each"),
+                        )
+                    else:
+                        # ``if`` / ``unless`` / ``with`` / ``lookup``:
+                        # argument is a context-lookup, not a new
+                        # iteration scope.  Argument itself is a
+                        # per-context field — credit as item_key when
+                        # inside iteration, top-level scalar otherwise.
+                        if inner is not None:
+                            _add_item_key_to_frame(inner, arg_root, "helper")
+                        else:
+                            variables.setdefault(
+                                arg_root,
+                                {"name": arg_root, "kind": "scalar"},
+                            )
+                        section_stack.append(_make_frame("helper", kw, kw))
+                    continue
+
+            if prefix == '/' and name in HELPER_KEYWORDS:
+                # ``{{/if}}`` / ``{{/each}}`` / etc. — pop the
+                # matching helper or each-section frame by close-marker.
+                # Each-section closing also flushes its accumulated
+                # item_keys to the parent via ``_attach_closed_section``.
+                if section_stack and section_stack[-1]["close_marker"] == name:
+                    popped = section_stack.pop()
+                    if popped["kind"] == "section":
+                        _attach_closed_section(popped)
+                continue
+
+            if prefix == '#':
+                # Opening plain section.  Two cases:
+                # - No enclosing iteration (``inner is None``) OR the
+                #   section's name matches the immediate enclosing
+                #   iteration (idempotent re-entry): register as a
+                #   top-level section variable.
+                # - Nested inside an enclosing iteration: register the
+                #   section's identifier in the enclosing iteration's
+                #   item_keys (source: "section") and push a frame
+                #   that will accumulate THIS section's own item_keys.
+                if inner is None or inner["name"] == name:
+                    entry = variables.get(name)
+                    if entry is None:
+                        variables[name] = {"name": name, "kind": "section"}
+                    elif entry["kind"] == "scalar":
+                        entry["kind"] = "section"
+                    elif entry["kind"] == "inverted_section":
+                        # Mustache if/else with the same identifier,
+                        # encountered ^ first then # — promote to
+                        # section AND mark inverted branch exists.
+                        entry["kind"] = "section"
+                        entry["has_inverted_branch"] = True
+                else:
+                    # Nested inside enclosing iteration.
+                    if "." in name:
+                        head_key = name.split(".", 1)[0]
+                        _add_item_key_to_frame(inner, head_key, "dotted")
+                    else:
+                        _add_item_key_to_frame(inner, name, "section")
+                section_stack.append(_make_frame("section", name, name))
+            elif prefix == '^':
+                # Opening inverted section.  Inverted sections do NOT
+                # push an iteration scope (their body runs in the
+                # parent context when the value is falsy/empty), so
+                # their frame's item_keys stay empty and refs flow
+                # through to the enclosing iteration above.
+                if inner is None or inner["name"] == name:
+                    entry = variables.get(name)
+                    if entry is None:
+                        variables[name] = {
+                            "name": name, "kind": "inverted_section",
+                        }
+                    elif entry["kind"] == "section":
+                        entry["has_inverted_branch"] = True
+                    # else: already inverted_section or scalar; leave.
+                else:
+                    if "." in name:
+                        head_key = name.split(".", 1)[0]
+                        _add_item_key_to_frame(inner, head_key, "dotted")
+                    else:
+                        _add_item_key_to_frame(inner, name, "inverted")
+                section_stack.append(
+                    _make_frame("inverted_section", name, name),
+                )
+            elif prefix == '/':
+                # Closing marker — pop matching frame by close_marker.
+                # Section frames flush their item_keys to parent via
+                # ``_attach_closed_section`` on close (server 0.6.46+).
+                if section_stack and section_stack[-1]["close_marker"] == name:
+                    popped = section_stack.pop()
+                    if popped["kind"] == "section":
+                        _attach_closed_section(popped)
+            else:
+                # Scalar reference.  Three cases:
+                # - Inside an iteration: credit innermost iteration's
+                #   item_keys (with inheritance flag if same name
+                #   exists in any outer iteration).
+                # - Inside helper/inverted frames but no iteration:
+                #   top-level scalar (parent context).
+                # - Outside all frames: top-level scalar.
+                if inner is not None:
+                    if "." in name:
+                        item_key = name.split(".")[0]
+                        _add_item_key_to_frame(inner, item_key, "dotted")
+                    else:
+                        _add_item_key_to_frame(inner, name, "scalar")
+                else:
+                    variables.setdefault(name, {"name": name, "kind": "scalar"})
+
+        # Defensive: if a malformed template left frames open at EOF
+        # (missing close tag), flush them so partial structure still
+        # surfaces in the result.
+        while section_stack:
+            popped = section_stack.pop()
+            if popped["kind"] == "section":
+                _attach_closed_section(popped)
+
+        # Top-level result list.  Section frames have already attached
+        # their own item_keys lists via ``_attach_closed_section``;
+        # here we just normalise has_inverted_branch and assemble
+        # the sorted output.
+        result = []
+        for var_name in sorted(variables.keys()):
+            entry = variables[var_name].copy()
+            if entry["kind"] == "section":
+                entry.setdefault("item_keys", [])
+                entry.setdefault("has_inverted_branch", False)
+            result.append(entry)
+        return result
+
     def _execute_list_template_variables(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Extract all undeclared variables from a template.
 
         Uses Jinja2's AST parser for Jinja2 templates to find undeclared variables,
-        or regex for Mustache templates.
+        or structural Mustache parsing for Mustache templates.
+
+        For Mustache (server 0.6.28+), each variable carries its kind
+        (``scalar`` / ``section`` / ``inverted_section``) and sections
+        also carry ``item_keys`` — the fields each list item must
+        provide when rendering.  This eliminates a non-determinism
+        source where agents would guess wrong shape on first attempt
+        (passing ``apiEndpoints`` as flat scalars or ``updateableFields``
+        as ``list[str]`` instead of ``list[dict]``), trigger a
+        ``pybars3`` render error, and self-correct on retry — with
+        the retry path producing different content across runs.
+
+        Variable list scope (server 0.6.36+): the returned ``variables``
+        list is the union of (a) variables referenced in the template
+        body and (b) variables referenced in the template's
+        ``// Output: <path>`` directive.  Without this merge, agents
+        called ``renderTemplateToFile`` with body-only variables, the
+        framework's auto-derivation of output_path failed on
+        unsubstituted ``{{path-only-var}}`` placeholders, and the
+        retry path resampled the variables dict — different runs
+        handled the supplementation differently, contributing
+        stochastic divergence even when generation_context provided
+        the missing values.
+
+        Body-precedence on name-collision: a variable used in BOTH
+        body and path keeps the body-parsed kind (which carries
+        item_keys for sections, has_inverted_branch flags, etc.).
+        Path-only vars get ``kind=scalar`` since path interpolation
+        is always scalar substitution (no sections in paths).
 
         Args:
             args: Tool arguments containing 'template_name'.
 
         Returns:
             Dict with 'variables' list and 'syntax' type, or 'error' on failure.
+            For Mustache: ``variables`` is ``list[{name, kind, item_keys?}]``.
+            For Jinja2: ``variables`` is ``list[{name, kind: "scalar"}]``
+            (kind detection for Jinja2 is a follow-up — current shape
+            is consistent in API but flat in semantics).
         """
-        template_name = args.get("template_name", "")
+        template_id = args.get("template_id", "")
 
-        if not template_name:
-            return {"error": "template_name is required"}
+        if not template_id:
+            return {"error": "template_id is required"}
+
+        # Resolve the LLM-facing hash id back to the human template name
+        # (server 0.6.119+).  Mirrors how the runtime resolves tool hash
+        # ids back to human names before dispatching.  Unknown ids
+        # round-trip unchanged via ``id_to_name`` and fall through to
+        # the normal "template not found" error path below.
+        template_name = _template_name_from_id(template_id)
 
         # Resolve the template name via index or filesystem
         resolved_path, paths_tried = self._resolve_template_path(template_name)
         if not resolved_path or not resolved_path.exists():
             return {
-                "error": f"Template not found: {template_name}",
+                "error": f"Template not found: template_id={template_id}",
                 "paths_tried": paths_tried
             }
 
@@ -2224,6 +5231,47 @@ Template rendering writes files to the workspace."""
         # Detect template syntax
         syntax = self._detect_template_syntax(template_content)
 
+        # Variables used in the output_path_template directive (if any)
+        # but not in the body.  These are "path-only" vars the agent
+        # must still supply for auto-derivation to substitute correctly.
+        # Re-extracting here (rather than reading from
+        # See server 0.6.36 — closes the symmetry gap where
+        # renderTemplateToFile auto-derives output_path but the agent's
+        # source-of-truth tool was reporting body vars only.
+        #
+        # Index-authoritative resolution (server 0.6.39+): the index
+        # entry's ``output_path_template`` field — populated by the
+        # walker at session-init OR by side-channel patches (e.g. a
+        # local override for kb-omissions) — takes precedence over
+        # re-extracting from the on-disk template content.
+        #
+        # Why: pre-0.6.39, this site re-extracted from disk regardless
+        # of what was in the index.  When a kb-author patched the
+        # index entry (say, to supply an ``output_path_template`` for a
+        # template whose upstream source lacks the ``// Output:``
+        # directive), ``renderTemplateToFile``'s auto-derive picked up
+        # the patched value (it reads the index directly) but
+        # ``listTemplateVariables`` did NOT (it re-parsed disk, found
+        # no directive, reported only body vars).  The asymmetry
+        # produced a regression class observed in kb-enablement-2.0
+        # chunk-1 v20: agent's first attempt rendered without the
+        # path-only var, hit empty-segment validation, retried with
+        # supplemented var, retry resampling drifted.
+        #
+        # Fix: index wins.  Both consumers (auto-derive + path-vars
+        # merge) now read the same authoritative source.  Falls back
+        # to disk re-extraction when the entry is absent or its
+        # ``output_path_template`` is empty — the legacy path is
+        # preserved for templates the walker hasn't yet seen.
+        template_entry = self._template_index.get(template_name)
+        if template_entry and template_entry.output_path_template:
+            output_path_template = template_entry.output_path_template
+        else:
+            output_path_template = self._extract_output_path_template(
+                template_content, filename=template_name,
+            )
+        path_vars = self._extract_path_variables(output_path_template)
+
         if syntax == "jinja2":
             # Use Jinja2's AST parser for accurate variable extraction
             try:
@@ -2238,11 +5286,31 @@ Template rendering writes files to the workspace."""
                 env = Environment()
                 ast = env.parse(template_content)
                 variables = meta.find_undeclared_variables(ast)
+                # Wrap in the same structured shape Mustache returns
+                # so consumers don't need to branch on syntax.  Jinja2
+                # AST-based kind detection (for / if blocks) is a
+                # follow-up; for now mark all as "scalar" — agents
+                # using Jinja2 templates today have less determinism
+                # surface anyway.
+                merged: Dict[str, Dict[str, Any]] = {
+                    v: {"name": v, "kind": "scalar"}
+                    for v in sorted(variables)
+                }
+                # Path-only vars: kind=scalar (path interpolation is
+                # always scalar substitution; no sections in paths).
+                # Body-precedence: vars appearing in both keep the
+                # body-parsed kind, which is already scalar in the
+                # Jinja2 path so the precedence is moot here but the
+                # logic mirrors the Mustache branch for symmetry.
+                for v in path_vars:
+                    if v not in merged:
+                        merged[v] = {"name": v, "kind": "scalar"}
+                final_list = [merged[k] for k in sorted(merged.keys())]
                 return {
-                    "variables": sorted(list(variables)),
+                    "variables": final_list,
                     "syntax": "jinja2",
                     "template_name": template_name,
-                    "count": len(variables)
+                    "count": len(final_list),
                 }
             except Exception as e:
                 return {
@@ -2252,23 +5320,53 @@ Template rendering writes files to the workspace."""
                 }
 
         elif syntax == "mustache":
-            # Use regex to find {{variable}} patterns for Mustache
-            # Match simple variables {{var}}, but not section markers {{#...}}, {{/...}}, {{^...}}
-            # Also exclude comments {{!...}}
-            matches = re.findall(r'\{\{([^#/^!}]+)\}\}', template_content)
-            variables = set()
-            for m in matches:
-                var = m.strip()
-                # Skip special Mustache markers like {{.}} (current context) and {{this}}
-                if var and var not in ('.', 'this'):
-                    variables.add(var)
-
-            return {
-                "variables": sorted(list(variables)),
+            # Structural parse: classify each variable by kind
+            # (scalar / section / inverted_section) and collect
+            # ``item_keys`` for sections — the inner field names the
+            # agent must provide on each list-item dict.  See
+            # ``_parse_mustache_structure`` docstring for the full
+            # rules.
+            structured = self._parse_mustache_structure(template_content)
+            # Merge path-only vars (kind=scalar) into the structured
+            # body-vars list.  Body-precedence on name-collision: a
+            # var used in both body and path keeps the body-parsed
+            # kind (which carries item_keys for sections, etc.).
+            existing_names = {v["name"] for v in structured}
+            for path_var in path_vars:
+                if path_var not in existing_names:
+                    structured.append({"name": path_var, "kind": "scalar"})
+            # Re-sort for stable output regardless of where each var
+            # came from.
+            structured.sort(key=lambda v: v["name"])
+            result = {
+                "variables": structured,
                 "syntax": "mustache",
                 "template_name": template_name,
-                "count": len(variables)
+                "count": len(structured),
             }
+            # Surface ``//`` host-comment lines that were stripped.
+            # Per the standard completion-payload-schema convention
+            # (see docs/design/payload-schema-conventions.md §3.2),
+            # warnings is the advisory escape hatch.
+            # Read from thread-local set by ``_parse_mustache_structure``
+            # earlier in this same thread.  Default to ``[]`` when the
+            # parser hasn't run on this thread or stripped nothing.
+            stripped = getattr(self._tls, "last_stripped_comment_lines", []) or []
+            if stripped:
+                result["warnings"] = [
+                    (
+                        f"Skipped {len(stripped)} line(s) starting with '//' "
+                        f"from variable extraction (host-language comment "
+                        f"lines: {stripped}). References inside these lines "
+                        f"were treated as documentation, not live Mustache "
+                        f"references. If any contain genuinely-live refs that "
+                        f"need to render, rewrite them outside the comment "
+                        f"line OR use Mustache's native comment syntax "
+                        f"`{{{{! ... }}}}` for documentation that the parser "
+                        f"correctly ignores."
+                    )
+                ]
+            return result
 
         else:
             return {

@@ -77,15 +77,19 @@ def apply_edit(
         if prologue or epilogue:
             msg = (
                 f"Search text matched {count} times even with context anchors. "
-                f"Provide more specific prologue/epilogue to disambiguate.\n"
+                f"Extend prologue/epilogue outward — more literal adjacent lines "
+                f"copied verbatim from the file (blank lines included) — until the "
+                f"match is unique.\n"
                 f"  prologue: {_truncate(prologue_text, 80)!r}\n"
                 f"  old:      {_truncate(old, 80)!r}\n"
                 f"  epilogue: {_truncate(epilogue_text, 80)!r}"
             )
         else:
             msg = (
-                f"Search text matched {count} times. "
-                f"Use prologue/epilogue to disambiguate: {_truncate(old, 120)!r}"
+                f"Search text matched {count} times. Add 'prologue'/'epilogue' — "
+                f"the literal lines immediately before/after 'old', copied verbatim "
+                f"from the file (blank lines included), extended until the match is "
+                f"unique: {_truncate(old, 120)!r}"
             )
         raise AmbiguousEditError(msg)
 

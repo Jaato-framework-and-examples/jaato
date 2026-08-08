@@ -1,0 +1,2 @@
+Hello from the notebook!
+This file was created via writeNewFile.

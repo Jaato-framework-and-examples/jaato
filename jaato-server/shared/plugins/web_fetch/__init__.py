@@ -9,6 +9,7 @@ from .plugin import WebFetchPlugin, create_plugin
 # Plugin kind identifier for registry discovery
 PLUGIN_KIND = "tool"
 
+PLUGIN_TIER = "runner"
 __all__ = [
     'WebFetchPlugin',
     'create_plugin',

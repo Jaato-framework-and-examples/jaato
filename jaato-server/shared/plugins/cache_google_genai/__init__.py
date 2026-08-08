@@ -13,6 +13,7 @@ and tracks cache metrics without modifying requests.
 
 PLUGIN_KIND = "cache"
 
+PLUGIN_TIER = "daemon"
 from .plugin import GoogleGenAICachePlugin, create_plugin
 
-__all__ = ["PLUGIN_KIND", "GoogleGenAICachePlugin", "create_plugin"]
+__all__ = ["PLUGIN_KIND", "PLUGIN_TIER", "GoogleGenAICachePlugin", "create_plugin"]

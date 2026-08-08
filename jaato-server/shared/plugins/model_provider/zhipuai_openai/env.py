@@ -69,7 +69,7 @@ def resolve_base_url() -> str:
     Returns:
         The API base URL.
     """
-    return os.environ.get(ENV_BASE_URL, DEFAULT_BASE_URL)
+    return os.environ.get(ENV_BASE_URL, DEFAULT_BASE_URL)  # env: endpoint for Zhipu's OpenAI-compatible API (default https://api.z.ai/api/paas/v4)
 
 
 def resolve_model() -> Optional[str]:
@@ -78,7 +78,7 @@ def resolve_model() -> Optional[str]:
     Returns:
         Model name if found, None otherwise.
     """
-    return os.environ.get(ENV_MODEL)
+    return os.environ.get(ENV_MODEL)  # env: default model name
 
 
 def resolve_context_length() -> Optional[int]:
@@ -87,7 +87,7 @@ def resolve_context_length() -> Optional[int]:
     Returns:
         Context length in tokens if set, None otherwise.
     """
-    val = os.environ.get(ENV_CONTEXT_LENGTH)
+    val = os.environ.get(ENV_CONTEXT_LENGTH)  # env: override context window size
     if val:
         try:
             return int(val)

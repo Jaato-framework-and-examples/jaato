@@ -19,10 +19,11 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Deque, Dict, List, Optional
 
 from jaato_sdk.plugins.base import UserCommand
-from jaato_sdk.plugins.model_provider.types import ToolSchema
+from jaato_sdk.plugins.model_provider.types import ToolSchema, DISCOVERABILITY_DEFERRED
 
 from .config import WebhookConfig, load_config
 from .http_server import WebhookHTTPServer
+from shared.plugins.runner_forwarding import RunnerForwardingMixin
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +36,7 @@ _thread_local = threading.local()
 _MAX_BUFFER_SIZE = 1000
 
 
-class WebhookPlugin:
+class WebhookPlugin(RunnerForwardingMixin):
     """Webhook ingress plugin for daemon agent sessions.
 
     Provides three tools:
@@ -143,6 +144,20 @@ class WebhookPlugin:
         self._initialized = False
         logger.info("Webhook plugin shut down")
 
+    def reset_for_next_session(self) -> None:
+        """Cascade-sharing reset — NO-OP for this plugin.
+
+        Phase 1 hotfix (server 0.6.148+): added to satisfy the
+        ``ToolPlugin`` / ``EnrichmentPlugin`` protocol's runtime
+        ``isinstance`` check.  Per Daniel's litmus test (see
+        ``docs/design/runner-cascade-sharing.md`` §4.3), this
+        plugin holds no per-session state that the next cascade
+        session would benefit from having cleared.  Override in
+        future PRs if the litmus test changes.
+        """
+        pass
+
+
     def get_tool_schemas(self) -> List[ToolSchema]:
         """Return tool schemas for webhook subscribe, poll, and status."""
         return [
@@ -169,7 +184,7 @@ class WebhookPlugin:
                     "required": [],
                 },
                 category="integration",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
             ToolSchema(
                 name='webhook_poll',
@@ -193,7 +208,7 @@ class WebhookPlugin:
                     "required": ["subscription_id"],
                 },
                 category="integration",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
             ToolSchema(
                 name='webhook_status',
@@ -206,17 +221,21 @@ class WebhookPlugin:
                     "required": [],
                 },
                 category="integration",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
         ]
 
     def get_executors(self) -> Dict[str, Callable[[Dict[str, Any]], Any]]:
-        """Return tool executor mapping."""
-        return {
+        """Return tool executor mapping.
+
+        Phase 3 §3.6 wave 3: forwards via runner-RPC when a runner
+        is attached; falls through to in-process otherwise.
+        """
+        return self.wrap_executors_for_runner_forwarding({
             'webhook_subscribe': self._execute_subscribe,
             'webhook_poll': self._execute_poll,
             'webhook_status': self._execute_status,
-        }
+        })
 
     def get_system_instructions(self) -> Optional[str]:
         """Return system instructions describing webhook tools."""

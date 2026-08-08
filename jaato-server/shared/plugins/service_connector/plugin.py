@@ -12,12 +12,17 @@ import os
 import tempfile
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 
 logger = logging.getLogger(__name__)
 
 from jaato_sdk.plugins.base import CommandCompletion, CommandParameter, HelpLines, UserCommand
-from jaato_sdk.plugins.model_provider.types import EditableContent, ToolSchema
+from jaato_sdk.plugins.model_provider.types import (
+    EditableContent,
+    ToolSchema,
+    TRAIT_GREPPABLE_CONTENT,
+    DISCOVERABILITY_DEFERRED,
+)
 
 from .auth import AuthError, AuthManager
 from .bruno_import import BrunoParseError, parse_bruno_collection
@@ -37,9 +42,13 @@ from .types import (
     ServiceConfig,
 )
 from .validation import SchemaValidator
+from shared.plugins.runner_forwarding import RunnerForwardingMixin
+
+if TYPE_CHECKING:
+    from .auth import AuthAttempt
 
 
-class ServiceConnectorPlugin:
+class ServiceConnectorPlugin(RunnerForwardingMixin):
     """Plugin for discovering and consuming web services.
 
     Provides tools for:
@@ -71,6 +80,33 @@ class ServiceConnectorPlugin:
     def name(self) -> str:
         return "service_connector"
 
+    @classmethod
+    def get_apparmor_rules(
+        cls,
+        *,
+        workspace_path: str,
+        session_id: str,
+        config_root: Optional[str],
+        plugin_config: Dict[str, Any],
+    ) -> List[str]:
+        """Contribute service_connector host paths to the AppArmor profile.
+
+        Phase 3 of the plugin-apparmor-contribution refactor
+        (template v24, 2026-05-16).  Previously hardcoded in
+        ``apparmor.py:PROFILE_TEMPLATE``; sessions without the
+        service_connector plugin in ``profile.plugins`` no longer
+        carry the grants (least-privilege).
+
+        The plugin reads service definitions and schemas from the
+        user-tier directory at ``~/.jaato/services/``.  Read-only;
+        write paths live under the workspace tier (covered by the
+        framework-template workspace rule).
+        """
+        return [
+            "@{HOME}/.jaato/services/    r,",
+            "@{HOME}/.jaato/services/**  r,",
+        ]
+
     def _trace(self, msg: str) -> None:
         """Write trace message to log file for debugging."""
         trace_path = os.environ.get(
@@ -99,19 +135,63 @@ class ServiceConnectorPlugin:
         if workspace:
             self._workspace_path = workspace
 
+        # Pull config_root from the registry rather than only from the
+        # set_config_root() broadcast, which won't fire again for
+        # plugin instances re-initialized inside subagent
+        # ``JaatoSession.configure`` (the registry only broadcasts on
+        # ``set_*`` mutations, not on every expose_tool).  Reading from
+        # the registry here makes the override survive
+        # shutdown→initialize cycles.
+        #
+        # Note ``_plugin_registry`` is set by ``set_plugin_registry``
+        # which fires AFTER initialize, so the attribute may not exist
+        # on first init — ``getattr`` with default keeps the lookup
+        # safe in that case.  For re-init (subagent re-expose) the
+        # attribute exists and the lookup works.
+        config_root = config.get("config_root")
+        registry_for_lookup = getattr(self, "_plugin_registry", None)
+        if not config_root and registry_for_lookup is not None:
+            try:
+                config_root = registry_for_lookup.get_config_root()
+            except Exception:
+                config_root = None
+
         self._auth_manager = AuthManager()
         self._http_client = ServiceHttpClient(auth_manager=self._auth_manager)
         self._validator = SchemaValidator()
-        self._schema_store = SchemaStore(workspace_path=self._workspace_path)
+        self._schema_store = SchemaStore(
+            workspace_path=self._workspace_path,
+            config_root=config_root,
+        )
 
         self._initialized = True
-        self._trace(f"initialize: workspace={self._workspace_path}")
+        registry_present = registry_for_lookup is not None
+        self._trace(
+            f"initialize: workspace={self._workspace_path} "
+            f"config_root={config_root} "
+            f"registry_attached={registry_present} "
+            f"agent_name={config.get('agent_name')!r}"
+        )
 
     def shutdown(self) -> None:
         """Shutdown the service connector plugin."""
         self._trace("shutdown")
         self._discovered_services.clear()
         self._initialized = False
+
+    def reset_for_next_session(self) -> None:
+        """Cascade-sharing reset — NO-OP for this plugin.
+
+        Phase 1 hotfix (server 0.6.148+): added to satisfy the
+        ``ToolPlugin`` / ``EnrichmentPlugin`` protocol's runtime
+        ``isinstance`` check.  Per Daniel's litmus test (see
+        ``docs/design/runner-cascade-sharing.md`` §4.3), this
+        plugin holds no per-session state that the next cascade
+        session would benefit from having cleared.  Override in
+        future PRs if the litmus test changes.
+        """
+        pass
+
 
     # === Session Persistence ===
 
@@ -159,6 +239,29 @@ class ServiceConnectorPlugin:
             self._schema_store.set_workspace_path(path)
         self._trace(f"set_workspace_path: {path}")
 
+    def set_config_root(self, path: Optional[str]) -> None:
+        """Adopt the registry-broadcast ``config_root`` override.
+
+        Forwarded to the underlying :class:`SchemaStore` so the
+        workspace tier becomes ``<config_root>/services/`` instead of
+        ``<workspace>/.jaato/services/``.  When ``path`` is ``None``,
+        the schema store reverts to the workspace tier.
+        """
+        if self._schema_store:
+            self._schema_store.set_config_root(path)
+        self._trace(f"set_config_root: {path}")
+
+    def set_plugin_registry(self, registry) -> None:
+        """Store the plugin registry handle.
+
+        Called by :class:`PluginRegistry` after :meth:`initialize`.
+        The handle is used in subsequent re-inits (e.g. when a
+        subagent re-exposes this plugin with a different ``agent_name``
+        config) to fall back to ``registry.get_config_root()`` when
+        the per-call ``config`` dict doesn't carry one.
+        """
+        self._plugin_registry = registry
+
     def get_tool_schemas(self) -> List[ToolSchema]:
         """Return tool schemas for service connector tools."""
         return [
@@ -203,7 +306,7 @@ class ServiceConnectorPlugin:
                     "required": ["source", "alias"]
                 },
                 category="web",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
             ToolSchema(
                 name="list_endpoints",
@@ -234,7 +337,7 @@ class ServiceConnectorPlugin:
                     "required": ["service"]
                 },
                 category="web",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
             ToolSchema(
                 name="get_endpoint_schema",
@@ -261,14 +364,18 @@ class ServiceConnectorPlugin:
                     "required": ["service", "method", "path"]
                 },
                 category="web",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
             ToolSchema(
                 name="call_service",
                 description=(
                     "Execute an HTTP request. Can use a discovered service (with auth and "
                     "base URL) or a raw URL. Request body is validated against schema if "
-                    "available. Response is validated and truncated if too large."
+                    "available. Response is validated and truncated if too large. "
+                    "The response is bulk content: when you are scanning it for something "
+                    "specific, call grep_mode_start(pattern) first to have these responses "
+                    "filtered to matching lines (with context) instead of returned in full — "
+                    "this cuts context cost. grep_mode_stop restores full responses."
                 ),
                 parameters={
                     "type": "object",
@@ -283,11 +390,20 @@ class ServiceConnectorPlugin:
                         },
                         "method": {
                             "type": "string",
-                            "description": "HTTP method (GET, POST, PUT, DELETE, PATCH)"
+                            "description": "HTTP method (GET, POST, PUT, DELETE, PATCH).  Optional when ``endpoint`` is provided — auto-resolved from the endpoint YAML."
                         },
                         "path": {
                             "type": "string",
-                            "description": "Endpoint path (when using service)"
+                            "description": "Endpoint path (when using service).  Mutually exclusive with ``endpoint``: pass either the literal URL path here OR the endpoint YAML's basename in ``endpoint``."
+                        },
+                        "endpoint": {
+                            "type": "string",
+                            "description": (
+                                "Endpoint identifier — the YAML filename (without .yaml suffix) under "
+                                "<config_root>/services/<service>/.  When provided, the framework reads "
+                                "method + path from the YAML; agent doesn't need to know the URL "
+                                "structure.  Server 0.6.57+.  Mutually exclusive with ``path``."
+                            )
                         },
                         "query": {
                             "type": "object",
@@ -344,12 +460,18 @@ class ServiceConnectorPlugin:
                     "required": ["method"]
                 },
                 category="web",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
                 editable=EditableContent(
                     parameters=["method", "path", "url", "query", "headers", "body"],
                     format="json",
                     template="# Edit the request below. Save and exit to continue.\n",
                 ),
+                # call_service responses are bulk HTTP/registry payloads whose
+                # heavy data sits under structured keys (body/headers) — invisible
+                # to the text-field enrichment path.  This trait routes the full
+                # result through enrichment so result_grep can filter it while
+                # grep-mode is active.
+                traits=frozenset({TRAIT_GREPPABLE_CONTENT}),
             ),
             ToolSchema(
                 name="preview_request",
@@ -396,7 +518,7 @@ class ServiceConnectorPlugin:
                     "required": ["method"]
                 },
                 category="web",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
             ToolSchema(
                 name="save_schema",
@@ -433,7 +555,7 @@ class ServiceConnectorPlugin:
                     "required": ["service", "name", "schema"]
                 },
                 category="web",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
             ToolSchema(
                 name="list_schemas",
@@ -451,7 +573,7 @@ class ServiceConnectorPlugin:
                     "required": []
                 },
                 category="web",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
             ToolSchema(
                 name="import_bruno_collection",
@@ -478,7 +600,7 @@ class ServiceConnectorPlugin:
                     "required": ["path", "service_name"]
                 },
                 category="web",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
             ToolSchema(
                 name="configure_service_auth",
@@ -518,13 +640,17 @@ class ServiceConnectorPlugin:
                     "required": ["service", "auth"]
                 },
                 category="web",
-                discoverability="discoverable",
+                discoverability=DISCOVERABILITY_DEFERRED,
             ),
         ]
 
     def get_executors(self) -> Dict[str, Callable[[Dict[str, Any]], Any]]:
-        """Return the executor mapping."""
-        return {
+        """Return the executor mapping.
+
+        Phase 3 §3.6 wave 3: forwards via runner-RPC when a runner
+        is attached; falls through to in-process otherwise.
+        """
+        return self.wrap_executors_for_runner_forwarding({
             "discover_service": self._execute_discover_service,
             "list_endpoints": self._execute_list_endpoints,
             "get_endpoint_schema": self._execute_get_endpoint_schema,
@@ -536,7 +662,7 @@ class ServiceConnectorPlugin:
             "configure_service_auth": self._execute_configure_service_auth,
             # User command
             "services": lambda args: self.execute_user_command("services", args),
-        }
+        })
 
     def get_system_instructions(self) -> Optional[str]:
         """Return system instructions for the service connector tools."""
@@ -1035,24 +1161,36 @@ class ServiceConnectorPlugin:
     def _build_auth_context(
         service_config: 'ServiceConfig',
         resolved: bool,
+        attempts: Optional[List['AuthAttempt']] = None,
     ) -> Dict[str, Any]:
         """Build structured auth context for error diagnostics.
 
         Included in tool results when a named service returns 401/403
         or when an ``AuthError`` is raised before the request.  Gives
         the model enough context to diagnose the failure accurately
-        instead of guessing (e.g. "env var not available in this
-        session" vs "credentials expired or revoked").
+        — naming the exact provenance (``pass://...``, env var) and
+        the rotation command when known, instead of generic boilerplate.
 
         Args:
             service_config: The service configuration with auth details.
             resolved: ``True`` if the auth credentials were resolved
                 (env vars found) and the server rejected them.
                 ``False`` if resolution itself failed (env var missing).
+            attempts: Per-credential :class:`AuthAttempt` list captured
+                during ``AuthManager.get_auth_headers`` (or attached to
+                the ``AuthError`` on the failure path).  When provided,
+                each attempt contributes a ``credentials[]`` entry with
+                ``method`` / ``resolved_from`` / ``token_prefix`` /
+                ``token_len`` / ``rotation_hint`` fields.  The hint
+                text is sharpened to name the provenance and rotation
+                command verbatim when only one credential is involved
+                (the common bearer case).
 
         Returns:
-            Dict with ``auth_type``, ``service_name``, ``resolved``,
-            and a ``hint`` explaining the failure mode.
+            Dict with ``auth_type``, ``service_name``,
+            ``credentials_resolved``, ``credentials[]`` (per-credential
+            provenance), and a ``hint`` explaining the failure mode and
+            (when known) the exact rotation command to run.
         """
         auth = service_config.auth
         ctx: Dict[str, Any] = {
@@ -1061,35 +1199,120 @@ class ServiceConnectorPlugin:
             "credentials_resolved": resolved,
         }
 
-        # Include the env var name so the model can reference it
-        # accurately — but never include the actual value.
-        from .types import AuthType
-        if auth.type == AuthType.API_KEY and auth.value_env:
-            ctx["env_var"] = auth.value_env
-        elif auth.type == AuthType.BEARER and auth.value_env:
-            ctx["env_var"] = auth.value_env
-        elif auth.type == AuthType.BASIC:
-            if auth.username_env:
-                ctx["env_var_username"] = auth.username_env
-            if auth.password_env:
-                ctx["env_var_password"] = auth.password_env
-        elif auth.type == AuthType.OAUTH2_CLIENT:
-            ctx["auth_method"] = "oauth2_client_credentials"
+        # Build per-credential provenance entries from attempts.  When
+        # attempts is empty (legacy callers, or OAuth2 cache hit) fall
+        # back to the static *_env names so the model still has *some*
+        # provenance to reference.
+        credentials: List[Dict[str, Any]] = []
+        if attempts:
+            for attempt in attempts:
+                source = attempt.source
+                entry: Dict[str, Any] = {
+                    "method": source.method,
+                    "resolved": attempt.resolved,
+                }
+                if source.kind == "env" and source.env_var:
+                    entry["resolved_from"] = f"env://{source.env_var}"
+                    entry["env_var"] = source.env_var
+                elif source.kind == "uri" and source.uri:
+                    entry["resolved_from"] = source.uri
+                if source.rotation_hint:
+                    entry["rotation_hint"] = source.rotation_hint
+                if attempt.token_len is not None:
+                    entry["token_len"] = attempt.token_len
+                if attempt.token_prefix is not None:
+                    entry["token_prefix"] = attempt.token_prefix
+                credentials.append(entry)
+        else:
+            from .types import AuthType
+            if auth.type in (AuthType.API_KEY, AuthType.BEARER) and auth.value_env:
+                credentials.append({"env_var": auth.value_env})
+            elif auth.type == AuthType.BASIC:
+                if auth.username_env:
+                    credentials.append({
+                        "method": "basic.username",
+                        "env_var": auth.username_env,
+                    })
+                if auth.password_env:
+                    credentials.append({
+                        "method": "basic.password",
+                        "env_var": auth.password_env,
+                    })
+
+        if credentials:
+            ctx["credentials"] = credentials
 
         if resolved:
-            ctx["hint"] = (
-                "The credentials were found and sent, but the server "
-                "rejected them (401/403). This usually means the token "
-                "is expired or revoked — not a framework configuration "
-                "problem. Do NOT tell the user their config is broken."
-            )
+            # Build a concrete hint when there's a single secret-like
+            # credential with a known rotation command — that's the
+            # bearer/api_key case where the agent can recommend the
+            # exact `pass edit X/Y` to run.  Multi-credential or
+            # unknown-scheme cases get the generic message.
+            rotation_pointer: Optional[str] = None
+            provenance_pointer: Optional[str] = None
+            if attempts:
+                secret_attempts = [
+                    a for a in attempts if a.token_prefix is not None
+                ]
+                if len(secret_attempts) == 1:
+                    a = secret_attempts[0]
+                    if a.source.uri:
+                        provenance_pointer = a.source.uri
+                    elif a.source.env_var:
+                        provenance_pointer = f"env var {a.source.env_var}"
+                    rotation_pointer = a.source.rotation_hint
+
+            if provenance_pointer and rotation_pointer:
+                ctx["hint"] = (
+                    f"The credentials were resolved from {provenance_pointer} "
+                    f"and sent, but the server rejected them (401/403). "
+                    f"The token is almost certainly stale (expired or revoked). "
+                    f"Rotate it with: `{rotation_pointer}` and retry. "
+                    f"Do NOT tell the user their config is broken."
+                )
+            elif provenance_pointer:
+                ctx["hint"] = (
+                    f"The credentials were resolved from {provenance_pointer} "
+                    f"and sent, but the server rejected them (401/403). "
+                    f"The token is almost certainly stale (expired or revoked). "
+                    f"Ask the user to rotate the credential at the source. "
+                    f"Do NOT tell the user their config is broken."
+                )
+            else:
+                ctx["hint"] = (
+                    "The credentials were found and sent, but the server "
+                    "rejected them (401/403). This usually means the token "
+                    "is expired or revoked — not a framework configuration "
+                    "problem. Do NOT tell the user their config is broken."
+                )
         else:
-            ctx["hint"] = (
-                "The environment variable was not available in this "
-                "session context. This is a session/environment issue, "
-                "not a credential configuration problem. Report it as: "
-                "'environment variable not set in this session.'"
-            )
+            # Resolution failed.  Name the failing source explicitly
+            # when we have it so the user knows whether the issue is a
+            # missing env var or an unregistered secret-URI scheme.
+            failing: Optional[str] = None
+            if attempts:
+                for a in attempts:
+                    if not a.resolved:
+                        failing = a.source.provenance
+                        break
+
+            if failing:
+                ctx["hint"] = (
+                    f"Could not resolve the credential from {failing}. "
+                    f"For env vars: the variable is not set in this "
+                    f"session context. For secret URIs: either no "
+                    f"resolver is registered for the scheme (e.g. "
+                    f"jaato-premium not installed for `pass://`) or the "
+                    f"resolver returned an empty value. This is a "
+                    f"configuration issue, not a stale-credential issue."
+                )
+            else:
+                ctx["hint"] = (
+                    "The environment variable was not available in this "
+                    "session context. This is a session/environment issue, "
+                    "not a credential configuration problem. Report it as: "
+                    "'environment variable not set in this session.'"
+                )
 
         return ctx
 
@@ -1559,6 +1782,11 @@ class ServiceConnectorPlugin:
         url = args.get("url", "").strip()
         method = args.get("method", "").upper()
         path = args.get("path", "").strip()
+        # Server 0.6.57+: endpoint identifier (YAML basename).  When
+        # present, framework auto-resolves method + path from the
+        # endpoint YAML.  Mutually exclusive with ``path`` — passing
+        # both is rejected to keep the resolution path unambiguous.
+        endpoint_id = args.get("endpoint", "").strip()
         query = args.get("query")
         headers = args.get("headers")
         body = args.get("body")
@@ -1576,36 +1804,116 @@ class ServiceConnectorPlugin:
             f"{f', save_to={save_to}' if save_to else ''}"
         )
 
-        if not method:
+        # Server 0.6.57+: ``endpoint`` and ``path`` are mutually exclusive.
+        # Passing both creates ambiguity over which one drives URL
+        # resolution.  Reject loudly so the agent is forced to pick.
+        if endpoint_id and path:
+            return {
+                "error": (
+                    "``endpoint`` and ``path`` are mutually exclusive — "
+                    "pass either the endpoint YAML basename in ``endpoint`` "
+                    "OR the literal URL path in ``path``, not both."
+                )
+            }
+
+        # Method becomes optional when ``endpoint`` is provided — the
+        # endpoint YAML's ``method:`` field is authoritative.  When
+        # neither endpoint nor method is supplied, fall through to the
+        # existing "method is required" check.
+        if not method and not endpoint_id:
             return {"error": "method is required"}
         if not url and not service_name:
             return {"error": "Either url or service is required"}
 
-        # Get service config and endpoint schema
+        # Get service config and endpoint schema.
+        #
+        # Precedence: hand-curated manual definitions
+        # (``<base>/<name>/_service.yaml``, version-controlled by the
+        # operator) ALWAYS win over model-discovered ones
+        # (``<base>/_discovered/<name>.yaml``, written by
+        # ``discover_service``).  ``load_service_config`` already
+        # encodes this precedence — manual is checked before
+        # discovered within each tier.  We try it first so a stale or
+        # malformed discovered entry can never shadow a curated config.
         service_config = None
         endpoint_schema = None
 
         if service_name:
-            discovered = self._get_service(service_name)
-            if discovered:
-                service_config = discovered.config
-                # Find endpoint schema for validation
-                if path:
-                    for ep in discovered.endpoints:
-                        if ep.method == method and ep.path == path:
-                            endpoint_schema = ep
-                            break
-
-            # Also check manual config
-            if not service_config and self._schema_store:
+            if self._schema_store:
                 service_config = self._schema_store.load_service_config(service_name)
-                if path:
+                if service_config and endpoint_id:
+                    # Server 0.6.57+: endpoint-by-name lookup.  Match
+                    # the YAML basename against ``list_endpoint_schemas``
+                    # tuples.  The schema's ``path`` and ``method``
+                    # become the request's path and method (the latter
+                    # only when the agent didn't pass ``method``).
+                    for ep_name, schema in self._schema_store.list_endpoint_schemas(service_name):
+                        if ep_name == endpoint_id:
+                            endpoint_schema = schema
+                            path = schema.path
+                            if not method:
+                                method = schema.method.upper()
+                            break
+                    if endpoint_schema is None:
+                        return {
+                            "error": (
+                                f"Endpoint '{endpoint_id}' not found in service "
+                                f"'{service_name}' — list_endpoint_schemas() "
+                                f"returned no YAML with that basename."
+                            )
+                        }
+                if service_config and path and endpoint_schema is None:
                     endpoint_schema = self._schema_store.find_endpoint(
                         service_name, method, path
                     )
 
+            # Fall back to the in-memory / discovered cache only when
+            # no manual config exists for this name.  This still
+            # supports services that were discovered but never given a
+            # ``_service.yaml`` file.
+            if not service_config:
+                discovered = self._get_service(service_name)
+                if discovered:
+                    service_config = discovered.config
+                    if endpoint_id:
+                        # Server 0.6.57+: discovered services may carry
+                        # named endpoints too.  Match by ``ep.name`` if
+                        # the schema exposes it; otherwise fall through
+                        # to path-match below.
+                        for ep in discovered.endpoints:
+                            ep_basename = getattr(ep, "name", None)
+                            if ep_basename == endpoint_id:
+                                endpoint_schema = ep
+                                path = ep.path
+                                if not method:
+                                    method = ep.method.upper()
+                                break
+                        if endpoint_schema is None:
+                            return {
+                                "error": (
+                                    f"Endpoint '{endpoint_id}' not found in "
+                                    f"discovered service '{service_name}'."
+                                )
+                            }
+                    if path and endpoint_schema is None:
+                        for ep in discovered.endpoints:
+                            if ep.method == method and ep.path == path:
+                                endpoint_schema = ep
+                                break
+
             if not service_config:
                 return {"error": f"Service not found: {service_name}"}
+
+            # Server 0.6.57+: re-validate that we now have a method.
+            # The earlier check let endpoint_id slip through without
+            # method; if no schema resolved a method, we still need it.
+            if not method:
+                return {
+                    "error": (
+                        "method is required (and could not be inferred from "
+                        f"endpoint='{endpoint_id}')"
+                    )
+                }
 
         # Determine SSL verification: skip if insecure or service is trusted
         verify_ssl = True
@@ -1690,10 +1998,14 @@ class ServiceConnectorPlugin:
 
             # Augment 401/403 responses with auth context so the model
             # can diagnose accurately (e.g. "env var not set in this
-            # session" vs "credentials expired").
+            # session" vs "credentials expired").  attempts come back
+            # via response.auth_attempts (populated by ServiceHttpClient
+            # during get_auth_headers).
             if response.status in (401, 403) and service_config and service_config.auth:
                 result["auth_context"] = self._build_auth_context(
-                    service_config, resolved=True
+                    service_config,
+                    resolved=True,
+                    attempts=response.auth_attempts,
                 )
 
             return result
@@ -1701,11 +2013,14 @@ class ServiceConnectorPlugin:
         except AuthError as e:
             # Auth failed before the request — env var missing or
             # placeholder didn't resolve.  Include structured context
-            # so the model reports accurately.
+            # so the model reports accurately.  AuthError carries the
+            # partial attempts list captured up to the failure point.
             result: Dict[str, Any] = {"error": f"Authentication error: {e}"}
             if service_config and service_config.auth:
                 result["auth_context"] = self._build_auth_context(
-                    service_config, resolved=False
+                    service_config,
+                    resolved=False,
+                    attempts=e.attempts,
                 )
             return result
         except HttpClientError as e:
