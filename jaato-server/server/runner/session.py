@@ -1132,6 +1132,23 @@ def _build_session(
             "(falling back to single-model mode): %s", exc,
         )
 
+    # Budget control: the envelope carries the profile's re-serialised
+    # ``budget_control`` (v5).  Re-parse + validate on this side of the
+    # process boundary; a rejected block degrades to UNBUDGETED with a
+    # warning rather than aborting the runner — same posture as tier
+    # config above (an operator gets an unbudgeted session, not a hard
+    # bootstrap failure).
+    budget_control = None
+    try:
+        from shared.budget_control import BudgetControlConfig
+        budget_control = BudgetControlConfig.from_dict(
+            envelope.budget_control or None)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            'runner-session bootstrap: budget_control rejected '
+            '(session runs unbudgeted): %s', exc,
+        )
+
     return runtime.create_session(
         model=envelope.model_name,
         # PR #240 (2026-06-07) attempted to fix the same bug at
@@ -1161,6 +1178,7 @@ def _build_session(
             _processors_from_envelope(envelope) or None
         ),
         tier_config=tier_config,
+        budget_control=budget_control,
         # Per-plugin tool allow-lists (profile ``tools:[...]`` modifier),
         # threaded from the envelope so scoped-out tools are absent from
         # this runner session's wire body + grammar surface.

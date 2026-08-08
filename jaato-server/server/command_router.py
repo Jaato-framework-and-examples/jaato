@@ -235,6 +235,18 @@ class CommandRouter:
                 self._handle_cascade_unregister(client_id, event.args)
                 return
 
+            elif cmd == "cascade.budget.set":
+                self._handle_cascade_budget_set(client_id, event.args, event.payload)
+                return
+
+            elif cmd == "cascade.budget.get":
+                self._handle_cascade_budget_get(client_id, event.args)
+                return
+
+            elif cmd == "cascade.budget.clear":
+                self._handle_cascade_budget_clear(client_id, event.args)
+                return
+
             elif cmd == "cascade.cancel":
                 self._handle_cascade_cancel(client_id, event.args)
                 return
@@ -650,6 +662,96 @@ class CommandRouter:
         else:
             # Session creation failed (e.g., missing MODEL_NAME).
             self._hint_available_auth_providers(client_id)
+
+    def _handle_cascade_budget_set(
+        self, client_id: str, args: list, payload: Any = None,
+    ) -> None:
+        """Handle ``cascade.budget.set`` — declare a cascade's AGGREGATE cap.
+
+        Wire: ``args = [cascade_driver_id]``, ``payload = {"limits": {...},
+        "degrade": [...]}`` (the same ``budget_control`` shape a profile
+        uses, so authors write one grammar).
+
+        Declared on the cascade OWNER rather than a profile because a cap is
+        a runtime aggregate over one live cid, not a property of a reusable
+        template — see docs/design/budget-control-degradation.md §3.1.
+        """
+        from jaato_sdk.events import ErrorEvent, SystemMessageEvent
+        from shared.budget_control import BudgetControlConfig
+
+        if not args:
+            self._event_sink.send_event(client_id, ErrorEvent(
+                error=("cascade.budget.set requires args: [cascade_driver_id] "
+                       "and a payload of {limits, degrade}"),
+                error_type="UsageError", recoverable=True))
+            return
+        cid = args[0]
+        try:
+            config = BudgetControlConfig.from_dict(payload or {})
+        except Exception as exc:  # noqa: BLE001 — author error, not a crash
+            self._event_sink.send_event(client_id, ErrorEvent(
+                error=f"cascade.budget.set: invalid budget: {exc}",
+                error_type="UsageError", recoverable=True))
+            return
+        if config is None:
+            self._event_sink.send_event(client_id, ErrorEvent(
+                error="cascade.budget.set: payload declared no limits",
+                error_type="UsageError", recoverable=True))
+            return
+        self._session_manager.set_cascade_budget(cid, config)
+        self._event_sink.send_event(client_id, SystemMessageEvent(
+            message=(f"cascade.budget.set: cid={cid} "
+                     f"limits={dict(config.limits)}"),
+            level="info"))
+
+    def _handle_cascade_budget_get(self, client_id: str, args: list) -> None:
+        """Handle ``cascade.budget.get`` — report a cascade's headroom.
+
+        Replies with a ``SystemMessageEvent`` carrying JSON:
+        ``{"cascade_driver_id", "limits", "remaining", "usage_fraction",
+        "pressure"}``, or ``{"declared": false}`` when the cid is uncapped.
+
+        This is the client-side witness for the pool depleting across
+        stages — independent corroboration of the daemon's clamp decision
+        rather than only the framework reporting what it decided.
+        """
+        import json
+        from jaato_sdk.events import ErrorEvent, SystemMessageEvent
+
+        if not args:
+            self._event_sink.send_event(client_id, ErrorEvent(
+                error="cascade.budget.get requires args: [cascade_driver_id]",
+                error_type="UsageError", recoverable=True))
+            return
+        cid = args[0]
+        pool = self._session_manager.get_cascade_budget(cid)
+        if pool is None:
+            body = {"cascade_driver_id": cid, "declared": False}
+        else:
+            body = {
+                "cascade_driver_id": cid,
+                "declared": True,
+                "limits": dict(pool.config.limits),
+                "remaining": pool.remaining(),
+                "usage_fraction": pool.usage_fraction(),
+                "pressure": pool.describe_pressure(),
+            }
+        self._event_sink.send_event(client_id, SystemMessageEvent(
+            message=json.dumps(body), level="info"))
+
+    def _handle_cascade_budget_clear(self, client_id: str, args: list) -> None:
+        """Handle ``cascade.budget.clear`` — drop a cascade's pool."""
+        from jaato_sdk.events import ErrorEvent, SystemMessageEvent
+
+        if not args:
+            self._event_sink.send_event(client_id, ErrorEvent(
+                error="cascade.budget.clear requires args: [cascade_driver_id]",
+                error_type="UsageError", recoverable=True))
+            return
+        cid = args[0]
+        self._session_manager.clear_cascade_budget(cid)
+        self._event_sink.send_event(client_id, SystemMessageEvent(
+            message=f"cascade.budget.clear: cid={cid}", level="info"))
 
     def _handle_cascade_register(self, client_id: str, args: list) -> None:
         """Handle ``cascade.register`` command (Phase 2 cascade-as-client).

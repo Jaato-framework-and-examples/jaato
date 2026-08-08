@@ -1554,6 +1554,23 @@ class RunnerRPCClient:
             timeout=timeout,
         )
 
+    async def session_get_budget_usage(
+        self, *, timeout: Optional[float] = 5.0,
+    ) -> Dict[str, Any]:
+        """The session's ABSOLUTE budget consumption, per dimension."""
+        result = await self._call_named(
+            "session.get_budget_usage", {}, timeout=timeout,
+        )
+        return dict(result.get("usage", {}))
+
+    def session_get_budget_usage_threadsafe(
+        self, *, timeout: Optional[float] = 5.0,
+    ) -> Dict[str, Any]:
+        return self._run_threadsafe(
+            self.session_get_budget_usage(timeout=timeout),
+            timeout=timeout,
+        )
+
     async def session_get_turn_accounting(
         self, *, timeout: Optional[float] = 10.0,
     ) -> list:

@@ -4305,6 +4305,7 @@ export type CacheCreationTokens = number | null;
 export type ReasoningTokens = number | null;
 export type ThinkingTokens = number | null;
 export type CostUsd = number | null;
+export type SpendTotalTokens = number | null;
 export type ContextLimit = number;
 export type PercentUsed = number;
 export type TokensRemaining = number;
@@ -5275,6 +5276,9 @@ export type Timestamp41 = string;
 export type Error3 = string;
 export type ErrorType2 = string;
 export type Recoverable = boolean;
+export type Details = {
+  [k: string]: unknown;
+} | null;
 /**
  * All event types in the protocol.
  */
@@ -6259,6 +6263,9 @@ export type PreloadedPlugins = string[];
 export type Model = string | null;
 export type Provider = string | null;
 export type MaxTurns = number;
+export type BudgetControl = {
+  [k: string]: unknown;
+} | null;
 export type Gc = {
   [k: string]: unknown;
 } | null;
@@ -14273,6 +14280,7 @@ export interface UsageBreakdown {
   reasoning_tokens?: ReasoningTokens;
   thinking_tokens?: ThinkingTokens;
   cost_usd?: CostUsd;
+  spend_total_tokens?: SpendTotalTokens;
 }
 /**
  * GC configuration snapshot for the active session.
@@ -14395,6 +14403,7 @@ export interface ErrorEvent {
   error?: Error3;
   error_type?: ErrorType2;
   recoverable?: Recoverable;
+  details?: Details;
 }
 /**
  * API retry notification with exponential backoff.
@@ -14536,6 +14545,7 @@ export interface ProfileSummary {
   provider?: Provider;
   max_turns?: MaxTurns;
   model_tiers?: ModelTiers;
+  budget_control?: BudgetControl;
   gc?: Gc;
   runtime_limits?: RuntimeLimits;
   completion_payload_schema?: CompletionPayloadSchema;

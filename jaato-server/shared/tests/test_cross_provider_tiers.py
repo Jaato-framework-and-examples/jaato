@@ -48,8 +48,10 @@ def _session(tier_dict):
         _created=created, _cfgs=cfgs,
     )
     s._provider_cache["zhipuai"] = s._provider
-    # Bind the real helper so switch_tier's self._provider_for_tier resolves.
+    # Bind the real helpers so switch_tier's self._* calls resolve.
     s._provider_for_tier = lambda pn, m: JaatoSession._provider_for_tier(s, pn, m)
+    s._is_connected_to = lambda e: JaatoSession._is_connected_to(s, e)
+    s._connect_tier_entry = lambda e: JaatoSession._connect_tier_entry(s, e)
     return s
 
 

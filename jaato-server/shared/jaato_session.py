@@ -109,6 +109,7 @@ if TYPE_CHECKING:
     from .plugins.telemetry import TelemetryPlugin
     from .plugins.thinking import ThinkingPlugin
     from .model_tiers import ModelTierConfig
+    from .budget_control import BudgetControlConfig, BudgetTracker
 
 # Import framework instruction for tool result injection
 from .jaato_runtime import _TASK_COMPLETION_INSTRUCTION
@@ -428,6 +429,23 @@ class JaatoSession:
         # is registered, no system-prompt augmentation, the provider
         # uses the legacy ``self._model_name``.
         self._tier_config: Optional['ModelTierConfig'] = None
+        # Budget control (shared/budget_control.py).  ``None`` = unbudgeted,
+        # which is the default and the pre-existing behaviour.  When set, the
+        # tracker accumulates spend from the SAME accounting the session
+        # already does (no new measurement path) and returns degrade rungs to
+        # apply.  ``_budget_terminal_action`` latches the last terminal action
+        # a rung asked for, so a caller can see WHY a session wound down.
+        self._budget_tracker: Optional['BudgetTracker'] = None
+        self._budget_terminal_action: Optional[str] = None
+        # Set once an ``abort`` rung fires.  Gates EVERY subsequent turn —
+        # see ``_refuse_if_budget_exhausted``.  Distinct from
+        # ``_budget_terminal_action`` (which also latches finalize/escalate,
+        # neither of which stops anything).
+        self._budget_exhausted_reason: Optional[str] = None
+        # True when the LAST send_message was refused by the budget gate
+        # (no turn ran).  Read runner-side to suppress the post-turn
+        # TurnCompletedEvent — see ``was_last_send_refused``.
+        self._last_send_refused: bool = False
         self._active_tier: Optional[str] = None
 
         # Spawn-time parameters passed to this session by the caller
@@ -1935,6 +1953,7 @@ class JaatoSession:
         workspace_path: Optional[str] = None,
         completion_payload_schema: Optional[Any] = None,
         tier_config: Optional['ModelTierConfig'] = None,
+        budget_control: Optional['BudgetControlConfig'] = None,
         agent_params: Optional[Dict[str, Any]] = None,
         completion_processors: Optional[List[Any]] = None,
         tool_scopes: Optional[Dict[str, List[str]]] = None,
@@ -2026,6 +2045,17 @@ class JaatoSession:
         # provider connects to the right model from turn 0.  The active
         # tier is set to the config's initial_tier.  When None, the
         # session stays in single-model mode (legacy behaviour).
+        # Budget control: build the tracker once per session.  Kept next to
+        # the tier wiring because a degrade rung REBINDS the tier table this
+        # block just installed.
+        if budget_control is not None:
+            from .budget_control import BudgetTracker
+            self._budget_tracker = BudgetTracker(budget_control)
+            logger.info(
+                "Budget control active: limits=%s, %d degrade rung(s)",
+                dict(budget_control.limits), len(budget_control.degrade),
+            )
+
         if tier_config is not None:
             self._tier_config = tier_config
             self._active_tier = tier_config.initial_tier
@@ -3970,6 +4000,17 @@ NOTES
         Raises:
             RuntimeError: If session is not configured.
         """
+        # Budget ceiling: refuse rather than silently serve an
+        # over-budget turn.  See _refuse_if_budget_exhausted.
+        _refusal = self._refuse_if_budget_exhausted()
+        self._last_send_refused = _refusal is not None
+        if _refusal is not None:
+            logger.info("refusing turn: %s", _refusal)
+            if on_output:
+                on_output("system", f"[{_refusal} — session will not run "
+                                    f"further turns]", "write")
+            return f"[{_refusal}]"
+
         if not self._configured:
             raise RuntimeError("Session not configured. Call configure() first.")
 
@@ -5073,6 +5114,16 @@ NOTES
             'prompt': 0,
             'output': 0,
             'total': 0,
+            # ``total`` is the LAST response's total_tokens, which for a
+            # prompt-inclusive provider is the end-of-turn CONTEXT SIZE — what
+            # GC and the context displays want.  It is NOT what the turn cost:
+            # a turn with a tool call has >=2 responses and each is billed, so
+            # summing responses is the SPEND.  Both are legitimate and
+            # different consumers want different ones; conflating them
+            # undercounted a real 3-turn run by 41%.
+            'spend_total': 0,
+            'spend_prompt': 0,
+            'spend_output': 0,
             'start_time': turn_start.isoformat(),
             'end_time': None,
             'duration_seconds': None,
@@ -5559,6 +5610,7 @@ NOTES
             turn_end = datetime.now()
             turn_data['end_time'] = turn_end.isoformat()
             turn_data['duration_seconds'] = (turn_end - turn_start).total_seconds()
+            self._budget_observe_turn(turn_data)
 
             if turn_data['total'] > 0:
                 self._turn_accounting.append(turn_data)
@@ -7728,6 +7780,17 @@ NOTES
             turn_tokens['prompt'] = response.usage.prompt_tokens
             turn_tokens['output'] = response.usage.output_tokens
             turn_tokens['total'] = response.usage.total_tokens
+            # SPEND accumulates where the replaced fields do not.  This is
+            # the correct hook precisely because it runs exactly ONCE per
+            # response on every path; the streaming usage-callback does not
+            # (it is streaming-only, and a provider emitting more than one
+            # usage chunk per response would double-count there).
+            turn_tokens['spend_total'] = (
+                turn_tokens.get('spend_total', 0) + response.usage.total_tokens)
+            turn_tokens['spend_prompt'] = (
+                turn_tokens.get('spend_prompt', 0) + response.usage.prompt_tokens)
+            turn_tokens['spend_output'] = (
+                turn_tokens.get('spend_output', 0) + response.usage.output_tokens)
 
         # Cache tokens: replace when present (same semantics as prompt/output)
         if response.usage.cache_read_tokens is not None:
@@ -7766,8 +7829,212 @@ NOTES
         # This ensures the budget snapshot includes current turn's conversation tokens
         self._update_conversation_budget()
 
+    def get_budget_usage(self) -> Dict[str, float]:
+        """This session's ABSOLUTE budget consumption, per dimension.
+
+        The authoritative figure: it is what the per-session
+        :class:`BudgetTracker` accumulated per RESPONSE, which is the same
+        number the tracker's own percentage reports come from.  Callers
+        reconcile a cascade pool against this rather than summing an event
+        stream — events have proven both duplicable (turn.progress re-emits)
+        and droppable (a cancelled turn's TurnCompletedEvent).
+
+        Falls back to summing ``spend_total`` over ``turn_accounting`` when
+        the session has no tracker (unbudgeted sessions still contribute to
+        a cascade pool).  Returns ``{}`` when neither source has anything.
+        """
+        if self._budget_tracker is not None:
+            return self._budget_tracker.usage.as_dict()
+        spend = sum(
+            int(t.get("spend_total", 0) or 0) for t in self._turn_accounting
+        )
+        return {"tokens": float(spend)} if spend else {}
+
+    def was_last_send_refused(self) -> bool:
+        """True when the last ``send_message`` was refused by the budget gate.
+
+        Read by the runner RPC handler to SUPPRESS the post-turn
+        ``TurnCompletedEvent``.  A refused turn never ran, so reporting it as
+        completed is doubly wrong: the handler sources its payload from
+        ``turn_accounting[-1]``, and a refused turn appends nothing — so the
+        event would carry the PREVIOUS turn's tokens and duration again.  A
+        client counting turns over-counts; one summing tokens double-counts.
+
+        The refusal is still visible to the client as an
+        ``on_output("system", ...)`` line, so suppressing the event loses no
+        information.
+        """
+        return self._last_send_refused
+
+    def _refuse_if_budget_exhausted(self) -> Optional[str]:
+        """Return a refusal reason when an ``abort`` rung has already fired.
+
+        ``abort`` wires to :meth:`request_stop`, which is a COOPERATIVE
+        cancel of the in-flight turn — it neither terminates the session nor
+        refuses later input.  Combined with rung latching (the 100% rung
+        fires once and never again), that made every turn after the first
+        abort effectively unbudgeted: a client that simply kept sending ran
+        a ``turns: 4`` budget to 8 turns.
+
+        So the ceiling is enforced HERE instead: once exhausted, the session
+        refuses further turns rather than silently serving them.  Budget
+        exhaustion means "this session is done", not "cancel this turn".
+        """
+        return self._budget_exhausted_reason
+
+    def _budget_observe_response(self, response: ProviderResponse) -> None:
+        """Feed one model response's spend to the tracker, then apply rungs.
+
+        Tokens come from the response's own usage; cost is resolved through
+        the SAME precedence the telemetry span uses
+        (``_resolve_span_cost``: provider-reported -> pricing table -> None).
+        A ``None`` cost leaves the ``usd`` dimension untouched — a budget
+        must never hard-stop on a number it invented.
+        """
+        if self._budget_tracker is None:
+            return
+        usage = getattr(response, "usage", None)
+        if usage is None:
+            return
+        try:
+            fired = self._budget_tracker.observe(
+                tokens=int(getattr(usage, "total_tokens", 0) or 0),
+                usd=self._resolve_span_cost(usage),
+            )
+            self._apply_budget_rungs(fired)
+        except Exception as exc:  # noqa: BLE001
+            # Budgeting is a guardrail, not part of the turn's contract —
+            # never let it break a live turn.
+            logger.warning("budget: response observation failed: %s", exc)
+
+    def _budget_observe_turn(self, turn_data: Dict[str, Any]) -> None:
+        """Feed one completed turn's wall-clock / tool-call / turn count."""
+        if self._budget_tracker is None:
+            return
+        try:
+            fired = self._budget_tracker.observe(
+                turns=1,
+                seconds=turn_data.get("duration_seconds") or 0.0,
+                tool_calls=len(turn_data.get("function_calls") or ()),
+            )
+            self._apply_budget_rungs(fired)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("budget: turn observation failed: %s", exc)
+
+    def _apply_budget_rungs(self, fired) -> None:
+        """Apply the degrade rungs that just crossed their threshold.
+
+        Two effects, per ``docs/design/budget-control-degradation.md``:
+
+        * **Overlay** — rebind entries in the live tier table (a brownout).
+          The tier vocabulary and the model's cognitive role are untouched;
+          only the model each tier points at changes.  When the rebind hits
+          the tier the session is CURRENTLY in, the provider is re-connected
+          immediately — ``switch_tier`` alone would not, because the tier
+          name has not changed (see ``_is_connected_to``).
+        * **Terminal action** — ``abort`` stops the run via the existing
+          cooperative cancel; ``finalize`` / ``escalate`` are latched on
+          ``_budget_terminal_action`` and surfaced, for the reactor layer to
+          act on (that layer already owns agent-directed actions such as
+          prompt injection).
+        """
+        if not fired:
+            return
+        from .budget_control import ACTION_ABORT, overlay_tier_table
+
+        for rung in fired:
+            detail = self._budget_tracker.describe_pressure()
+            if rung.model_tiers:
+                if self._tier_config is None:
+                    # Rejected by the profile validator, but a session can be
+                    # built without going through it (inline specs, tests).
+                    logger.warning(
+                        "budget: degrade rung at %.0f%% declares a model_tiers "
+                        "overlay but the session has no tier config; ignoring",
+                        rung.at_percent,
+                    )
+                else:
+                    changes = overlay_tier_table(
+                        self._tier_config.tiers, rung.model_tiers)
+                    if changes:
+                        logger.info(
+                            "budget: degrading at %.0f%% (%s) — rebound %s",
+                            rung.at_percent, detail,
+                            "; ".join(f"{k}: {v}" for k, v in changes.items()),
+                        )
+                        self._reconnect_active_tier_if_rebound()
+                        self._surface_budget_event(
+                            f"budget {detail}: degraded "
+                            + "; ".join(f"{k} {v}" for k, v in changes.items())
+                        )
+            if rung.action:
+                self._budget_terminal_action = rung.action
+                logger.info(
+                    "budget: terminal action '%s' at %.0f%% (%s)",
+                    rung.action, rung.at_percent, detail,
+                )
+                self._surface_budget_event(
+                    f"budget {detail}: {rung.action}")
+                if rung.action == ACTION_ABORT:
+                    # Latch FIRST: request_stop only cancels the IN-FLIGHT
+                    # turn (cooperative cancel).  Without the latch the next
+                    # send_message would run unbudgeted — the rungs are
+                    # latched so the 100% rung never re-fires — and the
+                    # "ceiling" would be a one-shot interrupt the client can
+                    # simply talk past.  A ceiling that only cancels one turn
+                    # is not a ceiling.
+                    self._budget_exhausted_reason = f"budget_exhausted ({detail})"
+                    self.request_stop(self._budget_exhausted_reason)
+
+    def _reconnect_active_tier_if_rebound(self) -> None:
+        """Re-point the provider when the ACTIVE tier's binding just changed.
+
+        The load-bearing half of a brownout: without this the overlay would
+        sit in the tier table and only take effect the next time the agent
+        happened to leave and re-enter the tier.
+        """
+        if self._tier_config is None or self._active_tier is None:
+            return
+        try:
+            _, entry = self._tier_config.model_for(self._active_tier)
+            if self._is_connected_to(entry):
+                return
+            self._connect_tier_entry(entry)
+            self._model_name = entry.model
+            logger.info(
+                "budget: active tier '%s' re-pointed at %s",
+                self._active_tier, entry.model,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("budget: re-connect after degrade failed: %s", exc)
+
+    def _surface_budget_event(self, message: str) -> None:
+        """Make a budget decision visible to the client (best-effort).
+
+        Uses ``_current_output_callback`` — the SAME per-turn channel the
+        rest of the session emits ``on_output("system", ...)`` through.
+
+        An earlier version routed this through ``self._ui_hooks``, which is
+        never set on the runner path (the live production path), so every
+        budget decision was silently dropped and the only evidence a budget
+        had acted at all was a server-side log line.  ``on_agent_output``
+        appears nowhere else in this file — that was the tell.
+        """
+        callback = self._current_output_callback
+        if callback is None:
+            return
+        try:
+            callback("system", f"[{message}]", "write")
+        except Exception:  # noqa: BLE001
+            pass
+
     def _record_token_usage(self, response: ProviderResponse) -> None:
-        """Record token usage to ledger if available."""
+        """Record token usage to the ledger (if any) and the budget tracker.
+
+        The budget observation runs FIRST and unconditionally: budgeting must
+        not silently depend on a ledger being configured.
+        """
+        self._budget_observe_response(response)
         if not self._runtime.ledger:
             return
 
@@ -8571,6 +8838,16 @@ NOTES
         on_output: OutputCallback
     ) -> str:
         """Send a message with custom Part objects."""
+        # Budget ceiling: refuse rather than silently serve an
+        # over-budget turn.  See _refuse_if_budget_exhausted.
+        _refusal = self._refuse_if_budget_exhausted()
+        if _refusal is not None:
+            logger.info("refusing turn: %s", _refusal)
+            if on_output:
+                on_output("system", f"[{_refusal} — session will not run "
+                                    f"further turns]", "write")
+            return f"[{_refusal}]"
+
         if not self._configured:
             raise RuntimeError("Session not configured.")
         self._ensure_provider()
@@ -8593,6 +8870,16 @@ NOTES
             'prompt': 0,
             'output': 0,
             'total': 0,
+            # ``total`` is the LAST response's total_tokens, which for a
+            # prompt-inclusive provider is the end-of-turn CONTEXT SIZE — what
+            # GC and the context displays want.  It is NOT what the turn cost:
+            # a turn with a tool call has >=2 responses and each is billed, so
+            # summing responses is the SPEND.  Both are legitimate and
+            # different consumers want different ones; conflating them
+            # undercounted a real 3-turn run by 41%.
+            'spend_total': 0,
+            'spend_prompt': 0,
+            'spend_output': 0,
             'start_time': turn_start.isoformat(),
             'end_time': None,
             'duration_seconds': None,
@@ -8848,6 +9135,7 @@ NOTES
             turn_end = datetime.now()
             turn_data['end_time'] = turn_end.isoformat()
             turn_data['duration_seconds'] = (turn_end - turn_start).total_seconds()
+            self._budget_observe_turn(turn_data)
 
             if turn_data['total'] > 0:
                 self._turn_accounting.append(turn_data)
@@ -9354,6 +9642,46 @@ NOTES
         self._provider_cache[provider_name] = prov
         return prov
 
+    def _is_connected_to(self, entry) -> bool:
+        """True if the live provider is already serving ``entry``'s binding.
+
+        Compares the resolved (model, provider) pair rather than the tier
+        name, so an in-place rebind of the active tier is correctly seen as
+        a CHANGE.  ``entry.provider`` of ``None`` means "the session's own
+        provider", which is by definition the active one.
+        """
+        if self._provider is None:
+            return True  # nothing to reconnect
+        if self._model_name != entry.model:
+            return False
+        return entry.provider is None or entry.provider == self._active_provider_name
+
+    def _connect_tier_entry(self, entry) -> None:
+        """Point the session's provider at ``entry``'s (provider, model).
+
+        Shared by ``switch_tier`` (model-driven, via ``enter_tier``) and by
+        budget-control degradation (framework-driven, after a rung rebinds
+        the active tier).  Cross-provider entries swap ``self._provider`` to
+        the cached instance for that provider — history is provider-neutral
+        (Message/Part), so the conversation flows across the swap.
+        """
+        if self._provider is None:
+            return
+        target_provider = entry.provider
+        try:
+            if target_provider and target_provider != self._active_provider_name:
+                self._provider = self._provider_for_tier(
+                    target_provider, entry.model)
+                self._active_provider_name = target_provider
+            self._provider.connect(entry.model, skip_model_test=True)
+        except Exception as exc:
+            logger.warning(
+                "tier connect to %s/%s failed: %s",
+                target_provider or self._active_provider_name,
+                entry.model, exc,
+            )
+            raise
+
     def switch_tier(self, requested_tier: str) -> Dict[str, Any]:
         """Switch the session's active model tier.
 
@@ -9392,7 +9720,15 @@ NOTES
 
         actual_tier, entry = self._tier_config.model_for(requested_tier)
 
-        if actual_tier == self._active_tier:
+        # Short-circuit on the RESOLVED ENTRY, not merely the tier name.
+        # A budget-control degrade rung can REBIND the active tier's model
+        # in place (planner: opus -> flash); the tier name is unchanged, so a
+        # name-only comparison would report "already_at_tier" and never
+        # re-connect — the rebind would silently not take effect until the
+        # agent happened to leave and re-enter the tier.  Comparing the
+        # resolved (model, provider) closes that hole while keeping the
+        # genuine no-op cheap.
+        if actual_tier == self._active_tier and self._is_connected_to(entry):
             return {
                 "status": "already_at_tier",
                 "active_tier": actual_tier,
@@ -9400,25 +9736,7 @@ NOTES
                 "model": entry.model,
             }
 
-        if self._provider is not None:
-            target_provider = entry.provider
-            try:
-                if target_provider and target_provider != self._active_provider_name:
-                    # V2 cross-provider tier: swap self._provider to the cached
-                    # (or newly-created) instance for this tier's provider, then
-                    # point it at the tier's model.  History is provider-neutral
-                    # (Message/Part), so the conversation flows across the swap.
-                    self._provider = self._provider_for_tier(
-                        target_provider, entry.model)
-                    self._active_provider_name = target_provider
-                self._provider.connect(entry.model, skip_model_test=True)
-            except Exception as exc:
-                logger.warning(
-                    "switch_tier: swap/connect to %s/%s failed: %s",
-                    target_provider or self._active_provider_name,
-                    entry.model, exc,
-                )
-                raise
+        self._connect_tier_entry(entry)
 
         previous_tier = self._active_tier
         self._active_tier = actual_tier

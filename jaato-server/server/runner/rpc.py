@@ -640,6 +640,13 @@ class RunnerRPC:
             # the seat-flip lands.
             return self._handle_session_get_context_usage()
 
+        if env.method == "session.get_budget_usage":
+            # The session's ABSOLUTE budget consumption per dimension, as
+            # the per-session BudgetTracker accumulated it (per RESPONSE).
+            # A cascade pool reconciles against this rather than summing an
+            # event stream, which has proven both duplicable and droppable.
+            return self._handle_session_get_budget_usage()
+
         if env.method == "session.get_context_limit":
             # Phase 3 §7b.1 precursor: read-only context-window
             # size in tokens.  Daemon-side falls back to this
@@ -1524,6 +1531,22 @@ class RunnerRPC:
                 "stage": "read",
             }
         return True, {"context_limit": limit}
+
+    def _handle_session_get_budget_usage(self) -> "tuple[bool, Any]":
+        """Read-only snapshot of the session's absolute budget consumption.
+
+        Wrapped as ``{"usage": {...}}`` for symmetry with the other read
+        handlers.  Empty dict when the session tracks no budget.
+        """
+        ready, err, session = self._require_ready_session()
+        if not ready:
+            return err
+        try:
+            getter = getattr(session, "get_budget_usage", None)
+            usage = getter() if callable(getter) else {}
+        except Exception as exc:  # noqa: BLE001
+            return False, {"error": f"session.get_budget_usage: {exc}"}
+        return True, {"usage": dict(usage or {})}
 
     def _handle_session_get_context_usage(self) -> "tuple[bool, Any]":
         """Read-only snapshot of context-window usage stats.
@@ -2939,6 +2962,16 @@ class RunnerRPC:
         # Run the message loop.  Model API calls happen
         # synchronously here; output streams via on_output;
         # usage + gc-threshold events stream via notification frames.
+        # Turn-count snapshot: the post-turn forwarding below must fire iff a
+        # NEW turn actually landed in turn_accounting.  This is the mechanical
+        # guarantee behind the refused-turn suppression (a refused turn
+        # appends nothing, so the event would re-emit the PREVIOUS turn's
+        # numbers) AND what makes it safe to forward on the cancelled path.
+        try:
+            _turns_before = len(session.get_turn_accounting() or ())
+        except Exception:  # noqa: BLE001
+            _turns_before = None
+
         try:
             try:
                 response = session.send_message(
@@ -2958,6 +2991,18 @@ class RunnerRPC:
                     CancelledException,
                 )
                 if isinstance(exc, CancelledException):
+                    # A CANCELLED turn RAN and SPENT — it is not a REFUSED
+                    # turn (which never started).  Returning early here
+                    # skipped the post-turn forwarding entirely, so that
+                    # turn's tokens reached no TurnCompletedEvent and were
+                    # invisible to anything accumulating from that event —
+                    # including the cascade pool, which then believed a
+                    # cascade had ~1.6x more headroom than it did.  Every
+                    # child that exhausts its own budget ends exactly this
+                    # way, so the leak hit precisely the children that
+                    # mattered.  Forward first, then return the cancel
+                    # envelope unchanged.
+                    self._forward_post_turn_hooks(session, _turns_before)
                     return False, {
                         "error": str(exc) or "Cancelled",
                         "stage": "cancelled",
@@ -3001,43 +3046,7 @@ class RunnerRPC:
             # at ``_run_subagent_async`` (line ~3408).  Best-effort —
             # forwarding failure must not corrupt the send_message
             # response.
-            ui_hooks = getattr(session, "_ui_hooks", None)
-            if ui_hooks is not None:
-                try:
-                    agent_id = getattr(session, "_agent_id", None) or "main"
-                    turn_accounting = session.get_turn_accounting()
-                    last_turn = turn_accounting[-1] if turn_accounting else {}
-                    ui_hooks.on_agent_turn_completed(
-                        agent_id=agent_id,
-                        turn_number=max(0, len(turn_accounting) - 1),
-                        prompt_tokens=last_turn.get("prompt", 0),
-                        output_tokens=last_turn.get("output", 0),
-                        total_tokens=last_turn.get("total", 0),
-                        duration_seconds=last_turn.get("duration_seconds", 0),
-                        function_calls=last_turn.get("function_calls", []),
-                        cache_read_tokens=last_turn.get("cache_read"),
-                        cache_creation_tokens=last_turn.get("cache_creation"),
-                        finish_reason=last_turn.get("finish_reason", "stop"),
-                    )
-                    usage = session.get_context_usage()
-                    ui_hooks.on_agent_context_updated(
-                        agent_id=agent_id,
-                        total_tokens=usage.get("total_tokens", 0),
-                        prompt_tokens=usage.get("prompt_tokens", 0),
-                        output_tokens=usage.get("output_tokens", 0),
-                        turns=usage.get("turns", 0),
-                        percent_used=usage.get("percent_used", 0),
-                    )
-                    history = session.get_history()
-                    ui_hooks.on_agent_history_updated(
-                        agent_id=agent_id,
-                        history=history,
-                    )
-                except Exception:  # noqa: BLE001 — best-effort forwarding
-                    logger.exception(
-                        "post-turn AgentUIHooks forwarding raised — "
-                        "send_message response still returned",
-                    )
+            self._forward_post_turn_hooks(session, _turns_before)
         finally:
             # Phase 3 §7c step 6.6.4.2: restore any pre-existing
             # callbacks the session had so other callers (e.g. a
@@ -3131,6 +3140,78 @@ class RunnerRPC:
     # ``SessionDescriptionUpdatedEvent`` for the TUI's session-picker
     # to refresh.
     _NOTIF_DESCRIPTION_UPDATED = "description_updated"
+
+    def _forward_post_turn_hooks(self, session, turns_before) -> None:
+        """Fire the post-turn ``AgentUIHooks`` fan-out for a turn that RAN.
+
+        Path G (2026-06-07) restored the JaatoClient-wrapper semantics for
+        the root IPC path: ``on_agent_turn_completed`` ->
+        ``TurnCompletedEvent``, plus context + history updates.
+
+        Called on BOTH the normal and the CANCELLED return paths.  A
+        cancelled turn ran and spent tokens; skipping it (as the early
+        ``return`` used to) left that spend in no TurnCompletedEvent at all,
+        invisible to every consumer accumulating from that event — the
+        cascade pool most consequentially, since a child that exhausts its
+        own budget ends by cancellation, so the leak hit exactly the
+        children whose spend mattered most.
+
+        Gated on a NEW turn having landed in ``turn_accounting``
+        (``turns_before`` snapshot).  That is the mechanical guarantee: the
+        payload is sourced from ``turn_accounting[-1]``, so firing when
+        nothing was appended re-emits the PREVIOUS turn's tokens and
+        duration — which is what a REFUSED turn would do, and why refused
+        turns must stay suppressed.  The count check subsumes the
+        refused-flag check and covers every other no-op path too.
+
+        Best-effort throughout: forwarding failure must not corrupt the
+        send_message response.
+        """
+        ui_hooks = getattr(session, "_ui_hooks", None)
+        if ui_hooks is None:
+            return
+        try:
+            turn_accounting = session.get_turn_accounting() or []
+        except Exception:  # noqa: BLE001
+            return
+        # No new turn => nothing completed => do not re-emit the last one.
+        if turns_before is not None and len(turn_accounting) <= turns_before:
+            return
+        if not turn_accounting:
+            return
+        try:
+            agent_id = getattr(session, "_agent_id", None) or "main"
+            last_turn = turn_accounting[-1]
+            ui_hooks.on_agent_turn_completed(
+                agent_id=agent_id,
+                turn_number=max(0, len(turn_accounting) - 1),
+                prompt_tokens=last_turn.get("prompt", 0),
+                output_tokens=last_turn.get("output", 0),
+                total_tokens=last_turn.get("total", 0),
+                duration_seconds=last_turn.get("duration_seconds", 0),
+                function_calls=last_turn.get("function_calls", []),
+                cache_read_tokens=last_turn.get("cache_read"),
+                cache_creation_tokens=last_turn.get("cache_creation"),
+                spend_total_tokens=last_turn.get("spend_total"),
+                finish_reason=last_turn.get("finish_reason", "stop"),
+            )
+            usage = session.get_context_usage()
+            ui_hooks.on_agent_context_updated(
+                agent_id=agent_id,
+                total_tokens=usage.get("total_tokens", 0),
+                prompt_tokens=usage.get("prompt_tokens", 0),
+                output_tokens=usage.get("output_tokens", 0),
+                turns=usage.get("turns", 0),
+                percent_used=usage.get("percent_used", 0),
+            )
+            ui_hooks.on_agent_history_updated(
+                agent_id=agent_id, history=session.get_history(),
+            )
+        except Exception:  # noqa: BLE001 — best-effort forwarding
+            logger.exception(
+                "post-turn AgentUIHooks forwarding raised — "
+                "send_message response still returned",
+            )
 
     def _make_usage_update_notification_shim(
         self, request_id: int,
@@ -4770,6 +4851,7 @@ class _AgentUIHooksNotificationShim:
         function_calls: List[Dict[str, Any]],
         cache_read_tokens: Optional[int] = None,
         cache_creation_tokens: Optional[int] = None,
+        spend_total_tokens: Optional[int] = None,
         finish_reason: str = "stop",
     ) -> None:
         """Forward ``on_agent_turn_completed`` across the wire.
@@ -4790,6 +4872,10 @@ class _AgentUIHooksNotificationShim:
                 payload={
                     "agent_id": str(agent_id or ""),
                     "turn_number": int(turn_number or 0),
+                    "spend_total_tokens": (
+                        int(spend_total_tokens)
+                        if spend_total_tokens is not None else None
+                    ),
                     "prompt_tokens": int(prompt_tokens or 0),
                     "output_tokens": int(output_tokens or 0),
                     "total_tokens": int(total_tokens or 0),

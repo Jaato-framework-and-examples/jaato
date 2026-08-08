@@ -926,6 +926,13 @@ class UsageBreakdown(BaseModel):
     thinking_tokens: Optional[int] = None
     # Cost in USD; None when neither provider nor pricing table knows
     cost_usd: Optional[float] = None
+    # Tokens BILLED across the turn — the sum over the turn's responses.
+    # Distinct from ``total_tokens``, which is the LAST response's total and
+    # therefore the end-of-turn CONTEXT SIZE for a prompt-inclusive provider.
+    # A turn with a tool call has >=2 billed responses, so summing
+    # ``total_tokens`` across turns undercounts spend (measured: 59% of
+    # actual).  ``None`` on per-response usage, where spend == total.
+    spend_total_tokens: Optional[int] = None
 
 
 class GCConfigEvent(Event):
@@ -1069,6 +1076,13 @@ class ErrorEvent(Event):
     error: str = ""
     error_type: str = ""  # Exception class name
     recoverable: bool = True
+    # Optional machine-readable evidence for errors whose cause is
+    # structured.  ``error`` stays the human-readable sentence; this is what
+    # a driver branches on.  Canonical case: a cascade budget refusal, which
+    # carries the exhausted dimensions and BOTH inputs to the min() that
+    # produced it — so a client can distinguish "out of budget" from
+    # "daemon hung" without parsing prose or reading the server's log.
+    details: Optional[Dict[str, Any]] = None
 
 
 class RetryEvent(Event):
@@ -1195,6 +1209,11 @@ class ProfileSummary(BaseModel):
     provider: Optional[str] = None
     max_turns: int = 10
     model_tiers: Dict[str, Any] = Field(default_factory=dict)
+    # Profile-declared budget_control, re-serialised (shared/budget_control.py).
+    # None = unbudgeted.  Declared explicitly because pydantic SILENTLY DROPS
+    # unknown kwargs — without the field the producer's value vanishes with no
+    # error (same class as the #540 turn_accounting drop).
+    budget_control: Optional[Dict[str, Any]] = None
     gc: Optional[Dict[str, Any]] = None
     runtime_limits: Optional[Dict[str, Any]] = None
     completion_payload_schema: Optional[Union[str, Dict[str, Any]]] = None

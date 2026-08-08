@@ -3,5 +3,6 @@
   "timestamp": "<TIMESTAMP>",
   "error": "",
   "error_type": "",
-  "recoverable": true
+  "recoverable": true,
+  "details": null
 }

@@ -10,7 +10,8 @@
     "cache_creation_tokens": null,
     "reasoning_tokens": null,
     "thinking_tokens": null,
-    "cost_usd": null
+    "cost_usd": null,
+    "spend_total_tokens": null
   },
   "context_limit": 0,
   "percent_used": 0.0,

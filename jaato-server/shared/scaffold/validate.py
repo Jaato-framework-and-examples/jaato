@@ -131,6 +131,57 @@ def validate_profile(
                     "`jaato-scaffold explain providers`)",
                     where=f"model_tiers.{key}.provider")
 
+    # --- budget_control --------------------------------------------------
+    # The block is already parsed + structurally validated at profile-load
+    # time (BudgetControlConfig.from_dict; a malformed one surfaces as
+    # parse_error, so it never reaches here).  What load time CANNOT know is
+    # (a) which providers are installed and (b) how the ladder relates to the
+    # profile's own model_tiers — both checked here, reusing the exact same
+    # resolve_provider / tier-name machinery the model_tiers branch above uses
+    # (an overlay IS a tier table, so it inherits the same defect classes).
+    budget = getattr(profile, "budget_control", None)
+    if budget is not None:
+        # Local import: the model_tiers branch above imports these inside its
+        # own `if`, which may not have run (a profile can declare a budget
+        # ladder with no tiers — exactly the case flagged below).
+        from shared.model_tiers import RESERVED_KEYS
+        declared_tiers = {
+            k for k in (getattr(profile, "model_tiers", None) or {})
+            if k not in RESERVED_KEYS
+        }
+        for i, rung in enumerate(getattr(budget, "degrade", ()) or ()):
+            overlay = getattr(rung, "model_tiers", None) or {}
+            if overlay and not declared_tiers:
+                # An overlay patches the session's tier table; with no
+                # model_tiers there is no table to patch, so the rung would
+                # silently do nothing at runtime.
+                add("error", "budget_overlay_without_tiers",
+                    f"budget_control.degrade[{i}] overlays model_tiers "
+                    f"({', '.join(sorted(overlay))}) but the profile declares no "
+                    "model_tiers — the overlay would have no table to rebind. "
+                    "Declare model_tiers, or use an action-only rung "
+                    "(finalize / abort / escalate).",
+                    where=f"budget_control.degrade[{i}].model_tiers")
+                continue
+            for tier_name, entry in overlay.items():
+                if tier_name not in declared_tiers:
+                    add("warn", "budget_overlay_undeclared_tier",
+                        f"budget_control.degrade[{i}] rebinds tier "
+                        f"'{tier_name}', which the profile's model_tiers does "
+                        f"not declare (has: {', '.join(sorted(declared_tiers))})"
+                        " — degrading would ADD a tier the agent could not "
+                        "reach before.",
+                        where=f"budget_control.degrade[{i}].model_tiers.{tier_name}")
+                tprov = getattr(entry, "provider", None)
+                if tprov and introspect.resolve_provider(tprov) is None:
+                    add("error", "unknown_provider",
+                        f"budget_control.degrade[{i}].model_tiers.{tier_name} "
+                        f"provider '{tprov}' is not installed (a degrade overlay "
+                        "may cross providers, but must name a real one — see "
+                        "`jaato-scaffold explain providers`)",
+                        where=f"budget_control.degrade[{i}].model_tiers."
+                              f"{tier_name}.provider")
+
     # --- per-plugin tool allow-lists (tool_scopes) -----------------------
     for plug, tools in (getattr(profile, "tool_scopes", None) or {}).items():
         pi = plugins.get(plug)
