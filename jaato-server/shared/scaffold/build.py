@@ -25,6 +25,151 @@ from typing import Dict, List, Optional
 from . import introspect
 from . import validate as _validate
 
+# --------------------------------------------------------------- secrets mode
+#
+# How a scaffolded profile REFERENCES its provider credential.  Three styles:
+#
+#   env  (default) — ``api_key: "${JAATO_OPENROUTER_API_KEY}"``.  Env-var
+#                    interpolation, resolved by the core framework.  Runs
+#                    against a public checkout with nothing else installed.
+#   none           — omit ``api_key`` entirely; the provider reads its own env
+#                    var directly.  Also public-safe, minimal.
+#   uri:<scheme>   — ``api_key: "pass://jaato/<provider>/api-key"`` (or any
+#                    registered scheme).  Nicer — the key never touches the
+#                    workspace — but the scheme's resolver is an out-of-tree,
+#                    entry-point-only plugin (e.g. jaato-premium's ``pass``);
+#                    on a host without it, resolution fails (fail-loud at the
+#                    provider boundary, or literal-URI-as-key in the generic
+#                    path).  This is why ``env`` is the default: a scaffolded
+#                    workspace must run out of the box.
+#
+# Historically the generator hardcoded ``pass://`` — the root cause of public
+# example repos shipping profiles that only work with jaato-premium.
+
+_SECRETS_DEFAULT = "env"
+_SECRET_PATH_DEFAULT = "jaato/{provider}/api-key"
+
+
+def _resolve_secrets_mode(raw: Optional[str]) -> "tuple[str, Optional[str]]":
+    """Parse the ``--secrets`` value into ``(kind, scheme)``.
+
+    ``kind`` is one of ``"env"`` / ``"none"`` / ``"uri"``.  ``scheme`` is the
+    URI scheme (``"pass"``, ``"vault"``, …) when ``kind == "uri"``, else None.
+    Accepts ``pass`` or ``pass://`` for a scheme.
+    """
+    mode = (raw or _SECRETS_DEFAULT).strip()
+    if mode in ("env", "none"):
+        return mode, None
+    scheme = mode[:-3] if mode.endswith("://") else mode
+    return "uri", scheme
+
+
+def _primary_key_env_var(info, provider: str) -> str:
+    """The env var a scaffolded profile should reference for the provider key.
+
+    Read from the provider's declared ``AuthSource`` chain (``info.auth``) so
+    the name is CORRECT per provider — ``ZHIPUAI_API_KEY``, ``ANTHROPIC_API_KEY``,
+    ``JAATO_DOUBLEWORD_API_KEY``, ``JAATO_OPENROUTER_API_KEY`` — rather than a
+    guessed ``JAATO_<PROVIDER>_API_KEY`` template (which is wrong for several
+    providers).  Prefers an explicit ``*_API_KEY`` env source over OAuth-token
+    vars; falls back to the ``JAATO_<PROVIDER>_API_KEY`` convention only when
+    the provider declares no env source at all.
+    """
+    env_names = [s.name for s in (getattr(info, "auth", ()) or ())
+                 if getattr(s, "kind", "") == "env" and getattr(s, "name", "")]
+    for n in env_names:
+        if n.upper().endswith("API_KEY"):
+            return n
+    if env_names:
+        return env_names[0]
+    return f"JAATO_{provider.upper()}_API_KEY"
+
+
+def _api_key_line(provider: str, info, kind: str, scheme: Optional[str],
+                  secret_path: str) -> Optional[str]:
+    """The YAML ``api_key:`` line for a set profile, per secrets mode.
+
+    Returns None for ``none`` mode (no line emitted).
+    """
+    if kind == "none":
+        return None
+    if kind == "uri":
+        path = secret_path.format(provider=provider)
+        return f"    api_key: {scheme}://{path}"
+    env_var = _primary_key_env_var(info, provider)
+    return f'    api_key: "${{{env_var}}}"'
+
+
+def _resolver_registered(scheme: str) -> bool:
+    """True if a resolver for *scheme* is discoverable (e.g. jaato-premium's
+    ``pass``).  Used to WARN at scaffold time when ``--secrets uri:<scheme>``
+    is chosen but nothing can resolve it — the same failure the runtime hits at
+    the provider credential boundary, surfaced early."""
+    try:
+        from shared.plugins.subagent.config import _discover_secret_resolvers
+        return scheme in _discover_secret_resolvers()
+    except Exception:
+        return False
+
+
+def _ensure_env_gitignore(ws: Path, written: List[str]) -> None:
+    """Ensure the workspace ``.gitignore`` ignores ``.env`` (keeps
+    ``.env.example`` tracked).  Converting to env-var credentials means the
+    user now puts a LIVE key in ``.env``; an absent ignore rule turns that into
+    a leak.  Creates or appends as needed, idempotently."""
+    gi = ws / ".gitignore"
+    block = ("# Local env holds a LIVE provider credential — never commit it.\n"
+             ".env\n"
+             "!.env.example\n")
+    if not gi.exists():
+        gi.write_text(block, encoding="utf-8")
+        written.append(str(gi.relative_to(ws)))
+        return
+    text = gi.read_text(encoding="utf-8")
+    lines = {ln.strip() for ln in text.splitlines()}
+    if ".env" in lines:
+        return  # already ignored
+    prefix = text if text.endswith("\n") else text + "\n"
+    gi.write_text(prefix + "\n" + block, encoding="utf-8")
+    written.append(str(gi.relative_to(ws)) + " (updated)")
+
+
+def _ws_secrets_marker(ws: Path) -> Path:
+    return ws / ".jaato" / "scaffold.json"
+
+
+def _read_ws_secrets(ws: Path) -> Optional[str]:
+    """The secrets mode recorded for this workspace by a prior ``new`` (so a
+    later ``new`` inherits the same style), or None."""
+    import json
+    marker = _ws_secrets_marker(ws)
+    if not marker.exists():
+        return None
+    try:
+        return json.loads(marker.read_text(encoding="utf-8")).get("secrets")
+    except Exception:
+        return None
+
+
+def _write_ws_secrets(ws: Path, raw: str, written: List[str]) -> None:
+    """Record the chosen secrets mode so subsequent ``new`` calls default to
+    it — keeps a workspace's credential-reference style consistent."""
+    import json
+    marker = _ws_secrets_marker(ws)
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    existing = {}
+    if marker.exists():
+        try:
+            existing = json.loads(marker.read_text(encoding="utf-8"))
+        except Exception:
+            existing = {}
+    if existing.get("secrets") == raw:
+        return
+    existing["secrets"] = raw
+    marker.write_text(json.dumps(existing, indent=2) + "\n", encoding="utf-8")
+    rel = str(marker.relative_to(ws))
+    written.append(rel if rel not in written else rel + " (updated)")
+
 
 def _compose_env(provider: str, active: list) -> str:
     """Build a workspace .env: active settings + commented optional knobs.
@@ -124,7 +269,10 @@ def _new_client_archetype(args, archetype: str) -> int:
         "__PROVIDER__": provider,
         "__TITLE__": title,
         "__ARCHETYPE__": archetype,
-        "__KEY_ENV__": f"JAATO_{provider.upper()}_API_KEY",
+        # Correct per-provider key var from the declared AuthSource chain
+        # (ZHIPUAI_API_KEY, ANTHROPIC_API_KEY, …), not a guessed template.
+        "__KEY_ENV__": _primary_key_env_var(
+            introspect.resolve_provider(provider), provider),
         "__CASCADE_ID__": "REPLACE_WITH_THE_CASCADE_DRIVER_ID",
     }
     # --transport selects the client. ipc (default) + ws are daemon clients that
@@ -282,8 +430,22 @@ def _new_client_archetype(args, archetype: str) -> int:
         print(f"✘ generated client does not compile — generator bug:\n{e}")
         return 1
     print("✓ generated client compiles.")
-    print(f"\nnext:\n  python -m jaato_sdk.doctor --workspace {ws} "
-          f"--env-file {env_file} --secret pass://jaato/{provider}/api-key\n"
+    # Next-steps hint, matched to how the credential is referenced.
+    ckind, cscheme = _resolve_secrets_mode(getattr(args, "secrets", None)
+                                           or _read_ws_secrets(ws))
+    csecret_path = getattr(args, "secret_path", None) or _SECRET_PATH_DEFAULT
+    key_env_var = _primary_key_env_var(
+        introspect.resolve_provider(provider), provider)
+    if ckind == "uri":
+        secret_hint = (f" --secret {cscheme}://"
+                       f"{csecret_path.format(provider=provider)}")
+        cred_note = ""
+    else:
+        secret_hint = ""
+        cred_note = f"  # first set {key_env_var}=... in {env_file}\n"
+    print(f"\nnext:\n{cred_note}"
+          f"  python -m jaato_sdk.doctor --workspace {ws} "
+          f"--env-file {env_file}{secret_hint}\n"
           f"  python {py_file}")
     return 0
 
@@ -304,11 +466,18 @@ def _base_profile_yaml(agent: str) -> str:
     )
 
 
-def _set_profile_yaml(agent: str, provider: str, model: str) -> str:
+def _set_profile_yaml(agent: str, provider: str, model: str,
+                      kind: str = _SECRETS_DEFAULT, scheme: Optional[str] = None,
+                      secret_path: str = _SECRET_PATH_DEFAULT) -> str:
     """Tier-2 set profile — binds provider+model + only valid knobs.
 
     Emitted knobs are gated on the provider's declared PROVIDER_KNOBS, so the
     emit step cannot author a key the validate step would reject.
+
+    The ``api_key`` reference style is chosen by *kind* / *scheme* (see the
+    secrets-mode section above): ``env`` interpolates ``${<PROVIDER_KEY_ENV>}``
+    (default, public-checkout friendly), ``none`` omits it, ``uri`` emits a
+    ``<scheme>://<path>`` secret URI.
     """
     info = introspect.resolve_provider(provider)
     lines = [
@@ -331,7 +500,9 @@ def _set_profile_yaml(agent: str, provider: str, model: str) -> str:
     if knobs is not None:
         cfg = [f"plugin_configs:", f"  {provider}:"]
         if knobs.accepts("top_level", "api_key"):
-            cfg.append(f"    api_key: pass://jaato/{provider}/api-key")
+            key_line = _api_key_line(provider, info, kind, scheme, secret_path)
+            if key_line is not None:
+                cfg.append(key_line)
         if knobs.accepts("api_params", "temperature"):
             cfg.append("    api_params:")
             cfg.append("      temperature: 0.0  # determinism knob")
@@ -363,6 +534,22 @@ def _new_profile_set(args) -> int:
     setdir = pdir / args.set
     setdir.mkdir(parents=True, exist_ok=True)
 
+    # How profiles REFERENCE the provider credential (env / none / uri:<scheme>).
+    # Explicit --secrets wins; else the workspace's recorded choice; else the
+    # public-checkout-friendly default (env-var interpolation).
+    raw_secrets = getattr(args, "secrets", None) or _read_ws_secrets(ws) \
+        or _SECRETS_DEFAULT
+    kind, scheme = _resolve_secrets_mode(raw_secrets)
+    secret_path = getattr(args, "secret_path", None) or _SECRET_PATH_DEFAULT
+    if kind == "uri" and not _resolver_registered(scheme):
+        print(f"  [warning] --secrets {scheme}://: no resolver for the "
+              f"'{scheme}' scheme is installed, so every profile in this set "
+              f"will FAIL to resolve its key at connect (is the plugin that "
+              f"provides it, e.g. jaato-premium, installed?). Use --secrets env "
+              f"for a public checkout.")
+    key_env_var = _primary_key_env_var(introspect.resolve_provider(provider),
+                                       provider)
+
     written: List[str] = []
     for agent in agents:
         base = pdir / f"_base_{agent}.yaml"
@@ -372,30 +559,51 @@ def _new_profile_set(args) -> int:
         setf = setdir / f"{agent}.yaml"
         if not setf.exists() or args.force:
             setf.write_text(
-                _set_profile_yaml(agent, provider, args.model), encoding="utf-8")
+                _set_profile_yaml(agent, provider, args.model,
+                                  kind, scheme, secret_path),
+                encoding="utf-8")
             written.append(str(setf.relative_to(ws)))
 
     # emit/merge the workspace .env so the set is SELECTED at runtime
     # (JAATO_PROFILE_SET) — without it the workspace isn't runnable as the
     # intended set.  Never clobber an existing JAATO_PROFILE_SET line.
+    #
+    # In env/none mode the credential lives in the env, so surface the provider
+    # key var as an ACTIVE, empty fill-in (and git-ignore .env so the live key
+    # can't be committed).  In uri mode the key is in the secret store, not the
+    # env, so neither applies.
+    active = ["# select this profile-set at runtime (tier-2 overlay)",
+              f"JAATO_PROFILE_SET={args.set}"]
+    if kind in ("env", "none"):
+        active += ["",
+                   f"# provider credential — fill in ({provider}); referenced by",
+                   f"# the set profiles as ${{{key_env_var}}}.",
+                   f"{key_env_var}="]
     envf = ws / ".env"
     if not envf.exists():
         # fresh workspace — full composed .env (set selector + commented knobs)
-        envf.write_text(
-            _compose_env(provider, [
-                "# select this profile-set at runtime (tier-2 overlay)",
-                f"JAATO_PROFILE_SET={args.set}"]),
-            encoding="utf-8")
+        envf.write_text(_compose_env(provider, active), encoding="utf-8")
         written.append(str(envf.relative_to(ws)))
-    elif "JAATO_PROFILE_SET" not in envf.read_text(encoding="utf-8"):
-        # existing user .env — append just the selector, don't inject template
+    else:
         existing = envf.read_text(encoding="utf-8")
         prefix = existing if existing.endswith("\n") else existing + "\n"
-        envf.write_text(prefix + f"JAATO_PROFILE_SET={args.set}\n",
-                        encoding="utf-8")
-        written.append(str(envf.relative_to(ws)))
+        add: List[str] = []
+        if "JAATO_PROFILE_SET" not in existing:
+            add.append(f"JAATO_PROFILE_SET={args.set}")
+        if kind in ("env", "none") and f"{key_env_var}=" not in existing \
+                and f"{key_env_var} =" not in existing:
+            add.append(f"{key_env_var}=")
+        if add:
+            envf.write_text(prefix + "\n".join(add) + "\n", encoding="utf-8")
+            written.append(str(envf.relative_to(ws)) + " (updated)")
 
-    print(f"scaffolded profile-set '{args.set}' ({provider}/{args.model}):")
+    if kind in ("env", "none"):
+        _ensure_env_gitignore(ws, written)
+    if getattr(args, "secrets", None):
+        _write_ws_secrets(ws, raw_secrets, written)
+
+    print(f"scaffolded profile-set '{args.set}' ({provider}/{args.model}, "
+          f"secrets={raw_secrets}):")
     for w in written:
         print(f"  + {w}")
 
