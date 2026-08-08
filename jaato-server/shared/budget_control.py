@@ -48,7 +48,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Dict, Mapping, Optional, Tuple
+from typing import Any, Dict, Mapping, NamedTuple, Optional, Tuple
 
 # Deliberate reuse of the tier-entry normalizer: a ``degrade[].model_tiers``
 # overlay IS a tier table, so it must accept the byte-identical grammar
@@ -680,6 +680,21 @@ class EffectiveLimits:
         return "; ".join(parts)
 
 
+class ReconcileResult(NamedTuple):
+    """Outcome of :meth:`CascadeBudgetPool.reconcile_session`.
+
+    Both halves are needed by the caller: ``deltas`` says what moved (for
+    logging), ``fired`` says which POOL rungs those deltas crossed and must
+    therefore be pushed to the cascade's live children.  An earlier version
+    returned only the deltas and silently dropped ``fired`` — which meant
+    cascade degrade ladders could never fire, invisible until a cascade
+    declared one.
+    """
+
+    deltas: Dict[str, float]
+    fired: Tuple["DegradeRung", ...]
+
+
 class CascadeBudgetPool:
     """The AGGREGATE ceiling for one cascade (cid) — a single shared counter.
 
@@ -741,7 +756,7 @@ class CascadeBudgetPool:
 
     def reconcile_session(
         self, session_id: str, absolute: Mapping[str, float],
-    ) -> Dict[str, float]:
+    ) -> "ReconcileResult":
         """Set a session's TOTAL contribution to the pool, applying the delta.
 
         Idempotent and monotonic: call it repeatedly with the session's
@@ -758,7 +773,11 @@ class CascadeBudgetPool:
         tracker's own absolute totals rather than derived from a stream of
         increments that may be duplicated or dropped.
 
-        Returns the deltas actually applied, for logging.
+        Returns a :class:`ReconcileResult` — the deltas actually applied
+        (for logging) AND any pool rungs those deltas crossed.  The rungs
+        matter: reconciliation is the pool's real accumulation path, so
+        discarding what ``observe`` fired here would mean cascade-level
+        degrade ladders never fire at all.
         """
         with self._lock:
             prior = self._per_session.setdefault(session_id, {})
@@ -775,9 +794,10 @@ class CascadeBudgetPool:
                     continue
                 deltas[dim] = total_f - seen
                 prior[dim] = total_f
+            fired: Tuple["DegradeRung", ...] = ()
             if deltas:
-                self._tracker.observe(**deltas)
-            return deltas
+                fired = self._tracker.observe(**deltas)
+            return ReconcileResult(deltas=deltas, fired=fired)
 
     def session_contribution(self, session_id: str) -> Dict[str, float]:
         """What this session has contributed to the pool so far."""

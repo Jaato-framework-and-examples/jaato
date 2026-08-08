@@ -152,8 +152,8 @@ def test_exhaustion_error_carries_framework_generated_evidence():
 
 def test_reconcile_is_idempotent_and_delta_based():
     p = _pool(tokens=12000)
-    assert p.reconcile_session("s1", {"tokens": 7695})["tokens"] == 7695.0
-    assert p.reconcile_session("s1", {"tokens": 7695}) == {}   # same reading
+    assert p.reconcile_session("s1", {"tokens": 7695}).deltas["tokens"] == 7695.0
+    assert p.reconcile_session("s1", {"tokens": 7695}).deltas == {}  # same reading
     assert p.remaining()["tokens"] == 12000 - 7695
 
 
@@ -170,7 +170,7 @@ def test_reconcile_ignores_a_stale_lower_reading():
     """A late or out-of-order report must never refund spend."""
     p = _pool(tokens=12000)
     p.reconcile_session("s1", {"tokens": 9314})
-    assert p.reconcile_session("s1", {"tokens": 100}) == {}
+    assert p.reconcile_session("s1", {"tokens": 100}).deltas == {}
     assert p.remaining()["tokens"] == pytest.approx(12000 - 9314)
 
 

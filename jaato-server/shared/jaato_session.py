@@ -7921,8 +7921,18 @@ NOTES
         except Exception as exc:  # noqa: BLE001
             logger.warning("budget: turn observation failed: %s", exc)
 
-    def _apply_budget_rungs(self, fired) -> None:
+    def _apply_budget_rungs(self, fired, origin: str = "session") -> None:
         """Apply the degrade rungs that just crossed their threshold.
+
+        ``origin`` distinguishes WHOSE ceiling fired: ``"session"`` for this
+        session's own ``budget_control``, ``"cascade"`` for a rung pushed
+        down because the shared cascade pool crossed.  It is carried into
+        both the log line and the client notice because the two mean
+        materially different things to a consumer — "I overspent" invites a
+        narrower retry, "the cascade overspent" means the whole run is
+        winding down and retrying is pointless.  A reactor branching on that
+        needs to tell them apart, and without the marker they are
+        indistinguishable: both paths land here and emit the same lines.
 
         Two effects, per ``docs/design/budget-control-degradation.md``:
 
@@ -7943,7 +7953,11 @@ NOTES
         from .budget_control import ACTION_ABORT, overlay_tier_table
 
         for rung in fired:
-            detail = self._budget_tracker.describe_pressure()
+            detail = (
+                self._budget_tracker.describe_pressure()
+                if self._budget_tracker is not None else "pool pressure"
+            )
+            tag = f"{origin} budget"
             if rung.model_tiers:
                 if self._tier_config is None:
                     # Rejected by the profile validator, but a session can be
@@ -7958,23 +7972,23 @@ NOTES
                         self._tier_config.tiers, rung.model_tiers)
                     if changes:
                         logger.info(
-                            "budget: degrading at %.0f%% (%s) — rebound %s",
-                            rung.at_percent, detail,
+                            "budget[%s]: degrading at %.0f%% (%s) — rebound %s",
+                            origin, rung.at_percent, detail,
                             "; ".join(f"{k}: {v}" for k, v in changes.items()),
                         )
                         self._reconnect_active_tier_if_rebound()
                         self._surface_budget_event(
-                            f"budget {detail}: degraded "
+                            f"{tag} {detail}: degraded "
                             + "; ".join(f"{k} {v}" for k, v in changes.items())
                         )
             if rung.action:
                 self._budget_terminal_action = rung.action
                 logger.info(
-                    "budget: terminal action '%s' at %.0f%% (%s)",
-                    rung.action, rung.at_percent, detail,
+                    "budget[%s]: terminal action '%s' at %.0f%% (%s)",
+                    origin, rung.action, rung.at_percent, detail,
                 )
                 self._surface_budget_event(
-                    f"budget {detail}: {rung.action}")
+                    f"{tag} {detail}: {rung.action}")
                 if rung.action == ACTION_ABORT:
                     # Latch FIRST: request_stop only cancels the IN-FLIGHT
                     # turn (cooperative cancel).  Without the latch the next
@@ -7983,8 +7997,52 @@ NOTES
                     # "ceiling" would be a one-shot interrupt the client can
                     # simply talk past.  A ceiling that only cancels one turn
                     # is not a ceiling.
-                    self._budget_exhausted_reason = f"budget_exhausted ({detail})"
+                    self._budget_exhausted_reason = (
+                        f"budget_exhausted ({origin}: {detail})")
                     self.request_stop(self._budget_exhausted_reason)
+
+    def apply_cascade_degrade(self, rungs: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Apply degrade rungs pushed down because the CASCADE pool crossed.
+
+        The mid-flight half of cascade budgets: a child already running when
+        the shared pool crosses must degrade too, rather than keeping the
+        ceiling it was handed at spawn.  A pool that only constrained
+        children at spawn would not be a shared budget — a sibling burning
+        the envelope has to affect everyone still running, which is the
+        whole point of the ceiling being aggregate.
+
+        Deliberately routed through the SAME :meth:`_apply_budget_rungs` a
+        session's own ladder uses, so a pushed rung produces identical
+        machinery — tier rebind, active-tier re-connect, abort latch — and
+        an identical client notice, differing only by its ``origin`` tag.
+
+        Args:
+            rungs: Wire form (``DegradeRung.to_dict()``) — re-parsed here so
+                the runner validates what it was handed rather than trusting
+                the daemon's serialisation.
+
+        Returns:
+            ``{"applied": <n>}``, or ``{"applied": 0, "error": ...}`` when
+            the payload will not parse.  Never raises: a budget push must
+            not break the session it is trying to constrain.
+        """
+        from .budget_control import DegradeRung
+        try:
+            parsed = [
+                DegradeRung.from_dict(r, index=i)
+                for i, r in enumerate(rungs or [])
+            ]
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("apply_cascade_degrade: bad payload: %s", exc)
+            return {"applied": 0, "error": str(exc)}
+        if not parsed:
+            return {"applied": 0}
+        try:
+            self._apply_budget_rungs(tuple(parsed), origin="cascade")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("apply_cascade_degrade: apply failed: %s", exc)
+            return {"applied": 0, "error": str(exc)}
+        return {"applied": len(parsed)}
 
     def _reconnect_active_tier_if_rebound(self) -> None:
         """Re-point the provider when the ACTIVE tier's binding just changed.

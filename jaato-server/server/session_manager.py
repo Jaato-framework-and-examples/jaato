@@ -4369,6 +4369,61 @@ class SessionManager:
                 session_id, exc, emit_exc,
             )
 
+    def _push_cascade_degrade(self, cascade_driver_id: str, fired) -> None:
+        """Push a crossed cascade rung to every LIVE child of the cascade.
+
+        The mid-flight half of the aggregate ceiling.  Spawn-time clamping
+        alone constrains only children not yet started; a pool that let
+        already-running siblings keep the ceiling they were handed would not
+        be a shared budget at all — the point of it being aggregate is that
+        one child burning the envelope affects everyone still running.
+
+        Applies to ALL live children rather than recomputing each one's own
+        ceiling: "the cascade is running low, everyone downshift" is what a
+        pool means, and a child that has barely spent still degrades because
+        its siblings did.
+
+        Runner-side the rungs go through the SAME ``_apply_budget_rungs``
+        path a session's own ladder uses, tagged ``origin="cascade"`` — so
+        each pushed child emits the ordinary per-session evidence (tier
+        rebind, active-tier re-connect, client notice), which is what makes
+        "the push landed on THIS child" observable rather than merely "the
+        pool crossed".
+
+        Best-effort per child: this runs on the event-emit path, and one
+        unreachable runner must not stop the others being degraded.
+        """
+        payload = []
+        for rung in fired:
+            try:
+                payload.append(rung.to_dict())
+            except Exception:  # noqa: BLE001
+                continue
+        if not payload:
+            return
+        with self._lock:
+            targets = [
+                (sid, sess) for sid, sess in self._sessions.items()
+                if getattr(sess, "cascade_driver_id", None) == cascade_driver_id
+            ]
+        for sid, sess in targets:
+            try:
+                rpc = getattr(getattr(sess, "server", None), "runner_rpc", None)
+                if rpc is None:
+                    continue
+                result = rpc.session_apply_budget_degrade_threadsafe(
+                    payload, timeout=5.0)
+                logger.info(
+                    "cascade %s pushed degrade to %s: %s",
+                    cascade_driver_id, sid, result,
+                )
+            except Exception as exc:  # noqa: BLE001 — best-effort
+                logger.warning(
+                    "cascade %s: degrade push to %s failed (%s) — that child "
+                    "keeps its spawn-time ceiling",
+                    cascade_driver_id, sid, exc,
+                )
+
     def _reconcile_cascade_pool(self, cascade_driver_id: Optional[str]) -> None:
         """Refresh a cascade's pool from its live sessions' own trackers.
 
@@ -4397,7 +4452,12 @@ class SessionManager:
                 if rpc is None:
                     continue
                 usage = rpc.session_get_budget_usage_threadsafe(timeout=5.0)
-                deltas = pool.reconcile_session(sid, usage or {})
+                result = pool.reconcile_session(sid, usage or {})
+                deltas = result.deltas
+                if result.fired:
+                    # A refresh can itself cross a rung — the incremental
+                    # view lagged.  Push before the new child is clamped.
+                    self._push_cascade_degrade(cascade_driver_id, result.fired)
                 if deltas:
                     # Log the session's TOTAL contribution too.  The delta
                     # alone is misleading: the incremental event path has
@@ -4456,15 +4516,15 @@ class SessionManager:
             cost = getattr(usage, "cost_usd", None) if usage else None
             if cost is not None:
                 absolute["usd"] = prior.get("usd", 0.0) + float(cost)
-            pool.reconcile_session(sid, absolute)
-            fired = ()
+            fired = pool.reconcile_session(sid, absolute).fired
             if fired:
                 logger.info(
-                    "cascade %s pool crossed %s (%s)",
+                    "cascade %s pool crossed %s (%s) — pushing to live children",
                     pool.cascade_driver_id,
                     ", ".join(f"{r.at_percent:.0f}%" for r in fired),
                     pool.describe_pressure(),
                 )
+                self._push_cascade_degrade(pool.cascade_driver_id, fired)
         except Exception as exc:  # noqa: BLE001
             logger.warning("cascade budget accumulation failed: %s", exc)
 

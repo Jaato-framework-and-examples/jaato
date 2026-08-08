@@ -1554,6 +1554,23 @@ class RunnerRPCClient:
             timeout=timeout,
         )
 
+    async def session_apply_budget_degrade(
+        self, rungs: list, *, timeout: Optional[float] = 5.0,
+    ) -> Dict[str, Any]:
+        """Push cascade degrade rungs onto a RUNNING session."""
+        return await self._call_named(
+            "session.apply_budget_degrade", {"rungs": list(rungs)},
+            timeout=timeout,
+        )
+
+    def session_apply_budget_degrade_threadsafe(
+        self, rungs: list, *, timeout: Optional[float] = 5.0,
+    ) -> Dict[str, Any]:
+        return self._run_threadsafe(
+            self.session_apply_budget_degrade(rungs, timeout=timeout),
+            timeout=timeout,
+        )
+
     async def session_get_budget_usage(
         self, *, timeout: Optional[float] = 5.0,
     ) -> Dict[str, Any]:
