@@ -4380,8 +4380,8 @@ class SessionManager:
         The mid-flight half of the aggregate ceiling.  Spawn-time clamping
         alone constrains only children not yet started; a pool that let
         already-running siblings keep the ceiling they were handed would not
-        be a shared budget at all — the point of it being aggregate is that
-        one child burning the envelope affects everyone still running.
+        be a shared budget — the point of it being aggregate is that one
+        child burning the envelope affects everyone still running.
 
         Applies to ALL live children rather than recomputing each one's own
         ceiling: "the cascade is running low, everyone downshift" is what a
@@ -4395,8 +4395,19 @@ class SessionManager:
         "the push landed on THIS child" observable rather than merely "the
         pool crossed".
 
-        Best-effort per child: this runs on the event-emit path, and one
-        unreachable runner must not stop the others being degraded.
+        DISPATCHED OFF THE EMIT PATH, one thread per child.  This is called
+        from ``_accumulate_cascade_budget`` inside ``_emit_to_session``,
+        which holds ``self._lock`` for its whole body — so doing the RPC
+        inline blocked the ENTIRE SessionManager (every session's event
+        delivery, not just this cascade's) for the duration.  Measured: three
+        children x a 10s RPC timeout = 30s of frozen event delivery, during
+        which the pushes themselves also timed out because the work they
+        needed could not proceed.  One cause, two symptoms — the push failing
+        AND clients receiving almost nothing.
+
+        Per-child threads rather than a serial loop: a best-effort fan-out
+        must not be serialised behind a per-child timeout, or N children cost
+        N x timeout before any of them degrade.
         """
         payload = []
         for rung in fired:
@@ -4412,22 +4423,40 @@ class SessionManager:
                 if getattr(sess, "cascade_driver_id", None) == cascade_driver_id
             ]
         for sid, sess in targets:
-            try:
-                rpc = getattr(getattr(sess, "server", None), "runner_rpc", None)
-                if rpc is None:
-                    continue
-                result = rpc.session_apply_budget_degrade_threadsafe(
-                    payload, timeout=5.0)
-                logger.info(
-                    "cascade %s pushed degrade to %s: %s",
-                    cascade_driver_id, sid, result,
-                )
-            except Exception as exc:  # noqa: BLE001 — best-effort
-                logger.warning(
-                    "cascade %s: degrade push to %s failed (%s) — that child "
-                    "keeps its spawn-time ceiling",
-                    cascade_driver_id, sid, exc,
-                )
+            rpc = getattr(getattr(sess, "server", None), "runner_rpc", None)
+            if rpc is None:
+                continue
+            threading.Thread(
+                target=self._push_cascade_degrade_one,
+                args=(cascade_driver_id, sid, rpc, payload),
+                name=f"cascade-degrade-{sid}",
+                daemon=True,
+            ).start()
+
+    def _push_cascade_degrade_one(
+        self, cascade_driver_id: str, session_id: str, rpc: Any, payload: list,
+    ) -> None:
+        """Deliver a cascade degrade to ONE child.  Best-effort, off-thread.
+
+        Never raises: one unreachable runner must not stop its siblings
+        degrading.  The failure log names the exception TYPE because a bare
+        ``TimeoutError`` stringifies to the empty string — a previous version
+        logged ``failed ()`` and told an operator nothing about why.
+        """
+        try:
+            result = rpc.session_apply_budget_degrade_threadsafe(
+                payload, timeout=10.0)
+            logger.info(
+                "cascade %s pushed degrade to %s: %s",
+                cascade_driver_id, session_id, result,
+            )
+        except Exception as exc:  # noqa: BLE001 — best-effort boundary
+            logger.warning(
+                "cascade %s: degrade push to %s failed: %s: %s — that child "
+                "keeps its spawn-time ceiling",
+                cascade_driver_id, session_id,
+                type(exc).__name__, exc or "(no message)",
+            )
 
     def _reconcile_cascade_pool(self, cascade_driver_id: Optional[str]) -> None:
         """Refresh a cascade's pool from its live sessions' own trackers.

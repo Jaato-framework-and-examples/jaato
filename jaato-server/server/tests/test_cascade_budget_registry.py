@@ -162,3 +162,107 @@ def test_refusal_emit_never_raises():
     sm = SimpleNamespace(_emit_to_client=lambda *a: (_ for _ in ()).throw(
         RuntimeError("sink down")))
     SessionManager._emit_cascade_refusal(sm, "c", "s", RuntimeError("boom"))
+
+
+# ------------- the push must not block the emit path (fan-out finding) ----
+
+def test_push_returns_immediately_and_does_not_block_the_emit_path():
+    """The push runs inside _emit_to_session, which holds the global lock
+    for its whole body. Doing the RPC inline froze the ENTIRE SessionManager
+    — every session's event delivery — for N x the RPC timeout, and the
+    pushes timed out because the work they needed could not proceed. One
+    cause, two symptoms."""
+    import threading
+    import time
+    from server.session_manager import SessionManager
+    from shared.budget_control import DegradeRung
+
+    released = threading.Event()
+
+    class _SlowRPC:
+        def session_apply_budget_degrade_threadsafe(self, payload, timeout=None):
+            released.wait(5)          # stands in for a 10s RPC timeout
+            return {"applied": 1}
+
+    sm = SimpleNamespace(
+        _lock=threading.RLock(),
+        _sessions={
+            "s1": SimpleNamespace(cascade_driver_id="cid1",
+                                  server=SimpleNamespace(runner_rpc=_SlowRPC())),
+            "s2": SimpleNamespace(cascade_driver_id="cid1",
+                                  server=SimpleNamespace(runner_rpc=_SlowRPC())),
+        },
+    )
+    for m in ("_push_cascade_degrade", "_push_cascade_degrade_one"):
+        setattr(sm, m, (lambda n: (lambda *a, **k:
+                getattr(SessionManager, n)(sm, *a, **k)))(m))
+
+    t0 = time.monotonic()
+    sm._push_cascade_degrade("cid1", (DegradeRung(50.0, action="abort"),))
+    elapsed = time.monotonic() - t0
+    released.set()
+    assert elapsed < 1.0, (
+        f"push blocked the caller for {elapsed:.2f}s — it runs under the "
+        "global lock, so this stalls every session's event delivery"
+    )
+
+
+def test_one_unreachable_child_does_not_stop_its_siblings():
+    import threading
+    from server.session_manager import SessionManager
+    from shared.budget_control import DegradeRung
+
+    delivered = []
+    done = threading.Event()
+
+    class _Boom:
+        def session_apply_budget_degrade_threadsafe(self, payload, timeout=None):
+            raise TimeoutError()          # stringifies to "" — the empty log
+
+    class _Ok:
+        def session_apply_budget_degrade_threadsafe(self, payload, timeout=None):
+            delivered.append(payload)
+            done.set()
+            return {"applied": 1}
+
+    sm = SimpleNamespace(
+        _lock=threading.RLock(),
+        _sessions={
+            "bad": SimpleNamespace(cascade_driver_id="cid1",
+                                   server=SimpleNamespace(runner_rpc=_Boom())),
+            "good": SimpleNamespace(cascade_driver_id="cid1",
+                                    server=SimpleNamespace(runner_rpc=_Ok())),
+        },
+    )
+    for m in ("_push_cascade_degrade", "_push_cascade_degrade_one"):
+        setattr(sm, m, (lambda n: (lambda *a, **k:
+                getattr(SessionManager, n)(sm, *a, **k)))(m))
+    sm._push_cascade_degrade("cid1", (DegradeRung(50.0, action="abort"),))
+    assert done.wait(5), "the reachable sibling was never pushed"
+    assert len(delivered) == 1
+
+
+def test_push_skips_sessions_outside_the_cascade():
+    import threading
+    from server.session_manager import SessionManager
+    from shared.budget_control import DegradeRung
+
+    hits = []
+
+    class _RPC:
+        def session_apply_budget_degrade_threadsafe(self, payload, timeout=None):
+            hits.append(1)
+            return {}
+
+    sm = SimpleNamespace(
+        _lock=threading.RLock(),
+        _sessions={"other": SimpleNamespace(
+            cascade_driver_id="different",
+            server=SimpleNamespace(runner_rpc=_RPC()))},
+    )
+    for m in ("_push_cascade_degrade", "_push_cascade_degrade_one"):
+        setattr(sm, m, (lambda n: (lambda *a, **k:
+                getattr(SessionManager, n)(sm, *a, **k)))(m))
+    sm._push_cascade_degrade("cid1", (DegradeRung(50.0, action="abort"),))
+    import time; time.sleep(0.3)
+    assert hits == []
