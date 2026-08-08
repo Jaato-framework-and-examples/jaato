@@ -735,6 +735,20 @@ class CommandRouter:
                 "remaining": pool.remaining(),
                 "usage_fraction": pool.usage_fraction(),
                 "pressure": pool.describe_pressure(),
+                # Scope, stated at the point of use.  "cascade budget"
+                # reads as "the most this cascade can cost" and it is NOT
+                # that: a child whose spawn declared its own budget_control
+                # is outside this pot entirely.  Someone who knew the rule,
+                # and had the warning in front of them, still summed
+                # budgeted children into this figure and reported a
+                # catastrophic ceiling failure that was entirely correct
+                # behaviour.  A caveat in prose did not prevent it; a field
+                # in the payload might.
+                "covers": (
+                    "sessions in this cascade that did NOT declare their own "
+                    "budget_control; children with their own budget are "
+                    "accounted separately and are not bounded by this pot"
+                ),
             }
         self._event_sink.send_event(client_id, SystemMessageEvent(
             message=json.dumps(body), level="info"))
