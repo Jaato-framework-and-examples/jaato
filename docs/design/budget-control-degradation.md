@@ -119,7 +119,7 @@ budget_control:
   `vision`). They introduce no ad-hoc labels, so no widening of the tier
   vocabulary or the `enter_tier` tool schema is required.
 
-### 3.0 Authoring a budgeted profile — three traps
+### 3.0 Authoring a budgeted profile — four traps
 
 Found while the first PoC was being built; none of them is caught by
 `jaato-scaffold validate`, so they are documented rather than enforced.
@@ -136,7 +136,18 @@ Found while the first PoC was being built; none of them is caught by
    discovery instead of during the work, and the run stops being
    reproducible. Use `cli(preload)` (the validator emits an
    informational `discovery_gated_tools` line listing what is deferred).
-3. **Model ids are not validated.** The validator checks tier names and
+3. **Every model in a ladder must support what the agent actually does.**
+   A rung that degrades to a model which cannot make tool calls does not
+   degrade the agent, it kills it — and it fails at the worst moment,
+   mid-run, on a rung that only fires under pressure. Worse than a bad id,
+   which at least fails on turn 1.
+   Checking a catalogue's `supported_parameters` is **necessary but not
+   sufficient**: that field is an aggregate over the providers serving a
+   model, so it tells you the model can do tools *somewhere*, not that the
+   provider you are routed to will. A gateway can advertise `tools: true`
+   and still route to an upstream that rejects them. Prefer models already
+   exercised in the same deployment over cheaper unproven ones.
+4. **Model ids are not validated.** The validator checks tier names and
    that a named provider is installed — it does NOT check that the model
    id exists on that provider. A typo validates clean and fails at
    `connect`. Check the provider's catalog (for OpenRouter,
@@ -584,6 +595,44 @@ it.
 `usage_fraction()` does not floor: `1.0734 × 12000 = 12881`, which is
 both stages' real spend to the token. For per-stage accounting, read
 `usage_fraction`.
+
+---
+
+### 8d. When a cascade rung actually takes effect
+
+A pushed rung does **not** take effect when the pool crosses it. It takes
+effect at each child's **next turn boundary**.
+
+A child inside a model call does not service the RPC until its turn ends,
+so a push aimed at a busy child does not ack within the daemon's timeout.
+That timeout is the daemon giving up waiting, **not** a rejection — the
+rung still lands, and rungs latched while a child was busy are applied
+together at the next boundary. Nothing is lost; delivery is *delayed by up
+to one turn*.
+
+Two consequences worth designing around:
+
+* This delay **is** the `cap + (N x one turn)` overshoot. The bound is not
+  a safety margin bolted on — it is the direct arithmetic of every live
+  child being able to finish the turn it is in before a rung reaches it.
+* A timeout in the logs is expected traffic under load, not a fault. It is
+  logged at INFO for that reason; a genuine delivery failure (an
+  unreachable runner) is the WARNING, and is the only case where a child
+  may never receive the rung.
+
+### The aggregate ceiling is conditional on the push
+
+Worth stating plainly because it bounds what §8c's validation claims. The
+spawn-time clamp cannot bound a fan-out: N children spawning concurrently
+each legitimately see the same full remaining, so each may be granted the
+entire pool. Under concurrency the aggregate ceiling therefore rests
+**entirely** on the mid-flight push, and the push is best-effort.
+
+Measured on the same harness: with the push working, total spend settled
+at ~158% of cap (inside the N-turn bound). With the push broken, ~307% of
+cap and no ceiling at all. Nothing in the current design sits between
+those two outcomes — a per-child *reservation* at spawn would provide that
+floor and demote the push to an optimisation. Not built; see §8.
 
 ---
 

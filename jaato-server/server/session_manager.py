@@ -4445,6 +4445,13 @@ class SessionManager:
         degrading.  The failure log names the exception TYPE because a bare
         ``TimeoutError`` stringifies to the empty string — a previous version
         logged ``failed ()`` and told an operator nothing about why.
+
+        A TIMEOUT is treated as distinct from a failure, and deliberately
+        logged at INFO.  It means the daemon stopped waiting, not that the
+        rung was rejected: a child inside a model call does not service the
+        RPC until its turn ends, and the rung then applies at that boundary.
+        An earlier version told the operator such a child "keeps its
+        spawn-time ceiling", which is false — it is degraded, just late.
         """
         from jaato_sdk.events import AgentOutputEvent
         try:
@@ -4464,10 +4471,26 @@ class SessionManager:
                     agent_id="main", source="system",
                     text=str(notice), mode="write",
                 ))
+        except TimeoutError as exc:
+            # A TIMEOUT is the DAEMON giving up waiting, not the runner
+            # refusing.  A child busy inside a model call does not service
+            # the RPC until its turn ends, so the rung lands at that
+            # boundary — measured across three runs: pushes that "failed"
+            # at the 50% crossing were applied together with the 75% rung
+            # at the next boundary.  Nothing is lost, it is DELAYED by up
+            # to one turn, which is exactly the overshoot the
+            # cap + N x one-turn bound accounts for.  Logged at INFO
+            # because it is expected behaviour, not a fault.
+            logger.info(
+                "cascade %s: degrade push to %s did not ack within the "
+                "timeout (%s) — child is mid-turn; the rung applies at its "
+                "next turn boundary",
+                cascade_driver_id, session_id, exc or "no message",
+            )
         except Exception as exc:  # noqa: BLE001 — best-effort boundary
             logger.warning(
-                "cascade %s: degrade push to %s failed: %s: %s — that child "
-                "keeps its spawn-time ceiling",
+                "cascade %s: degrade push to %s failed: %s: %s — unlike a "
+                "timeout this child may never receive the rung",
                 cascade_driver_id, session_id,
                 type(exc).__name__, exc or "(no message)",
             )
