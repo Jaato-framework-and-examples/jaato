@@ -45,7 +45,7 @@ jaato is a framework for building agentic AI applications with LLM function call
 - **Per-Session Isolation** - optional kernel-enforced AppArmor confinement, plus a pre-warm runner-process pool that cuts per-session bootstrap from ~30s to ~7s
 - **Parallel Tool Execution** - concurrent tool calls with thread-safe callbacks (up to 8 tools per turn), plus deferred (on-demand) tool loading
 - **Context Management** - four garbage-collection strategies (truncation, summarization, hybrid generational, token-budget) with proactive threshold-based triggering
-- **OpenTelemetry Observability** - structured tracing with span hierarchy (`jaato.turn` > `jaato.tool` > `jaato.permission`)
+- **OpenTelemetry Observability** - structured tracing with span hierarchy (`jaato.turn` > `jaato.tool` > `jaato.permission`); spans follow OpenInference conventions and export to any compatible backend (Arize Phoenix, **Langfuse**, generic OTLP collectors), carrying per-call cost, token counts, and session/user attribution
 
 ### Etymology
 
@@ -159,7 +159,7 @@ jaato ships with **40+ built-in plugins** organized by function. Plugins are aut
 | <img src="docs/web/assets/images/plugins/plugin-registry.png" width="32"> | **registry** | Plugin discovery, lifecycle management, and tool exposure control |
 | | **introspection** | Runtime self-inspection for tool and plugin discovery |
 | | **streaming** | Token-level streaming with cancellation support |
-| | **telemetry** | OpenTelemetry tracing integration |
+| | **telemetry** | OpenTelemetry / OpenInference tracing — exports to Arize Phoenix, Langfuse, or any OTLP backend |
 | | **reliability** | Per-tool reliability policies with configurable thresholds |
 | | **sandbox_manager** | Sandboxed execution environments for untrusted tools |
 | | **service_connector** | External web-service discovery and consumption (APIs, databases) |
@@ -426,6 +426,15 @@ Each provider's setup is also written up in the per-provider [provider docs](htt
 |----------|-------------|---------|
 | `JAATO_TELEMETRY_ENABLED` | Enable OTel tracing | `false` |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | OTLP collector endpoint | — |
+| `OTEL_EXPORTER_OTLP_PROTOCOL` | Transport for generic OTLP (`grpc` / `http/protobuf`) | `grpc` |
+| `JAATO_TELEMETRY_BACKEND` | Force a backend (`otel` / `langfuse`); auto-selects `langfuse` when a Langfuse key is set and no OTLP endpoint is configured | auto |
+| `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` | Langfuse credentials — enable the built-in Langfuse backend (derives its OTLP endpoint, `http/protobuf` transport, and Basic auth) | — |
+| `LANGFUSE_HOST` | Langfuse base URL (e.g. `https://cloud.langfuse.com`, a region host, or self-hosted) | `https://cloud.langfuse.com` |
+| `JAATO_TELEMETRY_USER_ID` | User attribution stamped on traces (`user.id`) for per-user analytics | — |
+
+For prompt authoring/versioning driven from the Langfuse UI (a separate, opt-in
+integration that plugs into jaato's prefetch seam), see the
+[jaato-langfuse-prompts PoC](https://github.com/Jaato-framework-and-examples/jaato-langfuse-prompts-integration-poc).
 
 ## Documentation
 
