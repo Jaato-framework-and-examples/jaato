@@ -4417,6 +4417,8 @@ class SessionManager:
                 continue
         if not payload:
             return
+        pool = self.get_cascade_budget(cascade_driver_id)
+        pressure = pool.describe_pressure() if pool is not None else None
         with self._lock:
             targets = [
                 (sid, sess) for sid, sess in self._sessions.items()
@@ -4428,13 +4430,14 @@ class SessionManager:
                 continue
             threading.Thread(
                 target=self._push_cascade_degrade_one,
-                args=(cascade_driver_id, sid, rpc, payload),
+                args=(cascade_driver_id, sid, rpc, payload, pressure),
                 name=f"cascade-degrade-{sid}",
                 daemon=True,
             ).start()
 
     def _push_cascade_degrade_one(
-        self, cascade_driver_id: str, session_id: str, rpc: Any, payload: list,
+        self, cascade_driver_id: str, session_id: str, rpc: Any,
+        payload: list, pool_pressure: Optional[str] = None,
     ) -> None:
         """Deliver a cascade degrade to ONE child.  Best-effort, off-thread.
 
@@ -4443,13 +4446,24 @@ class SessionManager:
         ``TimeoutError`` stringifies to the empty string — a previous version
         logged ``failed ()`` and told an operator nothing about why.
         """
+        from jaato_sdk.events import AgentOutputEvent
         try:
             result = rpc.session_apply_budget_degrade_threadsafe(
-                payload, timeout=10.0)
+                payload, pool_pressure, timeout=10.0)
             logger.info(
                 "cascade %s pushed degrade to %s: %s",
                 cascade_driver_id, session_id, result,
             )
+            # Emit the child's notices from HERE.  The runner collected them
+            # rather than writing them out because every client-facing
+            # channel a session has is turn-scoped, and a pushed rung can
+            # land between turns — which is why server-side degrades were
+            # invisible to the driver.  The daemon is not turn-scoped.
+            for notice in (result or {}).get("notices") or []:
+                self._emit_to_session(session_id, AgentOutputEvent(
+                    agent_id="main", source="system",
+                    text=str(notice), mode="write",
+                ))
         except Exception as exc:  # noqa: BLE001 — best-effort boundary
             logger.warning(
                 "cascade %s: degrade push to %s failed: %s: %s — that child "

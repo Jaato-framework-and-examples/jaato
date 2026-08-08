@@ -1548,7 +1548,8 @@ class RunnerRPC:
         apply = getattr(session, "apply_cascade_degrade", None)
         if not callable(apply):
             return False, {"error": "session has no apply_cascade_degrade"}
-        return True, apply(params.get("rungs") or [])
+        return True, apply(
+            params.get("rungs") or [], params.get("pool_pressure"))
 
     def _handle_session_get_budget_usage(self) -> "tuple[bool, Any]":
         """Read-only snapshot of the session's absolute budget consumption.

@@ -52,6 +52,7 @@ def _session(budget=None):
         _active_provider_name="openrouter", _provider_cache={},
         _budget_tracker=BudgetTracker(budget) if budget else None,
         _budget_terminal_action=None, _budget_exhausted_reason=None,
+        _budget_notice_sink=None,
         _current_output_callback=lambda src, txt, mode: notices.append(txt),
         _ui_hooks=None, _connects=connects, _notices=notices,
     )
@@ -71,7 +72,7 @@ def test_pushed_rung_rebinds_and_reconnects_a_running_child():
     out = s.apply_cascade_degrade([
         {"at": 50.0, "model_tiers": {"planner": {"model": "flash",
                                                  "provider": "openrouter"}}}])
-    assert out == {"applied": 1}
+    assert out["applied"] == 1
     assert s._tier_config.tiers["planner"].model == "flash"
     assert s._connects == ["flash"]        # the running child re-pointed
     assert s._model_name == "flash"
@@ -108,7 +109,7 @@ def test_push_works_on_a_child_with_no_budget_of_its_own():
     """A child need not be budgeted itself to be degraded by the pool."""
     s = _session(budget=None)
     assert s.apply_cascade_degrade([{"at": 50.0, "model_tiers":
-                                     {"planner": "flash"}}]) == {"applied": 1}
+                                     {"planner": "flash"}}])["applied"] == 1
     assert s._connects == ["flash"]
 
 
@@ -121,7 +122,7 @@ def test_malformed_push_is_rejected_without_raising():
 
 def test_empty_push_is_a_noop():
     s = _session()
-    assert s.apply_cascade_degrade([]) == {"applied": 0}
+    assert s.apply_cascade_degrade([]) == {"applied": 0, "notices": []}
 
 
 # --------------------------------------------------- the pool, fire side
@@ -149,3 +150,47 @@ def test_concurrent_children_cross_the_pool_rung_exactly_once():
         fired_total.extend(pool.reconcile_session(child, {"tokens": spend}).fired)
     assert [r.at_percent for r in fired_total] == [50.0]
     assert pool.remaining()["tokens"] == 6000.0
+
+
+# ---- notices must survive landing BETWEEN turns (fan-out run 4 finding) --
+
+def test_pushed_notices_are_collected_not_written_to_a_dead_channel():
+    """Every client-facing channel a session has is turn-scoped:
+    _current_output_callback is set per send and _ui_hooks is installed by
+    the runner per send and restored after. A pushed rung can land BETWEEN
+    turns, so writing there reaches nobody — server-side degrades were
+    invisible to the driver. The notices are handed back for the daemon,
+    which is not turn-scoped, to emit."""
+    s = _session()
+    s._current_output_callback = None          # between turns
+    out = s.apply_cascade_degrade(
+        [{"at": 50.0, "model_tiers": {"planner": "flash"}}])
+    assert out["applied"] == 1
+    assert out["notices"], "notice lost — nothing for the daemon to emit"
+    assert "cascade budget" in out["notices"][0]
+
+
+def test_notices_still_reach_a_live_turn_channel_too():
+    """Landing DURING a turn must not stop working."""
+    s = _session()
+    out = s.apply_cascade_degrade(
+        [{"at": 50.0, "model_tiers": {"planner": "flash"}}])
+    assert out["notices"] and s._notices          # both paths carried it
+
+
+def test_cascade_notice_reports_POOL_pressure_not_the_child_s():
+    """The rung fired on the pool's fraction. Reporting the child's own
+    usage reads as a contradiction: 'degrading at 50% (tokens 32%)'."""
+    s = _session(budget=_cfg(limits={"tokens": 15000}))
+    s._budget_tracker.observe(tokens=4800)     # child at 32% of its own
+    out = s.apply_cascade_degrade(
+        [{"at": 50.0, "model_tiers": {"planner": "flash"}}],
+        pool_pressure="tokens 50%")
+    assert "tokens 50%" in out["notices"][0]
+    assert "32%" not in out["notices"][0]
+
+
+def test_sink_is_restored_after_the_push():
+    s = _session()
+    s.apply_cascade_degrade([{"at": 50.0, "action": "abort"}])
+    assert s._budget_notice_sink is None

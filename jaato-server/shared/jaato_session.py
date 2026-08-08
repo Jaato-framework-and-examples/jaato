@@ -717,6 +717,11 @@ class JaatoSession:
         # This ensures enrichment notifications go to the correct agent panel even when
         # multiple sessions share the same registry (e.g., subagents)
         self._current_output_callback: Optional['OutputCallback'] = None
+        # When set, budget notices are ALSO collected here.  A rung pushed
+        # from the cascade can land BETWEEN turns, and every client-facing
+        # output channel this session has is turn-scoped — so the notice
+        # must be handed back to the caller (the daemon) to emit instead.
+        self._budget_notice_sink: Optional[List[str]] = None
 
         # Current turn span — set while a turn is in progress so that
         # _enrich_tool_result_dict can emit enrichment telemetry events on it.
@@ -7921,7 +7926,10 @@ NOTES
         except Exception as exc:  # noqa: BLE001
             logger.warning("budget: turn observation failed: %s", exc)
 
-    def _apply_budget_rungs(self, fired, origin: str = "session") -> None:
+    def _apply_budget_rungs(
+        self, fired, origin: str = "session",
+        pressure: Optional[str] = None,
+    ) -> None:
         """Apply the degrade rungs that just crossed their threshold.
 
         ``origin`` distinguishes WHOSE ceiling fired: ``"session"`` for this
@@ -7953,9 +7961,12 @@ NOTES
         from .budget_control import ACTION_ABORT, overlay_tier_table
 
         for rung in fired:
-            detail = (
+            # A cascade rung fired on the POOL's fraction; reporting this
+            # child's own usage instead reads as a contradiction ("degrading
+            # at 50% (tokens 32%)").  Caller supplies the pool's pressure.
+            detail = pressure or (
                 self._budget_tracker.describe_pressure()
-                if self._budget_tracker is not None else "pool pressure"
+                if self._budget_tracker is not None else "cascade pressure"
             )
             tag = f"{origin} budget"
             if rung.model_tiers:
@@ -8001,7 +8012,10 @@ NOTES
                         f"budget_exhausted ({origin}: {detail})")
                     self.request_stop(self._budget_exhausted_reason)
 
-    def apply_cascade_degrade(self, rungs: List[Dict[str, Any]]) -> Dict[str, Any]:
+    def apply_cascade_degrade(
+        self, rungs: List[Dict[str, Any]],
+        pool_pressure: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """Apply degrade rungs pushed down because the CASCADE pool crossed.
 
         The mid-flight half of cascade budgets: a child already running when
@@ -8036,13 +8050,21 @@ NOTES
             logger.warning("apply_cascade_degrade: bad payload: %s", exc)
             return {"applied": 0, "error": str(exc)}
         if not parsed:
-            return {"applied": 0}
+            return {"applied": 0, "notices": []}
+        notices: List[str] = []
+        previous_sink = self._budget_notice_sink
+        self._budget_notice_sink = notices
         try:
-            self._apply_budget_rungs(tuple(parsed), origin="cascade")
+            self._apply_budget_rungs(
+                tuple(parsed), origin="cascade", pressure=pool_pressure)
         except Exception as exc:  # noqa: BLE001
             logger.warning("apply_cascade_degrade: apply failed: %s", exc)
-            return {"applied": 0, "error": str(exc)}
-        return {"applied": len(parsed)}
+            return {"applied": 0, "error": str(exc), "notices": notices}
+        finally:
+            self._budget_notice_sink = previous_sink
+        # Handed back rather than emitted: the DAEMON emits these, because
+        # it is not turn-scoped and this push may have landed between turns.
+        return {"applied": len(parsed), "notices": notices}
 
     def _reconnect_active_tier_if_rebound(self) -> None:
         """Re-point the provider when the ACTIVE tier's binding just changed.
@@ -8078,11 +8100,18 @@ NOTES
         had acted at all was a server-side log line.  ``on_agent_output``
         appears nowhere else in this file — that was the tell.
         """
+        rendered = f"[{message}]"
+        # Collect first: the sink is the only channel that works when this
+        # runs outside a turn (a cascade push), because both
+        # ``_current_output_callback`` and the runner's ``_ui_hooks`` shim
+        # are installed per-send and restored afterwards.
+        if self._budget_notice_sink is not None:
+            self._budget_notice_sink.append(rendered)
         callback = self._current_output_callback
         if callback is None:
             return
         try:
-            callback("system", f"[{message}]", "write")
+            callback("system", rendered, "write")
         except Exception:  # noqa: BLE001
             pass
 

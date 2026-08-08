@@ -110,7 +110,7 @@ def test_apply_budget_degrade_dispatch_passes_the_args_through(monkeypatch):
     seen = {}
 
     class _Sess:
-        def apply_cascade_degrade(self, rungs):
+        def apply_cascade_degrade(self, rungs, pool_pressure=None):
             seen["rungs"] = rungs
             return {"applied": len(rungs)}
 
@@ -134,7 +134,7 @@ def test_apply_budget_degrade_tolerates_an_empty_envelope():
     from server.runner.rpc import RunnerRPC
 
     class _Sess:
-        def apply_cascade_degrade(self, rungs):
+        def apply_cascade_degrade(self, rungs, pool_pressure=None):
             return {"applied": 0}
 
     rpc = SimpleNamespace(_require_ready_session=lambda: (True, None, _Sess()))

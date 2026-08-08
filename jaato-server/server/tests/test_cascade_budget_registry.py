@@ -180,12 +180,13 @@ def test_push_returns_immediately_and_does_not_block_the_emit_path():
     released = threading.Event()
 
     class _SlowRPC:
-        def session_apply_budget_degrade_threadsafe(self, payload, timeout=None):
+        def session_apply_budget_degrade_threadsafe(self, payload, pool_pressure=None, timeout=None):
             released.wait(5)          # stands in for a 10s RPC timeout
             return {"applied": 1}
 
     sm = SimpleNamespace(
         _lock=threading.RLock(),
+        get_cascade_budget=lambda cid: None,
         _sessions={
             "s1": SimpleNamespace(cascade_driver_id="cid1",
                                   server=SimpleNamespace(runner_rpc=_SlowRPC())),
@@ -216,17 +217,18 @@ def test_one_unreachable_child_does_not_stop_its_siblings():
     done = threading.Event()
 
     class _Boom:
-        def session_apply_budget_degrade_threadsafe(self, payload, timeout=None):
+        def session_apply_budget_degrade_threadsafe(self, payload, pool_pressure=None, timeout=None):
             raise TimeoutError()          # stringifies to "" — the empty log
 
     class _Ok:
-        def session_apply_budget_degrade_threadsafe(self, payload, timeout=None):
+        def session_apply_budget_degrade_threadsafe(self, payload, pool_pressure=None, timeout=None):
             delivered.append(payload)
             done.set()
             return {"applied": 1}
 
     sm = SimpleNamespace(
         _lock=threading.RLock(),
+        get_cascade_budget=lambda cid: None,
         _sessions={
             "bad": SimpleNamespace(cascade_driver_id="cid1",
                                    server=SimpleNamespace(runner_rpc=_Boom())),
@@ -250,12 +252,13 @@ def test_push_skips_sessions_outside_the_cascade():
     hits = []
 
     class _RPC:
-        def session_apply_budget_degrade_threadsafe(self, payload, timeout=None):
+        def session_apply_budget_degrade_threadsafe(self, payload, pool_pressure=None, timeout=None):
             hits.append(1)
             return {}
 
     sm = SimpleNamespace(
         _lock=threading.RLock(),
+        get_cascade_budget=lambda cid: None,
         _sessions={"other": SimpleNamespace(
             cascade_driver_id="different",
             server=SimpleNamespace(runner_rpc=_RPC()))},
