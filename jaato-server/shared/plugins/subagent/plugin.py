@@ -2446,6 +2446,21 @@ class SubagentPlugin:
                     "_dispatch_isolated_spawn: runtime_limits "
                     "serialization failed; dropping",
                 )
+        # Budget control (optional).  Same producer trap as runtime_limits
+        # above and as the session envelope: the field is parsed on the far
+        # side and read by _build_isolated_envelope, but nothing put it on
+        # the wire — so an isolated subagent's declared budget silently did
+        # not survive daemon-side reconstruction.
+        if getattr(profile, "budget_control", None) is not None:
+            try:
+                profile_payload["budget_control"] = (
+                    profile.budget_control.to_dict()
+                )
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "_dispatch_isolated_spawn: budget_control "
+                    "serialization failed; dropping",
+                )
         # Preload annotations.
         if profile.preloaded_plugins:
             preload_set = set(profile.preloaded_plugins)

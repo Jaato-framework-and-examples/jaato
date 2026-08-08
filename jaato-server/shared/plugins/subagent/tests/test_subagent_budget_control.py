@@ -47,3 +47,34 @@ def test_the_forward_survives_a_profile_without_one():
     from types import SimpleNamespace
     profile = SimpleNamespace()
     assert getattr(profile, "budget_control", None) is None
+
+
+def test_isolated_spawn_payload_carries_the_budget():
+    """The ISOLATED path reconstructs the profile daemon-side from a
+    profile_payload. That payload mirrored build_inline_profile's field set
+    but omitted budget_control — so _build_isolated_envelope, which reads
+    profile.budget_control, always saw None. Same producer trap as the
+    session envelope: parsed on the far side, never put on the wire."""
+    src = inspect.getsource(subagent_plugin)
+    assert 'profile_payload["budget_control"]' in src, (
+        "isolated subagent spawns drop the profile's declared budget"
+    )
+
+
+def test_an_inline_spec_can_declare_its_own_budget():
+    """The spawn tool takes inline specs, not only profile references — so
+    an author who lets the parent spawn inline can still fix a child's
+    policy there. build_inline_profile must parse it."""
+    from shared.plugins.subagent.config import build_inline_profile
+    p = build_inline_profile(
+        {"plugins": [], "budget_control": {"limits": {"tokens": 9000}}},
+        name="x")
+    assert p.budget_control is not None
+    assert p.budget_control.limits == {"tokens": 9000}
+    assert p.budget_control.to_dict() == {"limits": {"tokens": 9000}}
+
+
+def test_an_inline_spec_without_a_budget_expresses_nothing():
+    """Absence is the signal that the parent's policy should apply."""
+    from shared.plugins.subagent.config import build_inline_profile
+    assert build_inline_profile({"plugins": []}, name="x").budget_control is None
