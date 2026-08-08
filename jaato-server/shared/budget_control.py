@@ -839,41 +839,40 @@ class CascadeBudgetPool:
     def child_config(
         self, profile_budget: Optional[BudgetControlConfig]
     ) -> Tuple[Optional[BudgetControlConfig], EffectiveLimits]:
-        """Build the config a child session should actually run under.
+        """Decide the budget a child spawned into this scope runs under.
 
-        Returns ``(config, effective)``.  The child runs against the clamped
-        limits either way; what differs is whose degradation POLICY applies.
+        **A child that declared its own budget keeps it, untouched.**  A
+        subagent is a delegation to another department with its own budget:
+        the author wrote a number, and the parent is not entitled to rewrite
+        it down to whatever happens to be left in the shared pot.  Its
+        spending is accounted on its own books, so it is neither clamped at
+        spawn nor refused when the shared pot is dry.
 
-        The rule turns on whether the child's author expressed one at all:
+        **A child that declared nothing draws on the parent's budget** —
+        both the limits (whatever remains) and the degradation ladder.
+        Choosing to spawn without a declared budget, whether by omitting a
+        profile or by an inline spec that does not mention one, IS the
+        author delegating that policy to the parent.
 
-        * The profile declares a ``budget_control`` block — its ladder is
-          taken LITERALLY, including when that ladder is empty.  A block
-          with ``limits`` and no ``degrade`` is a deliberate "cap me but do
-          not degrade me", and the cascade is not entitled to override it.
-          The cascade constrains ceilings, never policy.
-        * The profile declares NO block — nothing was expressed, so the
-          child inherits the CASCADE's ladder, shared with the parent and
-          with every other profileless sibling.
+        The test is therefore "did this spawn carry a ``budget_control``",
+        from a profile file or an inline spec alike — not "was a profile
+        referenced".  The spawn tool accepts both, so the mechanism the
+        author chose is itself the expression of intent.
 
-        Without that second branch a profileless child received a ceiling
-        with no behaviour attached: its tracker would accumulate, cross the
-        limit, and nothing would fire.  It was "budgeted" only in the sense
-        that a number had been written down, and the sole thing that could
-        degrade it was a best-effort push.
-
-        Note the inherited ladder's thresholds are percentages of the
-        CHILD's clamped limit, not the pool's — the policy shape ("brown out
-        at half, stop at full") applies at whatever scale the child was
-        allocated.
+        ``EffectiveLimits`` is still returned in both cases, now purely as
+        OBSERVABILITY: it shows what the child asked for beside what the
+        scope had, so an operator can see the relationship even when
+        nothing was clamped.
         """
         eff = self.effective_limits_for(
             profile_budget.limits if profile_budget else None)
-        if not eff.effective:
+        if profile_budget is not None:
+            # Its own books.  Not clamped, not refused.
             return profile_budget, eff
+        if not eff.effective:
+            return None, eff
         if eff.exhausted:
             raise CascadeExhaustedError(self.cascade_driver_id, eff)
-        degrade = (
-            profile_budget.degrade if profile_budget is not None
-            else self._tracker.config.degrade
-        )
-        return BudgetControlConfig(limits=eff.effective, degrade=degrade), eff
+        return BudgetControlConfig(
+            limits=eff.effective, degrade=self._tracker.config.degrade
+        ), eff

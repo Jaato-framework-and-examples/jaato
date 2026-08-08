@@ -188,6 +188,12 @@ class Session:
     # was never set, so the GC reaped the observer at 22:07:25
     # despite host_validator having spawned 85s earlier.
     cascade_driver_id: Optional[str] = None
+    # False when this child declared its own budget_control: a delegation
+    # to another department, accounted on its own books.  Such a child does
+    # not deplete the parent's shared pot, is not clamped by it, and is not
+    # degraded when it crosses.  True (default) = draws on the parent's
+    # budget and is governed by it.
+    draws_on_parent_budget: bool = True
     # Phase 3 §3.12 disk-restore + peer-review M5/N1: True when this
     # Session was loaded from disk and is awaiting its first
     # client-attach.  While True, ``check_permission`` ASK paths
@@ -1351,6 +1357,14 @@ class SessionManager:
             # wants the opposite response to a budget refusal.  Refusing at
             # the spawn boundary lets the requesting client be told
             # synchronously, with the framework's own evidence attached.
+            # Does this child draw on the shared pot, or does it have its
+            # own books?  A child that declared a budget is a delegation to
+            # another department: its spend is accounted separately, it is
+            # not clamped, and an exhausted pot does not refuse it.
+            _own_budget = getattr(
+                getattr(server, "_profile", None), "budget_control", None)
+            server._draws_on_parent_budget = _own_budget is None
+
             _pool = server._cascade_budget_pool
             if _pool is not None:
                 from shared.budget_control import CascadeExhaustedError
@@ -4425,6 +4439,10 @@ class SessionManager:
                 if getattr(sess, "cascade_driver_id", None) == cascade_driver_id
             ]
         for sid, sess in targets:
+            if getattr(sess, "draws_on_parent_budget", True) is False:
+                # Its own budget governs it; the parent's pot running low is
+                # not that child's problem and not the parent's call.
+                continue
             rpc = getattr(getattr(sess, "server", None), "runner_rpc", None)
             if rpc is None:
                 continue
@@ -4519,6 +4537,8 @@ class SessionManager:
             ]
         for sid, sess in sessions:
             try:
+                if getattr(sess, "draws_on_parent_budget", True) is False:
+                    continue        # own books — see _accumulate_cascade_budget
                 rpc = getattr(getattr(sess, "server", None), "runner_rpc", None)
                 if rpc is None:
                     continue
@@ -4567,6 +4587,12 @@ class SessionManager:
             return
         pool = self.get_cascade_budget(getattr(session, "cascade_driver_id", None))
         if pool is None:
+            return
+        # A child with its own declared budget spends on its own books, so
+        # it must not deplete the shared pot — otherwise the pot would be
+        # charged twice for the same tokens and would starve the children
+        # that genuinely draw on it.
+        if getattr(session, "draws_on_parent_budget", True) is False:
             return
         try:
             usage = getattr(event, "usage", None)
@@ -5187,6 +5213,10 @@ class SessionManager:
             # ``cascade_driver_id`` field; getattr returned None for
             # every cascade session, defeating dispatch + GC-skip.
             session.cascade_driver_id = cascade_driver_id
+            # Whether this child draws on the parent's shared pot or keeps
+            # its own books (see _spawn_session_runner_unconditional).
+            session.draws_on_parent_budget = getattr(
+                server, "_draws_on_parent_budget", True)
             self._sessions[session_id] = session
             # ``_sessions`` is authoritative from here; drop the claim.
             self._reserved_session_ids.discard(session_id)

@@ -38,19 +38,29 @@ def test_remaining_never_goes_negative():
     assert p.remaining() == {"usd": 0.0}
 
 
-def test_linear_chain_later_stage_is_clamped_by_earlier_spend():
-    """THE demo: stage 3 runs on what stages 1-2 left, not on what it asked
-    for, and its own profile never mentioned the cascade."""
+def test_a_child_with_its_own_budget_is_NOT_clamped_by_the_scope():
+    """A delegation to another department with its own budget: the author
+    wrote a number and the parent does not rewrite it down to whatever is
+    left in the shared pot. Its spend is accounted on its own books."""
     p = _pool(usd=10, turns=12)
-    p.spend(usd=7, turns=8)                       # stages 1 + 2
+    p.spend(usd=7, turns=8)                       # pot down to 3
     cfg, eff = p.child_config(_cfg(limits={"usd": 9, "turns": 2}))
-    assert cfg.limits["usd"] == 3.0               # clamped by the cascade
-    assert cfg.limits["turns"] == 2               # its own is tighter, kept
-    assert eff.clamped == ("usd",)
-    # both inputs observable, not just the outcome
+    assert cfg.limits["usd"] == 9                 # as declared, NOT 3
+    assert cfg.limits["turns"] == 2
+    # EffectiveLimits survives as observability, not as a clamp
     assert eff.profile_limits["usd"] == 9
     assert eff.cascade_remaining["usd"] == 3.0
-    assert "CLAMPED" in eff.describe()
+
+
+def test_a_child_with_no_budget_of_its_own_IS_bounded_by_the_remainder():
+    """Spawning without a declared budget delegates the policy to the
+    parent, so the child draws on what is left."""
+    p = _pool(usd=10, turns=12)
+    p.spend(usd=7, turns=8)
+    cfg, eff = p.child_config(None)
+    assert cfg.limits["usd"] == 3.0
+    # every dimension comes from the pool for a child that declared none
+    assert "usd" in eff.clamped
 
 
 def test_child_keeps_its_own_degrade_ladder():
@@ -114,16 +124,24 @@ def test_child_dimension_the_cascade_does_not_cap_is_untouched():
     assert "turns" not in eff.clamped
 
 
-def test_exhausted_pool_refuses_the_child_rather_than_handing_it_zero():
+def test_exhausted_scope_refuses_a_child_that_has_no_budget_of_its_own():
     """Zero is not a budget a session can run under, and returning None
-    ("unbudgeted") would be catastrophic — the reason there is no budget is
-    that the cascade is OUT of budget. Fail loud so the caller refuses."""
+    ("unbudgeted") would be catastrophic — the reason there is none is that
+    the scope is OUT. Fail loud so the caller refuses the spawn."""
     from shared.budget_control import CascadeExhaustedError
     p = _pool(usd=10)
     p.spend(usd=10)
-    assert p.effective_limits_for({"usd": 5}).exhausted == ("usd",)
+    assert p.effective_limits_for(None).exhausted == ("usd",)
     with pytest.raises(CascadeExhaustedError, match="no headroom"):
-        p.child_config(_cfg(limits={"usd": 5}))
+        p.child_config(None)
+
+
+def test_exhausted_scope_still_admits_a_child_with_its_own_budget():
+    """Its own books. An empty shared pot is not that department's problem."""
+    p = _pool(usd=10)
+    p.spend(usd=10)
+    cfg, _ = p.child_config(_cfg(limits={"usd": 5}))
+    assert cfg.limits["usd"] == 5
 
 
 def test_pool_rungs_fire_on_aggregate_spend():
@@ -172,13 +190,13 @@ def test_exhaustion_error_carries_framework_generated_evidence():
     p = _pool(usd=10, turns=20)
     p.spend(usd=10, turns=4)
     with pytest.raises(CascadeExhaustedError) as ei:
-        p.child_config(_cfg(limits={"usd": 5, "turns": 3}))
+        p.child_config(None)
     err = ei.value
     assert err.cascade_driver_id == "cid1"
     assert err.exhausted == ("usd",)
     payload = err.as_payload()
     assert payload["reason"] == "cascade_budget_exhausted"
-    assert payload["profile_limits"]["usd"] == 5      # what it asked for
+    assert payload["cascade_remaining"]["usd"] == 0.0  # nothing left
     assert payload["cascade_remaining"]["usd"] == 0.0  # what was left
     assert payload["exhausted_dimensions"] == ["usd"]
     # a non-exhausted dimension still reports, so the trace is complete
@@ -226,11 +244,11 @@ def test_reconcile_ignores_unknown_dimensions():
     assert p.remaining()["tokens"] == 90.0
 
 
-def test_linear_chain_via_reconciliation_lands_on_the_predicted_number():
-    """Stage 1 really spent 9314; stage 2 must be clamped from THAT, not
-    from the 7695 the events carried."""
+def test_reconciliation_feeds_the_remainder_a_pool_drawing_child_gets():
+    """Stage 1 really spent 9314; a child drawing on the pot must see THAT,
+    not the 7695 the events carried."""
     p = _pool(tokens=12000)
     p.reconcile_session("stage1", {"tokens": 9314})
-    cfg, eff = p.child_config(_cfg(limits={"tokens": 9000}))
+    cfg, eff = p.child_config(None)
     assert cfg.limits["tokens"] == pytest.approx(2686.0)
     assert eff.clamped == ("tokens",)

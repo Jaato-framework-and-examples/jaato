@@ -120,8 +120,10 @@ def test_depletion_across_stages_is_cumulative():
     sm._accumulate_cascade_budget(session, _turn_event(spend=9300, total=3000))
     pool = sm.get_cascade_budget("cid1")
     assert pool.remaining()["tokens"] == 2700.0
-    cfg, eff = pool.child_config(_cfg(tokens=9000))
-    assert cfg.limits["tokens"] == 2700.0     # stage 2 clamped
+    # a child DRAWING on the pot sees what is left; one with its own
+    # declared budget would keep its own (separate books).
+    cfg, eff = pool.child_config(None)
+    assert cfg.limits["tokens"] == 2700.0
     assert eff.clamped == ("tokens",)
 
 
@@ -140,8 +142,7 @@ def test_refusal_reaches_the_client_with_machine_readable_evidence():
         {"limits": {"tokens": 12000}}))
     pool.spend(tokens=12000)
     try:
-        pool.child_config(BudgetControlConfig.from_dict(
-            {"limits": {"tokens": 9000}}))
+        pool.child_config(None)   # no budget of its own -> draws on the pot
         raise AssertionError("expected CascadeExhaustedError")
     except Exception as exc:
         SessionManager._emit_cascade_refusal(sm, "client-1", "sid-3", exc)
@@ -153,7 +154,8 @@ def test_refusal_reaches_the_client_with_machine_readable_evidence():
     assert ev.recoverable is False
     assert ev.details["reason"] == "cascade_budget_exhausted"
     assert ev.details["exhausted_dimensions"] == ["tokens"]
-    assert ev.details["profile_limits"]["tokens"] == 9000     # what it asked
+    # declared nothing of its own — it was drawing on the parent's pot
+    assert ev.details["profile_limits"] == {}
     assert ev.details["cascade_remaining"]["tokens"] == 0.0   # what was left
 
 

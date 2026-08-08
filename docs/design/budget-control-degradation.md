@@ -598,7 +598,47 @@ both stages' real spend to the token. For per-stage accounting, read
 
 ---
 
-### 8e. Whose degradation policy applies to a child
+### 8e. Separate budgets: a child that declared one keeps it
+
+**A subagent is a delegation to another department, with its own budget.**
+That is the governing idea, and it decides both halves — the ladder and
+the numbers.
+
+| the spawn carried a `budget_control`? | limits | ladder | draws on the parent's pot? |
+|---|---|---|---|
+| **yes** (profile file *or* inline spec) | **exactly as declared** | **its own, taken literally** | **no — its own books** |
+| **no** | whatever the parent has left | inherits the parent's | yes |
+
+A child that declared a budget is **not clamped** to the parent's
+remainder, **not refused** when the parent's pot is dry, **does not
+deplete** that pot as it spends, and is **not degraded** when the pot
+crosses a rung. The author wrote a number; the parent is not entitled to
+rewrite it, and the department's spending is accounted separately.
+
+A child that declared nothing has delegated the policy: it draws on what
+the parent has left, inherits the parent's ladder, depletes the pot, and
+is degraded when the pot crosses.
+
+**The test is "did this spawn carry a `budget_control`", from either
+source — not "was a profile file referenced".** The spawn tool accepts
+inline specs as well as profile references, so an author who wants a
+child's policy fixed can express it either way, and an author who spawns
+without one has decided the parent governs. The mechanism chosen IS the
+expression of intent.
+
+**What the shared pot therefore is.** Not a cap on total family spend — a
+cap on the parent's own allowance and the children drawing on it. A caller
+wanting a true all-in total must sum the separate budgets; nothing does
+that today, and nothing should pretend to.
+
+This supersedes the earlier framing in which every child's limits were
+clamped to `min(profile, remaining)`. That rule overrode a declared
+number, which is the same overreach as degrading a profile whose author
+asked for no degradation.
+
+---
+
+### 8e-bis. Whose degradation policy applies to a child
 
 A child in a cascade always runs against the CLAMPED limits. What differs
 is whose *policy* governs it, and the rule turns on whether the child's
