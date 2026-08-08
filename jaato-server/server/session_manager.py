@@ -4501,9 +4501,14 @@ class SessionManager:
             # because it is expected behaviour, not a fault.
             logger.info(
                 "cascade %s: degrade push to %s did not ack within the "
-                "timeout (%s) — child is mid-turn; the rung applies at its "
-                "next turn boundary",
-                cascade_driver_id, session_id, exc or "no message",
+                "timeout (%s) — child is mid-turn; the rung is latched and "
+                "applies at its next turn boundary",
+                cascade_driver_id, session_id,
+                # ``exc or ...`` never fired: an exception instance is
+                # TRUTHY even when it stringifies to "", which is exactly
+                # what a bare TimeoutError does.  Six runs logged an empty
+                # "()".  Test the STRING, not the object.
+                str(exc) or type(exc).__name__,
             )
         except Exception as exc:  # noqa: BLE001 — best-effort boundary
             logger.warning(

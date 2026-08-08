@@ -729,6 +729,22 @@ Two consequences worth designing around:
 * This delay **is** the `cap + (N x one turn)` overshoot. The bound is not
   a safety margin bolted on — it is the direct arithmetic of every live
   child being able to finish the turn it is in before a rung reaches it.
+* **It is a true upper bound, and a conservative one.** The overshoot is
+  really `(N - k) x one turn`, where `k` is however many children happened
+  to finish before the crossing. The pot is exhausted part-way through a
+  *wave* of turns, and what escapes is the remainder of that wave — not one
+  turn from every child. Since a fixed pot is consumed by roughly the same
+  total work however many children share it, the observed overshoot stays
+  about constant as N rises while `N x one turn` grows with it. Size a pot
+  from the bound and you will over-provision, increasingly so at higher N;
+  the bound is what to *promise*, not what to *expect*.
+* **The delay reaches more children as N rises.** A crossing is more likely
+  to find every child mid-turn the more children there are, so at low N
+  some pushes ack immediately and at high N none may. That does not loosen
+  the bound — it is already the worst case — but it means the
+  one-turn delay applies to more children simultaneously, which is the
+  direction that matters, because more concurrent children also means more
+  spend in flight per unit time.
 * A timeout in the logs is expected traffic under load, not a fault. It is
   logged at INFO for that reason; a genuine delivery failure (an
   unreachable runner) is the WARNING, and is the only case where a child
