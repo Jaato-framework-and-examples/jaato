@@ -85,7 +85,7 @@ def test_pushed_rung_is_tagged_cascade_in_the_client_notice():
     s = _session()
     s.apply_cascade_degrade([
         {"at": 50.0, "model_tiers": {"planner": "flash"}}])
-    assert s._notices and "cascade budget" in s._notices[0]
+    assert s._notices and "budget[cascade-pushed]" in s._notices[0]
 
 
 def test_own_ladder_is_tagged_session_not_cascade():
@@ -94,7 +94,7 @@ def test_own_ladder_is_tagged_session_not_cascade():
                                        {"planner": "flash"}}]))
     fired = s._budget_tracker.observe(tokens=50)
     JaatoSession._apply_budget_rungs(s, fired)          # default origin
-    assert s._notices and "session budget" in s._notices[0]
+    assert s._notices and "budget[self-enforced]" in s._notices[0]
 
 
 def test_pushed_abort_latches_a_refusal_naming_the_cascade():
@@ -167,7 +167,7 @@ def test_pushed_notices_are_collected_not_written_to_a_dead_channel():
         [{"at": 50.0, "model_tiers": {"planner": "flash"}}])
     assert out["applied"] == 1
     assert out["notices"], "notice lost — nothing for the daemon to emit"
-    assert "cascade budget" in out["notices"][0]
+    assert "budget[cascade-pushed]" in out["notices"][0]
 
 
 def test_notices_still_reach_a_live_turn_channel_too():

@@ -7927,20 +7927,32 @@ NOTES
             logger.warning("budget: turn observation failed: %s", exc)
 
     def _apply_budget_rungs(
-        self, fired, origin: str = "session",
+        self, fired, origin: str = "self-enforced",
         pressure: Optional[str] = None,
     ) -> None:
         """Apply the degrade rungs that just crossed their threshold.
 
-        ``origin`` distinguishes WHOSE ceiling fired: ``"session"`` for this
-        session's own ``budget_control``, ``"cascade"`` for a rung pushed
-        down because the shared cascade pool crossed.  It is carried into
-        both the log line and the client notice because the two mean
-        materially different things to a consumer — "I overspent" invites a
-        narrower retry, "the cascade overspent" means the whole run is
-        winding down and retrying is pointless.  A reactor branching on that
-        needs to tell them apart, and without the marker they are
-        indistinguishable: both paths land here and emit the same lines.
+        ``origin`` names the MECHANISM, not whose ladder it was:
+
+        * ``"self-enforced"`` — this session's own tracker crossed its own
+          limit.  Note the ladder itself may have been INHERITED from the
+          parent (a child that declared no budget takes the parent's), so
+          "self-enforced" means "my tracker tripped it", not "my policy".
+        * ``"cascade-pushed"`` — the shared pool crossed and the rung was
+          pushed here from the daemon.
+
+        Mechanism is the distinction a consumer actually needs, and it is
+        why the marker exists at all: "I hit my own ceiling" invites a
+        narrower retry, "the shared pot ran out" means the run is winding
+        down and retrying is pointless.  Both paths land in this function
+        and would otherwise emit identical lines.
+
+        Earlier values were ``"session"`` / ``"cascade"``, which read as
+        "whose ladder" — actively wrong for a profileless child
+        self-enforcing the PARENT's ladder, which would have been labelled
+        ``session``.  Same class as reporting a child's own pressure
+        against a pool-triggered rung: defensible if you know the
+        internals, wrong if you do not.
 
         Two effects, per ``docs/design/budget-control-degradation.md``:
 
@@ -7968,7 +7980,7 @@ NOTES
                 self._budget_tracker.describe_pressure()
                 if self._budget_tracker is not None else "cascade pressure"
             )
-            tag = f"{origin} budget"
+            tag = f"budget[{origin}]"
             if rung.model_tiers:
                 if self._tier_config is None:
                     # Rejected by the profile validator, but a session can be
@@ -8056,7 +8068,8 @@ NOTES
         self._budget_notice_sink = notices
         try:
             self._apply_budget_rungs(
-                tuple(parsed), origin="cascade", pressure=pool_pressure)
+                tuple(parsed), origin="cascade-pushed",
+                pressure=pool_pressure)
         except Exception as exc:  # noqa: BLE001
             logger.warning("apply_cascade_degrade: apply failed: %s", exc)
             return {"applied": 0, "error": str(exc), "notices": notices}
