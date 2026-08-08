@@ -53,6 +53,7 @@ def _session(budget=None):
         _budget_tracker=BudgetTracker(budget) if budget else None,
         _budget_terminal_action=None, _budget_exhausted_reason=None,
         _budget_notice_sink=None,
+        _budget_applied_rung_pct=0.0,
         _current_output_callback=lambda src, txt, mode: notices.append(txt),
         _ui_hooks=None, _connects=connects, _notices=notices,
     )
@@ -194,3 +195,63 @@ def test_sink_is_restored_after_the_push():
     s = _session()
     s.apply_cascade_degrade([{"at": 50.0, "action": "abort"}])
     assert s._budget_notice_sink is None
+
+
+# ---- rungs apply at most once and IN ORDER, per ladder (poc3-run7) -------
+
+def test_a_lower_rung_cannot_run_the_ladder_BACKWARDS():
+    """THE defect: a pooled child runs the parent's ladder on its own
+    tracker AND receives pushes of the same ladder. The pool crosses first
+    under concurrent spawn, so the child's own LOWER rung fires later in
+    wall-clock and — overlays being last-writer-wins per tier — rebinds the
+    tier back to a model the cascade had already degraded away from. It was
+    measured landing on a ~10x MORE expensive model at the moment the pot
+    was most exhausted."""
+    s = _session()
+    # pool pushes 50% then 75%: opus -> haiku -> flash
+    s.apply_cascade_degrade([{"at": 50.0, "model_tiers": {"planner": "haiku"}}])
+    s.apply_cascade_degrade([{"at": 75.0, "model_tiers": {"planner": "flash"}}])
+    assert s._tier_config.tiers["planner"].model == "flash"
+
+    # now the child's OWN tracker crosses the SAME ladder's 50% rung, late
+    JaatoSession._apply_budget_rungs(
+        s, (DegradeRung(50.0, model_tiers={"planner": TierEntry("haiku")}),))
+    assert s._tier_config.tiers["planner"].model == "flash", (
+        "the ladder ran backwards — a lower rung re-bound the tier to a "
+        "model already degraded away from"
+    )
+
+
+def test_higher_rungs_still_apply_after_a_lower_one():
+    s = _session()
+    JaatoSession._apply_budget_rungs(
+        s, (DegradeRung(50.0, model_tiers={"planner": TierEntry("haiku")}),))
+    JaatoSession._apply_budget_rungs(
+        s, (DegradeRung(75.0, model_tiers={"planner": TierEntry("flash")}),))
+    assert s._tier_config.tiers["planner"].model == "flash"
+
+
+def test_the_same_rung_is_not_applied_twice():
+    s = _session()
+    s.apply_cascade_degrade([{"at": 50.0, "model_tiers": {"planner": "haiku"}}])
+    s._tier_config.tiers["planner"] = TierEntry("manually-changed")
+    s.apply_cascade_degrade([{"at": 50.0, "model_tiers": {"planner": "haiku"}}])
+    assert s._tier_config.tiers["planner"].model == "manually-changed"
+
+
+def test_ordering_holds_within_a_single_multi_rung_call():
+    """[50, 75] arriving together must still end on 75."""
+    s = _session()
+    JaatoSession._apply_budget_rungs(s, (
+        DegradeRung(50.0, model_tiers={"planner": TierEntry("haiku")}),
+        DegradeRung(75.0, model_tiers={"planner": TierEntry("flash")}),
+    ))
+    assert s._tier_config.tiers["planner"].model == "flash"
+
+
+def test_a_later_abort_still_fires_after_earlier_brownouts():
+    """The guard must not swallow the terminal rung."""
+    s = _session()
+    s.apply_cascade_degrade([{"at": 50.0, "model_tiers": {"planner": "haiku"}}])
+    s.apply_cascade_degrade([{"at": 100.0, "action": "abort"}])
+    assert s._budget_terminal_action == "abort"

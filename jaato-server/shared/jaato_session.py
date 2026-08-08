@@ -722,6 +722,14 @@ class JaatoSession:
         # output channel this session has is turn-scoped — so the notice
         # must be handed back to the caller (the daemon) to emit instead.
         self._budget_notice_sink: Optional[List[str]] = None
+        # Highest rung threshold already applied to THIS session, from any
+        # source.  Latching lives on each BudgetTracker, so two trackers
+        # watching the SAME ladder at different rates each latch
+        # independently — and a lower rung applied later silently reverses a
+        # higher one, because overlays are last-writer-wins per tier.  This
+        # makes "at most once, in order" a property of the LADDER rather
+        # than of whichever tracker noticed.
+        self._budget_applied_rung_pct: float = 0.0
 
         # Current turn span — set while a turn is in progress so that
         # _enrich_tool_result_dict can emit enrichment telemetry events on it.
@@ -7973,6 +7981,30 @@ NOTES
         from .budget_control import ACTION_ABORT, overlay_tier_table
 
         for rung in fired:
+            # Rungs apply at most once and IN ORDER, per ladder — not per
+            # tracker.  A pooled child runs the parent's ladder on its own
+            # tracker AND receives pushes of the same ladder from the pool,
+            # and the pool crosses first under concurrent spawn (each child
+            # is handed the full remainder, so the pot depletes ~N times
+            # faster than any one child).  Its own lower rung therefore
+            # fires LATER in wall-clock and, unguarded, rebinds the tier back
+            # to a model the cascade had already degraded away from — onto a
+            # pricier one, at the moment the pot is most exhausted.
+            #
+            # Safe to compare thresholds across sources because under the
+            # separate-budgets rule the two sources are always the SAME
+            # ladder: a child that declared a budget keeps its own and is
+            # never pushed; a child that declared none inherits the parent's,
+            # which is exactly what gets pushed.
+            if rung.at_percent <= self._budget_applied_rung_pct:
+                logger.info(
+                    "budget[%s]: skipping rung at %.0f%% — %.0f%% already "
+                    "applied; a lower rung would rebind BACKWARDS onto a "
+                    "model already degraded away from",
+                    origin, rung.at_percent, self._budget_applied_rung_pct,
+                )
+                continue
+            self._budget_applied_rung_pct = rung.at_percent
             # A cascade rung fired on the POOL's fraction; reporting this
             # child's own usage instead reads as a contradiction ("degrading
             # at 50% (tokens 32%)").  Caller supplies the pool's pressure.
