@@ -598,6 +598,47 @@ both stages' real spend to the token. For per-stage accounting, read
 
 ---
 
+### 8e. Whose degradation policy applies to a child
+
+A child in a cascade always runs against the CLAMPED limits. What differs
+is whose *policy* governs it, and the rule turns on whether the child's
+author expressed one at all:
+
+| the child's profile | limits | degrade ladder |
+|---|---|---|
+| declares `budget_control` **with** a ladder | clamped | **its own** |
+| declares `budget_control`, **limits only** | clamped | **none — taken literally** |
+| declares **no** `budget_control` | clamped to the cascade remainder | **inherits the cascade's** |
+
+The middle row is the deliberate one. A block with `limits` and no
+`degrade` is an author saying "cap me but do not degrade me", and the
+cascade is not entitled to override it — **the cascade constrains
+ceilings, never policy**. Degrading a profile whose author did not ask for
+degradation would be the framework substituting its judgement for theirs.
+
+The third row exists because the alternative is worse than it looks: a
+profileless child previously received a ceiling with **no behaviour
+attached**. Its tracker accumulated, crossed the limit, and nothing fired
+— "budgeted" only in the sense that a number had been written down, with a
+best-effort push the sole thing that could degrade it.
+
+Note the inherited ladder's thresholds are percentages of the **child's
+clamped limit**, not the pool's. The policy *shape* ("brown out at half,
+stop at full") applies at whatever scale the child was allocated, which is
+what makes it meaningful for a child holding a slice rather than the whole
+pool.
+
+**Interaction with the aggregate ceiling.** Inheritance means a
+profileless child SELF-ENFORCES — it reaches its own clamped ceiling and
+fires the rungs itself, no push involved. That removes the push from the
+critical path for those children. It does NOT close the aggregate hole:
+the clamp is still a read, so N concurrent children each clamped to the
+full remainder will each self-enforce correctly and still sum past the
+cap. Self-enforcement bounds each child; only a reservation bounds the
+sum.
+
+---
+
 ### 8d. When a cascade rung actually takes effect
 
 A pushed rung does **not** take effect when the pool crosses it. It takes

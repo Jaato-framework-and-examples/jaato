@@ -841,9 +841,30 @@ class CascadeBudgetPool:
     ) -> Tuple[Optional[BudgetControlConfig], EffectiveLimits]:
         """Build the config a child session should actually run under.
 
-        Returns ``(config, effective)``.  The child keeps its own ``degrade``
-        ladder (the cascade constrains ceilings, not a child's degradation
-        policy) but runs against the clamped limits.
+        Returns ``(config, effective)``.  The child runs against the clamped
+        limits either way; what differs is whose degradation POLICY applies.
+
+        The rule turns on whether the child's author expressed one at all:
+
+        * The profile declares a ``budget_control`` block — its ladder is
+          taken LITERALLY, including when that ladder is empty.  A block
+          with ``limits`` and no ``degrade`` is a deliberate "cap me but do
+          not degrade me", and the cascade is not entitled to override it.
+          The cascade constrains ceilings, never policy.
+        * The profile declares NO block — nothing was expressed, so the
+          child inherits the CASCADE's ladder, shared with the parent and
+          with every other profileless sibling.
+
+        Without that second branch a profileless child received a ceiling
+        with no behaviour attached: its tracker would accumulate, cross the
+        limit, and nothing would fire.  It was "budgeted" only in the sense
+        that a number had been written down, and the sole thing that could
+        degrade it was a best-effort push.
+
+        Note the inherited ladder's thresholds are percentages of the
+        CHILD's clamped limit, not the pool's — the policy shape ("brown out
+        at half, stop at full") applies at whatever scale the child was
+        allocated.
         """
         eff = self.effective_limits_for(
             profile_budget.limits if profile_budget else None)
@@ -851,5 +872,8 @@ class CascadeBudgetPool:
             return profile_budget, eff
         if eff.exhausted:
             raise CascadeExhaustedError(self.cascade_driver_id, eff)
-        degrade = profile_budget.degrade if profile_budget else ()
+        degrade = (
+            profile_budget.degrade if profile_budget is not None
+            else self._tracker.config.degrade
+        )
         return BudgetControlConfig(limits=eff.effective, degrade=degrade), eff

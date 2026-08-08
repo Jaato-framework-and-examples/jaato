@@ -69,6 +69,44 @@ def test_child_with_no_budget_still_inherits_the_cascade_ceiling():
     assert eff.clamped == ("usd",)
 
 
+# ------- whose degradation POLICY applies (literal vs inherited) ---------
+
+def _pool_with_ladder():
+    return CascadeBudgetPool("cid", _cfg(
+        limits={"tokens": 15000},
+        degrade=[{"at": 50, "action": "abort"}]))
+
+
+def test_profileless_child_inherits_the_cascade_ladder():
+    """Nothing was expressed, so the cascade's policy applies. Without this
+    the child got a ceiling with NO behaviour attached — its tracker would
+    cross the limit and nothing would fire, leaving a best-effort push as
+    the only thing that could degrade it."""
+    cfg, _ = _pool_with_ladder().child_config(None)
+    assert [r.action for r in cfg.degrade] == ["abort"]
+
+
+def test_limits_only_profile_is_taken_LITERALLY_and_never_degraded():
+    """Declaring budget_control with limits and no degrade is a deliberate
+    'cap me but do not degrade me'. The cascade constrains ceilings, never
+    policy — we are not entitled to degrade a profile whose author did not
+    ask for it."""
+    cfg, _ = _pool_with_ladder().child_config(_cfg(limits={"tokens": 9000}))
+    assert list(cfg.degrade) == []
+
+
+def test_a_child_with_its_own_ladder_keeps_it():
+    cfg, _ = _pool_with_ladder().child_config(_cfg(
+        limits={"tokens": 9000}, degrade=[{"at": 90, "action": "finalize"}]))
+    assert [r.action for r in cfg.degrade] == ["finalize"]
+
+
+def test_profileless_child_of_a_ladderless_cascade_has_no_ladder():
+    """Nobody expressed a policy anywhere; inheriting nothing is correct."""
+    cfg, _ = _pool(tokens=15000).child_config(None)
+    assert list(cfg.degrade) == []
+
+
 def test_child_dimension_the_cascade_does_not_cap_is_untouched():
     p = _pool(usd=10)
     cfg, eff = p.child_config(_cfg(limits={"turns": 5}))
