@@ -239,6 +239,19 @@ def main(argv=None) -> int:
     pn.add_argument("--set", help="profile-set name (provider_model)")
     pn.add_argument("--agents", help="comma-separated agent names for a set")
     pn.add_argument("--force", action="store_true", help="overwrite existing")
+    pn.add_argument("--secrets", metavar="MODE",
+                    help="how profiles reference the provider credential: "
+                         "'env' (default — ${<PROVIDER>_API_KEY} interpolation, "
+                         "runs on a public checkout), 'none' (omit api_key; the "
+                         "provider reads its own env var), or a resolver scheme "
+                         "like 'pass' / 'pass://' (secret URI — needs an "
+                         "out-of-tree resolver plugin, e.g. jaato-premium). The "
+                         "choice is recorded in .jaato/scaffold.json so later "
+                         "`new` calls stay consistent.")
+    pn.add_argument("--secret-path", metavar="TEMPLATE", dest="secret_path",
+                    help="path template for --secrets <scheme> URIs "
+                         "(default 'jaato/{provider}/api-key'; '{provider}' is "
+                         "substituted).")
     pn.add_argument("--recoverable", action="store_true",
                     help="emit the auto-reconnect client (IPCRecoveryClient for "
                          "--transport ipc, WSRecoveryClient for ws) — survives "
