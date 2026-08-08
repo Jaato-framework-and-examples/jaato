@@ -429,6 +429,11 @@ class SessionManager:
         # because a cascade cap is a runtime aggregate over a live cid, not a
         # property of any one reusable template (§3.1).  Keyed by
         # cascade_driver_id; absent = that cascade is uncapped.
+        # Session ids CLAIMED but not yet registered in ``_sessions``.
+        # Allocation and registration are ~336 lines and a full runner spawn
+        # apart, so without an atomic claim the check-then-act races: every
+        # concurrent create inside that window sees the same id free.
+        self._reserved_session_ids: Set[str] = set()
         self._cascade_budgets: Dict[str, "CascadeBudgetPool"] = {}
         self._cascade_budgets_lock = threading.Lock()
         # GC backstop: cascade-client entries with no event for this
@@ -4645,6 +4650,54 @@ class SessionManager:
             self._create_session_impl, *args, **kwargs,
         )
 
+    def _allocate_session_id(self, workspace_path: Optional[str]) -> str:
+        """Atomically CLAIM a unique session id.
+
+        Session ids are second-resolution timestamps
+        (``%Y%m%d_%H%M%S``) with ``_N`` appended on collision.  The
+        collision check used to be plain check-then-act: the candidate was
+        tested against ``_sessions`` here, but only inserted into
+        ``_sessions`` after the runner had spawned — measured at ~7.3s
+        later.  Every concurrent ``create_session`` inside that window saw
+        the same id free and took it, so three simultaneous creates were
+        issued ONE id between them; two of the three sessions then never
+        ran.  Second-resolution ids alone would collide for simultaneous
+        spawns, but the wide window means they collide even when spawns are
+        seconds apart.
+
+        The claim is therefore made under ``self._lock`` against three
+        sources at once — persisted ids, live ``_sessions``, and other
+        in-flight claims — which makes a duplicate IMPOSSIBLE rather than
+        unlikely.  Sub-second entropy would only have narrowed the window.
+
+        The claim is released by :meth:`_release_session_id` once the
+        session is registered (after which ``_sessions`` is authoritative)
+        or the creation fails.  A leaked claim is benign: it only prevents
+        that one timestamp string being reused.
+        """
+        existing_ids = {
+            sess.session_id
+            for sess in self._get_persisted_sessions(workspace_path=workspace_path)
+        }
+        base = datetime.now().strftime("%Y%m%d_%H%M%S")
+        with self._lock:
+            candidate = base
+            counter = 0
+            while (
+                candidate in existing_ids
+                or candidate in self._sessions
+                or candidate in self._reserved_session_ids
+            ):
+                counter += 1
+                candidate = f"{base}_{counter}"
+            self._reserved_session_ids.add(candidate)
+        return candidate
+
+    def _release_session_id(self, session_id: str) -> None:
+        """Drop an in-flight id claim (registered, or creation failed)."""
+        with self._lock:
+            self._reserved_session_ids.discard(session_id)
+
     def _create_session_impl(
         self,
         client_id: str,
@@ -4729,19 +4782,11 @@ class SessionManager:
         Returns:
             The session ID (empty string on failure).
         """
-        # Generate session ID (matches Session Plugin format)
+        # Claim the id ATOMICALLY — see _allocate_session_id for why a
+        # plain check-then-act here handed the same id to concurrent creates.
         timestamp = datetime.now()
-        session_id = timestamp.strftime("%Y%m%d_%H%M%S")
+        session_id = self._allocate_session_id(workspace_path)
         name = session_name or f"Session {timestamp.strftime('%Y-%m-%d %H:%M')}"
-
-        # Check for collision with existing session
-        existing = self._get_persisted_sessions(workspace_path=workspace_path)
-        existing_ids = {s.session_id for s in existing}
-        counter = 0
-        original_id = session_id
-        while session_id in existing_ids or session_id in self._sessions:
-            counter += 1
-            session_id = f"{original_id}_{counter}"
 
         # Get env_file from client config or derive from workspace path
         # Sessions are workspace-bound: the workspace determines the .env file,
@@ -4798,6 +4843,7 @@ class SessionManager:
                 error_type="InvalidSessionSpec",
                 recoverable=True,
             ))
+            self._release_session_id(session_id)
             return ""
 
         if profile_name:
@@ -5034,6 +5080,7 @@ class SessionManager:
         if server is None or session is None:
             # server.initialize() failed; core.py already emitted a
             # detailed ConfigurationError to the in-init sink.
+            self._release_session_id(session_id)
             return ""
 
         logger.info(f"Server initialized successfully for session {session_id}")
@@ -5075,6 +5122,8 @@ class SessionManager:
             # every cascade session, defeating dispatch + GC-skip.
             session.cascade_driver_id = cascade_driver_id
             self._sessions[session_id] = session
+            # ``_sessions`` is authoritative from here; drop the claim.
+            self._reserved_session_ids.discard(session_id)
             session.attached_clients.add(client_id)
             self._client_to_session[client_id] = session_id
             # Server 0.6.161+ (Bug B): record cid activity so the
