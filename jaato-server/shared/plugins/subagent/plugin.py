@@ -563,6 +563,9 @@ class SubagentPlugin:
                     preloaded_plugins=profile.preloaded_plugins or None,
                     completion_payload_schema=profile.completion_payload_schema,
                     completion_processors=profile.completion_processors or None,
+                    # See the sibling call site: a subagent's own declared
+                    # budget was omitted, leaving it silently unbudgeted.
+                    budget_control=getattr(profile, "budget_control", None),
                     # Per-plugin tool allow-lists (profile ``tools:[...]``).
                     # In-process subagents share the parent's registry, so
                     # the scope MUST be per-session (the session applies it
@@ -3280,6 +3283,13 @@ class SubagentPlugin:
                 agent_params=agent_params,
                 completion_payload_schema=profile.completion_payload_schema,
                 completion_processors=profile.completion_processors or None,
+                # A subagent's own declared budget.  Omitted until now, so a
+                # profile that declared ``budget_control`` was silently
+                # unbudgeted the moment it ran as a subagent — the ceiling
+                # existed on paper and nothing enforced it.  Subagents are
+                # runtime-level sessions, so they are also invisible to the
+                # daemon-side pool; this is their ONLY budget.
+                budget_control=getattr(profile, "budget_control", None),
                 suppress_base_instructions=getattr(profile, 'suppress_base_instructions', False),
                 # Per-plugin tool allow-lists (profile ``tools:[...]``) —
                 # per-session, never mutates the shared registry.

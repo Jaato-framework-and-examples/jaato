@@ -639,6 +639,51 @@ sum.
 
 ---
 
+### 8f. Scope: "cascade" is one grouping, not the general case
+
+The aggregate ceiling is currently keyed on ``cascade_driver_id`` and
+lives in ``SessionManager._sessions``. That was a convenience — a cid was
+the only pre-existing way to name a group of related agents — and it left
+the naming, and the implementation, narrower than the problem.
+
+The relationship that actually matters is **parent → children**. A cascade
+is one way to have it. A plain main agent calling ``spawn_subagent`` is
+another, and it is the more common one.
+
+**What that currently means, stated plainly:**
+
+| how the child is created | in `SessionManager._sessions` | carries a cid | pool / clamp / push |
+|---|---|---|---|
+| `session.new` over IPC with a `cascade_driver_id` | yes | yes | **applies** |
+| `session.new` without one | yes | no | no aggregate |
+| `spawn_subagent` (subagent plugin) | **no** — runtime-level session | no | **none of it** |
+
+A subagent is a `JaatoSession` created by ``runtime.create_session()``, not
+a daemon session. It never enters ``_sessions``, so the pool cannot see its
+spend, the spawn-time clamp never runs for it, and a mid-flight push cannot
+reach it. Its own profile's ``budget_control`` is the only budget it can
+have — which is why that had to be forwarded (it was not, and a subagent
+was silently unbudgeted regardless of what its profile declared).
+
+**Consequence for a non-cascade parent.** A main agent with a strict
+``budget_control`` bounds only *its own* session. Spawning ten subagents
+does not touch that ceiling, because the parent's session is not the one
+spending. There is no aggregate over the family today unless the family
+happens to be a cascade.
+
+**Direction, not yet built.** The pool should be keyed on a **spend
+scope** — an identifier a cascade *or* a parent session can own — rather
+than on `cascade_driver_id` specifically, with children drawing from the
+scope they were spawned into. That generalisation and the reservation
+question in §8 are the same decision at different scopes, and are best
+made together rather than retrofitting the cid-keyed mechanism twice.
+
+Until then, read every "cascade" in §8/§8b-§8e as "cascade specifically",
+not "any parent" — the mechanism is real but its reach is narrower than
+the vocabulary suggests.
+
+---
+
 ### 8d. When a cascade rung actually takes effect
 
 A pushed rung does **not** take effect when the pool crosses it. It takes
