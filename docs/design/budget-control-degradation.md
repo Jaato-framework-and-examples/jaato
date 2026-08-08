@@ -121,7 +121,7 @@ budget_control:
 
 ### 3.0 Authoring a budgeted profile — three traps
 
-Found while the first PoC was being built; none of them is caught by
+Found while authoring the first budgeted profiles; none is caught by
 `jaato-scaffold validate`, so they are documented rather than enforced.
 
 1. **`max_turns` must exceed `limits.turns`.** If both are `4` the run
@@ -241,20 +241,11 @@ The cheapest independent witness is **per-turn wall-clock**, not the
 `budget:` log lines or the system notice — both of those are *reports*
 that the swap happened; duration is an observable *consequence* of it.
 
-From the first live PoC (`turns: 4`, rung at 50% rebinding `planner`
-opus-4 → gemini-2.5-flash-lite):
-
-| turn | model | duration |
-|---|---|---|
-| 0 | opus-4 | 7.411 s |
-| 1 | opus-4 | 6.415 s |
-| 2 | flash-lite | 1.319 s |
-| 3 | flash-lite | 1.350 s |
-
-A ~5× collapse landing exactly on the rung boundary. If the rebind had
-not reached the provider, the durations would not move. This is worth
-asserting on in any brownout demo: it needs no log access, no telemetry
-backend, and it cannot be faked by a notice that fires without the swap
+Rebinding a tier to a materially cheaper model produces a step change in
+per-turn duration at the rung boundary. If the rebind had not reached the
+provider, the durations would not move. That makes it worth asserting on
+in any brownout check: it needs no log access and no telemetry backend,
+and — unlike a notice — it cannot fire unless the swap actually happened
 behind it.
 
 ---
@@ -274,25 +265,19 @@ a token budget by asking "how much work should this agent do" will
 undershoot badly.
 
 And the number most people reach for to measure it is **not** the number
-the budget counts. From a real calibration run (`limits: {tokens: 9000}`,
-3 turns, 5 responses):
+the budget counts. A turn with a tool call has two or more billed
+responses, and `turn_data['total']` *assigns* rather than accumulates —
+so only the last response survives in it, and summing
+`turn.completed.total_tokens` across turns materially understates real
+spend. Fixed additively: `spend_total` accumulates alongside `total`,
+because `total` is legitimately the end-of-turn CONTEXT SIZE that GC and
+the context displays read. Use `UsageBreakdown.spend_total_tokens` for
+spend; never sum `total_tokens`.
 
-| source | values | sum |
-|---|---|---|
-| per **response** — what the tracker accumulates | 2150, 2504, 1685, 1572, 1594 | **9505** |
-| per **turn** — `turn.completed.total_tokens` | 2504, 1572, 1594 | 5670 |
-
-The tracker's own verdict at abort was `tokens 106%` of 9000, and
-9505/9000 = 105.6% — so the per-response sum matches it exactly, while
-the per-turn figure accounts for **59%** of it. A turn with a tool call
-has >=2 billed responses, and `turn_data['total']` *assigns* rather than
-accumulates, so only the last survives. Fixed additively — `spend_total`
-accumulates alongside `total`, because `total` is legitimately the
-end-of-turn CONTEXT SIZE that GC and the context displays read.
-
-Note responses 3-5 (1685/1572/1594) are *lower* than 1-2 (2150/2504):
-a degrade rung swapped in a cheaper model and the context accounting
-shrank. Spend went down after the brownout — the brownout working.
+One counter-intuitive consequence worth expecting: per-turn spend can go
+*down* after a degrade rung fires, because a cheaper model shrinks the
+context accounting as well as the price. Falling numbers there are the
+brownout working, not the budget failing to count.
 
 **`usd` only advances when a cost is actually KNOWN.** Resolution is
 provider-reported → `.jaato/pricing.json` → nothing. With neither source
@@ -305,7 +290,7 @@ are always exact.
 
 ---
 
-### 5.1 What `abort` means (settled by the first live run)
+### 5.1 What `abort` means
 
 `abort` ends the **session**, not merely the turn: it cancels the
 in-flight turn via the cooperative `request_stop`, **and** latches
@@ -314,11 +299,10 @@ in-flight turn via the cooperative `request_stop`, **and** latches
 The latch is not belt-and-braces — without it the ceiling does not
 exist. `request_stop` only cancels the turn in flight, and rungs are
 **latched**, so the 100% rung never fires again; a client that simply
-sends another message then runs completely unbudgeted. The first live PoC
-ran a `limits: {turns: 4}` profile to **8 turns — 200% of budget** on
-exactly this path, with three real tool calls after the abort. A ceiling
-that only cancels one turn is not a ceiling, and "hard stop" in the
-earlier draft of this note was wrong about its own mechanism.
+sends another message then runs completely unbudgeted, doing real work
+past the ceiling for as long as it keeps sending. A ceiling that only
+cancels one turn is not a ceiling, and "hard stop" in the earlier draft
+of this note was wrong about its own mechanism.
 
 This also bounds the cascade pool (§8): if pool exhaustion pushes `abort`
 to each live session and `abort` did not refuse later turns, the pool's
@@ -535,55 +519,59 @@ can never break a live turn.
 
 ---
 
-## 8c. Validated end-to-end (two live PoCs)
+## 8c. Validation status and the reconcile rationale
 
-**PoC #1 — per-session brownout + ceiling.** A `turns: 4` profile with a
-50% rung rebinding `planner` opus-4 → gemini-2.5-flash-lite: the rebind
-and the active-tier re-connect land **1 ms apart** (§6.2 holds in
-production, not only in unit tests); exactly four tool calls then none;
-four subsequent sends refused; every decision visible client-side as
-`AGENT_OUTPUT source='system'`. Per-turn duration collapsed ~5× at the
-rung boundary — the independent witness of §5.0.
+Both halves of this design were exercised end to end against a live
+daemon before merge — the per-session brownout and ceiling, and the
+cascade cap over a sequential multi-stage chain (spawn-time clamp, pool
+depletion, and an exhausted pool refusing a spawn). That exercise is
+what surfaced the defects listed in §9 and drove the decision below.
 
-**PoC #2 — cascade cap, linear 3-stage chain.** Pool 12000, three stages
-of `tokens: 9000`, **none of which mentions the cascade**:
+### Why the pool reconciles against the tracker, not the event stream
 
-| | capped | uncapped baseline |
-|---|---|---|
-| stage 2 | 3654 tokens, 1 turn — aborted at 132% of its **clamped** 2773 | ~9300, 2–4 turns |
-| stage 3 | never spawned, refused with a machine-readable reason | ~9300, 2 turns |
+This is the least obvious choice in the feature and the one most likely
+to be "simplified" back, so the reasoning is recorded rather than the
+evidence.
 
-Pool depletion 12000 → 2773 → 0, with the client's `cascade.budget.get`
-and the daemon's clamp line agreeing at every boundary. The uncapped
-baseline is what makes each difference attributable to the cap rather
-than to stage variance.
+The event stream is **unreliable in both directions**:
 
-### Why the pool reconciles against the tracker — measured
+* **Inflation.** A progress event can be re-emitted, so summing the
+  stream can exceed what was actually spent. A pool fed that way closes
+  its ceiling EARLY — refusing children that the cascade could afford.
+* **Deflation.** A turn ended by cancellation can fail to produce a
+  completion event while having really spent, so the stream can also
+  miss real consumption. A pool fed that way leaks — and because a child
+  that exhausts its own budget ends exactly that way, it leaks on
+  precisely the children whose spend matters most.
 
-In the PoC #2 run the event stream was **inflated by 33%** by the
-duplicate-emission bug (§ open issues):
+Both were observed on real runs during validation. Either alone would be
+disqualifying; together they mean a ceiling derived from the stream is
+wrong in whichever direction the current defect happens to point, and
+silently so.
 
-| source | stage-1 tokens |
-|---|---|
-| `turn.progress` raw | 12261 |
-| `turn.progress` de-duplicated | 9227 |
-| **pool contribution** | **9227.0** — exact |
+The invariant that actually matters is that **the pool must see every
+token the per-session tracker saw**. So `CascadeBudgetPool` is
+reconciled against `JaatoSession.get_budget_usage()` — the tracker's
+ABSOLUTE totals, accumulated per response — rather than derived from a
+sequence of increments. An absolute reading is immune to both failure
+modes: a duplicate reports the same total, and a dropped increment is
+recovered by the next reading. Reconciliation is delta-based per session
+(idempotent) and monotonic (a lower reading is stale and ignored, so a
+late report can never refund spend), and it runs at the spawn boundary —
+off the hot path, and exactly when the number has to be right, because
+the next child's ceiling is `min(profile, cascade_remaining)`.
 
-Had the pool still accumulated from that stream it would have believed
-stage 1 spent 12261 and refused stage 2 outright. It reconciles against
-the per-session tracker's absolute totals instead, so the inflation
-never reached it. The event stream has now been shown wrong in **both**
-directions on real runs — inflated by re-emission, deflated by a dropped
-final-turn event — which is the case for never deriving a ceiling from
-it.
+Corollary for anyone adding a dimension or a new accumulation source:
+whatever the pool reads must have exactly-once semantics, or be an
+absolute reading. Do not accumulate a ceiling from an event stream.
 
 ### Reading a pool: use `usage_fraction`, not differences of `remaining`
 
 `remaining()` floors at zero, so differencing it across stages
-*understates* the last one (a stage that really spent 3654 shows 2773).
-`usage_fraction()` does not floor: `1.0734 × 12000 = 12881`, which is
-both stages' real spend to the token. For per-stage accounting, read
-`usage_fraction`.
+*understates* the last one once the pool is exhausted.
+`usage_fraction()` does not floor, so multiplying it by the declared cap
+recovers true total consumption including any overshoot. For per-stage
+accounting, read `usage_fraction`.
 
 ---
 
