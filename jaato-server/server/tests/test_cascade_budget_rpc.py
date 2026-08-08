@@ -112,3 +112,23 @@ def test_set_accepts_a_degrade_ladder_too():
         "limits": {"tokens": 100},
         "degrade": [{"at": 100, "action": "abort"}]})
     assert len(sm.get_cascade_budget("cid1").config.degrade) == 1
+
+
+def test_get_states_its_scope_in_the_payload():
+    """"Cascade budget" reads as "the most this cascade can cost" and is
+    not that. Someone who knew the rule and had the warning in hand still
+    summed budgeted children into this figure and reported a catastrophic
+    ceiling failure that was correct behaviour. Prose did not prevent it;
+    the payload says so at the point of use."""
+    r, sink, _ = _router()
+    r._handle_cascade_budget_set("c1", ["cid1"], {"limits": {"tokens": 100}})
+    r._handle_cascade_budget_get("c1", ["cid1"])
+    body = json.loads(sink.last().message)
+    assert "did NOT declare their own" in body["covers"]
+    assert "accounted separately" in body["covers"]
+
+
+def test_undeclared_scope_reply_has_no_covers_field():
+    r, sink, _ = _router()
+    r._handle_cascade_budget_get("c1", ["nope"])
+    assert "covers" not in json.loads(sink.last().message)
