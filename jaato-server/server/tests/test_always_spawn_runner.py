@@ -386,11 +386,23 @@ def test_apparmor_helper_callable_in_isolation(
     standalone — proves the §7a refactor extraction is clean."""
     sm = fake_session_manager
     sm.set_apparmor_dependencies(ws_server=None, daemon_loop="<loop>")
+    # 2026-05-14: the helper takes ``config_root`` / ``env_file`` explicitly
+    # instead of reading them from ``client_config[client_id]`` -- the old
+    # form silently omitted ``{config_root_rules}`` on the reactor-spawned
+    # headless path.  Opt-in is the CALLER's decision now, so there is no
+    # apparmor flag to pass here.
     profile_name, mode = sm._provision_apparmor_for_session(
         session_id="s-iso",
         workspace_path=str(tmp_path),
         client_id="c-1",
-        client_config={"apparmor": True},
+        config_root=None,
+        env_file=None,
     )
-    assert profile_name == "jaato-ws-s-iso"
-    assert mode == "apparmor"
+    # The pin is that the extraction is CALLABLE STANDALONE and honours its
+    # documented 2-tuple contract -- not that this host can confine.  A host
+    # without AppArmor returns ("", "soft") by design, so asserting
+    # mode == "apparmor" would make the refactor pin fail on environment.
+    assert (profile_name, mode) in {
+        ("jaato-ws-s-iso", "apparmor"),   # AppArmor available + provisioned
+        ("", "soft"),                     # unavailable / provisioning failed
+    }, f"undocumented return: {(profile_name, mode)!r}"

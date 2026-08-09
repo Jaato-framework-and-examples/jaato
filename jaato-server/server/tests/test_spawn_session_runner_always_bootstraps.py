@@ -40,13 +40,26 @@ class _FakeRPC:
 
 def _make_server() -> Any:
     """Minimal JaatoServer-shaped stub.  ``_spawn_session_runner``
-    only needs ``runner_rpc`` (set by spawn_session_runner) and
-    ``_profile`` / ``config_root`` (read by _build_session_envelope)."""
-    return SimpleNamespace(
+    needs ``runner_rpc`` (set by spawn_session_runner), ``_profile`` /
+    ``config_root`` (read by _build_session_envelope), and
+    ``mark_runner_ready`` — which ``dispatch_bootstrap_envelope`` calls
+    once the bootstrap RPC settles, on BOTH the success and the
+    daemon-authoritative failure path, so a reused warm pool slot does
+    not strand the send/push gates on a readiness timeout.
+
+    ``mark_runner_ready`` records rather than no-ops: whether bootstrap
+    signalled readiness is exactly the property these tests exist to pin.
+    """
+    srv = SimpleNamespace(
         runner_rpc=None,
         _profile=None,
         config_root=None,
+        runner_ready_marks=0,
     )
+    def _mark_runner_ready() -> None:
+        srv.runner_ready_marks += 1
+    srv.mark_runner_ready = _mark_runner_ready
+    return srv
 
 
 def _patch_spawn(monkeypatch, fake_rpc: _FakeRPC) -> Dict[str, Any]:

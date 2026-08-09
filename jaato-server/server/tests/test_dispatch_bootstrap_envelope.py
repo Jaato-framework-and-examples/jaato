@@ -39,11 +39,21 @@ def _make_server(rpc: _FakeRPC = None) -> Any:
     ``_profile`` + ``config_root`` flow through to
     ``build_session_envelope`` which is exercised separately in
     ``test_build_session_envelope.py``."""
-    return SimpleNamespace(
+    # ``dispatch_bootstrap_envelope`` calls ``mark_runner_ready()`` once the
+    # bootstrap RPC settles -- on BOTH the success and the daemon-authoritative
+    # failure path -- so a reused warm pool slot does not strand the send/push
+    # gates on a readiness timeout.  Recorded, not no-op'd: whether readiness
+    # was signalled is the property under test.
+    srv = SimpleNamespace(
         runner_rpc=rpc,
         _profile=None,
         config_root=None,
+        runner_ready_marks=0,
     )
+    def _mark_runner_ready() -> None:
+        srv.runner_ready_marks += 1
+    srv.mark_runner_ready = _mark_runner_ready
+    return srv
 
 
 # ----------------------------------------------------------------------

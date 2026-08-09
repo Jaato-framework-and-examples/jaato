@@ -67,6 +67,14 @@ def _make_server() -> JaatoServer:
     srv._runner_rpc = None
     srv._spawned_runner = None
     srv._prompt_operator_handler = None
+    # Mirrors ``JaatoServer.__init__``: ``set_runner_rpc`` CLEARS the
+    # readiness event (readiness is bootstrap-complete, not handle-live)
+    # and ``shutdown`` reads the pool-manager ref for cascade-aware
+    # teardown.  A ``__new__``-built server must declare both or those
+    # paths raise AttributeError on an object the production code would
+    # never see in that state.
+    srv._runner_ready = threading.Event()
+    srv._pool_manager_ref = None
     return srv
 
 
@@ -181,6 +189,8 @@ def test_shutdown_forward_compat_with_bypassed_init() -> None:
     srv.permission_plugin = None
     srv._runner_rpc = None
     srv._spawned_runner = None
+    srv._runner_ready = threading.Event()
+    srv._pool_manager_ref = None
     # Deliberately do NOT set _prompt_operator_handler.
     srv.shutdown()  # Must not raise.
 

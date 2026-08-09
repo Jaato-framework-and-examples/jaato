@@ -104,11 +104,17 @@ class _ShimSession:
         on_output: Any = None,
         on_usage_update: Any = None,
         on_gc_threshold: Any = None,
+        # Multimodal v1 (#297-#300) added ``attachments`` to
+        # ``JaatoSession.send_message``; the runner handler forwards it
+        # unconditionally, so a shim without it fails the call with a
+        # TypeError that surfaces as a generic ``stage: send`` error.
+        attachments: Any = None,
     ) -> str:
         self.kwargs_seen = {
             "on_output": on_output,
             "on_usage_update": on_usage_update,
             "on_gc_threshold": on_gc_threshold,
+            "attachments": attachments,
         }
         if self.fire_usage is not None and on_usage_update is not None:
             on_usage_update(self.fire_usage)

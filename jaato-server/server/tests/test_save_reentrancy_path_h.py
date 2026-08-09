@@ -288,6 +288,13 @@ def test_emit_to_session_does_not_block_on_runner_rpc() -> None:
     sm._async_save_lock = threading.Lock()
     sm._sessions = {}
     sm._workspace_monitors = {}
+    # ``_emit_to_session`` fans out to cascade-driver clients
+    # (``_dispatch_to_cascade_clients``, cascade-as-client Phase 2 / #180),
+    # which takes this lock unconditionally.  A ``__new__``-built manager
+    # must declare both halves or the emit path raises on an object
+    # production would never produce.
+    sm._cascade_clients = {}
+    sm._cascade_clients_lock = threading.Lock()
 
     # Construct a real Session.
     session = MagicMock()

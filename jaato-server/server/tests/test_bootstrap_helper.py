@@ -84,6 +84,27 @@ class _FakeJaatoServer:
                 self.lifecycle_log.append("with_session_env:exit")
         return _noop()
 
+    # Server 0.6.131+ (PR-148): the helper creates the plugin registry
+    # BEFORE composing the apparmor profile, so the composer can query
+    # each plugin's ``get_apparmor_rules``.  That block runs inside
+    # ``_in_workspace()`` so discovery resolves paths against the
+    # session's workspace rather than the daemon's cwd.  Both are
+    # recorded here because the ordering IS the contract these tests
+    # pin — see ``test_lifecycle_ordering``.
+    def _in_workspace(self):
+        from contextlib import contextmanager
+        @contextmanager
+        def _noop():
+            self.lifecycle_log.append("in_workspace:enter")
+            try:
+                yield
+            finally:
+                self.lifecycle_log.append("in_workspace:exit")
+        return _noop()
+
+    def create_registry_and_discover(self) -> None:
+        self.lifecycle_log.append("create_registry_and_discover")
+
 
 class _FakeSessionManager:
     """Standalone test double exercising only _bootstrap_session.
@@ -107,6 +128,8 @@ class _FakeSessionManager:
         # to drive the apparmor branch without real apparmor calls.
         self.ipc_provision_return: Optional[str] = None
         self.ipc_provision_calls: List[Tuple[Any, str, Optional[str], Optional[str]]] = []
+        # Keyword-only overrides captured per call (see the stub below).
+        self.ipc_provision_kwargs: List[Dict[str, Any]] = []
 
     def _run_pre_initialize_hooks(
         self,
@@ -128,10 +151,27 @@ class _FakeSessionManager:
         session_id: str,
         workspace_path: Optional[str],
         client_id: Optional[str],
+        *,
+        apparmor_override: Optional[bool] = None,
+        config_root_override: Optional[str] = None,
+        env_file_override: Optional[str] = None,
+        apparmor_fragments_override: Optional[List[str]] = None,
+        cascade_driver_id: Optional[str] = None,
     ) -> Optional[str]:
+        # Keyword-only overrides are mirrored EXPLICITLY rather than
+        # swallowed by ``**kwargs`` so that a future divergence from the
+        # real signature fails here loudly instead of silently accepting
+        # an argument the production method would reject.
         self.ipc_provision_calls.append(
             (server, session_id, workspace_path, client_id),
         )
+        self.ipc_provision_kwargs.append({
+            "apparmor_override": apparmor_override,
+            "config_root_override": config_root_override,
+            "env_file_override": env_file_override,
+            "apparmor_fragments_override": apparmor_fragments_override,
+            "cascade_driver_id": cascade_driver_id,
+        })
         if isinstance(server, _FakeJaatoServer):
             server.lifecycle_log.append("ipc_apparmor_provision")
         self.lifecycle_log.append("ipc_apparmor_provision")
@@ -245,6 +285,16 @@ def test_pre_init_hooks_fire_before_initialize() -> None:
     assert server is not None
     assert server.lifecycle_log == [
         "resolve_session_env",
+        # PR-148: registry creation + discovery, inside the session's
+        # workspace, BEFORE apparmor composition — the composer walks
+        # ``profile.plugins`` via ``registry.get_plugin`` and silently
+        # contributes zero plugin rules if the registry does not exist yet.
+        "with_session_env:enter",
+        "in_workspace:enter",
+        "create_registry_and_discover",
+        "in_workspace:exit",
+        "with_session_env:exit",
+        # then the apparmor provision + spawn, as before
         "with_session_env:enter",
         "ipc_apparmor_provision",
         "with_session_env:exit",

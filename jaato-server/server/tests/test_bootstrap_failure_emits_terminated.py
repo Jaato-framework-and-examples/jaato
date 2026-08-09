@@ -46,6 +46,17 @@ class TestBootstrapFailureEmitsTerminated:
         the raw emit.  Field-correctness is covered by the chokepoint's own
         test."""
         server = MagicMock()
+        # A MagicMock satisfies ``getattr(server, "_cascade_budget_pool",
+        # None)``, which would drive the cascade-clamp branch in
+        # ``_build_session_envelope`` and raise a ValueError that masks the
+        # SecretResolutionError this test is asserting on.  A server outside
+        # a cascade has no pool.
+        server._cascade_budget_pool = None
+        # Same hazard: the envelope builder reads
+        # ``getattr(server, "_suppress_base_instructions", frozenset())``
+        # and the validator rejects a Mock by type.  frozenset() is the
+        # production default for a server that suppresses nothing.
+        server._suppress_base_instructions = frozenset()
         server._main_agent_id = "build_judge"
         return server
 
@@ -112,6 +123,17 @@ class TestBootstrapFailureEmitsTerminated:
         from server.runner_spawn import _emit_bootstrap_terminated
 
         server = MagicMock()
+        # A MagicMock satisfies ``getattr(server, "_cascade_budget_pool",
+        # None)``, which would drive the cascade-clamp branch in
+        # ``_build_session_envelope`` and raise a ValueError that masks the
+        # SecretResolutionError this test is asserting on.  A server outside
+        # a cascade has no pool.
+        server._cascade_budget_pool = None
+        # Same hazard: the envelope builder reads
+        # ``getattr(server, "_suppress_base_instructions", frozenset())``
+        # and the validator rejects a Mock by type.  frozenset() is the
+        # production default for a server that suppresses nothing.
+        server._suppress_base_instructions = frozenset()
         server._main_agent_id = "main"
         server._emit_error_termination_from_exc = MagicMock(
             side_effect=RuntimeError("emit boom"),
@@ -138,6 +160,17 @@ class TestBootstrapFailureEmitsTerminated:
         from server.runner_spawn import dispatch_bootstrap_envelope
 
         server = MagicMock()
+        # A MagicMock satisfies ``getattr(server, "_cascade_budget_pool",
+        # None)``, which would drive the cascade-clamp branch in
+        # ``_build_session_envelope`` and raise a ValueError that masks the
+        # SecretResolutionError this test is asserting on.  A server outside
+        # a cascade has no pool.
+        server._cascade_budget_pool = None
+        # Same hazard: the envelope builder reads
+        # ``getattr(server, "_suppress_base_instructions", frozenset())``
+        # and the validator rejects a Mock by type.  frozenset() is the
+        # production default for a server that suppresses nothing.
+        server._suppress_base_instructions = frozenset()
         del server._main_agent_id  # simulate early-fail
         server.runner_rpc = None
 
