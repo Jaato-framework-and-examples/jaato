@@ -114,10 +114,12 @@ class TestImageCapableProviderTables:
         from ..anthropic.provider import AnthropicProvider
 
         p = self._bare(AnthropicProvider)
+        # Anthropic / Google declare {"text","image","file"} for PDF-capable models
+        # (MODALITY_FILE = "PDFs / documents"); antigravity's table is image-only.
         p._model_name = "claude-opus-4-5-20251101"
-        assert p.modalities() == {"text", "image"}
+        assert p.modalities() == {"text", "image", "file"}
         p._model_name = "claude-3-5-sonnet-20241022"
-        assert p.modalities() == {"text", "image"}
+        assert p.modalities() == {"text", "image", "file"}
         p._model_name = "claude-2.1"  # legacy, text-only, absent from table
         assert p.modalities() == {"text"}
 
@@ -128,7 +130,7 @@ class TestImageCapableProviderTables:
         for m in ("gemini-2.5-pro", "gemini-1.5-flash-latest",
                   "gemini-3-pro-preview", "gemini-2.0-flash"):
             p._model_name = m
-            assert p.modalities() == {"text", "image"}, m
+            assert p.modalities() == {"text", "image", "file"}, m
         for m in ("gemini-1.0-pro", "gemini-pro"):
             p._model_name = m
             assert p.modalities() == {"text"}, m
@@ -152,7 +154,7 @@ class TestImageCapableProviderTables:
         p = self._bare(AnthropicProvider)
         p._model_name = "claude-2.1"  # active = text-only
         assert p.modalities() == {"text"}
-        assert p.modalities(model="claude-opus-4-5") == {"text", "image"}
+        assert p.modalities(model="claude-opus-4-5") == {"text", "image", "file"}
         assert p.supports_modality("image", model="claude-3-5-sonnet") is True
         assert p.supports_modality("image", model="claude-2.1") is False
 

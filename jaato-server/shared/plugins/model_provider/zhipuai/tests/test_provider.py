@@ -1,6 +1,7 @@
 """Tests for ZhipuAIProvider."""
 
 import json
+from pathlib import Path
 import pytest
 from unittest.mock import MagicMock, patch
 
@@ -17,6 +18,30 @@ from ..provider import (
 from ..env import DEFAULT_ZHIPUAI_BASE_URL
 from shared.plugins.model_provider.base import ProviderConfig
 from jaato_sdk.plugins.model_provider.types import ThinkingConfig
+
+
+@pytest.fixture(autouse=True)
+def _isolate_home_credentials(monkeypatch, tmp_path):
+    """Keep the developer's real ~/.jaato credentials out of these tests.
+
+    Credential resolution falls through to a HOME tier, so "no key
+    configured" tests found a REAL stored key on a machine where the
+    developer has actually authenticated -- one asserted a
+    ZhipuAIAPIKeyNotFoundError that never came.  Clean CI has no such file,
+    which is why it passed there while failing locally.
+    """
+    empty_home = tmp_path / "home"
+    (empty_home / ".jaato").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(empty_home))
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: empty_home))
+    # BOTH tiers leak, not just home: the project tier resolves to
+    # ``<cwd>/.jaato/`` and pytest runs from the repo root, which carries real
+    # stored credentials.  Move cwd somewhere empty and clear the workspace
+    # env so neither tier can reach them.
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+    monkeypatch.delenv("JAATO_WORKSPACE_ROOT", raising=False)
 
 
 class TestInitialization:
@@ -495,10 +520,23 @@ class TestLogin:
     def test_login_provides_guidance(self):
         """Login should provide guidance for API key setup."""
         messages = []
-        ZhipuAIProvider.login(on_message=messages.append)
+        # login() gained an ``on_input`` callback and falls back to builtin
+        # input() without one -- which raises under pytest's output capture.
+        # Supply one so the guidance path runs without touching stdin.
+        ZhipuAIProvider.login(
+            on_message=messages.append,
+            on_input=lambda _prompt="": "",
+        )
 
-        assert any("ZHIPUAI_API_KEY" in m for m in messages)
-        assert any("open.bigmodel.cn" in m for m in messages)
+        # The flow changed from "set ZHIPUAI_API_KEY" to an interactive paste,
+        # so it no longer names the env var.  The intent -- actionable guidance
+        # for obtaining a key, and a clear outcome -- is what gets pinned.
+        blob = "\n".join(messages)
+        assert "z.ai/model-api" in blob        # international portal
+        assert "open.bigmodel.cn" in blob      # China portal
+        assert any("cancelled" in m.lower() for m in messages), (
+            "supplying no key must report the outcome, not fail silently"
+        )
 
 
 class TestThinkingSupport:
