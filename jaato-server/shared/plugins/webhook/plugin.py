@@ -76,6 +76,10 @@ class WebhookPlugin(RunnerForwardingMixin):
         self._sub_lock = threading.Lock()
         # Total events published counter
         self._total_events_published = 0
+        # EventBus captured at subscribe time -- see _execute_subscribe.
+        # The publish path runs on the HTTP server thread, which never has
+        # the thread-local session the framework sets on the session thread.
+        self._event_bus: Optional[Any] = None
 
     @property
     def name(self) -> str:
@@ -285,6 +289,20 @@ class WebhookPlugin(RunnerForwardingMixin):
         # execution time they are (via _with_session_env()).
         self._reload_config()
 
+        # Capture the EventBus HERE, on the session thread, because this is
+        # where the thread-local set by set_session() is actually visible.
+        # ``_publish_to_event_bus`` runs on the HTTP server thread we spawn
+        # below, which the framework never calls set_session on -- so reading
+        # the thread-local there always missed and the bridge silently
+        # published nothing.
+        #
+        # Storing the bus on the INSTANCE is safe: EventBus is per-RUNTIME and
+        # subagents within a runtime share it (JaatoRuntime.event_bus), so the
+        # per-subagent isolation the thread-local exists for does not apply.
+        _sess = getattr(_thread_local, 'session', None)
+        if _sess is not None:
+            self._event_bus = _sess._runtime.event_bus
+
         # Start HTTP server lazily
         if not self._http_server or not self._http_server.is_running:
             try:
@@ -461,18 +479,26 @@ class WebhookPlugin(RunnerForwardingMixin):
             headers: Request headers dict.
             payload: Parsed JSON payload.
         """
-        session = getattr(_thread_local, 'session', None)
-        if not session:
-            logger.debug("No session set, skipping EventBus publish")
+        bus = self._event_bus
+        if bus is None:
+            # WARNING, not DEBUG: the bridge silently publishing nothing is
+            # precisely how this defect survived -- the docstring advertises
+            # the bridge and _total_events_published keeps counting either way.
+            logger.warning(
+                "webhook: no EventBus captured at subscribe time; event %s "
+                "from route %s will NOT reach the bus",
+                event_id, route_name,
+            )
             return
 
         try:
             from jaato_sdk.event_bus import Event, EventType
         except Exception:
-            logger.debug("EventBus not available, skipping bus publish")
+            logger.warning(
+                "webhook: EventBus types unavailable; event %s from route %s "
+                "will NOT reach the bus", event_id, route_name,
+            )
             return
-
-        bus = session._runtime.event_bus
         task_event = Event(
             event_id=event_id,
             event_type=EventType.EXTERNAL_EVENT,

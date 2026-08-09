@@ -71,6 +71,11 @@ def _make_server_with_runner(rpc: _FakeRPC) -> JaatoServer:
     srv.permission_plugin = None
     srv._runner_rpc = rpc
     srv._spawned_runner = MagicMock()
+    # ``shutdown`` reads the pool-manager ref for cascade-aware teardown
+    # (server 0.6.144+): a pooled runner shared by a live cascade must not
+    # be torn down with the first session that releases it.
+    srv._pool_manager_ref = None
+    srv._runner_ready = threading.Event()
     return srv
 
 
@@ -174,5 +179,7 @@ def test_shutdown_without_runner_does_nothing_runner_related() -> None:
     srv.permission_plugin = None
     srv._runner_rpc = None
     srv._spawned_runner = None
+    srv._pool_manager_ref = None
+    srv._runner_ready = threading.Event()
     # Should not raise.
     srv.shutdown()

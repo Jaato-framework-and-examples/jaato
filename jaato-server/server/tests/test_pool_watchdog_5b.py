@@ -28,7 +28,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from server.runner_pool import PoolManager
+from server.runner_pool import PoolManager, PoolSlot
 
 
 # ----------------------------------------------------------------------
@@ -91,10 +91,16 @@ def test_subreaper_prctl_succeeds() -> None:
 # ----------------------------------------------------------------------
 
 
-def _fake_slot_handle(pid: int) -> Tuple[int, MagicMock]:
-    """Return a (pid, mock_socket) tuple for use as an idle slot
-    handle in test fixtures."""
-    return (pid, MagicMock(name=f"slot_socket_{pid}"))
+def _fake_slot_handle(pid: int) -> "PoolSlot":
+    """Return a real :class:`PoolSlot` with a mock socket.
+
+    Phase 2 replaced the Phase 1 ``Tuple[int, socket.socket]`` handle with
+    the ``PoolSlot`` dataclass (it carries cascade-affinity bookkeeping the
+    tuple could not).  The watchdog closes ``slot.sock``, so a bare tuple
+    raises AttributeError here -- construct the production type and mock
+    only the socket.
+    """
+    return PoolSlot(pid=pid, sock=MagicMock(name=f"slot_socket_{pid}"))
 
 
 def test_handle_template_death_drains_idle_slots_and_respawns() -> None:

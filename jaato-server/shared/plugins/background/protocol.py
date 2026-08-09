@@ -130,8 +130,17 @@ class TaskOutput:
 class TaskInfo:
     """Unified information about a background task.
 
-    Combines status, output streaming, and result into a single response.
-    Works the same whether the task is running or completed.
+    Combines status and output streaming into a single response.  Works the
+    same whether the task is running or completed.
+
+    NOTE: this does NOT carry the task's return value -- there is no
+    ``result`` field.  For a subprocess-style task the output IS the result
+    (``stdout`` / ``returncode``); for an in-process tool task the return
+    value is available only via :meth:`BackgroundMixin.get_result`, which
+    returns a :class:`TaskResult`.  ``BackgroundPlugin`` currently exposes no
+    tool for that, so a backgrounded in-process tool's return value is
+    unreachable from the model-facing surface -- see the xfail block in
+    ``background/tests/test_plugin.py``.
 
     Attributes:
         task_id: Unique identifier for the task.
@@ -366,8 +375,9 @@ class BackgroundCapable(Protocol):
         """Get unified information about a background task.
 
         This is the preferred method for querying task state. It combines
-        status, output streaming, and result into a single response that
-        works the same whether the task is running or completed.
+        status and output streaming into a single response that works the
+        same whether the task is running or completed.  It does NOT return
+        the task's return value -- use :meth:`get_result` for that.
 
         Args:
             task_id: ID from the TaskHandle.
@@ -376,7 +386,8 @@ class BackgroundCapable(Protocol):
             wait: If True, block until task completes.
 
         Returns:
-            TaskInfo with current state, output, and result (if completed).
+            TaskInfo with current state and output.  No return value: see
+            :meth:`get_result`.
 
         Raises:
             KeyError: If task_id is not found.

@@ -107,7 +107,13 @@ class TestSchemaValidator:
             endpoint
         )
         assert result.valid is False
-        assert any("minLength" in e.error for e in result.errors)
+        # The message is prose now ("string length must be >= 3"), not the
+        # schema keyword.  Assert the FIELD plus the constraint it reports,
+        # which survives wording changes and is what a caller acts on.
+        assert any(
+            e.field.endswith("username") and "length must be >= 3" in e.error
+            for e in result.errors
+        ), [(e.field, e.error) for e in result.errors]
 
         # Invalid email
         result = validator.validate_request_body(

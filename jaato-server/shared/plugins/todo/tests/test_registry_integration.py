@@ -183,8 +183,11 @@ class TestRegistryTodoAutoApproval:
 
         auto_approved = registry.get_auto_approved_tools()
 
+        # createPlan is DELIBERATELY excluded -- the user reviews the plan
+        # before it is created (see TodoPlugin.get_auto_approved_tools).
+        assert "createPlan" not in auto_approved
+
         # These are auto-approved (no security implications)
-        assert "createPlan" in auto_approved
         assert "setStepStatus" in auto_approved
         assert "getPlanStatus" in auto_approved
         assert "completePlan" in auto_approved
@@ -310,19 +313,29 @@ class TestRegistryPluginForTool:
 class TestRegistryShutdownCleanup:
     """Tests for shutdown and cleanup behavior."""
 
-    def test_unexpose_calls_shutdown(self):
-        """Test that unexposing the plugin calls its shutdown method."""
+    def test_unexpose_stops_exposing_but_preserves_plugin_state(self):
+        """Unexpose removes the tools; it does NOT tear the plugin down.
+
+        TodoPlugin.shutdown is a deliberate no-op beyond tracing because the
+        plugin is SHARED between agents -- plan tracking and storage must
+        survive one agent unexposing it while others keep working. The old
+        assertion (`_initialized is False`) pinned a teardown that no longer
+        happens.
+        """
         registry = PluginRegistry()
         registry.discover()
 
         registry.expose_tool("todo")
         plugin = registry.get_plugin("todo")
-
-        assert plugin._initialized is True
+        plugin._current_plan_ids["agent-a"] = "plan-1"
 
         registry.unexpose_tool("todo")
 
-        assert plugin._initialized is False
+        assert not registry.is_exposed("todo")
+        assert "createPlan" not in {
+            s.name for s in registry.get_exposed_tool_schemas()
+        }
+        assert plugin._current_plan_ids["agent-a"] == "plan-1"
 
     def test_current_plan_preserved_on_shutdown(self):
         """Test that current plan is preserved on shutdown for cross-agent collaboration."""

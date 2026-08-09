@@ -377,7 +377,15 @@ class TestPersistenceIsolation:
 class TestShutdownCleanup:
     """shutdown() should clear all state."""
 
-    def test_shutdown_clears_sessions(self):
+    def test_shutdown_preserves_running_subagents(self):
+        """shutdown() resets CONFIG, not running work.
+
+        Deliberate contract (see SubagentPlugin.shutdown): subagents are
+        independent sessions, so a parent reset or plugin reconfiguration
+        must not invalidate their work -- the parent cancels them explicitly
+        via cancel_subagent if that is what it wants.  This test previously
+        asserted the opposite, from before that decision.
+        """
         plugin = SubagentPlugin()
         plugin.initialize()
 
@@ -386,7 +394,12 @@ class TestShutdownCleanup:
 
         assert len(plugin._active_sessions) == 1
         plugin.shutdown()
-        assert len(plugin._active_sessions) == 0
+        assert len(plugin._active_sessions) == 1, (
+            "running subagents must survive a plugin shutdown"
+        )
+        # ...while the config state it DOES own is reset.
+        assert plugin._initialized is False
+        assert plugin._config is None
 
     def test_shutdown_clears_counters(self):
         plugin = SubagentPlugin()

@@ -43,15 +43,27 @@ class TestTodoPluginInitialization:
         plugin.initialize({"storage_type": "memory"})
         assert plugin._storage is not None
 
-    def test_shutdown(self):
+    def test_shutdown_preserves_shared_state(self):
+        """shutdown() is a deliberate NO-OP beyond tracing.
+
+        This plugin is SHARED between agents, so plan tracking and storage
+        must survive one agent shutting down while others keep using it (see
+        TodoPlugin.shutdown). The old assertion here -- `_initialized is
+        False` -- pinned a teardown that no longer happens.
+        """
         plugin = TodoPlugin()
         plugin.initialize()
+        storage_before = plugin._storage
+        plugin._current_plan_ids["agent-a"] = "plan-1"
+
         plugin.shutdown()
 
-        assert plugin._initialized is False
-        # Note: _storage and _reporter are intentionally preserved across shutdown
-        # for cross-agent collaboration - plans should persist when one agent
-        # shuts down while others continue using the shared plugin
+        assert plugin._storage is storage_before
+        assert plugin._current_plan_ids["agent-a"] == "plan-1"
+        # ...and it stays usable: another agent re-initializing must not lose
+        # the first agent's plans.
+        plugin.initialize()
+        assert plugin._current_plan_ids["agent-a"] == "plan-1"
 
 
 class TestTodoPluginToolSchemas:

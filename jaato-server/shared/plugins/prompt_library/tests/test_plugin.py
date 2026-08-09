@@ -2,7 +2,7 @@
 
 import tempfile
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -991,6 +991,23 @@ class TestCommandCompletions:
         assert completions == []
 
 
+@pytest.fixture(autouse=True)
+def _isolate_prompt_tiers(monkeypatch, tmp_path):
+    """Confine prompt discovery to the workspace tier.
+
+    The plugin merges the workspace prompts dir with ``~/.jaato/prompts/`` and
+    prompts registered by jaato-premium.  A test that writes ONE prompt into a
+    tmpdir and asserts on the rendered instructions was really measuring the
+    developer's machine: 17 real prompts crowded the preview list, and the
+    test's own prompt sorted past the 10 shown.  Clean CI has neither source,
+    which is why this never failed there.
+    """
+    empty_home = tmp_path / "home"
+    (empty_home / ".jaato" / "prompts").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(empty_home))
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: empty_home))
+
+
 class TestSystemInstructions:
     """Tests for system instructions."""
 
@@ -1225,10 +1242,16 @@ class TestToolsChangedNotification:
         """Setting the registry should store a reference."""
         plugin = PromptLibraryPlugin()
 
-        mock_registry = object()
+        # set_plugin_registry now also calls registry.register_category(...)
+        # (PluginRegistry.register_category), so a bare object() no longer
+        # satisfies the collaborator.  Use a double that records the call and
+        # pin BOTH effects.
+        mock_registry = Mock()
         plugin.set_plugin_registry(mock_registry)
 
         assert plugin._plugin_registry is mock_registry
+        mock_registry.register_category.assert_called_once()
+        assert mock_registry.register_category.call_args[0][0] == "prompt"
 
 
 class TestRemoveSubcommand:

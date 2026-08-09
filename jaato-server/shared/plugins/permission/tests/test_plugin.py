@@ -129,6 +129,7 @@ class TestPermissionPluginExecutors:
 
         result = executors["askPermission"]({
             "tool_name": "some_tool",
+            "intent": "exercise the permission path under test",
             "arguments": {}
         })
         assert result["allowed"] is True
@@ -146,6 +147,7 @@ class TestPermissionPluginExecutors:
 
         result = executors["askPermission"]({
             "tool_name": "blocked_tool",
+            "intent": "exercise the permission path under test",
             "arguments": {}
         })
         assert result["allowed"] is False
@@ -157,9 +159,13 @@ class TestPermissionPluginCheckPermission:
     def test_check_permission_not_initialized(self):
         plugin = PermissionPlugin()
         # Don't initialize
-        allowed, reason = plugin.check_permission("any_tool", {})
+        # check_permission returns (is_allowed, METADATA DICT) -- the second
+        # element carries 'reason' plus a machine-readable 'method', where it
+        # used to be a bare reason string.
+        allowed, meta = plugin.check_permission("any_tool", {})
         assert allowed is True  # Defaults to allow when not initialized
-        assert "not initialized" in reason.lower()
+        assert "not initialized" in meta["reason"].lower()
+        assert meta["method"] == "not_initialized"
 
     def test_check_permission_allow_by_default(self):
         plugin = PermissionPlugin()
@@ -167,7 +173,7 @@ class TestPermissionPluginCheckPermission:
             "policy": {"defaultPolicy": "allow"}
         })
 
-        allowed, reason = plugin.check_permission("any_tool", {})
+        allowed, meta = plugin.check_permission("any_tool", {})
         assert allowed is True
 
     def test_check_permission_deny_by_default(self):
@@ -176,7 +182,7 @@ class TestPermissionPluginCheckPermission:
             "policy": {"defaultPolicy": "deny"}
         })
 
-        allowed, reason = plugin.check_permission("any_tool", {})
+        allowed, meta = plugin.check_permission("any_tool", {})
         assert allowed is False
 
     def test_check_permission_blacklisted_tool(self):
@@ -188,7 +194,7 @@ class TestPermissionPluginCheckPermission:
             }
         })
 
-        allowed, reason = plugin.check_permission("dangerous_tool", {})
+        allowed, meta = plugin.check_permission("dangerous_tool", {})
         assert allowed is False
 
     def test_check_permission_whitelisted_tool(self):
@@ -200,7 +206,7 @@ class TestPermissionPluginCheckPermission:
             }
         })
 
-        allowed, reason = plugin.check_permission("safe_tool", {})
+        allowed, meta = plugin.check_permission("safe_tool", {})
         assert allowed is True
 
     def test_check_permission_blacklist_pattern(self):
@@ -212,7 +218,7 @@ class TestPermissionPluginCheckPermission:
             }
         })
 
-        allowed, reason = plugin.check_permission(
+        allowed, meta = plugin.check_permission(
             "cli_based_tool",
             {"command": "rm -rf /tmp/test"}
         )
@@ -227,7 +233,7 @@ class TestPermissionPluginCheckPermission:
             }
         })
 
-        allowed, reason = plugin.check_permission(
+        allowed, meta = plugin.check_permission(
             "cli_based_tool",
             {"command": "git status"}
         )
@@ -265,9 +271,10 @@ class TestPermissionPluginChannelInteraction:
         )
         plugin._channel = mock_channel
 
-        allowed, reason = plugin.check_permission("test_tool", {})
+        allowed, meta = plugin.check_permission("test_tool", {})
         assert allowed is True
-        assert "approved" in reason.lower()
+        # check_permission returns (allowed, METADATA DICT), not a bare string.
+        assert "approved" in meta["reason"].lower()
 
     def test_ask_channel_deny(self):
         plugin = PermissionPlugin()
@@ -283,7 +290,7 @@ class TestPermissionPluginChannelInteraction:
         )
         plugin._channel = mock_channel
 
-        allowed, reason = plugin.check_permission("test_tool", {})
+        allowed, meta = plugin.check_permission("test_tool", {})
         assert allowed is False
 
     def test_ask_channel_allow_session(self):
@@ -301,7 +308,7 @@ class TestPermissionPluginChannelInteraction:
         )
         plugin._channel = mock_channel
 
-        allowed, reason = plugin.check_permission("test_tool", {})
+        allowed, meta = plugin.check_permission("test_tool", {})
         assert allowed is True
 
         # Should be allowed without asking again
@@ -326,7 +333,7 @@ class TestPermissionPluginChannelInteraction:
         )
         plugin._channel = mock_channel
 
-        allowed, reason = plugin.check_permission("test_tool", {})
+        allowed, meta = plugin.check_permission("test_tool", {})
         assert allowed is False
 
         # Should be denied without asking again
@@ -349,7 +356,7 @@ class TestPermissionPluginChannelInteraction:
         )
         plugin._channel = mock_channel
 
-        allowed, reason = plugin.check_permission("test_tool", {})
+        allowed, meta = plugin.check_permission("test_tool", {})
         assert allowed is False
 
     def test_no_channel_configured(self):
@@ -359,9 +366,10 @@ class TestPermissionPluginChannelInteraction:
         })
         plugin._channel = None  # Remove channel
 
-        allowed, reason = plugin.check_permission("test_tool", {})
+        allowed, meta = plugin.check_permission("test_tool", {})
         assert allowed is False
-        assert "no channel" in reason.lower()
+        # check_permission returns (allowed, METADATA DICT), not a bare string.
+        assert "no channel" in meta["reason"].lower()
 
 
 class TestPermissionPluginExecutionLog:
@@ -420,7 +428,13 @@ class TestPermissionPluginWrapExecutor:
         result = wrapped({"arg": "val"})
 
         original_executor.assert_called_once_with({"arg": "val"})
-        assert result == {"result": "success"}
+        # The wrapper now ATTACHES a ``_permission`` provenance dict to a
+        # dict-shaped result (method + reason), so the payload is a superset
+        # of what the executor returned rather than identical to it.  Assert
+        # the original keys survive untouched AND that provenance is stamped
+        # -- exact equality would silently forbid that metadata.
+        assert result["result"] == "success"
+        assert result["_permission"]["method"] == "default"
 
     def test_wrap_executor_blocks_denied(self):
         plugin = PermissionPlugin()
@@ -482,7 +496,9 @@ class TestPermissionPluginWrapExecutor:
 
         # Safe tool should work
         result1 = wrapped["safe_tool"]({"a": 1})
-        assert result1 == {"r": 1}
+        # Superset, not equality -- see test_wrap_executor.
+        assert result1["r"] == 1
+        assert "_permission" in result1
 
         # Blocked tool should be denied
         result2 = wrapped["blocked_tool"]({"a": 1})
@@ -569,7 +585,7 @@ class TestPermissionPluginEdgeCases:
         mock_channel.request_permission.return_value = response
         plugin._channel = mock_channel
 
-        allowed, reason = plugin.check_permission("test_tool", {})
+        allowed, meta = plugin.check_permission("test_tool", {})
         # Should default to deny for unknown decisions
         assert allowed is False
 
@@ -579,7 +595,7 @@ class TestPermissionPluginEdgeCases:
             "policy": {"defaultPolicy": "allow"}
         })
 
-        allowed, reason = plugin.check_permission("tool", {})
+        allowed, meta = plugin.check_permission("tool", {})
         assert allowed is True
 
     def test_complex_arguments(self):
@@ -593,7 +609,7 @@ class TestPermissionPluginEdgeCases:
             "list": [1, 2, 3],
             "null": None,
         }
-        allowed, reason = plugin.check_permission("tool", complex_args)
+        allowed, meta = plugin.check_permission("tool", complex_args)
         assert allowed is True
 
 

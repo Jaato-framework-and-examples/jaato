@@ -7,7 +7,9 @@ through blacklist/whitelist rules and interactive channel approval.
 import fnmatch
 import os
 import tempfile
+import json
 import threading
+from collections import OrderedDict
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 from jaato_sdk.plugins.model_provider.types import ToolSchema
@@ -90,6 +92,13 @@ class PermissionPlugin(RunnerForwardingMixin):
         # This ensures only one permission prompt is shown at a time when
         # multiple tools request permission concurrently (parallel execution)
         self._channel_lock = threading.Lock()
+        # One-shot approvals handed out by ``askPermission`` (see
+        # :meth:`_grant_ask_once`).  Keyed by (tool_name, canonical args);
+        # each key is consumed by the FIRST matching ``check_permission``.
+        # Bounded so a model that spams askPermission without executing
+        # cannot grow this without limit.
+        self._ask_grants: "OrderedDict[str, None]" = OrderedDict()
+        self._ask_grants_lock = threading.Lock()
         # Phase 3 §3.7 + peer-review M3: lock around per-session policy
         # mutations so a cross-session ``permission.add_rule`` RPC
         # arriving mid-ASK can't let the next call for the same tool
@@ -1209,9 +1218,24 @@ class PermissionPlugin(RunnerForwardingMixin):
         context = {"intent": intent}
         allowed, perm_info = self.check_permission(tool_name, tool_args, context)
 
-        # If approved, add to session whitelist so actual execution won't prompt again
-        if allowed and self._policy:
-            self._policy.add_session_whitelist(tool_name)
+        # Carry THIS approval to the imminent real execution so the user is
+        # not prompted twice for one decision -- and nothing further.
+        #
+        # This used to call ``add_session_whitelist(tool_name)`` on ANY
+        # approval, which escalated a per-COMMAND grant into a whole-TOOL
+        # session grant: with defaultPolicy=deny + whitelist.patterns=
+        # ['git *'], `rm -rf /tmp` was denied on a fresh plugin but ALLOWED
+        # once `git status` had been approved.  It also turned an explicit
+        # ALLOW_ONCE into a session grant.  Every decision that legitimately
+        # wants a session grant already takes it itself in
+        # ``_handle_channel_response`` (ALLOW_SESSION whitelists, ALLOW_ALL /
+        # ALLOW_TURN / ALLOW_UNTIL_IDLE set their own flags), so this line was
+        # redundant where it was right and wrong everywhere else.
+        #
+        # Only an interactive approval can double-prompt; pattern, config and
+        # default decisions re-evaluate deterministically to the same answer.
+        if allowed and perm_info.get('method') == 'user_approved':
+            self._grant_ask_once(tool_name, tool_args)
 
         return {
             "allowed": allowed,
@@ -1265,6 +1289,41 @@ class PermissionPlugin(RunnerForwardingMixin):
         if client_type == ClientType.API:
             return "deny"
         return None  # unknown presentation → no enforcement (safe default)
+
+    _ASK_GRANT_LIMIT = 64
+
+    @staticmethod
+    def _ask_grant_key(tool_name: str, args: Optional[Dict[str, Any]]) -> str:
+        """Canonical key identifying ONE specific tool call.
+
+        Sorted-key JSON so argument ordering can't produce two keys for the
+        same call; ``default=str`` because tool args may carry non-JSON
+        values and this only has to be stable, not round-trippable.
+        """
+        return json.dumps(
+            [tool_name, args or {}], sort_keys=True, default=str,
+        )
+
+    def _grant_ask_once(self, tool_name: str, args: Optional[Dict[str, Any]]) -> None:
+        """Record that THIS exact call was approved via ``askPermission``.
+
+        Consumed once, by :meth:`_consume_ask_grant`, to suppress the
+        duplicate interactive prompt the imminent real execution would
+        otherwise raise.  It grants nothing else: a different argument set,
+        a second execution, or any other tool re-evaluates from scratch.
+        """
+        key = self._ask_grant_key(tool_name, args)
+        with self._ask_grants_lock:
+            self._ask_grants[key] = None
+            self._ask_grants.move_to_end(key)
+            while len(self._ask_grants) > self._ASK_GRANT_LIMIT:
+                self._ask_grants.popitem(last=False)
+
+    def _consume_ask_grant(self, tool_name: str, args: Optional[Dict[str, Any]]) -> bool:
+        """Consume a one-shot ``askPermission`` grant for this exact call."""
+        key = self._ask_grant_key(tool_name, args)
+        with self._ask_grants_lock:
+            return self._ask_grants.pop(key, "missing") is None
 
     def check_permission(
         self,
@@ -1542,6 +1601,25 @@ class PermissionPlugin(RunnerForwardingMixin):
                               'already approved); blacklist and evaluators still '
                               'enforced',
                     'method': 'trusted_bridge',
+                }
+
+            # A one-shot grant from ``askPermission`` suppresses the duplicate
+            # prompt for the SAME call the model just pre-checked.  Placed
+            # here deliberately, beside the trusted-bridge short-circuit and
+            # under the same guarantee: we only reach this branch after the
+            # blacklist, evaluators and reliability-escalation-deny have all
+            # passed, so consuming a grant cannot bypass a hard boundary.  A
+            # forced re-escalation is NOT suppressed, for the same reason it
+            # isn't for the bridge.
+            if not force_reescalation and self._consume_ask_grant(tool_name, args):
+                self._log_decision(
+                    tool_name, args, "allow",
+                    "askPermission pre-approval consumed (prompt suppressed)",
+                )
+                return True, {
+                    'reason': 'Approved via askPermission for this exact call; '
+                              'blacklist and evaluators still enforced',
+                    'method': 'ask_permission_once',
                 }
 
             # Need to ask the channel (already retrieved above for subagent check)

@@ -11,6 +11,34 @@ from ..config import SubagentConfig, SubagentProfile, ProfileDiscoveryResult, di
 from ..plugin import SubagentPlugin
 
 
+@pytest.fixture(autouse=True)
+def _isolate_discovery_tiers(monkeypatch, tmp_path):
+    """Confine discover_profiles to the WORKSPACE tier for these tests.
+
+    ``discover_profiles`` deliberately merges three sources: the workspace
+    dir, ``~/.jaato/profiles/``, and profiles registered by jaato-premium via
+    the ``jaato.premium`` -> ``profiles`` entry point.  Tests that create one
+    profile in a tmpdir and assert on the total were therefore measuring the
+    developer's machine: on this checkout the user tier contributed 6 and an
+    installed jaato-premium contributed 15, so a test expecting 1 saw 21.  On
+    a clean CI box (empty HOME, no premium) the same tests pass -- which is
+    exactly why this went unnoticed, on top of CI never running this path.
+
+    Point HOME at an empty tmp dir and stub the premium tier out, so these
+    tests measure the workspace tier they actually populate.  Tests that WANT
+    cross-tier behaviour should exercise it explicitly rather than inherit it
+    from whoever runs them.
+    """
+    empty_home = tmp_path / "home"
+    (empty_home / ".jaato" / "profiles").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(empty_home))
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: empty_home))
+    monkeypatch.setattr(
+        "shared.plugins.subagent.config._discover_premium_profiles",
+        lambda: {},
+    )
+
+
 class TestDiscoverProfiles:
     """Tests for the discover_profiles function."""
 
@@ -133,7 +161,10 @@ class TestDiscoverProfiles:
             valid_path = Path(tmpdir) / "valid.json"
             valid_path.write_text(json.dumps({
                 "name": "valid",
-                "description": "Valid profile"
+                "description": "Valid profile",
+                # `plugins` is required now; [] is the documented
+                # minimal framework set (permission/reliability/lifecycle).
+                "plugins": []
             }))
 
             # Create invalid JSON file
@@ -158,7 +189,10 @@ class TestDiscoverProfiles:
             valid_path = Path(tmpdir) / "valid.json"
             valid_path.write_text(json.dumps({
                 "name": "valid",
-                "description": "Valid profile"
+                "description": "Valid profile",
+                # `plugins` is required now; [] is the documented
+                # minimal framework set (permission/reliability/lifecycle).
+                "plugins": []
             }))
 
             result = discover_profiles(tmpdir)
@@ -180,7 +214,10 @@ class TestDiscoverProfiles:
             valid_path = Path(tmpdir) / "valid.json"
             valid_path.write_text(json.dumps({
                 "name": "valid",
-                "description": "Valid profile"
+                "description": "Valid profile",
+                # `plugins` is required now; [] is the documented
+                # minimal framework set (permission/reliability/lifecycle).
+                "plugins": []
             }))
 
             result = discover_profiles(tmpdir)
@@ -218,8 +255,6 @@ class TestDiscoverProfiles:
                 "system_instructions": "You are a helpful assistant.",
                 "model": "gemini-2.5-pro",
                 "max_turns": 20,
-                "icon": ["[*]", "| |", "---"],
-                "icon_name": "custom_icon",
             }
             profile_path = Path(tmpdir) / "full_agent.json"
             profile_path.write_text(json.dumps(profile_data))
@@ -234,8 +269,8 @@ class TestDiscoverProfiles:
             assert profile.system_instructions == "You are a helpful assistant."
             assert profile.model == "gemini-2.5-pro"
             assert profile.max_turns == 20
-            assert profile.icon == ["[*]", "| |", "---"]
-            assert profile.icon_name == "custom_icon"
+            # icon / icon_name dropped: removed from the profile schema in
+            # 635b00ec, so "all fields" no longer includes them.
 
 
 class TestDiscoverYamlProfiles:

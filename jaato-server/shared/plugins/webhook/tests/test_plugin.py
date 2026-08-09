@@ -2,6 +2,7 @@
 
 import json
 import socket
+import pytest
 import time
 import urllib.request
 

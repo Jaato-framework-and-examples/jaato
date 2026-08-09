@@ -754,7 +754,11 @@ class TestEdgeCases:
 
         result = plugin._execute_sandbox_command({
             "subcommand": "add",
-            "path": "../../sibling"
+            # `add` requires an access mode now:
+            # "sandbox add <readonly|readwrite> <path>".  Without one it
+            # returns the usage error, never reaching path resolution --
+            # which is what this test is actually about.
+            "path": "readwrite ../../sibling"
         })
 
         assert result["status"] == "added"

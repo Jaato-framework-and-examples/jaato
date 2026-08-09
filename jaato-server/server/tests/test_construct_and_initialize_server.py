@@ -78,6 +78,23 @@ class _FakeJaatoServer:
                 self.lifecycle_log.append("with_session_env:exit")
         return _noop()
 
+    # Server 0.6.131+ (PR-148): the bootstrap helper creates the plugin
+    # registry inside ``_in_workspace()`` BEFORE composing the apparmor
+    # profile, so the composer can query each plugin's apparmor rules.
+    def _in_workspace(self):
+        from contextlib import contextmanager
+        @contextmanager
+        def _noop():
+            self.lifecycle_log.append("in_workspace:enter")
+            try:
+                yield
+            finally:
+                self.lifecycle_log.append("in_workspace:exit")
+        return _noop()
+
+    def create_registry_and_discover(self) -> None:
+        self.lifecycle_log.append("create_registry_and_discover")
+
 
 class _FakeSessionManager:
     """Test double exposing the same stubs as in
@@ -113,6 +130,11 @@ class _FakeSessionManager:
         apparmor_override: Optional[bool] = None,
         config_root_override: Optional[str] = None,
         env_file_override: Optional[str] = None,
+        # Mirrors the production signature EXPLICITLY (not **kwargs) so a
+        # future divergence fails loudly here instead of silently accepting
+        # an argument the real method would reject.
+        apparmor_fragments_override: Optional[List[str]] = None,
+        cascade_driver_id: Optional[str] = None,
     ) -> Optional[str]:
         self.ipc_provision_calls.append(
             (server, session_id, workspace_path, client_id),
@@ -233,6 +255,16 @@ def test_subhelper_lifecycle_order_matches_bootstrap_session() -> None:
     assert server is not None
     assert server.lifecycle_log == [
         "resolve_session_env",
+        # PR-148: registry creation + discovery run inside the session's
+        # workspace BEFORE apparmor composition, so the composer can walk
+        # ``profile.plugins`` via ``registry.get_plugin``.  Without the
+        # registry, zero plugin-contributed rules reach the profile.
+        "with_session_env:enter",
+        "in_workspace:enter",
+        "create_registry_and_discover",
+        "in_workspace:exit",
+        "with_session_env:exit",
+        # then apparmor provision + spawn
         "with_session_env:enter",
         "ipc_apparmor_provision",
         "with_session_env:exit",
@@ -289,6 +321,16 @@ def test_load_session_impl_uses_sub_helper_with_no_client_id(
             self.turn_accounting: List[Any] = []
             self.interrupted_turn = None
             self.sandbox_mode = "apparmor"  # pre-restart value
+            # Mirrors the real SessionState field (plugins/session/base.py:92);
+            # the disk-restore path reads it to resolve the re-spawned runner's
+            # config_root.
+            self.config_root: Optional[str] = None
+            # Mirrors SessionState.profile_spec (plugins/session/base.py:70) —
+            # the inline-profile restore path reads it.
+            self.profile_spec: Optional[Dict[str, Any]] = None
+            # Mirrors SessionState.profile_name (base.py:52); "<inline>"
+            # marks a session born from an inline profile rather than a file.
+            self.profile_name: Optional[str] = None
 
     state = _FakeState()
     sm._session_plugin.load = lambda sid, storage_dir=None: state  # type: ignore[assignment]

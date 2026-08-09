@@ -143,6 +143,19 @@ def _stub_server(profile: Any) -> MagicMock:
     server = MagicMock()
     server._profile = profile
     server.config_root = None
+    # A MagicMock auto-creates any attribute, so ``getattr(server,
+    # "_cascade_budget_pool", None)`` would hand back a Mock rather than
+    # None and drive the cascade-clamp branch in
+    # ``runner_spawn._build_session_envelope`` -- which then fails
+    # unpacking ``child_config``'s 2-tuple from a Mock.  A real
+    # JaatoServer outside a cascade simply has no pool, so pin None and
+    # keep the clamp branch out of this test's scope.
+    server._cascade_budget_pool = None
+    # Same MagicMock hazard: the envelope builder reads
+    # ``getattr(server, "_suppress_base_instructions", frozenset())`` and a
+    # Mock would reach the validator, which rejects it by type.  frozenset()
+    # is the production default for a server that suppresses nothing.
+    server._suppress_base_instructions = frozenset()
     return server
 
 
@@ -246,6 +259,17 @@ def _capture_permission_init(envelope: SessionInitEnvelope) -> Dict[str, Any]:
 
         def set_config_root(self, c: Any) -> None:
             pass
+
+        def set_session_id(self, session_id: Any) -> None:
+            # Real registry method (plugins/registry.py:1480); JaatoServer
+            # calls it during initialize so plugins can scope per-session
+            # state.  Recorded so a test can assert the id it received.
+            self.session_id = session_id
+
+        def set_agent_name(self, agent_name: Any) -> None:
+            # Mirrors set_session_id (plugins/registry.py:1494, server
+            # 0.6.129+): the agent identity injected into plugin configs.
+            self.agent_name = agent_name
 
     class _StubRuntime:
         def configure_plugins(self, *a: Any, **kw: Any) -> None:

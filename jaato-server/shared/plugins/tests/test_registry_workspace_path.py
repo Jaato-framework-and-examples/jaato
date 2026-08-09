@@ -86,19 +86,27 @@ class TestRegistryWorkspacePath:
         registry.set_workspace_path("/my/workspace")
         assert registry.get_workspace_path() == "/my/workspace"
 
-    def test_set_workspace_path_only_broadcasts_to_exposed(self, registry):
-        """Should only broadcast to exposed plugins."""
-        # Add unexposed plugin
+    def test_set_workspace_path_broadcasts_to_unexposed_too(self, registry):
+        """ALL registered plugins get the workspace, exposed or not.
+
+        This test used to assert the opposite. Exposed-only scope WAS the bug:
+        a #344-class propagation gap where a registered-but-unexposed plugin
+        silently kept its init-time launch-dir default. Runner-tier plugins
+        need the per-session workspace before (or without) model exposure --
+        a pool-slot runner initialized at template time, or the notebook
+        subprocess backend spawning kernels rooted at the workspace. See
+        PluginRegistry.set_workspace_path, which documents exactly this.
+        """
         unexposed = MockPluginWithWorkspace()
         registry._plugins["unexposed"] = unexposed
 
         registry.set_workspace_path("/test/workspace")
 
-        # Exposed plugins get the broadcast
         assert registry._plugins["with_workspace1"].workspace_path == "/test/workspace"
-
-        # Unexposed plugin should NOT receive the broadcast
-        assert unexposed.workspace_path is None
+        assert unexposed.workspace_path == "/test/workspace", (
+            "registered-but-unexposed plugins must not be left on their "
+            "init-time default"
+        )
 
     def test_set_workspace_path_handles_exception_gracefully(self, registry):
         """Should continue broadcasting even if one plugin raises."""

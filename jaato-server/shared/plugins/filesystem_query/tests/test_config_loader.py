@@ -64,8 +64,10 @@ class TestFilesystemQueryConfig:
         # Should NOT include defaults
         assert ".git" not in effective
         assert "node_modules" not in effective
-        # Should only include custom patterns
-        assert effective == ["and_this", "only_this"]
+        # Should only include custom patterns.  Compare as a SET: excludes are
+        # match-any, so ordering carries no meaning and pinning it made this
+        # fail when the implementation switched to insertion order.
+        assert set(effective) == {"and_this", "only_this"}
 
     def test_should_include(self):
         """Test force-include pattern matching."""

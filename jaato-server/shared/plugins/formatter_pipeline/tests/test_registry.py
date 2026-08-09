@@ -254,25 +254,35 @@ class TestFormatterRegistryPipeline:
 class TestFormatterRegistryWiring:
     """Tests for formatter dependency wiring."""
 
-    def test_formatter_wiring_with_tool_registry(self):
-        """Should wire formatter with tool registry."""
+    def test_custom_formatter_is_included_and_wired_by_its_caller(self):
+        """Custom formatters go in as REGISTERED; the caller wires them.
+
+        The registry only calls wire_dependencies on formatters it CREATES
+        from config (_create_formatter). A register_custom() instance is
+        appended as-is -- see the "code_validation_formatter wired by server"
+        note at that append site -- so the owner wires it before handing it
+        over.
+
+        This test used to assert the registry did the wiring, and also named
+        the formatter in _config. That name lands in ``added_names`` while
+        _create_formatter finds no factory for it, so the custom instance was
+        SUPPRESSED and never reached the pipeline at all.
+        """
         registry = create_registry()
 
-        # Mock tool registry with LSP plugin
         mock_tool_registry = Mock()
         mock_lsp = Mock()
         mock_tool_registry.get_plugin.return_value = mock_lsp
-
         registry.set_tool_registry(mock_tool_registry)
 
-        # Create formatter that needs wiring
         formatter = MockFormatterWithWiring()
+        # Wire it the way the server does, BEFORE registering.
+        assert formatter.wire_dependencies(mock_tool_registry) is True
         registry.register_custom("wired", formatter)
-        registry._config = [{"name": "wired"}]
 
         pipeline = registry.create_pipeline()
 
-        # Formatter should be wired
+        assert "mock_wired" in pipeline.list_formatters()
         assert formatter._wired is True
         assert formatter._lsp_plugin is mock_lsp
 

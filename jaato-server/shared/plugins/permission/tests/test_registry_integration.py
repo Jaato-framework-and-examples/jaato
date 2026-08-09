@@ -171,6 +171,7 @@ class TestRegistryAskPermissionExecution:
         executors = registry.get_exposed_executors()
         result = executors["askPermission"]({
             "tool_name": "some_tool",
+            "intent": "exercise the permission path under test",
             "arguments": {"arg": "val"}
         })
 
@@ -192,6 +193,7 @@ class TestRegistryAskPermissionExecution:
         executors = registry.get_exposed_executors()
         result = executors["askPermission"]({
             "tool_name": "blocked_tool",
+            "intent": "exercise the permission path under test",
             "arguments": {}
         })
 
@@ -214,6 +216,7 @@ class TestRegistryAskPermissionExecution:
         # Should be allowed
         result = executors["askPermission"]({
             "tool_name": "cli_based_tool",
+            "intent": "exercise the permission path under test",
             "arguments": {"command": "git status"}
         })
         assert result["allowed"] is True
@@ -221,6 +224,7 @@ class TestRegistryAskPermissionExecution:
         # Should be denied
         result = executors["askPermission"]({
             "tool_name": "cli_based_tool",
+            "intent": "exercise the permission path under test",
             "arguments": {"command": "rm -rf /tmp"}
         })
         assert result["allowed"] is False
@@ -240,7 +244,7 @@ class TestRegistryPermissionPluginReconfiguration:
         })
 
         executors = registry.get_exposed_executors()
-        result = executors["askPermission"]({"tool_name": "test", "arguments": {}})
+        result = executors["askPermission"]({"tool_name": "test", "intent": "exercise the permission path under test", "arguments": {}})
         assert result["allowed"] is True
 
         # Reconfigure - deny all
@@ -249,7 +253,7 @@ class TestRegistryPermissionPluginReconfiguration:
         })
 
         executors = registry.get_exposed_executors()
-        result = executors["askPermission"]({"tool_name": "test", "arguments": {}})
+        result = executors["askPermission"]({"tool_name": "test", "intent": "exercise the permission path under test", "arguments": {}})
         assert result["allowed"] is False
 
 
@@ -283,6 +287,7 @@ class TestRegistryPermissionPluginWithConfigFile:
                 # Tool in file blacklist should be blocked
                 result = executors["askPermission"]({
                     "tool_name": "blocked_from_file",
+                    "intent": "exercise the permission path under test",
                     "arguments": {}
                 })
                 assert result["allowed"] is False
@@ -290,6 +295,7 @@ class TestRegistryPermissionPluginWithConfigFile:
                 # Pattern in file blacklist should be blocked
                 result = executors["askPermission"]({
                     "tool_name": "cli_based_tool",
+                    "intent": "exercise the permission path under test",
                     "arguments": {"command": "rm -rf /tmp/test"}
                 })
                 assert result["allowed"] is False
@@ -297,6 +303,7 @@ class TestRegistryPermissionPluginWithConfigFile:
                 # Other tools should be allowed (default allow)
                 result = executors["askPermission"]({
                     "tool_name": "other_tool",
+                    "intent": "exercise the permission path under test",
                     "arguments": {}
                 })
                 assert result["allowed"] is True

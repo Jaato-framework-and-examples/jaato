@@ -7,6 +7,7 @@ import time
 from pathlib import Path
 from unittest.mock import Mock, patch, MagicMock
 
+import re
 import pytest
 
 from ..channels import (
@@ -20,6 +21,10 @@ from ..channels import (
     create_channel,
 )
 
+
+def _strip_ansi(text: str) -> str:
+    """Drop SGR colour codes so assertions read the visible text."""
+    return re.sub(r"\x1b\[[0-9;]*m", "", text)
 
 class TestChannelDecision:
     """Tests for ChannelDecision enum."""
@@ -154,7 +159,10 @@ class TestConsoleChannel:
         response = channel.request_permission(request)
 
         assert response.decision == ChannelDecision.ALLOW
-        assert "approved" in response.reason.lower()
+        # The reason records WHICH option the user picked ("User chose: yes")
+        # rather than the outcome word "approved"; the decision above already
+        # pins the outcome, so assert the choice is recorded.
+        assert "yes" in response.reason.lower()
 
     def test_yes_full_word(self):
         channel = ConsoleChannel()
@@ -316,7 +324,10 @@ class TestConsoleChannel:
         )
         channel.request_permission(request)
 
-        output_text = "\n".join(outputs)
+        # The option line is colorized now -- "[\x1b[32myes\x1b[0m]" -- so the
+        # literal "[yes]" no longer appears in the raw stream.  Strip ANSI and
+        # assert on what a user actually SEES.
+        output_text = _strip_ansi("\n".join(outputs))
         assert "test_tool" in output_text
         assert "ls -la" in output_text
         assert "[yes]" in output_text

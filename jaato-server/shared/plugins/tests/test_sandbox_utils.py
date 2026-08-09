@@ -141,9 +141,17 @@ class TestHasNestedSymlink:
 
         workspace = tmp_path / "workspace"
         workspace.mkdir()
+        # has_nested_symlink derives the LOGICAL .jaato dir from workspace_root
+        # (``<workspace>/.jaato``) and walks the checked path relative to it.
+        # Handing it a path under a bare ``<tmp>/jaato`` made relpath produce
+        # "../../jaato/..." -- read as an escape attempt, so it returned True.
+        # Model the real shape, as the sibling symlink tests do: .jaato lives
+        # in the workspace and points at the boundary.
+        (workspace / JAATO_CONFIG_DIR).symlink_to(jaato_boundary)
+        checked = str(workspace / JAATO_CONFIG_DIR / "config" / "settings.json")
 
         result = has_nested_symlink(
-            str(config_file),
+            checked,
             str(jaato_boundary),
             str(workspace)
         )
@@ -314,9 +322,15 @@ class TestCheckPathWithJaatoContainment:
         secret = external / "secret.txt"
         secret.touch()
 
+        # /tmp is an ALLOWED zone by default (allow_tmp=True,
+        # SYSTEM_TEMP_PATHS), and pytest's tmp_path lives under it -- so this
+        # "external" dir was inside the allowance and the call correctly
+        # returned True.  Turn the allowance off so the test exercises the
+        # workspace boundary it actually describes.
         result = check_path_with_jaato_containment(
             str(secret),
-            str(workspace)
+            str(workspace),
+            allow_tmp=False,
         )
         assert result is False
 
@@ -528,9 +542,15 @@ class TestCheckPathWithJaatoContainment:
         # Try to access through symlink
         path = str(workspace / "external_link" / "secret.txt")
 
+        # /tmp is an ALLOWED zone by default (allow_tmp=True,
+        # SYSTEM_TEMP_PATHS), and pytest's tmp_path lives under it -- so this
+        # "external" dir was inside the allowance and the call correctly
+        # returned True.  Turn the allowance off so the test exercises the
+        # workspace boundary it actually describes.
         result = check_path_with_jaato_containment(
             path,
-            str(workspace)
+            str(workspace),
+            allow_tmp=False,
         )
         assert result is False
 

@@ -4,6 +4,7 @@ import json
 from unittest.mock import MagicMock, patch
 
 import httpx
+from pathlib import Path
 import pytest
 
 from ..auth import validate_api_key, try_load_credentials_with_reason
@@ -23,6 +24,30 @@ def _mock_client(status_code=200, body_text: str = ""):
     client = MagicMock()
     client.post.return_value = mock_response
     return client
+
+
+@pytest.fixture(autouse=True)
+def _isolate_home_credentials(monkeypatch, tmp_path):
+    """Keep the developer's real ~/.jaato credentials out of these tests.
+
+    Credential resolution falls through to a HOME tier, so "no key
+    configured" tests found a REAL stored key on a machine where the
+    developer has actually authenticated -- one asserted a
+    ZhipuAIAPIKeyNotFoundError that never came.  Clean CI has no such file,
+    which is why it passed there while failing locally.
+    """
+    empty_home = tmp_path / "home"
+    (empty_home / ".jaato").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(empty_home))
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: empty_home))
+    # BOTH tiers leak, not just home: the project tier resolves to
+    # ``<cwd>/.jaato/`` and pytest runs from the repo root, which carries real
+    # stored credentials.  Move cwd somewhere empty and clear the workspace
+    # env so neither tier can reach them.
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+    monkeypatch.delenv("JAATO_WORKSPACE_ROOT", raising=False)
 
 
 class TestValidateApiKey:

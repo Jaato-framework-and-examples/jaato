@@ -1299,9 +1299,14 @@ class TestPatternDetection:
         plugin.set_pattern_hook(on_pattern)
         plugin.on_turn_start(1)
 
-        # Call introspection tools 3 times
-        for i in range(3):
-            plugin.on_tool_called("list_tools", {})
+        # Vary the introspection calls.  Calling ONE tool with identical args
+        # three times now trips REPETITIVE_CALLS first, so the old fixture
+        # exercised a different detector than the one it names.  Cycling the
+        # introspection tools (all in introspection_tool_names) with no action
+        # tool in between is what an introspection LOOP actually looks like.
+        plugin.on_tool_called("list_tools", {})
+        plugin.on_tool_called("get_tool_schemas", {"tool": "cli"})
+        plugin.on_tool_called("list_tools", {"filter": "file"})
 
         assert len(patterns) == 1
         assert patterns[0].pattern_type == BehavioralPatternType.INTROSPECTION_LOOP
