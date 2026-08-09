@@ -199,25 +199,6 @@ class TestRegistryAskPermissionExecution:
 
         assert result["allowed"] is False
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "SECURITY GAP, not test rot -- this test is RIGHT and the code "
-            "regressed.  askPermission unconditionally runs "
-            "`self._policy.add_session_whitelist(tool_name)` on ANY approval "
-            "(plugin.py:1213), including approval that came from a per-COMMAND "
-            "pattern match.  So a policy of defaultPolicy=deny + "
-            "whitelist.patterns=['git *'] denies `rm -rf /tmp` on a fresh "
-            "plugin, but ALLOWS it once `git status` has been approved: the "
-            "pattern grant is escalated into a whole-tool session grant, and "
-            "every later command through that tool bypasses the pattern.  "
-            "Isolated by running the calls in both orders against fresh "
-            "plugins.  The don't-prompt-twice intent is sound; whitelisting "
-            "the TOOL rather than the approved CALL, for non-interactive "
-            "approval methods too, is the defect.  strict=True so a fix fails "
-            "here and forces this back on."
-        ),
-    )
     def test_execute_askPermission_pattern_check(self):
         """Test executing askPermission with pattern matching."""
         registry = PluginRegistry()
