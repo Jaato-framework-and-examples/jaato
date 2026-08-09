@@ -416,7 +416,10 @@ class TestLSPToolPluginBasics:
         assert len(commands) == 1
         cmd = commands[0]
         assert cmd.name == "lsp"
-        assert cmd.share_with_model is True
+        # The `lsp` command is OPERATOR-facing (list/status/connect/reload)
+        # and is explicitly declared share_with_model=False in the plugin --
+        # its output is server management chatter, not model context.
+        assert cmd.share_with_model is False
         assert cmd.parameters is not None
         assert len(cmd.parameters) == 2
 

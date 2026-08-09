@@ -54,14 +54,29 @@ def test_basic_functionality():
     print(f"  Store result: {result['status']}")
     print(f"  Memory ID: {result['memory_id']}")
     assert result["status"] == "success"
+    memory_id = result["memory_id"]
+    # A freshly stored memory is RAW (see MATURITY_RAW in store_memory).
+    assert result["maturity"] == "raw"
 
-    # Test retrieving
-    print("✓ Testing retrieve_memories")
+    # Test retrieving.  TAG search is CURATED-only by design -- see
+    # storage.py "Search **curated** memories by tag overlap" and the
+    # raw/curated lifecycle -- so a raw memory is correctly invisible to it.
+    # Retrieval by id spans both stores, which is how a just-stored memory is
+    # read back.  This test used to store raw and expect tag search to find
+    # it, which predates that split.
+    print("✓ Testing retrieve_memories (tags: curated-only)")
     result = executors["retrieve_memories"]({
         "tags": ["architecture"],
         "limit": 5
     })
-    print(f"  Retrieve result: {result['status']}")
+    print(f"  Retrieve-by-tag result: {result['status']}")
+    assert result["status"] == "no_results", (
+        "raw memories must not surface via curated tag search"
+    )
+
+    print("✓ Testing retrieve_memories (by id)")
+    result = executors["retrieve_memories"]({"ids": [memory_id]})
+    print(f"  Retrieve-by-id result: {result['status']}")
     print(f"  Found {result['count']} memories")
     assert result["status"] == "success"
     assert result["count"] == 1
@@ -72,7 +87,13 @@ def test_basic_functionality():
     print(f"  Found {result['count']} unique tags")
     print(f"  Tags: {result['tags']}")
     assert result["status"] == "success"
-    assert "architecture" in result["tags"]
+    # The tag index is built from CURATED memories only (initialize ->
+    # _safe_load_curated -> build_index) and store_memory does not index the
+    # raw memory it writes.  So the whole tag surface -- search AND listing --
+    # is curated-only, and a just-stored raw memory contributes no tags yet.
+    assert "architecture" not in result["tags"], (
+        "raw memories must not appear in the curated tag index"
+    )
 
     # Test prompt enrichment
     print("✓ Testing prompt enrichment")
