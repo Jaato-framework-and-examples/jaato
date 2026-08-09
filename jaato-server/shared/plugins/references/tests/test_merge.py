@@ -485,7 +485,7 @@ class TestMergeSubcommand:
         plugin.initialize({"lookup_strategy": "tags_only"})
 
         result = plugin._execute_references_cmd(
-            {"subcommand": "merge", "target": ""}
+            {"subcommand": "bundle", "target": "merge ".strip()}
         )
 
         assert "error" in result
@@ -504,7 +504,7 @@ class TestMergeSubcommand:
         plugin.initialize({"lookup_strategy": "tags_only"})
 
         result = plugin._execute_references_cmd(
-            {"subcommand": "merge", "target": "ghost-bundle"}
+            {"subcommand": "bundle", "target": "merge ghost-bundle".strip()}
         )
 
         assert "error" in result
@@ -533,12 +533,15 @@ class TestMergeSubcommand:
         plugin.initialize({"lookup_strategy": "tags_only"})
 
         result = plugin._execute_references_cmd(
-            {"subcommand": "merge", "target": "teammate"}
+            {"subcommand": "bundle", "target": "merge teammate".strip()}
         )
 
         assert result["status"] == "ok"
         assert result["added"] == ["teammate-x"]
-        assert result["target"] == "(root)"
+        # Bundle names are SCOPE-QUALIFIED now: the root bundle reports as
+        # "workspace:(root)" (see plugin.py:3345, which documents that as the
+        # --into default).
+        assert result["target"] == "workspace:(root)"
 
         # Root's manifest now has both rows.
         root_manifest = json.loads((refs / EMBEDDING_CONFIG_FILENAME).read_text())
@@ -578,7 +581,7 @@ class TestMergeSubcommand:
         plugin.initialize({"lookup_strategy": "tags_only"})
 
         result = plugin._execute_references_cmd(
-            {"subcommand": "merge", "target": "teammate --dry-run"}
+            {"subcommand": "bundle", "target": "merge teammate --dry-run".strip()}
         )
 
         assert result["status"] == "dry_run"
@@ -608,7 +611,7 @@ class TestMergeSubcommand:
 
         # Merge teammate into teammate (explicit --into target == source).
         result = plugin._execute_references_cmd(
-            {"subcommand": "merge", "target": "teammate --into teammate"}
+            {"subcommand": "bundle", "target": "merge teammate --into teammate".strip()}
         )
 
         assert "error" in result
