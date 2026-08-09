@@ -48,7 +48,8 @@ jobs:
 
   # ---------------------------------------------------------------
   # NON-BLOCKING (do NOT add to required checks yet). Reports the
-  # authoritative CI failure set for the full shared/tests suite so the
+  # authoritative CI failure set for the three non-contract suites --
+  # shared/tests, server/tests and shared/plugins/**/tests -- so the
   # pre-existing-failure backlog can be burned down (quarantine env-gated
   # tests with skipif, xfail genuine drift), then promoted to a required
   # check once green. `--continue-on-collection-errors` so a single bad
@@ -62,7 +63,9 @@ jobs:
   # ---------------------------------------------------------------
   full-suite:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # Three suites in separate processes: ~8 min locally (4 + 1.5 + 2 plus
+    # install), so 20 left little headroom on a slower runner.
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
@@ -78,3 +81,28 @@ jobs:
         run: |
           pytest -q --continue-on-collection-errors \
             jaato-server/shared/tests/
+
+      # Until now NO workflow ran either of these paths, so their tests rotted
+      # silently against deliberate production changes -- three files had not
+      # been touched since May while the code moved on through August, and
+      # 4 of the 7 budget_control test files had never executed in CI at all.
+      #
+      # Each suite gets its OWN pytest process ON PURPOSE. Run together in one
+      # invocation they pollute each other through process-global state
+      # (workspace-root ContextVar, apparmor, bootstrap helpers): measured 43
+      # failures combined versus 0 + 0 when run separately. Separate steps also
+      # mean one suite's failure list stays readable.
+      #
+      # `if: always()` so a failure in the step above still lets these report;
+      # otherwise the first red step hides the other two.
+      - name: server/tests suite (daemon tier)
+        if: always()
+        run: |
+          pytest -q --continue-on-collection-errors \
+            jaato-server/server/tests/
+
+      - name: shared/plugins/**/tests suite (plugin tier)
+        if: always()
+        run: |
+          pytest -q --continue-on-collection-errors \
+            jaato-server/shared/plugins/
