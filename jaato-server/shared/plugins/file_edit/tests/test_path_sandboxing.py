@@ -59,19 +59,27 @@ class TestFileEditPluginPathSandboxing:
         test_file.write_text("test content")
 
         plugin = create_plugin()
+        # PR-146/147: backups live under ``<config_root>/sessions/<id>/backups``;
+        # the workspace fallback was REMOVED on purpose ("framework confined to
+        # config_root, workspace belongs to the tenant"), so a plugin without
+        # config_root raises when a mutating tool backs a file up.  Supply one
+        # exactly as PluginRegistry does in production.
         plugin.initialize({
             "workspace_root": workspace,
+            "config_root": str(tmp_path / "config"),
         })
         return plugin, workspace
 
     @pytest.fixture
-    def plugin_no_workspace(self, monkeypatch):
-        """Create a plugin without workspace root."""
+    def plugin_no_workspace(self, monkeypatch, tmp_path):
+        """Create a plugin without workspace root (but WITH config_root: these
+        fixtures pin workspace-less path resolution, not the PR-147 backup-dir
+        requirement)."""
         monkeypatch.delenv("JAATO_WORKSPACE_ROOT", raising=False)
         monkeypatch.delenv("workspaceRoot", raising=False)
 
         plugin = create_plugin()
-        plugin.initialize({})
+        plugin.initialize({"config_root": str(tmp_path / "config")})
         return plugin
 
     def test_path_allowed_within_workspace(self, plugin_with_workspace):
@@ -116,6 +124,12 @@ class TestFileEditPluginPathSandboxing:
         # Create mock registry
         mock_registry = Mock()
         mock_registry.is_path_authorized.return_value = True
+        # ``check_path_with_jaato_containment`` consults ``is_path_denied``
+        # FIRST and it takes precedence over authorization.  A bare Mock
+        # auto-creates that method returning a truthy Mock, so every path is
+        # denied and ``is_path_authorized`` is never reached.  Pin the
+        # no-denied-paths answer a real registry would give.
+        mock_registry.is_path_denied.return_value = False
         plugin.set_plugin_registry(mock_registry)
 
         # Use a path outside /tmp so registry is actually consulted
@@ -132,6 +146,12 @@ class TestFileEditPluginPathSandboxing:
         # Create mock registry that returns False
         mock_registry = Mock()
         mock_registry.is_path_authorized.return_value = False
+        # ``check_path_with_jaato_containment`` consults ``is_path_denied``
+        # FIRST and it takes precedence over authorization.  A bare Mock
+        # auto-creates that method returning a truthy Mock, so every path is
+        # denied and ``is_path_authorized`` is never reached.  Pin the
+        # no-denied-paths answer a real registry would give.
+        mock_registry.is_path_denied.return_value = False
         plugin.set_plugin_registry(mock_registry)
 
         # Use a path outside /tmp so it's actually blocked
@@ -162,8 +182,14 @@ class TestReadFileSandboxing:
         outside_file.write_text("external file content")
 
         plugin = create_plugin()
+        # PR-146/147: backups live under ``<config_root>/sessions/<id>/backups``;
+        # the workspace fallback was REMOVED on purpose ("framework confined to
+        # config_root, workspace belongs to the tenant"), so a plugin without
+        # config_root raises when a mutating tool backs a file up.  Supply one
+        # exactly as PluginRegistry does in production.
         plugin.initialize({
             "workspace_root": workspace,
+            "config_root": str(tmp_path / "config"),
         })
         return plugin, workspace, str(outside_file)
 
@@ -209,6 +235,12 @@ class TestReadFileSandboxing:
         # Create mock registry that authorizes the path
         mock_registry = Mock()
         mock_registry.is_path_authorized.return_value = True
+        # ``check_path_with_jaato_containment`` consults ``is_path_denied``
+        # FIRST and it takes precedence over authorization.  A bare Mock
+        # auto-creates that method returning a truthy Mock, so every path is
+        # denied and ``is_path_authorized`` is never reached.  Pin the
+        # no-denied-paths answer a real registry would give.
+        mock_registry.is_path_denied.return_value = False
         plugin.set_plugin_registry(mock_registry)
 
         result = plugin._execute_read_file({
@@ -230,7 +262,10 @@ class TestAutoDetectWorkspace:
         monkeypatch.setenv("JAATO_WORKSPACE_ROOT", workspace)
 
         plugin = create_plugin()
-        plugin.initialize({})
+        # config_root is unrelated to what this test pins (env auto-detection
+        # of the WORKSPACE), but initialize now requires it -- PR-146/147
+        # dropped the workspace fallback for the backup dir.
+        plugin.initialize({"config_root": str(tmp_path / "config")})
 
         assert plugin._workspace_root == os.path.realpath(workspace)
 
@@ -245,6 +280,7 @@ class TestAutoDetectWorkspace:
 
         plugin = create_plugin()
         plugin.initialize({
+            "config_root": str(tmp_path / "config"),
             "workspace_root": config_workspace,
         })
 
@@ -270,19 +306,27 @@ class TestPathResolution:
         (Path(workspace) / "root.txt").write_text("root file")
 
         plugin = create_plugin()
+        # PR-146/147: backups live under ``<config_root>/sessions/<id>/backups``;
+        # the workspace fallback was REMOVED on purpose ("framework confined to
+        # config_root, workspace belongs to the tenant"), so a plugin without
+        # config_root raises when a mutating tool backs a file up.  Supply one
+        # exactly as PluginRegistry does in production.
         plugin.initialize({
             "workspace_root": workspace,
+            "config_root": str(tmp_path / "config"),
         })
         return plugin, workspace
 
     @pytest.fixture
-    def plugin_no_workspace(self, monkeypatch):
-        """Create a plugin without workspace root."""
+    def plugin_no_workspace(self, monkeypatch, tmp_path):
+        """Create a plugin without workspace root (but WITH config_root: these
+        fixtures pin workspace-less path resolution, not the PR-147 backup-dir
+        requirement)."""
         monkeypatch.delenv("JAATO_WORKSPACE_ROOT", raising=False)
         monkeypatch.delenv("workspaceRoot", raising=False)
 
         plugin = create_plugin()
-        plugin.initialize({})
+        plugin.initialize({"config_root": str(tmp_path / "config")})
         return plugin
 
     def test_resolve_absolute_path_unchanged(self, plugin_with_workspace):

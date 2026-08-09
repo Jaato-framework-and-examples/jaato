@@ -327,15 +327,15 @@ class TestFileEditPluginFunctionDeclarations:
         plugin = FileEditPlugin()
         declarations = plugin.get_tool_schemas()
 
-        assert len(declarations) == 7
-        tool_names = [d.name for d in declarations]
-        assert "readFile" in tool_names
-        assert "updateFile" in tool_names
-        assert "writeNewFile" in tool_names
-        assert "removeFile" in tool_names
-        assert "moveFile" in tool_names
-        assert "renameFile" in tool_names
-        assert "undoFileChange" in tool_names
+        # Pin the exact SET rather than a count: a bare number rots
+        # invisibly (this read ``== 7`` while the plugin had grown to 11)
+        # and, when it does trip, says nothing about what changed.
+        tool_names = {d.name for d in declarations}
+        assert tool_names == {
+            "readFile", "updateFile", "writeNewFile", "removeFile",
+            "moveFile", "renameFile", "undoFileChange",
+            "findAndReplace", "multiFileEdit", "listBackups", "restoreFile",
+        }
 
     def test_read_file_schema(self):
         plugin = FileEditPlugin()
@@ -1205,7 +1205,17 @@ class TestMoveFileExecution:
         plugin.initialize({"backup_dir": str(tmp_path / "backups")})
 
         executors = plugin.get_executors()
-        assert executors["moveFile"] == executors["renameFile"]
+        # ``RunnerForwardingMixin`` now wraps every executor in a PER-TOOL
+        # forwarder closure, so the two entries are distinct objects even
+        # though they delegate to one implementation -- identity no longer
+        # expresses "same executor".  The forwarder propagates the wrapped
+        # function's ``__name__``, so compare that instead: both must resolve
+        # to ``_execute_move_file``, which is what this test has always meant.
+        assert (
+            executors["moveFile"].__name__
+            == executors["renameFile"].__name__
+            == "_execute_move_file"
+        )
 
     def test_move_file_source_is_directory(self, tmp_path):
         """Test error when source is a directory."""
@@ -1257,10 +1267,13 @@ class TestMoveFileToolSchemas:
         plugin = FileEditPlugin()
         declarations = plugin.get_tool_schemas()
 
-        assert len(declarations) == 7
         tool_names = [d.name for d in declarations]
         assert "moveFile" in tool_names
         assert "renameFile" in tool_names
+        # The count this test used to pin was a proxy for "the schema list
+        # has no duplicate entries" -- assert that directly, so adding a
+        # tool doesn't fail a test about move/rename.
+        assert len(tool_names) == len(set(tool_names))
 
 
 class TestTelemetryEnrichment:

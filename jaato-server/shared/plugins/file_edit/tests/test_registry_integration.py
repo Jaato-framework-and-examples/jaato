@@ -57,11 +57,17 @@ class TestRegistryExposeFileEditPlugin:
         registry.unexpose_tool("file_edit")
         assert not registry.is_exposed("file_edit")
 
-    def test_expose_all_includes_file_edit(self):
+    def test_expose_all_includes_file_edit(self, tmp_path):
         """Test that expose_all includes the file_edit plugin."""
         registry = PluginRegistry()
         registry.discover()
 
+        # PR-146: file_edit's initialize() fails -- and the plugin is then
+        # NOT exposed -- unless a backup base dir can be resolved.  Production
+        # fires set_config_root before expose_all; mirror that ordering here
+        # rather than passing a per-plugin backup_dir, since expose_all takes
+        # no per-plugin config.
+        registry.set_config_root(str(tmp_path / "config"))
         registry.expose_all()
 
         assert registry.is_exposed("file_edit")

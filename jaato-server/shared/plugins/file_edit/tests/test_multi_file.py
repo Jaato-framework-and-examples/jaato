@@ -189,10 +189,18 @@ class TestMultiFileExecutor:
         result = executor.execute(operations)
 
         assert not result.success
-        assert result.rollback_completed
         assert result.failed_operation == 1
 
-        # Verify foo.py was rolled back to original
+        # The invariant is that a failed batch leaves the workspace UNCHANGED.
+        # ``execute`` now pre-flights ``validate_operations`` before applying
+        # anything, so a batch that references a missing file is rejected with
+        # ZERO operations completed -- there is nothing to roll back, and
+        # ``rollback_completed`` stays False.  That is strictly stronger than
+        # apply-then-rollback (no partial writes ever hit disk), so assert the
+        # end state and require rollback only if something WAS applied.
+        if result.operations_completed:
+            assert result.rollback_completed
+        assert result.files_modified == []
         assert (workspace / "src" / "foo.py").read_text() == original_foo
 
     def test_create_and_edit_in_same_batch(self, executor, workspace):
@@ -715,6 +723,13 @@ class TestGitignoreParser:
     def test_basic_pattern(self, tmp_path):
         """Test basic gitignore pattern matching."""
         (tmp_path / ".gitignore").write_text("*.pyc\n__pycache__/\n")
+
+        # ``__pycache__/`` is a DIRECTORY-ONLY pattern, and the parser honours
+        # that the way git does: it matches only when the path really is a
+        # directory.  The path has to exist for ``is_dir()`` to say so, so
+        # create it -- previously this asserted dir-pattern matching against a
+        # path that was never created.
+        (tmp_path / "__pycache__").mkdir()
 
         parser = GitignoreParser(tmp_path)
 
