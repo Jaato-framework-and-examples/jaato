@@ -80,6 +80,17 @@ class MockRegistry:
     def get_plugin(self, name: str) -> Optional[Any]:
         return self._plugins.get(name)
 
+    def get_tool_traits(self, tool_name: str) -> frozenset:
+        """Mirror PluginRegistry.get_tool_traits (registry.py:1673).
+
+        ToolExecutor consults tool traits on every execute (e.g. to spot
+        TRAIT_FRAMEWORK_LEVEL), so a registry double without this method
+        makes EVERY tool call fail with AttributeError rather than run.
+        An empty frozenset is what the real registry returns for a tool
+        whose schema declares no traits.
+        """
+        return frozenset()
+
 
 class TestToolExecutorAutoBackground:
     """Tests for ToolExecutor auto-background functionality."""
