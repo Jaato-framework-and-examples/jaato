@@ -47,13 +47,15 @@ jobs:
             jaato-server/shared/tests/test_enrichment_plugin.py
 
   # ---------------------------------------------------------------
-  # NON-BLOCKING (do NOT add to required checks yet). Reports the
-  # authoritative CI failure set for the three non-contract suites --
-  # shared/tests, server/tests and shared/plugins/**/tests -- so the
-  # pre-existing-failure backlog can be burned down (quarantine env-gated
-  # tests with skipif, xfail genuine drift), then promoted to a required
-  # check once green. `--continue-on-collection-errors` so a single bad
-  # import (e.g. a stale symbol) doesn't mask the rest of the suite.
+  # REQUIRED CHECK (repo ruleset "contract-guards" on refs/heads/main, since
+  # 2026-08-09). Runs the three non-contract suites -- shared/tests,
+  # server/tests and shared/plugins/**/tests. It was non-blocking while the
+  # pre-existing-failure backlog was burned down; all three are green now, and
+  # leaving it advisory is what let server/tests and shared/plugins rot
+  # unnoticed for months in the first place.
+  #
+  # `--continue-on-collection-errors` so a single bad import (e.g. a stale
+  # symbol) doesn't mask the rest of the suite.
   #
   # Installs the full `.[all]` dev env so the failure list reflects real
   # test failures, not missing-optional-backend import noise. `.[all]`
