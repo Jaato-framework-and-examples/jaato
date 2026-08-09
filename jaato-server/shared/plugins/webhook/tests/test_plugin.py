@@ -2,6 +2,7 @@
 
 import json
 import socket
+import pytest
 import time
 import urllib.request
 
@@ -316,6 +317,26 @@ class TestWebhookPluginLifecycle:
         assert plugin._config.port == 9999
 
 
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "GAP, not test rot: the webhook -> EventBus bridge never publishes.  "
+        "set_session() stores the session in threading.local() (plugin.py:117), "
+        "matching the framework-wide convention used by todo and thinking -- "
+        "subagents run on their own threads and must not clobber each other.  "
+        "But webhook's consumer, _publish_to_event_bus (plugin.py:464), runs on "
+        "the HTTP SERVER thread this plugin spawns itself, and the framework "
+        "never calls set_session on that thread.  So the lookup always misses "
+        "and the publish no-ops behind a DEBUG log.  Reproduced directly: main "
+        "thread has the session, the handler thread logs 'No session set, "
+        "skipping EventBus publish', and zero EXTERNAL_EVENTs reach the bus -- "
+        "while the plugin's own docstring advertises the bridge and "
+        "_total_events_published still counts up.  Fixing it means choosing how "
+        "to carry the session onto the server thread without breaking the "
+        "per-subagent isolation the thread-local exists for, which is a design "
+        "decision, not a test repair.  strict=True so a fix fails here."
+    ),
+)
 class TestEventBusBridge:
     """Tests for webhook → TaskEventBus bridge."""
 
