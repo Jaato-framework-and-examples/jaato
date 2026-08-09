@@ -490,8 +490,34 @@ class TestArtifactSaving:
         assert len(saved_files) == 1
         assert saved_files[0].read_bytes() == b"\x89PNG fake data"
 
-        # Check output references the artifact
+        # The "[saved: <path>]" hint belongs to the NO-BACKEND fallback: when a
+        # backend renders the image inline there is nothing to point at, so the
+        # hint is deliberately absent here.  Covered by
+        # test_fallback_shows_saved_artifact_hint below.
+        assert "saved:" not in output
+        assert "[rendered]" in output
+
+    @patch("shared.plugins.mermaid_formatter.plugin.renderer")
+    @patch("shared.plugins.mermaid_formatter.plugin.select_backend")
+    def test_fallback_shows_saved_artifact_hint(
+        self, mock_select_backend, mock_renderer, tmp_path,
+    ):
+        """With no graphics backend, the user gets the artifact PATH instead."""
+        mock_renderer.render.return_value = RenderResult(png=b"\x89PNG fake data")
+        mock_select_backend.return_value = None
+
+        plugin = MermaidFormatterPlugin()
+        plugin.initialize()
+        plugin._artifact_dir = str(tmp_path)
+
+        output = "".join(
+            plugin.process_chunk("```mermaid\ngraph TD\n    A-->B\n```")
+        )
+
+        saved_files = list(tmp_path.glob("mermaid_*.png"))
+        assert len(saved_files) == 1
         assert "saved:" in output
+        assert str(saved_files[0]) in output
 
     @patch("shared.plugins.mermaid_formatter.plugin.renderer")
     @patch("shared.plugins.mermaid_formatter.plugin.select_backend")

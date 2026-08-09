@@ -266,6 +266,13 @@ class MermaidFormatterPlugin:
                 # No image protocol — show truncated source + artifact path
                 return self._fallback_source_with_hint(source, artifact_path)
 
+            # Actually drive the backend.  Without this the next line read an
+            # unbound `rendered` and raised UnboundLocalError, so inline
+            # rendering crashed on exactly the terminals it exists for
+            # (kitty/iTerm) and "worked" only where select_backend() returned
+            # None and took the fallback above.
+            rendered = backend.render(result.png, max_width=render_width)
+
             lines = rendered.split('\n')
             rendered = '\n'.join(
                 PRERENDERED_LINE_PREFIX + line if line.strip() else line
