@@ -117,29 +117,10 @@ class TestValidateProfile:
         assert is_valid is False
         assert any("'provider' must be a string" in e for e in errors)
 
-    def test_icon_not_list(self):
-        data = {"name": "test", "description": "test", "icon": "ascii art"}
-        is_valid, errors, warnings = validate_profile(data)
-        assert is_valid is False
-        assert any("'icon' must be an array" in e for e in errors)
-
-    def test_icon_wrong_length(self):
-        data = {"name": "test", "description": "test", "icon": ["line1", "line2"]}
-        is_valid, errors, warnings = validate_profile(data)
-        assert is_valid is False
-        assert any("exactly 3 strings" in e for e in errors)
-
-    def test_icon_not_strings(self):
-        data = {"name": "test", "description": "test", "icon": [1, 2, 3]}
-        is_valid, errors, warnings = validate_profile(data)
-        assert is_valid is False
-        assert any("'icon' must contain only strings" in e for e in errors)
-
-    def test_icon_name_not_string(self):
-        data = {"name": "test", "description": "test", "icon_name": 42}
-        is_valid, errors, warnings = validate_profile(data)
-        assert is_valid is False
-        assert any("'icon_name' must be a string" in e for e in errors)
+    # test_icon_not_list / test_icon_wrong_length / test_icon_not_strings /
+    # test_icon_name_not_string were removed with the fields they validated:
+    # commit 635b00ec "Remove icon and icon_name from profiles".  Kept as a
+    # note so the gap in coverage reads as deliberate rather than lost.
 
     def test_gc_not_dict(self):
         data = {"name": "test", "description": "test", "gc": "truncate"}

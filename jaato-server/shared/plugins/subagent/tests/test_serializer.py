@@ -52,8 +52,6 @@ class TestSerializeSubagentState:
             model='gemini-2.5-flash',
             provider='google_genai',
             max_turns=5,
-            icon=['[R]', '[E]', '[S]'],
-            icon_name='research',
         )
 
         session_info = {
@@ -76,8 +74,6 @@ class TestSerializeSubagentState:
         assert result['profile']['model'] == 'gemini-2.5-flash'
         assert result['profile']['provider'] == 'google_genai'
         assert result['profile']['max_turns'] == 5
-        assert result['profile']['icon'] == ['[R]', '[E]', '[S]']
-        assert result['profile']['icon_name'] == 'research'
 
     def test_serialize_with_gc_config(self):
         """Test serialization with GC configuration."""
