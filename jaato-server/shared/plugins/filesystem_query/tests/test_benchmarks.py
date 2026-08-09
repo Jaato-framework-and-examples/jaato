@@ -320,7 +320,7 @@ class TestGrepVsGrep:
 
         grep_content_min, grep_content_avg, grep_content_max = time_function(
             plugin._execute_grep_content,
-            {"pattern": pattern, "path": str(root), "file_glob": "*.py", "max_results": 10000, "context_lines": 0}
+            {"pattern": pattern, "path": str(root), "file_glob": ["*.py"], "max_results": 10000, "context_lines": 0}
         )
 
         grep_min, grep_avg, grep_max = time_cli_command(
@@ -336,7 +336,7 @@ class TestGrepVsGrep:
         print(f"Ratio (grep_content/grep): {grep_content_avg/grep_avg:.2f}x")
 
         result = plugin._execute_grep_content({
-            "pattern": pattern, "path": str(root), "file_glob": "*.py", "max_results": 10000
+            "pattern": pattern, "path": str(root), "file_glob": ["*.py"], "max_results": 10000
         })
         assert result["total_matches"] > 0, "Should find function definitions"
 
@@ -346,7 +346,7 @@ class TestGrepVsGrep:
 
         grep_content_min, grep_content_avg, grep_content_max = time_function(
             plugin._execute_grep_content,
-            {"pattern": "class", "path": str(root), "file_glob": "*.py", "context_lines": 3, "max_results": 1000}
+            {"pattern": "class", "path": str(root), "file_glob": ["*.py"], "context_lines": 3, "max_results": 1000}
         )
 
         grep_min, grep_avg, grep_max = time_cli_command(
@@ -416,12 +416,12 @@ class TestScalability:
 
         min_time, avg_time, max_time = time_function(
             plugin._execute_grep_content,
-            {"pattern": "def", "path": str(tmp_path), "file_glob": "*.py", "max_results": 10000, "context_lines": 0},
+            {"pattern": "def", "path": str(tmp_path), "file_glob": ["*.py"], "max_results": 10000, "context_lines": 0},
             iterations=3
         )
 
         result = plugin._execute_grep_content({
-            "pattern": "def", "path": str(tmp_path), "file_glob": "*.py", "max_results": 10000
+            "pattern": "def", "path": str(tmp_path), "file_glob": ["*.py"], "max_results": 10000
         })
 
         print(f"\ngrep_content with {num_files} files ({result['files_searched']} searched, {result['total_matches']} matches): avg={avg_time:.4f}s")

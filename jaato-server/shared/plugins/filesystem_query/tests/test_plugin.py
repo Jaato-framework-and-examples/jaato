@@ -648,25 +648,6 @@ class TestPathScopeValidation:
             assert "error" not in result
             assert result["total"] == 1
 
-    def test_glob_files_path_scope_blocks_absolute(self):
-        """Test that glob_files respects block_absolute."""
-        plugin = FilesystemQueryPlugin()
-        plugin.initialize(config={
-            "path_scope": {
-                "allowed_roots": ["."],
-                "block_absolute": True,
-                "allow_tmp": False,
-            }
-        })
-
-        result = plugin._execute_glob_files({
-            "pattern": "*.txt",
-            "root": "/etc",
-        })
-
-        assert "error" in result
-        assert "not allowed" in result["error"].lower()
-
     def test_glob_files_path_scope_allows_tmp(self):
         """Test that glob_files allows /tmp when allow_tmp=True."""
         plugin = FilesystemQueryPlugin()
@@ -693,25 +674,6 @@ class TestPathScopeValidation:
             assert "violations" not in result
         finally:
             os.unlink(tmp_file)
-
-    def test_grep_content_path_scope_blocks_absolute(self):
-        """Test that grep_content respects block_absolute."""
-        plugin = FilesystemQueryPlugin()
-        plugin.initialize(config={
-            "path_scope": {
-                "allowed_roots": ["."],
-                "block_absolute": True,
-                "allow_tmp": False,
-            }
-        })
-
-        result = plugin._execute_grep_content({
-            "pattern": "test",
-            "path": "/etc/passwd",
-        })
-
-        assert "error" in result
-        assert "not allowed" in result["error"].lower()
 
     def test_grep_content_path_scope_allows_tmp(self):
         """Test that grep_content allows /tmp when allow_tmp=True."""
@@ -741,78 +703,70 @@ class TestPathScopeValidation:
         finally:
             os.unlink(tmp_file)
 
-    def test_set_path_scope_after_init(self):
-        """Test setting path scope after initialization."""
-        plugin = FilesystemQueryPlugin()
-        plugin.initialize()
+    # ------------------------------------------------------------------
+    # The four tests that used to live here drove a ``set_path_scope`` /
+    # ``_path_scope_config`` API on this plugin.  That API exists NOWHERE in
+    # the tree -- no definition, no git history -- so they could never have
+    # passed against this plugin; PathScopeConfig itself lives in
+    # permission/sanitization.py and is consumed there.
+    #
+    # The PROTECTION they cared about is real and is enforced by a different
+    # mechanism: workspace-root containment via
+    # ``sandbox_utils.check_path_with_jaato_containment``.  Rather than delete
+    # security coverage, the tests below pin that mechanism directly, against
+    # the real parameter name (``root``, not ``path`` -- passing the wrong key
+    # silently falls back to the workspace and looks like a pass).
+    # ------------------------------------------------------------------
 
-        # Initially no path scope
-        assert plugin._path_scope_config is None
-
-        # Set path scope
-        config = PathScopeConfig(
-            allowed_roots=["."],
-            block_absolute=True,
-            allow_tmp=True,
-        )
-        plugin.set_path_scope(config)
-
-        assert plugin._path_scope_config is config
-
-        # Now absolute paths should be blocked (except /tmp)
-        result = plugin._execute_glob_files({
-            "pattern": "*.txt",
-            "root": "/etc",
-        })
-        assert "error" in result
-
-    def test_path_scope_cleared_on_shutdown(self):
-        """Test that path scope is cleared on shutdown."""
-        plugin = FilesystemQueryPlugin()
-        plugin.initialize(config={
-            "path_scope": {
-                "allowed_roots": ["."],
-                "block_absolute": True,
-            }
-        })
-
-        assert plugin._path_scope_config is not None
-
-        plugin.shutdown()
-
-        assert plugin._path_scope_config is None
-
-    def test_path_scope_blocks_parent_traversal(self):
-        """Test that parent traversal is blocked when configured."""
+    def test_absolute_root_outside_workspace_is_refused(self):
+        """glob_files must refuse a root outside the configured workspace."""
         with tempfile.TemporaryDirectory() as tmpdir:
             plugin = FilesystemQueryPlugin()
-            plugin.initialize(config={
-                "path_scope": {
-                    "allowed_roots": [tmpdir],
-                    "block_absolute": False,
-                    "block_parent_traversal": True,
-                }
-            })
+            plugin.initialize(config={"workspace_root": tmpdir})
 
-            result = plugin._execute_glob_files({
-                "pattern": "*.txt",
-                "root": f"{tmpdir}/../",
-            })
+            for outside in ("/etc", "/"):
+                result = plugin._execute_glob_files({
+                    "pattern": "*", "root": outside,
+                })
+                assert "error" in result, f"{outside} was not refused"
+                assert "not allowed" in result["error"].lower()
+                assert result["total"] == 0
 
+    def test_workspace_root_itself_is_allowed(self):
+        """The refusal must not be indiscriminate."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            (Path(tmpdir) / "inside.txt").write_text("x")
+            plugin = FilesystemQueryPlugin()
+            plugin.initialize(config={"workspace_root": tmpdir})
+
+            result = plugin._execute_glob_files({"pattern": "*", "root": tmpdir})
+            assert "error" not in result
+            assert result["total"] == 1
+
+    def test_parent_traversal_out_of_workspace_is_refused(self):
+        """`<workspace>/../../..` must not escape the sandbox."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            plugin = FilesystemQueryPlugin()
+            plugin.initialize(config={"workspace_root": tmpdir})
+
+            result = plugin._execute_grep_content({
+                "pattern": "root", "path": f"{tmpdir}/../../../etc",
+            })
             assert "error" in result
-            assert "traversal" in result["error"].lower()
+            assert "not allowed" in result["error"].lower()
+            assert result["total_matches"] == 0
 
-    def test_path_scope_with_pathscopeconfig_instance(self):
-        """Test passing PathScopeConfig instance directly."""
-        plugin = FilesystemQueryPlugin()
-        config = PathScopeConfig(
-            allowed_roots=["/tmp"],
-            block_absolute=False,
-            allow_tmp=True,
-        )
-        plugin.initialize(config={"path_scope": config})
+    def test_grep_content_refuses_absolute_outside_workspace(self):
+        """The same boundary applies to grep_content, not just glob_files."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            plugin = FilesystemQueryPlugin()
+            plugin.initialize(config={"workspace_root": tmpdir})
 
-        assert plugin._path_scope_config is config
+            result = plugin._execute_grep_content({
+                "pattern": "root", "path": "/etc",
+            })
+            assert "error" in result
+            assert "not allowed" in result["error"].lower()
 
 
 class TestGitignoreIntegration:
