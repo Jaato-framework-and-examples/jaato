@@ -93,6 +93,7 @@ diagrams = [
 ]
 templates = [
     "pybars3>=0.9.7",  # template plugin: Handlebars/Mustache template rendering engine
+    "Jinja2>=3.1.0",  # template plugin: the OTHER first-class engine (SandboxedEnvironment render + AST variable extraction)
 ]
 # --- Other extras ---
 kaggle = [
