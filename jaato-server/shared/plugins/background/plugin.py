@@ -20,6 +20,7 @@ from jaato_sdk.plugins.model_provider.types import (
 
 from jaato_sdk.plugins.base import ToolPlugin, UserCommand
 from .protocol import BackgroundCapable, TaskHandle, TaskResult, TaskStatus
+from shared.utils.errors import exc_message
 from shared.trace import trace as _trace_write
 
 if TYPE_CHECKING:
@@ -172,7 +173,10 @@ Response fields:
 - has_more: true if task still running (more output expected)
 - returncode: exit code when completed (null while running)
 - error: error message if failed
-- duration_seconds: execution time when completed""",
+- duration_seconds: execution time when completed
+- result: the tool's RETURN VALUE, present only once the task reaches a
+  terminal state. Subprocess-style tasks put their output in stdout; an
+  in-process tool task returns a value, and this is where it appears.""",
                 parameters={
                     "type": "object",
                     "properties": {
@@ -187,6 +191,15 @@ Response fields:
                         "stderr_offset": {
                             "type": "integer",
                             "description": "Byte offset to read stderr from (default: 0)"
+                        },
+                        "include_result": {
+                            "type": "boolean",
+                            "description": (
+                                "Include the tool's return value once the task "
+                                "is terminal (default: true). Set false to keep "
+                                "polls small when the result is large and you "
+                                "only care about progress."
+                            )
                         },
                     },
                     "required": ["task_id"]
@@ -308,6 +321,47 @@ Use this to discover which tools can be run in background mode.""",
                 "traceback": traceback.format_exc()
             }
 
+    _TERMINAL_STATES = ("completed", "failed", "cancelled")
+
+    def _attach_result(
+        self,
+        payload: Dict[str, Any],
+        plugin: Any,
+        task_id: str,
+        include_result: bool,
+    ) -> Dict[str, Any]:
+        """Add the task's RETURN VALUE to *payload* once it is terminal.
+
+        ``TaskInfo`` carries status and output but no return value, so a
+        backgrounded IN-PROCESS tool had no way to hand its result back to the
+        model -- subprocess tasks were fine, since their result IS stdout.
+        ``BackgroundCapable.get_result`` already exposes it; this surfaces it
+        on the poll the model is making anyway.
+
+        Called with ``wait=False`` ONLY.  ``get_result(wait=True)`` blocks on
+        ``future.result()`` with no timeout, so exposing it here could hang
+        the agent's tool-call loop indefinitely; the model polls instead and
+        picks the result up on the call that observes completion.
+
+        A result is attached only in a terminal state -- mid-run there is
+        nothing to report, and omitting the key keeps polls small.
+        """
+        if not include_result:
+            return payload
+        if payload.get("status") not in self._TERMINAL_STATES:
+            return payload
+        if not hasattr(plugin, "get_result"):
+            return payload
+        try:
+            outcome = plugin.get_result(task_id, wait=False)
+        except Exception as exc:  # noqa: BLE001 - never fail the poll
+            self._trace(f"get_result({task_id}) failed: {exc_message(exc)}")
+            return payload
+        payload["result"] = getattr(outcome, "result", None)
+        if payload.get("error") is None:
+            payload["error"] = getattr(outcome, "error", None)
+        return payload
+
     def _get_task(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Get unified status, output, and result of a background task.
 
@@ -321,9 +375,11 @@ Use this to discover which tools can be run in background mode.""",
         task_id = args.get("task_id")
         stdout_offset = int(args.get("stdout_offset", 0))
         stderr_offset = int(args.get("stderr_offset", 0))
+        include_result = bool(args.get("include_result", True))
         self._trace(
             f"getBackgroundTask: task_id={task_id}, "
-            f"stdout_offset={stdout_offset}, stderr_offset={stderr_offset}"
+            f"stdout_offset={stdout_offset}, stderr_offset={stderr_offset}, "
+            f"include_result={include_result}"
         )
 
         if not task_id:
@@ -338,7 +394,7 @@ Use this to discover which tools can be run in background mode.""",
                 if not hasattr(plugin, 'get_task'):
                     # Fall back to get_status for basic info
                     status = plugin.get_status(task_id)
-                    return {
+                    return self._attach_result({
                         "task_id": task_id,
                         "plugin_name": plugin_name,
                         "status": status.value,
@@ -350,14 +406,14 @@ Use this to discover which tools can be run in background mode.""",
                         "returncode": None,
                         "error": None,
                         "duration_seconds": None,
-                    }
+                    }, plugin, task_id, include_result)
 
                 info = plugin.get_task(
                     task_id,
                     stdout_offset=stdout_offset,
                     stderr_offset=stderr_offset,
                 )
-                return {
+                return self._attach_result({
                     "task_id": info.task_id,
                     "plugin_name": plugin_name,
                     "status": info.status.value,
@@ -369,7 +425,7 @@ Use this to discover which tools can be run in background mode.""",
                     "returncode": info.returncode,
                     "error": info.error,
                     "duration_seconds": info.duration_seconds,
-                }
+                }, plugin, task_id, include_result)
             except KeyError:
                 continue
 

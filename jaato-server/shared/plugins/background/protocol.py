@@ -136,11 +136,14 @@ class TaskInfo:
     NOTE: this does NOT carry the task's return value -- there is no
     ``result`` field.  For a subprocess-style task the output IS the result
     (``stdout`` / ``returncode``); for an in-process tool task the return
-    value is available only via :meth:`BackgroundMixin.get_result`, which
-    returns a :class:`TaskResult`.  ``BackgroundPlugin`` currently exposes no
-    tool for that, so a backgrounded in-process tool's return value is
-    unreachable from the model-facing surface -- see the xfail block in
-    ``background/tests/test_plugin.py``.
+    value lives on :class:`TaskResult`, via :meth:`get_result`.
+
+    The model-facing ``getBackgroundTask`` tool stitches the two together: on
+    a poll that finds the task TERMINAL it calls ``get_result(wait=False)``
+    and adds the value under ``result`` (suppress with
+    ``include_result=false``).  ``wait`` is deliberately not exposed there --
+    ``get_result(wait=True)`` blocks on ``future.result()`` with no timeout,
+    which would let a model hang its own tool-call loop.
 
     Attributes:
         task_id: Unique identifier for the task.
