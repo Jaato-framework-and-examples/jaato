@@ -226,24 +226,6 @@ class TestUnifiedOutput:
 class TestColorConfiguration:
     """Tests for color scheme configuration."""
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "GAP, not test rot: disable_colors() cannot suppress SYNTAX "
-            "highlighting.  It swaps the diff ColorScheme for NO_COLOR_SCHEME "
-            "(every diff colour -> \"\"), but side_by_side calls "
-            "syntax_highlight.highlight_line(line, filename) unconditionally "
-            "and that helper takes no scheme -- so truecolor codes still reach "
-            "the output for any highlightable content.  Reproduced with the "
-            "sample below: escapes remain on the 'def hello():' context lines. "
-            "A caller disabling colour for a non-ANSI sink (log file, plain "
-            "export, a client without ANSI) still gets escapes, and the method "
-            "is documented simply as 'Disable color output'.  Whether "
-            "highlighting should be gated on the colour scheme or given its "
-            "own switch is a product decision, not a test repair.  "
-            "strict=True so a fix fails here."
-        ),
-    )
     def test_disable_colors(self):
         plugin = create_plugin()
         plugin.disable_colors()
@@ -252,6 +234,36 @@ class TestColorConfiguration:
 
         # Should not contain ANSI escape codes
         assert "\033[" not in output
+
+    def test_disable_colors_also_suppresses_syntax_highlighting(self):
+        """The regression this closes: Pygments escaped the colour switch.
+
+        disable_colors() swaps the diff ColorScheme for NO_COLOR_SCHEME, but
+        the renderer called syntax_highlight.highlight_line unconditionally
+        and that helper took no scheme -- so truecolor codes still reached the
+        output for any highlightable content.  A caller writing to a log file
+        or a non-ANSI client got escapes from a method documented as "Disable
+        color output".  Asserted on SOURCE lines specifically, since those are
+        the ones Pygments touches.
+        """
+        plugin = create_plugin()
+        plugin.disable_colors()
+
+        output = plugin.format_output(SAMPLE_DIFF)
+
+        assert "\033[" not in output
+        # ...and the content itself is still there, not stripped along with it.
+        assert "def hello" in output
+        assert "print" in output
+
+    def test_highlighting_still_applies_when_colors_enabled(self):
+        """The gate must not disable highlighting outright."""
+        plugin = create_plugin()
+
+        output = plugin.format_output(SAMPLE_DIFF)
+
+        # Pygments emits truecolor SGR; the diff scheme does not.
+        assert "\033[38;2;" in output, "syntax highlighting was lost"
 
     def test_enable_colors(self):
         plugin = create_plugin()
@@ -278,24 +290,6 @@ class TestColorConfiguration:
 
         assert "[GREEN]" in output or "[RED]" in output
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "GAP, not test rot: disable_colors() cannot suppress SYNTAX "
-            "highlighting.  It swaps the diff ColorScheme for NO_COLOR_SCHEME "
-            "(every diff colour -> \"\"), but side_by_side calls "
-            "syntax_highlight.highlight_line(line, filename) unconditionally "
-            "and that helper takes no scheme -- so truecolor codes still reach "
-            "the output for any highlightable content.  Reproduced with the "
-            "sample below: escapes remain on the 'def hello():' context lines. "
-            "A caller disabling colour for a non-ANSI sink (log file, plain "
-            "export, a client without ANSI) still gets escapes, and the method "
-            "is documented simply as 'Disable color output'.  Whether "
-            "highlighting should be gated on the colour scheme or given its "
-            "own switch is a product decision, not a test repair.  "
-            "strict=True so a fix fails here."
-        ),
-    )
     def test_initialize_with_no_colors(self):
         plugin = create_plugin()
         plugin.initialize({"colors": False})

@@ -369,8 +369,8 @@ class SideBySideRenderer:
             elif old_line.change_type == "unchanged":
                 # Unchanged - apply syntax highlighting for context lines
                 if filename:
-                    old_content = highlight_line(old_content, filename)
-                    new_content = highlight_line(new_content, filename)
+                    old_content = highlight_line(old_content, filename, colors)
+                    new_content = highlight_line(new_content, filename, colors)
         elif old_line and old_line.change_type in ("deleted", "modified"):
             # Pure deletion - subtle coloring to indicate removed line
             old_color = colors.deleted
@@ -555,7 +555,7 @@ class SideBySideRenderer:
         # Apply syntax highlighting if no diff color (context lines)
         # For new/deleted files, all lines have color so this won't apply
         if not color and filename:
-            content = highlight_line(content, filename)
+            content = highlight_line(content, filename, colors)
 
         # Format line number (right-aligned)
         ln_fmt = pad_text(ln, line_no_width, align="right")

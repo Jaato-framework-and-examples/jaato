@@ -7,7 +7,10 @@ Highlights context (unchanged) lines while preserving diff colors for changes.
 
 import os
 from functools import lru_cache
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from .renderers.base import ColorScheme
 
 # Try to import Pygments - gracefully degrade if not available
 try:
@@ -105,17 +108,38 @@ def _get_formatter():
     return TerminalTrueColorFormatter(style='monokai')
 
 
-def highlight_line(line: str, filename: str) -> str:
+def highlight_line(
+    line: str,
+    filename: str,
+    colors: Optional["ColorScheme"] = None,
+) -> str:
     """Apply syntax highlighting to a single line of code.
 
     Args:
         line: The code line to highlight.
         filename: Filename for language detection.
+        colors: The renderer's active colour scheme.  When it carries NO
+            colour (``NO_COLOR_SCHEME``, or any scheme whose codes are empty)
+            the line is returned untouched.
 
     Returns:
-        Line with ANSI escape codes for syntax highlighting,
-        or original line if highlighting fails/unavailable.
+        Line with ANSI escape codes for syntax highlighting, or the original
+        line if colour is off, or if highlighting fails/is unavailable.
+
+    Why ``colors`` is checked HERE rather than at each call site: the gate
+    was previously absent, so ``disable_colors()`` swapped the diff scheme for
+    ``NO_COLOR_SCHEME`` while Pygments kept emitting truecolor escapes -- a
+    caller writing to a log file or a non-ANSI client still got escapes from a
+    method documented as "Disable color output".  Deciding it in the helper
+    means the three existing call sites and any future one are covered without
+    each remembering to ask.
     """
+    if colors is not None and not colors.reset:
+        # An empty reset code is the tell for a no-colour scheme: the caller
+        # wants plain text, and that has to include Pygments' escapes, not
+        # just the diff's own.
+        return line
+
     if not PYGMENTS_AVAILABLE:
         return line
 
