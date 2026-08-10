@@ -401,6 +401,16 @@ class CodeAnalyzer:
         """Recursively analyze AST nodes."""
         code_lines = code.split('\n')
 
+        # Attribute nodes that ARE the callee of a Call.  ``_check_call``
+        # already reports those, and every such expression also yields a bare
+        # ast.Attribute child during the walk -- without this, one
+        # ``os.system("x")`` would be reported twice.
+        called_attrs = {
+            id(n.func)
+            for n in ast.walk(node)
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+        }
+
         for child in ast.walk(node):
             line_no = getattr(child, 'lineno', 1)
             snippet = code_lines[line_no - 1] if line_no <= len(code_lines) else ""
@@ -419,7 +429,10 @@ class CodeAnalyzer:
 
             # Check attribute access
             elif isinstance(child, ast.Attribute):
-                self._check_attribute(child, snippet, result)
+                self._check_attribute(
+                    child, snippet, result,
+                    is_callee=id(child) in called_attrs,
+                )
 
             # Check string literals for paths
             elif isinstance(child, ast.Constant) and isinstance(child.value, str):
@@ -579,11 +592,52 @@ class CodeAnalyzer:
                 ))
 
     def _check_attribute(
-        self, node: ast.Attribute, snippet: str, result: AnalysisResult
+        self,
+        node: ast.Attribute,
+        snippet: str,
+        result: AnalysisResult,
+        is_callee: bool = False,
     ) -> None:
-        """Check attribute access (even without call)."""
+        """Check attribute access (even without call).
+
+        Args:
+            node: The attribute node.
+            snippet: Source line, for the report.
+            result: Accumulator.
+            is_callee: True when this node is the ``func`` of a Call, i.e.
+                ``_check_call`` is already reporting it.  Set so the two
+                handlers do not both fire for one expression.
+        """
         line_no = getattr(node, 'lineno', 1)
         attr_name = node.attr
+
+        # A dangerous attribute referenced as a VALUE rather than called.
+        # ``os.environ`` is the motivating case -- it was in DANGEROUS_ATTRS
+        # all along, but the table was only ever consulted from the call
+        # handler, so ``secrets = os.environ`` produced no risk naming it and
+        # a reviewer could not tell "imports os" from "reads every
+        # environment variable".  Aliasing a dangerous callable
+        # (``f = os.system``) is caught here for the same reason.
+        if not is_callee:
+            obj = node.value
+            obj_name = None
+            if isinstance(obj, ast.Name):
+                obj_name = obj.id
+                if obj_name in self._import_aliases:
+                    obj_name = self._import_aliases[obj_name].split('.')[0]
+            elif isinstance(obj, ast.Attribute):
+                obj_name = self._get_attribute_chain(obj)
+
+            key = (obj_name, attr_name)
+            if obj_name and key in DANGEROUS_ATTRS:
+                level, category, desc = DANGEROUS_ATTRS[key]
+                result.risks.append(DetectedRisk(
+                    category=category,
+                    description=f"Reference to '{obj_name}.{attr_name}': {desc}",
+                    level=level,
+                    line_number=line_no,
+                    code_snippet=snippet.strip(),
+                ))
 
         # Check for __builtins__ access
         if attr_name == "__builtins__":
@@ -669,6 +723,16 @@ class CodeAnalyzer:
                 if re.match(pattern, path):
                     return True
             return False
+
+        # Anchor RELATIVE paths on the workspace, not on the server's cwd.
+        # check_path_with_jaato_containment() calls os.path.abspath(), which
+        # resolves against os.getcwd() -- the daemon's directory, not the
+        # session's.  So open('data/file.txt') under a workspace_root of
+        # /home/user/myproject was judged as <cwd>/data/file.txt and reported
+        # external, even though a notebook cell runs WITH cwd at the
+        # workspace and would open the in-workspace file.
+        if not os.path.isabs(path):
+            path = os.path.join(self.workspace_root, path)
 
         # Use the shared sandbox utility for consistent path validation
         # This respects .jaato symlinks, /tmp access, and plugin registry auth
