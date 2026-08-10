@@ -104,6 +104,26 @@ def history_to_openinference(messages: Iterable[Message]) -> List[Dict[str, Any]
     return result
 
 
+def build_input_messages(
+    system_instruction: Optional[str],
+    messages: Iterable[Message],
+) -> List[Dict[str, Any]]:
+    """OpenInference input messages for a turn: the conversation history with
+    the system instruction prepended as a ``system``-role message.
+
+    The system prompt is **not** part of session history — it reaches the
+    provider as the API's separate top-level ``system`` parameter — so it must
+    be added here or the span shows only the conversation, dropping the largest
+    and most important input. Emitting it as ``input_messages[0]`` is the
+    standard OpenInference representation. Omitted when falsy (no system prompt
+    configured, or the whole prompt was suppressed for a small-context model).
+    """
+    result = history_to_openinference(messages)
+    if system_instruction:
+        result.insert(0, {"role": "system", "content": system_instruction})
+    return result
+
+
 def classify_cache_outcome(
     prompt_tokens: int,
     cache_read_tokens: Optional[int],

@@ -16,6 +16,7 @@ from jaato_sdk.plugins.model_provider.types import (
 )
 
 from shared.session_telemetry import (
+    build_input_messages,
     classify_cache_outcome,
     history_to_openinference,
     response_to_openinference,
@@ -90,6 +91,24 @@ class TestHistoryToOpenInference:
 
     def test_empty_history(self):
         assert history_to_openinference([]) == []
+
+
+class TestBuildInputMessages:
+    def test_prepends_system_prompt_as_first_message(self):
+        # Regression: the system prompt reaches the provider as a separate API
+        # param, so without this it is dropped from the span entirely.
+        history = [Message(role=Role.USER, parts=[Part.from_text("hi")])]
+        out = build_input_messages("You are helpful.", history)
+        assert out[0] == {"role": "system", "content": "You are helpful."}
+        assert out[1] == {"role": "user", "content": "hi"}
+
+    def test_no_system_prompt_leaves_history_unchanged(self):
+        history = [Message(role=Role.USER, parts=[Part.from_text("hi")])]
+        assert build_input_messages(None, history) == history_to_openinference(history)
+        assert build_input_messages("", history) == history_to_openinference(history)
+
+    def test_system_only_when_history_empty(self):
+        assert build_input_messages("SYS", []) == [{"role": "system", "content": "SYS"}]
 
 
 class TestClassifyCacheOutcome:
