@@ -116,18 +116,6 @@ os.system('ls -la /home')
         assert any("__class__" in r.description or "__bases__" in r.description
                    for r in result.risks)
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "DETECTION GAP: os.environ ACCESS is not flagged.  The analyzer "
-            "reports 'Import of \'os\' module' (dangerous_import) so "
-            "has_risks is True, but nothing names environ, so a reviewer "
-            "scanning risk descriptions cannot tell 'imports os' from 'reads "
-            "every environment variable, including secrets'.  Whether to add "
-            "an attribute-level rule is a product decision.  strict=True so a "
-            "fix fails here."
-        ),
-    )
     def test_detect_os_environ(self):
         """os.environ access should be flagged."""
         code = """
@@ -137,6 +125,25 @@ secrets = os.environ
         result = analyze_code(code)
         assert result.has_risks
         assert any("environ" in r.description for r in result.risks)
+
+    def test_dangerous_callable_referenced_without_calling(self):
+        """Aliasing a dangerous callable is a risk too, not just calling it."""
+        result = analyze_code("import os\nf = os.system\n")
+        assert any(
+            "os.system" in r.description and r.category == "subprocess"
+            for r in result.risks
+        ), [r.description for r in result.risks]
+
+    def test_call_is_not_double_reported(self):
+        """One call must yield ONE subprocess risk.
+
+        ``os.system("ls")`` produces both an ast.Call and, inside it, an
+        ast.Attribute. Now that bare attribute loads are checked, the two
+        handlers would each report it without the is_callee guard.
+        """
+        result = analyze_code('import os\nos.system("ls")\n')
+        subprocess_risks = [r for r in result.risks if r.category == "subprocess"]
+        assert len(subprocess_risks) == 1, [r.description for r in subprocess_risks]
 
     def test_detect_shutil_rmtree(self):
         """shutil.rmtree should be flagged as high risk."""
@@ -272,23 +279,6 @@ class TestAnalyzerWithWorkspace:
         assert result.has_risks
         # Should flag both open() and external path
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "BUG: a RELATIVE path is resolved against the SERVER's cwd, not "
-            "workspace_root.  _is_external_path hands the raw string to "
-            "check_path_with_jaato_containment, which does os.path.abspath() "
-            "-- anchored on os.getcwd().  So open('data/file.txt') under "
-            "workspace_root='/home/user/myproject' is judged against "
-            "<cwd>/data/file.txt and flagged external_path.  Verified: the "
-            "same call with the absolute in-workspace path yields 0 "
-            "external_path risks, and '/etc/passwd' correctly yields 1 -- "
-            "only the relative case is wrong.  A notebook cell runs with cwd "
-            "at the workspace, so legitimate in-workspace relative access is "
-            "mislabelled.  Fixing means changing path-resolution semantics in "
-            "shared sandbox code, not a test repair.  strict=True."
-        ),
-    )
     def test_workspace_path_not_external(self):
         """Paths inside workspace should not be flagged as external."""
         analyzer = CodeAnalyzer(workspace_root="/home/user/myproject")
@@ -298,6 +288,26 @@ class TestAnalyzerWithWorkspace:
         # open() is still flagged but path should not be external
         external_risks = [r for r in result.risks if r.category == "external_path"]
         assert len(external_risks) == 0
+
+
+class TestRelativePathAnchoring:
+    """Relative paths resolve against the WORKSPACE, not the server's cwd."""
+
+    def test_relative_in_workspace_is_not_external(self):
+        analyzer = CodeAnalyzer(workspace_root="/home/user/myproject")
+        result = analyzer.analyze("f = open('data/file.txt')")
+        assert [r for r in result.risks if r.category == "external_path"] == []
+
+    def test_relative_traversal_still_caught(self):
+        """Anchoring must not make `../../..` invisible."""
+        analyzer = CodeAnalyzer(workspace_root="/home/user/myproject")
+        result = analyzer.analyze("f = open('../../../etc/passwd')")
+        assert [r for r in result.risks if r.category == "external_path"]
+
+    def test_absolute_outside_still_caught(self):
+        analyzer = CodeAnalyzer(workspace_root="/home/user/myproject")
+        result = analyzer.analyze("f = open('/etc/passwd')")
+        assert [r for r in result.risks if r.category == "external_path"]
 
 
 class TestRiskLevelOrdering:
