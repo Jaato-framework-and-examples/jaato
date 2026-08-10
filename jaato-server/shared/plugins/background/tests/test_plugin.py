@@ -124,9 +124,9 @@ class TestBackgroundPlugin:
         expected_tools = [
             "startBackgroundTask",
             "getBackgroundTask",
-            # getBackgroundTaskResult: see the xfail block below -- the
-            # result-retrieval tool is missing from the surface, tracked
-            # there rather than silently dropped from this list.
+            # No getBackgroundTaskResult tool by design: the return value
+            # rides along on getBackgroundTask's response once the task is
+            # terminal (include_result), so there is no second tool to list.
             "getBackgroundTask",
             "cancelBackgroundTask",
             "listBackgroundTasks",
@@ -144,9 +144,9 @@ class TestBackgroundPlugin:
         expected_executors = [
             "startBackgroundTask",
             "getBackgroundTask",
-            # getBackgroundTaskResult: see the xfail block below -- the
-            # result-retrieval tool is missing from the surface, tracked
-            # there rather than silently dropped from this list.
+            # No getBackgroundTaskResult tool by design: the return value
+            # rides along on getBackgroundTask's response once the task is
+            # terminal (include_result), so there is no second tool to list.
             "getBackgroundTask",
             "cancelBackgroundTask",
             "listBackgroundTasks",
@@ -269,46 +269,14 @@ class TestBackgroundPlugin:
         assert status_result["plugin_name"] == "mock_capable"
         assert status_result["status"] in ["pending", "running", "completed"]
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "GAP, not test rot: the tool surface cannot return a backgrounded "
-            "tool's RESULT.  BackgroundMixin.get_result(task_id, wait=...) "
-            "exists and TaskResult.result carries the value, and the "
-            "BackgroundCapable protocol's get_task() takes wait= and its "
-            "docstring promises 'status, output, and result' -- but "
-            "BackgroundPlugin exposes no getBackgroundTaskResult tool, "
-            "_get_task forwards no wait=, and TaskInfo has no result field.  "
-            "So an in-process tool run in the background has an unreachable "
-            "return value (subprocess tasks are fine: theirs is in stdout).  "
-            "strict=True so restoring the capability FAILS here and forces "
-            "these back on rather than leaving them silently skipped."
-        ),
-    )
     def test_get_result_not_found(self):
         """Test getBackgroundTaskResult with unknown task."""
         plugin = BackgroundPlugin()
 
-        result = plugin._get_result({"task_id": "nonexistent"})
+        result = plugin._get_task({"task_id": "nonexistent"})
         assert "error" in result
         assert "not found" in result["error"]
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "GAP, not test rot: the tool surface cannot return a backgrounded "
-            "tool's RESULT.  BackgroundMixin.get_result(task_id, wait=...) "
-            "exists and TaskResult.result carries the value, and the "
-            "BackgroundCapable protocol's get_task() takes wait= and its "
-            "docstring promises 'status, output, and result' -- but "
-            "BackgroundPlugin exposes no getBackgroundTaskResult tool, "
-            "_get_task forwards no wait=, and TaskInfo has no result field.  "
-            "So an in-process tool run in the background has an unreachable "
-            "return value (subprocess tasks are fine: theirs is in stdout).  "
-            "strict=True so restoring the capability FAILS here and forces "
-            "these back on rather than leaving them silently skipped."
-        ),
-    )
     def test_get_result_success(self):
         """Test getBackgroundTaskResult with completed task."""
         capable = MockCapablePlugin()
@@ -328,29 +296,13 @@ class TestBackgroundPlugin:
         time.sleep(0.2)
 
         # Get result
-        result = plugin._get_result({"task_id": task_id})
+        result = plugin._get_task({"task_id": task_id})
 
         assert not result.get("error")
         assert result["status"] == "completed"
         assert result["result"]["status"] == "bg_done"
         assert result["result"]["key"] == "value"
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "GAP, not test rot: the tool surface cannot return a backgrounded "
-            "tool's RESULT.  BackgroundMixin.get_result(task_id, wait=...) "
-            "exists and TaskResult.result carries the value, and the "
-            "BackgroundCapable protocol's get_task() takes wait= and its "
-            "docstring promises 'status, output, and result' -- but "
-            "BackgroundPlugin exposes no getBackgroundTaskResult tool, "
-            "_get_task forwards no wait=, and TaskInfo has no result field.  "
-            "So an in-process tool run in the background has an unreachable "
-            "return value (subprocess tasks are fine: theirs is in stdout).  "
-            "strict=True so restoring the capability FAILS here and forces "
-            "these back on rather than leaving them silently skipped."
-        ),
-    )
     def test_get_result_with_wait(self):
         """Test getBackgroundTaskResult with wait=True."""
         capable = MockCapablePlugin()
@@ -367,10 +319,57 @@ class TestBackgroundPlugin:
         })
         task_id = start_result["task_id"]
 
-        # Get result with wait - should block until complete
-        result = plugin._get_result({"task_id": task_id, "wait": True})
+        # POLL rather than block.  `wait` is deliberately NOT exposed on the
+        # tool: BackgroundMixin.get_result(wait=True) sits on
+        # future.result() with no timeout, so a model calling it could hang
+        # its own tool-call loop indefinitely.  The result rides along on the
+        # poll that first observes completion.
+        deadline = time.time() + 5.0
+        while time.time() < deadline:
+            result = plugin._get_task({"task_id": task_id})
+            if not result["has_more"]:
+                break
+            time.sleep(0.05)
 
         assert result["status"] == "completed"
+        assert result["result"]["status"] == "bg_done"
+
+    def test_result_absent_while_running(self):
+        """Mid-run there is no return value, so the key must be absent."""
+        capable = MockCapablePlugin()
+        registry = MockRegistry()
+        registry.add_plugin(capable)
+        plugin = BackgroundPlugin()
+        plugin.set_registry(registry)
+
+        task_id = plugin._start_task({
+            "tool_name": "slow_bg_tool", "arguments": {"duration": 5.0},
+        })["task_id"]
+        try:
+            running = plugin._get_task({"task_id": task_id})
+            assert running["status"] in ("pending", "running")
+            assert "result" not in running
+        finally:
+            plugin._cancel_task({"task_id": task_id})
+
+    def test_include_result_false_suppresses_it(self):
+        """The opt-out keeps polls small when the payload is large."""
+        capable = MockCapablePlugin()
+        registry = MockRegistry()
+        registry.add_plugin(capable)
+        plugin = BackgroundPlugin()
+        plugin.set_registry(registry)
+
+        task_id = plugin._start_task({
+            "tool_name": "bg_tool", "arguments": {"duration": 0.1},
+        })["task_id"]
+        time.sleep(0.4)
+
+        assert "result" in plugin._get_task({"task_id": task_id})
+        suppressed = plugin._get_task(
+            {"task_id": task_id, "include_result": False})
+        assert suppressed["status"] == "completed"
+        assert "result" not in suppressed
 
     def test_cancel_task_not_found(self):
         """Test cancelBackgroundTask with unknown task."""
@@ -681,22 +680,6 @@ class TestBackgroundPlugin:
 class TestBackgroundPluginIntegration:
     """Integration tests for BackgroundPlugin."""
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "GAP, not test rot: the tool surface cannot return a backgrounded "
-            "tool's RESULT.  BackgroundMixin.get_result(task_id, wait=...) "
-            "exists and TaskResult.result carries the value, and the "
-            "BackgroundCapable protocol's get_task() takes wait= and its "
-            "docstring promises 'status, output, and result' -- but "
-            "BackgroundPlugin exposes no getBackgroundTaskResult tool, "
-            "_get_task forwards no wait=, and TaskInfo has no result field.  "
-            "So an in-process tool run in the background has an unreachable "
-            "return value (subprocess tasks are fine: theirs is in stdout).  "
-            "strict=True so restoring the capability FAILS here and forces "
-            "these back on rather than leaving them silently skipped."
-        ),
-    )
     def test_full_workflow(self):
         """Test complete background task workflow."""
         capable = MockCapablePlugin()
@@ -729,7 +712,7 @@ class TestBackgroundPluginIntegration:
 
         # 5. Wait and get result
         time.sleep(0.3)
-        result = plugin._get_result({"task_id": task_id})
+        result = plugin._get_task({"task_id": task_id})
         assert result["status"] == "completed"
         assert result["result"]["data"] == "test"
 
