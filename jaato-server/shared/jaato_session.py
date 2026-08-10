@@ -47,8 +47,8 @@ from .instruction_suppression import (
 )
 from .session_persistence import SessionPersistence
 from .session_telemetry import (
+    build_input_messages,
     classify_cache_outcome,
-    history_to_openinference,
     response_to_openinference,
 )
 
@@ -8317,12 +8317,25 @@ NOTES
 
         Converts the current session history (messages being sent to the
         provider) into OpenInference ``llm.input_messages.*`` indexed
-        attributes on the LLM span.
+        attributes on the LLM span, prepended with the system instruction.
+
+        The system prompt is NOT part of ``_history.messages`` — it reaches the
+        provider as the API's separate top-level ``system`` parameter — so
+        without prepending it here the largest, most important input is silently
+        dropped from every span. Emitting it as ``input_messages[0]`` with role
+        ``system`` is the standard OpenInference representation and reflects
+        per-turn changes (dynamic instructions, injected reminders, budget
+        suppression). ``self._system_instruction`` is the effective prompt
+        (already resolved to any ``system_instruction_override``). Content is
+        routed through :meth:`set_input_messages`' redactor, so it is blanked
+        automatically when content redaction is on.
 
         Args:
             span: The LLM span context to set attributes on.
         """
-        input_msgs = history_to_openinference(self._history.messages)
+        input_msgs = build_input_messages(
+            self._system_instruction, self._history.messages
+        )
         if input_msgs:
             span.set_input_messages(input_msgs)
 
