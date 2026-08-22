@@ -128,13 +128,34 @@ This is Prime Agent's headline area, and where jaato has the clearest gaps.
 | Event-driven autonomy | **Yes** — reactor engine (premium): JMESPath match on the session event bus → action scripts → spawn/fork/inject/webhook, hot-reloaded | No equivalent; extensions can subscribe to events in-process but there is no declarative rules file |
 | Background tool execution | Yes — `background` plugin auto-backgrounds long tool calls | Detached bash trees are tracked and reaped by the daemon; no model-facing background API |
 
-**Verdict.** Prime Agent wins the *unattended-operation* column outright.
-Goals, heartbeats, cron schedules, and gate-checked autonomous mode are four
-distinct, documented, host-enforced mechanisms with explicit budgets — jaato
-has no direct equivalent for any of them. jaato answers the same need from the
-other direction: signed external wakes and a declarative reactor rules engine,
-which is stronger for *event-driven* pipelines and weaker for *time-driven* or
-*self-driven* ones.
+**Verdict.** Prime Agent wins the *time-driven* half of this column outright
+and does **not** win the rest — the four mechanisms are less novel against
+jaato than their marketing implies. Sorting them by what they actually
+correct:
+
+| Failure being corrected | jaato | Prime Agent |
+|---|---|---|
+| **Direction** — agent works, but on the wrong thing | `drift_monitor` (cosine similarity of turn text vs. active plan-step goal embedding, `HARD_THRESHOLD = 0.30`, emits `drift.measured` + injects a nudge); `auto_steering` (open-loop hint re-injection); reliability nudges | **nothing** — Prime Agent measures no drift signal |
+| **Termination** — agent says "done" and isn't | `completion_payload_schema` structural floor + `completeness`-phase processors contributing `incomplete[]` / `errors[]` to a composite `is_complete` verdict; `on_error: fail_completion` returns a `validation_failed` shape so the model retries | `--autonomous-gate "npm run check"` — shell exit code as the verdict |
+| **Runaway** — agent never stops | `budget_control`: ceilings on `usd` / `tokens` / `seconds` / `tool_calls` / `turns`, plus an ordered **degradation ladder** that rebinds model tiers at percentage thresholds (brownout, not blackout) — and per-profile `max_turns` | hard limits on continuations / turns / tokens / wall-clock; stop only, no degradation |
+| **Self-report** — objective survives across turns | — | `/goal`, re-presented after each turn until `goal.complete()` |
+| **Time-driven re-entry** — nothing is happening and something should | **nothing** | cron schedules + user/agent heartbeats |
+
+So on three of five rows jaato is level or ahead, and on one row (drift) Prime
+Agent has no answer at all. `budget_control`'s degradation ladder in particular
+is strictly richer than Prime Agent's limits, which can only halt.
+
+The real gap is narrower than "unattended operation": it is **time-driven
+re-entry**. jaato can be woken by an event (signed wake, webhook, reactor) but
+not by a clock, and nothing re-enters a session on its own initiative. Two
+narrower gaps sit alongside it: (a) Prime Agent's gates are *subprocesses*
+with timeouts and process-tree kill, so "does the build pass" is a valid
+termination verdict, whereas jaato's `completeness` phase is explicitly
+constrained to cheap payload inspection (no subprocess) — a finalization-phase
+validator can shell out, but that only runs at `signal_completion`; and (b)
+jaato's completion gate exists only for schema-carrying agents — `signal_completion`
+is hidden for terminal roots and schema-less sessions, so an ordinary
+interactive session has no done-ness check at all.
 
 ### Are these "just skills"?
 
@@ -164,8 +185,12 @@ in the daemon.
 
 **Concrete borrow candidates for jaato:** (1) a per-session persisted scheduler
 (`scheduled-jobs.json` with claim-before-deliver semantics and tick
-coalescing); (2) host-enforced continuation budgets with shell quality gates;
-(3) agent-owned recurring prompts distinct from user-owned ones.
+coalescing) — the one genuinely missing primitive; (2) agent-owned recurring
+prompts, distinct from user-owned ones, so the model can set its own check-back
+timers; (3) subprocess quality gates with timeout and process-tree kill as a
+termination verdict, wired to the existing `budget_control` ceilings rather
+than to a new budget system; (4) extending the done-ness gate to schema-less
+sessions.
 
 ---
 
@@ -344,7 +369,10 @@ Agent is ahead.
 | Tool breadth and typed schemas | **jaato** | Large — ~60 plugins vs. 1 tool |
 | Permissions and policy | **jaato** | Total — Prime Agent has none built in |
 | Kernel-enforced isolation (AppArmor / cgroups / egress) | **jaato** | Total — Prime Agent explicitly disclaims it |
-| Unattended operation (goals, schedules, heartbeats, gates) | **Prime Agent** | Large — jaato has no scheduler or continuation budget |
+| Time-driven re-entry (cron schedules, heartbeats) | **Prime Agent** | Total — jaato has no scheduler and no self-initiated re-entry |
+| Termination gating (done-ness verdicts) | **Even** | jaato: typed schema + completeness processors; PA: shell exit codes. Different verdict sources, comparable strength |
+| Budget ceilings and degradation | **jaato** | Moderate — `budget_control` is multi-dimensional with a tier-rebinding brownout ladder; PA can only hard-stop |
+| Drift detection and steering | **jaato** | Total — PA measures no drift signal |
 | Event-driven autonomy (reactors, signed wakes, webhooks) | **jaato** | Large — Prime Agent has no declarative rules engine |
 | Subagent messaging ergonomics | **Prime Agent** | Moderate — roles, modes, receipts, CLI verb |
 | Subagent configurability (per-child model/plugins/GC/permissions) | **jaato** | Large |
@@ -370,12 +398,14 @@ Agent is ahead.
 **jaato → from Prime Agent**
 
 1. **Persisted per-session scheduler** — cron + one-shot prompts with
-   claim-before-deliver ticks and coalescing. Closes jaato's biggest
-   long-running gap and composes cleanly with the existing reactor engine
+   claim-before-deliver ticks and coalescing. The single genuinely missing
+   primitive, and it composes cleanly with the existing reactor engine
    (`schedule.fired` becomes just another bus event).
-2. **Host-enforced continuation budgets with shell quality gates** —
-   `--autonomous-gate "pytest"` plus hard continuation/turn/token/time limits.
-   jaato has the reliability primitives; it lacks the loop that enforces them.
+2. **Subprocess quality gates as a termination verdict** — `--autonomous-gate
+   "pytest"` with timeout and process-tree kill. jaato already has the ceilings
+   (`budget_control`) and the gate slot (completion processors); what it lacks
+   is a gate that may shell out, and a done-ness check for schema-less
+   sessions.
 3. **A single reviewable refinement ledger** with before/after snapshots and
    rollback, sitting above memory / auto-steering / references rather than
    beside them.
