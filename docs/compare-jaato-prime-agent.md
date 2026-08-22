@@ -217,16 +217,61 @@ signature verification, and for a clock trigger Stage B collapses to nothing
 because the caller is our own daemon. Reusing the `event_id` dedup claim gives
 idempotent redelivery for free.
 
-**The one leg that does not work is a backgrounded "cron" task.** Three reasons,
-and jaato already settled the argument for itself:
+**How small is the store?** Smaller than Prime Agent's. Its `AgentCronJobStore`
+carries dispatch rows because it has no idempotency layer downstream; jaato
+does — `wake_session` already dedups on `event_id`. Deriving a deterministic
+`event_id` from `(job_id, scheduled_for)` therefore buys crash-safe
+at-most-once delivery *and* tick coalescing from machinery that already exists,
+leaving the store as a plain table: job id, schedule expression, prompt, target
+session, optional cid, TTL.
 
-1. **Wrong tier.** A background task runs in the runner, and the runner is
+**Where it lives is a placement decision, not a requirement.** The only real
+constraint is that the clock must outlive the *target session's runner*. That
+admits three hosts, and the daemon is not the obvious winner:
+
+| Host | Cost | Fits |
+|---|---|---|
+| **OS scheduler + a thin SDK client** — `crontab` / systemd timer / k8s CronJob calling `session.wake` | ~zero jaato code; inherits decades of scheduler hardening; no timer to write | operator-driven recurring prompts |
+| **External always-on cascade-client** — owns its own store and timer, holds the cid, subscribes to cascade events | zero daemon code; swappable, testable, per-tenant | pipeline / cascade drivers |
+| **Daemon-tier store** | new code, but in-band and lifecycle-coupled | agent-owned self-timers |
+
+For the operator case the first row is plainly best — there is no reason to
+write a scheduler when the OS ships one, and jaato's contribution reduces to a
+CLI verb for ergonomics.
+
+**What actually earns a daemon-side store is the narrow case: agent-owned
+schedules** — Prime Agent's `rlm_heartbeat`, where the *model* sets its own
+timer. That needs an in-band tool, storage that outlives the session, lifecycle
+coupling so the schedule dies with its session, and a guarantee that session A
+cannot schedule wakes into session B.
+
+Which is precisely the shape jaato already built for `wake_binding_registry`:
+daemon-owned storage under `~/.jaato/`, holding session-owned content, written
+through an owner-guarded command that *"runs AS the caller's session, so a
+caller can only bind ITSELF — hijack-proof by construction"*, carrying a TTL as
+the safety net for a forgotten unbind, durable because *"a wake may arrive days
+after the bind"*. A binding says "wake me about `wake_ref` if someone signs with
+`trust_keys`"; a schedule says "wake me at time T". Same write path, same
+durability rationale, same TTL, same daemon-owns-the-sandbox /
+session-owns-the-invitation split. **It is another column on an existing table,
+not a new subsystem.**
+
+The one genuinely new moving part either way is the sweep: registry expiry today
+is *lazy* (checked at resolve — `existing.expires_at > now`), so nothing
+currently scans for due rows. That is also the one piece the OS-cron route lets
+you skip entirely.
+
+**The leg that does not work in any of the three placements is a backgrounded
+"cron" task.** Three reasons, and jaato already settled the argument for itself:
+
+1. **Wrong lifetime.** A background task runs in the runner, and the runner is
    precisely what unloads — a timer living inside the thing it is supposed to
    wake is circular. `server/wake_ingress.py` states the identical conclusion
    verbatim for the same reason: *"It lives at the DAEMON tier — NOT the
    runner-tier webhook plugin — because it must survive session unload (a wake
    can arrive days after the session went idle-detached; the runner-bound
-   webhook listener would be gone)."* A clock is no different from a webhook here.
+   webhook listener would be gone)."* That argument rules the runner out; it
+   does not by itself select the daemon over the two external placements above.
 2. **Wrong cost.** `BackgroundCapableMixin` runs a `SafeThreadPoolExecutor` with
    `max_workers=4` and `default_timeout=300.0`. A task sleeping until 09:00
    tomorrow holds a worker slot and is killed after five minutes anyway. A
@@ -556,9 +601,11 @@ Agent is ahead.
    Not a scheduler subsystem: `wake_session` already revives cold sessions,
    resolves the workspace server-side, dedups on `event_id`, and notifies
    cascade observers — its docstring already lists `cron` as an intended
-   caller. Must live at the daemon tier beside `wake_ingress`, never as a
-   runner-tier background task. See §4 for the composition and the `DEFERRED`
-   wrinkle.
+   caller. For operator-driven schedules an OS cron plus a thin SDK client
+   needs no jaato code at all; a daemon-side store earns its place only for
+   agent-owned self-timers, and there it is a column on `wake_binding_registry`
+   rather than a new subsystem. Never a runner-tier background task. See §4 for
+   the placement trade, the composition, and the `DEFERRED` wrinkle.
 2. **Subprocess quality gates as a termination verdict** — `--autonomous-gate
    "pytest"` with timeout and process-tree kill. jaato already has the ceilings
    (`budget_control`) and the gate slot (completion processors); what it lacks
