@@ -96,11 +96,14 @@ loop:
   await agent.completed payload
     ├─ outcome == finished   → run finalization (write artifacts, report), exit 0
     └─ outcome == suspended  → persist due-row {session_id, resume_at,
-                                  resume_reason, watch_handle, attempt}
+                                  resume_reason, watch_handle, progress_note,
+                                  attempt}
                                sleep until the nearest due row
                                attach_session + send_message(continuation)
+                                 ^ carries watch_handle + progress_note VERBATIM,
+                                   so resume never depends on history surviving GC
                                attempt += 1
-  budget exhausted / max_resumes → report unfinished with the last progress_note
+  budget refuses / exhausted → report unfinished with the last progress_note
 ```
 
 Three properties the example must actually demonstrate, not just describe:
@@ -119,7 +122,9 @@ Three properties the example must actually demonstrate, not just describe:
 README.md                     # the pattern, the caveat, how to run
 .jaato/
   profiles/
-    goal-actor.yaml           # plugins, model, budget_control, completion schema ref
+    goal-actor.yaml           # provider/model first + swap block, plugins,
+                              #   gc: budget (context grows across cycles),
+                              #   completion schema ref
     completion_schemas/
       goal_actor.yaml
   policies/
@@ -171,16 +176,68 @@ Named in the README so readers do not mistake scope for limitation:
   example once the repo exists — routing on `outcome` with a `where` clause —
   but it cannot ship in a repo meant to run from public deps.
 
-## 8. Open questions before implementation
+## 8. Resolved decisions
 
-1. **Resume granularity** — does the agent resume in its *same* session (history
-   intact, context grows across every cycle and needs GC) or does each cycle
-   spawn a fresh session seeded with the previous `progress_note` and
-   `watch_handle`? The second is cheaper and more cascade-idiomatic; the first is
-   simpler and demonstrates continuity. Worth showing the first and noting the
-   second.
-2. **Where `max_resumes` belongs** — the driver, or the cascade budget's `turns`
-   dimension. Preference: the budget, so the ceiling is declared once and the
-   degradation ladder can respond before the hard stop.
-3. **Does the repo pin a provider?** A cheap, fast, widely-available model keeps
-   the demo runnable; the profile should make substitution obvious.
+### 8.1 Resume in the same session
+
+Each cycle continues the **same** `session_id`, so the agent keeps its reasoning
+context across suspends. Two consequences follow, and the second is the one that
+actually matters.
+
+**Context grows monotonically, so GC is load-bearing.** The goal-actor profile
+must declare a strategy — `gc_budget` is the right fit here, being the only one
+that makes policy-aware removal decisions and supports continuous per-turn
+collection rather than waiting for a threshold breach. A goal running for a dozen
+cycles is exactly the workload it was built for.
+
+**But correctness must not depend on GC keeping anything.** `GCPolicy`
+(`LOCKED` / `PRESERVABLE` / `PARTIAL` / `EPHEMERAL` / `CONDITIONAL`) governs
+*instruction sources*, not conversation messages — there is no per-message pin,
+so a `progress_note` from cycle 3 can legitimately be summarised away by cycle 9.
+
+The resolution is clean, and it is what makes "same session" safe: **the driver
+already holds the payload** — it received the validated `progress_note` and
+`watch_handle` through `on_agent_completed` — so it re-injects them verbatim in
+the continuation message it sends on resume. That splits continuity in two:
+
+| | carrier | guarantee |
+|---|---|---|
+| **State** — what I was waiting on, where to look, what I had achieved | the driver's continuation message | load-bearing, guaranteed, survives any GC |
+| **Reasoning context** — how I got here, what I already ruled out | the session's own history | nice-to-have, degrades gracefully under GC |
+
+So history GC can be as aggressive as it likes and the goal still advances. This
+is worth calling out explicitly in the README: it is the non-obvious reason the
+same-session choice does not become a slow context leak.
+
+### 8.2 The ceiling is the cascade budget
+
+`cascade_budget_set(cid, limits={...}, degrade=[...])` owns termination; the
+driver does not carry its own `max_resumes`. Declared once, it clamps every
+session under the cid and refuses a spawn with no headroom left.
+
+**One precision the example must not blur: `turns` is a plain turn counter, not
+a resume count.** A single resume cycle usually costs several assistant turns
+(inspect → maybe act → signal), so `limits={"turns": 40}` is an outer bound on
+work, not "40 resumes". The driver should therefore *report* its resume count as
+observability while the budget *enforces* the ceiling — never present the two as
+the same number.
+
+This also gives the example something Prime Agent's autonomous mode cannot do at
+all: a `degrade` ladder that rebinds model tiers as the goal consumes its budget,
+so a long-running goal gets *cheaper* as it goes rather than simply dying at the
+limit. A brownout ladder — cheaper executor at 60 %, cheaper planner at 80 %,
+terminal action at 95 % — is a better demo of jaato's budget model than a bare
+hard stop, and costs a few lines of profile YAML.
+
+### 8.3 Provider is pinned but obviously swappable
+
+Default to one cheap, fast, widely-available model needing a single environment
+variable, so `pip install && export ONE_KEY && run` works. Structure the profile
+so `provider:` and `model:` are the first two keys, with a commented swap block
+immediately beneath listing two or three alternatives across different providers
+(one hosted, one local via Ollama/LM Studio) — the point being that nothing else
+in the repo changes when you swap them.
+
+The README states the demo's approximate token cost per full run, since the
+whole pattern is about work that spans many turns and a reader deserves to know
+what they are starting.
