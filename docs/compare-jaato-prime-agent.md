@@ -183,6 +183,43 @@ and process-tree kill, and injection into the session prompt queue. None of
 that is reachable by writing prompt files; it is a scheduler and a policy loop
 in the daemon.
 
+### Isn't jaato's `background` plugin the same thing?
+
+No — they solve adjacent problems, and being exact about the difference narrows
+what actually needs building.
+
+| | jaato `background` | Prime Agent scheduler |
+|---|---|---|
+| Who executes the long work | **jaato** — a `SafeThreadPoolExecutor` thread in the runner wrapping one of our own tool calls | **nobody here** — the job only injects a prompt; the real work runs elsewhere |
+| Creates a new turn | **No** | **Yes** |
+| Completion discovery | model polls `getBackgroundTaskStatus` / `getBackgroundTaskResult` | daemon re-enters the session unprompted |
+| Survives turn end | task keeps running, but delivery does not — nothing tells the model | yes |
+| Survives session unload / daemon restart | **No** — in-process threads, no persistence of any kind | yes — `scheduled-jobs.json`, lockfile + fsync, and it revives dormant sessions from disk |
+| Horizon | `default_timeout = 300.0` s | unbounded |
+
+Put plainly: **backgrounding is intra-turn concurrency; scheduling is inter-turn
+re-entry.** Backgrounding lets one agent do two things at once inside a turn it
+is already having. Scheduling lets an agent *exist at a moment when nothing is
+happening*. Once the turn ends, backgrounding has stopped being a mechanism —
+the thread may still run, but no path exists to tell anyone it finished.
+
+Ownership matters as much as timing. `startBackgroundTask` wraps a jaato tool.
+It cannot represent "the CI run finishes in 40 minutes" — pointing it at that
+burns a runner thread on a sleep loop and hits the 300 s timeout anyway. Prime
+Agent's scheduler never executes the external job either; it just guarantees
+somebody asks about it later.
+
+**A cheaper fix falls out of the comparison.** The background plugin's real hole
+is not the missing scheduler — it is that a task completing after the turn ends
+stays invisible until the user types again. It emits nothing: no bus event, no
+callback. Yet `JaatoRuntime.event_bus` is already reachable from a plugin — the
+`webhook` plugin does exactly this (`self._event_bus = _sess._runtime.event_bus`,
+then `_publish_to_event_bus(...)`) and reactors consume it. Having background
+tasks publish `background.completed` would let a reactor inject the result and
+resume the agent, closing the gap for all work **jaato itself owns**, with no
+new subsystem. The scheduler would then be needed only for its irreducible
+case: polling external state jaato does not own and cannot be notified about.
+
 ### How Prime Agent's scheduler actually works
 
 Worth recording, since it is the one primitive jaato lacks outright.
@@ -457,17 +494,23 @@ Agent is ahead.
    (`budget_control`) and the gate slot (completion processors); what it lacks
    is a gate that may shell out, and a done-ness check for schema-less
    sessions.
-3. **A single reviewable refinement ledger** with before/after snapshots and
+3. **`background.completed` on the runtime event bus** — not a Prime Agent
+   feature, but exposed by the comparison: background tasks emit nothing today,
+   so a task finishing after the turn ends is invisible. Publishing to
+   `JaatoRuntime.event_bus` (the `webhook` plugin's existing pattern) lets a
+   reactor resume the agent. Cheaper than the scheduler, and it covers every
+   case where jaato owns the work.
+4. **A single reviewable refinement ledger** with before/after snapshots and
    rollback, sitting above memory / auto-steering / references rather than
    beside them.
-4. **`/compact <instructions>`** — user-steered summarisation focus, persisted
+5. **`/compact <instructions>`** — user-steered summarisation focus, persisted
    on the compaction record. Cheap to add to `gc_summarize` / `gc_hybrid`.
-5. **Agent-to-agent messaging ergonomics** — named agents, sibling addressing,
+6. **Agent-to-agent messaging ergonomics** — named agents, sibling addressing,
    `steer` / `follow_up` / `auto` delivery modes with receipts, and a CLI
    `send` verb.
-6. **Split-turn compaction** — jaato's GC assumes turn boundaries; a single
+7. **Split-turn compaction** — jaato's GC assumes turn boundaries; a single
    oversized turn is a real failure mode.
-7. **Reading foreign skill directories** (`~/.claude/skills`, `~/.codex/skills`)
+8. **Reading foreign skill directories** (`~/.claude/skills`, `~/.codex/skills`)
    into the prompt library.
 
 **Prime Agent → from jaato** (for context on where the moat is)
