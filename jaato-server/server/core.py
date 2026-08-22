@@ -271,38 +271,14 @@ class AgentState:
 def _profile_binds_a_model(profile: Any) -> bool:
     """Does *profile* bind a model for session start, by EITHER route?
 
-    A profile binds one via a flat ``model`` OR via ``model_tiers``: the
-    session assigns ``tier_config.tiers[initial_tier].model`` over whatever
-    ``model`` held (jaato_session.py, "Tier mode active: overriding session
-    model"), so a tiers-only profile is a complete, coherent shape.
-
-    Before this existed the bootstrap gate consulted ``model`` alone and
-    rejected such a profile -- while the profile loader was simultaneously
-    warning that ``model`` "will be ignored" when ``model_tiers`` is present.
-    Following that advice produced a profile the session could not start,
-    so authors had to keep a ``model`` the runtime then discarded.  Reported
-    by an SDK-only cascade whose goal actor is tiers-driven.
-
-    Deliberately tolerant of a malformed tier table: this is a
-    precondition check, not validation.  ``ModelTierConfig.resolve`` runs
-    later and reports a bad table with a precise error -- returning False
-    here would mask that behind the generic "no model bound" message.
+    Thin wrapper over :func:`shared.model_tiers.bound_model_for_profile`,
+    which ``runner_spawn`` also uses to fill ``envelope.model_name``.  They
+    MUST agree: when the gate said yes and the envelope said empty, the
+    caller got a dropped IPC connection and "session not bootstrapped on this
+    runner" instead of a configuration error.
     """
-    if profile is None:
-        return False
-    if getattr(profile, "model", None):
-        return True
-
-    tiers = getattr(profile, "model_tiers", None) or {}
-    if not tiers:
-        return False
-
-    from shared.model_tiers import DEFAULT_INITIAL_TIER, RESERVED_INITIAL_KEY
-    initial = tiers.get(RESERVED_INITIAL_KEY) or DEFAULT_INITIAL_TIER
-    entry = tiers.get(initial)
-    if isinstance(entry, dict):
-        return bool(entry.get("model"))
-    return bool(getattr(entry, "model", None))
+    from shared.model_tiers import bound_model_for_profile
+    return bound_model_for_profile(profile) is not None
 
 
 class JaatoServer:

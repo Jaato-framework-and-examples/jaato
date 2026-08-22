@@ -353,3 +353,54 @@ class ModelTierConfig:
         if profile_model_tiers:
             return cls.from_unified_dict(profile_model_tiers)
         return cls.from_env(env=env)
+
+
+def bound_model_for_profile(profile: object) -> Optional[str]:
+    """The model a profile binds for session START, by EITHER route.
+
+    A profile binds a model with a flat ``model``, or with ``model_tiers``
+    whose initial tier declares one -- and the tiers route is authoritative
+    at runtime: ``JaatoSession`` assigns
+    ``tier_config.tiers[initial_tier].model`` over whatever ``model`` held.
+
+    ONE definition, deliberately, because two of them disagreed:
+
+      * ``core.py``'s bootstrap gate asked "is a model bound?" and, before
+        PR #574, consulted ``model`` alone -- so a tiers-only profile was
+        rejected outright.
+      * ``runner_spawn`` builds ``envelope.model_name`` and ALSO consulted
+        ``model`` alone.  After #574 opened the gate, that disagreement moved
+        the failure one layer down: the gate passed, the runner rejected the
+        envelope with "envelope.model_name is empty", and the caller saw a
+        dropped IPC connection and "session not bootstrapped on this runner"
+        instead of a configuration error.  Worse than before the gate opened.
+
+    Both callers now ask this function, so "bound" cannot mean two things.
+
+    Returns:
+        The bound model name, or ``None`` when the profile binds none by
+        either route.  A malformed tier entry yields ``None`` rather than
+        raising: callers use this as a precondition, and
+        ``ModelTierConfig.resolve`` reports shape errors precisely later.
+    """
+    if profile is None:
+        return None
+
+    flat = getattr(profile, "model", None)
+    if flat:
+        return flat
+
+    tiers = getattr(profile, "model_tiers", None) or {}
+    if not tiers:
+        return None
+
+    initial = tiers.get(RESERVED_INITIAL_KEY) or DEFAULT_INITIAL_TIER
+    if initial not in tiers:
+        return None
+    try:
+        # Delegate the entry grammar -- mapping OR the documented bare-string
+        # shorthand -- instead of re-reading it.  Re-reading it is what made
+        # the shorthand the one shape that could not boot.
+        return _normalize_tier_entry(initial, tiers[initial]).model or None
+    except ModelTierConfigError:
+        return None
