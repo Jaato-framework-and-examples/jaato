@@ -5086,6 +5086,41 @@ NOTES
 
         return response, None, False
 
+    def _begin_turn_completion_state(self) -> None:
+        """Clear the completion flags that are per-TURN in meaning.
+
+        Three flags looked session-lifetime but every reader asks a per-turn
+        question:
+
+        * ``_signal_completion_called`` -- read by the turn terminator
+          (``_execute_tools_and_continue``: "session is over"), the nudge
+          predicate, the quiescence hook (whose own comment says "called
+          signal_completion DURING THIS TURN"), the signal_completion
+          idempotency guard ("in the same tool batch"), the auto-finalize
+          synthesizer, the subagent nudge loop, and the embedded nudge gate.
+        * ``_completion_nudges_fired`` -- the nudge BUDGET, otherwise spent
+          once per session rather than once per turn.
+        * ``_session_quiescent_emitted`` -- the once-per-turn quiescence latch.
+
+        None of them is persisted, so this has no restore implications.
+
+        Invisible for a one-shot session, where turn 0 is the only turn --
+        which is why it survived.  On a SUSPEND/RESUME session the agent calls
+        ``signal_completion`` every turn (``outcome=suspended`` ends the turn,
+        the driver wakes the same session later), so the flag latched on turn
+        0 and every later turn was TRUNCATED at its first tool batch: the
+        terminator fired on a stale flag before the model could reach its
+        exit.  Observed as a 2.9s turn with one tool call and no completion,
+        six runs running, and misread as the model forgetting its exit.
+
+        Called from both chat loops rather than from ``send_message``, since
+        ``send_message`` may delegate to ``send_message_with_parts`` -- one
+        reset per turn on either path, and neither path can miss it.
+        """
+        self._signal_completion_called = False
+        self._completion_nudges_fired = 0
+        self._session_quiescent_emitted = False
+
     def _run_chat_loop(
         self,
         message: str,
@@ -5102,6 +5137,8 @@ NOTES
         Returns:
             The final response text.
         """
+        self._begin_turn_completion_state()
+
         # Set output callback on executor
         if self._executor:
             self._executor.set_output_callback(on_output)
@@ -9007,6 +9044,8 @@ NOTES
         on_output: OutputCallback
     ) -> str:
         """Internal function calling loop for multi-part messages."""
+        self._begin_turn_completion_state()
+
         if self._executor:
             self._executor.set_output_callback(on_output)
 

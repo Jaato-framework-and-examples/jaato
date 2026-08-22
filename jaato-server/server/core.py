@@ -1942,10 +1942,17 @@ class JaatoServer:
             session_provider = get_config("JAATO_PROVIDER")
             provider_to_use = session_provider or self._provider
 
-            # Apply agent profile overrides for model and provider
+            # Apply agent profile overrides for model and provider.
+            # Use the SAME binder the gate above used: reading
+            # ``profile.model`` alone left ``self._model_name`` None for a
+            # tiers-only profile, so ``SessionInfoEvent(model_name=None)``
+            # failed pydantic validation inside _create_session_impl and the
+            # caller saw a dropped IPC connection -- the third time this
+            # mismatch surfaced as "spawn refused".
             if self._profile:
-                if self._profile.model:
-                    model_name = self._profile.model
+                _bound = bound_model_for_profile(self._profile)
+                if _bound:
+                    model_name = _bound
                 if self._profile.provider:
                     provider_to_use = self._profile.provider
 

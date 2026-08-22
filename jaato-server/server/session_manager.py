@@ -2074,7 +2074,11 @@ class SessionManager:
         from shared.session_envelope import SessionInitEnvelope
 
         provider_name = getattr(profile, "provider", None) or ""
-        model_name = getattr(profile, "model", None) or ""
+        # Second envelope builder (isolated subagents have no daemon-side
+        # JaatoServer).  Same binder as runner_spawn's, so a tiers-only
+        # profile does not produce "envelope.model_name is empty" here either.
+        from shared.model_tiers import bound_model_for_profile
+        model_name = bound_model_for_profile(profile) or ""
         plugins_list = list(getattr(profile, "plugins", []) or [])
         preloaded = set(
             getattr(profile, "preloaded_plugins", set()) or set(),
