@@ -108,3 +108,14 @@ jobs:
         run: |
           pytest -q --continue-on-collection-errors \
             jaato-server/shared/plugins/
+
+      # jaato-sdk/tests was the LAST suite no workflow ran -- the same gap
+      # server/tests and shared/plugins had. It matters now because
+      # test_recovery_client_parity.py lives here: that guard exists to catch
+      # IPCRecoveryClient falling behind IPCClient, and a guard CI never runs
+      # is exactly the failure mode it was written for.
+      - name: jaato-sdk/tests suite (SDK surface)
+        if: always()
+        run: |
+          pytest -q --continue-on-collection-errors \
+            jaato-sdk/tests/

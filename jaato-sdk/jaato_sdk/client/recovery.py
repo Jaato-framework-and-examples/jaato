@@ -745,12 +745,23 @@ class IPCRecoveryClient:
         self,
         command: str,
         args: Optional[list] = None,
+        payload: Optional[dict] = None,
     ) -> None:
-        """Execute a command."""
+        """Execute a command.
+
+        Args:
+            command: Command verb (e.g. ``session.wake``).
+            args: Positional arguments.
+            payload: Structured payload.  Required by verbs that take one --
+                ``cascade.budget.set`` errors without it, and ``session.wake``
+                accepts either shape.  Omitting this parameter here (while
+                :class:`IPCClient` had it) made every payload-form verb a
+                TypeError on a recovery client.
+        """
         self._check_can_send()
 
         if self._client:
-            await self._client.execute_command(command, args)
+            await self._client.execute_command(command, args, payload)
 
     # ---- typed wake-primitive methods (see _wake_client) ----
     async def bind_wake(self, wake_ref: str, trust_keys: list, *,
@@ -775,6 +786,81 @@ class IPCRecoveryClient:
         See :func:`jaato_sdk.client._wake_client.cascade_register`."""
         from ._wake_client import cascade_register
         await cascade_register(self, cascade_driver_id, role, event_types)
+
+    @property
+    def server_protocol_version(self) -> Optional[str]:
+        """The server's WIRE-PROTOCOL version, once the handshake completes.
+
+        Distinct from :attr:`server_version` (the daemon's package version).
+        This is the value the compatibility check actually ran against.
+
+        Exposed because the wrapper already ACCEPTS ``min_protocol_version``
+        and forwards it to the inner client -- a caller could constrain the
+        negotiation but not observe its outcome.  That matters most for the
+        long-lived drivers this class exists for: reconnecting across a daemon
+        restart can land on a DIFFERENT server build, and without this there
+        is no way to notice.
+        """
+        return self._client.server_protocol_version if self._client else None
+
+    async def cascade_budget_set(
+        self,
+        cascade_driver_id: str,
+        limits: dict,
+        degrade: Optional[list] = None,
+    ) -> None:
+        """Set a cascade's aggregate budget ceiling.
+
+        See :meth:`jaato_sdk.client.ipc.IPCClient.cascade_budget_set`.  There
+        is no args-only form of this verb -- the daemon requires
+        ``args=[cascade_driver_id]`` AND a ``{limits, degrade}`` payload -- so
+        before this existed a recovery client could not set a ceiling at all.
+        """
+        self._check_can_send()
+        if self._client:
+            await self._client.cascade_budget_set(
+                cascade_driver_id, limits, degrade)
+
+    async def cascade_budget_get(self, cascade_driver_id: str) -> None:
+        """Read a cascade's budget state.
+        See :meth:`jaato_sdk.client.ipc.IPCClient.cascade_budget_get`."""
+        self._check_can_send()
+        if self._client:
+            await self._client.cascade_budget_get(cascade_driver_id)
+
+    async def cascade_budget_clear(self, cascade_driver_id: str) -> None:
+        """Drop a cascade's budget registration.
+        See :meth:`jaato_sdk.client.ipc.IPCClient.cascade_budget_clear`."""
+        self._check_can_send()
+        if self._client:
+            await self._client.cascade_budget_clear(cascade_driver_id)
+
+    def cascade_events(
+        self,
+        cascade_driver_id: str,
+        event_types: Optional[List[str]] = None,
+        role: str = "observer",
+    ):
+        """Async-iterate events from sessions stamped with *cascade_driver_id*.
+
+        See :meth:`jaato_sdk.client.ipc.IPCClient.cascade_events`.  The
+        recovery wrapper already forwarded ``cascade_register`` but not this,
+        so an observer could register and then have no way to read.
+
+        NOT an ``async def``: the underlying method is an async GENERATOR, so
+        returning it directly preserves ``async for`` at the call site.
+        """
+        self._check_can_send()
+        if not self._client:
+            raise RuntimeError("cascade_events: not connected")
+        return self._client.cascade_events(
+            cascade_driver_id, event_types=event_types, role=role)
+
+    async def drain_events(self) -> None:
+        """Drive the event loop, dispatching to subscribed handlers.
+        See :meth:`jaato_sdk.client.ipc.IPCClient.drain_events`."""
+        async for _ in self.events():
+            pass
 
     async def disable_tool(self, tool_name: str) -> None:
         """Disable a tool directly via registry.
