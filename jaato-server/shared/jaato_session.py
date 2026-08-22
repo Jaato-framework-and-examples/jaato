@@ -7900,6 +7900,18 @@ NOTES
         )
         return {"tokens": float(spend)} if spend else {}
 
+    def budget_exhausted_reason(self) -> Optional[str]:
+        """Why this session stopped at its budget ceiling, or ``None``.
+
+        Set only by an ``abort`` rung.  Read by the runner's
+        ``session.send_message`` handler so the RPC result carries a TYPED
+        exhaustion signal: without it a ceiling announced itself only in prose
+        ("[Generation cancelled (...)]" and a system line), so a driver could
+        not distinguish "stopped at the ceiling" from a normal finish without
+        substring-matching -- the parse-the-log shape budgets exist to replace.
+        """
+        return self._budget_exhausted_reason
+
     def was_last_send_refused(self) -> bool:
         """True when the last ``send_message`` was refused by the budget gate.
 
@@ -7913,8 +7925,32 @@ NOTES
         The refusal is still visible to the client as an
         ``on_output("system", ...)`` line, so suppressing the event loses no
         information.
+
+        NOT the mechanism that actually protects this today, despite what the
+        wording above implies.  ``rpc._forward_post_turn_hooks`` gates on a NEW
+        turn having landed in ``turn_accounting`` -- strictly stronger, since
+        it covers every no-op path rather than just a budget refusal -- so a
+        refused turn already emits nothing.  This accessor has no consumer and
+        is kept only because a caller may want to ASK whether the last send
+        was refused; do not add a second suppression path on top of it.
         """
         return self._last_send_refused
+
+    def restore_budget_usage(self, usage: Dict[str, float]) -> None:
+        """Re-seed this session's budget usage after a reload.
+
+        Counterpart to :meth:`get_budget_usage`, which existed read-only for
+        cascade-pool reconciliation.  Without a restore, an unloaded session
+        came back with a zeroed tracker -- see
+        :meth:`BudgetTracker.restore_usage` for why that silently disabled
+        every cross-turn ceiling.
+
+        No-op when the session runs unbudgeted.
+        """
+        if self._budget_tracker is None or not usage:
+            return
+        self._budget_tracker.restore_usage(usage)
+        logger.info("budget: restored usage after reload: %s", usage)
 
     def _refuse_if_budget_exhausted(self) -> Optional[str]:
         """Return a refusal reason when an ``abort`` rung has already fired.

@@ -549,6 +549,40 @@ class BudgetTracker:
             setattr(self._usage, name, getattr(self._usage, name) + value)
         return self._newly_fired()
 
+    def restore_usage(self, usage: Dict[str, float]) -> None:
+        """Re-seed accumulated usage after a session reload.
+
+        ``BudgetTracker`` accumulates in memory only, so an unload/reload
+        rebuilt it with ZEROED usage and every cross-turn dimension silently
+        restarted.  For a suspend/resume cascade that is the whole ceiling: a
+        session evicted during a wait came back with ``turns`` at 0, so a
+        ``turns: 2`` limit never fired however many resumes ran.  Confirmed
+        live 2026-08-23 -- the session unloaded during every wait, and only a
+        ``usd`` limit small enough to cross WITHIN one turn ever tripped.
+
+        Absolute, not a delta: this restores a snapshot, it does not
+        re-observe.  Unknown keys are ignored and non-numeric values are
+        skipped with a warning, so an older or newer snapshot loads rather
+        than raising -- a budget that refuses to restore is worse than one
+        that restores what it understands.
+
+        Rungs are deliberately NOT re-latched: :meth:`observe` re-evaluates
+        the ladder on the next turn against the restored totals, so a rung
+        already crossed fires once more after a reload instead of being
+        skipped.  Firing again is the safe direction -- a rebind is
+        idempotent and an abort must re-assert.
+        """
+        for name in VALID_DIMENSIONS:
+            value = usage.get(name)
+            if value is None:
+                continue
+            try:
+                setattr(self._usage, name, float(value))
+            except (TypeError, ValueError):
+                logger.warning(
+                    "budget: ignoring non-numeric restored %s=%r", name, value)
+
+
     def usage_fraction(self) -> float:
         """Highest ``used / limit`` ratio across the DECLARED dimensions.
 
