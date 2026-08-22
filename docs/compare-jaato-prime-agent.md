@@ -183,6 +183,72 @@ and process-tree kill, and injection into the session prompt queue. None of
 that is reachable by writing prompt files; it is a scheduler and a policy loop
 in the daemon.
 
+### The dual completion schema: jaato's better-shaped answer
+
+Prime Agent's `rlm_heartbeat` is a **tool the model may call at will**. jaato has
+a shape available to it that Prime Agent does not, because jaato already gates
+completion on an operator-authored schema: make the *suspend* a branch of the
+completion payload.
+
+```yaml
+# completion_payload_schema (sketch) — discriminated on `outcome`
+outcome: finished | suspended
+# finished  → result fields, artifacts, …
+# suspended → wake_at, continuation_note, poll handle (job id / URL), …
+```
+
+The agent then ends its turn the only way it already knows how — `signal_completion`
+— but says *"paused, here is my state, wake me at T"* instead of *"done"*. The
+routing half needs no new code: `LifecycleTools._execute_signal_completion`
+already fires `hooks.on_agent_completed(payload=...)` with the **validated**
+payload, and a reactor rule discriminates on it with an ordinary `where` clause.
+Continuity is free too — `wake_session` cold-revives via `resume_session` before
+driving, so the resumed agent keeps its history and the continuation note
+becomes the wake text.
+
+Why this is better than a heartbeat tool, for jaato specifically:
+
+- **Deferral becomes a granted capability, not a discovered one.** Whether an
+  agent may suspend is a property of the schema its operator authored. Prime
+  Agent's model decides for itself.
+- **No new model-facing surface** — no tool, no permission entry, no extra
+  discoverable schema. Only a payload variant on a call the agent already makes.
+- **The pause is validated and atomic.** A `completeness` processor can *require*
+  that a `suspended` payload carries the handle its continuation will need; a
+  half-set timer is unrepresentable. Prime Agent's heartbeat instruction is
+  unvalidated free text.
+
+It does **not** remove the store or the sweeper: a reactor action script runs on
+a worker thread and can no more sleep until 09:00 than a background task can. It
+changes *who writes the due-row* — a reactor action instead of a model tool —
+which is a real simplification, but something must still persist and sweep it.
+
+**Three hazards this design has to answer:**
+
+1. **A suspend is not a completion.** `signal_completion` is "the terminal tool
+   by contract" and terminates the turn loop; downstream consumers read
+   `agent.completed` as *finished*. A suspend riding the same event means the
+   cascade driver could advance the pipeline, budget accounting could close out
+   the stage, and — most concretely — **`finalization`-phase processors would
+   run and write final artifacts for work that is not done**. `phase` currently
+   selects *when* a processor runs, not *conditional on which payload branch
+   validated*; suppressing finalization on a suspend branch is the one piece of
+   framework work this design actually requires.
+2. **It makes the `DEFERRED` wrinkle mandatory to fix.** A suspended cascade
+   agent is precisely "revived cold, no client attached, cid present" — the exact
+   condition under which `wake_session` holds the turn pending an attach. Left
+   as-is, every suspend/resume stalls.
+3. **Suspend loops need a ceiling.** An agent that keeps emitting "wake me in ten
+   minutes" is a runaway with no natural terminator, and unlike Prime Agent's
+   autonomous mode nothing is counting continuations. This is where
+   `budget_control` earns its keep: count suspend-resumes against the profile's
+   `turns` / `seconds` / `usd` ceilings, and let the degradation ladder respond
+   rather than only hard-stopping.
+
+Handled, this is strictly stronger than what Prime Agent ships: a governed,
+schema-validated, operator-granted pause with typed continuation state, against
+Prime Agent's ungoverned free-text timer.
+
 ### Why the model sets its own timer: the no-blocking rule
 
 The agent-owned heartbeat is not a convenience — it is the other half of a
