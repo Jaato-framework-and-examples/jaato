@@ -183,6 +183,55 @@ and process-tree kill, and injection into the session prompt queue. None of
 that is reachable by writing prompt files; it is a scheduler and a policy loop
 in the daemon.
 
+### Why the model sets its own timer: the no-blocking rule
+
+The agent-owned heartbeat is not a convenience — it is the other half of a
+discipline Prime Agent enforces in its system prompt (`src/core/prompts/rlm.ts`):
+
+> For slow or independently completing work, use a nonblocking control loop:
+> start the work, record its handle or output location, **then end your turn**.
+> Read the result on a later turn or when a reply arrives.
+>
+> **Do not keep the turn open by polling with `time.sleep()` or shell `sleep`**,
+> and do not replace polling with a long blocking `await`. Await only the short
+> operation needed to start work or inspect a result that is already available;
+> otherwise end the turn.
+
+So the model is told never to wait inside a turn. That splits waiting into two
+cases by whether the awaited work can announce itself:
+
+- **It can notify** — an RLM child. The child sends `agent_message` on
+  completion, which arrives as an ordinary message and re-enters the parent.
+  No timer is involved; this is the "or when a reply arrives" branch.
+- **It cannot notify** — a test run, a deployment, a training job. Nothing will
+  ever send a message, so "read the result on a later turn" requires *a later
+  turn to exist at all*. `rlm_heartbeat` manufactures exactly that turn.
+
+That is the whole purpose: the heartbeat is the yield-side counterpart to the
+no-blocking rule. Without it, "end your turn" applied to non-notifying work
+means the work is silently abandoned until a human happens to type something.
+
+The delivery-mode default confirms the session is *not* assumed idle in between.
+`steer` (the default) interrupts an in-flight turn, because the common shape is
+start the long job → set the heartbeat → end the turn → do something else → be
+interrupted mid-task when the tick comes due. An idle or cold session instead
+gets a fresh turn (revived from disk if necessary); `shouldDeferHeartbeatCronJob`
+suppresses the tick entirely in states where neither is safe.
+
+**The consequence for jaato is a sequencing constraint.** This prompt discipline
+and the wake mechanism are a matched pair, and the mechanism must land first:
+telling a model "end your turn, you will be resumed" is only safe once
+resumption actually exists. jaato today has no affordance for this at all — an
+agent facing a long external job must block (burning context and wall-clock),
+background it (which cannot represent work jaato does not own, and dies with the
+runner), or hand back to the user. Adding the guidance before the wake path
+would convert every long external wait into silently dropped work.
+
+It also re-prices the heartbeat spend noted above: ending the turn makes the
+*wait* free, and moves the entire cost into one turn per tick — which is exactly
+why an agent-owned timer needs a ceiling, and why routing it through
+`budget_control` rather than leaving it unbounded is the better version.
+
 ### What jaato would actually have to build
 
 Less than "a scheduler". `SessionManager.wake_session()` already **is** the hard
