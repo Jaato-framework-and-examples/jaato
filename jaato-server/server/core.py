@@ -268,6 +268,9 @@ class AgentState:
         self.pending_formatter_feedback: Optional[str] = None
 
 
+from shared.model_tiers import bound_model_for_profile
+
+
 def _profile_binds_a_model(profile: Any) -> bool:
     """Does *profile* bind a model for session start, by EITHER route?
 
@@ -277,7 +280,6 @@ def _profile_binds_a_model(profile: Any) -> bool:
     caller got a dropped IPC connection and "session not bootstrapped on this
     runner" instead of a configuration error.
     """
-    from shared.model_tiers import bound_model_for_profile
     return bound_model_for_profile(profile) is not None
 
 
