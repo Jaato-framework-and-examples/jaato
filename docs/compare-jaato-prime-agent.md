@@ -183,6 +183,57 @@ and process-tree kill, and injection into the session prompt queue. None of
 that is reachable by writing prompt files; it is a scheduler and a policy loop
 in the daemon.
 
+### How Prime Agent's scheduler actually works
+
+Worth recording, since it is the one primitive jaato lacks outright.
+
+**Shape.** One `AgentCronJobStore` per session (`session-artifacts/<id>/scheduled-jobs.json`,
+`proper-lockfile`-guarded, atomic rename + fsync) and one `AgentCronScheduler`
+per worker. Three schedule kinds — `once` / `cron` / `interval`; three sources —
+`cron` (user CLI), `heartbeat` (user `/heartbeat`), `rlm_heartbeat` (agent-owned);
+two runtime kinds — `top-level` / `subagent`.
+
+**Payload is a prompt string.** It is not a job runner: a due job injects text
+into the session prompt queue and the model reads it on its next turn. Every
+tick therefore costs a full turn.
+
+**The load-bearing part is session revival.** `getOrCreateCronJobSession()` falls
+through to `createRuntime({ type: "create", sessionPath: job.sessionFile })` —
+a due job **loads a dormant session from disk and brings it back**, including
+restoring an RLM subagent runtime for `rlm_heartbeat` jobs whose
+`runtimeKind === "subagent"`. So a schedule is not "run while attached"; it is
+"revive this session at 09:00 and hand it this instruction". That is the same
+capability jaato's wake ingress provides for *external* events and nothing
+provides for the clock.
+
+**Crash safety.** `claimDueInState()` advances `nextRunAt` **at claim time**, before
+dispatch, and records a dispatch row. A crash mid-dispatch therefore cannot
+replay an uncertain prompt — `recoverInterruptedDispatches()` marks it
+interrupted and resumes at the *next* tick. A tick landing on an
+already-claimed job stamps `lastSkippedAt` instead of queueing, which is the
+coalescing: a session busy for an hour accrues one pending heartbeat, not twelve.
+
+**Delivery discipline.** Dispatches are serialised per `activeSessionId` lane.
+`shouldDeferHeartbeatCronJob()` skips outright while compacting, retrying,
+running bash, holding pending session work, or mid agent-message — regardless
+of delivery mode. Otherwise `steer` interrupts the current turn and `follow_up`
+waits for it.
+
+**What it is for.** Three surfaces over one store: `prime-agent schedule add`
+for operator-driven recurrence (`"0 9 * * 1-5" -- "Review open work"`),
+`/heartbeat` for one visible user-owned poll loop, and `rlm_heartbeat.create(...)`
+for agent-owned timers the model sets itself (multiple, labelled, pausable).
+The animating use case is Prime Intellect's own: start a long evaluation or
+training run, have the agent set a 5-minute check-back on it, detach the
+terminal. It exists to poll **external state that has no callback** — a GPU
+job, a CI run, a benchmark — which is exactly the case jaato's event-driven
+stack cannot cover, since there is nothing to subscribe to.
+
+The honest limit: heartbeats carry no budget of their own. An idle session with
+a 5-minute `rlm_heartbeat` burns a turn every five minutes indefinitely; the
+deferral rules bound *stacking*, not *spend*. Wiring the equivalent into
+jaato's `budget_control` ceilings would be a strict improvement.
+
 **Concrete borrow candidates for jaato:** (1) a per-session persisted scheduler
 (`scheduled-jobs.json` with claim-before-deliver semantics and tick
 coalescing) — the one genuinely missing primitive; (2) agent-owned recurring
