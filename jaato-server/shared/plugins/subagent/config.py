@@ -2190,7 +2190,10 @@ def _scan_profiles_dir(
             logger.warning(
                 "Profile '%s' declares both 'model' and 'model_tiers'; "
                 "'model' will be ignored — the active model is selected "
-                "per turn from 'model_tiers[<active_tier>]'.", name,
+                "per turn from 'model_tiers[<active_tier>]', starting at "
+                "the initial tier. Keeping 'model' is harmless; removing it "
+                "is also fine (the session bootstraps from the initial "
+                "tier).", name,
             )
 
         raw_quirks = data.get('quirks') or {}
