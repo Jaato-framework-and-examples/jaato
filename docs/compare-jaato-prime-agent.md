@@ -136,6 +136,32 @@ other direction: signed external wakes and a declarative reactor rules engine,
 which is stronger for *event-driven* pipelines and weaker for *time-driven* or
 *self-driven* ones.
 
+### Are these "just skills"?
+
+Worth being precise, because the model-facing surface is misleading. Two of the
+four are **not skills at all**, and the other two are skill-shaped facades over
+host machinery:
+
+| Mechanism | Kernel-side skill | Host-side implementation |
+|---|---|---|
+| Cron / one-shot schedules | **none** | `src/core/cron-jobs.ts` — 1735 lines: `AgentCronJobStore`, `AgentCronScheduler`, cron parsing, `scheduled-jobs.json` persistence, claim-before-deliver ticks. Surfaced as the `prime-agent schedule` CLI verb |
+| Autonomous mode | **none** | `src/core/autonomous.ts` — 593 lines, wired into `AgentSession` as `_autonomousState` with continuation-suppression tracking. Gate subprocesses, budget counters and continuation injection all sit *around* the model, which cannot see them |
+| Goals | `skills/goal` — **52 lines** of `await host_request("goal.get")` | `src/core/goals.ts` — 290 lines owning state, persistence, token/elapsed accounting and continuation prompting; handlers at `agent-session.ts:2935` |
+| Heartbeats | `skills/rlm-heartbeat` — **102 lines** of the same RPC shim | `/heartbeat` is a host slash command; `rlm_heartbeat.*` handlers at `agent-session.ts:3084` back onto the same cron store |
+
+So ~154 lines of Python facade against ~2600 lines of TypeScript enforcement.
+The bundled skills are a *typed API veneer over host RPC* — an interesting
+pattern in itself (jaato's analogue would be a tool schema), but they carry no
+policy.
+
+This matters for the borrow assessment: the hard part is precisely the part
+that isn't a skill — crash-safe tick claiming so an uncertain prompt is never
+replayed, coalescing missed ticks instead of accumulating a backlog, budget
+accounting the model cannot misreport, gate subprocess lifecycle with timeout
+and process-tree kill, and injection into the session prompt queue. None of
+that is reachable by writing prompt files; it is a scheduler and a policy loop
+in the daemon.
+
 **Concrete borrow candidates for jaato:** (1) a per-session persisted scheduler
 (`scheduled-jobs.json` with claim-before-deliver semantics and tick
 coalescing); (2) host-enforced continuation budgets with shell quality gates;
