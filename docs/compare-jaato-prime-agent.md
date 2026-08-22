@@ -183,6 +183,72 @@ and process-tree kill, and injection into the session prompt queue. None of
 that is reachable by writing prompt files; it is a scheduler and a policy loop
 in the daemon.
 
+### What jaato would actually have to build
+
+Less than "a scheduler". `SessionManager.wake_session()` already **is** the hard
+half, and its own docstring names the missing caller:
+
+> The client-agnostic wake primitive (``session.wake``): any authenticated
+> caller — IPC, WS, an HTTP webhook shim, **cron**, a peer — can drive a fresh
+> turn on a session with NO client attached.
+
+It revives cold/unloaded sessions from disk (`resume_session` → `send_message_to_session`),
+resolves the workspace server-side from `SessionWorkspaceIndex` so an
+authenticated-but-untrusted caller cannot point revival at a weaker sandbox
+root, wraps the payload via `wrap_untrusted_content`, dedups on `event_id`, and
+already accepts a `cascade_driver_id` so cascade observers are notified. Every
+capability that makes Prime Agent's scheduler load-bearing — session revival,
+crash-safe idempotency, durable targeting — exists here already.
+
+What is missing is only **the clock**. The composition:
+
+```
+daemon-tier job store (due-time, prompt, target session, cid)
+  → single timer on the nearest due time, claim-before-advance
+    → wake_session(session_id, text, source="schedule", event_id=..., cascade_driver_id=...)
+      → session revives → reactor sees the bus events
+        → cascade agent spawns → completion schema + completeness processors gate done-ness
+```
+
+Everything from `wake_session` rightward is unchanged and already shipped. The
+scheduler is a *clock-driven wake source* sitting beside the existing
+*externally-driven* one: wake ingress is Stage A transport hygiene + Stage B
+signature verification, and for a clock trigger Stage B collapses to nothing
+because the caller is our own daemon. Reusing the `event_id` dedup claim gives
+idempotent redelivery for free.
+
+**The one leg that does not work is a backgrounded "cron" task.** Three reasons,
+and jaato already settled the argument for itself:
+
+1. **Wrong tier.** A background task runs in the runner, and the runner is
+   precisely what unloads — a timer living inside the thing it is supposed to
+   wake is circular. `server/wake_ingress.py` states the identical conclusion
+   verbatim for the same reason: *"It lives at the DAEMON tier — NOT the
+   runner-tier webhook plugin — because it must survive session unload (a wake
+   can arrive days after the session went idle-detached; the runner-bound
+   webhook listener would be gone)."* A clock is no different from a webhook here.
+2. **Wrong cost.** `BackgroundCapableMixin` runs a `SafeThreadPoolExecutor` with
+   `max_workers=4` and `default_timeout=300.0`. A task sleeping until 09:00
+   tomorrow holds a worker slot and is killed after five minutes anyway. A
+   future point in time wants a persisted due-time plus one timer — Prime
+   Agent's `scheduleNext()` keeps exactly one `setTimeout` aimed at the nearest
+   due job — not a parked thread per pending job.
+3. **No durability.** The background plugin persists nothing, so a daemon
+   restart would silently drop every pending schedule.
+
+**One wrinkle worth designing around up front.** `wake_session` returns
+`DEFERRED` when a session is revived cold with no attached client *and* a
+`cascade_driver_id` is present: host (client-side) tools would have no client to
+dispatch to, so it emits `SessionWokenEvent` to the cid's observers and holds
+the turn until a client re-attaches. That is exactly the state a scheduled wake
+into a detached cascade lands in — so the turn would wait for an attach that may
+never come. `attach_session`'s comment shows the resolution is already
+conditional (*"the transport layer drives the pending wake AFTER wiring the
+client's tools, or immediately when the client has none"*), so the fix is to
+extend that "client has none" reasoning to the target profile: a profile
+declaring no host tools should drive immediately even under a cid. Without
+that, scheduled cascade wakes stall.
+
 ### Isn't jaato's `background` plugin the same thing?
 
 No — they solve adjacent problems, and being exact about the difference narrows
@@ -485,10 +551,14 @@ Agent is ahead.
 
 **jaato → from Prime Agent**
 
-1. **Persisted per-session scheduler** — cron + one-shot prompts with
-   claim-before-deliver ticks and coalescing. The single genuinely missing
-   primitive, and it composes cleanly with the existing reactor engine
-   (`schedule.fired` becomes just another bus event).
+1. **A clock in front of `wake_session`** — a daemon-tier persisted job store
+   plus one timer, with Prime Agent's claim-before-advance and tick coalescing.
+   Not a scheduler subsystem: `wake_session` already revives cold sessions,
+   resolves the workspace server-side, dedups on `event_id`, and notifies
+   cascade observers — its docstring already lists `cron` as an intended
+   caller. Must live at the daemon tier beside `wake_ingress`, never as a
+   runner-tier background task. See §4 for the composition and the `DEFERRED`
+   wrinkle.
 2. **Subprocess quality gates as a termination verdict** — `--autonomous-gate
    "pytest"` with timeout and process-tree kill. jaato already has the ceilings
    (`budget_control`) and the gate slot (completion processors); what it lacks
