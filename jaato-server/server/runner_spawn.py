@@ -346,7 +346,8 @@ def build_session_envelope(
     needs.
 
     Fallback rules (no hardcoded defaults):
-    - ``model_name``: profile.model → ``session_env["MODEL_NAME"]``.
+    - ``model_name``: profile.model → ``model_tiers[initial].model``
+      → ``session_env["MODEL_NAME"]``.
       Empty if neither declares; runner-side ``_validate_envelope``
       raises ``BootstrapError(stage="validate")`` audibly.
     - ``provider_name``: profile.provider → ``session_env["JAATO_PROVIDER"]``.
@@ -382,7 +383,14 @@ def build_session_envelope(
 
     if profile is not None:
         provider_name = getattr(profile, "provider", None) or ""
-        model_name = getattr(profile, "model", None) or ""
+        # Same source the bootstrap gate uses (core._profile_binds_a_model):
+        # flat ``model``, else ``model_tiers[initial].model``.  Reading
+        # ``profile.model`` alone made the gate and the envelope disagree --
+        # a tiers-only profile passed the gate, then the runner rejected the
+        # envelope with "envelope.model_name is empty" and the caller saw a
+        # dropped connection rather than a config error.
+        from shared.model_tiers import bound_model_for_profile
+        model_name = bound_model_for_profile(profile) or ""
         names = list(getattr(profile, "plugins", []) or [])
         preloaded = set(getattr(profile, "preloaded_plugins", set()) or set())
         # v3 (2026-05-14): forward profile.model_tiers to the runner so
