@@ -6339,7 +6339,8 @@ class SessionManager:
         the unload is still crossed after it.
         """
         usage = getattr(state, "budget_usage", None)
-        if not usage:
+        reason = getattr(state, "budget_exhausted_reason", None)
+        if not usage and not reason:
             return False
         rpc = getattr(server, "_runner_rpc", None)
         restorer = getattr(
@@ -6348,7 +6349,7 @@ class SessionManager:
         if not callable(restorer):
             return False
         try:
-            restorer(usage, timeout=5.0)
+            restorer(usage or {}, exhausted_reason=reason, timeout=5.0)
         except Exception as exc:  # noqa: BLE001
             # WARNING, not debug: a budget that silently fails to restore is
             # a ceiling that silently stops applying.
@@ -6359,7 +6360,8 @@ class SessionManager:
             )
             return False
         logger.info(
-            "Restored budget usage for session %s: %s", session_id, usage)
+            "Restored budget usage for session %s: %s%s", session_id, usage,
+            f" (still exhausted: {reason})" if reason else "")
         return True
 
     def _load_session_impl(
@@ -7226,6 +7228,7 @@ class SessionManager:
             # restarted -- and sessions unload on ORPHAN, so a suspend/resume
             # driver is evicted on every wait.
             budget_usage = None
+            budget_exhausted_reason = None
             if session.server is not None:
                 rpc = getattr(session.server, "_runner_rpc", None)
                 if rpc is not None:
@@ -7238,6 +7241,20 @@ class SessionManager:
                         except Exception as exc:  # noqa: BLE001
                             logger.debug(
                                 "budget usage snapshot failed: %s", exc)
+
+                    # The ENFORCEMENT latch travels with the usage. Usage
+                    # alone left a reloaded session at its ceiling with no
+                    # memory of being stopped, so it served one more turn.
+                    reason_reader = getattr(
+                        rpc, "session_get_budget_exhausted_threadsafe", None,
+                    )
+                    if callable(reason_reader):
+                        try:
+                            budget_exhausted_reason = (
+                                reason_reader(timeout=5.0) or None)
+                        except Exception as exc:  # noqa: BLE001
+                            logger.debug(
+                                "budget latch snapshot failed: %s", exc)
 
             # Get workspace file tracking state for persistence
             workspace_files = None
@@ -7292,6 +7309,7 @@ class SessionManager:
                 metadata=subagent_metadata,
                 budget_state=budget_state,
                 budget_usage=budget_usage,
+                budget_exhausted_reason=budget_exhausted_reason,
                 interrupted_turn=session.interrupted_turn,  # For recovery on restart
                 workspace_files=workspace_files,
             )

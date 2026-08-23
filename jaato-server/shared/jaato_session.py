@@ -7952,6 +7952,27 @@ NOTES
         self._budget_tracker.restore_usage(usage)
         logger.info("budget: restored usage after reload: %s", usage)
 
+    def restore_budget_exhausted(self, reason: Optional[str]) -> None:
+        """Re-assert a ceiling that had already stopped this session.
+
+        Usage alone was not enough.  A reloaded session held usage AT its
+        limit with no memory of having been aborted, so it served one more
+        turn: the rung does re-fire, but from ``_budget_observe_turn`` in the
+        turn's ``finally`` -- after the turn it was supposed to prevent.  A
+        goal that finished inside that turn passed a ceiling that had already
+        fired.
+
+        Restoring the latch makes the refusal land at turn START, which is
+        where a ceiling has to act.
+
+        No-op for an unbudgeted session, and for a session that was never
+        stopped -- absence must not be turned into a refusal.
+        """
+        if not reason:
+            return
+        self._budget_exhausted_reason = reason
+        logger.info("budget: restored exhaustion latch after reload: %s", reason)
+
     def _refuse_if_budget_exhausted(self) -> Optional[str]:
         """Return a refusal reason when an ``abort`` rung has already fired.
 

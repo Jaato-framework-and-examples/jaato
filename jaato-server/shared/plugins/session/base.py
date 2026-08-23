@@ -148,6 +148,14 @@ class SessionState:
     # longer a goal suspends, the more certainly the ceiling meant to bound it
     # resets.
     budget_usage: Optional[Dict[str, float]] = None
+    # Why a budget ceiling STOPPED this session, if it did.  Persisted
+    # alongside the usage above because usage alone was not enough: an abort
+    # rung latches this, and it is what `_refuse_if_budget_exhausted` reads to
+    # turn a crossed ceiling into a refused turn.  Without it a reloaded
+    # session held usage AT the ceiling with no memory of being stopped, so it
+    # served one more turn -- the re-assert lands in that turn's `finally`,
+    # one turn too late -- and a goal finishing inside it sailed through.
+    budget_exhausted_reason: Optional[str] = None
     """Serialized conversation budget for restoration."""
 
     interrupted_turn: Optional[Dict[str, Any]] = None

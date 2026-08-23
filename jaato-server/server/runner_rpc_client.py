@@ -1597,8 +1597,27 @@ class RunnerRPCClient:
             timeout=timeout,
         )
 
+    async def session_get_budget_exhausted(
+        self, *, timeout: Optional[float] = 5.0,
+    ) -> Optional[str]:
+        """Why a budget ceiling stopped this session, or ``None``."""
+        result = await self._call_named(
+            "session.get_budget_exhausted", {}, timeout=timeout,
+        )
+        return result.get("reason")
+
+    def session_get_budget_exhausted_threadsafe(
+        self, *, timeout: Optional[float] = 5.0,
+    ) -> Optional[str]:
+        return self._run_threadsafe(
+            self.session_get_budget_exhausted(timeout=timeout),
+            timeout=timeout,
+        )
+
     async def session_restore_budget_usage(
-        self, usage: Dict[str, float], *, timeout: Optional[float] = 5.0,
+        self, usage: Dict[str, float], *,
+        exhausted_reason: Optional[str] = None,
+        timeout: Optional[float] = 5.0,
     ) -> bool:
         """Re-seed the runner session's budget usage after a reload.
 
@@ -1606,16 +1625,20 @@ class RunnerRPCClient:
         delta -- the caller is restoring a snapshot, not observing new spend.
         """
         result = await self._call_named(
-            "session.restore_budget_usage", {"usage": dict(usage or {})},
+            "session.restore_budget_usage",
+            {"usage": dict(usage or {}), "exhausted_reason": exhausted_reason},
             timeout=timeout,
         )
         return bool(result.get("restored", False))
 
     def session_restore_budget_usage_threadsafe(
-        self, usage: Dict[str, float], *, timeout: Optional[float] = 5.0,
+        self, usage: Dict[str, float], *,
+        exhausted_reason: Optional[str] = None,
+        timeout: Optional[float] = 5.0,
     ) -> bool:
         return self._run_threadsafe(
-            self.session_restore_budget_usage(usage, timeout=timeout),
+            self.session_restore_budget_usage(
+                usage, exhausted_reason=exhausted_reason, timeout=timeout),
             timeout=timeout,
         )
 
