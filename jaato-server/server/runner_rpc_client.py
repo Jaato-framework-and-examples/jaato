@@ -2340,10 +2340,20 @@ class RunnerRPCClient:
         cancel_token: Optional[Any] = None,
         timeout: Optional[float] = None,
         attachments: Optional[List[Dict[str, Any]]] = None,
+        on_result: Optional[Any] = None,
     ) -> str:
         """Phase 3 §7b.2: dispatch ``session.send_message`` to the
         runner.  Long-running — streams output via ``on_output``
         and returns the final response text.
+
+        ``on_result`` receives the FULL result dict before the text is
+        extracted.  The return stays ``str`` because every caller depends on
+        it, but the runner puts more than text there -- notably the typed
+        budget signal (``budget_exhausted`` / ``budget_exhausted_reason`` /
+        ``budget_usage``, rpc.py).  Without this hook those fields died at
+        this boundary: the daemon had the ceiling in hand and dropped it, so
+        a refusal reached clients only as prose and a wake-driven driver
+        waited out its whole timeout.
 
         Args:
             prompt: User message to send to the model.
@@ -2405,6 +2415,8 @@ class RunnerRPCClient:
                 f"session.send_message: unexpected result type "
                 f"{type(response.result).__name__}; expected dict"
             )
+        if on_result is not None:
+            on_result(response.result)
         return str(response.result.get("response", ""))
 
     def session_send_message_threadsafe(
@@ -2416,6 +2428,7 @@ class RunnerRPCClient:
         cancel_token: Optional[Any] = None,
         timeout: Optional[float] = None,
         attachments: Optional[List[Dict[str, Any]]] = None,
+        on_result: Optional[Any] = None,
     ) -> str:
         """Synchronous wrapper for ``session_send_message`` from
         worker threads.  Note: long-running; the future may block
@@ -2434,6 +2447,7 @@ class RunnerRPCClient:
             cancel_token=cancel_token,
             timeout=timeout,
             attachments=attachments,
+            on_result=on_result,
         )
         future = asyncio.run_coroutine_threadsafe(coro, self._loop)
         return future.result(

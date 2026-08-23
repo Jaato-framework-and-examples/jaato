@@ -505,6 +505,16 @@ class SessionTerminatedEvent(Event):
     ``None`` for the non-error reasons (``natural`` /
     ``client_request`` / ``stopped``).
 
+    When ``reason="budget_exhausted"``, the session hit a budget
+    ceiling and REFUSES all further turns -- exhaustion means "this
+    session is done", not "cancel this turn"
+    (:meth:`JaatoSession._refuse_if_budget_exhausted`).  ``details``
+    carries the refusal prose and the per-dimension usage.  Emitted
+    because the refusal short-circuits before any turn runs, so no
+    turn-completion notification fires and a wake-driven driver would
+    otherwise wait out its full timeout and report a generic failure --
+    a ceiling stop indistinguishable from a break.
+
     Canonical pattern (test harness):
 
         client.subscribe_once(EventType.SESSION_TERMINATED, on_done)
@@ -516,9 +526,14 @@ class SessionTerminatedEvent(Event):
     type: EventType = Field(default=EventType.SESSION_TERMINATED)
     session_id: str = ""
     agent_id: Optional[str] = None
-    reason: str = "natural"  # "natural" | "client_request" | "stopped" | "error" | "cascade_cancelled"
+    reason: str = "natural"  # "natural" | "client_request" | "stopped" | "error" | "cascade_cancelled" | "budget_exhausted"
     error_summary: Optional[str] = None  # populated when reason="error"
     error_type: Optional[str] = None     # Python exception class name (e.g. "AnthropicAPIError")
+    # Machine-readable evidence for reasons whose cause is structured.
+    # Populated for ``reason="budget_exhausted"`` with the refusal prose
+    # and the per-dimension usage, so a driver can exit on the ceiling
+    # without substring-matching the output stream.  ``None`` otherwise.
+    details: Optional[Dict[str, Any]] = None
 
 
 class SlotSettledEvent(Event):
