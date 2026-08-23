@@ -167,13 +167,20 @@ def test_spawn_blocks_until_template_ready() -> None:
         mgr.spawn()
         spawn_elapsed = time.monotonic() - t0
 
-        # Template discover empirically takes ~1.5-2s on dev
-        # workstations.  Spawn-blocks-for-READY should take at least
-        # 0.5s (lower bound — discovery isn't instant) and well
-        # under the 30s timeout.
-        assert 0.5 < spawn_elapsed < 30.0, (
-            f"spawn elapsed {spawn_elapsed:.2f}s — expected 0.5s "
-            f"(discover lower-bound) < t < 30s (timeout upper-bound)"
+        # Upper bound only.  There used to be a 0.5s LOWER bound too,
+        # reasoning that "discovery isn't instant" from ~1.5-2s measured on a
+        # dev workstation -- but that measures the MACHINE, not the handshake.
+        # A fast CI runner discovered in 0.46s and turned main red on a
+        # required check, for behaviour that was entirely correct.
+        #
+        # The causal property this test exists for is asserted directly below:
+        # ``request_fork_slot`` succeeding with NO sleep proves spawn returned
+        # only after READY. That holds however fast discovery is, so the floor
+        # was a proxy for something already covered -- and the only thing it
+        # could ever catch on its own was a quick machine.
+        assert spawn_elapsed < 30.0, (
+            f"spawn elapsed {spawn_elapsed:.2f}s — expected well under the "
+            f"30s ready-handshake timeout"
         )
 
         # Immediately try fork-slot — should succeed because
