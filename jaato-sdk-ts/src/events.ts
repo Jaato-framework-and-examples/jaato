@@ -983,6 +983,9 @@ export type AgentId5 = string | null;
 export type Reason = string;
 export type ErrorSummary1 = string | null;
 export type ErrorType1 = string | null;
+export type Details = {
+  [k: string]: unknown;
+} | null;
 /**
  * All event types in the protocol.
  */
@@ -5276,7 +5279,7 @@ export type Timestamp41 = string;
 export type Error3 = string;
 export type ErrorType2 = string;
 export type Recoverable = boolean;
-export type Details = {
+export type Details1 = {
   [k: string]: unknown;
 } | null;
 /**
@@ -13827,6 +13830,16 @@ export interface AgentErrorEvent {
  * ``None`` for the non-error reasons (``natural`` /
  * ``client_request`` / ``stopped``).
  *
+ * When ``reason="budget_exhausted"``, the session hit a budget
+ * ceiling and REFUSES all further turns -- exhaustion means "this
+ * session is done", not "cancel this turn"
+ * (:meth:`JaatoSession._refuse_if_budget_exhausted`).  ``details``
+ * carries the refusal prose and the per-dimension usage.  Emitted
+ * because the refusal short-circuits before any turn runs, so no
+ * turn-completion notification fires and a wake-driven driver would
+ * otherwise wait out its full timeout and report a generic failure --
+ * a ceiling stop indistinguishable from a break.
+ *
  * Canonical pattern (test harness):
  *
  *     client.subscribe_once(EventType.SESSION_TERMINATED, on_done)
@@ -13843,6 +13856,7 @@ export interface SessionTerminatedEvent {
   reason?: Reason;
   error_summary?: ErrorSummary1;
   error_type?: ErrorType1;
+  details?: Details;
 }
 /**
  * Session was loaded from disk and the first client just attached.
@@ -14403,7 +14417,7 @@ export interface ErrorEvent {
   error?: Error3;
   error_type?: ErrorType2;
   recoverable?: Recoverable;
-  details?: Details;
+  details?: Details1;
 }
 /**
  * API retry notification with exponential backoff.

@@ -4269,6 +4269,48 @@ class JaatoServer:
         # ride the first send to the runner session's multimodal path.
         self._start_model_thread(text, attachments=attachments)
 
+    def _emit_budget_refusal_if_exhausted(self, result: Any) -> bool:
+        """Emit ``SessionTerminatedEvent(reason="budget_exhausted")`` when the
+        send result reports a ceiling refusal.  Returns True if emitted.
+
+        A budget refusal never runs a turn: ``JaatoSession.send_message``
+        short-circuits with a log line, a PROSE output chunk and a string
+        return, so no turn-completion notification is produced and the normal
+        ``on_session_quiescent`` path is never reached.  A wake-driven client
+        therefore had nothing to wait for -- it waited out its full timeout and
+        reported a generic failure, making a correct ceiling stop
+        indistinguishable from a break.
+
+        ``SessionTerminatedEvent`` rather than a new event type or an
+        ``ErrorEvent``: it is the terminal event drivers already subscribe to
+        (the canonical wait pattern in its own docstring), ``reason`` is an
+        open vocabulary, and exhaustion genuinely means the SESSION is done --
+        it refuses all further turns, not just this one.  Filing it as an
+        error would mischaracterise a working ceiling as a failure.
+
+        Extracted so it can be tested by CALLING it: inline in the model
+        thread it is reachable only through a live runner.
+        """
+        if not isinstance(result, dict) or not result.get("budget_exhausted"):
+            return False
+        from jaato_sdk.events import SessionTerminatedEvent
+        reason_text = result.get("budget_exhausted_reason") or "budget exhausted"
+        self._terminal_reason = "budget_exhausted"
+        logger.info(
+            "session %s stopped at its budget ceiling: %s",
+            self.session_id or "", reason_text,
+        )
+        self.emit(SessionTerminatedEvent(
+            session_id=self.session_id or "",
+            agent_id=self._main_agent_id,
+            reason="budget_exhausted",
+            details={
+                "reason": reason_text,
+                "usage": dict(result.get("budget_usage") or {}),
+            },
+        ))
+        return True
+
     def _build_send_message_notification_handler(self):
         """Build the per-call ``on_notification`` demuxer used by
         ``_start_model_thread``'s runner-RPC ``session.send_message``.
@@ -4757,12 +4799,20 @@ class JaatoServer:
                 # Run in workspace context so file operations use client's CWD
                 # Also apply session env so provider/tools can access session-specific config
                 with server._with_session_env(), server._in_workspace():
+                    # The runner puts a TYPED budget signal on the send result
+                    # (rpc.py).  Capture it: a budget refusal short-circuits
+                    # before any turn runs, so no turn-completion notification
+                    # fires and a driver waiting on a terminal event would sit
+                    # out its whole timeout and then report a generic failure.
+                    _send_result: Dict[str, Any] = {}
                     _rpc.session_send_message_threadsafe(
                         prompt,
                         on_output=output_callback,
                         on_notification=notification_handler,
                         attachments=attachments,
+                        on_result=_send_result.update,
                     )
+                    server._emit_budget_refusal_if_exhausted(_send_result)
 
                     # Auto-continuation for formatter feedback
                     # When formatters detect errors in model text output (syntax errors,
