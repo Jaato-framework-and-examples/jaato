@@ -424,6 +424,18 @@ def build_session_envelope(
             _budget = _effective
         if _budget is not None:
             budget_control_dict = _budget.to_dict()
+        # Record the EFFECTIVE budget (post cascade-clamp) on the server so
+        # ``_save_session`` can persist what this session ACTUALLY ran under.
+        # The profile is the only vehicle that carries a budget to the runner,
+        # so a budget declared anywhere else -- notably ``cascade_budget_set``
+        # on the driver, where limits are a per-RUN operator choice rather
+        # than a property of the agent -- has nothing to restore from once the
+        # session unloads, and the revived session runs UNBUDGETED by
+        # construction.  Persisting the resolved config here is what lets the
+        # restore path re-attach it (session_manager: ``state.budget_control``
+        # -> the rebuilt profile), the same way ``profile_spec`` lets an
+        # inline session restore its own recipe.
+        server._effective_budget_control = budget_control_dict
         # Phase 4 §C: carry the full profile.plugin_configs at the
         # envelope's top level (schema v2) so auto-loaded plugins not
         # named in profile.plugins (e.g. permission) receive their

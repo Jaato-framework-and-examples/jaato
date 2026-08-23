@@ -7879,7 +7879,7 @@ NOTES
         # This ensures the budget snapshot includes current turn's conversation tokens
         self._update_conversation_budget()
 
-    def get_budget_usage(self) -> Dict[str, float]:
+    def get_budget_usage(self, *, tracker_only: bool = False) -> Dict[str, float]:
         """This session's ABSOLUTE budget consumption, per dimension.
 
         The authoritative figure: it is what the per-session
@@ -7892,9 +7892,27 @@ NOTES
         Falls back to summing ``spend_total`` over ``turn_accounting`` when
         the session has no tracker (unbudgeted sessions still contribute to
         a cascade pool).  Returns ``{}`` when neither source has anything.
+
+        ``tracker_only=True`` suppresses that fallback and is REQUIRED for
+        persistence.  The two branches return incompatible shapes under one
+        name: the tracker yields every declared dimension, the fallback
+        yields a single synthetic ``tokens`` key.  A caller that persists
+        the fallback silently OVERWRITES a real snapshot with one that can
+        never satisfy a ``turns`` / ``usd`` / ``seconds`` ceiling -- so an
+        unbudgeted reload does not merely stop enforcing, it destroys the
+        snapshot the next reload would have enforced from.  Observed live
+        2026-08-23: a session file holding ``{"tokens": 247004.0}`` where
+        five dimensions had been in flight, which is the fallback's
+        fingerprint and the proof the reloaded session had no tracker.
+
+        Cascade-pool reconciliation still wants the fallback (an unbudgeted
+        child spends real tokens against the shared pot), so it stays --
+        behind an explicit opt-in rather than as the silent default.
         """
         if self._budget_tracker is not None:
             return self._budget_tracker.usage.as_dict()
+        if tracker_only:
+            return {}
         spend = sum(
             int(t.get("spend_total", 0) or 0) for t in self._turn_accounting
         )

@@ -156,6 +156,18 @@ class SessionState:
     # served one more turn -- the re-assert lands in that turn's `finally`,
     # one turn too late -- and a goal finishing inside it sailed through.
     budget_exhausted_reason: Optional[str] = None
+    # The EFFECTIVE ``budget_control`` config this session ran under, as the
+    # dict ``BudgetControlConfig.to_dict`` produces.  DISTINCT from
+    # ``budget_usage`` (what was spent) -- this is the CEILING itself.
+    #
+    # Needed because a budget reaches the runner ONLY via the profile, and a
+    # budget declared outside the profile (``cascade_budget_set`` on a driver,
+    # where limits are a per-run operator choice) leaves nothing for restore
+    # to rebuild from: the revived session came back with no BudgetTracker at
+    # all, so no cross-turn ceiling could fire however many resumes ran.
+    # Persisting the resolved ceiling lets restore re-attach it to the
+    # rebuilt profile.  ``None`` for genuinely unbudgeted sessions.
+    budget_control: Optional[Dict[str, Any]] = None
     """Serialized conversation budget for restoration."""
 
     interrupted_turn: Optional[Dict[str, Any]] = None
