@@ -350,20 +350,26 @@ def open_session(client_cls, *, profile=None, agent=None, agent_params=None,
     host-tool specs, same shape as :meth:`register_client_tools`) is registered
     after connect but before create_session, so host-tool clients can use the
     facade instead of the low-level connect/register/create dance.
-    ``config_root`` and ``apparmor`` are ``IPCClient``-only ctor args
-    (read-only-config root override; opt-in per-session AppArmor confinement);
-    ``on_status_change`` is an ``IPCRecoveryClient``-only ctor arg
-    (reconnection-status callback).  Each is forwarded to the constructor only
-    when set — passing an ``IPCClient``-only arg to ``IPCRecoveryClient.session``
-    (or ``on_status_change`` to a plain ``IPCClient``) is a fail-loud ctor error
-    by design.
+    ``config_root`` (read-only-config root override) and ``apparmor`` (opt-in
+    per-session AppArmor confinement) are accepted by BOTH client classes.
+    They were ``IPCClient``-only until 2026-08-23, and this docstring used to
+    record that as deliberate — it was not.  ``on_status_change`` is the only
+    genuinely asymmetric arg: it is an ``IPCRecoveryClient``-only
+    reconnection-status callback, meaningless on a plain ``IPCClient``.
+    Each is forwarded to the constructor only when set.
     """
     ctor_kwargs = dict(client_type=client_type, auto_start=auto_start,
                        env_file=env_file, workspace_path=workspace_path,
                        presentation=presentation)
-    # IPCClient-only ctor args, forwarded only when set (passing them to
-    # IPCRecoveryClient, which lacks them, is a fail-loud ctor error by design —
-    # same pattern as on_status_change, which is IPCRecoveryClient-only).
+    # Accepted by BOTH client classes since 2026-08-23; forwarded only when
+    # set so the constructors keep their own defaults.  The previous comment
+    # here claimed they were IPCClient-only "by design, same pattern as
+    # on_status_change" — a false analogy that made an accident look
+    # deliberate.  on_status_change IS recovery-only (a reconnection concept);
+    # config_root/apparmor are ordinary session bootstrap config that goes
+    # straight into ClientConfigRequest, and withholding them from recovery
+    # clients left confinement SILENTLY incomplete for anything that had to
+    # survive a daemon restart.
     if config_root is not None:
         ctor_kwargs["config_root"] = config_root
     if apparmor is not None:
