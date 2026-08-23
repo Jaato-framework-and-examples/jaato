@@ -6326,6 +6326,56 @@ class SessionManager:
             return str(pathlib.Path(workspace_path) / ".jaato")
         return None
 
+    def _reattach_budget_ceiling(self, state, restored_profile, session_id) -> bool:
+        """Re-attach the persisted budget CEILING to a rebuilt profile.
+
+        Returns True when a ceiling was attached.  Extracted so it can be
+        tested by CALLING it -- inline in ``_load_session_impl`` it was only
+        reachable through several hundred lines of server construction, and a
+        test that cannot call the code ends up asserting on its source text
+        instead, which survives deleting the very line it means to protect.
+
+        A budget reaches the runner ONLY as ``profile.budget_control``
+        (runner_spawn: ``profile = server._profile`` -> the envelope's wire
+        field -> ``configure(budget_control=...)`` -> the BudgetTracker).  So
+        a budget declared OUTSIDE the profile has no vehicle across a reload:
+        ``cascade_budget_set`` puts limits on the cascade pool, the pool is
+        not re-established on restore, and the profile is deliberately
+        budget-free when limits are a per-run operator choice rather than a
+        property of the agent.  The revived session came back with NO tracker,
+        so its cross-turn ceilings could not fire -- confirmed live
+        2026-08-23, where a ``turns: 2`` ceiling let a goal run three turns
+        and exit 0.
+
+        A profile that declares its own budget WINS: that is authored policy,
+        re-read from disk on every restore, and must not be shadowed by a
+        stale snapshot.  The persisted config fills the gap only where there
+        was no vehicle at all.
+        """
+        persisted = getattr(state, "budget_control", None)
+        if not persisted or restored_profile is None:
+            return False
+        if getattr(restored_profile, "budget_control", None) is not None:
+            return False  # authored policy wins over the snapshot
+        from shared.budget_control import BudgetControlConfig
+        try:
+            restored_profile.budget_control = BudgetControlConfig.from_dict(
+                persisted)
+        except (ValueError, TypeError) as exc:
+            # Loud: a ceiling that fails to rebuild is a ceiling that silently
+            # stops applying.
+            logger.warning(
+                "_load_session: persisted budget ceiling for session %s failed "
+                "to rebuild (%s) -- this session will run UNBUDGETED and its "
+                "cross-turn ceilings will not fire", session_id, exc)
+            return False
+        logger.info(
+            "_load_session: re-attached persisted budget ceiling to session %s "
+            "(limits=%s) -- the profile declares none, so without this the "
+            "revived session runs unbudgeted",
+            session_id, persisted.get("limits"))
+        return True
+
     def _restore_budget_usage(self, server, state, session_id: str) -> bool:
         """Re-seed a reloaded session's budget usage.  Returns True if applied.
 
@@ -6337,11 +6387,46 @@ class SessionManager:
 
         Must run BEFORE the session takes a turn, so a ceiling crossed before
         the unload is still crossed after it.
+
+        Returns True only when the RUNNER confirms it applied the snapshot.
+        The RPC returning normally is NOT that confirmation -- a session that
+        came back unbudgeted answers ``restored: False`` and the ceiling is
+        gone.  Honouring that bool is the difference between an instrument
+        and a decoration.
         """
         usage = getattr(state, "budget_usage", None)
         reason = getattr(state, "budget_exhausted_reason", None)
         if not usage and not reason:
             return False
+        # A snapshot on disk IS the evidence this session was budgeted.  So
+        # the reloaded session MUST have come back with a budget to restore
+        # into -- and the only way the budget reaches the runner is the
+        # profile (runner_spawn.py: ``profile = server._profile`` ->
+        # ``profile.budget_control`` -> the envelope's wire field).  A
+        # profile that failed to rebuild, or rebuilt without its budget,
+        # yields a session with NO BudgetTracker: every cross-turn ceiling
+        # is gone, restore is a no-op, and nothing downstream can tell.
+        #
+        # Checked HERE, before the RPC, because the cause is visible here
+        # and the symptom is not: the restore call returns cleanly either
+        # way.  Verified live 2026-08-23 -- a suspend/resume cascade logged
+        # "Budget control active" exactly ONCE across a run with a reload
+        # (the initial configure), so the revived session ran unbudgeted and
+        # a ``turns: 2`` ceiling never fired however many resumes it took.
+        _profile = getattr(server, "_profile", None)
+        if getattr(_profile, "budget_control", None) is None:
+            logger.warning(
+                "session %s has a persisted budget snapshot (%s) but its "
+                "reloaded profile declares NO budget_control (%s) -- this "
+                "session came back UNBUDGETED and its cross-turn ceilings "
+                "will not fire.  The budget reaches the runner only via the "
+                "profile, so this is a profile-restore failure, not a "
+                "budget-restore failure.",
+                session_id, usage,
+                "no profile was rebuilt" if _profile is None
+                else f"profile {getattr(_profile, 'name', '?')!r} rebuilt "
+                     "without budget_control",
+            )
         rpc = getattr(server, "_runner_rpc", None)
         restorer = getattr(
             rpc, "session_restore_budget_usage_threadsafe", None,
@@ -6349,7 +6434,8 @@ class SessionManager:
         if not callable(restorer):
             return False
         try:
-            restorer(usage or {}, exhausted_reason=reason, timeout=5.0)
+            applied = restorer(usage or {}, exhausted_reason=reason,
+                               timeout=5.0)
         except Exception as exc:  # noqa: BLE001
             # WARNING, not debug: a budget that silently fails to restore is
             # a ceiling that silently stops applying.
@@ -6357,6 +6443,22 @@ class SessionManager:
                 "budget usage restore failed for session %s (%s) -- this "
                 "session's cross-turn ceilings restart from zero",
                 session_id, exc,
+            )
+            return False
+        if not applied:
+            # The RPC succeeded and the runner said it restored NOTHING.
+            # That is the reloaded session reporting it has no BudgetTracker
+            # (rpc.py ``_handle_session_restore_budget_usage`` -> restored
+            # False), i.e. it came back UNBUDGETED -- every cross-turn
+            # ceiling is now gone even though a snapshot existed to enforce
+            # one.  Logging this as success is what made the whole
+            # suspend/resume budget arc invisible: the observable said
+            # "Restored" whether or not anything was.
+            logger.warning(
+                "budget usage restore did NOT apply for session %s "
+                "(snapshot %s) -- the reloaded session reports no budget "
+                "tracker, so its cross-turn ceilings restart from zero",
+                session_id, usage,
             )
             return False
         logger.info(
@@ -6504,6 +6606,8 @@ class SessionManager:
                     state.profile_name, session_id, profile_err,
                     state.workspace_path, restore_config_root,
                 )
+
+        self._reattach_budget_ceiling(state, restored_profile, session_id)
 
         # Rebind the agent PERSONA on restore.  Persisting + restoring
         # ``agent_name`` (below, on the envelope) restores the agent IDENTITY
@@ -7229,6 +7333,14 @@ class SessionManager:
             # driver is evicted on every wait.
             budget_usage = None
             budget_exhausted_reason = None
+            # The CEILING this session ran under, recorded on the server when
+            # its runner envelope was built (runner_spawn: server.
+            # _effective_budget_control).  Read from the server rather than
+            # the profile: a cascade-declared budget never touches the
+            # profile, and the effective value is post-clamp.
+            budget_control_cfg = getattr(
+                session.server, "_effective_budget_control", None,
+            ) if session.server is not None else None
             if session.server is not None:
                 rpc = getattr(session.server, "_runner_rpc", None)
                 if rpc is not None:
@@ -7237,7 +7349,15 @@ class SessionManager:
                     )
                     if callable(usage_reader):
                         try:
-                            budget_usage = usage_reader(timeout=5.0) or None
+                            # tracker_only: persistence must never write the
+                            # unbudgeted ``{"tokens": N}`` fallback over a
+                            # real multi-dimension snapshot.  Doing so turns
+                            # "the ceiling stopped applying" into "the
+                            # ceiling can never be restored again" -- the
+                            # only layer of this class that poisons the
+                            # input to its own fix.
+                            budget_usage = usage_reader(
+                                tracker_only=True, timeout=5.0) or None
                         except Exception as exc:  # noqa: BLE001
                             logger.debug(
                                 "budget usage snapshot failed: %s", exc)
@@ -7299,6 +7419,7 @@ class SessionManager:
                 # named-profile ``profile_name`` ("<inline>") isn't
                 # re-resolvable.  None for named-profile sessions.
                 profile_spec=session.inline_profile_spec,
+                budget_control=budget_control_cfg,
                 workspace_path=session.workspace_path,
                 config_root=session.config_root,
                 # Persist confinement so orphan-revive / disk-restore re-applies

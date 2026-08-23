@@ -250,6 +250,10 @@ def serialize_session_state(state: SessionState) -> Dict[str, Any]:
         # dropped and the persisted JSON carried no key at all.
         'budget_usage': state.budget_usage,
         'budget_exhausted_reason': state.budget_exhausted_reason,
+        # The CEILING (distinct from budget_usage, the spend).  This
+        # serializer writes a FIXED key list -- a field absent here
+        # never reaches disk however well it is wired elsewhere.
+        'budget_control': state.budget_control,
         'interrupted_turn': state.interrupted_turn,
         'session_state': state.session_state,
     }
@@ -295,6 +299,7 @@ def deserialize_session_state(data: Dict[str, Any]) -> SessionState:
         budget_state=data.get('budget_state'),
         budget_usage=data.get('budget_usage'),
         budget_exhausted_reason=data.get('budget_exhausted_reason'),
+        budget_control=data.get('budget_control'),
         interrupted_turn=data.get('interrupted_turn'),
         session_state=data.get('session_state'),
     )

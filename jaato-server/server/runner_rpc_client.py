@@ -1581,19 +1581,27 @@ class RunnerRPCClient:
         )
 
     async def session_get_budget_usage(
-        self, *, timeout: Optional[float] = 5.0,
+        self, *, tracker_only: bool = False, timeout: Optional[float] = 5.0,
     ) -> Dict[str, Any]:
-        """The session's ABSOLUTE budget consumption, per dimension."""
+        """The session's ABSOLUTE budget consumption, per dimension.
+
+        ``tracker_only=True`` is MANDATORY for persistence: without it an
+        unbudgeted session answers with the synthetic ``{"tokens": N}``
+        fallback, which a save then writes over a real multi-dimension
+        snapshot.  See :meth:`JaatoSession.get_budget_usage`.
+        """
         result = await self._call_named(
-            "session.get_budget_usage", {}, timeout=timeout,
+            "session.get_budget_usage", {"tracker_only": tracker_only},
+            timeout=timeout,
         )
         return dict(result.get("usage", {}))
 
     def session_get_budget_usage_threadsafe(
-        self, *, timeout: Optional[float] = 5.0,
+        self, *, tracker_only: bool = False, timeout: Optional[float] = 5.0,
     ) -> Dict[str, Any]:
         return self._run_threadsafe(
-            self.session_get_budget_usage(timeout=timeout),
+            self.session_get_budget_usage(
+                tracker_only=tracker_only, timeout=timeout),
             timeout=timeout,
         )
 

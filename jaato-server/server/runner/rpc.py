@@ -651,7 +651,7 @@ class RunnerRPC:
             # the per-session BudgetTracker accumulated it (per RESPONSE).
             # A cascade pool reconciles against this rather than summing an
             # event stream, which has proven both duplicable and droppable.
-            return self._handle_session_get_budget_usage()
+            return self._handle_session_get_budget_usage(env.args)
 
         if env.method == "session.restore_budget_usage":
             # Counterpart to get_budget_usage.  Without it a reloaded session
@@ -1596,18 +1596,26 @@ class RunnerRPC:
             latch(reason)
         return True, {"restored": bool(usage), "exhausted": bool(reason)}
 
-    def _handle_session_get_budget_usage(self) -> "tuple[bool, Any]":
+    def _handle_session_get_budget_usage(
+        self, args: Optional[Dict[str, Any]] = None,
+    ) -> "tuple[bool, Any]":
         """Read-only snapshot of the session's absolute budget consumption.
 
         Wrapped as ``{"usage": {...}}`` for symmetry with the other read
         handlers.  Empty dict when the session tracks no budget.
+
+        ``args["tracker_only"]`` forwards to
+        :meth:`JaatoSession.get_budget_usage` and suppresses the unbudgeted
+        ``{"tokens": N}`` fallback -- see that method for why persisting the
+        fallback destroys the snapshot it overwrites.
         """
         ready, err, session = self._require_ready_session()
         if not ready:
             return err
+        tracker_only = bool((args or {}).get("tracker_only", False))
         try:
             getter = getattr(session, "get_budget_usage", None)
-            usage = getter() if callable(getter) else {}
+            usage = getter(tracker_only=tracker_only) if callable(getter) else {}
         except Exception as exc:  # noqa: BLE001
             return False, {"error": f"session.get_budget_usage: {exc}"}
         return True, {"usage": dict(usage or {})}
