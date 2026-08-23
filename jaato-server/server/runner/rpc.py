@@ -3082,7 +3082,26 @@ class RunnerRPC:
         elif not isinstance(response, str):
             response = str(response)
 
-        return True, {"response": response}
+        # Typed budget-exhaustion signal.  A ceiling that only announces
+        # itself in prose ("[Generation cancelled (...)]" plus a system line)
+        # cannot be told from a normal finish by a driver -- it would have to
+        # substring-match, which is the parse-the-log shape budgets exist to
+        # replace.  Reported by a suspend/resume cascade whose operator needs
+        # "stopped at the ceiling" to exit non-zero rather than look achieved.
+        result = {"response": response}
+        # getattr with a default, NOT try/except: a bare except here would
+        # swallow a renamed accessor and silently emit no signal at all --
+        # the failure mode is a ceiling that stops working invisibly.
+        _reason_fn = getattr(session, "budget_exhausted_reason", None)
+        reason = _reason_fn() if callable(_reason_fn) else None
+        if reason:
+            result["budget_exhausted"] = True
+            result["budget_exhausted_reason"] = reason
+            try:
+                result["budget_usage"] = session.get_budget_usage() or {}
+            except Exception:  # noqa: BLE001
+                pass
+        return True, result
 
     # ----------------------------------------------------------------------
     # §7c step 6.6.4.2: notification-emitting callback wiring for the
