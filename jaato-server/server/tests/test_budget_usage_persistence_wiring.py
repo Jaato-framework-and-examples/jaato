@@ -90,16 +90,44 @@ class TestTheSeamsExist:
             "turns": 2.0}
 
     @pytest.mark.parametrize("usage", [None, {}])
-    def test_load_skips_when_there_is_no_snapshot(self, usage):
+    def test_load_skips_when_there_is_nothing_to_restore(self, usage):
+        """Nothing to restore = neither usage NOR the exhaustion latch.
+
+        Both fields are pinned explicitly: a MagicMock auto-creates
+        ``budget_exhausted_reason`` as a truthy Mock, so leaving it unset made
+        this assert the opposite of what it reads -- the same auto-attribute
+        trap that bit the cascade-clamp and sandbox tests elsewhere.
+        """
         from unittest.mock import MagicMock
         from server.session_manager import SessionManager
         rpc = MagicMock()
         server = MagicMock(); server._runner_rpc = rpc
-        state = MagicMock(); state.budget_usage = usage
+        state = MagicMock()
+        state.budget_usage = usage
+        state.budget_exhausted_reason = None
 
         assert SessionManager._restore_budget_usage(
             MagicMock(), server, state, "sess-1") is False
         rpc.session_restore_budget_usage_threadsafe.assert_not_called()
+
+    def test_load_restores_a_latch_even_without_usage(self):
+        """A ceiling that stopped the session must be re-asserted.
+
+        Usage could legitimately be absent (older snapshot) while the latch is
+        present; refusing to restore then would serve turns past a ceiling.
+        """
+        from unittest.mock import MagicMock
+        from server.session_manager import SessionManager
+        rpc = MagicMock()
+        server = MagicMock(); server._runner_rpc = rpc
+        state = MagicMock()
+        state.budget_usage = None
+        state.budget_exhausted_reason = "budget_exhausted (turns 100%)"
+
+        assert SessionManager._restore_budget_usage(
+            MagicMock(), server, state, "sess-1") is True
+        kwargs = rpc.session_restore_budget_usage_threadsafe.call_args.kwargs
+        assert kwargs["exhausted_reason"] == "budget_exhausted (turns 100%)"
 
     def test_a_failing_restore_is_reported_not_swallowed(self, caplog):
         """A ceiling that silently stops applying is the worst outcome."""

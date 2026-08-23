@@ -658,6 +658,11 @@ class RunnerRPC:
             # ran with a zeroed tracker and no cross-turn ceiling could fire.
             return self._handle_session_restore_budget_usage(env.args)
 
+        if env.method == "session.get_budget_exhausted":
+            # The enforcement latch, read at save time so it can travel with
+            # the usage snapshot.
+            return self._handle_session_get_budget_exhausted()
+
         if env.method == "session.get_context_limit":
             # Phase 3 §7b.1 precursor: read-only context-window
             # size in tokens.  Daemon-side falls back to this
@@ -1556,6 +1561,14 @@ class RunnerRPC:
         return True, apply(
             params.get("rungs") or [], params.get("pool_pressure"))
 
+    def _handle_session_get_budget_exhausted(self) -> "tuple[bool, Any]":
+        """Why a budget ceiling stopped this session, or ``None``."""
+        ready, err, session = self._require_ready_session()
+        if not ready:
+            return err
+        reader = getattr(session, "budget_exhausted_reason", None)
+        return True, {"reason": reader() if callable(reader) else None}
+
     def _handle_session_restore_budget_usage(
         self, args: Dict[str, Any],
     ) -> "tuple[bool, Any]":
@@ -1569,12 +1582,19 @@ class RunnerRPC:
         ready, err, session = self._require_ready_session()
         if not ready:
             return err
-        usage = (args or {}).get("usage") or {}
+        args = args or {}
+        usage = args.get("usage") or {}
+        reason = args.get("exhausted_reason")
         restorer = getattr(session, "restore_budget_usage", None)
         if not callable(restorer):
             return True, {"restored": False}
         restorer(usage)
-        return True, {"restored": bool(usage)}
+        # The ENFORCEMENT latch travels with the usage: restoring one without
+        # the other leaves a session at its ceiling that still serves a turn.
+        latch = getattr(session, "restore_budget_exhausted", None)
+        if callable(latch):
+            latch(reason)
+        return True, {"restored": bool(usage), "exhausted": bool(reason)}
 
     def _handle_session_get_budget_usage(self) -> "tuple[bool, Any]":
         """Read-only snapshot of the session's absolute budget consumption.
