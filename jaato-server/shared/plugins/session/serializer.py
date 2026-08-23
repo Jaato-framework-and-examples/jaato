@@ -244,6 +244,11 @@ def serialize_session_state(state: SessionState) -> Dict[str, Any]:
         'agent_name': state.agent_name,
         'history': serialize_history(state.history),
         'budget_state': state.budget_state,
+        # budget_control usage.  Enumerated explicitly like every other field
+        # here -- adding it to the dataclass alone was NOT enough: this
+        # serializer writes a fixed key list, so the field was silently
+        # dropped and the persisted JSON carried no key at all.
+        'budget_usage': state.budget_usage,
         'interrupted_turn': state.interrupted_turn,
         'session_state': state.session_state,
     }
@@ -287,6 +292,7 @@ def deserialize_session_state(data: Dict[str, Any]) -> SessionState:
         sandbox_mode=data.get('sandbox_mode'),
         agent_name=data.get('agent_name'),
         budget_state=data.get('budget_state'),
+        budget_usage=data.get('budget_usage'),
         interrupted_turn=data.get('interrupted_turn'),
         session_state=data.get('session_state'),
     )
