@@ -1597,6 +1597,28 @@ class RunnerRPCClient:
             timeout=timeout,
         )
 
+    async def session_restore_budget_usage(
+        self, usage: Dict[str, float], *, timeout: Optional[float] = 5.0,
+    ) -> bool:
+        """Re-seed the runner session's budget usage after a reload.
+
+        Counterpart to :meth:`session_get_budget_usage`.  Absolute, not a
+        delta -- the caller is restoring a snapshot, not observing new spend.
+        """
+        result = await self._call_named(
+            "session.restore_budget_usage", {"usage": dict(usage or {})},
+            timeout=timeout,
+        )
+        return bool(result.get("restored", False))
+
+    def session_restore_budget_usage_threadsafe(
+        self, usage: Dict[str, float], *, timeout: Optional[float] = 5.0,
+    ) -> bool:
+        return self._run_threadsafe(
+            self.session_restore_budget_usage(usage, timeout=timeout),
+            timeout=timeout,
+        )
+
     async def session_get_turn_accounting(
         self, *, timeout: Optional[float] = 10.0,
     ) -> list:

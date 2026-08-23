@@ -653,6 +653,11 @@ class RunnerRPC:
             # event stream, which has proven both duplicable and droppable.
             return self._handle_session_get_budget_usage()
 
+        if env.method == "session.restore_budget_usage":
+            # Counterpart to get_budget_usage.  Without it a reloaded session
+            # ran with a zeroed tracker and no cross-turn ceiling could fire.
+            return self._handle_session_restore_budget_usage(env.args)
+
         if env.method == "session.get_context_limit":
             # Phase 3 §7b.1 precursor: read-only context-window
             # size in tokens.  Daemon-side falls back to this
@@ -1550,6 +1555,26 @@ class RunnerRPC:
             return False, {"error": "session has no apply_cascade_degrade"}
         return True, apply(
             params.get("rungs") or [], params.get("pool_pressure"))
+
+    def _handle_session_restore_budget_usage(
+        self, args: Dict[str, Any],
+    ) -> "tuple[bool, Any]":
+        """Re-seed the runner session's budget usage from a snapshot.
+
+        Args (over the wire): ``{"usage": {"turns": 2.0, ...}}``.
+
+        Returns ``(True, {"restored": bool})`` -- False when the session runs
+        unbudgeted, which is not an error.
+        """
+        ready, err, session = self._require_ready_session()
+        if not ready:
+            return err
+        usage = (args or {}).get("usage") or {}
+        restorer = getattr(session, "restore_budget_usage", None)
+        if not callable(restorer):
+            return True, {"restored": False}
+        restorer(usage)
+        return True, {"restored": bool(usage)}
 
     def _handle_session_get_budget_usage(self) -> "tuple[bool, Any]":
         """Read-only snapshot of the session's absolute budget consumption.

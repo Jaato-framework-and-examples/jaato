@@ -6326,6 +6326,42 @@ class SessionManager:
             return str(pathlib.Path(workspace_path) / ".jaato")
         return None
 
+    def _restore_budget_usage(self, server, state, session_id: str) -> bool:
+        """Re-seed a reloaded session's budget usage.  Returns True if applied.
+
+        Extracted so it can be tested by CALLING it.  The first version of
+        this lived inline in ``_load_session_impl`` and its test grepped the
+        method source for the RPC name -- which survived deleting the call
+        line, because the ``getattr`` lookup above it still mentioned the
+        name.  Checking that a symbol is mentioned is not checking it is used.
+
+        Must run BEFORE the session takes a turn, so a ceiling crossed before
+        the unload is still crossed after it.
+        """
+        usage = getattr(state, "budget_usage", None)
+        if not usage:
+            return False
+        rpc = getattr(server, "_runner_rpc", None)
+        restorer = getattr(
+            rpc, "session_restore_budget_usage_threadsafe", None,
+        ) if rpc is not None else None
+        if not callable(restorer):
+            return False
+        try:
+            restorer(usage, timeout=5.0)
+        except Exception as exc:  # noqa: BLE001
+            # WARNING, not debug: a budget that silently fails to restore is
+            # a ceiling that silently stops applying.
+            logger.warning(
+                "budget usage restore failed for session %s (%s) -- this "
+                "session's cross-turn ceilings restart from zero",
+                session_id, exc,
+            )
+            return False
+        logger.info(
+            "Restored budget usage for session %s: %s", session_id, usage)
+        return True
+
     def _load_session_impl(
         self,
         session_id: str,
@@ -6672,6 +6708,8 @@ class SessionManager:
         # 6.6.1.3 at commit b40d2439); use the existing
         # ``session.snapshot_instruction_budget`` (§7c step 6.1
         # (2/3) at commit 1043bfde) for the post-restore emit.
+        self._restore_budget_usage(server, state, session_id)
+
         if state.budget_state:
             rpc = getattr(server, "_runner_rpc", None)
             if rpc is not None:
@@ -7181,6 +7219,26 @@ class SessionManager:
                                 exc,
                             )
 
+            # budget_control usage.  Separate from ``budget_state`` above
+            # (that is the conversation budget).  BudgetTracker accumulates in
+            # memory only, so without this an unloaded session came back with
+            # a zeroed tracker and every cross-turn ceiling silently
+            # restarted -- and sessions unload on ORPHAN, so a suspend/resume
+            # driver is evicted on every wait.
+            budget_usage = None
+            if session.server is not None:
+                rpc = getattr(session.server, "_runner_rpc", None)
+                if rpc is not None:
+                    usage_reader = getattr(
+                        rpc, "session_get_budget_usage_threadsafe", None,
+                    )
+                    if callable(usage_reader):
+                        try:
+                            budget_usage = usage_reader(timeout=5.0) or None
+                        except Exception as exc:  # noqa: BLE001
+                            logger.debug(
+                                "budget usage snapshot failed: %s", exc)
+
             # Get workspace file tracking state for persistence
             workspace_files = None
             monitor = self._workspace_monitors.get(session.session_id)
@@ -7233,6 +7291,7 @@ class SessionManager:
                 agent_name=agent_name,
                 metadata=subagent_metadata,
                 budget_state=budget_state,
+                budget_usage=budget_usage,
                 interrupted_turn=session.interrupted_turn,  # For recovery on restart
                 workspace_files=workspace_files,
             )

@@ -137,6 +137,17 @@ class SessionState:
     """
 
     budget_state: Optional[Dict[str, Any]] = None
+    # Accumulated budget_control usage (usd / tokens / seconds / tool_calls /
+    # turns).  DISTINCT from ``budget_state`` above, which is the
+    # conversation/instruction budget -- a different subsystem entirely.
+    #
+    # Persisted because BudgetTracker accumulates in memory only: an unloaded
+    # session came back with a zeroed tracker, so every CROSS-TURN ceiling
+    # silently restarted.  Sessions unload on ORPHAN, so a suspend/resume
+    # driver that disconnects during a wait is evicted every time -- the
+    # longer a goal suspends, the more certainly the ceiling meant to bound it
+    # resets.
+    budget_usage: Optional[Dict[str, float]] = None
     """Serialized conversation budget for restoration."""
 
     interrupted_turn: Optional[Dict[str, Any]] = None
