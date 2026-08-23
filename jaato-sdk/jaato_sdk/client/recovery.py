@@ -163,6 +163,9 @@ class IPCRecoveryClient:
         on_status_change: Optional[StatusCallback] = None,
         min_protocol_version: Optional[str] = None,
         presentation: Optional[Any] = None,
+        config_root: Optional[str] = None,
+        apparmor: bool = False,
+        autostart_timeout: float = 120.0,
     ):
         """Initialize the recovery client.
 
@@ -179,6 +182,25 @@ class IPCRecoveryClient:
                 see ``IPCClient.__init__`` for semantics.  Pass
                 ``ClientType.TERMINAL`` for the TUI, ``API`` for
                 headless / batch / cascade harnesses.
+            config_root: Forwarded to the inner IPCClient — where the
+                daemon reads framework config for sessions on this
+                connection.  Was IPCClient-ONLY, which left a
+                recovery-driven session at ``config_root=None`` with no
+                route to set it: AppArmor composition then silently
+                dropped every plugin rule gated on config_root and
+                file_edit lost its backup subtree, while the profile
+                still loaded and still logged ``runner confined
+                (enforce)``.  An incomplete confinement profile that
+                reports success is worse than a missing kwarg.
+            apparmor: Forwarded to the inner IPCClient — opt-in
+                confinement for sessions on this connection.  A profile
+                can also request it (``apparmor: true``), so this was
+                the one half of the gap with an escape hatch;
+                ``config_root`` had none.
+            autostart_timeout: Forwarded to the inner IPCClient — how
+                long to wait for the daemon socket when auto-starting.
+                Relevant here precisely because recovery forwards
+                ``auto_start``.
             min_protocol_version: Override the inner IPCClient's
                 ``MIN_PROTOCOL_VERSION``. Forwarded verbatim — see
                 ``IPCClient.__init__`` for semantics.
@@ -196,6 +218,9 @@ class IPCRecoveryClient:
         self._on_status_change = on_status_change
         self._min_protocol_version = min_protocol_version
         self._presentation = presentation
+        self._config_root = config_root
+        self._apparmor = apparmor
+        self._autostart_timeout = autostart_timeout
 
         # Load config if not provided
         if config is None:
@@ -343,6 +368,9 @@ class IPCRecoveryClient:
             workspace_path=str(self._workspace_path) if self._workspace_path else None,
             min_protocol_version=self._min_protocol_version,
             presentation=self._presentation,
+            config_root=self._config_root,
+            apparmor=self._apparmor,
+            autostart_timeout=self._autostart_timeout,
         )
 
     async def connect(self, timeout: float = 5.0) -> bool:

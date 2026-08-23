@@ -27,6 +27,7 @@ import inspect
 import pytest
 
 from jaato_sdk import IPCClient, IPCRecoveryClient
+from jaato_sdk.events import ClientType
 
 
 # Members of IPCClient that IPCRecoveryClient deliberately does NOT expose.
@@ -45,8 +46,20 @@ INTENTIONALLY_ABSENT = {
 }
 
 
+# Constructor arguments of IPCClient that IPCRecoveryClient deliberately does
+# NOT accept.  Separate list from INTENTIONALLY_ABSENT because ctor args are a
+# DIFFERENT drift axis -- and one this test was blind to until it bit someone.
+INTENTIONALLY_ABSENT_CTOR_ARGS = {
+    "self": "not an argument",
+}
+
+
 def _public(cls):
     return {name for name in dir(cls) if not name.startswith("_")}
+
+
+def _ctor_args(cls):
+    return set(inspect.signature(cls.__init__).parameters)
 
 
 def test_recovery_client_exposes_everything_ipcclient_does():
@@ -104,3 +117,79 @@ def test_forwarded_methods_keep_a_compatible_signature(name):
         f"IPCClient.{name} accepts -- callers get a TypeError, not a clear "
         f"'not supported'."
     )
+
+
+# ---------------------------------------------------------------------------
+# Constructor-argument parity -- the axis this test used to miss entirely.
+#
+# ``_public`` compares dir(), i.e. METHODS and attributes.  Constructor kwargs
+# are neither, so ``config_root`` / ``apparmor`` / ``autostart_timeout`` were
+# invisible to every check above.  They stayed IPCClient-only for months and
+# were found the same way the payload= gap was: by a user hitting it.
+#
+# ``config_root`` was the one that mattered.  A recovery-driven session got
+# ``config_root=None`` with NO route to set it (unlike ``apparmor``, which a
+# profile can request via ``apparmor: true``).  AppArmor composition then
+# silently dropped every plugin rule gated on config_root and file_edit lost
+# its backup subtree -- while the profile still loaded and still logged
+# "runner confined (enforce)".  A confinement profile missing part of its
+# intended policy is indistinguishable from a complete one in the log, which
+# makes this strictly worse than an AttributeError.
+
+
+def test_recovery_client_accepts_every_ipcclient_ctor_arg():
+    """Every IPCClient ctor arg is accepted by recovery or explicitly excused."""
+    missing = _ctor_args(IPCClient) - _ctor_args(IPCRecoveryClient)
+    undocumented = sorted(missing - set(INTENTIONALLY_ABSENT_CTOR_ARGS))
+
+    assert not undocumented, (
+        "IPCRecoveryClient cannot be constructed with: "
+        f"{undocumented}.\n"
+        "Recovery clients are load-bearing for anything that must survive a "
+        "daemon restart, so an IPCClient-only ctor arg is unreachable for "
+        "those callers -- there is no escape hatch unless the arg happens to "
+        "have a profile-level equivalent.\n"
+        "Forward each on IPCRecoveryClient, or add it to "
+        "INTENTIONALLY_ABSENT_CTOR_ARGS with a reason."
+    )
+
+
+def test_ctor_exclusion_list_has_no_stale_entries():
+    """An excused ctor arg that recovery now accepts must leave the list."""
+    stale = sorted(
+        (set(INTENTIONALLY_ABSENT_CTOR_ARGS) & _ctor_args(IPCRecoveryClient))
+        - {"self"}
+    )
+    assert not stale, (
+        f"INTENTIONALLY_ABSENT_CTOR_ARGS names args recovery DOES accept: "
+        f"{stale}. Remove them -- a stale excuse hides the next real gap."
+    )
+
+
+def test_ctor_exclusion_list_only_names_real_ipcclient_args():
+    bogus = sorted(set(INTENTIONALLY_ABSENT_CTOR_ARGS) - _ctor_args(IPCClient))
+    assert not bogus, (
+        f"INTENTIONALLY_ABSENT_CTOR_ARGS names non-existent IPCClient ctor "
+        f"args: {bogus}. A typo'd entry silently excuses nothing."
+    )
+
+
+def test_forwarded_ctor_args_reach_the_inner_client():
+    """Accepting the arg is not enough -- it must reach the inner IPCClient.
+
+    A ctor that stores an arg and never forwards it passes the signature
+    check above while changing nothing, which is the same
+    observable-reports-success shape the arg was added to fix.
+    """
+    rc = IPCRecoveryClient(
+        client_type=ClientType.API,
+        config_root="/tmp/cfg-root",
+        apparmor=True,
+        autostart_timeout=7.5,
+    )
+    inner = rc._make_client(auto_start=False)
+    assert inner.config_root == "/tmp/cfg-root", (
+        "config_root was accepted and dropped -- the session still boots with "
+        "config_root=None and confinement is still silently incomplete")
+    assert inner.apparmor is True
+    assert inner.autostart_timeout == 7.5
