@@ -33,6 +33,7 @@ import asyncio
 import json
 import logging
 import struct
+import uuid
 import subprocess
 import sys
 import tempfile
@@ -1431,6 +1432,12 @@ class IPCClient:
         """
         args: List[str] = [name] if name else []
         payload: Optional[Dict[str, Any]] = None
+        # Correlate this create with the event that answers it.  The wait below
+        # used to accept ANY SessionInfoEvent carrying a session_id, and
+        # ``_subscribe_events`` drains the buffered-event list into each new
+        # subscription — so a stale event from an earlier create satisfied a
+        # later wait and returned an id this call never created.
+        req_id = f"req_{uuid.uuid4().hex[:16]}"
 
         if isinstance(profile, str):
             args.extend(["--profile", profile])
@@ -1456,6 +1463,10 @@ class IPCClient:
             args.extend(["--cascade-driver-id", cascade_driver_id])
         if sibling_name:
             args.extend(["--sibling-name", sibling_name])
+        # ``payload`` is the documented generic escape hatch; the request id
+        # rides it so no new CommandRequest field is needed.
+        payload = dict(payload or {})
+        payload["request_id"] = req_id
         await self._send_event(CommandRequest(
             command="session.new",
             args=args,
@@ -1470,7 +1481,7 @@ class IPCClient:
         # hasn't fully completed yet.
         try:
             return await asyncio.wait_for(
-                self._await_session_info(), timeout=timeout
+                self._await_session_info(req_id), timeout=timeout
             )
         except asyncio.TimeoutError:
             logger.warning(
@@ -1480,7 +1491,52 @@ class IPCClient:
             )
             return None
 
-    async def _await_session_info(self) -> Optional[str]:
+    #: Wire-protocol minor from which the daemon echoes ``request_id`` on the
+    #: events answering ``session.new``.  Gated on the PROTOCOL version, not the
+    #: package version -- ``server_version`` is diagnostics-only and says
+    #: nothing about wire shape (two daemons can differ in package and speak
+    #: the same protocol).  Below 1.1 nothing echoes, so requiring the id would
+    #: make every create hang.
+    MIN_CORRELATION_PROTOCOL = "1.1"
+
+    def _correlates(self, event: Any, request_id: Optional[str]) -> bool:
+        """Does ``event`` answer the request identified by ``request_id``?
+
+        Correlation is what makes the wait about THIS call.  Matching on shape
+        alone -- "any SessionInfoEvent with a session_id" -- let a stale event
+        from an earlier create satisfy a later wait, because
+        ``_subscribe_events`` drains the buffered-event list into every new
+        subscription.  A refused ``sibling_name`` reproduced it on demand; any
+        two rapid ``session.new`` calls could hit it.
+
+        Falls back to accepting an uncorrelated event ONLY when the daemon is
+        too old to echo the id, and says so once.  Requiring the echo
+        unconditionally would hang every call against an older daemon;
+        accepting it silently would leave the bug in place with nothing to
+        notice.
+        """
+        if request_id is None:
+            return True                      # caller did not ask to correlate
+        got = getattr(event, "request_id", None)
+        if got is not None:
+            return got == request_id
+        if not _protocol_compatible(
+                self.server_protocol_version, self.MIN_CORRELATION_PROTOCOL):
+            if not getattr(self, "_warned_no_correlation", False):
+                self._warned_no_correlation = True
+                logger.warning(
+                    "daemon protocol %s predates session.new request "
+                    "correlation (needs >= %s); a concurrent or refused create "
+                    "may return another call's session id",
+                    self.server_protocol_version,
+                    self.MIN_CORRELATION_PROTOCOL,
+                )
+            return True
+        return False
+
+    async def _await_session_info(
+        self, request_id: Optional[str] = None,
+    ) -> Optional[str]:
         """Subscribe to the drain loop and wait for SessionInfoEvent.
 
         Filters the subscriber queue for ``SessionInfoEvent`` (success)
@@ -1530,6 +1586,10 @@ class IPCClient:
                 solo = len(self._event_subscribers) == 1
 
                 if isinstance(event, SessionInfoEvent) and event.session_id:
+                    if not self._correlates(event, request_id):
+                        if solo:
+                            incidental.append(event)
+                        continue
                     self._session_id = event.session_id
                     if solo:
                         incidental.append(event)
@@ -1537,6 +1597,10 @@ class IPCClient:
                     return event.session_id
 
                 if isinstance(event, ErrorEvent):
+                    if not self._correlates(event, request_id):
+                        if solo:
+                            incidental.append(event)
+                        continue
                     logger.warning(
                         "create_session: daemon reported error "
                         "(error_type=%s, recoverable=%s): %s",
