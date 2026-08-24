@@ -5059,7 +5059,28 @@ class SessionManager:
                 self._known_sibling_addresses(workspace_path),
             )
             if _bad:
+                # TELL THE CLIENT.  A refusal a consumer cannot see is not a
+                # refusal -- it is a hang that happens to be correct
+                # server-side.  Returning "" alone left the caller blocking
+                # until its own timeout, and the router's falsy branch emits
+                # an AUTH-PROVIDER hint, so a naming violation surfaced as a
+                # misleading suggestion about credentials.
+                #
+                # Worse for a COLLISION: the client's ``_await_session_info``
+                # would pick up the SessionInfoEvent of the session created
+                # moments earlier and return ITS id, so the caller believed it
+                # had created a sibling it had not, holding an address clash it
+                # could not see.  An explicit error ends the wait instead.
+                #
+                # ``recoverable=True`` and an ErrorEvent match every other
+                # session.new failure, which the SDK documents as arriving
+                # that way.
                 logger.error("create_session refused: %s", _bad)
+                self._emit_to_client(client_id, ErrorEvent(
+                    error=f"session.new: {_bad}",
+                    error_type="InvalidSiblingName",
+                    recoverable=True,
+                ))
                 return ""
 
         # Claim the id ATOMICALLY — see _allocate_session_id for why a
