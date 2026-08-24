@@ -850,13 +850,53 @@ inversion ledger, bounded overview injection. jaato's loops are rigorous and
 operator-driven; Prime Agent's is shallow but runs unattended every 25 turns.
 Neither project currently has both.
 
-**Verdict.** The "Continual Harness" is Prime Agent's most distinctive idea and
-it is *shipped*, not designed: durable supplemental prompt state that the agent
-refines with reviewable, rollback-able edits, explicitly walled off from the
-immutable base prompt. jaato's equivalents are split across memory,
-auto-steering, drift monitoring and the (unbuilt) fine-tuner loop — richer in
-aggregate, but no single reviewable ledger with rollback. The refinement-ledger
-shape is the strongest single borrow candidate in this whole comparison.
+### 9.4 The closest jaato analogue: the memory curator
+
+Refinement's purpose (§9.0) is jaato's **memory curator** pattern
+(`docs/design/agent-continuity.md`), and the two are close enough that the
+differences are the interesting part.
+
+Both extract durable lessons from a finished stretch of work, both gate what is
+allowed to persist, and both re-inject the result as **bounded hints** rather
+than full content — jaato's tag-coherent `💡 Available Memories`, Prime Agent's
+6-per-kind / 180-character overview. Both fire automatically.
+
+Where jaato's is the better-designed of the two:
+
+- **Second-party, not reflexive.** The curator is a *separate headless session*
+  running its own `memory-advisor` profile, spawned by a reactor on
+  `agent.completed`, reviewing another agent's residue. Prime Agent's refiner
+  judges its own trajectory from inside the session that produced it. This is
+  the same second-party advantage §9.3 credits to the fine-tuner, and jaato has
+  it here too.
+- **A quarantine tier.** Working agents write memories at `maturity="raw"`, and
+  enrichment indexes **`curated.jsonl` only** — raw is explicitly *"the
+  curator's queue"* and never auto-surfaces. So an agent-written memory is inert
+  until an independent reviewer promotes it. Prime Agent has no such tier:
+  a refinement applies to the live store, rebuilds the system prompt, and
+  resumes the agent immediately.
+- **Expressive scoping.** `{{continuity_scope}}` takes any operator-chosen id —
+  project, A2A `contextId`, ticket — against Prime Agent's fixed local/global.
+
+Where Prime Agent's is ahead:
+
+- **More surfaces.** Four entry kinds against the curator's memories alone,
+  though `prompt` notes are the riskiest of them and `skill` entries are only
+  descriptions.
+- **Mechanical rollback.** Per-edit `before`/`after` inversion; the raw→curated
+  tier bounds what reaches the prompt but offers no revert of a bad promotion.
+- **It also fires on compaction.** jaato's reactor triggers on
+  `agent.completed`, i.e. at end of work; Prime Agent additionally extracts at
+  every compaction. A long jaato session that compacts several times before
+  completing loses that context before the curator ever sees it — a real and
+  narrow gap.
+
+**Verdict.** The "Continual Harness" is Prime Agent's headline abstraction and
+is genuinely shipped, but it is not a capability jaato lacks — the memory
+curator answers the same need, and answers it with a second-party reviewer and a
+quarantine tier that Prime Agent has no equivalent for. What jaato does not have
+is the *ledger* (per-edit inversion) and the *compaction-time trigger*. Those two,
+not "the refinement pattern", are the borrow.
 
 Conversely, jaato's instruction-layering model is far more precise than Prime
 Agent's, and `drift_monitor` measures something Prime Agent does not measure at
