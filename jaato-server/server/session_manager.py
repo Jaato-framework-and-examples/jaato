@@ -4814,6 +4814,8 @@ class SessionManager:
         config_root: Optional[str] = None,
         apparmor: Optional[bool] = None,
         cascade_driver_id: Optional[str] = None,
+        budget_control: Optional[Dict[str, Any]] = None,
+        budget_usage: Optional[Dict[str, float]] = None,
     ) -> str:
         """Implementation of session creation, called via ``Context().run()``.
 
@@ -5112,6 +5114,13 @@ class SessionManager:
         # kwarg (CLI --no-instructions / SDK bool-or-dict) and the profile's
         # field.  A piece is suppressed if EITHER source asks for it.  Both
         # normalize to the canonical frozenset (see instruction_suppression).
+        # Caller-supplied CEILING, applied BEFORE the envelope is built.
+        # ``profile.budget_control`` -> the envelope's wire field is the only
+        # route a budget takes to the runner, so attaching it here means there
+        # is no window in which the session exists unbudgeted.  Same ordering
+        # the reload path uses (#583).  An authored profile budget wins.
+        self._attach_budget_ceiling(budget_control, profile, session_id)
+
         effective_suppress_base = normalize_suppression(
             suppress_base_instructions
         ) | (
@@ -5182,6 +5191,16 @@ class SessionManager:
             return ""
 
         logger.info(f"Server initialized successfully for session {session_id}")
+
+        # Caller-supplied USAGE, pre-charged onto the fresh session via the
+        # same RPC a reload uses.  Safe in this window because the session has
+        # not served a turn.  Without it a fork starts at ZERO against a full
+        # ceiling, so N branches from an exhausted source each run the budget
+        # again -- branching becomes a way out of the ceiling.
+        if budget_usage:
+            self._restore_budget_usage(
+                server, budget_usage, None, session_id,
+            )
 
         # Wire SessionManager into the session_ops plugin so its
         # interrogate_session tool can fork_ask other daemon sessions.
@@ -5325,6 +5344,8 @@ class SessionManager:
         apparmor: Optional[bool] = None,
         cascade_driver_id: Optional[str] = None,
         inline_profile_data: Optional[Dict[str, Any]] = None,
+        budget_control: Optional[Dict[str, Any]] = None,
+        budget_usage: Optional[Dict[str, float]] = None,
     ) -> str:
         """Create a top-level session not attached to any real client.
 
@@ -5406,6 +5427,8 @@ class SessionManager:
             initial_session_state=initial_session_state,
             config_root=config_root,
             apparmor=apparmor,
+            budget_control=budget_control,
+            budget_usage=budget_usage,
             cascade_driver_id=cascade_driver_id,
             inline_profile_data=inline_profile_data,
         )
@@ -6326,14 +6349,30 @@ class SessionManager:
             return str(pathlib.Path(workspace_path) / ".jaato")
         return None
 
-    def _reattach_budget_ceiling(self, state, restored_profile, session_id) -> bool:
-        """Re-attach the persisted budget CEILING to a rebuilt profile.
+    def _attach_budget_ceiling(
+        self, budget_control, profile, session_id,
+    ) -> bool:
+        """Attach a caller-supplied budget CEILING to a session's profile.
 
-        Returns True when a ceiling was attached.  Extracted so it can be
-        tested by CALLING it -- inline in ``_load_session_impl`` it was only
-        reachable through several hundred lines of server construction, and a
-        test that cannot call the code ends up asserting on its source text
-        instead, which survives deleting the very line it means to protect.
+        Returns True when a ceiling was attached.  Two callers, one shape:
+
+        RELOAD  ``_load_session_impl`` passes ``state.budget_control`` -- the
+                effective ceiling persisted when the session unloaded.
+        CREATE  ``_create_session_impl`` passes the ``budget_control`` kwarg --
+                a caller (notably a FORK) declaring the ceiling this session
+                runs under, when its profile cannot express it.
+
+        Both must land BEFORE ``build_session_envelope`` reads the profile:
+        that wire field is the only route a budget takes to the runner, so a
+        ceiling applied after the spawn would leave a window in which the
+        session exists unbudgeted.  Applying it here means there is no window
+        at all rather than one that is merely hard to hit today.
+
+        Extracted so it can be tested by CALLING it -- inline in
+        ``_load_session_impl`` it was only reachable through several hundred
+        lines of server construction, and a test that cannot call the code ends
+        up asserting on its source text instead, which survives deleting the
+        very line it means to protect.
 
         A budget reaches the runner ONLY as ``profile.budget_control``
         (runner_spawn: ``profile = server._profile`` -> the envelope's wire
@@ -6352,14 +6391,14 @@ class SessionManager:
         stale snapshot.  The persisted config fills the gap only where there
         was no vehicle at all.
         """
-        persisted = getattr(state, "budget_control", None)
-        if not persisted or restored_profile is None:
+        persisted = budget_control
+        if not persisted or profile is None:
             return False
-        if getattr(restored_profile, "budget_control", None) is not None:
+        if getattr(profile, "budget_control", None) is not None:
             return False  # authored policy wins over the snapshot
         from shared.budget_control import BudgetControlConfig
         try:
-            restored_profile.budget_control = BudgetControlConfig.from_dict(
+            profile.budget_control = BudgetControlConfig.from_dict(
                 persisted)
         except (ValueError, TypeError) as exc:
             # Loud: a ceiling that fails to rebuild is a ceiling that silently
@@ -6376,7 +6415,9 @@ class SessionManager:
             session_id, persisted.get("limits"))
         return True
 
-    def _restore_budget_usage(self, server, state, session_id: str) -> bool:
+    def _restore_budget_usage(
+        self, server, usage, reason, session_id: str,
+    ) -> bool:
         """Re-seed a reloaded session's budget usage.  Returns True if applied.
 
         Extracted so it can be tested by CALLING it.  The first version of
@@ -6394,8 +6435,6 @@ class SessionManager:
         gone.  Honouring that bool is the difference between an instrument
         and a decoration.
         """
-        usage = getattr(state, "budget_usage", None)
-        reason = getattr(state, "budget_exhausted_reason", None)
         if not usage and not reason:
             return False
         # A snapshot on disk IS the evidence this session was budgeted.  So
@@ -6607,7 +6646,9 @@ class SessionManager:
                     state.workspace_path, restore_config_root,
                 )
 
-        self._reattach_budget_ceiling(state, restored_profile, session_id)
+        self._attach_budget_ceiling(
+            getattr(state, "budget_control", None), restored_profile,
+            session_id)
 
         # Rebind the agent PERSONA on restore.  Persisting + restoring
         # ``agent_name`` (below, on the envelope) restores the agent IDENTITY
@@ -6814,7 +6855,10 @@ class SessionManager:
         # 6.6.1.3 at commit b40d2439); use the existing
         # ``session.snapshot_instruction_budget`` (§7c step 6.1
         # (2/3) at commit 1043bfde) for the post-restore emit.
-        self._restore_budget_usage(server, state, session_id)
+        self._restore_budget_usage(
+            server, getattr(state, "budget_usage", None),
+            getattr(state, "budget_exhausted_reason", None),
+            session_id)
 
         if state.budget_state:
             rpc = getattr(server, "_runner_rpc", None)
