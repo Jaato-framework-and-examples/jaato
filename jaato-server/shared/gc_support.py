@@ -126,6 +126,7 @@ def run_gc(
     telemetry: Any,
     on_trace: TraceFn,
     on_collected: Optional[Callable[[Any, GCResult, Any], Any]] = None,
+    on_phase: Optional[Callable[[str, Dict[str, Any]], None]] = None,
 ) -> Tuple[Any, GCResult]:
     """Run one GC pass with its telemetry span, uniformly.
 
@@ -168,6 +169,14 @@ def run_gc(
         telemetry: Telemetry facade exposing ``gc_span``.
         on_trace: Diagnostic trace callback.
         on_collected: Optional post-collect hook, run inside the span.
+        on_phase: Optional ``(phase, payload)`` callback emitting the GC
+            lifecycle -- ``"started"`` before ``collect`` and
+            ``"completed"`` after, including when the pass FAILED (that is
+            the one an operator most needs).  Emitted here rather than at the
+            call sites precisely so it cannot fire for a subset of passes:
+            a signal that fires sometimes reads as complete and is worse than
+            none.  Never raises into the GC path -- an observer that breaks
+            must not break the collection it is observing.
 
     Returns:
         ``(new_history, result)`` exactly as ``gc_plugin.collect`` produced,
@@ -178,6 +187,22 @@ def run_gc(
         context_usage, budget=budget, cache_plugin=cache_plugin,
     )
     reason_value = getattr(trigger_reason, "value", trigger_reason)
+
+    def _phase(name: str, payload: Dict[str, Any]) -> None:
+        if on_phase is None:
+            return
+        try:
+            on_phase(name, payload)
+        except Exception as exc:  # noqa: BLE001
+            # An observer must never break the collection it observes.
+            on_trace(f"GC_PHASE: {name} emit failed: {exc}")
+
+    _phase("started", {
+        "trigger_reason": reason_value,
+        "strategy": gc_plugin.name,
+        "percent_used": float(context_usage.get("percent_used", 0) or 0),
+        "context_limit": int(context_usage.get("context_limit", 0) or 0),
+    })
     with telemetry.gc_span(
         trigger_reason=reason_value,
         strategy=gc_plugin.name,
@@ -191,6 +216,16 @@ def run_gc(
             if replacement is not None:
                 new_history = replacement
         populate_gc_span_result(gc_span, result, on_trace=on_trace)
+    _phase("completed", {
+        "trigger_reason": reason_value,
+        "strategy": gc_plugin.name,
+        "success": bool(result.success),
+        "items_collected": int(result.items_collected),
+        "tokens_before": int(result.tokens_before),
+        "tokens_after": int(result.tokens_after),
+        "tokens_freed": int(result.tokens_freed),
+        "error": result.error,
+    })
     return new_history, result
 
 

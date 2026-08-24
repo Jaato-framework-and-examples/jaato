@@ -57,6 +57,7 @@ export type JaatoEvents =
   | ErrorEvent
   | RetryEvent
   | SessionListEvent
+  | GCEvent
   | SessionInfoEvent
   | MemoryListEvent
   | SandboxPathsEvent
@@ -167,6 +168,7 @@ export type EventType =
   | "turn.progress"
   | "instruction_budget.updated"
   | "gc.config"
+  | "gc"
   | "instruction_budget.request"
   | "system.message"
   | "help.text"
@@ -285,6 +287,7 @@ export type EventType1 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "gc.config"
+  | "gc"
   | "instruction_budget.request"
   | "system.message"
   | "help.text"
@@ -409,6 +412,7 @@ export type EventType2 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "gc.config"
+  | "gc"
   | "instruction_budget.request"
   | "system.message"
   | "help.text"
@@ -530,6 +534,7 @@ export type EventType3 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "gc.config"
+  | "gc"
   | "instruction_budget.request"
   | "system.message"
   | "help.text"
@@ -650,6 +655,7 @@ export type EventType4 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "gc.config"
+  | "gc"
   | "instruction_budget.request"
   | "system.message"
   | "help.text"
@@ -778,6 +784,7 @@ export type EventType5 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "gc.config"
+  | "gc"
   | "instruction_budget.request"
   | "system.message"
   | "help.text"
@@ -904,6 +911,7 @@ export type EventType6 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "gc.config"
+  | "gc"
   | "instruction_budget.request"
   | "system.message"
   | "help.text"
@@ -1029,6 +1037,7 @@ export type EventType7 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "gc.config"
+  | "gc"
   | "instruction_budget.request"
   | "system.message"
   | "help.text"
@@ -1148,6 +1157,7 @@ export type EventType8 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "gc.config"
+  | "gc"
   | "instruction_budget.request"
   | "system.message"
   | "help.text"
@@ -1271,6 +1281,7 @@ export type EventType9 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "gc.config"
+  | "gc"
   | "instruction_budget.request"
   | "system.message"
   | "help.text"
@@ -1391,6 +1402,7 @@ export type EventType10 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "gc.config"
+  | "gc"
   | "instruction_budget.request"
   | "system.message"
   | "help.text"
@@ -1519,6 +1531,7 @@ export type EventType11 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "gc.config"
+  | "gc"
   | "instruction_budget.request"
   | "system.message"
   | "help.text"
@@ -1639,6 +1652,7 @@ export type EventType12 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "gc.config"
+  | "gc"
   | "instruction_budget.request"
   | "system.message"
   | "help.text"
@@ -1766,6 +1780,7 @@ export type EventType13 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "gc.config"
+  | "gc"
   | "instruction_budget.request"
   | "system.message"
   | "help.text"
@@ -1896,6 +1911,7 @@ export type EventType14 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "gc.config"
+  | "gc"
   | "instruction_budget.request"
   | "system.message"
   | "help.text"
@@ -2019,6 +2035,7 @@ export type EventType15 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "gc.config"
+  | "gc"
   | "instruction_budget.request"
   | "system.message"
   | "help.text"
@@ -2138,6 +2155,7 @@ export type EventType16 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "gc.config"
+  | "gc"
   | "instruction_budget.request"
   | "system.message"
   | "help.text"
@@ -2260,6 +2278,7 @@ export type EventType17 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "gc.config"
+  | "gc"
   | "instruction_budget.request"
   | "system.message"
   | "help.text"
@@ -2382,6 +2401,7 @@ export type EventType18 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "gc.config"
+  | "gc"
   | "instruction_budget.request"
   | "system.message"
   | "help.text"
@@ -2510,6 +2530,7 @@ export type EventType19 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "gc.config"
+  | "gc"
   | "instruction_budget.request"
   | "system.message"
   | "help.text"
@@ -2631,6 +2652,7 @@ export type EventType20 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "gc.config"
+  | "gc"
   | "instruction_budget.request"
   | "system.message"
   | "help.text"
@@ -2755,6 +2777,7 @@ export type EventType21 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "gc.config"
+  | "gc"
   | "instruction_budget.request"
   | "system.message"
   | "help.text"
@@ -2874,6 +2897,7 @@ export type EventType22 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "gc.config"
+  | "gc"
   | "instruction_budget.request"
   | "system.message"
   | "help.text"
@@ -2995,6 +3019,7 @@ export type EventType23 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "gc.config"
+  | "gc"
   | "instruction_budget.request"
   | "system.message"
   | "help.text"
@@ -3116,6 +3141,7 @@ export type EventType24 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "gc.config"
+  | "gc"
   | "instruction_budget.request"
   | "system.message"
   | "help.text"
@@ -3235,6 +3261,7 @@ export type EventType25 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "gc.config"
+  | "gc"
   | "instruction_budget.request"
   | "system.message"
   | "help.text"
@@ -3360,6 +3387,7 @@ export type EventType26 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "gc.config"
+  | "gc"
   | "instruction_budget.request"
   | "system.message"
   | "help.text"
@@ -3481,6 +3509,7 @@ export type EventType27 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "gc.config"
+  | "gc"
   | "instruction_budget.request"
   | "system.message"
   | "help.text"
@@ -3600,6 +3629,7 @@ export type EventType28 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "gc.config"
+  | "gc"
   | "instruction_budget.request"
   | "system.message"
   | "help.text"
@@ -3727,6 +3757,7 @@ export type EventType29 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "gc.config"
+  | "gc"
   | "instruction_budget.request"
   | "system.message"
   | "help.text"
@@ -3848,6 +3879,7 @@ export type EventType30 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "gc.config"
+  | "gc"
   | "instruction_budget.request"
   | "system.message"
   | "help.text"
@@ -3970,6 +4002,7 @@ export type EventType31 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "gc.config"
+  | "gc"
   | "instruction_budget.request"
   | "system.message"
   | "help.text"
@@ -4107,6 +4140,7 @@ export type EventType32 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "gc.config"
+  | "gc"
   | "instruction_budget.request"
   | "system.message"
   | "help.text"
@@ -4225,6 +4259,7 @@ export type EventType33 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "gc.config"
+  | "gc"
   | "instruction_budget.request"
   | "system.message"
   | "help.text"
@@ -4356,6 +4391,7 @@ export type EventType34 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "gc.config"
+  | "gc"
   | "instruction_budget.request"
   | "system.message"
   | "help.text"
@@ -4478,6 +4514,7 @@ export type EventType35 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "gc.config"
+  | "gc"
   | "instruction_budget.request"
   | "system.message"
   | "help.text"
@@ -4596,6 +4633,7 @@ export type EventType36 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "gc.config"
+  | "gc"
   | "instruction_budget.request"
   | "system.message"
   | "help.text"
@@ -4721,6 +4759,7 @@ export type EventType37 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "gc.config"
+  | "gc"
   | "instruction_budget.request"
   | "system.message"
   | "help.text"
@@ -4843,6 +4882,7 @@ export type EventType38 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "gc.config"
+  | "gc"
   | "instruction_budget.request"
   | "system.message"
   | "help.text"
@@ -4962,6 +5002,7 @@ export type EventType39 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "gc.config"
+  | "gc"
   | "instruction_budget.request"
   | "system.message"
   | "help.text"
@@ -5080,6 +5121,7 @@ export type EventType40 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "gc.config"
+  | "gc"
   | "instruction_budget.request"
   | "system.message"
   | "help.text"
@@ -5202,6 +5244,7 @@ export type EventType41 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "gc.config"
+  | "gc"
   | "instruction_budget.request"
   | "system.message"
   | "help.text"
@@ -5325,6 +5368,7 @@ export type EventType42 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "gc.config"
+  | "gc"
   | "instruction_budget.request"
   | "system.message"
   | "help.text"
@@ -5447,6 +5491,7 @@ export type EventType43 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "gc.config"
+  | "gc"
   | "instruction_budget.request"
   | "system.message"
   | "help.text"
@@ -5567,6 +5612,7 @@ export type EventType44 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "gc.config"
+  | "gc"
   | "instruction_budget.request"
   | "system.message"
   | "help.text"
@@ -5641,28 +5687,19 @@ export type EventType44 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp44 = string;
-export type SessionId7 = string;
-export type SessionName = string;
-export type ModelProvider = string;
-export type ModelName1 = string;
-export type ProfileName1 = string | null;
-export type Sessions1 = {
-  [k: string]: unknown;
-}[];
-export type Tools = {
-  [k: string]: unknown;
-}[];
-export type Models = string[];
-export type UserInputs = string[];
-export type Memories = {
-  [k: string]: unknown;
-}[];
-export type SandboxPaths = {
-  [k: string]: string;
-}[];
-export type Services = {
-  [k: string]: unknown;
-}[];
+export type AgentId28 = string;
+export type Phase = string;
+export type TriggerReason = string | null;
+export type Strategy1 = string | null;
+export type PercentUsed2 = number | null;
+export type Threshold1 = number | null;
+export type ContextLimit2 = number | null;
+export type Success2 = boolean | null;
+export type ItemsCollected = number | null;
+export type TokensBefore = number | null;
+export type TokensAfter = number | null;
+export type TokensFreed = number | null;
+export type Error4 = string | null;
 /**
  * All event types in the protocol.
  */
@@ -5706,6 +5743,7 @@ export type EventType45 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "gc.config"
+  | "gc"
   | "instruction_budget.request"
   | "system.message"
   | "help.text"
@@ -5780,7 +5818,26 @@ export type EventType45 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp45 = string;
-export type Memories1 = {
+export type SessionId7 = string;
+export type SessionName = string;
+export type ModelProvider = string;
+export type ModelName1 = string;
+export type ProfileName1 = string | null;
+export type Sessions1 = {
+  [k: string]: unknown;
+}[];
+export type Tools = {
+  [k: string]: unknown;
+}[];
+export type Models = string[];
+export type UserInputs = string[];
+export type Memories = {
+  [k: string]: unknown;
+}[];
+export type SandboxPaths = {
+  [k: string]: string;
+}[];
+export type Services = {
   [k: string]: unknown;
 }[];
 /**
@@ -5826,6 +5883,7 @@ export type EventType46 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "gc.config"
+  | "gc"
   | "instruction_budget.request"
   | "system.message"
   | "help.text"
@@ -5900,8 +5958,8 @@ export type EventType46 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp46 = string;
-export type Paths = {
-  [k: string]: string;
+export type Memories1 = {
+  [k: string]: unknown;
 }[];
 /**
  * All event types in the protocol.
@@ -5946,6 +6004,7 @@ export type EventType47 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "gc.config"
+  | "gc"
   | "instruction_budget.request"
   | "system.message"
   | "help.text"
@@ -6020,8 +6079,8 @@ export type EventType47 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp47 = string;
-export type Services1 = {
-  [k: string]: unknown;
+export type Paths = {
+  [k: string]: string;
 }[];
 /**
  * All event types in the protocol.
@@ -6066,6 +6125,7 @@ export type EventType48 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "gc.config"
+  | "gc"
   | "instruction_budget.request"
   | "system.message"
   | "help.text"
@@ -6140,8 +6200,9 @@ export type EventType48 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp48 = string;
-export type SessionId8 = string;
-export type Description = string;
+export type Services1 = {
+  [k: string]: unknown;
+}[];
 /**
  * All event types in the protocol.
  */
@@ -6185,6 +6246,7 @@ export type EventType49 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "gc.config"
+  | "gc"
   | "instruction_budget.request"
   | "system.message"
   | "help.text"
@@ -6259,33 +6321,8 @@ export type EventType49 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp49 = string;
-export type Name = string;
-export type Description1 = string;
-export type Plugins = string[];
-export type PreloadedPlugins = string[];
-export type Model = string | null;
-export type Provider = string | null;
-export type MaxTurns = number;
-export type BudgetControl = {
-  [k: string]: unknown;
-} | null;
-export type Gc = {
-  [k: string]: unknown;
-} | null;
-export type RuntimeLimits = {
-  [k: string]: unknown;
-} | null;
-export type CompletionPayloadSchema =
-  | string
-  | {
-      [k: string]: unknown;
-    }
-  | null;
-export type EnvVarNames = string[];
-export type Profiles = ProfileSummary[];
-export type Name1 = string;
-export type Error4 = string;
-export type ParseErrors = ProfileParseError[];
+export type SessionId8 = string;
+export type Description = string;
 /**
  * All event types in the protocol.
  */
@@ -6329,6 +6366,7 @@ export type EventType50 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "gc.config"
+  | "gc"
   | "instruction_budget.request"
   | "system.message"
   | "help.text"
@@ -6403,11 +6441,33 @@ export type EventType50 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp50 = string;
-export type Text1 = string;
-export type Attachments = {
+export type Name = string;
+export type Description1 = string;
+export type Plugins = string[];
+export type PreloadedPlugins = string[];
+export type Model = string | null;
+export type Provider = string | null;
+export type MaxTurns = number;
+export type BudgetControl = {
   [k: string]: unknown;
-}[];
-export type ParallelTools = boolean | null;
+} | null;
+export type Gc = {
+  [k: string]: unknown;
+} | null;
+export type RuntimeLimits = {
+  [k: string]: unknown;
+} | null;
+export type CompletionPayloadSchema =
+  | string
+  | {
+      [k: string]: unknown;
+    }
+  | null;
+export type EnvVarNames = string[];
+export type Profiles = ProfileSummary[];
+export type Name1 = string;
+export type Error5 = string;
+export type ParseErrors = ProfileParseError[];
 /**
  * All event types in the protocol.
  */
@@ -6451,6 +6511,7 @@ export type EventType51 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "gc.config"
+  | "gc"
   | "instruction_budget.request"
   | "system.message"
   | "help.text"
@@ -6525,11 +6586,11 @@ export type EventType51 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp51 = string;
-export type RequestId18 = string;
-export type Response2 = string;
-export type EditedArguments = {
+export type Text1 = string;
+export type Attachments = {
   [k: string]: unknown;
-} | null;
+}[];
+export type ParallelTools = boolean | null;
 /**
  * All event types in the protocol.
  */
@@ -6573,6 +6634,7 @@ export type EventType52 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "gc.config"
+  | "gc"
   | "instruction_budget.request"
   | "system.message"
   | "help.text"
@@ -6647,9 +6709,11 @@ export type EventType52 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp52 = string;
-export type RequestId19 = string;
-export type QuestionIndex2 = number;
-export type Response3 = string;
+export type RequestId18 = string;
+export type Response2 = string;
+export type EditedArguments = {
+  [k: string]: unknown;
+} | null;
 /**
  * All event types in the protocol.
  */
@@ -6693,6 +6757,7 @@ export type EventType53 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "gc.config"
+  | "gc"
   | "instruction_budget.request"
   | "system.message"
   | "help.text"
@@ -6767,7 +6832,9 @@ export type EventType53 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp53 = string;
-export type AgentId28 = string | null;
+export type RequestId19 = string;
+export type QuestionIndex2 = number;
+export type Response3 = string;
 /**
  * All event types in the protocol.
  */
@@ -6811,6 +6878,7 @@ export type EventType54 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "gc.config"
+  | "gc"
   | "instruction_budget.request"
   | "system.message"
   | "help.text"
@@ -6885,7 +6953,7 @@ export type EventType54 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp54 = string;
-export type Name2 = string;
+export type AgentId29 = string | null;
 /**
  * All event types in the protocol.
  */
@@ -6929,6 +6997,7 @@ export type EventType55 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "gc.config"
+  | "gc"
   | "instruction_budget.request"
   | "system.message"
   | "help.text"
@@ -7003,8 +7072,7 @@ export type EventType55 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp55 = string;
-export type AgentId29 = string;
-export type EventNames = string[];
+export type Name2 = string;
 /**
  * All event types in the protocol.
  */
@@ -7048,6 +7116,7 @@ export type EventType56 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "gc.config"
+  | "gc"
   | "instruction_budget.request"
   | "system.message"
   | "help.text"
@@ -7122,11 +7191,8 @@ export type EventType56 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp56 = string;
-export type Command = string;
-export type Args = string[];
-export type Payload1 = {
-  [k: string]: unknown;
-} | null;
+export type AgentId30 = string;
+export type EventNames = string[];
 /**
  * All event types in the protocol.
  */
@@ -7170,6 +7236,7 @@ export type EventType57 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "gc.config"
+  | "gc"
   | "instruction_budget.request"
   | "system.message"
   | "help.text"
@@ -7244,7 +7311,11 @@ export type EventType57 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp57 = string;
-export type AgentId30 = string | null;
+export type Command = string;
+export type Args = string[];
+export type Payload1 = {
+  [k: string]: unknown;
+} | null;
 /**
  * All event types in the protocol.
  */
@@ -7288,6 +7359,7 @@ export type EventType58 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "gc.config"
+  | "gc"
   | "instruction_budget.request"
   | "system.message"
   | "help.text"
@@ -7362,6 +7434,7 @@ export type EventType58 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp58 = string;
+export type AgentId31 = string | null;
 /**
  * All event types in the protocol.
  */
@@ -7405,6 +7478,7 @@ export type EventType59 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "gc.config"
+  | "gc"
   | "instruction_budget.request"
   | "system.message"
   | "help.text"
@@ -7479,9 +7553,6 @@ export type EventType59 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp59 = string;
-export type Commands = {
-  [k: string]: string;
-}[];
 /**
  * All event types in the protocol.
  */
@@ -7525,6 +7596,7 @@ export type EventType60 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "gc.config"
+  | "gc"
   | "instruction_budget.request"
   | "system.message"
   | "help.text"
@@ -7599,6 +7671,9 @@ export type EventType60 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp60 = string;
+export type Commands = {
+  [k: string]: string;
+}[];
 /**
  * All event types in the protocol.
  */
@@ -7642,6 +7717,7 @@ export type EventType61 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "gc.config"
+  | "gc"
   | "instruction_budget.request"
   | "system.message"
   | "help.text"
@@ -7716,10 +7792,6 @@ export type EventType61 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp61 = string;
-export type Tools1 = {
-  [k: string]: unknown;
-}[];
-export type Message3 = string;
 /**
  * All event types in the protocol.
  */
@@ -7763,6 +7835,7 @@ export type EventType62 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "gc.config"
+  | "gc"
   | "instruction_budget.request"
   | "system.message"
   | "help.text"
@@ -7837,6 +7910,10 @@ export type EventType62 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp62 = string;
+export type Tools1 = {
+  [k: string]: unknown;
+}[];
+export type Message3 = string;
 /**
  * All event types in the protocol.
  */
@@ -7880,6 +7957,7 @@ export type EventType63 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "gc.config"
+  | "gc"
   | "instruction_budget.request"
   | "system.message"
   | "help.text"
@@ -7954,7 +8032,6 @@ export type EventType63 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp63 = string;
-export type ToolName11 = string;
 /**
  * All event types in the protocol.
  */
@@ -7998,6 +8075,7 @@ export type EventType64 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "gc.config"
+  | "gc"
   | "instruction_budget.request"
   | "system.message"
   | "help.text"
@@ -8072,9 +8150,7 @@ export type EventType64 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp64 = string;
-export type Tools2 = {
-  [k: string]: unknown;
-}[];
+export type ToolName11 = string;
 /**
  * All event types in the protocol.
  */
@@ -8118,6 +8194,7 @@ export type EventType65 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "gc.config"
+  | "gc"
   | "instruction_budget.request"
   | "system.message"
   | "help.text"
@@ -8192,9 +8269,9 @@ export type EventType65 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp65 = string;
-export type CallId4 = string;
-export type AgentId31 = string;
-export type ToolName12 = string;
+export type Tools2 = {
+  [k: string]: unknown;
+}[];
 /**
  * All event types in the protocol.
  */
@@ -8238,6 +8315,7 @@ export type EventType66 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "gc.config"
+  | "gc"
   | "instruction_budget.request"
   | "system.message"
   | "help.text"
@@ -8312,9 +8390,9 @@ export type EventType66 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp66 = string;
-export type CallId5 = string;
-export type Result1 = string;
-export type Error5 = string;
+export type CallId4 = string;
+export type AgentId32 = string;
+export type ToolName12 = string;
 /**
  * All event types in the protocol.
  */
@@ -8358,6 +8436,7 @@ export type EventType67 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "gc.config"
+  | "gc"
   | "instruction_budget.request"
   | "system.message"
   | "help.text"
@@ -8432,7 +8511,9 @@ export type EventType67 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp67 = string;
-export type AgentId32 = string;
+export type CallId5 = string;
+export type Result1 = string;
+export type Error6 = string;
 /**
  * All event types in the protocol.
  */
@@ -8476,6 +8557,7 @@ export type EventType68 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "gc.config"
+  | "gc"
   | "instruction_budget.request"
   | "system.message"
   | "help.text"
@@ -8551,12 +8633,6 @@ export type EventType68 =
   | "gates.snapshot";
 export type Timestamp68 = string;
 export type AgentId33 = string;
-export type History = {
-  [k: string]: unknown;
-}[];
-export type TurnAccounting = {
-  [k: string]: unknown;
-}[];
 /**
  * All event types in the protocol.
  */
@@ -8600,6 +8676,7 @@ export type EventType69 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "gc.config"
+  | "gc"
   | "instruction_budget.request"
   | "system.message"
   | "help.text"
@@ -8674,16 +8751,13 @@ export type EventType69 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp69 = string;
-export type TraceLogPath = string | null;
-export type ProviderTraceLog = string | null;
-export type WorkingDir = string | null;
-export type ConfigRoot = string | null;
-export type EnvFile = string | null;
-export type Presentation = {
+export type AgentId34 = string;
+export type History = {
   [k: string]: unknown;
-} | null;
-export type PermissionTimeout = number | null;
-export type Apparmor = boolean;
+}[];
+export type TurnAccounting = {
+  [k: string]: unknown;
+}[];
 /**
  * All event types in the protocol.
  */
@@ -8727,6 +8801,7 @@ export type EventType70 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "gc.config"
+  | "gc"
   | "instruction_budget.request"
   | "system.message"
   | "help.text"
@@ -8801,8 +8876,16 @@ export type EventType70 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp70 = string;
-export type Text2 = string;
-export type PositionInQueue = number;
+export type TraceLogPath = string | null;
+export type ProviderTraceLog = string | null;
+export type WorkingDir = string | null;
+export type ConfigRoot = string | null;
+export type EnvFile = string | null;
+export type Presentation = {
+  [k: string]: unknown;
+} | null;
+export type PermissionTimeout = number | null;
+export type Apparmor = boolean;
 /**
  * All event types in the protocol.
  */
@@ -8846,6 +8929,7 @@ export type EventType71 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "gc.config"
+  | "gc"
   | "instruction_budget.request"
   | "system.message"
   | "help.text"
@@ -8920,7 +9004,8 @@ export type EventType71 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp71 = string;
-export type Text3 = string;
+export type Text2 = string;
+export type PositionInQueue = number;
 /**
  * All event types in the protocol.
  */
@@ -8964,6 +9049,7 @@ export type EventType72 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "gc.config"
+  | "gc"
   | "instruction_budget.request"
   | "system.message"
   | "help.text"
@@ -9038,8 +9124,7 @@ export type EventType72 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp72 = string;
-export type PartialResponseChars = number;
-export type UserPromptPreview = string;
+export type Text3 = string;
 /**
  * All event types in the protocol.
  */
@@ -9083,6 +9168,7 @@ export type EventType73 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "gc.config"
+  | "gc"
   | "instruction_budget.request"
   | "system.message"
   | "help.text"
@@ -9157,10 +9243,8 @@ export type EventType73 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp73 = string;
-export type SessionId9 = string;
-export type AgentId34 = string;
-export type RecoveredCalls = number;
-export type ActionTaken = string;
+export type PartialResponseChars = number;
+export type UserPromptPreview = string;
 /**
  * All event types in the protocol.
  */
@@ -9204,6 +9288,7 @@ export type EventType74 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "gc.config"
+  | "gc"
   | "instruction_budget.request"
   | "system.message"
   | "help.text"
@@ -9278,6 +9363,10 @@ export type EventType74 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp74 = string;
+export type SessionId9 = string;
+export type AgentId35 = string;
+export type RecoveredCalls = number;
+export type ActionTaken = string;
 /**
  * All event types in the protocol.
  */
@@ -9321,6 +9410,7 @@ export type EventType75 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "gc.config"
+  | "gc"
   | "instruction_budget.request"
   | "system.message"
   | "help.text"
@@ -9395,10 +9485,6 @@ export type EventType75 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp75 = string;
-export type Root = string;
-export type Workspaces = {
-  [k: string]: unknown;
-}[];
 /**
  * All event types in the protocol.
  */
@@ -9442,6 +9528,7 @@ export type EventType76 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "gc.config"
+  | "gc"
   | "instruction_budget.request"
   | "system.message"
   | "help.text"
@@ -9516,7 +9603,10 @@ export type EventType76 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp76 = string;
-export type Name3 = string;
+export type Root = string;
+export type Workspaces = {
+  [k: string]: unknown;
+}[];
 /**
  * All event types in the protocol.
  */
@@ -9560,6 +9650,7 @@ export type EventType77 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "gc.config"
+  | "gc"
   | "instruction_budget.request"
   | "system.message"
   | "help.text"
@@ -9634,8 +9725,7 @@ export type EventType77 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp77 = string;
-export type Name4 = string;
-export type Path = string;
+export type Name3 = string;
 /**
  * All event types in the protocol.
  */
@@ -9679,6 +9769,7 @@ export type EventType78 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "gc.config"
+  | "gc"
   | "instruction_budget.request"
   | "system.message"
   | "help.text"
@@ -9753,7 +9844,8 @@ export type EventType78 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp78 = string;
-export type Name5 = string;
+export type Name4 = string;
+export type Path = string;
 /**
  * All event types in the protocol.
  */
@@ -9797,6 +9889,7 @@ export type EventType79 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "gc.config"
+  | "gc"
   | "instruction_budget.request"
   | "system.message"
   | "help.text"
@@ -9871,12 +9964,7 @@ export type EventType79 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp79 = string;
-export type Workspace = string;
-export type Configured = boolean;
-export type Provider1 = string | null;
-export type Model1 = string | null;
-export type AvailableProviders = string[];
-export type MissingFields = string[];
+export type Name5 = string;
 /**
  * All event types in the protocol.
  */
@@ -9920,6 +10008,7 @@ export type EventType80 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "gc.config"
+  | "gc"
   | "instruction_budget.request"
   | "system.message"
   | "help.text"
@@ -9994,9 +10083,12 @@ export type EventType80 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp80 = string;
-export type Provider2 = string;
-export type Model2 = string | null;
-export type ApiKey = string | null;
+export type Workspace = string;
+export type Configured = boolean;
+export type Provider1 = string | null;
+export type Model1 = string | null;
+export type AvailableProviders = string[];
+export type MissingFields = string[];
 /**
  * All event types in the protocol.
  */
@@ -10040,6 +10132,7 @@ export type EventType81 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "gc.config"
+  | "gc"
   | "instruction_budget.request"
   | "system.message"
   | "help.text"
@@ -10114,11 +10207,9 @@ export type EventType81 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp81 = string;
-export type Workspace1 = string;
-export type Provider3 = string;
-export type Model3 = string | null;
-export type Success2 = boolean;
-export type Error6 = string | null;
+export type Provider2 = string;
+export type Model2 = string | null;
+export type ApiKey = string | null;
 /**
  * All event types in the protocol.
  */
@@ -10162,6 +10253,7 @@ export type EventType82 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "gc.config"
+  | "gc"
   | "instruction_budget.request"
   | "system.message"
   | "help.text"
@@ -10236,9 +10328,11 @@ export type EventType82 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp82 = string;
-export type Changes = {
-  [k: string]: string;
-}[];
+export type Workspace1 = string;
+export type Provider3 = string;
+export type Model3 = string | null;
+export type Success3 = boolean;
+export type Error7 = string | null;
 /**
  * All event types in the protocol.
  */
@@ -10282,6 +10376,7 @@ export type EventType83 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "gc.config"
+  | "gc"
   | "instruction_budget.request"
   | "system.message"
   | "help.text"
@@ -10356,10 +10451,9 @@ export type EventType83 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp83 = string;
-export type Files = {
+export type Changes = {
   [k: string]: string;
 }[];
-export type Total = number;
 /**
  * All event types in the protocol.
  */
@@ -10403,6 +10497,7 @@ export type EventType84 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "gc.config"
+  | "gc"
   | "instruction_budget.request"
   | "system.message"
   | "help.text"
@@ -10477,12 +10572,10 @@ export type EventType84 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp84 = string;
-export type WorkspaceId = string;
-export type Name6 = string;
-export type Size = number;
-export type ContentType = string | null;
-export type Mode1 = number | null;
-export type Files1 = StagedFileSpec[];
+export type Files = {
+  [k: string]: string;
+}[];
+export type Total = number;
 /**
  * All event types in the protocol.
  */
@@ -10526,6 +10619,7 @@ export type EventType85 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "gc.config"
+  | "gc"
   | "instruction_budget.request"
   | "system.message"
   | "help.text"
@@ -10600,11 +10694,12 @@ export type EventType85 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp85 = string;
-export type WorkspaceId1 = string;
-export type Staged = string[];
-export type Failed = {
-  [k: string]: string;
-}[];
+export type WorkspaceId = string;
+export type Name6 = string;
+export type Size = number;
+export type ContentType = string | null;
+export type Mode1 = number | null;
+export type Files1 = StagedFileSpec[];
 /**
  * All event types in the protocol.
  */
@@ -10648,6 +10743,7 @@ export type EventType86 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "gc.config"
+  | "gc"
   | "instruction_budget.request"
   | "system.message"
   | "help.text"
@@ -10722,20 +10818,11 @@ export type EventType86 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp86 = string;
-export type ServerId = string;
-export type ServerName = string;
-export type ServerVersion = string;
-export type ActiveSessions = number;
-export type ActiveAgents = number;
-export type AvailableProviders1 = string[];
-export type AvailableModels1 = string[];
-export type Tags = string[];
-export type CpuPercent = number;
-export type MemoryPercent = number;
-export type UptimeSeconds = number;
-export type TrustState = string;
-export type SuccessRate1H = number;
-export type EscalatedTools = number;
+export type WorkspaceId1 = string;
+export type Staged = string[];
+export type Failed = {
+  [k: string]: string;
+}[];
 /**
  * All event types in the protocol.
  */
@@ -10779,6 +10866,7 @@ export type EventType87 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "gc.config"
+  | "gc"
   | "instruction_budget.request"
   | "system.message"
   | "help.text"
@@ -10853,17 +10941,20 @@ export type EventType87 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp87 = string;
-export type RequestId20 = string;
-export type OriginServer = string;
-export type AgentName1 = string;
-export type Task = string;
-export type Context1 = string;
-export type ProfileJson = string;
-export type InlineConfigJson = string;
-export type WorkspaceGitUrl = string;
-export type WorkspaceBranch = string;
-export type WorkspaceCommit = string;
-export type WorkspaceTempBranch = string;
+export type ServerId = string;
+export type ServerName = string;
+export type ServerVersion = string;
+export type ActiveSessions = number;
+export type ActiveAgents = number;
+export type AvailableProviders1 = string[];
+export type AvailableModels1 = string[];
+export type Tags = string[];
+export type CpuPercent = number;
+export type MemoryPercent = number;
+export type UptimeSeconds = number;
+export type TrustState = string;
+export type SuccessRate1H = number;
+export type EscalatedTools = number;
 /**
  * All event types in the protocol.
  */
@@ -10907,6 +10998,7 @@ export type EventType88 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "gc.config"
+  | "gc"
   | "instruction_budget.request"
   | "system.message"
   | "help.text"
@@ -10981,8 +11073,17 @@ export type EventType88 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp88 = string;
-export type RequestId21 = string;
-export type RemoteAgentId = string;
+export type RequestId20 = string;
+export type OriginServer = string;
+export type AgentName1 = string;
+export type Task = string;
+export type Context1 = string;
+export type ProfileJson = string;
+export type InlineConfigJson = string;
+export type WorkspaceGitUrl = string;
+export type WorkspaceBranch = string;
+export type WorkspaceCommit = string;
+export type WorkspaceTempBranch = string;
 /**
  * All event types in the protocol.
  */
@@ -11026,6 +11127,7 @@ export type EventType89 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "gc.config"
+  | "gc"
   | "instruction_budget.request"
   | "system.message"
   | "help.text"
@@ -11100,8 +11202,8 @@ export type EventType89 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp89 = string;
-export type RequestId22 = string;
-export type Reason1 = string;
+export type RequestId21 = string;
+export type RemoteAgentId = string;
 /**
  * All event types in the protocol.
  */
@@ -11145,6 +11247,7 @@ export type EventType90 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "gc.config"
+  | "gc"
   | "instruction_budget.request"
   | "system.message"
   | "help.text"
@@ -11219,10 +11322,8 @@ export type EventType90 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp90 = string;
-export type RequestId23 = string;
-export type RemoteAgentId1 = string;
-export type Text4 = string;
-export type Source1 = string;
+export type RequestId22 = string;
+export type Reason1 = string;
 /**
  * All event types in the protocol.
  */
@@ -11266,6 +11367,7 @@ export type EventType91 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "gc.config"
+  | "gc"
   | "instruction_budget.request"
   | "system.message"
   | "help.text"
@@ -11340,12 +11442,10 @@ export type EventType91 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp91 = string;
-export type RequestId24 = string;
-export type RemoteAgentId2 = string;
-export type Success3 = boolean;
-export type Summary = string;
-export type Error7 = string;
-export type WorkspaceModified = boolean;
+export type RequestId23 = string;
+export type RemoteAgentId1 = string;
+export type Text4 = string;
+export type Source1 = string;
 /**
  * All event types in the protocol.
  */
@@ -11389,6 +11489,7 @@ export type EventType92 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "gc.config"
+  | "gc"
   | "instruction_budget.request"
   | "system.message"
   | "help.text"
@@ -11463,8 +11564,12 @@ export type EventType92 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp92 = string;
-export type RequestId25 = string;
-export type RemoteAgentId3 = string;
+export type RequestId24 = string;
+export type RemoteAgentId2 = string;
+export type Success4 = boolean;
+export type Summary = string;
+export type Error8 = string;
+export type WorkspaceModified = boolean;
 /**
  * All event types in the protocol.
  */
@@ -11508,6 +11613,7 @@ export type EventType93 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "gc.config"
+  | "gc"
   | "instruction_budget.request"
   | "system.message"
   | "help.text"
@@ -11582,8 +11688,8 @@ export type EventType93 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp93 = string;
-export type RequestId26 = string;
-export type RemoteAgentId4 = string;
+export type RequestId25 = string;
+export type RemoteAgentId3 = string;
 /**
  * All event types in the protocol.
  */
@@ -11627,6 +11733,7 @@ export type EventType94 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "gc.config"
+  | "gc"
   | "instruction_budget.request"
   | "system.message"
   | "help.text"
@@ -11701,10 +11808,8 @@ export type EventType94 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp94 = string;
-export type GateName = string;
-export type TenantId = string;
-export type Owner = string;
-export type AnnouncedAt = string;
+export type RequestId26 = string;
+export type RemoteAgentId4 = string;
 /**
  * All event types in the protocol.
  */
@@ -11748,6 +11853,7 @@ export type EventType95 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "gc.config"
+  | "gc"
   | "instruction_budget.request"
   | "system.message"
   | "help.text"
@@ -11822,15 +11928,10 @@ export type EventType95 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp95 = string;
-export type GateName1 = string;
-export type SessionId10 = string;
-export type TenantId1 = string;
-export type Owner1 = string;
-export type Outcome = {
-  [k: string]: unknown;
-} | null;
-export type ReleasedAt = string;
-export type WasAnnounced = boolean;
+export type GateName = string;
+export type TenantId = string;
+export type Owner = string;
+export type AnnouncedAt = string;
 /**
  * All event types in the protocol.
  */
@@ -11874,6 +11975,7 @@ export type EventType96 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "gc.config"
+  | "gc"
   | "instruction_budget.request"
   | "system.message"
   | "help.text"
@@ -11948,17 +12050,15 @@ export type EventType96 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp96 = string;
-export type GateName2 = string;
-export type TenantId2 = string;
-export type State = string;
-export type Owner2 = string | null;
-export type Intent1 = {
+export type GateName1 = string;
+export type SessionId10 = string;
+export type TenantId1 = string;
+export type Owner1 = string;
+export type Outcome = {
   [k: string]: unknown;
 } | null;
-export type AcquiredAt = string | null;
-export type ExpiresAt = string | null;
-export type Gates = GateState[];
-export type SnapshotAt = string;
+export type ReleasedAt = string;
+export type WasAnnounced = boolean;
 /**
  * All event types in the protocol.
  */
@@ -12002,6 +12102,7 @@ export type EventType97 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "gc.config"
+  | "gc"
   | "instruction_budget.request"
   | "system.message"
   | "help.text"
@@ -12076,9 +12177,17 @@ export type EventType97 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp97 = string;
-export type Text5 = string;
-export type SourceType = string;
-export type SourceId = string | null;
+export type GateName2 = string;
+export type TenantId2 = string;
+export type State = string;
+export type Owner2 = string | null;
+export type Intent1 = {
+  [k: string]: unknown;
+} | null;
+export type AcquiredAt = string | null;
+export type ExpiresAt = string | null;
+export type Gates = GateState[];
+export type SnapshotAt = string;
 /**
  * All event types in the protocol.
  */
@@ -12122,6 +12231,7 @@ export type EventType98 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "gc.config"
+  | "gc"
   | "instruction_budget.request"
   | "system.message"
   | "help.text"
@@ -12196,13 +12306,9 @@ export type EventType98 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp98 = string;
-export type RequestId27 = string;
-export type Messages =
-  | {
-      [k: string]: unknown;
-    }[]
-  | null;
-export type TimeoutSeconds = number;
+export type Text5 = string;
+export type SourceType = string;
+export type SourceId = string | null;
 /**
  * All event types in the protocol.
  */
@@ -12246,6 +12352,7 @@ export type EventType99 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "gc.config"
+  | "gc"
   | "instruction_budget.request"
   | "system.message"
   | "help.text"
@@ -12320,9 +12427,13 @@ export type EventType99 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp99 = string;
-export type RequestId28 = string;
-export type ResponseText = string;
-export type Error8 = string;
+export type RequestId27 = string;
+export type Messages =
+  | {
+      [k: string]: unknown;
+    }[]
+  | null;
+export type TimeoutSeconds = number;
 /**
  * All event types in the protocol.
  */
@@ -12366,6 +12477,7 @@ export type EventType100 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "gc.config"
+  | "gc"
   | "instruction_budget.request"
   | "system.message"
   | "help.text"
@@ -12440,10 +12552,9 @@ export type EventType100 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp100 = string;
-export type RequestId29 = string;
-export type AfterMessage = number | null;
-export type AfterToolCall = string | null;
-export type AfterTimestamp = string | null;
+export type RequestId28 = string;
+export type ResponseText = string;
+export type Error9 = string;
 /**
  * All event types in the protocol.
  */
@@ -12487,6 +12598,7 @@ export type EventType101 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "gc.config"
+  | "gc"
   | "instruction_budget.request"
   | "system.message"
   | "help.text"
@@ -12561,9 +12673,10 @@ export type EventType101 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp101 = string;
-export type RequestId30 = string;
-export type ForkIndex = number;
-export type Error9 = string;
+export type RequestId29 = string;
+export type AfterMessage = number | null;
+export type AfterToolCall = string | null;
+export type AfterTimestamp = string | null;
 /**
  * All event types in the protocol.
  */
@@ -12607,6 +12720,7 @@ export type EventType102 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "gc.config"
+  | "gc"
   | "instruction_budget.request"
   | "system.message"
   | "help.text"
@@ -12681,11 +12795,9 @@ export type EventType102 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp102 = string;
-export type WakeRef = string;
-export type Outcome1 = string;
-export type Detail = string;
-export type ExpiresAt1 = number;
-export type Endpoint = string;
+export type RequestId30 = string;
+export type ForkIndex = number;
+export type Error10 = string;
 /**
  * All event types in the protocol.
  */
@@ -12729,6 +12841,7 @@ export type EventType103 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "gc.config"
+  | "gc"
   | "instruction_budget.request"
   | "system.message"
   | "help.text"
@@ -12803,9 +12916,11 @@ export type EventType103 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp103 = string;
-export type SessionId11 = string;
-export type WakeRef1 = string;
-export type Source2 = string;
+export type WakeRef = string;
+export type Outcome1 = string;
+export type Detail = string;
+export type ExpiresAt1 = number;
+export type Endpoint = string;
 /**
  * All event types in the protocol.
  */
@@ -12849,6 +12964,7 @@ export type EventType104 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "gc.config"
+  | "gc"
   | "instruction_budget.request"
   | "system.message"
   | "help.text"
@@ -12923,8 +13039,9 @@ export type EventType104 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp104 = string;
-export type Tools3 = string[];
-export type Patterns = string[];
+export type SessionId11 = string;
+export type WakeRef1 = string;
+export type Source2 = string;
 /**
  * All event types in the protocol.
  */
@@ -12968,6 +13085,7 @@ export type EventType105 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "gc.config"
+  | "gc"
   | "instruction_budget.request"
   | "system.message"
   | "help.text"
@@ -13042,8 +13160,8 @@ export type EventType105 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp105 = string;
-export type Tools4 = string[];
-export type Patterns1 = string[];
+export type Tools3 = string[];
+export type Patterns = string[];
 /**
  * All event types in the protocol.
  */
@@ -13087,6 +13205,7 @@ export type EventType106 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "gc.config"
+  | "gc"
   | "instruction_budget.request"
   | "system.message"
   | "help.text"
@@ -13161,9 +13280,8 @@ export type EventType106 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp106 = string;
-export type Target = string;
-export type Tools5 = string[];
-export type Patterns2 = string[];
+export type Tools4 = string[];
+export type Patterns1 = string[];
 /**
  * All event types in the protocol.
  */
@@ -13207,6 +13325,7 @@ export type EventType107 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "gc.config"
+  | "gc"
   | "instruction_budget.request"
   | "system.message"
   | "help.text"
@@ -13281,7 +13400,9 @@ export type EventType107 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp107 = string;
-export type Target1 = string;
+export type Target = string;
+export type Tools5 = string[];
+export type Patterns2 = string[];
 /**
  * All event types in the protocol.
  */
@@ -13325,6 +13446,7 @@ export type EventType108 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "gc.config"
+  | "gc"
   | "instruction_budget.request"
   | "system.message"
   | "help.text"
@@ -13399,7 +13521,7 @@ export type EventType108 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp108 = string;
-export type Policy = string;
+export type Target1 = string;
 /**
  * All event types in the protocol.
  */
@@ -13443,6 +13565,7 @@ export type EventType109 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "gc.config"
+  | "gc"
   | "instruction_budget.request"
   | "system.message"
   | "help.text"
@@ -13517,7 +13640,7 @@ export type EventType109 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp109 = string;
-export type RequestId31 = string;
+export type Policy = string;
 /**
  * All event types in the protocol.
  */
@@ -13561,6 +13684,7 @@ export type EventType110 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "gc.config"
+  | "gc"
   | "instruction_budget.request"
   | "system.message"
   | "help.text"
@@ -13635,6 +13759,125 @@ export type EventType110 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp110 = string;
+export type RequestId31 = string;
+/**
+ * All event types in the protocol.
+ */
+export type EventType111 =
+  | "connected"
+  | "disconnected"
+  | "agent.created"
+  | "agent.output"
+  | "agent.status_changed"
+  | "agent.completed"
+  | "agent.error"
+  | "session.terminated"
+  | "slot.settled"
+  | "session.restored"
+  | "tool.call_start"
+  | "tool.call_end"
+  | "tool.output"
+  | "permission.requested"
+  | "permission.input_mode"
+  | "permission.resolved"
+  | "permission.response"
+  | "permission.status"
+  | "clarification.requested"
+  | "clarification.input_mode"
+  | "clarification.question"
+  | "clarification.resolved"
+  | "clarification.response"
+  | "clarification.batch"
+  | "clarification.batch_response"
+  | "reference_selection.requested"
+  | "reference_selection.resolved"
+  | "reference_selection.response"
+  | "workspace_mismatch.requested"
+  | "workspace_mismatch.resolved"
+  | "workspace_mismatch.response"
+  | "plan.updated"
+  | "plan.step_updated"
+  | "plan.cleared"
+  | "context.updated"
+  | "turn.completed"
+  | "turn.progress"
+  | "instruction_budget.updated"
+  | "gc.config"
+  | "gc"
+  | "instruction_budget.request"
+  | "system.message"
+  | "help.text"
+  | "error"
+  | "init.progress"
+  | "retry"
+  | "session.list"
+  | "session.info"
+  | "session.description_updated"
+  | "memory.list"
+  | "sandbox.paths"
+  | "service.list"
+  | "message.send"
+  | "session.stop"
+  | "command.execute"
+  | "command.list_request"
+  | "command.list"
+  | "command.list_refresh"
+  | "tools.status"
+  | "tools.id_registry"
+  | "tools.disable"
+  | "tools.register_client"
+  | "tool.execute_request"
+  | "tool.execute_result"
+  | "history.request"
+  | "history"
+  | "client.config"
+  | "mid_turn_prompt.queued"
+  | "mid_turn_prompt.injected"
+  | "mid_turn_prompt.interrupt"
+  | "session.interrupted_turn_recovered"
+  | "auth.setup"
+  | "auth.setup_response"
+  | "workspace.list"
+  | "workspace.list_response"
+  | "workspace.create"
+  | "workspace.created"
+  | "workspace.select"
+  | "config.status"
+  | "config.update"
+  | "config.updated"
+  | "workspace.files.stage_request"
+  | "workspace.files.staged"
+  | "session.profiles"
+  | "workspace.files_changed"
+  | "workspace.files_snapshot"
+  | "event.external"
+  | "inject_prompt.request"
+  | "replay_messages.request"
+  | "replay_messages.result"
+  | "resolve_fork_point.request"
+  | "resolve_fork_point.result"
+  | "session.wake_bind_result"
+  | "session.woken"
+  | "permission.add_whitelist"
+  | "permission.add_blacklist"
+  | "permission.remove"
+  | "permission.clear"
+  | "permission.set_default"
+  | "permission.policy_snapshot.request"
+  | "permission.policy_snapshot"
+  | "events.subscribed"
+  | "peer.heartbeat"
+  | "peer.spawn_request"
+  | "peer.spawn_accepted"
+  | "peer.spawn_rejected"
+  | "peer.agent_output"
+  | "peer.agent_completed"
+  | "peer.stop_request"
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
+export type Timestamp111 = string;
 export type RequestId32 = string;
 export type DefaultPolicy = string;
 export type SessionDefaultPolicy = string | null;
@@ -14443,6 +14686,61 @@ export interface SessionListEvent {
   sessions?: Sessions;
 }
 /**
+ * Garbage collection lifecycle — one event, switched on ``phase``.
+ *
+ * DISTINCT from :class:`GCConfigEvent`, which carries configuration only
+ * (threshold / strategy / target) at init and reconfigure.  This is the
+ * lifecycle: GC is about to run, is running, has finished.
+ *
+ * Before this existed there was NO lifecycle signal on the bus.  The
+ * framework opened an OpenTelemetry span with the trigger reason and the
+ * strategy, and clients got either prose -- a ``SystemMessageEvent`` reading
+ * "Context usage (84.2%) exceeds threshold (80%). GC will run after this
+ * turn." -- or nothing at all.  A client wanting to show "compacting..." had
+ * to substring-match that sentence for the start and guess at the end, which
+ * is the parse-the-log shape typed events exist to replace.
+ *
+ * Phases:
+ *
+ * ``about_to_run``
+ *     The threshold was crossed; GC will run after this turn.  Carries
+ *     ``percent_used`` / ``threshold``.  Announces a FUTURE pass -- the
+ *     session keeps serving the current turn.
+ * ``started``
+ *     A pass is beginning now.  Carries ``trigger_reason`` / ``strategy``
+ *     plus the "before" figures.
+ * ``completed``
+ *     The pass finished.  Carries ``success``, ``items_collected``,
+ *     ``tokens_freed``, ``tokens_before`` / ``tokens_after``, and ``error``
+ *     when it failed.
+ *
+ * "Ongoing" is the interval BETWEEN ``started`` and ``completed`` -- a
+ * client renders its spinner there.  ``collect()`` is atomic, so there is no
+ * sub-pass progress to report and none is invented.
+ *
+ * Every GC pass emits ``started`` + ``completed``, including a failed one:
+ * the failure is the case an operator most needs.  ``about_to_run`` fires
+ * only for threshold-triggered passes, since the other triggers (manual,
+ * context-limit recovery) have no advance warning by nature.
+ */
+export interface GCEvent {
+  type?: EventType44;
+  timestamp?: Timestamp44;
+  agent_id?: AgentId28;
+  phase?: Phase;
+  trigger_reason?: TriggerReason;
+  strategy?: Strategy1;
+  percent_used?: PercentUsed2;
+  threshold?: Threshold1;
+  context_limit?: ContextLimit2;
+  success?: Success2;
+  items_collected?: ItemsCollected;
+  tokens_before?: TokensBefore;
+  tokens_after?: TokensAfter;
+  tokens_freed?: TokensFreed;
+  error?: Error4;
+}
+/**
  * Session state snapshot - sent on connect/attach with all data client needs.
  *
  * Includes current session info plus lists for completion/display:
@@ -14454,8 +14752,8 @@ export interface SessionListEvent {
  * Server pushes updates when state changes.
  */
 export interface SessionInfoEvent {
-  type?: EventType44;
-  timestamp?: Timestamp44;
+  type?: EventType45;
+  timestamp?: Timestamp45;
   session_id?: SessionId7;
   session_name?: SessionName;
   model_provider?: ModelProvider;
@@ -14477,8 +14775,8 @@ export interface ToolIdMappings {
  * List of available memories - for completion cache and pager display.
  */
 export interface MemoryListEvent {
-  type?: EventType45;
-  timestamp?: Timestamp45;
+  type?: EventType46;
+  timestamp?: Timestamp46;
   memories?: Memories1;
 }
 /**
@@ -14488,8 +14786,8 @@ export interface MemoryListEvent {
  * completion list for @@ (sandbox path) references.
  */
 export interface SandboxPathsEvent {
-  type?: EventType46;
-  timestamp?: Timestamp46;
+  type?: EventType47;
+  timestamp?: Timestamp47;
   paths?: Paths;
 }
 /**
@@ -14499,16 +14797,16 @@ export interface SandboxPathsEvent {
  * completion list for service names and HTTP methods.
  */
 export interface ServiceListEvent {
-  type?: EventType47;
-  timestamp?: Timestamp47;
+  type?: EventType48;
+  timestamp?: Timestamp48;
   services?: Services1;
 }
 /**
  * Session description was updated (by model calling session_describe).
  */
 export interface SessionDescriptionUpdatedEvent {
-  type?: EventType48;
-  timestamp?: Timestamp48;
+  type?: EventType49;
+  timestamp?: Timestamp49;
   session_id?: SessionId8;
   description?: Description;
 }
@@ -14530,8 +14828,8 @@ export interface SessionDescriptionUpdatedEvent {
  * removed from this event.
  */
 export interface SessionProfilesEvent {
-  type?: EventType49;
-  timestamp?: Timestamp49;
+  type?: EventType50;
+  timestamp?: Timestamp50;
   profiles?: Profiles;
   parse_errors?: ParseErrors;
 }
@@ -14582,14 +14880,14 @@ export interface ModelTiers {
  */
 export interface ProfileParseError {
   name: Name1;
-  error: Error4;
+  error: Error5;
 }
 /**
  * Send a message to the model.
  */
 export interface SendMessageRequest {
-  type?: EventType50;
-  timestamp?: Timestamp50;
+  type?: EventType51;
+  timestamp?: Timestamp51;
   text?: Text1;
   attachments?: Attachments;
   parallel_tools?: ParallelTools;
@@ -14598,8 +14896,8 @@ export interface SendMessageRequest {
  * Respond to a permission request.
  */
 export interface PermissionResponseRequest {
-  type?: EventType51;
-  timestamp?: Timestamp51;
+  type?: EventType52;
+  timestamp?: Timestamp52;
   request_id?: RequestId18;
   response?: Response2;
   edited_arguments?: EditedArguments;
@@ -14608,8 +14906,8 @@ export interface PermissionResponseRequest {
  * Respond to a clarification question.
  */
 export interface ClarificationResponseRequest {
-  type?: EventType52;
-  timestamp?: Timestamp52;
+  type?: EventType53;
+  timestamp?: Timestamp53;
   request_id?: RequestId19;
   question_index?: QuestionIndex2;
   response?: Response3;
@@ -14618,9 +14916,9 @@ export interface ClarificationResponseRequest {
  * Stop current operation (cancel generation).
  */
 export interface StopRequest {
-  type?: EventType53;
-  timestamp?: Timestamp53;
-  agent_id?: AgentId28;
+  type?: EventType54;
+  timestamp?: Timestamp54;
+  agent_id?: AgentId29;
 }
 /**
  * External event injected by the host page via the web component.
@@ -14629,8 +14927,8 @@ export interface StopRequest {
  * so that agents subscribed via ``subscribeToEvents`` are notified.
  */
 export interface ExternalEventRequest {
-  type?: EventType54;
-  timestamp?: Timestamp54;
+  type?: EventType55;
+  timestamp?: Timestamp55;
   name?: Name2;
   data?: Data;
 }
@@ -14645,9 +14943,9 @@ export interface Data {
  * events.
  */
 export interface EventsSubscribedEvent {
-  type?: EventType55;
-  timestamp?: Timestamp55;
-  agent_id?: AgentId29;
+  type?: EventType56;
+  timestamp?: Timestamp56;
+  agent_id?: AgentId30;
   event_names?: EventNames;
 }
 /**
@@ -14667,8 +14965,8 @@ export interface EventsSubscribedEvent {
  * construction.
  */
 export interface CommandRequest {
-  type?: EventType56;
-  timestamp?: Timestamp56;
+  type?: EventType57;
+  timestamp?: Timestamp57;
   command?: Command;
   args?: Args;
   payload?: Payload1;
@@ -14680,23 +14978,23 @@ export interface CommandRequest {
  * If agent_id is None or empty, returns budget for main agent.
  */
 export interface GetInstructionBudgetRequest {
-  type?: EventType57;
-  timestamp?: Timestamp57;
-  agent_id?: AgentId30;
+  type?: EventType58;
+  timestamp?: Timestamp58;
+  agent_id?: AgentId31;
 }
 /**
  * Request list of available commands from server.
  */
 export interface CommandListRequest {
-  type?: EventType58;
-  timestamp?: Timestamp58;
+  type?: EventType59;
+  timestamp?: Timestamp59;
 }
 /**
  * List of available commands from server/plugins.
  */
 export interface CommandListEvent {
-  type?: EventType59;
-  timestamp?: Timestamp59;
+  type?: EventType60;
+  timestamp?: Timestamp60;
   commands?: Commands;
 }
 /**
@@ -14707,15 +15005,15 @@ export interface CommandListEvent {
  * by re-requesting the full command list from the daemon.
  */
 export interface CommandListRefreshEvent {
-  type?: EventType60;
-  timestamp?: Timestamp60;
+  type?: EventType61;
+  timestamp?: Timestamp61;
 }
 /**
  * Tool status information for client display.
  */
 export interface ToolStatusEvent {
-  type?: EventType61;
-  timestamp?: Timestamp61;
+  type?: EventType62;
+  timestamp?: Timestamp62;
   tools?: Tools1;
   message?: Message3;
 }
@@ -14730,8 +15028,8 @@ export interface ToolStatusEvent {
  * not a delta. Clients should replace their local lookup on each receive.
  */
 export interface ToolIdRegistryEvent {
-  type?: EventType62;
-  timestamp?: Timestamp62;
+  type?: EventType63;
+  timestamp?: Timestamp63;
   mappings?: Mappings;
 }
 export interface Mappings {
@@ -14744,8 +15042,8 @@ export interface Mappings {
  * Used by headless mode to disable tools before starting event handling.
  */
 export interface ToolDisableRequest {
-  type?: EventType63;
-  timestamp?: Timestamp63;
+  type?: EventType64;
+  timestamp?: Timestamp64;
   tool_name?: ToolName11;
 }
 /**
@@ -14756,8 +15054,8 @@ export interface ToolDisableRequest {
  * ``tool.execute_request`` and waits for ``tool.execute_result``.
  */
 export interface ToolsRegisterClientRequest {
-  type?: EventType64;
-  timestamp?: Timestamp64;
+  type?: EventType65;
+  timestamp?: Timestamp65;
   tools?: Tools2;
   categories?: Categories;
 }
@@ -14768,10 +15066,10 @@ export interface Categories {
  * Server requests the WS client to execute a client-registered tool.
  */
 export interface ToolExecuteRequestEvent {
-  type?: EventType65;
-  timestamp?: Timestamp65;
+  type?: EventType66;
+  timestamp?: Timestamp66;
   call_id?: CallId4;
-  agent_id?: AgentId31;
+  agent_id?: AgentId32;
   tool_name?: ToolName12;
   tool_args?: ToolArgs3;
 }
@@ -14782,27 +15080,27 @@ export interface ToolArgs3 {
  * Client returns the result of a client-side tool execution.
  */
 export interface ToolExecuteResultEvent {
-  type?: EventType66;
-  timestamp?: Timestamp66;
+  type?: EventType67;
+  timestamp?: Timestamp67;
   call_id?: CallId5;
   result?: Result1;
-  error?: Error5;
+  error?: Error6;
 }
 /**
  * Client request for conversation history.
  */
 export interface HistoryRequest {
-  type?: EventType67;
-  timestamp?: Timestamp67;
-  agent_id?: AgentId32;
+  type?: EventType68;
+  timestamp?: Timestamp68;
+  agent_id?: AgentId33;
 }
 /**
  * Conversation history from server.
  */
 export interface HistoryEvent {
-  type?: EventType68;
-  timestamp?: Timestamp68;
-  agent_id?: AgentId33;
+  type?: EventType69;
+  timestamp?: Timestamp69;
+  agent_id?: AgentId34;
   history?: History;
   turn_accounting?: TurnAccounting;
 }
@@ -14814,8 +15112,8 @@ export interface HistoryEvent {
  * a ``PresentationContext`` on the server side.
  */
 export interface ClientConfigRequest {
-  type?: EventType69;
-  timestamp?: Timestamp69;
+  type?: EventType70;
+  timestamp?: Timestamp70;
   trace_log_path?: TraceLogPath;
   provider_trace_log?: ProviderTraceLog;
   working_dir?: WorkingDir;
@@ -14833,8 +15131,8 @@ export interface ClientConfigRequest {
  * pause point (between tool executions, after subagent completion, etc.).
  */
 export interface MidTurnPromptQueuedEvent {
-  type?: EventType70;
-  timestamp?: Timestamp70;
+  type?: EventType71;
+  timestamp?: Timestamp71;
   text?: Text2;
   position_in_queue?: PositionInQueue;
 }
@@ -14845,8 +15143,8 @@ export interface MidTurnPromptQueuedEvent {
  * by the model.
  */
 export interface MidTurnPromptInjectedEvent {
-  type?: EventType71;
-  timestamp?: Timestamp71;
+  type?: EventType72;
+  timestamp?: Timestamp72;
   text?: Text3;
 }
 /**
@@ -14857,8 +15155,8 @@ export interface MidTurnPromptInjectedEvent {
  * The partial response is preserved and the user's prompt is being processed.
  */
 export interface MidTurnInterruptEvent {
-  type?: EventType72;
-  timestamp?: Timestamp72;
+  type?: EventType73;
+  timestamp?: Timestamp73;
   partial_response_chars?: PartialResponseChars;
   user_prompt_preview?: UserPromptPreview;
 }
@@ -14870,10 +15168,10 @@ export interface MidTurnInterruptEvent {
  * for any pending tool calls.
  */
 export interface InterruptedTurnRecoveredEvent {
-  type?: EventType73;
-  timestamp?: Timestamp73;
+  type?: EventType74;
+  timestamp?: Timestamp74;
   session_id?: SessionId9;
-  agent_id?: AgentId34;
+  agent_id?: AgentId35;
   recovered_calls?: RecoveredCalls;
   action_taken?: ActionTaken;
 }
@@ -14881,15 +15179,15 @@ export interface InterruptedTurnRecoveredEvent {
  * Client requests list of available workspaces.
  */
 export interface WorkspaceListRequest {
-  type?: EventType74;
-  timestamp?: Timestamp74;
+  type?: EventType75;
+  timestamp?: Timestamp75;
 }
 /**
  * Response to workspace.list - list of available workspaces.
  */
 export interface WorkspaceListEvent {
-  type?: EventType75;
-  timestamp?: Timestamp75;
+  type?: EventType76;
+  timestamp?: Timestamp76;
   root?: Root;
   workspaces?: Workspaces;
 }
@@ -14897,16 +15195,16 @@ export interface WorkspaceListEvent {
  * Client requests creation of a new workspace.
  */
 export interface WorkspaceCreateRequest {
-  type?: EventType76;
-  timestamp?: Timestamp76;
+  type?: EventType77;
+  timestamp?: Timestamp77;
   name?: Name3;
 }
 /**
  * Response to workspace.create - new workspace created.
  */
 export interface WorkspaceCreatedEvent {
-  type?: EventType77;
-  timestamp?: Timestamp77;
+  type?: EventType78;
+  timestamp?: Timestamp78;
   name?: Name4;
   path?: Path;
 }
@@ -14914,16 +15212,16 @@ export interface WorkspaceCreatedEvent {
  * Client selects a workspace to use for the session.
  */
 export interface WorkspaceSelectRequest {
-  type?: EventType78;
-  timestamp?: Timestamp78;
+  type?: EventType79;
+  timestamp?: Timestamp79;
   name?: Name5;
 }
 /**
  * Response to workspace.select - configuration status of selected workspace.
  */
 export interface ConfigStatusEvent {
-  type?: EventType79;
-  timestamp?: Timestamp79;
+  type?: EventType80;
+  timestamp?: Timestamp80;
   workspace?: Workspace;
   configured?: Configured;
   provider?: Provider1;
@@ -14935,8 +15233,8 @@ export interface ConfigStatusEvent {
  * Client updates workspace configuration (provider, model, API key).
  */
 export interface ConfigUpdateRequest {
-  type?: EventType80;
-  timestamp?: Timestamp80;
+  type?: EventType81;
+  timestamp?: Timestamp81;
   provider?: Provider2;
   model?: Model2;
   api_key?: ApiKey;
@@ -14945,13 +15243,13 @@ export interface ConfigUpdateRequest {
  * Response to config.update - configuration was updated.
  */
 export interface ConfigUpdatedEvent {
-  type?: EventType81;
-  timestamp?: Timestamp81;
+  type?: EventType82;
+  timestamp?: Timestamp82;
   workspace?: Workspace1;
   provider?: Provider3;
   model?: Model3;
-  success?: Success2;
-  error?: Error6;
+  success?: Success3;
+  error?: Error7;
 }
 /**
  * Incremental workspace file change notification.
@@ -14967,8 +15265,8 @@ export interface ConfigUpdatedEvent {
  *     ``"deleted"``  – file was previously tracked and is now gone.
  */
 export interface WorkspaceFilesChangedEvent {
-  type?: EventType82;
-  timestamp?: Timestamp82;
+  type?: EventType83;
+  timestamp?: Timestamp83;
   changes?: Changes;
 }
 /**
@@ -14979,8 +15277,8 @@ export interface WorkspaceFilesChangedEvent {
  * replaying individual deltas.
  */
 export interface WorkspaceFilesSnapshotEvent {
-  type?: EventType83;
-  timestamp?: Timestamp83;
+  type?: EventType84;
+  timestamp?: Timestamp84;
   files?: Files;
   total?: Total;
 }
@@ -15024,8 +15322,8 @@ export interface WorkspaceFilesSnapshotEvent {
  * already-existing workspace mid-session.
  */
 export interface StageFilesRequest {
-  type?: EventType84;
-  timestamp?: Timestamp84;
+  type?: EventType85;
+  timestamp?: Timestamp85;
   workspace_id?: WorkspaceId;
   files?: Files1;
 }
@@ -15073,8 +15371,8 @@ export interface StagedFileSpec {
  *   AppArmor refusal, ...).  ``error`` carries the OS message.
  */
 export interface StageFilesEvent {
-  type?: EventType85;
-  timestamp?: Timestamp85;
+  type?: EventType86;
+  timestamp?: Timestamp86;
   workspace_id?: WorkspaceId1;
   staged?: Staged;
   failed?: Failed;
@@ -15087,8 +15385,8 @@ export interface StageFilesEvent {
  * to expose cluster state to the model.
  */
 export interface PeerHeartbeatEvent {
-  type?: EventType86;
-  timestamp?: Timestamp86;
+  type?: EventType87;
+  timestamp?: Timestamp87;
   server_id?: ServerId;
   server_name?: ServerName;
   server_version?: ServerVersion;
@@ -15113,8 +15411,8 @@ export interface PeerHeartbeatEvent {
  * this spawn lifecycle.
  */
 export interface PeerSpawnRequestEvent {
-  type?: EventType87;
-  timestamp?: Timestamp87;
+  type?: EventType88;
+  timestamp?: Timestamp88;
   request_id?: RequestId20;
   origin_server?: OriginServer;
   agent_name?: AgentName1;
@@ -15134,8 +15432,8 @@ export interface PeerSpawnRequestEvent {
  * ephemeral session and is about to start processing.
  */
 export interface PeerSpawnAcceptedEvent {
-  type?: EventType88;
-  timestamp?: Timestamp88;
+  type?: EventType89;
+  timestamp?: Timestamp89;
   request_id?: RequestId21;
   remote_agent_id?: RemoteAgentId;
 }
@@ -15146,8 +15444,8 @@ export interface PeerSpawnAcceptedEvent {
  * capacity limits, missing provider, unknown profile).
  */
 export interface PeerSpawnRejectedEvent {
-  type?: EventType89;
-  timestamp?: Timestamp89;
+  type?: EventType90;
+  timestamp?: Timestamp90;
   request_id?: RequestId22;
   reason?: Reason1;
 }
@@ -15159,8 +15457,8 @@ export interface PeerSpawnRejectedEvent {
  * to the parent session via ``inject_prompt``.
  */
 export interface PeerAgentOutputEvent {
-  type?: EventType90;
-  timestamp?: Timestamp90;
+  type?: EventType91;
+  timestamp?: Timestamp91;
   request_id?: RequestId23;
   remote_agent_id?: RemoteAgentId1;
   text?: Text4;
@@ -15174,13 +15472,13 @@ export interface PeerAgentOutputEvent {
  * populated only when ``success`` is False.
  */
 export interface PeerAgentCompletedEvent {
-  type?: EventType91;
-  timestamp?: Timestamp91;
+  type?: EventType92;
+  timestamp?: Timestamp92;
   request_id?: RequestId24;
   remote_agent_id?: RemoteAgentId2;
-  success?: Success3;
+  success?: Success4;
   summary?: Summary;
-  error?: Error7;
+  error?: Error8;
   workspace_modified?: WorkspaceModified;
 }
 /**
@@ -15190,8 +15488,8 @@ export interface PeerAgentCompletedEvent {
  * a previously spawned remote subagent.
  */
 export interface PeerStopRequestEvent {
-  type?: EventType92;
-  timestamp?: Timestamp92;
+  type?: EventType93;
+  timestamp?: Timestamp93;
   request_id?: RequestId25;
   remote_agent_id?: RemoteAgentId3;
 }
@@ -15199,8 +15497,8 @@ export interface PeerStopRequestEvent {
  * Confirmation that a remote peer received and processed the stop request.
  */
 export interface PeerStopAcknowledgedEvent {
-  type?: EventType93;
-  timestamp?: Timestamp93;
+  type?: EventType94;
+  timestamp?: Timestamp94;
   request_id?: RequestId26;
   remote_agent_id?: RemoteAgentId4;
 }
@@ -15213,8 +15511,8 @@ export interface PeerStopAcknowledgedEvent {
  * observe the spawned session's events.
  */
 export interface GateAnnouncedEvent {
-  type?: EventType94;
-  timestamp?: Timestamp94;
+  type?: EventType95;
+  timestamp?: Timestamp95;
   gate_name?: GateName;
   tenant_id?: TenantId;
   owner?: Owner;
@@ -15234,8 +15532,8 @@ export interface Intent {
  * on TTL expiry.
  */
 export interface GateReleasedEvent {
-  type?: EventType95;
-  timestamp?: Timestamp95;
+  type?: EventType96;
+  timestamp?: Timestamp96;
   gate_name?: GateName1;
   session_id?: SessionId10;
   tenant_id?: TenantId1;
@@ -15252,8 +15550,8 @@ export interface GateReleasedEvent {
  * the registry replays the live state once at subscription time.
  */
 export interface GatesSnapshotEvent {
-  type?: EventType96;
-  timestamp?: Timestamp96;
+  type?: EventType97;
+  timestamp?: Timestamp97;
   gates?: Gates;
   snapshot_at?: SnapshotAt;
 }
@@ -15295,8 +15593,8 @@ export interface GateState {
  * patterns via the priority dimension.
  */
 export interface InjectPromptRequest {
-  type?: EventType97;
-  timestamp?: Timestamp97;
+  type?: EventType98;
+  timestamp?: Timestamp98;
   text?: Text5;
   source_type?: SourceType;
   source_id?: SourceId;
@@ -15316,8 +15614,8 @@ export interface InjectPromptRequest {
  * flows compose this with ``resolve_fork_point``.
  */
 export interface ReplayMessagesRequest {
-  type?: EventType98;
-  timestamp?: Timestamp98;
+  type?: EventType99;
+  timestamp?: Timestamp99;
   request_id?: RequestId27;
   messages?: Messages;
   timeout_seconds?: TimeoutSeconds;
@@ -15326,11 +15624,11 @@ export interface ReplayMessagesRequest {
  * Server's response to :class:`ReplayMessagesRequest`.
  */
 export interface ReplayMessagesResultEvent {
-  type?: EventType99;
-  timestamp?: Timestamp99;
+  type?: EventType100;
+  timestamp?: Timestamp100;
   request_id?: RequestId28;
   response_text?: ResponseText;
-  error?: Error8;
+  error?: Error9;
 }
 /**
  * Resolve a fork point in the session's history to a message index.
@@ -15348,8 +15646,8 @@ export interface ReplayMessagesResultEvent {
  * tool uses internally.
  */
 export interface ResolveForkPointRequest {
-  type?: EventType100;
-  timestamp?: Timestamp100;
+  type?: EventType101;
+  timestamp?: Timestamp101;
   request_id?: RequestId29;
   after_message?: AfterMessage;
   after_tool_call?: AfterToolCall;
@@ -15359,11 +15657,11 @@ export interface ResolveForkPointRequest {
  * Server's response to :class:`ResolveForkPointRequest`.
  */
 export interface ResolveForkPointResultEvent {
-  type?: EventType101;
-  timestamp?: Timestamp101;
+  type?: EventType102;
+  timestamp?: Timestamp102;
   request_id?: RequestId30;
   fork_index?: ForkIndex;
-  error?: Error9;
+  error?: Error10;
 }
 /**
  * Server returns the result of ``session.bind_wake`` / ``session.unbind_wake``.
@@ -15375,8 +15673,8 @@ export interface ResolveForkPointResultEvent {
  * binding's Unix expiry — the values the caller's waker keys on.
  */
 export interface WakeBindResultEvent {
-  type?: EventType102;
-  timestamp?: Timestamp102;
+  type?: EventType103;
+  timestamp?: Timestamp103;
   wake_ref?: WakeRef;
   outcome?: Outcome1;
   detail?: Detail;
@@ -15403,8 +15701,8 @@ export interface WakeBindResultEvent {
  * notification is a signal to attach, not the untrusted payload).
  */
 export interface SessionWokenEvent {
-  type?: EventType103;
-  timestamp?: Timestamp103;
+  type?: EventType104;
+  timestamp?: Timestamp104;
   session_id?: SessionId11;
   wake_ref?: WakeRef1;
   source?: Source2;
@@ -15418,8 +15716,8 @@ export interface SessionWokenEvent {
  * additive.
  */
 export interface PermissionAddWhitelistRequest {
-  type?: EventType104;
-  timestamp?: Timestamp104;
+  type?: EventType105;
+  timestamp?: Timestamp105;
   tools?: Tools3;
   patterns?: Patterns;
 }
@@ -15431,8 +15729,8 @@ export interface PermissionAddWhitelistRequest {
  * both lists are additive.
  */
 export interface PermissionAddBlacklistRequest {
-  type?: EventType105;
-  timestamp?: Timestamp105;
+  type?: EventType106;
+  timestamp?: Timestamp106;
   tools?: Tools4;
   patterns?: Patterns1;
 }
@@ -15443,8 +15741,8 @@ export interface PermissionAddBlacklistRequest {
  * ``"blacklist"``.  Empty lists are no-ops.
  */
 export interface PermissionRemoveRequest {
-  type?: EventType106;
-  timestamp?: Timestamp106;
+  type?: EventType107;
+  timestamp?: Timestamp107;
   target?: Target;
   tools?: Tools5;
   patterns?: Patterns2;
@@ -15458,8 +15756,8 @@ export interface PermissionRemoveRequest {
  * session-level overrides.
  */
 export interface PermissionClearRequest {
-  type?: EventType107;
-  timestamp?: Timestamp107;
+  type?: EventType108;
+  timestamp?: Timestamp108;
   target?: Target1;
 }
 /**
@@ -15470,16 +15768,16 @@ export interface PermissionClearRequest {
  * the base default for this session only.
  */
 export interface PermissionSetDefaultRequest {
-  type?: EventType108;
-  timestamp?: Timestamp108;
+  type?: EventType109;
+  timestamp?: Timestamp109;
   policy?: Policy;
 }
 /**
  * Request a structured snapshot of the current permission policy.
  */
 export interface PermissionPolicySnapshotRequest {
-  type?: EventType109;
-  timestamp?: Timestamp109;
+  type?: EventType110;
+  timestamp?: Timestamp110;
   request_id?: RequestId31;
 }
 /**
@@ -15491,8 +15789,8 @@ export interface PermissionPolicySnapshotRequest {
  * the stringly-typed ``permissions check`` command.
  */
 export interface PermissionPolicySnapshotEvent {
-  type?: EventType110;
-  timestamp?: Timestamp110;
+  type?: EventType111;
+  timestamp?: Timestamp111;
   request_id?: RequestId32;
   default_policy?: DefaultPolicy;
   session_default_policy?: SessionDefaultPolicy;
@@ -15563,6 +15861,7 @@ export const EventTypeValue = {
   TURN_PROGRESS: "turn.progress",
   INSTRUCTION_BUDGET_UPDATED: "instruction_budget.updated",
   GC_CONFIG: "gc.config",
+  GC: "gc",
   INSTRUCTION_BUDGET_REQUEST: "instruction_budget.request",
   SYSTEM_MESSAGE: "system.message",
   HELP_TEXT: "help.text",

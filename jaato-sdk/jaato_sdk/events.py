@@ -145,6 +145,7 @@ class EventType(str, Enum):
     TURN_PROGRESS = "turn.progress"
     INSTRUCTION_BUDGET_UPDATED = "instruction_budget.updated"
     GC_CONFIG = "gc.config"
+    GC = "gc"                       # GC lifecycle (phase-switched)
 
     # Instruction budget (Client <-> Server)
     INSTRUCTION_BUDGET_REQUEST = "instruction_budget.request"  # Client -> Server
@@ -965,6 +966,62 @@ class GCConfigEvent(Event):
     strategy: Optional[str] = None          # "truncate" | "summarize" | "hybrid" | "budget"
     target_percent: Optional[float] = None  # Target usage after GC
     continuous_mode: bool = False           # True if GC runs after every turn
+
+
+class GCEvent(Event):
+    """Garbage collection lifecycle — one event, switched on ``phase``.
+
+    DISTINCT from :class:`GCConfigEvent`, which carries configuration only
+    (threshold / strategy / target) at init and reconfigure.  This is the
+    lifecycle: GC is about to run, is running, has finished.
+
+    Before this existed there was NO lifecycle signal on the bus.  The
+    framework opened an OpenTelemetry span with the trigger reason and the
+    strategy, and clients got either prose -- a ``SystemMessageEvent`` reading
+    "Context usage (84.2%) exceeds threshold (80%). GC will run after this
+    turn." -- or nothing at all.  A client wanting to show "compacting..." had
+    to substring-match that sentence for the start and guess at the end, which
+    is the parse-the-log shape typed events exist to replace.
+
+    Phases:
+
+    ``about_to_run``
+        The threshold was crossed; GC will run after this turn.  Carries
+        ``percent_used`` / ``threshold``.  Announces a FUTURE pass -- the
+        session keeps serving the current turn.
+    ``started``
+        A pass is beginning now.  Carries ``trigger_reason`` / ``strategy``
+        plus the "before" figures.
+    ``completed``
+        The pass finished.  Carries ``success``, ``items_collected``,
+        ``tokens_freed``, ``tokens_before`` / ``tokens_after``, and ``error``
+        when it failed.
+
+    "Ongoing" is the interval BETWEEN ``started`` and ``completed`` -- a
+    client renders its spinner there.  ``collect()`` is atomic, so there is no
+    sub-pass progress to report and none is invented.
+
+    Every GC pass emits ``started`` + ``completed``, including a failed one:
+    the failure is the case an operator most needs.  ``about_to_run`` fires
+    only for threshold-triggered passes, since the other triggers (manual,
+    context-limit recovery) have no advance warning by nature.
+    """
+    type: EventType = Field(default=EventType.GC)
+    agent_id: str = ""
+    phase: str = ""                          # about_to_run | started | completed
+    trigger_reason: Optional[str] = None     # threshold | manual | context_limit | ...
+    strategy: Optional[str] = None           # GC plugin name
+    # Context framing (about_to_run / started)
+    percent_used: Optional[float] = None
+    threshold: Optional[float] = None
+    context_limit: Optional[int] = None
+    # Outcome (completed)
+    success: Optional[bool] = None
+    items_collected: Optional[int] = None
+    tokens_before: Optional[int] = None
+    tokens_after: Optional[int] = None
+    tokens_freed: Optional[int] = None
+    error: Optional[str] = None
 
 
 class ContextUpdatedEvent(Event):
@@ -2525,6 +2582,7 @@ _EVENT_CLASSES: Dict[str, type] = {
     EventType.ERROR.value: ErrorEvent,
     EventType.RETRY.value: RetryEvent,
     EventType.SESSION_LIST.value: SessionListEvent,
+    EventType.GC.value: GCEvent,
     EventType.SESSION_INFO.value: SessionInfoEvent,
     EventType.MEMORY_LIST.value: MemoryListEvent,
     EventType.SANDBOX_PATHS.value: SandboxPathsEvent,

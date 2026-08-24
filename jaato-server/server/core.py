@@ -4269,6 +4269,42 @@ class JaatoServer:
         # ride the first send to the runner session's multimodal path.
         self._start_model_thread(text, attachments=attachments)
 
+    def _emit_gc_phase_event(self, payload: Any) -> None:
+        """Re-emit a runner ``gc_phase`` notification as a typed ``GCEvent``.
+
+        The lifecycle counterpart to the ``gc_threshold`` handler below, which
+        renders a human sentence ("Context usage (84.2%) exceeds threshold
+        (80%). GC will run after this turn.").  That sentence stays -- it is
+        good for humans -- but it was the ONLY GC signal on the bus, so a
+        client wanting to show "compacting..." had to substring-match it for
+        the start and guess at the end.
+
+        Fields are read positionally from the payload rather than
+        reconstructed, so a field added in ``gc_support.run_gc`` reaches
+        clients without a change here.
+        """
+        from jaato_sdk.events import GCEvent
+        if not isinstance(payload, dict):
+            return
+        phase = str(payload.get("phase") or "")
+        if not phase:
+            return
+        self.emit(GCEvent(
+            agent_id=self._main_agent_id or "",
+            phase=phase,
+            trigger_reason=payload.get("trigger_reason"),
+            strategy=payload.get("strategy"),
+            percent_used=payload.get("percent_used"),
+            threshold=payload.get("threshold"),
+            context_limit=payload.get("context_limit"),
+            success=payload.get("success"),
+            items_collected=payload.get("items_collected"),
+            tokens_before=payload.get("tokens_before"),
+            tokens_after=payload.get("tokens_after"),
+            tokens_freed=payload.get("tokens_freed"),
+            error=payload.get("error"),
+        ))
+
     def _emit_budget_refusal_if_exhausted(self, result: Any) -> bool:
         """Emit ``SessionTerminatedEvent(reason="budget_exhausted")`` when the
         send result reports a ceiling refusal.  Returns True if emitted.
@@ -4450,6 +4486,10 @@ class JaatoServer:
                         tokens_remaining=max(0, context_limit - total_tokens),
                         turns=turns,
                     ))
+                    return
+
+                if event_type == "gc_phase":
+                    server._emit_gc_phase_event(payload)
                     return
 
                 if event_type == "gc_threshold":

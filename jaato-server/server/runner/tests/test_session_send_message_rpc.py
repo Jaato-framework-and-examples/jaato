@@ -77,6 +77,11 @@ class _FakeSession:
         on_output: Any = None,
         on_usage_update: Any = None,
         on_gc_threshold: Any = None,
+        # Mirror the production caller: the runner handler forwards every
+        # callback kwarg unconditionally, so a stub missing one fails with a
+        # TypeError that reads as a generic send-stage error.
+        on_gc_phase: Any = None,
+        **_kw: Any,
     ) -> str:
         self.received_prompts.append(message)
         if self.raise_on_send is not None:

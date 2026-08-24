@@ -3030,6 +3030,7 @@ class RunnerRPC:
         # implementation-review audit.
         usage_shim = self._make_usage_update_notification_shim(request_id)
         gc_shim = self._make_gc_threshold_notification_shim(request_id)
+        gc_phase_shim = self._make_gc_phase_notification_shim(request_id)
 
         # Run the message loop.  Model API calls happen
         # synchronously here; output streams via on_output;
@@ -3051,6 +3052,7 @@ class RunnerRPC:
                     on_output=on_output,
                     on_usage_update=usage_shim,
                     on_gc_threshold=gc_shim,
+                    on_gc_phase=gc_phase_shim,
                     attachments=attachments,
                 )
             except Exception as exc:  # noqa: BLE001 — boundary
@@ -3182,6 +3184,7 @@ class RunnerRPC:
     # §7c step 6.6.4.3b additions — the audit-caught per-call kwargs.
     _NOTIF_USAGE_UPDATE = "usage_update"
     _NOTIF_GC_THRESHOLD = "gc_threshold"
+    _NOTIF_GC_PHASE = "gc_phase"
 
     # Path F (cycle 7): AgentUIHooks methods that the runner-side
     # session calls but `_ui_hooks` is None post-§7c — see backlog
@@ -3386,6 +3389,34 @@ class RunnerRPC:
                 )
             except Exception:  # noqa: BLE001
                 logger.exception("usage_update notify raised")
+
+        return _shim
+
+    def _make_gc_phase_notification_shim(
+        self, request_id: int,
+    ) -> Any:
+        """Build a per-call ``on_gc_phase`` shim emitting ``gc_phase`` frames.
+
+        Signature: ``(phase: str, payload: dict) -> None``.  The daemon-side
+        handler re-emits a typed ``GCEvent``.  Sibling of the ``gc_threshold``
+        shim below, which carries only the threshold crossing and whose
+        handler renders PROSE -- this one carries the whole lifecycle
+        (about_to_run / started / completed) as branchable values.
+
+        The payload is forwarded verbatim: ``gc_support.run_gc`` owns its
+        shape, so a new field there reaches clients without a change here.
+        """
+        rpc = self
+
+        def _shim(phase: str, payload: Dict[str, Any]) -> None:
+            try:
+                rpc.emit_notification(
+                    request_id=request_id,
+                    event_type=rpc._NOTIF_GC_PHASE,
+                    payload={"phase": str(phase), **(payload or {})},
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception("gc_phase notify raised")
 
         return _shim
 

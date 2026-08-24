@@ -611,7 +611,8 @@ class JaatoClient:
         message: str,
         on_output: Optional[OutputCallback] = None,
         on_usage_update: Optional[UsageUpdateCallback] = None,
-        on_gc_threshold: Optional[GCThresholdCallback] = None
+        on_gc_threshold: Optional[GCThresholdCallback] = None,
+        on_gc_phase: Optional[Any] = None,
     ) -> str:
         """Send a message to the model.
 
@@ -625,6 +626,13 @@ class JaatoClient:
                 Signature: (percent_used: float, threshold: float) -> None
                 Called during streaming when context usage exceeds the configured
                 threshold, enabling proactive GC notifications.
+            on_gc_phase: Optional callback for the GC LIFECYCLE.
+                Signature: (phase: str, payload: dict) -> None
+                Phases: ``about_to_run`` / ``started`` / ``completed``.
+                Forwarded here as well as on the runner path so a GC signal
+                cannot exist for one transport and not the other — a client
+                that sees GC events over IPC but never in-process would read
+                the silence as "no GC ran".
 
         Returns:
             The final model response text.
@@ -652,7 +660,8 @@ class JaatoClient:
                 on_output(source, text, mode)
 
         response = self._session.send_message(
-            message, wrapped_output_callback, on_usage_update, on_gc_threshold
+            message, wrapped_output_callback, on_usage_update, on_gc_threshold,
+            on_gc_phase=on_gc_phase,
         )
 
         # After turn completes, update UI hooks with accounting data
