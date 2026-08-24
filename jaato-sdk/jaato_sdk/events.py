@@ -52,7 +52,11 @@ from pydantic import BaseModel, ConfigDict, Field
 #
 # See ``docs/sdk-protocol-versioning.md`` for the bump policy and the
 # CHANGELOG of past versions.
-PROTOCOL_VERSION = "1.0"
+# 1.1 (2026-08-24): additive optional ``request_id`` on SessionInfoEvent
+# and ErrorEvent, so a client can tell WHICH session.new a given answer
+# belongs to.  Minor bump per the compat rule -- same major, additive
+# optional fields -- so clients declaring 1.0 still connect.
+PROTOCOL_VERSION = "1.1"
 
 
 # =============================================================================
@@ -1163,6 +1167,11 @@ class ErrorEvent(Event):
     # produced it — so a client can distinguish "out of budget" from
     # "daemon hung" without parsing prose or reading the server's log.
     details: Optional[Dict[str, Any]] = None
+    # Echoes the originating request's correlation id when there was one, so a
+    # failure is attributable to the call that caused it.  Without it, two
+    # creates in flight and one refused meant the SUCCEEDING caller could
+    # observe the other's failure.
+    request_id: Optional[str] = None
 
 
 class RetryEvent(Event):
@@ -1227,6 +1236,13 @@ class SessionInfoEvent(Event):
     Server pushes updates when state changes.
     """
     type: EventType = Field(default=EventType.SESSION_INFO)
+    # Echoes ``CommandRequest.payload["request_id"]`` when the client supplied
+    # one, so a caller can tell WHICH create this describes.  Without it
+    # ``_await_session_info`` matched on SHAPE -- any SessionInfoEvent with a
+    # session_id -- and since the client's event buffer is drained into each
+    # new subscription, a stale event from an EARLIER create satisfied a LATER
+    # wait and handed the caller an id it had not created.
+    request_id: Optional[str] = None
     # Current session
     session_id: str = ""
     session_name: str = ""

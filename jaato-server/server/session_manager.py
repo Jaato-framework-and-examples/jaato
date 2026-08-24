@@ -4983,6 +4983,7 @@ class SessionManager:
         budget_control: Optional[Dict[str, Any]] = None,
         budget_usage: Optional[Dict[str, float]] = None,
         sibling_name: Optional[str] = None,
+        request_id: Optional[str] = None,
     ) -> str:
         """Implementation of session creation, called via ``Context().run()``.
 
@@ -5080,6 +5081,7 @@ class SessionManager:
                     error=f"session.new: {_bad}",
                     error_type="InvalidSiblingName",
                     recoverable=True,
+                    request_id=request_id,
                 ))
                 return ""
 
@@ -5504,7 +5506,12 @@ class SessionManager:
         # needs the session_id immediately.  on_auth_complete() will send
         # an updated SessionInfoEvent once the provider is fully ready.
         try:
-            self._emit_to_client(client_id, self._build_session_info_event(session))
+            _info = self._build_session_info_event(session)
+            # Echo the correlation id so the caller can tell THIS answer
+            # from a concurrent create's.  Without it the client matched on
+            # shape and a stale buffered event satisfied the wrong wait.
+            _info.request_id = request_id
+            self._emit_to_client(client_id, _info)
         except Exception as exc:
             logger.error("Failed to build SessionInfoEvent: %s", exc, exc_info=True)
             # Send a minimal SessionInfoEvent so the client can still proceed
