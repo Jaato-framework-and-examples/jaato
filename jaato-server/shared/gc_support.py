@@ -17,7 +17,7 @@ monkeypatch them on a session instance).
 
 from __future__ import annotations
 
-from typing import Any, Callable, Dict
+from typing import Any, Callable, Dict, Optional, Tuple
 
 from .instruction_budget import GCPolicy, InstructionSource
 from .plugins.gc import GCResult
@@ -112,6 +112,86 @@ def populate_gc_span_result(
                     gc_span.set_attribute(f"gc.{key}", val)
     except Exception as e:
         on_trace(f"GC_TELEMETRY: failed to populate span attrs: {e}")
+
+
+def run_gc(
+    *,
+    gc_plugin: Any,
+    history: Any,
+    context_usage: Dict[str, Any],
+    gc_config: Any,
+    trigger_reason: Any,
+    budget: Any,
+    cache_plugin: Any,
+    telemetry: Any,
+    on_trace: TraceFn,
+    on_collected: Optional[Callable[[Any, GCResult, Any], Any]] = None,
+) -> Tuple[Any, GCResult]:
+    """Run one GC pass with its telemetry span, uniformly.
+
+    THE single place a GC pass happens.  Before this existed the four collect
+    paths on :class:`JaatoSession` each wired their own instrumentation by
+    hand, and only half of them did:
+
+    ===============================  =====================
+    site                             telemetry span
+    ===============================  =====================
+    ``_maybe_collect_after_turn``    yes
+    ``_maybe_collect_before_send``   yes
+    ``_try_gc_for_context_recovery`` NO
+    ``manual_gc``                    NO
+    ===============================  =====================
+
+    So an operator watching spans saw a subset of the GC that actually ran,
+    with nothing marking the difference -- context-limit recovery and manual
+    compaction were invisible, and those are exactly the passes someone
+    debugging an overflow goes looking for.  A partially-firing observable is
+    worse than none: it reads as complete.  Routing every path through here
+    makes instrumentation a property of "a GC pass" rather than of whichever
+    call site remembered to add it.
+
+    ``on_collected(new_history, result, gc_span)`` runs INSIDE the span and
+    returns the history to hand back (or ``None`` to keep what it was given).
+    The four paths genuinely differ after collect -- one re-appends a trailing
+    MODEL message held back for a retry, one skips the budget sync -- so that
+    stays with the caller; only the parts that should never have differed move
+    here.
+
+    Args:
+        gc_plugin: The active GC plugin.
+        history: Conversation history to collect over.
+        context_usage: Output of ``session.get_context_usage()``.
+        gc_config: The active ``GCConfig``.
+        trigger_reason: ``GCTriggerReason`` for this pass.
+        budget: The active ``InstructionBudget`` (or ``None``).
+        cache_plugin: The active cache plugin (or ``None``).
+        telemetry: Telemetry facade exposing ``gc_span``.
+        on_trace: Diagnostic trace callback.
+        on_collected: Optional post-collect hook, run inside the span.
+
+    Returns:
+        ``(new_history, result)`` exactly as ``gc_plugin.collect`` produced,
+        with ``new_history`` replaced by ``on_collected``'s return when it
+        returns one.
+    """
+    attrs = build_gc_span_attributes(
+        context_usage, budget=budget, cache_plugin=cache_plugin,
+    )
+    reason_value = getattr(trigger_reason, "value", trigger_reason)
+    with telemetry.gc_span(
+        trigger_reason=reason_value,
+        strategy=gc_plugin.name,
+        attributes=attrs,
+    ) as gc_span:
+        new_history, result = gc_plugin.collect(
+            history, context_usage, gc_config, trigger_reason, budget=budget,
+        )
+        if on_collected is not None:
+            replacement = on_collected(new_history, result, gc_span)
+            if replacement is not None:
+                new_history = replacement
+        populate_gc_span_result(gc_span, result, on_trace=on_trace)
+    return new_history, result
 
 
 def apply_gc_removal_list(

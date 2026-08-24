@@ -23,6 +23,7 @@ from .gc_support import (
     apply_gc_removal_list as _gc_apply_removal_list,
     build_gc_span_attributes as _gc_build_span_attributes,
     populate_gc_span_result as _gc_populate_span_result,
+    run_gc as _gc_run,
 )
 from .tool_result_truncation import (
     cap_tool_results as _cap_tool_results_impl,
@@ -4332,48 +4333,38 @@ NOTES
         # is actually evaluating (with wire_tool_schemas broken out).
         self._log_gc_denominator("after_turn")
 
-        # Build pre-GC telemetry attributes for span context
-        gc_attrs = self._build_gc_span_attributes(
-            context_usage, pre_collect=True,
-        )
-
-        with self._telemetry.gc_span(
-            trigger_reason=GCTriggerReason.THRESHOLD.value,
-            strategy=self._gc_plugin.name,
-            attributes=gc_attrs,
-        ) as gc_span:
-            # Use THRESHOLD as the reason since it was triggered by threshold crossing
-            new_history, result = self._gc_plugin.collect(
-                history, context_usage, self._gc_config, GCTriggerReason.THRESHOLD,
-                budget=self._instruction_budget,
-            )
-
-            if result.success:
-                if result.items_collected == 0:
-                    # GC ran but collected nothing - this is often surprising to users
-                    self._trace(
-                        f"PROACTIVE_GC: WARNING - GC triggered but collected 0 items. "
-                        f"Check preserve_recent_turns setting vs actual turn count. "
-                        f"Details: {result.details}"
-                    )
-                else:
-                    self._trace(
-                        f"PROACTIVE_GC: Collected {result.items_collected} items, "
-                        f"freed {result.tokens_freed} tokens"
-                    )
-                new_history = ensure_tool_call_integrity(
-                    new_history, trace_fn=lambda m: self._trace(f"PROACTIVE_GC: {m}"),
+        def _after(new_history, result, gc_span):
+            if not result.success:
+                return None
+            if result.items_collected == 0:
+                # GC ran but collected nothing - this is often surprising to users
+                self._trace(
+                    f"PROACTIVE_GC: WARNING - GC triggered but collected 0 items. "
+                    f"Check preserve_recent_turns setting vs actual turn count. "
+                    f"Details: {result.details}"
                 )
-                self._history.replace(new_history)
-                self._gc_history.append(result)
+            else:
+                self._trace(
+                    f"PROACTIVE_GC: Collected {result.items_collected} items, "
+                    f"freed {result.tokens_freed} tokens"
+                )
+            new_history = ensure_tool_call_integrity(
+                new_history, trace_fn=lambda m: self._trace(f"PROACTIVE_GC: {m}"),
+            )
+            self._history.replace(new_history)
+            self._gc_history.append(result)
 
-                # Sync budget with GC changes (publishes cache invalidation events
-                # on the active gc_span via on_gc_result callback)
-                self._apply_gc_removal_list(result, gc_span=gc_span)
-                self._emit_instruction_budget_update()
+            # Sync budget with GC changes (publishes cache invalidation events
+            # on the active gc_span via on_gc_result callback)
+            self._apply_gc_removal_list(result, gc_span=gc_span)
+            self._emit_instruction_budget_update()
+            return new_history
 
-            # Populate post-GC span attributes from the result
-            self._populate_gc_span_result(gc_span, result)
+        # Use THRESHOLD as the reason since it was triggered by threshold crossing
+        _new_history, result = self._run_gc(
+            history, context_usage, GCTriggerReason.THRESHOLD,
+            on_collected=_after,
+        )
 
         return result
 
@@ -4421,6 +4412,36 @@ NOTES
         Thin wrapper over :func:`gc_support.populate_gc_span_result`.
         """
         _gc_populate_span_result(gc_span, result, on_trace=self._trace)
+
+    def _run_gc(
+        self,
+        history: Any,
+        context_usage: Dict[str, Any],
+        trigger_reason: Any,
+        *,
+        on_collected: Any = None,
+    ) -> "tuple[Any, GCResult]":
+        """Run one GC pass through the shared, uniformly-instrumented path.
+
+        Thin wrapper over :func:`gc_support.run_gc` supplying this session's
+        plugin, config, budget, cache plugin, telemetry and trace.  Every GC
+        path on this class goes through here: before it existed each wired its
+        own span by hand and only ONE of four did so completely, so GC was
+        observable for a subset of the GC that actually ran, with nothing
+        marking which.
+        """
+        return _gc_run(
+            gc_plugin=self._gc_plugin,
+            history=history,
+            context_usage=context_usage,
+            gc_config=self._gc_config,
+            trigger_reason=trigger_reason,
+            budget=self._instruction_budget,
+            cache_plugin=getattr(self, "_cache_plugin", None),
+            telemetry=self._telemetry,
+            on_trace=self._trace,
+            on_collected=on_collected,
+        )
 
     def _apply_gc_removal_list(
         self, result: GCResult, gc_span: Any = None,
@@ -6772,12 +6793,8 @@ NOTES
                 f"before GC"
             )
 
-        new_history, result = self._gc_plugin.collect(
-            history,
-            context_usage,
-            self._gc_config,
-            GCTriggerReason.CONTEXT_LIMIT,
-            budget=self._instruction_budget,
+        new_history, result = self._run_gc(
+            history, context_usage, GCTriggerReason.CONTEXT_LIMIT,
         )
 
         if result.success and result.tokens_freed > 0:
@@ -9430,9 +9447,8 @@ NOTES
             f"MANUAL_GC: triggering manual GC (usage={context_usage.get('percent_used', 0):.1f}%)"
         )
 
-        new_history, result = self._gc_plugin.collect(
-            history, context_usage, self._gc_config, GCTriggerReason.MANUAL,
-            budget=self._instruction_budget,
+        new_history, result = self._run_gc(
+            history, context_usage, GCTriggerReason.MANUAL,
         )
 
         if result.success:
@@ -9508,21 +9524,7 @@ NOTES
             )
             history = self.get_history()
 
-            # Build pre-GC telemetry attributes
-            gc_attrs = self._build_gc_span_attributes(
-                context_usage, pre_collect=True,
-            )
-
-            with self._telemetry.gc_span(
-                trigger_reason=reason.value,
-                strategy=self._gc_plugin.name,
-                attributes=gc_attrs,
-            ) as gc_span:
-                new_history, result = self._gc_plugin.collect(
-                    history, context_usage, self._gc_config, reason,
-                    budget=self._instruction_budget,
-                )
-
+            def _after(new_history, result, gc_span):
                 if result.success:
                     if result.items_collected == 0:
                         # GC ran but collected nothing — often surprising to
@@ -9598,9 +9600,12 @@ NOTES
                     # via on_gc_result with the active span attached)
                     self._apply_gc_removal_list(result, gc_span=gc_span)
                     self._emit_instruction_budget_update()
+                    return new_history
+                return None
 
-                # Populate post-GC span attributes from the result
-                self._populate_gc_span_result(gc_span, result)
+            _new_history, result = self._run_gc(
+                history, context_usage, reason, on_collected=_after,
+            )
 
             return result
 
