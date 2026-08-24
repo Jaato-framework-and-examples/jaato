@@ -1353,6 +1353,7 @@ class IPCClient:
         agent: Optional[str] = None,
         agent_params: Optional[Dict[str, str]] = None,
         cascade_driver_id: Optional[str] = None,
+        peer_name: Optional[str] = None,
         timeout: float = 60.0,
     ) -> Optional[str]:
         """Create a new session on the server.
@@ -1385,6 +1386,14 @@ class IPCClient:
                 profile describes its capabilities; they compose freely.
             agent_params: Parameter values for the agent's ``{{param}}``
                 placeholders.  Only used when *agent* is specified.
+            peer_name: Cascade-scoped ADDRESS other sessions use to
+                reach this one via ``send_to_peer`` — the same string
+                they pass, so there is no translation between what you
+                set and what they address.  Shape
+                ``^[a-z0-9][a-z0-9_-]{0,31}$``, unique within the
+                cascade; the server refuses a malformed or already-taken
+                name at creation rather than producing a session nobody
+                can address.  ``None`` (default) = not peer-addressable.
             cascade_driver_id: Phase 2 cascade-sharing (server
                 0.6.144+) tenant ID identifying the cascade this
                 session belongs to.  Opaque UTF-8 string; UUID
@@ -1434,6 +1443,8 @@ class IPCClient:
         # for log diffing.  Server-side parser accepts any order.
         if cascade_driver_id:
             args.extend(["--cascade-driver-id", cascade_driver_id])
+        if peer_name:
+            args.extend(["--peer-name", peer_name])
         await self._send_event(CommandRequest(
             command="session.new",
             args=args,

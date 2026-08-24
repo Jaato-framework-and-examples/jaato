@@ -301,6 +301,11 @@ class CommandRouter:
 
         Accepted flags (CLI argv path, used by the TUI):
             --profile <name>            Runtime config (model, plugins, GC, etc.)
+            --peer-name <slug>          Cascade-scoped address other sessions
+                                        use to reach this one via
+                                        send_to_peer.  Shape
+                                        ^[a-z0-9][a-z0-9_-]{0,31}$, unique
+                                        within the cascade.
             --agent <name>              Agent whose rendered markdown becomes
                                         the session's system instructions
             --instructions <text|@path> FULL OVERRIDE — replace the assembled
@@ -339,6 +344,7 @@ class CommandRouter:
         suppress_base_instructions: bool = False
         agent_params: Dict[str, str] = {}
         cascade_driver_id: Optional[str] = None
+        peer_name: Optional[str] = None
         args_iter = iter(args)
         for arg in args_iter:
             if arg == "--profile":
@@ -362,6 +368,12 @@ class CommandRouter:
                     return  # error already emitted
             elif arg == "--no-instructions":
                 suppress_base_instructions = True
+            elif arg == "--peer-name":
+                # Cascade-scoped ADDRESS for peer messaging (design §4).
+                # Validated server-side for shape and for uniqueness within
+                # the cascade; a bad or taken name fails the create rather
+                # than silently producing an unaddressable session.
+                peer_name = next(args_iter, None)
             elif arg == "--cascade-driver-id":
                 # Phase 2 cascade-sharing (server 0.6.144+): opaque
                 # tenant ID identifying the cascade this session
@@ -393,6 +405,7 @@ class CommandRouter:
             suppress_base_instructions=suppress_base_instructions,
             inline_profile_data=inline_profile_data,
             cascade_driver_id=cascade_driver_id,
+            peer_name=peer_name,
         )
         if new_session_id:
             # Update logging context now that session_id is known.
