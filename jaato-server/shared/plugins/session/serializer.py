@@ -254,6 +254,7 @@ def serialize_session_state(state: SessionState) -> Dict[str, Any]:
         # serializer writes a FIXED key list -- a field absent here
         # never reaches disk however well it is wired elsewhere.
         'budget_control': state.budget_control,
+        'peer_name': state.peer_name,
         'interrupted_turn': state.interrupted_turn,
         'session_state': state.session_state,
     }
@@ -300,6 +301,7 @@ def deserialize_session_state(data: Dict[str, Any]) -> SessionState:
         budget_usage=data.get('budget_usage'),
         budget_exhausted_reason=data.get('budget_exhausted_reason'),
         budget_control=data.get('budget_control'),
+        peer_name=data.get('peer_name'),
         interrupted_turn=data.get('interrupted_turn'),
         session_state=data.get('session_state'),
     )

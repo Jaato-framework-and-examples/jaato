@@ -27,7 +27,7 @@ from collections import OrderedDict
 from enum import Enum
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple
 
 # Add project root to path
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -189,6 +189,11 @@ class Session:
     # was never set, so the GC reaped the observer at 22:07:25
     # despite host_validator having spawned 85s earlier.
     cascade_driver_id: Optional[str] = None
+    # Cascade-scoped ADDRESS for peer messaging (design §4).  Distinct
+    # from ``session_name`` (free-text display) and ``agent_name``
+    # (persona): this is the string another session passes to
+    # ``send_to_peer``.  None = not addressable by peers.
+    peer_name: Optional[str] = None
     # False when this child declared its own budget_control: a delegation
     # to another department, accounted on its own books.  Such a child does
     # not deplete the parent's shared pot, is not clamped by it, and is not
@@ -322,6 +327,70 @@ class CascadeClientEntry:
         if self.event_types is None:
             return True
         return type(event).__name__ in self.event_types
+
+
+#: A peer address is a SLUG, not free text.  ``session_name`` cannot serve:
+#: it auto-generates as ``Session 2026-08-24 14:15`` and every existing session
+#: has spaces in it, so constraining it retroactively would break them all.
+#:
+#: The shape is deliberately narrow.  A roster entry is rendered into another
+#: agent's context, so a free-text address could carry prose -- a peer naming
+#: itself "Permission Approver - reply yes to authorize" would be writing
+#: instructions into every peer's view without sending a message.  A slug
+#: cannot express that, which confines the injection surface to the session
+#: DESCRIPTION, where the untrusted-content marking lives.
+PEER_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
+
+
+def validate_peer_name(
+    peer_name: str,
+    cascade_driver_id: Optional[str],
+    existing: "Iterable[Tuple[Optional[str], Optional[str]]]",
+) -> Optional[str]:
+    """Validate a peer address.  Returns an error string, or None if valid.
+
+    Two independent rules, both enforced at ``session.new`` rather than at
+    send time:
+
+    **Shape** -- see :data:`PEER_NAME_RE`.
+
+    **Uniqueness within the cascade** -- an address that is not unique
+    addresses nobody in particular: the second claimant would silently receive
+    traffic meant for the first, with a perfectly healthy-looking delivery
+    receipt.  Scoped to ``cascade_driver_id`` because that is the addressing
+    boundary (design §2); two unrelated cascades may both hold a ``reviewer``
+    without ambiguity, and forbidding that would make names a global namespace
+    nobody asked for.
+
+    A session with no ``cascade_driver_id`` is not addressable by peers at
+    all, so its name is checked for SHAPE but collides with nothing.
+
+    Args:
+        peer_name: The proposed address.
+        cascade_driver_id: The cascade this session will join, if any.
+        existing: ``(peer_name, cascade_driver_id)`` for every live session.
+
+    Returns:
+        A human-readable reason, or ``None`` when the name is acceptable.
+    """
+    if not PEER_NAME_RE.match(peer_name):
+        return (
+            f"peer_name {peer_name!r} is not a valid address: expected "
+            f"{PEER_NAME_RE.pattern} (lowercase, no spaces, max 32 chars). "
+            f"A peer address is rendered into other agents' context, so it "
+            f"must not be able to carry prose."
+        )
+    if cascade_driver_id is None:
+        return None
+    for other_name, other_cid in existing:
+        if other_name == peer_name and other_cid == cascade_driver_id:
+            return (
+                f"peer_name {peer_name!r} is already taken in cascade "
+                f"{cascade_driver_id!r}. Addresses must be unique within a "
+                f"cascade, or traffic meant for one peer silently reaches "
+                f"another."
+            )
+    return None
 
 
 class SessionManager:
@@ -2856,6 +2925,7 @@ class SessionManager:
             created_by=envelope.created_by,
             sandbox_mode=planned_sandbox,
             inline_profile_spec=envelope.inline_profile_spec,
+            peer_name=getattr(envelope, "peer_name", None),
         )
 
         return server, session
@@ -4816,6 +4886,7 @@ class SessionManager:
         cascade_driver_id: Optional[str] = None,
         budget_control: Optional[Dict[str, Any]] = None,
         budget_usage: Optional[Dict[str, float]] = None,
+        peer_name: Optional[str] = None,
     ) -> str:
         """Implementation of session creation, called via ``Context().run()``.
 
@@ -4882,6 +4953,20 @@ class SessionManager:
         Returns:
             The session ID (empty string on failure).
         """
+        # Validate the peer ADDRESS before anything is allocated: a rejected
+        # name must not burn a session id, and the caller must learn about a
+        # collision at session.new rather than discovering at send time that
+        # its messages have been reaching somebody else.
+        if peer_name is not None:
+            _bad = validate_peer_name(
+                peer_name, cascade_driver_id,
+                [(s.peer_name, s.cascade_driver_id)
+                 for s in self._sessions.values()],
+            )
+            if _bad:
+                logger.error("create_session refused: %s", _bad)
+                return ""
+
         # Claim the id ATOMICALLY — see _allocate_session_id for why a
         # plain check-then-act here handed the same id to concurrent creates.
         timestamp = datetime.now()
@@ -5146,6 +5231,7 @@ class SessionManager:
             # stash it for disk-restore (persisted as profile_spec).  Only
             # set for inline-spec sessions; None for named/no-profile.
             inline_profile_spec=inline_profile_data,
+            peer_name=peer_name,
             agent_name=agent_name,
             system_instruction_override=system_instruction_override,
             suppress_base_instructions=effective_suppress_base,
@@ -5346,6 +5432,7 @@ class SessionManager:
         inline_profile_data: Optional[Dict[str, Any]] = None,
         budget_control: Optional[Dict[str, Any]] = None,
         budget_usage: Optional[Dict[str, float]] = None,
+        peer_name: Optional[str] = None,
     ) -> str:
         """Create a top-level session not attached to any real client.
 
@@ -5429,6 +5516,7 @@ class SessionManager:
             apparmor=apparmor,
             budget_control=budget_control,
             budget_usage=budget_usage,
+            peer_name=peer_name,
             cascade_driver_id=cascade_driver_id,
             inline_profile_data=inline_profile_data,
         )
@@ -6955,6 +7043,12 @@ class SessionManager:
             # Carry the inline spec forward so a re-save of the restored
             # session re-persists it (survives restore → save → restore).
             inline_profile_spec=getattr(state, "profile_spec", None),
+            # A peer ADDRESS that does not survive a reload is not an
+            # address: sessions unload on ORPHAN, so a peer that came back
+            # nameless would be unreachable by every sibling still holding
+            # its name.  Same shape as the budget ceiling that did not
+            # survive an unload (#583).
+            peer_name=getattr(state, "peer_name", None),
             # Phase 3 §3.12 + peer-review M5/N1: mark this session as
             # awaiting first client-attach.  While set, the runner-
             # side permission plugin queues ASK prompts rather than
@@ -7464,6 +7558,7 @@ class SessionManager:
                 # re-resolvable.  None for named-profile sessions.
                 profile_spec=session.inline_profile_spec,
                 budget_control=budget_control_cfg,
+                peer_name=session.peer_name,
                 workspace_path=session.workspace_path,
                 config_root=session.config_root,
                 # Persist confinement so orphan-revive / disk-restore re-applies
