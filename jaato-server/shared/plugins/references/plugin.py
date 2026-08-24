@@ -1823,7 +1823,7 @@ class ReferencesPlugin(RunnerForwardingMixin):
         if not ids and not filter_tags:
             return {
                 "status": "error",
-                "message": (
+                "error": (
                     "At least one of 'ids' or 'filter_tags' must be provided. "
                     "Use listReferences to discover available reference IDs and tags."
                 )

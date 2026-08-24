@@ -1071,7 +1071,7 @@ class MemoryPlugin(RunnerForwardingMixin):
         if not self._storage or not self._indexer:
             return {
                 "status": "error",
-                "message": "Memory plugin not initialized"
+                "error": "Memory plugin not initialized"
             }
 
         # Validate and normalize tags: strip whitespace, reject single-char tags
@@ -1083,7 +1083,7 @@ class MemoryPlugin(RunnerForwardingMixin):
         if not valid_tags:
             return {
                 "status": "error",
-                "message": (
+                "error": (
                     "All tags were rejected — each tag must be a meaningful "
                     "word or phrase (at least 2 characters). "
                     f"Received: {raw_tags!r}"
@@ -1167,7 +1167,7 @@ class MemoryPlugin(RunnerForwardingMixin):
         if not self._storage:
             return {
                 "status": "error",
-                "message": "Memory plugin not initialized"
+                "error": "Memory plugin not initialized"
             }
 
         ids = args.get("ids") or []
@@ -1282,7 +1282,7 @@ class MemoryPlugin(RunnerForwardingMixin):
         if not self._indexer:
             return {
                 "status": "error",
-                "message": "Memory plugin not initialized"
+                "error": "Memory plugin not initialized"
             }
 
         tags = self._indexer.get_all_tags()
@@ -1325,7 +1325,7 @@ class MemoryPlugin(RunnerForwardingMixin):
         """
         memory_id = args.get("id", "")
         if not memory_id:
-            return {"status": "error", "message": "'id' is required"}
+            return {"status": "error", "error": "'id' is required"}
 
         # Find the memory in either store
         memory = None
@@ -1345,7 +1345,7 @@ class MemoryPlugin(RunnerForwardingMixin):
                 target_indexer = self._global_indexer
 
         if memory is None:
-            return {"status": "error", "message": f"Memory '{memory_id}' not found"}
+            return {"status": "error", "error": f"Memory '{memory_id}' not found"}
 
         # Apply updates
         if "maturity" in args:
@@ -1353,7 +1353,7 @@ class MemoryPlugin(RunnerForwardingMixin):
             if new_maturity in VALID_MATURITIES:
                 memory.maturity = new_maturity
             else:
-                return {"status": "error", "message": f"Invalid maturity: {new_maturity}"}
+                return {"status": "error", "error": f"Invalid maturity: {new_maturity}"}
 
         if "confidence" in args:
             try:
@@ -1401,7 +1401,7 @@ class MemoryPlugin(RunnerForwardingMixin):
         """
         memory_id = args.get("id", "")
         if not memory_id:
-            return {"status": "error", "message": "'id' is required"}
+            return {"status": "error", "error": "'id' is required"}
 
         # Try workspace store first, then global
         deleted = False
@@ -1414,7 +1414,7 @@ class MemoryPlugin(RunnerForwardingMixin):
             self._trace(f"delete_memory: id={memory_id}")
             return {"status": "success", "message": f"Memory '{memory_id}' deleted"}
         else:
-            return {"status": "error", "message": f"Memory '{memory_id}' not found"}
+            return {"status": "error", "error": f"Memory '{memory_id}' not found"}
 
     # ===== User Command Executor =====
 

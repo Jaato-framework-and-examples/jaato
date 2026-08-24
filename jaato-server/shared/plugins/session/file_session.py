@@ -549,7 +549,7 @@ class FileSessionPlugin:
             args: May include 'user_inputs' list for prompt history restoration.
         """
         if not self._client:
-            return {"status": "error", "message": "Session plugin not properly configured"}
+            return {"status": "error", "error": "Session plugin not properly configured"}
 
         try:
             user_inputs = args.get("user_inputs", [])
@@ -559,7 +559,7 @@ class FileSessionPlugin:
                 "message": f"Session saved: {session_id}\nUse 'resume' to restore this session later."
             }
         except Exception as e:
-            return {"status": "error", "message": f"Error saving session: {e}"}
+            return {"status": "error", "error": f"Error saving session: {e}"}
 
     def _resolve_session_id(self, session_id: Any) -> Optional[str]:
         """Resolve a session ID, supporting numeric indexes.
@@ -600,7 +600,7 @@ class FileSessionPlugin:
             Result dict including 'user_inputs' for prompt history restoration.
         """
         if not self._client:
-            return {"status": "error", "message": "Session plugin not properly configured"}
+            return {"status": "error", "error": "Session plugin not properly configured"}
 
         # Get session_id from standardized args list
         cmd_args = args.get("args", [])
@@ -611,7 +611,7 @@ class FileSessionPlugin:
                 # Resolve numeric index to actual session ID
                 session_id = self._resolve_session_id(raw_session_id)
                 if session_id is None:
-                    return {"status": "error", "message": f"Session not found: {raw_session_id}"}
+                    return {"status": "error", "error": f"Session not found: {raw_session_id}"}
 
                 # Resume specific session
                 state = self._client.resume_session(session_id)
@@ -636,9 +636,9 @@ class FileSessionPlugin:
                 return {"status": "info", "message": "\n".join(lines)}
 
         except FileNotFoundError:
-            return {"status": "error", "message": f"Session not found: {session_id}"}
+            return {"status": "error", "error": f"Session not found: {session_id}"}
         except Exception as e:
-            return {"status": "error", "message": f"Error resuming session: {e}"}
+            return {"status": "error", "error": f"Error resuming session: {e}"}
 
     def _execute_sessions(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Execute the sessions user command.
@@ -646,7 +646,7 @@ class FileSessionPlugin:
         Lists all available saved sessions.
         """
         if not self._client:
-            return {"status": "error", "message": "Session plugin not properly configured"}
+            return {"status": "error", "error": "Session plugin not properly configured"}
 
         try:
             sessions = self._client.list_sessions()
@@ -672,7 +672,7 @@ class FileSessionPlugin:
             return {"status": "ok", "message": "\n".join(lines)}
 
         except Exception as e:
-            return {"status": "error", "message": f"Error listing sessions: {e}"}
+            return {"status": "error", "error": f"Error listing sessions: {e}"}
 
     def _execute_delete_session(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Execute the delete-session user command.
@@ -680,26 +680,26 @@ class FileSessionPlugin:
         Deletes a saved session. Supports both full session IDs and numeric indexes.
         """
         if not self._client:
-            return {"status": "error", "message": "Session plugin not properly configured"}
+            return {"status": "error", "error": "Session plugin not properly configured"}
 
         # Get session_id from standardized args list
         cmd_args = args.get("args", [])
         raw_session_id = cmd_args[0] if cmd_args else None
         if raw_session_id is None:
-            return {"status": "error", "message": "Usage: delete-session <session_id or index>"}
+            return {"status": "error", "error": "Usage: delete-session <session_id or index>"}
 
         # Resolve numeric index to actual session ID
         session_id = self._resolve_session_id(raw_session_id)
         if session_id is None:
-            return {"status": "error", "message": f"Session not found: {raw_session_id}"}
+            return {"status": "error", "error": f"Session not found: {raw_session_id}"}
 
         try:
             if self._client.delete_session(session_id):
                 return {"status": "ok", "message": f"Session deleted: {session_id}"}
             else:
-                return {"status": "error", "message": f"Session not found: {session_id}"}
+                return {"status": "error", "error": f"Session not found: {session_id}"}
         except Exception as e:
-            return {"status": "error", "message": f"Error deleting session: {e}"}
+            return {"status": "error", "error": f"Error deleting session: {e}"}
 
     def _execute_backtoturn(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Execute the backtoturn user command.
@@ -707,7 +707,7 @@ class FileSessionPlugin:
         Reverts the conversation to a specific turn.
         """
         if not self._client:
-            return {"status": "error", "message": "Session plugin not properly configured"}
+            return {"status": "error", "error": "Session plugin not properly configured"}
 
         # Get turn_id from standardized args list
         cmd_args = args.get("args", [])
@@ -727,12 +727,12 @@ class FileSessionPlugin:
                     )
                 }
             except Exception as e:
-                return {"status": "error", "message": f"Error: {e}"}
+                return {"status": "error", "error": f"Error: {e}"}
 
         try:
             turn_id = int(turn_id)
         except (ValueError, TypeError):
-            return {"status": "error", "message": f"Invalid turn ID: {turn_id}. Must be a number."}
+            return {"status": "error", "error": f"Invalid turn ID: {turn_id}. Must be a number."}
 
         try:
             result = self._client.revert_to_turn(turn_id)
@@ -741,9 +741,9 @@ class FileSessionPlugin:
                 "message": result.get("message", f"Reverted to turn {turn_id}")
             }
         except ValueError as e:
-            return {"status": "error", "message": str(e)}
+            return {"status": "error", "error": str(e)}
         except Exception as e:
-            return {"status": "error", "message": f"Error reverting: {e}"}
+            return {"status": "error", "error": f"Error reverting: {e}"}
 
     def _execute_describe(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Execute the session_describe tool.
@@ -760,7 +760,7 @@ class FileSessionPlugin:
         description = args.get("description", "").strip()
 
         if not description:
-            return {"status": "error", "message": "Description cannot be empty"}
+            return {"status": "error", "error": "Description cannot be empty"}
 
         is_first_description = self._session_description is None
         self._session_description = description

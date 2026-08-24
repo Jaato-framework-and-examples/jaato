@@ -375,7 +375,7 @@ class TestMemoryPlugin(unittest.TestCase):
         })
 
         self.assertEqual(result["status"], "error")
-        self.assertIn("at least 2 characters", result["message"])
+        self.assertIn("at least 2 characters", result["error"])
 
     def test_short_tags_filtered_valid_kept(self):
         """Test that short tags are filtered but valid tags are kept."""

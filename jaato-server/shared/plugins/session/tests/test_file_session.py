@@ -356,7 +356,7 @@ class TestFileSessionPluginWithClient:
         result = plugin._execute_delete_session({})
 
         assert result["status"] == "error"
-        assert "Usage" in result["message"]
+        assert "Usage" in result["error"]
 
     def test_execute_backtoturn_no_turn_id(self, plugin_with_client):
         """Test backtoturn without turn ID shows info."""
@@ -376,7 +376,7 @@ class TestFileSessionPluginWithClient:
         result = plugin._execute_backtoturn({"args": ["abc"]})
 
         assert result["status"] == "error"
-        assert "Invalid turn ID" in result["message"]
+        assert "Invalid turn ID" in result["error"]
 
     def test_execute_backtoturn_success(self, plugin_with_client):
         """Test successful backtoturn execution."""
@@ -402,7 +402,7 @@ class TestFileSessionPluginWithClient:
         result = plugin._execute_backtoturn({"args": ["10"]})
 
         assert result["status"] == "error"
-        assert "Turn 10 does not exist" in result["message"]
+        assert "Turn 10 does not exist" in result["error"]
 
 
 class TestSessionLifecycle:

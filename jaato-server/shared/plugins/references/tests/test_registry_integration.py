@@ -556,7 +556,7 @@ class TestReferencesSandboxIntegration:
         result = plugin._execute_select({})
 
         assert result["status"] == "error"
-        assert "ids" in result["message"] or "filter_tags" in result["message"]
+        assert "ids" in result["error"] or "filter_tags" in result["error"]
 
     def test_select_already_selected_id(self, plugin_with_sandbox):
         """Test selecting an already-selected reference."""
