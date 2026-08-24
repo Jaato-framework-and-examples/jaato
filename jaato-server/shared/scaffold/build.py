@@ -511,6 +511,46 @@ def _set_profile_yaml(agent: str, provider: str, model: str,
     return "\n".join(lines) + "\n"
 
 
+def _report_revalidation(diags) -> int:
+    """Print post-generation findings and decide the generator's verdict.
+
+    ``validate_workspace`` reports over the MERGED profile tree — the workspace
+    set just generated AND the inherited user tier (``~/.jaato/profiles``).
+    Only the workspace tier is ours, so only it can convict the generator.
+
+    Counting user-tier findings here accused the scaffold of a bug it did not
+    commit, emphatically ("this is a generator bug; please report"), on a CLEAN
+    generation — sending the reader into the scaffold templates hunting for a
+    plugin reference that lives in their home directory.  ``validate`` already
+    labels findings ``[workspace]`` / ``[user]``; this never used it.
+    Reported from the cascade-coordination example, 2026-08-24.
+
+    Extracted from ``_new_profile_set`` so it can be tested by CALLING it: the
+    alternative is asserting on the source of a function that needs a real
+    filesystem, which survives the very edit it is meant to catch.
+
+    Returns:
+        Process exit code — non-zero only when the GENERATED set has errors.
+    """
+    ours = [d for d in diags if getattr(d, "tier", None) != "user"]
+    theirs = [d for d in diags if getattr(d, "tier", None) == "user"]
+    errs = [d for d in ours if d.severity == "error"]
+    for d in diags:
+        loc = f" @ {d.where}" if d.where else ""
+        tier = f"[{d.tier}] " if getattr(d, "tier", None) else ""
+        print(f"  [{d.severity}] {tier}{d.profile}: {d.code}: {d.message}{loc}")
+    if theirs:
+        print(f"\nnote: {len(theirs)} finding(s) above are in your USER tier "
+              "(~/.jaato/profiles), not in the generated set — shown for "
+              "context, not attributed to the scaffold.")
+    if errs:
+        print(f"\n✘ scaffold emitted {len(errs)} error(s) in the generated set "
+              "— this is a generator bug; please report.")
+        return 1
+    print("✓ scaffolded set is valid by construction.")
+    return 0
+
+
 def _new_profile_set(args) -> int:
     # --- fail-loud required inputs --------------------------------------
     missing = [f for f in ("workspace", "set", "provider", "model")
@@ -609,14 +649,5 @@ def _new_profile_set(args) -> int:
 
     # --- emit-then-validate: the same validator the `validate` verb runs -
     print("\nre-validating scaffolded set …")
-    diags = _validate.validate_workspace(str(ws), profile_set=args.set)
-    errs = [d for d in diags if d.severity == "error"]
-    for d in diags:
-        loc = f" @ {d.where}" if d.where else ""
-        print(f"  [{d.severity}] {d.profile}: {d.code}: {d.message}{loc}")
-    if errs:
-        print(f"\n✘ scaffold emitted {len(errs)} error(s) — this is a generator "
-              "bug; please report.")
-        return 1
-    print("✓ scaffolded set is valid by construction.")
-    return 0
+    return _report_revalidation(
+        _validate.validate_workspace(str(ws), profile_set=args.set))
