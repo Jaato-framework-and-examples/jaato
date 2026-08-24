@@ -885,18 +885,37 @@ Where Prime Agent's is ahead:
   descriptions.
 - **Mechanical rollback.** Per-edit `before`/`after` inversion; the raw→curated
   tier bounds what reaches the prompt but offers no revert of a bad promotion.
-- **It also fires on compaction.** jaato's reactor triggers on
-  `agent.completed`, i.e. at end of work; Prime Agent additionally extracts at
-  every compaction. A long jaato session that compacts several times before
-  completing loses that context before the curator ever sees it — a real and
-  narrow gap.
+#### Why Prime Agent must fire at compaction, and jaato need not
 
-**Verdict.** The "Continual Harness" is Prime Agent's headline abstraction and
-is genuinely shipped, but it is not a capability jaato lacks — the memory
-curator answers the same need, and answers it with a second-party reviewer and a
-quarantine tier that Prime Agent has no equivalent for. What jaato does not have
-is the *ledger* (per-edit inversion) and the *compaction-time trigger*. Those two,
-not "the refinement pattern", are the borrow.
+The compaction trigger looks at first like a jaato gap. It is the opposite —
+a mitigation for a weakness the two architectures do not share.
+
+| | jaato | Prime Agent |
+|---|---|---|
+| When the insight is captured | **immediately** — the working agent calls `store_memory`, which atomically writes `memories/raw/{id}.json` (tempfile + rename, one file per writer, no contention) | **not captured at the time**; nothing is written when the insight occurs |
+| What the later pass reads | the raw queue **on disk** | whatever survives of the **conversation trajectory** |
+| Effect of context loss | none — the file already exists | decisive — the refiner can only extract what is still in context |
+| Why fire at compaction | no reason to | **necessary**: it is racing context loss |
+
+jaato memories are not conversation content, so GC and compaction never touch
+them. Prime Agent's refinement is *trajectory-dependent extraction*; jaato's is
+*eager write, later curation* — two independent decisions, neither of which
+needs the history intact. jaato also captures the persist decision at the moment
+of insight, when the agent knows why it mattered, rather than reconstructing it
+later from a compacted trace.
+
+The trade jaato accepts in exchange is real but small: an agent that never calls
+`store_memory` records nothing, whereas Prime Agent's sweep needs no in-turn
+discipline. Over-eager storing costs nothing, since raw is quarantined; forgetting
+costs the memory outright.
+
+**Verdict.** The "Continual Harness" is Prime Agent's headline abstraction and is
+genuinely shipped, but it is not a capability jaato lacks. The memory curator
+answers the same need with a second-party reviewer and a quarantine tier Prime
+Agent has no equivalent for, and it is immune to the context loss Prime Agent has
+to schedule around. The one thing jaato does not have is the **per-edit inversion
+ledger**. That alone — not "the refinement pattern" — is the borrow, and §9.2
+places it on `memory` rather than beside it.
 
 Conversely, jaato's instruction-layering model is far more precise than Prime
 Agent's, and `drift_monitor` measures something Prime Agent does not measure at
@@ -1014,14 +1033,14 @@ Agent is ahead.
    `JaatoRuntime.event_bus` (the `webhook` plugin's existing pattern) lets a
    reactor resume the agent. Cheaper than the scheduler, and it covers every
    case where jaato owns the work.
-4. **The refinement plumbing, not its epistemics** — an automatic cadence with
-   a cheap review gate in front of the expensive writer, a per-edit inversion
-   ledger (`git revert` semantics, which `waypoint`'s point-in-time restore
-   cannot give), and bounded overview injection so the standing prompt cost stays
-   fixed. jaato's `finetuner-closed-loop` design already has the better signal
-   (telemetry), the better verification (fork-replay) and the better surface
-   (enforced reliability policy) — it lacks the machinery to run continuously.
-   Combining the two closes a loop neither project has today (§9.3).
+4. **A per-edit inversion ledger for curated memories** — the one piece of the
+   refinement machinery jaato has no counterpart for. Everything else in §9
+   survived checking: the memory curator already does eager-write + second-party
+   curation with a quarantine tier (§9.4), `waypoint` already does
+   snapshot-and-restore better (§9.2), and `kb-stage-agent-LoRA-training`
+   already closes a measured loop Prime Agent does not attempt (§9.3). What is
+   missing is `git revert` semantics over a bad curation — undoing one promotion
+   while keeping later ones.
 5. **`/compact <instructions>`** — user-steered summarisation focus, persisted
    on the compaction record. Cheap to add to `gc_summarize` / `gc_hybrid`.
 6. **Agent-to-agent messaging ergonomics** — named agents, sibling addressing,
