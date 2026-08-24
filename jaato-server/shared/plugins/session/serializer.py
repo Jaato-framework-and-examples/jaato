@@ -255,6 +255,7 @@ def serialize_session_state(state: SessionState) -> Dict[str, Any]:
         # never reaches disk however well it is wired elsewhere.
         'budget_control': state.budget_control,
         'sibling_name': state.sibling_name,
+        'cascade_driver_id': state.cascade_driver_id,
         'interrupted_turn': state.interrupted_turn,
         'session_state': state.session_state,
     }
@@ -302,6 +303,7 @@ def deserialize_session_state(data: Dict[str, Any]) -> SessionState:
         budget_exhausted_reason=data.get('budget_exhausted_reason'),
         budget_control=data.get('budget_control'),
         sibling_name=data.get('sibling_name'),
+        cascade_driver_id=data.get('cascade_driver_id'),
         interrupted_turn=data.get('interrupted_turn'),
         session_state=data.get('session_state'),
     )
@@ -326,6 +328,9 @@ def serialize_session_info(state: SessionState) -> Dict[str, Any]:
         'turn_count': state.turn_count,
         'profile_name': state.profile_name,
         'workspace_path': state.workspace_path,
+        # Needed while the session is COLD -- see SessionInfo.
+        'cascade_driver_id': state.cascade_driver_id,
+        'sibling_name': state.sibling_name,
     }
 
 
@@ -343,6 +348,8 @@ def deserialize_session_info(data: Dict[str, Any]) -> SessionInfo:
         description=data.get('description'),
         created_at=_naive(datetime.fromisoformat(data['created_at'])),
         updated_at=_naive(datetime.fromisoformat(data['updated_at'])),
+        cascade_driver_id=data.get('cascade_driver_id'),
+        sibling_name=data.get('sibling_name'),
         turn_count=data.get('turn_count', 0),
         # Pre-2.3 sessions wrote 'model' instead of 'profile_name'.
         # Old indexes deserialize with profile_name=None; consumers

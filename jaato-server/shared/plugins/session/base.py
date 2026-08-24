@@ -173,6 +173,19 @@ class SessionState:
     # sessions unload on ORPHAN, and a sibling that came back nameless
     # would be unreachable by every sibling still holding its name.
     sibling_name: Optional[str] = None
+    # The cascade this session belongs to.  Persisted because it was NOT, and
+    # nothing restored it: ``Session.cascade_driver_id`` is set at create and
+    # re-supplied by the CALLER of ``wake_session`` -- so a stage that unloaded
+    # on ORPHAN and was later LOADED (attach / disk-restore rather than an
+    # explicit wake) came back with ``None`` and silently left its cascade.
+    #
+    # Consequences beyond siblings: the cid is what ``_emit_to_session`` routes
+    # a cascade's observers on, and what the durability sweep reads.
+    #
+    # For siblings it made ``sibling_name`` incoherent -- the ADDRESS survived
+    # a reload while the MEMBERSHIP did not, so a revived sibling held a name
+    # belonging to a cascade it was no longer in.
+    cascade_driver_id: Optional[str] = None
     """Serialized conversation budget for restoration."""
 
     interrupted_turn: Optional[Dict[str, Any]] = None
@@ -235,6 +248,12 @@ class SessionInfo:
     """
 
     workspace_path: Optional[str] = None
+    # Carried on the INDEX so a COLD sibling stays visible.  Sessions unload on
+    # ORPHAN, so one resting on disk still owns its address; a roster or a
+    # uniqueness check reading only the in-memory table cannot see it, and the
+    # name can be handed to a second claimant.
+    cascade_driver_id: Optional[str] = None
+    sibling_name: Optional[str] = None
     """Workspace path (directory) where this session was created."""
 
     def display_name(self) -> str:

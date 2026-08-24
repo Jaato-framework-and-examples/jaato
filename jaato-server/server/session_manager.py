@@ -4914,6 +4914,54 @@ class SessionManager:
         with self._lock:
             self._reserved_session_ids.discard(session_id)
 
+    def _known_sibling_addresses(
+        self, workspace_path: Optional[str] = None,
+    ) -> "List[Tuple[Optional[str], Optional[str]]]":
+        """Every ``(sibling_name, cascade_driver_id)`` currently claimed.
+
+        IN-MEMORY UNION ON-DISK, and the union is the point.  Sessions unload
+        on ORPHAN, so a sibling resting on disk still owns its address.
+        Checking only ``self._sessions`` handed that address to a second
+        claimant the moment the first went cold -- and when the cold one
+        revived, one cascade held two sessions answering to one name, with a
+        perfectly healthy delivery receipt on whichever the roster happened to
+        return.  That is the exact failure ``validate_sibling_name``'s own
+        docstring warns about.
+
+        Reachable in practice because a cascade is not fixed at creation: a
+        reactor rule matching an agent-caused event can read the cid off it and
+        mint further cid-stamped sessions later, long after the original stages
+        have cycled through ORPHAN.
+
+        Extracted so it can be tested by CALLING it.
+
+        Args:
+            workspace_path: Workspace whose persisted sessions to include.
+
+        Returns:
+            Pairs from live sessions and from the persisted index.
+        """
+        claimed: "List[Tuple[Optional[str], Optional[str]]]" = [
+            (s.sibling_name, s.cascade_driver_id)
+            for s in self._sessions.values()
+        ]
+        live_ids = set(self._sessions)
+        try:
+            for info in self._get_persisted_sessions(workspace_path=workspace_path):
+                if info.session_id in live_ids:
+                    continue          # already counted, and fresher in memory
+                name = getattr(info, "sibling_name", None)
+                if name:
+                    claimed.append((name, getattr(info, "cascade_driver_id", None)))
+        except Exception as exc:  # noqa: BLE001
+            # WARNING, not debug: falling back to the in-memory view silently
+            # is how a duplicate address gets issued.
+            logger.warning(
+                "sibling-address uniqueness could not read persisted sessions "
+                "(%s) -- a name held by a COLD sibling may be reissued", exc,
+            )
+        return claimed
+
     def _create_session_impl(
         self,
         client_id: str,
@@ -5008,8 +5056,7 @@ class SessionManager:
         if sibling_name is not None:
             _bad = validate_sibling_name(
                 sibling_name, cascade_driver_id,
-                [(s.sibling_name, s.cascade_driver_id)
-                 for s in self._sessions.values()],
+                self._known_sibling_addresses(workspace_path),
             )
             if _bad:
                 logger.error("create_session refused: %s", _bad)
@@ -7097,6 +7144,13 @@ class SessionManager:
             # its name.  Same shape as the budget ceiling that did not
             # survive an unload (#583).
             sibling_name=getattr(state, "sibling_name", None),
+            # Restore cascade MEMBERSHIP, not just the address.  Without
+            # this a stage that unloaded on ORPHAN came back with None and
+            # silently left its cascade: its sibling_name addressed a
+            # cascade it was no longer in, _emit_to_session stopped
+            # reaching the cid's observers, and the durability sweep
+            # stopped seeing it.
+            cascade_driver_id=getattr(state, "cascade_driver_id", None),
             # Phase 3 §3.12 + peer-review M5/N1: mark this session as
             # awaiting first client-attach.  While set, the runner-
             # side permission plugin queues ASK prompts rather than
@@ -7607,6 +7661,7 @@ class SessionManager:
                 profile_spec=session.inline_profile_spec,
                 budget_control=budget_control_cfg,
                 sibling_name=session.sibling_name,
+                cascade_driver_id=session.cascade_driver_id,
                 workspace_path=session.workspace_path,
                 config_root=session.config_root,
                 # Persist confinement so orphan-revive / disk-restore re-applies
