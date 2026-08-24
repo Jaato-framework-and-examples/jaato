@@ -1491,6 +1491,34 @@ class PluginRegistry:
         """
         self._session_id = session_id
 
+    @property
+    def session_id(self) -> Optional[str]:
+        """The daemon session this registry belongs to, or ``None``.
+
+        A ``PluginRegistry`` is constructed per :class:`JaatoServer`, and
+        a ``JaatoServer`` is per session — so this identifies the ONE
+        session whose plugins this registry holds.  ``JaatoServer``
+        stamps it during initialization (``core.py``, right after the
+        registry is built).
+
+        **Why a getter.**  ``set_session_id`` existed with no reader
+        outside :meth:`_augment_plugin_config`, so a daemon-side plugin
+        answering a FORWARDED call had no supported way to learn which
+        session was asking.  ``daemon.plugin_execute`` ships
+        ``plugin_name``, ``tool_name`` and ``args`` — no caller identity
+        — so a plugin like ``subagent.list_siblings``, whose entire job
+        is "tell me about the cascade around ME", could not name the
+        caller and failed every forwarded call.
+
+        The identity was never missing from the daemon, only from the
+        CALL: it is one attribute away on the registry the plugin
+        already holds (via ``set_plugin_registry``).
+
+        Depends on the per-session invariant above; see
+        ``test_registry_session_id_is_per_session``.
+        """
+        return self._session_id
+
     def set_agent_name(self, agent_name: Optional[str]) -> None:
         """Set the agent_name injected into plugin configs at init.
 

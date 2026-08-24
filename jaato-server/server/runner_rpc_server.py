@@ -46,7 +46,9 @@ import traceback
 from typing import Any, Awaitable, Callable, Dict, Optional
 
 from server.runner.envelope import (
+    TOOL_ERROR_TYPE,
     ErrorPayload,
+    ExecutorOutcome,
     RequestEnvelope,
     ResponseEnvelope,
 )
@@ -63,6 +65,23 @@ logger = logging.getLogger(__name__)
 # payload — same contract as the runner-side dispatcher in
 # ``server/runner/rpc.py``.
 HandlerFn = Callable[[Dict[str, Any]], Awaitable[Any]]
+
+
+def _extract_outcome_error(payload: Any) -> str:
+    """Best-effort human-readable message for a domain-failure payload.
+
+    Mirrors ``server/runner/rpc.py``'s ``_extract_error_message`` for the
+    opposite direction: the message is for LOGS and for clients that show
+    ``envelope.error.message``.  The structured payload still travels in
+    ``result`` — this never replaces it, so nothing is lost when the
+    payload isn't dict-shaped.
+    """
+    if isinstance(payload, dict):
+        for key in ("error", "message"):
+            value = payload.get(key)
+            if isinstance(value, str) and value:
+                return value
+    return "executor reported failure"
 
 
 class RunnerRPCServer:
@@ -107,12 +126,24 @@ class RunnerRPCServer:
     async def dispatch(self, env: RequestEnvelope) -> ResponseEnvelope:
         """Run the handler for *env.method*; return the typed envelope.
 
-        Exception handling mirrors the runner-side dispatcher
+        Mirrors the runner-side dispatcher
         (`server/runner/rpc.py:RunnerRPC._handle_request`):
         - Unknown method → ``ok=False`` with a useful error message.
         - Handler raises → ``ok=False`` with traceback (sanitized
           per §3.1) in the error payload.
-        - Handler returns → ``ok=True`` with the result.
+        - Handler returns :class:`ExecutorOutcome` → its ``ok`` and
+          ``payload`` become the envelope's ``ok`` / ``result``, with a
+          :data:`TOOL_ERROR_TYPE` error stamped on failure.
+        - Handler returns anything else → ``ok=True`` with the result.
+
+        The ``ExecutorOutcome`` branch is what makes this a real mirror.
+        The runner-side dispatcher has always split an executor's
+        ``(ok, result)`` into the envelope's own halves; this side
+        previously mirrored only the EXCEPTION paths, so a handler
+        dispatching a plugin executor had nowhere to put the flag and
+        returned the raw tuple as ``result``.  JSON has no tuple type,
+        so it arrived as ``[False, {...}]`` and the flag was read as
+        data — see :class:`ExecutorOutcome` for the full failure mode.
         """
         handler = self._handlers.get(env.method)
         if handler is None:
@@ -143,6 +174,53 @@ class RunnerRPCServer:
                     type=type(exc).__name__,
                     message=sanitize_traceback(str(exc), self._workspace_root),
                     traceback=tb,
+                ),
+            )
+
+        # A BARE TUPLE can no longer be shipped as ``result``.  JSON has
+        # no tuple type, so it would arrive as a list and any
+        # ``isinstance(x, tuple)`` check downstream would silently read
+        # the flag as data — the exact defect ``ExecutorOutcome`` exists
+        # to remove.  No handler returns a tuple today, so this cannot
+        # fire for existing callers; it fires for the NEXT handler that
+        # tries to express the ``(ok, payload)`` contract by shape.
+        #
+        # Loud, not silent: a wrong-but-plausible envelope is what made
+        # the original bug survive four consumer-side error checks.
+        if isinstance(result, tuple):
+            return ResponseEnvelope(
+                id=env.id,
+                ok=False,
+                result=None,
+                error=ErrorPayload(
+                    type="HandlerContractError",
+                    message=(
+                        f"handler for {env.method!r} returned a bare tuple; "
+                        f"a tuple cannot cross the JSON wire intact. Return "
+                        f"ExecutorOutcome(ok=..., payload=...) to express "
+                        f"the (ok, payload) executor contract."
+                    ),
+                ),
+            )
+
+        # Domain failure declared by the handler — unpack into the
+        # envelope's own halves rather than shipping the pair as data.
+        # ``error`` is stamped with the SAME discriminator the
+        # runner-side dispatcher uses, so a client can tell "the
+        # executor returned (False, payload)" from "the call crashed"
+        # without inspecting the payload.
+        if isinstance(result, ExecutorOutcome):
+            if result.ok:
+                return ResponseEnvelope(
+                    id=env.id, ok=True, result=result.payload,
+                )
+            return ResponseEnvelope(
+                id=env.id,
+                ok=False,
+                result=result.payload,
+                error=ErrorPayload(
+                    type=TOOL_ERROR_TYPE,
+                    message=_extract_outcome_error(result.payload),
                 ),
             )
 

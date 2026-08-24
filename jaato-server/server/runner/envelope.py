@@ -80,6 +80,58 @@ class ErrorPayload:
 
 
 # ----------------------------------------------------------------------
+# Executor outcome (the ``(ok, payload)`` contract, made transportable)
+# ----------------------------------------------------------------------
+
+# ``ErrorPayload.type`` value marking a DOMAIN failure — an executor that
+# returned ``(False, payload)`` without raising — as opposed to a crash,
+# where ``type`` is the real exception class name.  The runner-side
+# dispatcher has always stamped this (``runner/rpc.py``); naming it here
+# lets the daemon-side dispatcher and the RPC client agree on the same
+# discriminator instead of matching the string in three places.
+TOOL_ERROR_TYPE = "ToolError"
+
+
+@dataclass
+class ExecutorOutcome:
+    """An executor's ``(ok, payload)`` result, as an explicit TYPE.
+
+    **Why this exists.**  Plugin executors signal domain failure by
+    returning a ``(False, payload)`` 2-tuple (``split_executor_result``).
+    That contract is carried by a Python ``tuple`` — and JSON has no
+    tuple type, so ``json.dumps((False, {...}))`` yields ``[False, {...}]``
+    and the receiving ``isinstance(x, tuple)`` check fails.  The flag then
+    demotes from FLAG to DATA: ``split_executor_result`` falls through to
+    ``return True, executor_result``, the call reports success, and the
+    payload arrives wrapped as ``{"result": [False, {...}]}``.  Both the
+    ``is_error`` flag and the deeper ``tool_result_is_error`` body check
+    read ``False``, so a failing forwarded tool is invisible to every
+    consumer-side error check.
+
+    **Why a type and not a shape.**  The tempting fix is to accept any
+    2-element list whose head is a bool.  That makes a list that IS a
+    payload indistinguishable from an ``(ok, payload)`` pair — the same
+    absent-vs-empty ambiguity, moved rather than removed.  A handler
+    returning ``ExecutorOutcome`` states the contract; no other handler
+    can be mistaken for one.
+
+    The dispatcher unpacks this into the envelope's own halves —
+    ``ok`` + ``result`` + an ``error`` stamped :data:`TOOL_ERROR_TYPE` —
+    which is exactly what :class:`ResponseEnvelope` documents ``ok`` for
+    ("kept explicit because some plugins legitimately return
+    ``(False, dict)`` without raising").  The field existed for this case
+    and the daemon path routed around it.
+
+    Attributes:
+        ok: The executor's success flag.
+        payload: The executor's result value, unchanged.
+    """
+
+    ok: bool
+    payload: Any = None
+
+
+# ----------------------------------------------------------------------
 # Response envelope (§4.8)
 # ----------------------------------------------------------------------
 

@@ -1030,12 +1030,30 @@ class SubagentPlugin(DaemonForwardingMixin):
                     "attached (this build routes it daemon-side)."
                 ),
             }
-        sid = getattr(self, "_daemon_session_id", None) or getattr(
-            getattr(self, "_session", None), "_session_id", None)
+        # WHO IS ASKING.  ``daemon.plugin_execute`` ships plugin_name,
+        # tool_name and args — no caller identity — so the daemon-side
+        # instance answering a forwarded call must recover it.  The
+        # registry is per-session and already carries it (JaatoServer
+        # stamps it right after building the registry), and this plugin
+        # holds that registry via ``set_plugin_registry``.
+        #
+        # This previously read ``self._daemon_session_id`` with a
+        # fallback to ``self._session._session_id``.  Nothing anywhere
+        # sets ``_daemon_session_id`` on a PLUGIN — it is a
+        # ``JaatoSession`` attribute (``set_daemon_session_id``) — and
+        # the daemon-side instance has no ``_session``.  So the pair was
+        # a fallback chain in which neither link could ever be reached,
+        # and the guard below could never pass on the forwarded path.
+        registry = getattr(self, "_plugin_registry", None)
+        sid = getattr(registry, "session_id", None) if registry else None
         if not sid:
             return False, {
                 "status": "error",
-                "error": "list_siblings could not determine the calling session.",
+                "error": (
+                    "list_siblings could not determine the calling "
+                    "session: the daemon-side plugin registry carries no "
+                    "session_id."
+                ),
             }
         roster = mgr.build_sibling_roster(sid)
         return {"status": "ok", **roster}

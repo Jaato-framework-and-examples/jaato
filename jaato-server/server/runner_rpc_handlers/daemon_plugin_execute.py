@@ -38,6 +38,9 @@ import asyncio
 import logging
 from typing import Any, Dict, Optional
 
+from server.runner.envelope import ExecutorOutcome
+from shared.tool_result_builder import split_executor_result
+
 
 logger = logging.getLogger(__name__)
 
@@ -200,7 +203,24 @@ class DaemonPluginExecuteHandler:
         )
         loop = asyncio.get_running_loop()
         result = await loop.run_in_executor(None, executor, tool_args)
-        return result
+
+        # Split the executor's ``(ok, payload)`` contract into an
+        # explicit outcome the dispatcher unpacks into the envelope's
+        # own ``ok`` / ``result`` halves.
+        #
+        # Returning ``result`` raw was the bug: an executor's 2-TUPLE
+        # became ``envelope.result``, JSON flattened it to a LIST (there
+        # is no tuple type on the wire), and the runner-side
+        # ``split_executor_result`` — which gates on
+        # ``isinstance(x, tuple)`` — fell through to
+        # ``return True, executor_result``.  The ``False`` demoted from
+        # flag to data and the failing call reported success.
+        #
+        # ``split_executor_result`` is the SAME function the in-process
+        # path uses, so forwarded and in-process executors are read
+        # through one contract rather than two.
+        ok, payload = split_executor_result(result)
+        return ExecutorOutcome(ok=ok, payload=payload)
 
     def shutdown(self) -> None:
         """Mark the handler closed.

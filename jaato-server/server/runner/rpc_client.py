@@ -27,7 +27,7 @@ from typing import Any, Dict, Optional
 
 from shared.plugins.permission.types import PromptPayload, PromptResponse
 
-from .envelope import ResponseEnvelope
+from .envelope import TOOL_ERROR_TYPE, ResponseEnvelope
 from .rpc import RunnerRPC
 
 
@@ -385,6 +385,12 @@ class RunnerRPCClient:
             for interrogate_session) but primitives + lists are also
             supported.
 
+            For a DOMAIN failure (the executor returned
+            ``(False, payload)`` without raising) this returns the
+            ``(False, payload)`` TUPLE, so the caller's
+            ``split_executor_result`` reads it exactly as it reads the
+            in-process path.  Only transport / handler failures raise.
+
         Raises:
             RunnerRPCError: when the daemon-side handler reports an
                 error (envelope ``ok=False``) — typically:
@@ -404,6 +410,21 @@ class RunnerRPCClient:
             },
             timeout=timeout,
         )
+        # A DOMAIN failure — the executor returned ``(False, payload)``
+        # without raising — is a normal result, not a transport error.
+        # Return the pair so the caller's ``split_executor_result`` sees
+        # a real Python tuple and the structured payload survives.
+        # Raising here instead would collapse the payload into an error
+        # STRING, which is how the forwarded path used to lose it.
+        #
+        # ``TOOL_ERROR_TYPE`` is the discriminator BOTH dispatchers stamp
+        # for this case; a crash carries the real exception class name.
+        if (
+            not env.ok
+            and env.error is not None
+            and env.error.type == TOOL_ERROR_TYPE
+        ):
+            return (False, env.result)
         if not env.ok or env.error is not None:
             err_type = env.error.type if env.error else "UnknownError"
             err_msg = env.error.message if env.error else "no error message"

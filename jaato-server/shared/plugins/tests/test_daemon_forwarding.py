@@ -21,6 +21,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from jaato_sdk.plugins.model_provider.types import tool_result_is_error
+from shared.tool_result_builder import split_executor_result
 from shared.plugins.daemon_forwarding import (
     DaemonForwardingMixin,
     _forward_via_daemon,
@@ -189,10 +191,15 @@ def test_per_call_resolution_picks_up_late_attached_rpc() -> None:
 # ----------------------------------------------------------------------
 
 
-def test_rpc_error_translates_to_error_dict() -> None:
-    """When the wrapper method raises ``RunnerRPCError`` (typed RPC
-    failure), the forwarder returns a clean error dict — same shape
-    runner_forwarding produces."""
+def test_rpc_error_is_visible_to_both_error_checks() -> None:
+    """A handler-level RPC failure must fail the executor CONTRACT too.
+
+    It used to return a bare ``{"error": ...}`` dict, which is
+    ``ok=True`` to ``split_executor_result``: the body check
+    (``tool_result_is_error``, which reads the ``error`` key) saw the
+    failure but the contract flag did not, so ``tool.call_end`` reported
+    ``success=True`` for a call that failed.  Returning the pair makes
+    both signals agree."""
     from server.runner.rpc_client import RunnerRPCError
 
     plugin = _FakePlugin()
@@ -203,18 +210,18 @@ def test_rpc_error_translates_to_error_dict() -> None:
     plugin._plugin_registry = _FakeRegistry(runner_rpc_client=rpc_client)
 
     executors = plugin.get_executors()
-    result = executors["demo_tool"]({})
+    ok, data = split_executor_result(executors["demo_tool"]({}))
 
-    assert isinstance(result, dict)
-    assert "error" in result
-    assert "demo_tool" in result["error"]
-    assert "ValueError" in result["error"]
+    assert ok is False, "the executor contract must report failure"
+    assert tool_result_is_error(data), "the body check must agree"
+    assert "demo_tool" in data["error"]
+    assert "ValueError" in data["error"]
 
 
-def test_transport_error_translates_to_error_dict() -> None:
+def test_transport_error_is_visible_to_both_error_checks() -> None:
     """Transport-level failures (channel closed, malformed frame, etc.)
-    translate to ``{"error": ...}`` so the model sees a clean message
-    rather than an opaque traceback."""
+    give the model a clean message AND fail the executor contract, so a
+    dropped channel cannot read as a successful tool call."""
     plugin = _FakePlugin()
     rpc_client = MagicMock()
     rpc_client.daemon_plugin_execute.side_effect = OSError(
@@ -223,12 +230,12 @@ def test_transport_error_translates_to_error_dict() -> None:
     plugin._plugin_registry = _FakeRegistry(runner_rpc_client=rpc_client)
 
     executors = plugin.get_executors()
-    result = executors["demo_tool"]({})
+    ok, data = split_executor_result(executors["demo_tool"]({}))
 
-    assert isinstance(result, dict)
-    assert "error" in result
-    assert "demo_tool" in result["error"]
-    assert "OSError" in result["error"]
+    assert ok is False, "the executor contract must report failure"
+    assert tool_result_is_error(data), "the body check must agree"
+    assert "demo_tool" in data["error"]
+    assert "OSError" in data["error"]
 
 
 def test_cancelled_exception_re_raises() -> None:

@@ -21,6 +21,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from server.runner.envelope import ExecutorOutcome
 from server.runner_rpc_handlers.daemon_plugin_execute import (
     DaemonPluginExecuteHandler,
     register,
@@ -39,12 +40,17 @@ class _FakePlugin:
         self.name = name
         self.executor_thread_id: int = -1
         self.executor_args: Dict[str, Any] = {}
+        # Override to exercise the ``(ok, payload)`` contract; ``None``
+        # means "return the default success dict".
+        self.executor_result: Any = None
 
-    def _execute_demo(self, args: Dict[str, Any]) -> Dict[str, Any]:
+    def _execute_demo(self, args: Dict[str, Any]) -> Any:
         # Record the thread we ran on — used to assert the handler
         # ran us off the asyncio loop.
         self.executor_thread_id = threading.get_ident()
         self.executor_args = dict(args)
+        if self.executor_result is not None:
+            return self.executor_result
         return {"answer": "ok", "echo": args}
 
     def get_executors(self) -> Dict[str, Any]:
@@ -185,8 +191,37 @@ def test_dispatches_executor_with_args() -> None:
         "args": {"q": "hello"},
     }))
 
-    assert result == {"answer": "ok", "echo": {"q": "hello"}}
+    # The handler now states the executor contract explicitly instead of
+    # returning the raw value: a bare ``(ok, payload)`` TUPLE cannot cross
+    # the JSON wire intact (no tuple type), so the flag would arrive as
+    # data.  ``ExecutorOutcome`` carries it to the dispatcher, which
+    # unpacks it into the envelope's own ``ok`` / ``result`` halves.
+    assert result == ExecutorOutcome(
+        ok=True, payload={"answer": "ok", "echo": {"q": "hello"}},
+    )
     assert plugin.executor_args == {"q": "hello"}
+
+
+def test_domain_failure_is_declared_not_returned_raw() -> None:
+    """An executor returning ``(False, payload)`` must reach the
+    dispatcher as a DECLARED failure, not as a tuple in the result slot.
+
+    This is the shape that used to arrive at the model as
+    ``{"result": [False, {...}]}`` with both error checks reading False.
+    """
+    plugin = _FakePlugin()
+    plugin.executor_result = (False, {"status": "error", "error": "nope"})
+    handler = _make_handler({"fake_plugin": plugin})
+
+    result = asyncio.run(handler.handle({
+        "plugin_name": "fake_plugin",
+        "tool_name": "demo_tool",
+        "args": {},
+    }))
+
+    assert isinstance(result, ExecutorOutcome)
+    assert result.ok is False
+    assert result.payload == {"status": "error", "error": "nope"}
 
 
 def test_executor_runs_off_event_loop_thread() -> None:

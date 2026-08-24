@@ -65,12 +65,20 @@ converts it to the legacy result-dict shape every plugin's
 ``_execute_*`` returns today:
 
 - ``envelope.ok=True`` + dict result → returned unchanged.
-- ``envelope.ok=False`` + structured result → result dict returned
-  unchanged so the model sees the same shape as the in-process path.
+- ``envelope.ok=False`` + ``error.type == "ToolError"`` → the executor
+  returned ``(False, payload)`` without raising; the pair is returned
+  as a real Python TUPLE so the caller's ``split_executor_result``
+  reads it exactly as it reads the in-process path.
 - ``envelope.error.type == "CancelledException"`` → re-raised so the
   in-process pipeline classifies the call as cancelled.
-- Transport / handler crash → translated into a clean error-dict
-  ``{"error": "..."}``.
+- Transport / handler crash → ``(False, {"error": "..."})``, so a
+  failed forward is visible to BOTH consumer-side checks: the
+  executor-contract flag (``is_error``) and the body check
+  (``tool_result_is_error``, which reads the ``error`` key).
+
+Returning a bare error DICT here was half-visible: the body check saw
+the ``error`` key but the contract flag stayed ``True``, so
+``tool.call_end`` reported ``success=True`` for a call that failed.
 
 Streaming + cancellation: deliberately NOT threaded through in v1.
 The canonical use case (``interrogate_session``) is a single-shot
@@ -214,22 +222,28 @@ def _forward_via_daemon(
             args=dict(args),
         )
     except _RunnerRPCError as exc:
-        # Domain failure surfaced by the wrapper as a typed exception.
+        # HANDLER-level failure: plugin not found, tool not in the
+        # plugin's executors, or the executor RAISED.  A domain failure
+        # (executor returned ``(False, payload)``) no longer arrives
+        # here — ``daemon_plugin_execute`` returns that as a tuple, so
+        # the structured payload survives instead of collapsing into
+        # this message string.
+        #
         # Cancellation needs to flow through as CancelledException so
         # the in-process pipeline classifies it correctly.
         message = str(exc)
         if "CancelledException" in message:
             raise CancelledException(message)
-        return {
+        return False, {
             "error": (
                 f"{tool_name}: daemon RPC failed: {message}"
             ),
         }
     except Exception as exc:  # noqa: BLE001 — RPC transport boundary
         # Transport-level failure (channel closed, malformed frame,
-        # etc.).  Translate to legacy error-dict shape so the model
-        # sees a clean message rather than an opaque traceback.
-        return {
+        # etc.).  Translate to a clean message rather than an opaque
+        # traceback.
+        return False, {
             "error": (
                 f"{tool_name}: daemon RPC failed: "
                 f"{type(exc).__name__}: {exc}"
