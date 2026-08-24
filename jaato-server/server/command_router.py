@@ -406,6 +406,10 @@ class CommandRouter:
             inline_profile_data=inline_profile_data,
             cascade_driver_id=cascade_driver_id,
             sibling_name=sibling_name,
+            # Correlation id from the generic payload escape hatch.  Echoed on
+            # whichever event answers this create, so the caller can tell its
+            # own answer from a concurrent one.
+            request_id=(payload or {}).get("request_id"),
         )
         if new_session_id:
             # Update logging context now that session_id is known.

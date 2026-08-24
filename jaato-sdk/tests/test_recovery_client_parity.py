@@ -40,6 +40,10 @@ INTENTIONALLY_ABSENT = {
     "supports_reconnection":
         "recovery IS the reconnection layer; the question is meaningless on "
         "it, and `.state` / `.is_reconnecting` answer what callers want",
+    "MIN_CORRELATION_PROTOCOL":
+        "implementation detail of the INNER IPCClient's session.new "
+        "correlation; recovery delegates create_session to it and never "
+        "consults the constant itself",
     "MIN_PROTOCOL_VERSION":
         "protocol floor is negotiated by the inner IPCClient; recovery takes "
         "`min_protocol_version` as a constructor argument instead",

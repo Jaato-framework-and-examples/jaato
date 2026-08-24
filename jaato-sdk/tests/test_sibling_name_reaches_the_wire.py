@@ -109,6 +109,10 @@ def test_every_create_session_kwarg_the_server_takes_is_reachable():
         "initial_session_state", "budget_control", "budget_usage",
         "system_instruction_override", "suppress_base_instructions",
         "inline_profile_data", "profile_name", "agent_name", "agent_params",
+        # Minted BY the client per call, not accepted FROM the caller — a
+        # caller-chosen correlation id could collide with another call's and
+        # reintroduce exactly the mis-attribution it exists to prevent.
+        "request_id",
     }
     unreachable = server_params - client_params - NOT_CLIENT_SETTABLE
     assert not unreachable, (
