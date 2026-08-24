@@ -622,6 +622,57 @@ jaato treats MCP tools as first-class permission-gated tools.
 | Skill authoring by the agent | Scaffold verbs (`jaato-scaffold compile`, Daruma invariant compiler → profiles, evaluators, processors, reactors, host tools, emit-then-validate) | Built-in `skill-creator` skill: the agent packages recurring workflows into markdown or Python-backed skills |
 | Training-data flywheel | **`kb-stage-agent-LoRA-training` — built and proven.** Teacher (GLM-5) runs the cascade; trajectories are harvested per stage; LoRA adapters are trained on Nebius Token Factory and served on self-hosted vLLM; each is scored on held-out specs against the teacher as gold. Plus premium `modlog_training_pipeline`. The operator trains adapters for their own cascade, on their own account | Opt-in trace upload to Prime Intellect (`/traces`, `PRIME_AGENT_TRACES_API_KEY`). The repo documents the mechanism but **states no purpose** for the uploaded traces; that they feed the same org's `verifiers` / `prime-rl` stack is a reasonable inference from the branding and sibling repos, not a documented claim. What is certain is the direction: full session traces leave the machine, and nothing returns as a model the operator owns |
 
+### 9.0 What refinement is *for*
+
+The mechanism only makes sense against the architecture it serves. Prime Agent
+is deliberately **context-minimal**: one model tool, skills that stay
+metadata-only until loaded, subagents whose answers never enter the parent's
+context, and compaction that discards conversation aggressively *because the
+real work lives in Python variables rather than in the transcript*.
+
+That buys a small, cheap context — and creates the problem refinement exists to
+solve: **everything the agent learns evaporates.** In an agent whose transcript
+*is* its memory, a lesson survives by sitting in history. Here history is
+summarised away by design, subagent context is isolated by design, and sessions
+end.
+
+So refinement is the **write-back path for an architecture that keeps throwing
+context away**. Its own system prompt says so directly:
+
+> This is similar in spirit to context compaction, but instead of summarizing
+> the conversation you emit precise Create, Update, or Delete edits to reusable
+> state.
+
+It is compaction's inverse. Compaction asks *what can I discard from this
+trajectory?*; refinement asks *what should I extract before it goes?* — which is
+why one of its two automatic triggers is compaction itself
+(`AutoRefineReason = "turn_interval" | "compact"`). It fires precisely when
+context is about to be lost.
+
+The four entry kinds are four things worth surviving that loss:
+
+| Kind | Saves you from |
+|---|---|
+| `memory` | re-deriving a fact, decision or outcome, or re-asking the user a preference |
+| `prompt` | the user repeating the same behavioural correction every session |
+| `skill` | re-improvising a procedure already performed several times |
+| `subagent` | re-describing a delegation role in prose each time it recurs |
+
+So the intended payoff is narrow and practical: **don't re-learn, don't re-ask,
+don't re-improvise.** Not "the agent gets smarter" — the model is unchanged;
+only its durable notes accumulate.
+
+Whether that payoff is achieved is unmeasured (§9.3). The guardrails — immutable
+base prompt, bounded overview injection, session-local default, per-edit
+rollback — bound the *damage* of a bad refinement rather than verify the
+*benefit* of a good one. Read alongside the "Continual Harness" being one of
+the project's two headline abstractions, refinement reads as a research bet:
+that durable editable harness state is a route to improvement without touching
+weights. jaato takes the other route (§9.3's layer table), which is why it needs
+no equivalent as urgently — its context GC preserves by policy, its knowledge is
+human-curated, and its improvement loop reaches for weights or enforced policy
+instead of prompt notes.
+
 ### 9.1 How `/refine` actually works
 
 Worth the detail, because the shape is more copyable than the idea.
