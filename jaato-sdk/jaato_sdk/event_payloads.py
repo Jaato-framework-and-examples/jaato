@@ -155,6 +155,10 @@ class AgentOutputPayload(TypedDict):
     source: str
     text: str
     mode: str
+    # Which session this event is about (protocol 1.2+).  Mirrors the
+    # base ``Event.session_id``, stamped centrally as the daemon routes;
+    # NotRequired because a hand-built payload need not supply it.
+    session_id: NotRequired[str]
 
 
 class AgentStatusChangedPayload(TypedDict):
@@ -165,6 +169,10 @@ class AgentStatusChangedPayload(TypedDict):
     agent_id: str
     status: str
     error: NotRequired[Optional[str]]
+    # Which session this event is about (protocol 1.2+).  Mirrors the
+    # base ``Event.session_id``, stamped centrally as the daemon routes;
+    # NotRequired because a hand-built payload need not supply it.
+    session_id: NotRequired[str]
 
 
 class AgentCompletedPayload(TypedDict):
@@ -184,6 +192,10 @@ class AgentCompletedPayload(TypedDict):
     turns_used: NotRequired[Optional[int]]
     error: NotRequired[str]
     payload: NotRequired[Optional[Dict[str, Any]]]
+    # Which session this event is about (protocol 1.2+).  Mirrors the
+    # base ``Event.session_id``, stamped centrally as the daemon routes;
+    # NotRequired because a hand-built payload need not supply it.
+    session_id: NotRequired[str]
 
 
 class ToolCallStartedPayload(TypedDict):
@@ -195,6 +207,10 @@ class ToolCallStartedPayload(TypedDict):
     tool_name: str
     tool_args: Dict[str, Any]
     call_id: NotRequired[Optional[str]]
+    # Which session this event is about (protocol 1.2+).  Mirrors the
+    # base ``Event.session_id``, stamped centrally as the daemon routes;
+    # NotRequired because a hand-built payload need not supply it.
+    session_id: NotRequired[str]
 
 
 class ToolCallCompletedPayload(TypedDict):
@@ -213,6 +229,10 @@ class ToolCallCompletedPayload(TypedDict):
     continuation_id: NotRequired[Optional[str]]
     show_output: NotRequired[Optional[bool]]
     show_popup: NotRequired[Optional[bool]]
+    # Which session this event is about (protocol 1.2+).  Mirrors the
+    # base ``Event.session_id``, stamped centrally as the daemon routes;
+    # NotRequired because a hand-built payload need not supply it.
+    session_id: NotRequired[str]
 
 
 class ToolOutputPayload(TypedDict):
@@ -223,6 +243,10 @@ class ToolOutputPayload(TypedDict):
     agent_id: str
     call_id: str
     chunk: str
+    # Which session this event is about (protocol 1.2+).  Mirrors the
+    # base ``Event.session_id``, stamped centrally as the daemon routes;
+    # NotRequired because a hand-built payload need not supply it.
+    session_id: NotRequired[str]
 
 
 class PlanStepUpdatedPayload(TypedDict):
@@ -240,6 +264,10 @@ class PlanStepUpdatedPayload(TypedDict):
     blocked_by: NotRequired[Optional[List[Dict[str, Any]]]]
     depends_on: NotRequired[Optional[List[Dict[str, Any]]]]
     received_outputs: NotRequired[Optional[Dict[str, Any]]]
+    # Which session this event is about (protocol 1.2+).  Mirrors the
+    # base ``Event.session_id``, stamped centrally as the daemon routes;
+    # NotRequired because a hand-built payload need not supply it.
+    session_id: NotRequired[str]
 
 
 class TurnCompletedPayload(TypedDict):
@@ -259,6 +287,10 @@ class TurnCompletedPayload(TypedDict):
     function_calls: List[Dict[str, Any]]
     formatted_text: NotRequired[Optional[str]]
     finish_reason: str
+    # Which session this event is about (protocol 1.2+).  Mirrors the
+    # base ``Event.session_id``, stamped centrally as the daemon routes;
+    # NotRequired because a hand-built payload need not supply it.
+    session_id: NotRequired[str]
 
 
 class TurnProgressPayload(TypedDict):
@@ -273,6 +305,10 @@ class TurnProgressPayload(TypedDict):
     percent_used: float
     tokens_remaining: int
     pending_tool_calls: int
+    # Which session this event is about (protocol 1.2+).  Mirrors the
+    # base ``Event.session_id``, stamped centrally as the daemon routes;
+    # NotRequired because a hand-built payload need not supply it.
+    session_id: NotRequired[str]
 
 
 class ContextUpdatedPayload(TypedDict):
@@ -288,6 +324,10 @@ class ContextUpdatedPayload(TypedDict):
     percent_used: float
     tokens_remaining: int
     turns: int
+    # Which session this event is about (protocol 1.2+).  Mirrors the
+    # base ``Event.session_id``, stamped centrally as the daemon routes;
+    # NotRequired because a hand-built payload need not supply it.
+    session_id: NotRequired[str]
 
 
 class GCConfigPayload(TypedDict):
@@ -317,6 +357,10 @@ class PermissionRequestedPayload(TypedDict):
     response_options: List[Dict[str, str]]
     tool_args: NotRequired[Optional[Dict[str, Any]]]
     editable_metadata: NotRequired[Optional[Dict[str, Any]]]
+    # Which session this event is about (protocol 1.2+).  Mirrors the
+    # base ``Event.session_id``, stamped centrally as the daemon routes;
+    # NotRequired because a hand-built payload need not supply it.
+    session_id: NotRequired[str]
 
 
 class PermissionResolvedPayload(TypedDict):
@@ -330,6 +374,10 @@ class PermissionResolvedPayload(TypedDict):
     granted: bool
     method: str
     comment: str
+    # Which session this event is about (protocol 1.2+).  Mirrors the
+    # base ``Event.session_id``, stamped centrally as the daemon routes;
+    # NotRequired because a hand-built payload need not supply it.
+    session_id: NotRequired[str]
 
 
 # =============================================================================

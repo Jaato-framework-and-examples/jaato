@@ -232,8 +232,18 @@ async def main() -> int:
         role="observer",
     ):
         et = getattr(ev, "type", "?")
-        sid = getattr(ev, "session_id", "")
-        print(f"[{et}] session={sid}")
+        # Every event carries session_id (protocol 1.2+), stamped by the
+        # daemon as it routes.  It is what tells two sessions of one
+        # cascade apart -- agent_id will NOT: it is "main" for every
+        # top-level session, so siblings are indistinguishable by it.
+        #
+        # Read it as a plain attribute, not getattr(ev, "session_id", "").
+        # That idiom returns "" both when the field is missing and when
+        # it is blank, so it cannot tell "this event type has no
+        # attribution" from "this event was not routed" -- and against a
+        # pre-1.2 server it silently prints empty for every line rather
+        # than failing where you can see it.
+        print(f"[{et}] session={ev.session_id or '<unrouted>'}")
     await client.disconnect()
     return 0
 
