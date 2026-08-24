@@ -97,6 +97,50 @@ Doubleword, TensorRT-LLM, Triton).
 | Registry durability | Session persistence + reactor-driven respawn | Parent-scoped registry survives compaction, kernel restart, and parent restore; completed daemon children are rehydrated and remain addressable |
 | Warm-start | **Pre-warm runner pool** (fork-from-template, ~30s → ~7s per session) | Kernel is lazily provisioned; no pool |
 
+### 3.1 Agent messaging, in detail
+
+One of the two places (with ACP, §11.1) where Prime Agent is ahead on a check
+rather than on first impression.
+
+| | jaato | Prime Agent |
+|---|---|---|
+| Topology | parent ↔ child only | parent / **sibling** / child (`AgentFamilyRelationship`) |
+| Addressing | opaque `subagent_id` from `spawn_subagent` | **names**, with availability checks — human-typeable and restart-stable |
+| Delivery choice | one behaviour: *"processed at the next yield point"* | caller picks `auto` / `steer` / `follow_up` |
+| Result | no delivery status | **receipt**: `deliveryStatus: delivered\|queued`, plus `deliveredAt` / `queuedAt` |
+| Receiver context | — | `fromRelationship` — who the sender is *from the receiver's point of view* |
+| Discovery | `list_active_subagents` (own children) | `list_agents()` roster with `running` / `idle` / `inactive` |
+| Broadcast | — | `send("all", …)` within the family roster |
+| From a shell | — | `prime-agent send <agent> "…"` |
+| Backpressure | — | 16 384 chars, 20 pending per session, token bucket (3 / 1 s) |
+
+Three of those matter more than the rest. **Sibling addressing**: a jaato cascade
+stage that needs something from a peer must route through the parent, a reactor,
+or a file. **Named addressing** is what makes a CLI verb possible at all — you
+cannot type a UUID you never saw. **Delivery mode as a caller decision** is a
+real semantic: a course correction wants `steer`, a data handoff wants
+`follow_up`, and jaato has only the latter.
+
+jaato is not simply behind here, though — it is typed where Prime Agent is
+textual:
+
+- **`share_context` (telepathy)** transfers *structured* findings child→parent.
+  Prime Agent's agent messages are strings; it has no equivalent, and its own
+  tool description tells the model to use messages for conversation and files
+  for data.
+- **`completion_payload_schema`** makes stage handoffs validated objects rather
+  than prose.
+- **`session.wake`** carries an actual trust model — Ed25519/RSA signatures over
+  the raw body, per-session trust keys, replay window — where Prime Agent's
+  messaging is same-OS-user trust with the daemon deriving sender identity.
+- **Gossip** delegates across hosts; Prime Agent's roster is one machine.
+
+So the split is ergonomics and topology (Prime Agent) against typing and trust
+(jaato). Prime Agent optimises for a conversational mesh of peer agents; jaato
+for a governed pipeline with validated handoffs. The borrow is the addressing
+layer — names, roles, modes, receipts — which would sit on top of jaato's
+existing routing without disturbing the typed paths.
+
 **Verdict.** A genuine split. Prime Agent's messaging layer is better: named
 agents, sibling/parent/child roles, three delivery modes with receipts, a
 CLI `send` verb, and rate/size limits enforced by the daemon. jaato's
@@ -966,6 +1010,47 @@ nothing to offer today.
 | SDKs | Python SDK (`jaato-sdk`) + TypeScript SDK (`jaato-sdk-ts`) | TypeScript SDK (`createAgentSession`, `AgentSessionRuntime`, run modes) |
 | Client-side tools | **Host-provided tools** — a WS client registers tools the daemon routes back to it (browser DOM, screen capture, user interaction) | Extensions run in-process; no remote tool-execution boundary |
 | Presentation awareness | **`PresentationContext`** — the model is told content width, table/image/expandable support and client type, and adapts its output | Terminal-only assumptions |
+
+### 11.1 ACP: what jaato is actually missing
+
+jaato has no ACP implementation — the term appears nowhere in the tree outside
+these comparison documents. This is the clearest single-feature gap in the
+comparison, and it is worth being precise about what it buys.
+
+ACP ([agentclientprotocol.com](https://agentclientprotocol.com)) is JSON-RPC 2.0
+over newline-delimited JSON on stdin/stdout. `prime-agent --mode acp` implements
+`initialize`, `session/new`, `session/prompt`, `session/cancel`, `session/close`,
+and streams activity as `session/update` notifications — assistant text as
+`agent_message_chunk`, reasoning as `agent_thought_chunk`, tool starts as
+`tool_call`, completions as `tool_call_update`.
+
+The point is not the transport. jaato has three already (IPC, WebSocket, and the
+headless event stream), all of them richer. The point is that **they are jaato's
+own**. An editor wanting to drive jaato must implement jaato's protocol; an
+editor that already speaks ACP drives Prime Agent with no Prime-Agent-specific
+work at all. That is the difference between having an API and speaking a protocol
+someone else already implements — Zed and other ACP clients arrive free.
+
+Two details worth copying if jaato ever adds it:
+
+- **Extensions ride in a reverse-domain `_meta` envelope**
+  (`ai.primeintellect.prime-agent`), carrying what ACP has no field for —
+  subagents, gate attempts, goals, heartbeats, refinement. A standard client
+  ignores `_meta` and still works. *"Nothing non-standard is ever added to an ACP
+  object root, which the protocol reserves for future fields."* Disciplined
+  protocol citizenship, and the pattern jaato would need for permissions,
+  reactors and cascade state.
+- **Refusal over silent degradation.** One session per connection, because the
+  underlying session is fixed at process startup — a second `session/new` is
+  *refused* rather than silently sharing conversation, cwd and model. A concurrent
+  `session/prompt` is refused too, and a client-supplied `cwd` that differs from
+  the real one is reported back in `_meta` instead of being ignored.
+
+The open question for a jaato ACP mode is **permissions**: jaato's defining
+feature is a gate that can block a tool call pending approval, and mapping that
+onto ACP's session lifecycle needs design rather than a straight adapter. The
+streaming and tool-call mappings themselves would be thin over the existing event
+protocol.
 
 **Verdict.** jaato is built as a *service* with many client shapes; Prime Agent
 is built as a *terminal program* with excellent headless modes. If you need a
