@@ -1353,6 +1353,7 @@ class IPCClient:
         agent: Optional[str] = None,
         agent_params: Optional[Dict[str, str]] = None,
         cascade_driver_id: Optional[str] = None,
+        sibling_name: Optional[str] = None,
         timeout: float = 60.0,
     ) -> Optional[str]:
         """Create a new session on the server.
@@ -1385,6 +1386,14 @@ class IPCClient:
                 profile describes its capabilities; they compose freely.
             agent_params: Parameter values for the agent's ``{{param}}``
                 placeholders.  Only used when *agent* is specified.
+            sibling_name: Cascade-scoped ADDRESS other sessions use to
+                reach this one via ``send_to_sibling`` — the same string
+                they pass, so there is no translation between what you
+                set and what they address.  Shape
+                ``^[a-z0-9][a-z0-9_-]{0,31}$``, unique within the
+                cascade; the server refuses a malformed or already-taken
+                name at creation rather than producing a session nobody
+                can address.  ``None`` (default) = not sibling-addressable.
             cascade_driver_id: Phase 2 cascade-sharing (server
                 0.6.144+) tenant ID identifying the cascade this
                 session belongs to.  Opaque UTF-8 string; UUID
@@ -1394,10 +1403,21 @@ class IPCClient:
                 cascade stages.  ``None`` (default) = standalone
                 session, no slot reuse.  Generate one ID per
                 cascade (``uuid.uuid4().hex``) and pass it on every
-                ``session.new`` for that cascade.  Subagent sessions
-                inherit automatically via the shared runner — only
-                the top-level cascade-driver supplies the ID.  See
-                ``docs/design/runner-cascade-sharing.md``.
+                ``session.new`` for that cascade.  Only the top-level
+                cascade-driver supplies the ID.
+
+                Subagents inherit the runner's WARM SLOT, not this
+                identifier: a subagent is a runtime-level session
+                (``JaatoRuntime.create_session``, which takes no
+                cascade parameter), never enters the daemon's session
+                table, and carries no ``cascade_driver_id`` of its
+                own.  It is therefore NOT addressable as a sibling —
+                it is reached by its parent through
+                ``send_to_subagent``.  The previous wording said
+                subagents "inherit automatically via the shared
+                runner", which reads as inheriting the ID and implies
+                the opposite fact about who appears in a sibling
+                roster.  See ``docs/design/runner-cascade-sharing.md``.
             timeout: Maximum seconds to wait for session creation when
                 blocking.  The server may need time to initialise the
                 provider, so the default is generous.
@@ -1434,6 +1454,8 @@ class IPCClient:
         # for log diffing.  Server-side parser accepts any order.
         if cascade_driver_id:
             args.extend(["--cascade-driver-id", cascade_driver_id])
+        if sibling_name:
+            args.extend(["--sibling-name", sibling_name])
         await self._send_event(CommandRequest(
             command="session.new",
             args=args,
