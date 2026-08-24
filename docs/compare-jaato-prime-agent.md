@@ -109,10 +109,21 @@ rather than on first impression.
 | Delivery choice | one behaviour: *"processed at the next yield point"* | caller picks `auto` / `steer` / `follow_up` |
 | Result | no delivery status | **receipt**: `deliveryStatus: delivered\|queued`, plus `deliveredAt` / `queuedAt` |
 | Receiver context | — | `fromRelationship` — who the sender is *from the receiver's point of view* |
-| Discovery | `list_active_subagents` (own children) | `list_agents()` roster with `running` / `idle` / `inactive` |
+| Discovery | `list_active_subagents` — **own direct children only**: the executor filters `_active_sessions` by `owner_id = id(self._parent_session)`, so a subagent calling it sees its own children (usually none), never its parent or peers | `list_agents()` roster with `running` / `idle` / `inactive`, spanning parent, siblings and children |
 | Broadcast | — | `send("all", …)` within the family roster |
 | From a shell | — | `prime-agent send <agent> "…"` |
 | Backpressure | — | 16 384 chars, 20 pending per session, token bucket (3 / 1 s) |
+
+A roster does exist in jaato — but one tier up. `session.list` is a **client**
+command, and `cascade_events(cid)` lets a driver observe every session stamped
+with its cascade id. So an orchestrating client can enumerate and route; the
+*agent* cannot see its peers. (Premium gossip adds cluster topology — reachable
+peer *servers* with health, for remote spawn — which is a different axis again.)
+
+That tier split is consistent with jaato's architecture rather than an oversight:
+the driver orchestrates, and agents do not self-organise. It becomes a limitation
+only for the peer-to-peer shape Prime Agent is built around, where a stage talks
+directly to another stage without the driver in the loop.
 
 Three of those matter more than the rest. **Sibling addressing**: a jaato cascade
 stage that needs something from a peer must route through the parent, a reactor,
