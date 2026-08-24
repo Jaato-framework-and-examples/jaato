@@ -685,6 +685,44 @@ and global requires an explicit request; and the refiner is pushed toward the
 repeatable procedures, prompt for narrow behavioural policy, subagent for a
 repeated delegation role.
 
+### 9.2 Isn't `waypoint` already this?
+
+Nearly, and it is worth being exact — jaato's `waypoint` plugin is the stronger
+primitive of the two *in its own domain*, and Prime Agent has no answer to it
+(`/tree` branches the conversation, not the workspace).
+
+Waypoint captures a workspace file snapshot **plus** a
+`session_state_snapshot` — JSON from `JaatoSession.get_all_session_state()`, so
+registered state providers are invoked live. Waypoints form a **tree** via
+`parent_id`, carry an `owner` (`user` or `model`, so the agent can mark its own),
+and on restore an enrichment tells the model which files were reverted so its
+context does not go stale. Prime Agent has nothing comparable.
+
+Two differences keep it from covering the same ground:
+
+**1. Different object.** Waypoint versions the *work product* — the workspace and
+session runtime state. The refinement ledger versions the *agent's own persisted
+configuration*: prompt notes, memories, skill descriptions, subagent specs.
+jaato has no equivalent because it has no self-modifying configuration to
+protect — `.jaato/instructions/`, references and profiles are human-authored, and
+the one surface that **is** model-authored, the `memory` plugin
+(`.jaato/memories.jsonl`), has no undo of any kind.
+
+**2. Point-in-time restore vs per-change inversion.** This is the structural one.
+A waypoint restores state *as of time T*; its snapshot is whole-state, so
+returning to `w3` discards `w4` and `w5` with it. Refinement rollback stores
+`before` / `after` snapshots **per edit**, so `rollbackProposal()` can invert
+refinement B alone while A and C stand. It is the difference between
+`git reset --hard <commit>` and `git revert <commit>` — and only the second is
+usable when a change three edits back turns out to be the bad one.
+
+So the borrow is narrower than "snapshot and restore", which jaato already does
+better. It is: **a per-change inversion ledger over agent-authored state**, whose
+natural home in jaato is the `memory` plugin (model-written, currently
+irreversible) and the not-yet-built fine-tuner loop that would write reliability
+rules into profiles. `register_session_state_provider` is the existing seam a
+memory ledger could hang from.
+
 **Verdict.** The "Continual Harness" is Prime Agent's most distinctive idea and
 it is *shipped*, not designed: durable supplemental prompt state that the agent
 refines with reviewable, rollback-able edits, explicitly walled off from the
@@ -795,9 +833,13 @@ Agent is ahead.
    `JaatoRuntime.event_bus` (the `webhook` plugin's existing pattern) lets a
    reactor resume the agent. Cheaper than the scheduler, and it covers every
    case where jaato owns the work.
-4. **A single reviewable refinement ledger** with before/after snapshots and
-   rollback, sitting above memory / auto-steering / references rather than
-   beside them.
+4. **A per-change inversion ledger over agent-authored state** — not
+   snapshot-and-restore, which `waypoint` already does better (files + session
+   state, tree-structured, model- or user-owned). The gap is per-edit
+   `before`/`after` snapshots enabling selective, out-of-order undo:
+   `git revert` semantics rather than `git reset --hard`. Its natural home is
+   the `memory` plugin, which is model-written and today has no undo at all.
+   Pair it with a cheap review gate in front of the expensive writer (§9.1).
 5. **`/compact <instructions>`** — user-steered summarisation focus, persisted
    on the compaction record. Cheap to add to `gc_summarize` / `gc_hybrid`.
 6. **Agent-to-agent messaging ergonomics** — named agents, sibling addressing,
