@@ -617,10 +617,73 @@ jaato treats MCP tools as first-class permission-gated tools.
 | Persistent memory | `memory` plugin — two-phase (enrichment hints → model-driven retrieval), `.jaato/memories.jsonl` | Harness memories in `harness_state.json` (session-local) / `~/.prime/agent/harness/` (global) |
 | Curated knowledge | `references` plugin + knowledge bundles + semantic matching (premium embeddings via sentence-transformers) | `SKILL.md` progressive disclosure; reference docs loaded on demand |
 | Instruction layering | `.jaato/instructions/` base + `.jaato/agents/<name>.md` personas + plugin instructions + framework constants + security boundary, each independently suppressible via `suppress_base_instructions` | Immutable base system prompt + `AGENTS.md`/`CLAUDE.md` context files + `--append-system-prompt` |
-| Self-modifying harness | Premium auto-steering re-injects drift hints; `finetuner-closed-loop` design (assessor → applies reliability rules to profiles) is **designed, not built** | **`/refine`** — reviews the trajectory and applies small evidence-backed create/update/delete edits to supplemental prompts, memories, skill descriptions, and subagent specs, with before/after snapshots for rollback. Base prompt stays immutable |
+| Self-modifying harness | Premium auto-steering re-injects drift hints; `finetuner-closed-loop` design (assessor → applies reliability rules to profiles) is **designed, not built** | **`/refine`, and it runs automatically by default** — every 25 assistant turns and on every compaction (20-min cooldown), gated by a cheap LLM reviewer before the expensive edit pass. Emits create/update/delete edits over four entry kinds (`prompt`/`memory`/`skill`/`subagent`) in two scopes (session-local default, global on explicit request). Every applied edit stores `before`/`after` entry snapshots, so rollback is a pure function of the ledger, not a second LLM call. Base prompt immutable. See §9.1 |
 | Drift detection | Premium `drift_monitor` reactor — embedding similarity of turn text vs. active plan-step goal, emits `drift.measured`, injects nudges | None |
 | Skill authoring by the agent | Scaffold verbs (`jaato-scaffold compile`, Daruma invariant compiler → profiles, evaluators, processors, reactors, host tools, emit-then-validate) | Built-in `skill-creator` skill: the agent packages recurring workflows into markdown or Python-backed skills |
 | Training-data flywheel | Premium `modlog_training_pipeline`; fine-tuner closed loop (design) | Opt-in trace upload to Prime Intellect (`PRIME_AGENT_TRACES_API_KEY`), feeding the same org's `verifiers` / `prime-rl` stack |
+
+### 9.1 How `/refine` actually works
+
+Worth the detail, because the shape is more copyable than the idea.
+
+**Data model.** `HarnessEntry` × 4 kinds × 3 actions × 2 scopes. Kinds are
+`prompt` (supplemental notes only), `memory` (durable facts, decisions,
+failures, preferences), `skill` (an installed Python REPL skill, which must
+carry a `reference` object naming its import and call pattern plus an
+`arguments` contract), and `subagent` (a reusable delegation spec). Entries are
+versioned with `created_at` / `updated_at` / `source`. State lives in
+`harness/harness_state.json` — under the session artifact directory for `local`,
+under `~/.prime/agent/harness/` for `global`.
+
+**It is automatic, not just a slash command.** `getAutoRefineSettings()` defaults
+to `enabled: true`, `turnInterval: 25`, `compact: true`, `cooldownMs: 20 min`.
+So refinement fires on its own every 25 assistant turns and at every compaction.
+`/refine` and the kernel-side `await refine.run(...)` are manual entry points to
+the same machinery.
+
+**Two stages, deliberately asymmetric in cost.** A cheap review gate
+(`AUTO_REFINE_REVIEW_SYSTEM_PROMPT`, 4 096 output tokens) returns
+`{shouldRefine, rationale, instructions?}` and is told to *"reject one-off noise,
+unsupported hypotheses, and transient tool outputs."* Only on approval does the
+expensive pass run (`REFINEMENT_SYSTEM_PROMPT`, 32 000 output tokens) and emit
+the edit proposal. You never pay for the big pass without a judge finding
+evidence first.
+
+**Rollback is mechanical, and this is the part worth stealing.** Every applied
+edit persists `before` and `after` `HarnessEntry` snapshots, so
+`rollbackProposal()` walks the applied edits **in reverse** and inverts each one
+from its own snapshots — restore `before` where it existed, delete where only
+`after` did. No model is involved in undoing a refinement; it is a pure function
+of the ledger. History is appended to `refinements.jsonl`, and malformed lines
+are skipped explicitly *"so a single bad append cannot break rollback."*
+
+**Scope discipline is enforced in the prompt, not just by convention.** During a
+local refinement, global entries are read-only context: the refiner is told never
+to propose update or delete edits against them, and to create a local override
+instead. `mergeHarnessStates()` layers global then local, disambiguating an id
+collision by prefixing the key — and the prompt tells the model those
+`local:` / `global:` prefixes are display-only, so edits must use the bare id.
+
+**What reaches the prompt is an overview, not the content.** Six entries per
+kind, five recent refinements, 180 characters each, framed explicitly as
+*"compact summaries, not full descriptions … routing/context hints; inspect the
+underlying entry only when detail matters."* Progressive disclosure applied to
+the harness itself, so the standing prompt cost stays bounded however much
+harness accumulates.
+
+**Ordering guarantees.** Refinement never runs mid-cell: `refine.run()` returns
+`{"scheduled": true}` immediately, the pass runs at turn end, applies edits,
+**rebuilds the system prompt**, and resumes the agent automatically. A refine
+started before a `/tree` branch switch is discarded via a branch-version check,
+and a failed review stamps the cooldown so a persistent failure (bad auth,
+unparseable output) cannot retry a full review every turn.
+
+**The guardrails, collected:** the base system prompt is immutable and may not be
+rewritten; refinement may never edit source files directly; local is the default
+and global requires an explicit request; and the refiner is pushed toward the
+*smallest* component that fits — memory for declarative facts, skill for
+repeatable procedures, prompt for narrow behavioural policy, subagent for a
+repeated delegation role.
 
 **Verdict.** The "Continual Harness" is Prime Agent's most distinctive idea and
 it is *shipped*, not designed: durable supplemental prompt state that the agent
