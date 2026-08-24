@@ -87,9 +87,8 @@ def test_usage_round_trips_with_the_same_keys():
 
 def _reattach(persisted, profile_budget):
     profile = SimpleNamespace(budget_control=profile_budget, name="goal-actor")
-    applied = SessionManager._reattach_budget_ceiling(
-        SimpleNamespace(), SimpleNamespace(budget_control=persisted),
-        profile, "s1")
+    applied = SessionManager._attach_budget_ceiling(
+        SimpleNamespace(), persisted, profile, "s1")
     return applied, profile
 
 

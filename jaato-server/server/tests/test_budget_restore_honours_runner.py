@@ -35,8 +35,10 @@ def _state():
 def _call(restored):
     rpc = _RPC(restored)
     server = SimpleNamespace(_runner_rpc=rpc)
+    st = _state()
     applied = SessionManager._restore_budget_usage(
-        SimpleNamespace(), server, _state(), "s1")
+        SimpleNamespace(), server, st.budget_usage,
+        st.budget_exhausted_reason, "s1")
     return applied, rpc
 
 
@@ -69,7 +71,6 @@ def test_no_snapshot_is_not_a_failure_path():
     rpc = _RPC(True)
     server = SimpleNamespace(_runner_rpc=rpc)
     applied = SessionManager._restore_budget_usage(
-        SimpleNamespace(), server,
-        SimpleNamespace(budget_usage=None, budget_exhausted_reason=None), "s1")
+        SimpleNamespace(), server, None, None, "s1")
     assert applied is False
     assert rpc.calls == []

@@ -82,7 +82,8 @@ class TestTheSeamsExist:
         state.budget_usage = {"turns": 2.0}
 
         applied = SessionManager._restore_budget_usage(
-            MagicMock(), server, state, "sess-1")
+            MagicMock(), server, state.budget_usage,
+            state.budget_exhausted_reason, "sess-1")
 
         assert applied is True
         rpc.session_restore_budget_usage_threadsafe.assert_called_once()
@@ -107,7 +108,8 @@ class TestTheSeamsExist:
         state.budget_exhausted_reason = None
 
         assert SessionManager._restore_budget_usage(
-            MagicMock(), server, state, "sess-1") is False
+            MagicMock(), server, state.budget_usage,
+            state.budget_exhausted_reason, "sess-1") is False
         rpc.session_restore_budget_usage_threadsafe.assert_not_called()
 
     def test_load_restores_a_latch_even_without_usage(self):
@@ -125,7 +127,8 @@ class TestTheSeamsExist:
         state.budget_exhausted_reason = "budget_exhausted (turns 100%)"
 
         assert SessionManager._restore_budget_usage(
-            MagicMock(), server, state, "sess-1") is True
+            MagicMock(), server, state.budget_usage,
+            state.budget_exhausted_reason, "sess-1") is True
         kwargs = rpc.session_restore_budget_usage_threadsafe.call_args.kwargs
         assert kwargs["exhausted_reason"] == "budget_exhausted (turns 100%)"
 
@@ -142,7 +145,8 @@ class TestTheSeamsExist:
 
         with caplog.at_level(logging.WARNING):
             applied = SessionManager._restore_budget_usage(
-                MagicMock(), server, state, "sess-1")
+                MagicMock(), server, state.budget_usage,
+            state.budget_exhausted_reason, "sess-1")
 
         assert applied is False
         assert any(
