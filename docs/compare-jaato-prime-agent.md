@@ -723,6 +723,50 @@ irreversible) and the not-yet-built fine-tuner loop that would write reliability
 rules into profiles. `register_session_state_provider` is the existing seam a
 memory ledger could hang from.
 
+### 9.3 Is refinement the auto-tune pattern?
+
+No — and the gap is the part that defines tuning. Set the two loops side by side:
+
+| Step | jaato `finetuner-closed-loop` (designed) | Prime Agent `/refine` (shipped) |
+|---|---|---|
+| **1. Signal** | a failure pattern detected from the **OpenTelemetry stream** of another running session — structured, post-hoc, cross-session | an LLM reading the current conversation trajectory in-context |
+| **2. Proposal** | a validated reliability patch against the profile's `plugin_configs.reliability`, returned as a unified diff | create/update/delete edits over harness entries |
+| **3. Verification** | **fork-replay the failing turn against the patched profile** | *nothing* |
+| **4. Accept / reject** | apply if the failure no longer reproduces; discard and escalate to a human if it does | always applies; rollback exists but is a later, separately-initiated act |
+
+Prime Agent has steps 1 and 2 plus an undo. It emits an `expectedOutcome` field
+described in its own prompt as *"what should improve and how to validate it"* —
+and nothing ever reads it back. There is no metric, no replay, no convergence
+test. So refinement is **open-loop self-editing with undo**, not tuning: it never
+learns whether an edit helped.
+
+Three further differences that follow from that:
+
+- **Reflexive vs second-party.** `/refine` edits the session it runs inside, on
+  evidence it produced itself. The fine-tuner is an external observer analysing a
+  *different* session's telemetry, and can fork that session read-only to
+  interrogate the model about its decisions. A judge that is also the defendant
+  is a weaker instrument.
+- **Advice vs enforced policy.** A harness memory ("always check git status
+  first") is guidance the model may ignore on any given turn. A reliability
+  policy is applied by the framework at tool-call time. Same intent, entirely
+  different blast radius.
+- **Where it lands.** Reliability patches are written to the profile — on disk,
+  diffable, reviewable in version control, travelling with the agent definition.
+  Harness state lives in `harness_state.json`, session-local by default and
+  outside VCS.
+
+It is not auto-tune in the hyperparameter sense either: nothing searches a
+parameter space against an objective.
+
+**The useful conclusion is a swap of strengths.** Prime Agent shipped the loose
+version of this pattern; jaato designed the rigorous one and has not built it.
+What is worth taking from Prime Agent is the **plumbing, not the epistemics** —
+the automatic cadence with a cheap gate, the per-edit inversion ledger, the
+bounded overview injection. Bolted onto jaato's telemetry signal, fork-replay
+verification and enforced-policy surface, that yields a closed loop neither
+project currently has.
+
 **Verdict.** The "Continual Harness" is Prime Agent's most distinctive idea and
 it is *shipped*, not designed: durable supplemental prompt state that the agent
 refines with reviewable, rollback-able edits, explicitly walled off from the
@@ -833,13 +877,14 @@ Agent is ahead.
    `JaatoRuntime.event_bus` (the `webhook` plugin's existing pattern) lets a
    reactor resume the agent. Cheaper than the scheduler, and it covers every
    case where jaato owns the work.
-4. **A per-change inversion ledger over agent-authored state** — not
-   snapshot-and-restore, which `waypoint` already does better (files + session
-   state, tree-structured, model- or user-owned). The gap is per-edit
-   `before`/`after` snapshots enabling selective, out-of-order undo:
-   `git revert` semantics rather than `git reset --hard`. Its natural home is
-   the `memory` plugin, which is model-written and today has no undo at all.
-   Pair it with a cheap review gate in front of the expensive writer (§9.1).
+4. **The refinement plumbing, not its epistemics** — an automatic cadence with
+   a cheap review gate in front of the expensive writer, a per-edit inversion
+   ledger (`git revert` semantics, which `waypoint`'s point-in-time restore
+   cannot give), and bounded overview injection so the standing prompt cost stays
+   fixed. jaato's `finetuner-closed-loop` design already has the better signal
+   (telemetry), the better verification (fork-replay) and the better surface
+   (enforced reliability policy) — it lacks the machinery to run continuously.
+   Combining the two closes a loop neither project has today (§9.3).
 5. **`/compact <instructions>`** — user-steered summarisation focus, persisted
    on the compaction record. Cheap to add to `gc_summarize` / `gc_hybrid`.
 6. **Agent-to-agent messaging ergonomics** — named agents, sibling addressing,
