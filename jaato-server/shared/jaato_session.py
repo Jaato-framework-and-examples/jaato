@@ -656,6 +656,11 @@ class JaatoSession:
         # O(N) network API calls to count_tokens on every budget rebuild.
         self._msg_token_cache: Dict[str, int] = {}
         self._gc_threshold_callback: Optional[GCThresholdCallback] = None
+        # GC LIFECYCLE observer: (phase, payload) for about_to_run /
+        # started / completed.  Distinct from _gc_threshold_callback
+        # above, which carries only the threshold crossing and whose
+        # daemon handler renders it as PROSE for humans.
+        self._gc_phase_callback: Optional[Any] = None
 
         # Terminal width for formatting (used by enrichment notifications)
         self._terminal_width: int = 80
@@ -3989,6 +3994,7 @@ NOTES
         on_output: Optional[OutputCallback] = None,
         on_usage_update: Optional[UsageUpdateCallback] = None,
         on_gc_threshold: Optional[GCThresholdCallback] = None,
+        on_gc_phase: Optional[Any] = None,
         attachments: Optional[List[Dict[str, Any]]] = None
     ) -> str:
         """Send a message to the model.
@@ -4000,6 +4006,10 @@ NOTES
             on_usage_update: Optional callback for real-time token usage.
                 Signature: (usage: TokenUsage) -> None
             on_gc_threshold: Optional callback when GC threshold is crossed.
+            on_gc_phase: Optional ``(phase, payload)`` callback for the GC
+                LIFECYCLE (about_to_run / started / completed).  Before it
+                existed there was no bus signal for GC at all -- clients got
+                a prose system message or nothing.
                 Signature: (percent_used: float, threshold: float) -> None
             attachments: Optional user-message multimodal attachments, each a
                 ``{mime_type, data: base64-str, display_name}`` dict (the
@@ -4113,6 +4123,8 @@ NOTES
             # Reset proactive GC tracking for this turn
             self._gc_threshold_crossed = False
             self._gc_threshold_callback = on_gc_threshold
+            if on_gc_phase is not None:
+                self._gc_phase_callback = on_gc_phase
 
             # Scrub provider tool-ids (t_xxxxxxxx / c_xxxxxxxx) out of user-facing
             # MODEL text before it reaches the client.  The id exists only at the
@@ -4248,6 +4260,24 @@ NOTES
                         # Notify via callback if provided
                         if self._gc_threshold_callback:
                             self._gc_threshold_callback(percent_used, threshold)
+                        # Typed counterpart: the prose callback above renders a
+                        # human sentence, which a driver could only
+                        # substring-match.  Same crossing, branchable values.
+                        #
+                        # Guarded like the callback above rather than relying on
+                        # _emit_gc_phase's own None check: the payload coerces
+                        # with float(), so building it eagerly does real work --
+                        # and raises -- for a listener that isn't there.
+                        if self._gc_phase_callback is not None:
+                            self._emit_gc_phase("about_to_run", {
+                                "percent_used": float(percent_used),
+                                "threshold": float(threshold),
+                                "trigger_reason": GCTriggerReason.THRESHOLD.value,
+                                "strategy": (
+                                    self._gc_plugin.name
+                                    if self._gc_plugin else None
+                                ),
+                            })
 
             # Call original callback if provided
             if on_usage_update:
@@ -4441,7 +4471,19 @@ NOTES
             telemetry=self._telemetry,
             on_trace=self._trace,
             on_collected=on_collected,
+            on_phase=self._emit_gc_phase,
         )
+
+    def _emit_gc_phase(self, phase: str, payload: Dict[str, Any]) -> None:
+        """Forward one GC lifecycle phase to the registered observer.
+
+        No-op when nothing is listening.  Exceptions are swallowed by
+        :func:`gc_support.run_gc`'s wrapper -- an observer must never break
+        the collection it observes.
+        """
+        if self._gc_phase_callback is None:
+            return
+        self._gc_phase_callback(phase, payload)
 
     def _apply_gc_removal_list(
         self, result: GCResult, gc_span: Any = None,

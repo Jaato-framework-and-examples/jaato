@@ -97,6 +97,7 @@ class _ShimSession:
         self.kwargs_seen: Dict[str, Any] = {}
         self.fire_usage: Optional[_FakeUsage] = None
         self.fire_gc: Optional[Tuple[float, float]] = None
+        self.fire_gc_phase: Optional[Tuple[str, Dict[str, Any]]] = None
 
     def send_message(
         self,
@@ -104,6 +105,14 @@ class _ShimSession:
         on_output: Any = None,
         on_usage_update: Any = None,
         on_gc_threshold: Any = None,
+        # GC LIFECYCLE events added ``on_gc_phase``; same story as
+        # ``attachments`` below — the runner handler forwards it
+        # unconditionally, so a stub missing it fails with a TypeError that
+        # surfaces as a generic ``stage: send`` error rather than as "your
+        # fixture is out of date".  Third instance of this class: a stub that
+        # does not mirror the production caller's shape breaks on the NEXT
+        # kwarg, every time.
+        on_gc_phase: Any = None,
         # Multimodal v1 (#297-#300) added ``attachments`` to
         # ``JaatoSession.send_message``; the runner handler forwards it
         # unconditionally, so a shim without it fails the call with a
@@ -114,12 +123,15 @@ class _ShimSession:
             "on_output": on_output,
             "on_usage_update": on_usage_update,
             "on_gc_threshold": on_gc_threshold,
+            "on_gc_phase": on_gc_phase,
             "attachments": attachments,
         }
         if self.fire_usage is not None and on_usage_update is not None:
             on_usage_update(self.fire_usage)
         if self.fire_gc is not None and on_gc_threshold is not None:
             on_gc_threshold(*self.fire_gc)
+        if self.fire_gc_phase is not None and on_gc_phase is not None:
+            on_gc_phase(*self.fire_gc_phase)
         return self.response
 
     def request_stop(self, reason: str = "") -> bool:
@@ -172,6 +184,7 @@ def test_send_message_passes_usage_and_gc_shims_to_session() -> None:
         # Both shims threaded through.
         assert callable(session.kwargs_seen["on_usage_update"])
         assert callable(session.kwargs_seen["on_gc_threshold"])
+        assert callable(session.kwargs_seen["on_gc_phase"])
     finally:
         peer.close()
 
@@ -652,3 +665,34 @@ def test_threadsafe_wrapper_accepts_on_notification() -> None:
     from server.runner_rpc_client import RunnerRPCClient
     sig = inspect.signature(RunnerRPCClient.session_send_message_threadsafe)
     assert "on_notification" in sig.parameters
+
+
+def test_gc_phase_shim_emits_notification_frame() -> None:
+    """Firing ``on_gc_phase`` produces a ``gc_phase`` NotificationFrame.
+
+    The lifecycle counterpart to the ``gc_threshold`` frame above: that one
+    carries only the crossing and is rendered as prose daemon-side, this one
+    carries the whole pass as branchable values.
+    """
+    rpc, peer = _make_lone_runner()
+    try:
+        session = _ShimSession()
+        session.fire_gc_phase = ("completed", {
+            "trigger_reason": "threshold", "strategy": "gc_hybrid",
+            "success": True, "items_collected": 4, "tokens_freed": 600,
+        })
+        _install_shim(rpc, session)
+
+        ok, _ = rpc._handle_session_send_message({"prompt": "hi"}, request_id=1)
+        assert ok is True
+
+        frames = _drain_notification_frames(peer)
+        gc_frames = [f for f in frames if f.event_type == "gc_phase"]
+        assert len(gc_frames) == 1, (
+            f"expected one gc_phase frame, got {[f.event_type for f in frames]}")
+        payload = gc_frames[0].payload
+        assert payload["phase"] == "completed"
+        assert payload["items_collected"] == 4
+        assert payload["tokens_freed"] == 600
+    finally:
+        peer.close()
