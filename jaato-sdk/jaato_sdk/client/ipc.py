@@ -1403,10 +1403,21 @@ class IPCClient:
                 cascade stages.  ``None`` (default) = standalone
                 session, no slot reuse.  Generate one ID per
                 cascade (``uuid.uuid4().hex``) and pass it on every
-                ``session.new`` for that cascade.  Subagent sessions
-                inherit automatically via the shared runner — only
-                the top-level cascade-driver supplies the ID.  See
-                ``docs/design/runner-cascade-sharing.md``.
+                ``session.new`` for that cascade.  Only the top-level
+                cascade-driver supplies the ID.
+
+                Subagents inherit the runner's WARM SLOT, not this
+                identifier: a subagent is a runtime-level session
+                (``JaatoRuntime.create_session``, which takes no
+                cascade parameter), never enters the daemon's session
+                table, and carries no ``cascade_driver_id`` of its
+                own.  It is therefore NOT addressable as a sibling —
+                it is reached by its parent through
+                ``send_to_subagent``.  The previous wording said
+                subagents "inherit automatically via the shared
+                runner", which reads as inheriting the ID and implies
+                the opposite fact about who appears in a sibling
+                roster.  See ``docs/design/runner-cascade-sharing.md``.
             timeout: Maximum seconds to wait for session creation when
                 blocking.  The server may need time to initialise the
                 provider, so the default is generous.
