@@ -160,3 +160,46 @@ def test_the_description_tells_the_model_descriptions_are_claims():
     assert "list_active_subagents" in sch.description, (
         "without pointing at the other roster, a model hunts for its children "
         "here and finds nothing")
+
+
+# ------------------------------------------------- forwarding + error shape
+
+def test_a_failing_list_siblings_is_visible_as_an_error():
+    """A bare status-dict is read as SUCCESS by the executor contract.
+
+    ``split_executor_result`` returns ``(True, value)`` for any non-tuple
+    (tool_result_builder.py:43) and nothing inspects the payload.  So an error
+    dict arrived as ``is_error=False`` and ``tool.call_end`` reported
+    ``success=True`` — a consumer watching the event stream saw a clean call
+    while the tool failed every time.
+    """
+    from shared.plugins.subagent.plugin import SubagentPlugin
+    from shared.tool_result_builder import split_executor_result
+
+    ok, data = split_executor_result(
+        SubagentPlugin()._execute_list_siblings({}))
+    assert ok is False, (
+        "the failure is reported as success, so nothing watching events can "
+        "see it")
+    assert data["status"] == "error"
+
+
+def test_the_plugin_can_find_the_registry_for_daemon_forwarding():
+    """Without the hook the mixin cannot tell runner-side from daemon-side.
+
+    ``PluginRegistry`` calls ``set_plugin_registry`` only when it exists, so a
+    missing hook left ``_plugin_registry`` unset — and the mixin read that as
+    "no runner client, therefore I am the daemon", running every forwarded
+    call in-process on the runner.
+    """
+    from types import SimpleNamespace
+    from shared.plugins.subagent.plugin import SubagentPlugin
+
+    p = SubagentPlugin()
+    p.set_plugin_registry(SimpleNamespace(runner_rpc_client="RPC"))
+    assert p._runner_rpc_client_handle() == "RPC"
+
+    daemon_side = SubagentPlugin()
+    daemon_side.set_plugin_registry(SimpleNamespace())
+    assert daemon_side._runner_rpc_client_handle() is None, (
+        "a daemon-side registry has no runner client and must run in-process")

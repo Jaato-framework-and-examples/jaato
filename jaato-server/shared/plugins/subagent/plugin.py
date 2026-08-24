@@ -1015,9 +1015,15 @@ class SubagentPlugin(DaemonForwardingMixin):
         only subagents IT spawned).  So this executor is daemon-forwarded --
         see ``get_executors``.
         """
+        # ``(False, ...)`` — NOT a bare {"status": "error"} dict.
+        # ``split_executor_result`` reads a bare value as ``ok=True``
+        # unconditionally (tool_result_builder.py:43); nothing inspects the
+        # payload.  So a status-dict failure arrives as is_error=False and
+        # ``tool.call_end`` reports success=True, making a failing tool
+        # invisible to anything watching the event stream.
         mgr = getattr(self, "_session_manager", None)
         if mgr is None:
-            return {
+            return False, {
                 "status": "error",
                 "message": (
                     "list_siblings is unavailable: no session manager is "
@@ -1027,12 +1033,33 @@ class SubagentPlugin(DaemonForwardingMixin):
         sid = getattr(self, "_daemon_session_id", None) or getattr(
             getattr(self, "_session", None), "_session_id", None)
         if not sid:
-            return {
+            return False, {
                 "status": "error",
                 "message": "list_siblings could not determine the calling session.",
             }
         roster = mgr.build_sibling_roster(sid)
         return {"status": "ok", **roster}
+
+    def set_plugin_registry(self, registry: Any) -> None:
+        """Stash the registry — REQUIRED for daemon forwarding to work.
+
+        ``DaemonForwardingMixin`` decides runner-side vs daemon-side by looking
+        for ``runner_rpc_client`` on ``self._plugin_registry``.  This plugin
+        never defined the hook, and ``PluginRegistry`` calls it only
+        ``if hasattr(plugin, 'set_plugin_registry')`` — so it was silently
+        skipped, ``_plugin_registry`` stayed unset, and the mixin's
+        ``getattr(..., None)`` read that as "no runner client attached, so I
+        must BE the daemon".
+
+        The result: ``list_siblings`` never forwarded.  The runner-side
+        instance answered every call and hit the "no session manager attached"
+        guard, on the driver-created cascade path the feature exists for.
+
+        A missing hook was indistinguishable from being daemon-side — the same
+        absent-vs-empty collapse as ``_injection_queue`` (#589) and the phantom
+        entry-point group (#595).
+        """
+        self._plugin_registry = registry
 
     def set_session_manager(self, session_manager: Any) -> None:
         """Receive the daemon's SessionManager (duck-typed lifecycle hook).
