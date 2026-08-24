@@ -5,8 +5,9 @@
 case being the premium ``compile`` verb (the Daruma invariant compiler) — by
 registering a :class:`ScaffoldVerb` under the ``jaato.scaffold_verbs`` entry-point
 group.  The public CLI discovers and mounts them at startup; a verb whose package
-is not installed simply does not appear (mirrors the ``jaato.premium`` /
-``jaato.premium_reactors`` convention used elsewhere in the framework).
+is not installed simply does not appear (mirrors the ``jaato.premium`` and
+``jaato.extensions`` convention used elsewhere in the framework; there is
+no ``jaato.premium_reactors`` group — see ``__main__.py``).
 
 This module is the **primary** stable surface for an external verb — the seam
 (the CLI mount + the generic emit/validate plumbing).  Keep it stable: internals

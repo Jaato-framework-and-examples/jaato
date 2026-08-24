@@ -18,8 +18,12 @@ registering a :class:`api.ScaffoldVerb` under the ``jaato.scaffold_verbs``
 entry-point group; the CLI discovers and mounts them at startup, and they reuse
 the framework internals via :mod:`shared.scaffold.api` (introspection, the
 validator, and the emit-then-validate plumbing).  A verb whose package is not
-installed simply does not appear — the same convention as ``jaato.premium`` /
-``jaato.premium_reactors`` elsewhere in the framework.  The premium ``compile``
+installed simply does not appear — the same convention as ``jaato.premium``
+and ``jaato.extensions`` elsewhere in the framework.  (There is no
+``jaato.premium_reactors`` group: reactors mount as the ``reactors``
+entry in ``jaato.extensions``, and their RULES load from directories
+— ``~/.jaato/reactors/`` and ``<workspace>/.jaato/reactors/`` — not from
+entry points.)  The premium ``compile``
 verb (the Daruma invariant compiler) mounts this way, with no compiler code in
 this repo.
 """
