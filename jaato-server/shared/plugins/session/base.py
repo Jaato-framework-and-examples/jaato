@@ -168,11 +168,11 @@ class SessionState:
     # Persisting the resolved ceiling lets restore re-attach it to the
     # rebuilt profile.  ``None`` for genuinely unbudgeted sessions.
     budget_control: Optional[Dict[str, Any]] = None
-    # Cascade-scoped peer ADDRESS (design §4).  Persisted because an
+    # Cascade-scoped sibling ADDRESS (design §4).  Persisted because an
     # address that does not survive a reload is not an address --
-    # sessions unload on ORPHAN, and a peer that came back nameless
+    # sessions unload on ORPHAN, and a sibling that came back nameless
     # would be unreachable by every sibling still holding its name.
-    peer_name: Optional[str] = None
+    sibling_name: Optional[str] = None
     """Serialized conversation budget for restoration."""
 
     interrupted_turn: Optional[Dict[str, Any]] = None

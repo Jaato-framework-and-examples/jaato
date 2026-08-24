@@ -545,7 +545,7 @@ class IPCRecoveryClient:
         agent: Optional[str] = None,
         agent_params: Optional[Dict[str, str]] = None,
         cascade_driver_id: Optional[str] = None,
-        peer_name: Optional[str] = None,
+        sibling_name: Optional[str] = None,
         timeout: float = 60.0,
     ) -> Optional[str]:
         """Create a new session.
@@ -561,7 +561,7 @@ class IPCRecoveryClient:
                 becomes the session's system instructions.
             agent_params: Parameter values for the agent's ``{{param}}``
                 placeholders.
-            peer_name: Cascade-scoped address; see
+            sibling_name: Cascade-scoped address; see
                 ``IPCClient.create_session`` for the contract.
             cascade_driver_id: Phase 2 cascade-sharing tenant ID; see
                 ``IPCClient.create_session`` for the contract.  Pass
@@ -587,7 +587,7 @@ class IPCRecoveryClient:
                 name, profile=profile, agent=agent,
                 agent_params=agent_params,
                 cascade_driver_id=cascade_driver_id,
-                peer_name=peer_name,
+                sibling_name=sibling_name,
                 timeout=timeout,
             )
             if session_id:

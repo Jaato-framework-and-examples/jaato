@@ -498,12 +498,12 @@ class BootstrapEnvelope:
     # (persisted as ``SessionState.profile_spec``).  None for named-profile
     # / no-profile sessions.
     inline_profile_spec: Optional[Dict[str, Any]] = None
-    # Cascade-scoped peer ADDRESS (design §4): the string another session
-    # passes to ``send_to_peer``.  Distinct from ``name`` (free-text
+    # Cascade-scoped sibling ADDRESS (design §4): the string another session
+    # passes to ``send_to_sibling``.  Distinct from ``name`` (free-text
     # display) and ``agent_name`` (persona).  Validated at session.new for
     # shape and for uniqueness within the cascade, so by the time it
     # reaches here it is already known-good.
-    peer_name: Optional[str] = None
+    sibling_name: Optional[str] = None
     agent_name: str = "main"
     system_instruction_override: Optional[str] = None
     # Canonical frozenset of framework instruction pieces to drop (see

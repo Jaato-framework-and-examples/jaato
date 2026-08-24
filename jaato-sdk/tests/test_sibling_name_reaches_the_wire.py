@@ -1,15 +1,15 @@
-"""``peer_name`` must be settable BY A CONSUMER, not merely by the server.
+"""``sibling_name`` must be settable BY A CONSUMER, not merely by the server.
 
 #592 landed the field complete server-side — validation, envelope, persistence
 — and it was unreachable through the facade: zero occurrences in jaato-sdk,
-no ``--peer-name`` in the ``session.new`` argv parser, and the router's
+no ``--sibling-name`` in the ``session.new`` argv parser, and the router's
 ``create_session`` call did not pass it.  A session could be given an address
 only by code that imports ``session_manager`` directly.
 
 Found by the cascade-coordination example on the first commit it was pointed
 at, precisely because an example can only use the public surface.  An
 in-process harness would have called
-``create_session(peer_name="reviewer")`` directly, got a validated address, and
+``create_session(sibling_name="reviewer")`` directly, got a validated address, and
 gone GREEN — certifying a path no consumer can reach.
 
 This is #585's defect class on a THIRD axis.  That parity test compares
@@ -48,22 +48,22 @@ def _sent_args(**kwargs):
     return captured
 
 
-def test_peer_name_becomes_a_wire_flag():
-    args = _sent_args(peer_name="reviewer")["args"]
-    assert "--peer-name" in args, (
-        "peer_name never reaches the wire — the field exists on the server and "
+def test_sibling_name_becomes_a_wire_flag():
+    args = _sent_args(sibling_name="reviewer")["args"]
+    assert "--sibling-name" in args, (
+        "sibling_name never reaches the wire — the field exists on the server and "
         "no consumer can set it")
-    assert args[args.index("--peer-name") + 1] == "reviewer"
+    assert args[args.index("--sibling-name") + 1] == "reviewer"
 
 
 def test_omitting_it_sends_no_flag():
-    assert "--peer-name" not in _sent_args()["args"]
+    assert "--sibling-name" not in _sent_args()["args"]
 
 
 def test_both_clients_accept_it():
     for cls in (IPCClient, IPCRecoveryClient):
-        assert "peer_name" in inspect.signature(cls.create_session).parameters, (
-            f"{cls.__name__}.create_session cannot set a peer address")
+        assert "sibling_name" in inspect.signature(cls.create_session).parameters, (
+            f"{cls.__name__}.create_session cannot set a sibling address")
 
 
 def test_the_recovery_client_FORWARDS_it_rather_than_dropping_it():
@@ -80,9 +80,9 @@ def test_the_recovery_client_FORWARDS_it_rather_than_dropping_it():
     rc._client = _Inner()
     rc._check_can_send = lambda: None
     rc._session_id = None
-    asyncio.run(rc.create_session("n", peer_name="reviewer"))
-    assert seen.get("peer_name") == "reviewer", (
-        "the recovery client accepted peer_name and dropped it")
+    asyncio.run(rc.create_session("n", sibling_name="reviewer"))
+    assert seen.get("sibling_name") == "reviewer", (
+        "the recovery client accepted sibling_name and dropped it")
 
 
 # ------------------------------------------------- the axis that missed this
@@ -92,7 +92,7 @@ def test_every_create_session_kwarg_the_server_takes_is_reachable():
 
     ``test_recovery_client_parity`` compares the two clients to each other, so
     a parameter added to ``SessionManager`` and to neither client looks
-    perfectly consistent.  That is exactly how peer_name shipped unreachable.
+    perfectly consistent.  That is exactly how sibling_name shipped unreachable.
 
     Server-side-only params are legitimate (in-process/daemon-extension
     concerns), so they are excused BY NAME with a reason.

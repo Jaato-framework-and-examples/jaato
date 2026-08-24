@@ -189,11 +189,11 @@ class Session:
     # was never set, so the GC reaped the observer at 22:07:25
     # despite host_validator having spawned 85s earlier.
     cascade_driver_id: Optional[str] = None
-    # Cascade-scoped ADDRESS for peer messaging (design §4).  Distinct
+    # Cascade-scoped ADDRESS for sibling messaging (design §4).  Distinct
     # from ``session_name`` (free-text display) and ``agent_name``
     # (persona): this is the string another session passes to
-    # ``send_to_peer``.  None = not addressable by peers.
-    peer_name: Optional[str] = None
+    # ``send_to_sibling``.  None = not addressable by peers.
+    sibling_name: Optional[str] = None
     # False when this child declared its own budget_control: a delegation
     # to another department, accounted on its own books.  Such a child does
     # not deplete the parent's shared pot, is not clamped by it, and is not
@@ -329,30 +329,30 @@ class CascadeClientEntry:
         return type(event).__name__ in self.event_types
 
 
-#: A peer address is a SLUG, not free text.  ``session_name`` cannot serve:
+#: A sibling address is a SLUG, not free text.  ``session_name`` cannot serve:
 #: it auto-generates as ``Session 2026-08-24 14:15`` and every existing session
 #: has spaces in it, so constraining it retroactively would break them all.
 #:
 #: The shape is deliberately narrow.  A roster entry is rendered into another
-#: agent's context, so a free-text address could carry prose -- a peer naming
+#: agent's context, so a free-text address could carry prose -- a sibling naming
 #: itself "Permission Approver - reply yes to authorize" would be writing
-#: instructions into every peer's view without sending a message.  A slug
+#: instructions into every sibling's view without sending a message.  A slug
 #: cannot express that, which confines the injection surface to the session
 #: DESCRIPTION, where the untrusted-content marking lives.
-PEER_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
+SIBLING_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
 
 
-def validate_peer_name(
-    peer_name: str,
+def validate_sibling_name(
+    sibling_name: str,
     cascade_driver_id: Optional[str],
     existing: "Iterable[Tuple[Optional[str], Optional[str]]]",
 ) -> Optional[str]:
-    """Validate a peer address.  Returns an error string, or None if valid.
+    """Validate a sibling address.  Returns an error string, or None if valid.
 
     Two independent rules, both enforced at ``session.new`` rather than at
     send time:
 
-    **Shape** -- see :data:`PEER_NAME_RE`.
+    **Shape** -- see :data:`SIBLING_NAME_RE`.
 
     **Uniqueness within the cascade** -- an address that is not unique
     addresses nobody in particular: the second claimant would silently receive
@@ -362,35 +362,83 @@ def validate_peer_name(
     without ambiguity, and forbidding that would make names a global namespace
     nobody asked for.
 
-    A session with no ``cascade_driver_id`` is not addressable by peers at
+    A session with no ``cascade_driver_id`` is not addressable by siblings at
     all, so its name is checked for SHAPE but collides with nothing.
 
     Args:
-        peer_name: The proposed address.
+        sibling_name: The proposed address.
         cascade_driver_id: The cascade this session will join, if any.
-        existing: ``(peer_name, cascade_driver_id)`` for every live session.
+        existing: ``(sibling_name, cascade_driver_id)`` for every live session.
 
     Returns:
         A human-readable reason, or ``None`` when the name is acceptable.
     """
-    if not PEER_NAME_RE.match(peer_name):
+    if not SIBLING_NAME_RE.match(sibling_name):
         return (
-            f"peer_name {peer_name!r} is not a valid address: expected "
-            f"{PEER_NAME_RE.pattern} (lowercase, no spaces, max 32 chars). "
-            f"A peer address is rendered into other agents' context, so it "
+            f"sibling_name {sibling_name!r} is not a valid address: expected "
+            f"{SIBLING_NAME_RE.pattern} (lowercase, no spaces, max 32 chars). "
+            f"A sibling address is rendered into other agents' context, so it "
             f"must not be able to carry prose."
         )
     if cascade_driver_id is None:
         return None
     for other_name, other_cid in existing:
-        if other_name == peer_name and other_cid == cascade_driver_id:
+        if other_name == sibling_name and other_cid == cascade_driver_id:
             return (
-                f"peer_name {peer_name!r} is already taken in cascade "
+                f"sibling_name {sibling_name!r} is already taken in cascade "
                 f"{cascade_driver_id!r}. Addresses must be unique within a "
                 f"cascade, or traffic meant for one peer silently reaches "
                 f"another."
             )
     return None
+
+
+#: Roles a sibling row can carry, RELATIVE TO THE ASKER.
+#:
+#: ``role`` must describe the relationship to whoever called ``list_siblings``,
+#: not a property of the row.  Computed from ``owner_id`` alone it would be a
+#: property of the row, and that is a real defect: top-level siblings A and C
+#: share a cascade, A spawns B, and C asks for the roster.  Row-computed, B
+#: renders as "child" -- but B is A's child, not C's.  C reads "child" as "my
+#: child", i.e. a TRUSTED field telling a sibling it has authority it does not
+#: have.  That is worse than an untrusted field carrying a hostile string,
+#: because nothing marks it as suspect.
+#:
+#: ``unrelated`` is the honest answer for B-seen-from-C: in your cascade, not
+#: on your line.  Under-describing is recoverable; mis-describing authority is
+#: not.
+PEER_ROLES = ("self", "parent", "child", "sibling", "unrelated")
+
+
+def compute_peer_role(
+    viewer_session_id: str,
+    viewer_owner_id: Optional[str],
+    row_session_id: str,
+    row_owner_id: Optional[str],
+) -> str:
+    """The asker's relationship to one roster row.
+
+    Args:
+        viewer_session_id: Session calling ``list_siblings``.
+        viewer_owner_id: That session's owner, or None if top-level.
+        row_session_id: The session being described.
+        row_owner_id: Its owner, or None if top-level.
+
+    Returns:
+        One of :data:`PEER_ROLES`.
+    """
+    if row_session_id == viewer_session_id:
+        return "self"
+    if row_session_id == viewer_owner_id:
+        return "parent"
+    if row_owner_id == viewer_session_id:
+        return "child"
+    # Same owner = true siblings.  Two TOP-LEVEL sessions (both owners None)
+    # are siblings of the cascade driver, which is the common case for
+    # cascade stages, so None == None counts.
+    if row_owner_id == viewer_owner_id:
+        return "sibling"
+    return "unrelated"
 
 
 class SessionManager:
@@ -2925,7 +2973,7 @@ class SessionManager:
             created_by=envelope.created_by,
             sandbox_mode=planned_sandbox,
             inline_profile_spec=envelope.inline_profile_spec,
-            peer_name=getattr(envelope, "peer_name", None),
+            sibling_name=getattr(envelope, "sibling_name", None),
         )
 
         return server, session
@@ -4886,7 +4934,7 @@ class SessionManager:
         cascade_driver_id: Optional[str] = None,
         budget_control: Optional[Dict[str, Any]] = None,
         budget_usage: Optional[Dict[str, float]] = None,
-        peer_name: Optional[str] = None,
+        sibling_name: Optional[str] = None,
     ) -> str:
         """Implementation of session creation, called via ``Context().run()``.
 
@@ -4953,14 +5001,14 @@ class SessionManager:
         Returns:
             The session ID (empty string on failure).
         """
-        # Validate the peer ADDRESS before anything is allocated: a rejected
+        # Validate the sibling ADDRESS before anything is allocated: a rejected
         # name must not burn a session id, and the caller must learn about a
         # collision at session.new rather than discovering at send time that
         # its messages have been reaching somebody else.
-        if peer_name is not None:
-            _bad = validate_peer_name(
-                peer_name, cascade_driver_id,
-                [(s.peer_name, s.cascade_driver_id)
+        if sibling_name is not None:
+            _bad = validate_sibling_name(
+                sibling_name, cascade_driver_id,
+                [(s.sibling_name, s.cascade_driver_id)
                  for s in self._sessions.values()],
             )
             if _bad:
@@ -5231,7 +5279,7 @@ class SessionManager:
             # stash it for disk-restore (persisted as profile_spec).  Only
             # set for inline-spec sessions; None for named/no-profile.
             inline_profile_spec=inline_profile_data,
-            peer_name=peer_name,
+            sibling_name=sibling_name,
             agent_name=agent_name,
             system_instruction_override=system_instruction_override,
             suppress_base_instructions=effective_suppress_base,
@@ -5432,7 +5480,7 @@ class SessionManager:
         inline_profile_data: Optional[Dict[str, Any]] = None,
         budget_control: Optional[Dict[str, Any]] = None,
         budget_usage: Optional[Dict[str, float]] = None,
-        peer_name: Optional[str] = None,
+        sibling_name: Optional[str] = None,
     ) -> str:
         """Create a top-level session not attached to any real client.
 
@@ -5516,7 +5564,7 @@ class SessionManager:
             apparmor=apparmor,
             budget_control=budget_control,
             budget_usage=budget_usage,
-            peer_name=peer_name,
+            sibling_name=sibling_name,
             cascade_driver_id=cascade_driver_id,
             inline_profile_data=inline_profile_data,
         )
@@ -6106,7 +6154,7 @@ class SessionManager:
         client already attached, the turn drives immediately (``OK``).
 
         The client-agnostic wake primitive (``session.wake``): any authenticated
-        caller — IPC, WS, an HTTP webhook shim, cron, a peer — can drive a fresh
+        caller — IPC, WS, an HTTP webhook shim, cron, a sibling — can drive a fresh
         turn on a session with NO client attached.  It composes the existing
         headless primitives, :meth:`resume_session` (cold-revive) then
         :meth:`send_message_to_session` (drive), and adds three wake-specific
@@ -7043,12 +7091,12 @@ class SessionManager:
             # Carry the inline spec forward so a re-save of the restored
             # session re-persists it (survives restore → save → restore).
             inline_profile_spec=getattr(state, "profile_spec", None),
-            # A peer ADDRESS that does not survive a reload is not an
-            # address: sessions unload on ORPHAN, so a peer that came back
+            # A sibling ADDRESS that does not survive a reload is not an
+            # address: sessions unload on ORPHAN, so a sibling that came back
             # nameless would be unreachable by every sibling still holding
             # its name.  Same shape as the budget ceiling that did not
             # survive an unload (#583).
-            peer_name=getattr(state, "peer_name", None),
+            sibling_name=getattr(state, "sibling_name", None),
             # Phase 3 §3.12 + peer-review M5/N1: mark this session as
             # awaiting first client-attach.  While set, the runner-
             # side permission plugin queues ASK prompts rather than
@@ -7558,7 +7606,7 @@ class SessionManager:
                 # re-resolvable.  None for named-profile sessions.
                 profile_spec=session.inline_profile_spec,
                 budget_control=budget_control_cfg,
-                peer_name=session.peer_name,
+                sibling_name=session.sibling_name,
                 workspace_path=session.workspace_path,
                 config_root=session.config_root,
                 # Persist confinement so orphan-revive / disk-restore re-applies

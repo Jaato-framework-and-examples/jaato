@@ -22,8 +22,8 @@ class SourceType(Enum):
 
     The tier a source sits in is an AUTHORITY statement, not a scheduling
     detail.  A high-priority source can interrupt a turn in progress; an
-    idle-only source cannot.  That is why PEER is idle-only: peers coordinate,
-    they do not control (design: peer-to-peer agent coordination, §7.3 / §10).
+    idle-only source cannot.  That is why SIBLING is idle-only: siblings
+    coordinate, they do not control (design: sibling coordination, §7.3 / §10).
     Membership is declared once in :data:`HIGH_PRIORITY_SOURCES` /
     :data:`IDLE_ONLY_SOURCES` below -- it used to be spelled out separately in
     three methods, so adding a source type meant editing three literals and a
@@ -34,11 +34,13 @@ class SourceType(Enum):
     USER = "user"       # User input - treated like parent (high priority)
     SYSTEM = "system"   # System messages - treated like parent (high priority)
     EVENT = "event"     # Explicitly subscribed events - high priority, mid-turn processing
-    PEER = "peer"       # Cascade-sibling coordination - idle-only, NEVER
-                        # mid-turn.  "Peer" = another SESSION sharing my
-                        # cascade_driver_id, at any depth -- NOT a tree
-                        # sibling, and NOT the server-to-server sense the
-                        # EventType.PEER_* gossip namespace carries.
+    SIBLING = "sibling"  # Cascade-sibling coordination - idle-only, NEVER
+                        # mid-turn.  A SIBLING is another SESSION sharing my
+                        # cascade_driver_id.  Every cid-bearing session is
+                        # top-level (subagents carry no cid), so the set is
+                        # flat and "sibling" is literal, not a metaphor.
+                        # Distinct from EventType.PEER_*, which is the
+                        # server-to-server gossip sense.
 
 
 #: Sources that may be processed MID-TURN.  Membership here is the ability to
@@ -48,7 +50,7 @@ HIGH_PRIORITY_SOURCES = frozenset({
 })
 
 #: Sources processed only when the session is IDLE.
-IDLE_ONLY_SOURCES = frozenset({SourceType.CHILD, SourceType.PEER})
+IDLE_ONLY_SOURCES = frozenset({SourceType.CHILD, SourceType.SIBLING})
 
 
 @dataclass
@@ -188,7 +190,7 @@ class MessageQueue:
         restriction is the point: a consumer looking for a reply from a
         specific RELATIONSHIP (e.g. a subagent awaiting its parent's
         permission decision) must not be satisfiable by anyone else, and
-        matching on message CONTENT cannot express that.  A peer or child
+        matching on message CONTENT cannot express that.  A sibling or child
         message is invisible to a PARENT-scoped search however it is worded.
 
         Args:
@@ -260,40 +262,40 @@ class MessageQueue:
                 current = current._next
         return False
 
-    def pop_first_peer_message(self) -> Optional[QueuedMessage]:
+    def pop_first_sibling_message(self) -> Optional[QueuedMessage]:
         """Find and remove the oldest PEER message.
 
         Separate from :meth:`pop_first_child_message` on purpose: that one
         carries subagent STATUS semantics for its consumer
         (``JaatoSession`` idle processing), and a sibling's coordination
         message is not a status update.  Draining them through the same
-        accessor would hand peer traffic to code written for children.
+        accessor would hand sibling traffic to code written for children.
 
         Peer messages are idle-only by tier (:data:`IDLE_ONLY_SOURCES`), so
         this never delivers anything mid-turn.
 
         Returns:
-            The oldest peer message, or None if none exist.
+            The oldest sibling message, or None if none exist.
         """
         with self._lock:
             current = self._head
             while current:
-                if current.source_type == SourceType.PEER:
+                if current.source_type == SourceType.SIBLING:
                     self._remove(current)
                     return current
                 current = current._next
         return None
 
-    def has_peer_messages(self) -> bool:
-        """Check if there are any peer messages pending.
+    def has_sibling_messages(self) -> bool:
+        """Check if there are any sibling messages pending.
 
         Returns:
-            True if at least one peer message exists.
+            True if at least one sibling message exists.
         """
         with self._lock:
             current = self._head
             while current:
-                if current.source_type == SourceType.PEER:
+                if current.source_type == SourceType.SIBLING:
                     return True
                 current = current._next
         return False
