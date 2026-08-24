@@ -620,7 +620,7 @@ jaato treats MCP tools as first-class permission-gated tools.
 | Self-modifying harness | Premium auto-steering re-injects drift hints; `finetuner-closed-loop` design (assessor → applies reliability rules to profiles) is **designed, not built** | **`/refine`, and it runs automatically by default** — every 25 assistant turns and on every compaction (20-min cooldown), gated by a cheap LLM reviewer before the expensive edit pass. Emits create/update/delete edits over four entry kinds (`prompt`/`memory`/`skill`/`subagent`) in two scopes (session-local default, global on explicit request). Every applied edit stores `before`/`after` entry snapshots, so rollback is a pure function of the ledger, not a second LLM call. Base prompt immutable. See §9.1 |
 | Drift detection | Premium `drift_monitor` reactor — embedding similarity of turn text vs. active plan-step goal, emits `drift.measured`, injects nudges | None |
 | Skill authoring by the agent | Scaffold verbs (`jaato-scaffold compile`, Daruma invariant compiler → profiles, evaluators, processors, reactors, host tools, emit-then-validate) | Built-in `skill-creator` skill: the agent packages recurring workflows into markdown or Python-backed skills |
-| Training-data flywheel | **`kb-stage-agent-LoRA-training` — built and proven.** Teacher (GLM-5) runs the cascade; trajectories are harvested per stage; LoRA adapters are trained on Nebius Token Factory and served on self-hosted vLLM; each is scored on held-out specs against the teacher as gold. Plus premium `modlog_training_pipeline`. The operator trains adapters for their own cascade, on their own account | Opt-in trace upload to Prime Intellect (`PRIME_AGENT_TRACES_API_KEY`), feeding the same org's `verifiers` / `prime-rl` stack — the **vendor's** models improve, not yours |
+| Training-data flywheel | **`kb-stage-agent-LoRA-training` — built and proven.** Teacher (GLM-5) runs the cascade; trajectories are harvested per stage; LoRA adapters are trained on Nebius Token Factory and served on self-hosted vLLM; each is scored on held-out specs against the teacher as gold. Plus premium `modlog_training_pipeline`. The operator trains adapters for their own cascade, on their own account | Opt-in trace upload to Prime Intellect (`/traces`, `PRIME_AGENT_TRACES_API_KEY`). The repo documents the mechanism but **states no purpose** for the uploaded traces; that they feed the same org's `verifiers` / `prime-rl` stack is a reasonable inference from the branding and sibling repos, not a documented claim. What is certain is the direction: full session traces leave the machine, and nothing returns as a model the operator owns |
 
 ### 9.1 How `/refine` actually works
 
@@ -820,6 +820,19 @@ all.
 | Tracing | OpenTelemetry with **OpenInference** semantic conventions; span tree `jaato.turn → jaato.tool → jaato.permission`; renders natively in Phoenix / Langfuse | Pseudonymous product analytics to `api.primeintellect.ai` (agent started / command used / run completed / session ended) |
 | Cost attribution | Per-call `gen_ai.usage.cost` / `llm.cost.total`, resolved provider-reported → `.jaato/pricing.json` → none | Per-model pricing baked into the model catalogue; child usage attributed to the parent turn; context-tree reporting reconciles own vs. aggregate |
 | Token accounting | `TokenLedger` (JSONL via `LEDGER_PATH`), rate-limit retries, budget panel in the TUI | Usage on each assistant message; `/context` tree view |
+> **Two separate data flows, worth not conflating.** Prime Agent's *analytics*
+> (`telemetry.enabled`, **default true**, opt-out via settings,
+> `PRIME_AGENT_TELEMETRY=0`, `DO_NOT_TRACK=1`, or `--offline`) sends only
+> pseudonymous aggregates — version, OS category, execution mode, TTFT/latency,
+> prompt and turn counts, token usage, tool success counts, retries,
+> compactions — behind a random installation id, and the docs enumerate what is
+> excluded: prompts, responses, thinking, tool arguments and results, command
+> text, filenames, paths, repository information, environment variables,
+> credentials, raw error messages, hostnames, usernames, emails, hardware ids.
+> That is a carefully scoped policy. *Trace sharing* is the separate,
+> genuinely opt-in path that uploads whole session traces; it is off unless a
+> key with the `agent_traces` scope is configured.
+
 | Session logs | `JAATO_SESSION_LOG_DIR` per-session logs; env report; health check endpoint | Rotating logs; `prime-agent status` / `doctor [--fix]` |
 | Backend integrations | Any OTLP collector; Langfuse auto-selected from keys | Prime Intellect analytics + optional trace sharing |
 
