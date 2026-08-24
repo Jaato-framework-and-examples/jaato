@@ -620,7 +620,7 @@ jaato treats MCP tools as first-class permission-gated tools.
 | Self-modifying harness | Premium auto-steering re-injects drift hints; `finetuner-closed-loop` design (assessor → applies reliability rules to profiles) is **designed, not built** | **`/refine`, and it runs automatically by default** — every 25 assistant turns and on every compaction (20-min cooldown), gated by a cheap LLM reviewer before the expensive edit pass. Emits create/update/delete edits over four entry kinds (`prompt`/`memory`/`skill`/`subagent`) in two scopes (session-local default, global on explicit request). Every applied edit stores `before`/`after` entry snapshots, so rollback is a pure function of the ledger, not a second LLM call. Base prompt immutable. See §9.1 |
 | Drift detection | Premium `drift_monitor` reactor — embedding similarity of turn text vs. active plan-step goal, emits `drift.measured`, injects nudges | None |
 | Skill authoring by the agent | Scaffold verbs (`jaato-scaffold compile`, Daruma invariant compiler → profiles, evaluators, processors, reactors, host tools, emit-then-validate) | Built-in `skill-creator` skill: the agent packages recurring workflows into markdown or Python-backed skills |
-| Training-data flywheel | Premium `modlog_training_pipeline`; fine-tuner closed loop (design) | Opt-in trace upload to Prime Intellect (`PRIME_AGENT_TRACES_API_KEY`), feeding the same org's `verifiers` / `prime-rl` stack |
+| Training-data flywheel | **`kb-stage-agent-LoRA-training` — built and proven.** Teacher (GLM-5) runs the cascade; trajectories are harvested per stage; LoRA adapters are trained on Nebius Token Factory and served on self-hosted vLLM; each is scored on held-out specs against the teacher as gold. Plus premium `modlog_training_pipeline`. The operator trains adapters for their own cascade, on their own account | Opt-in trace upload to Prime Intellect (`PRIME_AGENT_TRACES_API_KEY`), feeding the same org's `verifiers` / `prime-rl` stack — the **vendor's** models improve, not yours |
 
 ### 9.1 How `/refine` actually works
 
@@ -759,13 +759,45 @@ Three further differences that follow from that:
 It is not auto-tune in the hyperparameter sense either: nothing searches a
 parameter space against an objective.
 
-**The useful conclusion is a swap of strengths.** Prime Agent shipped the loose
-version of this pattern; jaato designed the rigorous one and has not built it.
-What is worth taking from Prime Agent is the **plumbing, not the epistemics** —
-the automatic cadence with a cheap gate, the per-edit inversion ledger, the
-bounded overview injection. Bolted onto jaato's telemetry signal, fork-replay
-verification and enforced-policy surface, that yields a closed loop neither
-project currently has.
+**Correction: jaato's closed loop is built, at a deeper layer than the design
+doc describes.** `kb-stage-agent-LoRA-training` distils a GLM-5 teacher running
+the kb-enablement cascade into **per-stage LoRA adapters**, trained on Nebius and
+served on self-hosted vLLM, each scored on held-out specs with the teacher as
+gold — discovery 0.53 → 0.78 precision, build_judge `error_count` 0/3 → 3/3,
+codegen template recall 0.10 → 0.75. The *reliability-rule-patching* variant in
+`finetuner-closed-loop.md` remains unbuilt as specified, but the pattern it
+describes — measure, intervene, verify, accept or reject — is running at the
+weight level.
+
+`pipeline/tool_tutor.py` is the sharpest piece: STaR / hint-augmented rejection
+sampling that drives a student through a stage in isolation, validates its
+structured tool call, injects Socratic error-grounded hints until it emits a
+schema-conforming call, and harvests the corrected trajectory as training data.
+Its second role turned out to matter more than its first — as a **diagnostic**
+it adds real cascade conditions back one variable at a time to localise a
+failure across model / prompt / serving / wiring. A 2×2 factorial
+(`pipeline/twobytwo.py`) isolated an *interaction*: the failure needed **both**
+sampling **and** the real conditions (~42K of tool-doc bloat plus the
+`prepare_completion` accumulator), neither alone. That reassigned the blame from
+"weak students" to two framework bugs — vllm temperature threading (#381) and the
+accumulator's `floor_met` (#386). A training tool that proved training was not
+what was needed, and a README that records having falsified its own earlier
+conclusion.
+
+So the two projects sit at different layers, and only one of them closes:
+
+| Intervention layer | jaato | Prime Agent |
+|---|---|---|
+| Prompt notes / memories | `memory`, `auto_steering`, `references` | `/refine` — automatic, but open-loop |
+| Declarative policy in profiles | `finetuner-closed-loop` (designed; fork-replay verification) | — |
+| **Model weights** | **`kb-stage-agent-LoRA-training` (built, measured)** | — |
+
+What remains worth taking from Prime Agent is narrower than "the refinement
+pattern": the **plumbing for continuous, cheap self-editing** — an automatic
+cadence, a cheap review gate in front of an expensive writer, a per-edit
+inversion ledger, bounded overview injection. jaato's loops are rigorous and
+operator-driven; Prime Agent's is shallow but runs unattended every 25 turns.
+Neither project currently has both.
 
 **Verdict.** The "Continual Harness" is Prime Agent's most distinctive idea and
 it is *shipped*, not designed: durable supplemental prompt state that the agent
@@ -838,7 +870,8 @@ Agent is ahead.
 | Cross-host / clustered agents | **jaato** | Total (premium gossip) |
 | Context GC as a policy engine | **jaato** | Moderate |
 | Compaction quality (split turns, steered summaries, kernel survival) | **Prime Agent** | Moderate |
-| Self-improving harness with reviewable rollback | **Prime Agent** | Large — `/refine` is shipped; jaato's equivalent is designed |
+| Continuous, unattended self-editing of harness state | **Prime Agent** | Moderate — `/refine` runs automatically with a gate and an inversion ledger; jaato has no equivalent cadence |
+| Closed-loop agent improvement with measured verification | **jaato** | Large — `kb-stage-agent-LoRA-training` trains and evaluates per-stage LoRA adapters against held-out metrics; Prime Agent's `/refine` never measures whether an edit helped, and its traces improve the vendor's models rather than yours |
 | Instruction layering precision | **jaato** | Moderate |
 | Model-provider depth (capability guard, quirks, catalog detection) | **jaato** | Moderate |
 | Model-provider breadth + baked-in pricing metadata | **Prime Agent** | Moderate |
