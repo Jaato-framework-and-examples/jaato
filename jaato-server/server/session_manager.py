@@ -4914,6 +4914,98 @@ class SessionManager:
         with self._lock:
             self._reserved_session_ids.discard(session_id)
 
+    def build_sibling_roster(
+        self, viewer_session_id: str, workspace_path: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """The sessions sharing a viewer's cascade, as ``list_siblings`` sees them.
+
+        ``{"you": <own address or None>, "siblings": [<row>, ...]}``.
+
+        NO SELF ROW.  An agent has no reason to address itself, and a self row
+        is an invitation to ``send_to_sibling(my_own_name)`` -- a loop generator
+        in a feature whose §8 is entirely about bounding loops.  The ``you``
+        scalar carries the agent's own address (assigned by whoever called
+        ``session.new``, so it cannot otherwise know it) without putting it
+        somewhere it can be passed as a target.
+
+        NO ``role`` AND NO ``owner``.  Every cid-bearing session is top-level --
+        subagents are runtime-level and carry no cid -- so the set is flat and
+        every row would read "sibling".  A field whose value cannot vary is not
+        information, and shipping ``parent``/``child`` values nothing can
+        produce is the same defect as a guard that cannot fire.  They return
+        when there is a topology to describe.
+
+        LIVE UNION COLD.  Sessions unload on ORPHAN constantly, so a roster
+        built from the in-memory table alone would make idle stages blink out
+        and back -- and ``no_such_sibling`` would become a race rather than a
+        fact.
+
+        ``description`` is the peer's OWN ``session_describe`` output and is
+        therefore UNTRUSTED CONTENT: the tool carries
+        ``TRAIT_UNTRUSTED_CONTENT`` so the result routes through the boundary
+        that marks and escapes it.  ``profile_name`` is author-written and
+        trusted.
+
+        Args:
+            viewer_session_id: The asking session.
+            workspace_path: Workspace whose persisted sessions to include.
+
+        Returns:
+            The roster.  ``siblings`` is empty when the viewer is in no
+            cascade -- which is correct: it has none.
+        """
+        viewer = self._sessions.get(viewer_session_id)
+        cid = getattr(viewer, "cascade_driver_id", None) if viewer else None
+        you = getattr(viewer, "sibling_name", None) if viewer else None
+        if cid is None:
+            return {"you": you, "siblings": []}
+
+        rows: List[Dict[str, Any]] = []
+        live_ids = set()
+        for sid, s in self._sessions.items():
+            if s.cascade_driver_id != cid or sid == viewer_session_id:
+                continue
+            live_ids.add(sid)
+            running = bool(
+                s.server is not None and getattr(s.server, "_model_running", False))
+            rows.append({
+                "sibling_name": s.sibling_name,
+                "status": "active" if (running or s.attached_clients) else "idle",
+                "profile_name": self._roster_profile_name(s),
+                "description": s.description,
+            })
+
+        try:
+            for info in self._get_persisted_sessions(workspace_path=workspace_path):
+                if info.session_id in live_ids or info.session_id == viewer_session_id:
+                    continue
+                if getattr(info, "cascade_driver_id", None) != cid:
+                    continue
+                rows.append({
+                    "sibling_name": getattr(info, "sibling_name", None),
+                    "status": "cold",
+                    "profile_name": getattr(info, "profile_name", None),
+                    "description": info.description,
+                })
+        except Exception as exc:  # noqa: BLE001
+            # WARNING, not debug: a roster silently missing its cold members
+            # reads as "those siblings do not exist".
+            logger.warning(
+                "sibling roster could not read persisted sessions (%s) -- "
+                "cold siblings are missing from this listing", exc,
+            )
+
+        rows = [r for r in rows if r["sibling_name"]]
+        rows.sort(key=lambda r: r["sibling_name"])
+        return {"you": you, "siblings": rows}
+
+    @staticmethod
+    def _roster_profile_name(session: Any) -> Optional[str]:
+        """The profile a LIVE session was built from, or None."""
+        server = getattr(session, "server", None)
+        profile = getattr(server, "_profile", None) if server else None
+        return getattr(profile, "name", None)
+
     def _known_sibling_addresses(
         self, workspace_path: Optional[str] = None,
     ) -> "List[Tuple[Optional[str], Optional[str]]]":
@@ -5409,9 +5501,22 @@ class SessionManager:
         # Wire SessionManager into the session_ops plugin so its
         # interrogate_session tool can fork_ask other daemon sessions.
         if server.registry:
-            session_ops_plugin = server.registry.get_plugin("session_ops")
-            if session_ops_plugin and hasattr(session_ops_plugin, 'set_session_manager'):
-                session_ops_plugin.set_session_manager(self)
+            # Wire the manager into EVERY plugin that asks for it, rather than
+            # naming one.  The by-name form (``get_plugin("session_ops")``)
+            # meant a second plugin needing daemon-side session state had to
+            # edit this file — and a plugin that grew the hook without editing
+            # it would silently never receive the manager.  Duck-typed on the
+            # method, like the rest of the plugin lifecycle.
+            for _pname in server.registry.list_exposed():
+                _plugin = server.registry.get_plugin(_pname)
+                if _plugin is not None and hasattr(_plugin, "set_session_manager"):
+                    try:
+                        _plugin.set_session_manager(self)
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning(
+                            "set_session_manager failed for plugin %s: %s",
+                            _pname, exc,
+                        )
 
         # Switch to session-based event emission now that init is complete
         server.set_event_callback(lambda e: self._emit_to_session(session_id, e))
