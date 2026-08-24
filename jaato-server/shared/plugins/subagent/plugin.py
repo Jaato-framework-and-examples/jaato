@@ -1019,7 +1019,7 @@ class SubagentPlugin(DaemonForwardingMixin):
         if mgr is None:
             return {
                 "status": "error",
-                "message": (
+                "error": (
                     "list_siblings is unavailable: no session manager is "
                     "attached (this build routes it daemon-side)."
                 ),
@@ -1029,7 +1029,7 @@ class SubagentPlugin(DaemonForwardingMixin):
         if not sid:
             return {
                 "status": "error",
-                "message": "list_siblings could not determine the calling session.",
+                "error": "list_siblings could not determine the calling session.",
             }
         roster = mgr.build_sibling_roster(sid)
         return {"status": "ok", **roster}
