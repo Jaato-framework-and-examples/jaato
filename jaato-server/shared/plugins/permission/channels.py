@@ -1269,28 +1269,52 @@ class ParentBridgedChannel(Channel):
         )
 
     def _wait_for_response(self, request_id: str) -> Optional[str]:
-        """Wait for parent's response on injection queue.
+        """Wait for the PARENT's response to a specific permission request.
 
-        The timeout is resolved at call time from the
-        JAATO_PERMISSION_TIMEOUT env var (falling back to
-        ``_default_timeout``).  A value of 0 or negative means wait
-        forever, consistent with the other channel implementations.
+        Reads the session's real message queue, scoped to
+        ``SourceType.PARENT`` and to a message that identifies THIS request.
+        Both restrictions are load-bearing:
+
+        **Source scoping.** Answering a permission request is parent
+        authority.  Content cannot express that -- a message reading ``yes``
+        is indistinguishable whoever sent it -- so eligibility is decided by
+        the sender relationship the daemon stamped at ``inject_prompt`` time,
+        which a sender cannot forge.  A child, or a future peer (design:
+        peer-to-peer agent coordination, §7), is invisible to this search
+        however it is worded.
+
+        **Explicit identification.** A message must carry this ``request_id``
+        or a ``<permission_response>`` envelope while this request is the
+        pending one.  The previous implementation also accepted a message
+        whose entire body was ``y`` / ``yes`` / ``deny`` / ``always`` /
+        ``once``; that is removed.  It could not distinguish a deliberate
+        answer from a parent replying "yes" conversationally to something
+        else while a request happened to be outstanding -- an accident path,
+        not merely a hostile one.
+
+        Non-matching messages are LEFT IN THE QUEUE, in order: an ordinary
+        parent instruction arriving mid-request must still reach the turn
+        loop.  The previous implementation drained the queue and re-queued
+        misses, which reordered them.
+
+        (It also read ``_session._injection_queue``, an attribute that exists
+        nowhere in the tree, so this returned ``None`` immediately and every
+        parent-bridged request timed out.  The queue below is the real one.)
 
         Args:
             request_id: The request ID to match.
 
         Returns:
-            Response string or None on timeout.
+            Response string, or None on timeout.
         """
-        import queue as queue_module
-
         if not self._session:
             return None
 
-        # Access the session's injection queue
-        injection_queue = getattr(self._session, '_injection_queue', None)
-        if not injection_queue:
+        message_queue = getattr(self._session, '_message_queue', None)
+        if message_queue is None:
             return None
+
+        from ...message_queue import SourceType as _SourceType
 
         # Apply env var override at runtime (matches QueueChannel pattern)
         timeout = self._default_timeout
@@ -1298,56 +1322,33 @@ class ParentBridgedChannel(Channel):
         if env_timeout is not None:
             try:
                 timeout = float(env_timeout)
-            except ValueError:
+            except (TypeError, ValueError):
                 pass
-        no_timeout = timeout <= 0  # 0 or negative means wait forever
+
+        def _is_answer(msg: Any) -> bool:
+            text = msg.text or ""
+            if (f'request_id="{request_id}"' in text
+                    or f"request_id='{request_id}'" in text):
+                return True
+            return ('<permission_response' in text.lower()
+                    and self._pending_request_id == request_id)
 
         poll_interval = 0.1
         elapsed = 0.0
-        held_messages = []  # Messages that aren't our response
-
-        while no_timeout or elapsed < timeout:
-            # Check for cancellation
+        while timeout <= 0 or elapsed < timeout:
             cancel_token = getattr(self._session, '_cancel_token', None)
-            if cancel_token and hasattr(cancel_token, 'is_cancelled'):
-                if cancel_token.is_cancelled:
-                    # Put held messages back
-                    for msg in held_messages:
-                        injection_queue.put(msg)
-                    return None
+            if cancel_token and getattr(cancel_token, 'is_cancelled', False):
+                return None
 
-            try:
-                message = injection_queue.get(timeout=poll_interval)
+            match = message_queue.pop_first_matching(
+                _is_answer, source_types={_SourceType.PARENT},
+            )
+            if match is not None:
+                return match.text
 
-                # Check if this is our response
-                if f'request_id="{request_id}"' in message or f"request_id='{request_id}'" in message:
-                    # Put held messages back
-                    for msg in held_messages:
-                        injection_queue.put(msg)
-                    return message
+            time.sleep(poll_interval)
+            elapsed += poll_interval
 
-                # Check if it's a permission response without explicit request_id
-                if '<permission_response' in message.lower() and self._pending_request_id == request_id:
-                    for msg in held_messages:
-                        injection_queue.put(msg)
-                    return message
-
-                # Check for simple yes/no/allow/deny responses (single pending request)
-                simple_response = message.strip().lower()
-                if self._pending_request_id == request_id and simple_response in ['y', 'yes', 'n', 'no', 'a', 'always', 'once', 'deny']:
-                    for msg in held_messages:
-                        injection_queue.put(msg)
-                    return message
-
-                # Not our response, hold it
-                held_messages.append(message)
-
-            except queue_module.Empty:
-                elapsed += poll_interval
-
-        # Timeout - put held messages back
-        for msg in held_messages:
-            injection_queue.put(msg)
         return None
 
     def request_permission(self, request: PermissionRequest) -> ChannelResponse:
