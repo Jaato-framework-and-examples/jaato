@@ -273,7 +273,15 @@ class EventType(str, Enum):
     # Event subscription notifications (Server -> Client)
     EVENTS_SUBSCRIBED = "events.subscribed"
 
-    # Peer channel events (server-to-server gossip)
+    # Peer channel events (server-to-server gossip).
+    #
+    # NOTE: "peer" HERE means another jaato SERVER — this is the
+    # federation/gossip channel consumed by the premium gossip
+    # extension (jaato_premium/gossip/).  It is NOT the sibling-session
+    # coordination surface (``list_peers`` / ``send_to_peer``, which are
+    # TOOLS scoped to one cascade_driver_id and emit no events).  The two
+    # never share an identifier, but a reader running ``explain events``
+    # while building session coordination lands here first.
     PEER_HEARTBEAT = "peer.heartbeat"
     PEER_SPAWN_REQUEST = "peer.spawn_request"
     PEER_SPAWN_ACCEPTED = "peer.spawn_accepted"

@@ -18,13 +18,37 @@ class SourceType(Enum):
 
     Priority groups:
     - High priority (mid-turn): PARENT, USER, SYSTEM, EVENT
-    - Low priority (idle-only): CHILD
+    - Low priority (idle-only): CHILD, PEER
+
+    The tier a source sits in is an AUTHORITY statement, not a scheduling
+    detail.  A high-priority source can interrupt a turn in progress; an
+    idle-only source cannot.  That is why PEER is idle-only: peers coordinate,
+    they do not control (design: peer-to-peer agent coordination, §7.3 / §10).
+    Membership is declared once in :data:`HIGH_PRIORITY_SOURCES` /
+    :data:`IDLE_ONLY_SOURCES` below -- it used to be spelled out separately in
+    three methods, so adding a source type meant editing three literals and a
+    half-added type would land in NO tier and never drain.
     """
     PARENT = "parent"   # Controller messages - high priority, mid-turn processing
     CHILD = "child"     # Status updates - lower priority, process when idle
     USER = "user"       # User input - treated like parent (high priority)
     SYSTEM = "system"   # System messages - treated like parent (high priority)
     EVENT = "event"     # Explicitly subscribed events - high priority, mid-turn processing
+    PEER = "peer"       # Cascade-sibling coordination - idle-only, NEVER
+                        # mid-turn.  "Peer" = another SESSION sharing my
+                        # cascade_driver_id, at any depth -- NOT a tree
+                        # sibling, and NOT the server-to-server sense the
+                        # EventType.PEER_* gossip namespace carries.
+
+
+#: Sources that may be processed MID-TURN.  Membership here is the ability to
+#: interrupt work in progress, so adding a type is an authority decision.
+HIGH_PRIORITY_SOURCES = frozenset({
+    SourceType.PARENT, SourceType.USER, SourceType.SYSTEM, SourceType.EVENT,
+})
+
+#: Sources processed only when the session is IDLE.
+IDLE_ONLY_SOURCES = frozenset({SourceType.CHILD, SourceType.PEER})
 
 
 @dataclass
@@ -141,7 +165,7 @@ class MessageQueue:
         with self._lock:
             current = self._head
             while current:
-                if current.source_type in (SourceType.PARENT, SourceType.USER, SourceType.SYSTEM, SourceType.EVENT):
+                if current.source_type in HIGH_PRIORITY_SOURCES:
                     self._remove(current)
                     return current
                 current = current._next
@@ -232,6 +256,44 @@ class MessageQueue:
             current = self._head
             while current:
                 if current.source_type in (SourceType.USER, SourceType.SYSTEM):
+                    return True
+                current = current._next
+        return False
+
+    def pop_first_peer_message(self) -> Optional[QueuedMessage]:
+        """Find and remove the oldest PEER message.
+
+        Separate from :meth:`pop_first_child_message` on purpose: that one
+        carries subagent STATUS semantics for its consumer
+        (``JaatoSession`` idle processing), and a sibling's coordination
+        message is not a status update.  Draining them through the same
+        accessor would hand peer traffic to code written for children.
+
+        Peer messages are idle-only by tier (:data:`IDLE_ONLY_SOURCES`), so
+        this never delivers anything mid-turn.
+
+        Returns:
+            The oldest peer message, or None if none exist.
+        """
+        with self._lock:
+            current = self._head
+            while current:
+                if current.source_type == SourceType.PEER:
+                    self._remove(current)
+                    return current
+                current = current._next
+        return None
+
+    def has_peer_messages(self) -> bool:
+        """Check if there are any peer messages pending.
+
+        Returns:
+            True if at least one peer message exists.
+        """
+        with self._lock:
+            current = self._head
+            while current:
+                if current.source_type == SourceType.PEER:
                     return True
                 current = current._next
         return False
