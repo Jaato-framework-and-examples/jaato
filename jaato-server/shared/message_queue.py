@@ -34,7 +34,11 @@ class SourceType(Enum):
     USER = "user"       # User input - treated like parent (high priority)
     SYSTEM = "system"   # System messages - treated like parent (high priority)
     EVENT = "event"     # Explicitly subscribed events - high priority, mid-turn processing
-    PEER = "peer"       # Sibling coordination - idle-only, NEVER mid-turn
+    PEER = "peer"       # Cascade-sibling coordination - idle-only, NEVER
+                        # mid-turn.  "Peer" = another SESSION sharing my
+                        # cascade_driver_id, at any depth -- NOT a tree
+                        # sibling, and NOT the server-to-server sense the
+                        # EventType.PEER_* gossip namespace carries.
 
 
 #: Sources that may be processed MID-TURN.  Membership here is the ability to
