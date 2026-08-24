@@ -2,6 +2,7 @@
 
 import logging
 import os
+import time
 import sys
 import uuid
 from abc import ABC, abstractmethod
@@ -735,74 +736,69 @@ class ParentBridgedChannel(ClarificationChannel):
         return Answer(question_index=question_index, free_text=text)
 
     def _wait_for_response(self, request_id: str) -> Optional[str]:
-        """Wait for parent's response on injection queue.
+        """Wait for the PARENT's answer to a specific clarification request.
 
-        The timeout is resolved at call time from the
-        JAATO_CLARIFICATION_TIMEOUT env var (falling back to
-        ``_default_timeout``).  A value of 0 or negative means wait
-        forever, consistent with the other channel implementations.
+        Twin of ``permission/channels.py``'s method; see it for the full
+        reasoning.  In short:
+
+        - Eligibility is decided by the sender relationship the daemon
+          stamped (``SourceType.PARENT``), not by message content.  Answering
+          a subagent's clarification is parent authority; a child or a future
+          peer must not be able to satisfy it by emitting the right-looking
+          envelope.
+        - Non-matching messages stay in the queue, in order.  The previous
+          implementation drained and re-queued misses, which reordered them.
+        - It read ``_session._injection_queue``, which exists nowhere in the
+          tree, so this returned ``None`` immediately and every
+          parent-bridged clarification timed out.
 
         Args:
             request_id: The request ID to match.
 
         Returns:
-            Response string or None on timeout.
+            Response string, or None on timeout.
         """
-        import queue as queue_module
-        import time
-
         if not self._session:
             return None
 
-        # Access the session's injection queue
-        injection_queue = getattr(self._session, '_injection_queue', None)
-        if not injection_queue:
+        message_queue = getattr(self._session, '_message_queue', None)
+        if message_queue is None:
             return None
 
-        # Apply env var override at runtime (matches QueueChannel pattern)
-        timeout = _get_timeout(self._default_timeout)
-        no_timeout = timeout <= 0  # 0 or negative means wait forever
+        from ...message_queue import SourceType as _SourceType
+
+        timeout = self._default_timeout
+        env_timeout = os.environ.get("JAATO_CLARIFICATION_TIMEOUT")
+        if env_timeout is not None:
+            try:
+                timeout = float(env_timeout)
+            except (TypeError, ValueError):
+                pass
+
+        def _is_answer(msg: Any) -> bool:
+            text = msg.text or ""
+            if (f'request_id="{request_id}"' in text
+                    or f"request_id='{request_id}'" in text):
+                return True
+            return ('<clarification_response' in text.lower()
+                    and self._pending_request_id == request_id)
 
         poll_interval = 0.1
         elapsed = 0.0
-        held_messages = []  # Messages that aren't our response
-
-        while no_timeout or elapsed < timeout:
-            # Check for cancellation
+        while timeout <= 0 or elapsed < timeout:
             cancel_token = getattr(self._session, '_cancel_token', None)
-            if cancel_token and hasattr(cancel_token, 'is_cancelled'):
-                if cancel_token.is_cancelled:
-                    # Put held messages back
-                    for msg in held_messages:
-                        injection_queue.put(msg)
-                    return None
+            if cancel_token and getattr(cancel_token, 'is_cancelled', False):
+                return None
 
-            try:
-                message = injection_queue.get(timeout=poll_interval)
+            match = message_queue.pop_first_matching(
+                _is_answer, source_types={_SourceType.PARENT},
+            )
+            if match is not None:
+                return match.text
 
-                # Check if this is our response
-                if f'request_id="{request_id}"' in message or f"request_id='{request_id}'" in message:
-                    # Put held messages back
-                    for msg in held_messages:
-                        injection_queue.put(msg)
-                    return message
+            time.sleep(poll_interval)
+            elapsed += poll_interval
 
-                # Check if it's a clarification response without explicit request_id
-                # (simple response from parent for single pending request)
-                if '<clarification_response' in message.lower() and self._pending_request_id == request_id:
-                    for msg in held_messages:
-                        injection_queue.put(msg)
-                    return message
-
-                # Not our response, hold it
-                held_messages.append(message)
-
-            except queue_module.Empty:
-                elapsed += poll_interval
-
-        # Timeout - put held messages back
-        for msg in held_messages:
-            injection_queue.put(msg)
         return None
 
     def request_clarification(

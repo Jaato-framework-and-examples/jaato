@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from threading import Lock
-from typing import Optional, Iterator
+from typing import Callable, Iterator, Optional, Set
 
 
 class SourceType(Enum):
@@ -145,6 +145,45 @@ class MessageQueue:
                     self._remove(current)
                     return current
                 current = current._next
+        return None
+
+    def pop_first_matching(
+        self,
+        predicate: "Callable[[QueuedMessage], bool]",
+        *,
+        source_types: "Optional[Set[SourceType]]" = None,
+    ) -> Optional[QueuedMessage]:
+        """Remove and return the oldest message matching ``predicate``.
+
+        SELECTIVE removal: messages that do not match are left in place, in
+        order.  This exists because the alternative -- drain the queue, keep
+        what you want, put the rest back -- reorders every message it touches
+        and races with concurrent producers.
+
+        ``source_types`` restricts which senders are even eligible.  That
+        restriction is the point: a consumer looking for a reply from a
+        specific RELATIONSHIP (e.g. a subagent awaiting its parent's
+        permission decision) must not be satisfiable by anyone else, and
+        matching on message CONTENT cannot express that.  A peer or child
+        message is invisible to a PARENT-scoped search however it is worded.
+
+        Args:
+            predicate: Called with each eligible message; the first ``True``
+                wins.
+            source_types: Eligible sender types.  ``None`` = any.
+
+        Returns:
+            The matching message, or ``None``.
+        """
+        with self._lock:
+            current = self._head
+            while current:
+                nxt = current._next
+                if source_types is None or current.source_type in source_types:
+                    if predicate(current):
+                        self._remove(current)
+                        return current
+                current = nxt
         return None
 
     def pop_first_child_message(self) -> Optional[QueuedMessage]:
