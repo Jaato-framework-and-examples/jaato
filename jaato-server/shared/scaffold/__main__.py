@@ -81,7 +81,15 @@ def _cmd_explain(args) -> int:
     elif scope == "sets":
         data, text = _explain.sets(ws)
     elif scope == "profile":
-        data, text = _explain.profile()
+        # ``profile`` alone is the SCHEMA; ``profile <name>`` is what that
+        # named profile INHERITS and what it costs per turn.  A profile file
+        # states what it adds and never what it inherits, so the instruction
+        # tax is invisible at authoring time and shows up later as a budget
+        # refusal.
+        if name:
+            data, text = _explain.profile_cost(name, ws)
+        else:
+            data, text = _explain.profile()
     elif scope == "paths":
         data, text = _explain.paths()
     elif scope == "prefetch":
@@ -89,7 +97,8 @@ def _cmd_explain(args) -> int:
     else:
         print(f"unknown explain scope {scope!r} — one of: plugins, plugin, "
               "providers, provider, gc, env, events, event, transports, "
-              "clients, runtime, tiers, sets, profile, paths", file=sys.stderr)
+              "clients, runtime, tiers, sets, profile [<name>], paths",
+              file=sys.stderr)
         return 2
     print(json.dumps(data, indent=2, default=str) if args.json else text)
     return 0
