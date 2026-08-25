@@ -374,6 +374,28 @@ def plugins() -> Rendered:
     return data, text
 
 
+def _signature(parameters: "Optional[Dict[str, Any]]") -> str:
+    """Render a tool's arguments as ``(a, b=..., ...)``.
+
+    Required arguments bare, optional ones suffixed ``=...`` -- enough to
+    check a call site against, without printing a JSON-Schema block into a
+    terminal.  The full schema is in ``--json`` for anything that needs to
+    compare types.
+
+    ``None`` (schema omitted one) renders as ``(?)``; ``{}`` -- a tool that
+    genuinely takes no arguments -- renders as ``()``.  Those are different
+    facts and the rendering keeps them apart.
+    """
+    if parameters is None:
+        return "(?)"
+    props = parameters.get("properties")
+    if not isinstance(props, dict):
+        return "()"
+    required = set(parameters.get("required") or ())
+    return "(" + ", ".join(
+        p if p in required else f"{p}=..." for p in props) + ")"
+
+
 def plugin(name: str) -> Rendered:
     PL = introspect.plugins()
     pi = PL.get(name)
@@ -389,7 +411,9 @@ def plugin(name: str) -> Rendered:
         lines.append("  tools:")
         for t in pi.tools:
             badge = "core" if t.discoverability == DISCOVERABILITY_EAGER else "disc"
-            lines.append(f"    [{badge}] {t.name:28} {t.description}")
+            lines.append(f"    [{badge}] {t.name}{_signature(t.parameters)}")
+            if t.description:
+                lines.append(f"           {t.description}")
         if any(t.discoverability != DISCOVERABILITY_EAGER for t in pi.tools):
             lines.append(
                 f"  note: [core] tools are in the model's INITIAL schema; [disc] "
@@ -405,8 +429,15 @@ def plugin(name: str) -> Rendered:
             lines.append(f"    {s.name:22} {s.type:8}{d}{dflt}")
     data = {"description": pi.description,
             "kind": pi.kind, "tier": pi.tier, "dynamic": pi.dynamic,
+            # ``parameters`` is what makes a tool SIGNATURE machine-checkable
+            # from the CLI.  Without it a consumer validating a published spec
+            # against the framework can compare names and prose but not the
+            # arguments -- which is exactly how four drifts survived in a
+            # public spec (a parameter that was never implemented, a renamed
+            # one, two stale return shapes).
             "tools": [{"name": t.name, "discoverability": t.discoverability,
-                       "description": t.description} for t in pi.tools],
+                       "description": t.description,
+                       "parameters": t.parameters} for t in pi.tools],
             "config": [{"name": s.name, "type": s.type, "default": s.default,
                         "description": s.description} for s in pi.config_settings]}
     return data, "\n".join(lines)
