@@ -114,7 +114,13 @@ def test_the_sibling_tier_is_actually_drained():
     s._message_queue = q
     s._agent_id = "bob"
     s._trace = lambda *a, **k: None
-    s._on_prompt_injected = None
+    # A REAL callback, not None.  Setting this to None is what let an
+    # orphaned `self._on_prompt_injected(msg.text)` -- left at the wrong
+    # indent by a partial replacement -- crash every drain in production
+    # while every test here passed: the crashing line sits BEHIND this
+    # guard, so disabling it made the bug unreachable from the tests
+    # written to cover the function.
+    s._on_prompt_injected = lambda _text: None
     s._activity_phase = None
     s._is_running = False
     s._on_continuation_needed = None
@@ -136,7 +142,13 @@ def test_draining_keeps_parent_priority_ahead_of_siblings():
     s._message_queue = q
     s._agent_id = "bob"
     s._trace = lambda *a, **k: None
-    s._on_prompt_injected = None
+    # A REAL callback, not None.  Setting this to None is what let an
+    # orphaned `self._on_prompt_injected(msg.text)` -- left at the wrong
+    # indent by a partial replacement -- crash every drain in production
+    # while every test here passed: the crashing line sits BEHIND this
+    # guard, so disabling it made the bug unreachable from the tests
+    # written to cover the function.
+    s._on_prompt_injected = lambda _text: None
     s._activity_phase = None
     s._is_running = False
     s._on_continuation_needed = None

@@ -1605,10 +1605,6 @@ class JaatoSession:
                 if self._on_prompt_injected:
                     self._on_prompt_injected(msg.text)
 
-            # Log the child message for tracing (UI visibility)
-            if self._on_prompt_injected:
-                self._on_prompt_injected(msg.text)
-
         collected_text = "\n\n".join(collected_messages)
 
         if drained_count > 0:
