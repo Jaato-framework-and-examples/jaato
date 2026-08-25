@@ -5389,6 +5389,32 @@ class SessionManager:
         outcome = deliver(
             is_busy=lambda: busy, queue=_queue, drive=_drive,
         )
+
+        # DIAGNOSTIC — the busy decision, at the moment it was made.
+        #
+        # A ``queued`` receipt and a stranded message look identical from
+        # every witness a consumer has: the receipt says the peer was busy,
+        # and whether a drain ever ran is only visible in the provider trace
+        # (which is off unless JAATO_PROVIDER_TRACE is set).  So "queued and
+        # drained" and "queued and stranded" are the same observation.
+        #
+        # ``thread_alive`` is the discriminator.  ``_model_running`` is set
+        # at the top of ``model_thread`` and cleared in its finally, so a
+        # True flag with NO live thread means the flag is stale -- a
+        # different bug from a peer that is genuinely mid-turn, and they
+        # need opposite fixes.
+        #
+        # Daemon log, not the provider trace: a diagnostic nobody can read
+        # without setting an env var is one that will be read after the run
+        # it was needed for.  Greppable token: SIBLING_DELIVERY.
+        _thread = getattr(getattr(target, "server", None), "_model_thread", None)
+        logger.info(
+            "SIBLING_DELIVERY: from=%s to=%s target_session=%s busy=%s "
+            "thread_alive=%s outcome=%s bytes=%d",
+            sender_name or sender_session_id, sibling_name, target_id,
+            busy, (_thread is not None and getattr(_thread, "is_alive", lambda: None)()),
+            outcome, size,
+        )
         if not reached.get("ok"):
             return {"status": "refused",
                     "error": (f"send_to_sibling: {sibling_name!r} could not be "
