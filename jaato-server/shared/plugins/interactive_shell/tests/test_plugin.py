@@ -4,6 +4,8 @@ import time
 
 import pytest
 
+from jaato_sdk.plugins.model_provider.types import WithMetadata
+
 from shared.plugins.interactive_shell.plugin import (
     InteractiveShellPlugin,
     create_plugin,
@@ -11,9 +13,18 @@ from shared.plugins.interactive_shell.plugin import (
 
 
 def _unpack(result):
-    """Unpack executor result — may be a plain dict or (dict, metadata) tuple."""
+    """Unpack an executor result to its model-facing dict.
+
+    ``WithMetadata`` replaced the bare ``(result, metadata)`` tuple: that
+    shape was indistinguishable from the ``(ok, payload)`` contract, so
+    ``ToolExecutor`` read a domain failure's ok flag as the result and
+    dropped the payload.  The tuple branch stays for executors that return
+    ``(ok, payload)`` directly — those carry the payload SECOND.
+    """
+    if isinstance(result, WithMetadata):
+        return result.result
     if isinstance(result, tuple):
-        return result[0]
+        return result[1] if isinstance(result[0], bool) else result[0]
     return result
 
 

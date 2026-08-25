@@ -19,6 +19,7 @@ from typing import Dict, List, Any, Callable, Optional
 
 from jaato_sdk.plugins.base import UserCommand
 from jaato_sdk.plugins.model_provider.types import (
+    WithMetadata,
     ToolSchema,
     DISCOVERABILITY_DEFERRED,
 )
@@ -775,7 +776,8 @@ IMPORTANT NOTES:
                 f"alive={session.is_alive}"
             )
             if session.is_alive:
-                return (result, {"continuation_id": session_id, "show_output": True})
+                return WithMetadata(result, {"continuation_id": session_id,
+                                            "show_output": True})
             return result
 
         except Exception as exc:
@@ -821,7 +823,8 @@ IMPORTANT NOTES:
                 },
             }
             if session.is_alive:
-                return (result, {"continuation_id": session_id, "show_output": False})
+                return WithMetadata(result, {"continuation_id": session_id,
+                                            "show_output": False})
             return result
         except Exception as exc:
             self._trace(f"input: id={session_id} FAILED: {exc}")
@@ -849,7 +852,9 @@ IMPORTANT NOTES:
                 'is_alive': session.is_alive,
             }
             if session.is_alive:
-                return (result, {"continuation_id": session_id, "show_output": False, "show_popup": False})
+                return WithMetadata(result, {"continuation_id": session_id,
+                                            "show_output": False,
+                                            "show_popup": False})
             return result
         except Exception as exc:
             return {'error': f'shell_read: {exc}', 'is_alive': session.is_alive}
@@ -891,7 +896,8 @@ IMPORTANT NOTES:
                 },
             }
             if session.is_alive:
-                return (result, {"continuation_id": session_id, "show_output": False})
+                return WithMetadata(result, {"continuation_id": session_id,
+                                            "show_output": False})
             return result
         except ValueError as exc:
             return {'error': str(exc)}
@@ -926,7 +932,7 @@ IMPORTANT NOTES:
                 'jaato.shell.session_id': session_id,
                 'jaato.shell.exit_status': result.get('exit_status'),
             }
-            return (result, {"show_output": True})
+            return WithMetadata(result, {"show_output": True})
 
         except Exception as exc:
             # Clean up even on error

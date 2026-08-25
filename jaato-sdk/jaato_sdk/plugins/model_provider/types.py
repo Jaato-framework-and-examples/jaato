@@ -179,6 +179,39 @@ def _sanitize_source(source: str) -> str:
     return cleaned.strip()[:64]
 
 
+@dataclass
+class WithMetadata:
+    """A tool result plus SIDE-CHANNEL metadata for the session layer.
+
+    Lets an executor pass ``continuation_id`` / ``show_output`` /
+    ``show_popup`` up to the UI without putting them in the model-facing
+    result.  ``ToolExecutor`` merges ``metadata`` into ``result`` so the
+    session reads it at ``executor_result[1]`` -- the same level as
+    ``auto_backgrounded``.
+
+    **Why this is a TYPE and not a bare 2-tuple.**  It used to be
+    ``return (result, {"continuation_id": ...})``, and ``ToolExecutor``
+    unwrapped ANY 2-tuple whose second element was a dict.  That is the
+    same shape as the ``(ok, payload)`` contract
+    (``split_executor_result``), which 19 executors return.  The two
+    conventions were structurally indistinguishable, so ``(False, receipt)``
+    was read as result=``False`` / metadata=``receipt``; the merge was
+    skipped because ``False`` is not a dict; and the call came back as
+    ``(True, False)`` -- flag inverted, payload GONE.  Both halves were
+    affected: ``(True, {...})`` became ``(True, True)``.
+
+    Naming ONE of the two conventions makes the other unambiguous.  This
+    one is named because it has four producers and the other has nineteen.
+
+    Attributes:
+        result: The model-facing tool result.
+        metadata: Side-channel keys merged into ``result`` by the executor.
+    """
+
+    result: Any
+    metadata: Dict[str, Any]
+
+
 def wrap_untrusted_content(text: str, source: Optional[str] = None) -> str:
     """Wrap ``text`` in the untrusted-content boundary, neutralizing any
     embedded marker so injected content can't break out of the block."""
