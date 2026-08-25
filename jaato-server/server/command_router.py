@@ -1868,10 +1868,28 @@ class CommandRouter:
             }
         elif hasattr(part, 'function_response') and part.function_response:
             fr = part.function_response
+            # ``ToolResult`` has ``result``, never ``response`` — so the
+            # old ``hasattr(fr, 'response')`` was ALWAYS False and every
+            # tool response in request_history was sent as ``str(fr)``:
+            # the dataclass REPR, not data.  A client could not read a
+            # tool result structurally at all; it had to parse a Python
+            # repr to recover ``is_error`` or the result dict, and a large
+            # result was stringified whole into the history payload.
+            #
+            # The hasattr guard is what hid it: a wrong attribute name and
+            # an absent one are indistinguishable to ``hasattr``, and the
+            # fallback produced something that LOOKED like a value.
             return {
                 "type": "function_response",
-                "name": fr.name if hasattr(fr, 'name') else str(fr),
-                "response": fr.response if hasattr(fr, 'response') else str(fr),
+                "name": getattr(fr, 'name', ''),
+                "call_id": getattr(fr, 'call_id', ''),
+                "response": fr.result,
+                "is_error": getattr(fr, 'is_error', False),
+                # The untrusted-content boundary, readable WITHOUT parsing
+                # a repr.  A client deciding how to display or re-feed a
+                # tool result needs to know the text is attacker-authored.
+                "untrusted": getattr(fr, 'untrusted', False),
+                "untrusted_source": getattr(fr, 'untrusted_source', None),
             }
         else:
             return {"type": "unknown", "data": str(part)}
