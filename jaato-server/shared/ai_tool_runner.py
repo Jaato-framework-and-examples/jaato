@@ -23,7 +23,10 @@ logger = logging.getLogger(__name__)
 
 from shared.token_accounting import TokenLedger
 from jaato_sdk.plugins.base import OutputCallback
-from jaato_sdk.plugins.model_provider.types import CancelledException
+from jaato_sdk.plugins.model_provider.types import (
+    CancelledException,
+    WithMetadata,
+)
 
 # Callback for streaming tool output during execution
 # (chunk: str) -> None - simplified since call_id is known at call site
@@ -715,19 +718,47 @@ class ToolExecutor:
                 result = fn(name, args)
             else:
                 result = fn(args)
-            # Unwrap plugin metadata tuples: (result_dict, metadata_dict)
-            # Plugins can return (result, {"continuation_id": ...}) to pass
-            # metadata through to the session layer. Merge metadata into result
-            # so it appears at executor_result[1] — same level as auto_backgrounded.
-            if isinstance(result, tuple) and len(result) == 2 and isinstance(result[1], dict):
-                actual_result, metadata = result
-                if isinstance(actual_result, dict):
-                    actual_result.update(metadata)
-                return True, actual_result
-            return True, result
+            return self._normalize_executor_return(result)
         except Exception as exc:
             logger.error(f"Tool execution failed for {name}", exc_info=True)
             return False, {'error': str(exc), 'traceback': traceback.format_exc()}
+
+    @staticmethod
+    def _normalize_executor_return(result: Any) -> Tuple[bool, Any]:
+        """Turn an executor's raw return into ``(ok, result)``.
+
+        THREE SHAPES, and only one of them used to be distinguishable:
+
+        - :class:`WithMetadata` -- a result plus side-channel keys for the
+          session layer.  Merged, reported as success.
+        - a 2-tuple -- the ``(ok, payload)`` contract that
+          ``split_executor_result`` reads everywhere else.  Passed through
+          UNCHANGED, because it is already the shape this method returns.
+        - anything else -- a bare result, reported as success.
+
+        THE BUG THIS REPLACES: the metadata convention was a bare
+        ``(result_dict, metadata_dict)`` tuple, and this code unwrapped ANY
+        2-tuple whose second element was a dict.  ``(ok, payload)`` has
+        exactly that shape, so ``(False, receipt)`` was read as
+        result=``False`` / metadata=``receipt``; the merge was skipped
+        because ``False`` is not a dict; and the call returned
+        ``(True, False)`` -- flag inverted, payload gone.  ``(True, {...})``
+        became ``(True, True)``.  Nineteen executors return that contract.
+
+        Naming the metadata convention (:class:`WithMetadata`) is what makes
+        the bare tuple unambiguous.  Discriminating on
+        ``isinstance(x[0], bool)`` would have ARBITRATED the ambiguity
+        instead of removing it, and the next convention shaped
+        ``(bool, dict)`` would rejoin the collision silently.
+        """
+        if isinstance(result, WithMetadata):
+            merged = result.result
+            if isinstance(merged, dict):
+                merged.update(result.metadata)
+            return True, merged
+        if isinstance(result, tuple) and len(result) == 2:
+            return result[0], result[1]
+        return True, result
 
     def _execute_with_auto_background(
         self,
@@ -1144,29 +1175,29 @@ class ToolExecutor:
             finally:
                 if ctx:
                     ctx.__exit__(None, None, None)
-            # Unwrap plugin metadata tuples: (result_dict, metadata_dict)
-            # Plugins can return (result, {"continuation_id": ...}) to pass
-            # metadata through to the session layer. Merge metadata into result
-            # so it appears at executor_result[1] — same level as auto_backgrounded.
-            if isinstance(result, tuple) and len(result) == 2 and isinstance(result[1], dict):
-                actual_result, metadata = result
-                if isinstance(actual_result, dict):
-                    actual_result.update(metadata)
-                result = actual_result
+            # Normalize the executor's return; this path keeps the pieces
+            # separately because it injects permission metadata and notifies
+            # the reliability plugin before returning.
+            ok, result = self._normalize_executor_return(result)
             # Inject permission metadata if available and result is a dict
             if permission_meta and isinstance(result, dict):
                 result['_permission'] = permission_meta
 
-            # Notify reliability plugin of success
+            # Notify the reliability plugin of the REAL outcome.  This
+            # passed a hardcoded ``True``: an executor that returned
+            # ``(False, payload)`` -- a domain failure without an exception
+            # -- was reported to reliability as a success, so its retry and
+            # circuit-breaker policies never saw the failures they exist to
+            # count.  The flag was available the whole time; nothing read it.
             if self._reliability_plugin:
                 try:
                     self._reliability_plugin.on_tool_result(
-                        name, args, True, result, call_id or "", plugin_name
+                        name, args, ok, result, call_id or "", plugin_name
                     )
                 except Exception as e:
                     logger.debug(f"Reliability plugin on_tool_result failed: {e}")
 
-            return True, result
+            return ok, result
         except CancelledException:
             # Tool was cancelled via CancelToken — not an error, not retried.
             # Return a structured result so the session can record it in history.
