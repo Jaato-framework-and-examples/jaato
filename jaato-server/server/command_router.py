@@ -215,6 +215,10 @@ class CommandRouter:
                 self._handle_snapshot_workspace(client_id, event.args, workspace_path)
                 return
 
+            elif cmd == "session.send":
+                self._handle_session_send(client_id, event.args, event.payload)
+                return
+
             elif cmd == "session.wake":
                 self._handle_session_wake(client_id, event.args, event.payload)
                 return
@@ -506,6 +510,58 @@ class CommandRouter:
                     session_env=attached.server.get_all_session_env(),
                 )
             self._event_sink.set_client_session(client_id, target_session_id)
+
+    def _handle_session_send(
+        self, client_id: str, args: list, payload: Optional[dict],
+    ) -> None:
+        """Handle ``session.send`` — nudge a NAMED session in a cascade.
+
+        Design §9, client tier: a human or script reaches a stage directly,
+        without the model relaying and without knowing an opaque session id.
+
+        Accepts a structured ``payload`` (SDK callers) —
+        ``{cascade_driver_id, sibling_name, text}`` — or positional ``args``
+        ``[cascade_driver_id, sibling_name, text...]``.  The trailing
+        positional form joins the remainder so a typed message need not be
+        quoted; a message is prose and the shell has already split it.
+
+        Authentication is the transport's boundary (IPC socket-mode / WS
+        bearer token), as for ``session.wake``: this handler runs only for
+        callers already past that gate.
+
+        Distinct from ``session.wake``, which REVIVES a cold session and
+        drives a turn.  This reaches a LOADED session only, and reports
+        ``sibling_cold`` rather than quietly resurrecting one — the two are
+        different acts and conflating them would make the smaller one
+        silently perform the larger.
+        """
+        from jaato_sdk.events import ErrorEvent, SystemMessageEvent
+        p = payload or {}
+        cid = p.get("cascade_driver_id") or (args[0] if len(args) > 0 else None)
+        name = p.get("sibling_name") or (args[1] if len(args) > 1 else None)
+        text = p.get("text") or (" ".join(args[2:]) if len(args) > 2 else None)
+        if not cid or not name or not text:
+            self._event_sink.send_event(client_id, ErrorEvent(
+                error=("session.send requires <cascade_driver_id> "
+                       "<sibling_name> <message>"),
+                error_type="UsageError",
+                recoverable=True,
+            ))
+            return
+
+        receipt = self._session_manager.send_to_named_session(cid, name, text)
+        if receipt.get("status") != "delivered":
+            self._event_sink.send_event(client_id, ErrorEvent(
+                error=receipt.get("error", "session.send refused"),
+                error_type="SessionSendError",
+                recoverable=True,
+            ))
+            return
+        # A receipt, not a reply: this says the message was handed to the
+        # session, never that it was read or acted on.
+        self._event_sink.send_event(client_id, SystemMessageEvent(
+            message=f"session.send: delivered to {name!r}",
+        ))
 
     def _handle_session_wake(
         self, client_id: str, args: list, payload: Optional[dict],
@@ -1067,6 +1123,11 @@ class CommandRouter:
             ("", ""),
             ("    delete <id>       Delete a session permanently", "dim"),
             ("                      Removes both memory and disk state", "dim"),
+            ("", ""),
+            ("    send <cid> <name> <message>", "dim"),
+            ("                      Nudge a NAMED session in a cascade directly.", "dim"),
+            ("                      Reaches a LOADED session only — use wake to", "dim"),
+            ("                      revive a resting one.", "dim"),
             ("", ""),
             ("    help              Show this help message", "dim"),
             ("", ""),
