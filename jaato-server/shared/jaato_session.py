@@ -1608,6 +1608,23 @@ class JaatoSession:
         # that never stops -- and an unbounded loop in turn teardown would
         # hang the turn rather than lose a message.  The cap is generous and
         # loud, never silent.
+        # DIAGNOSTIC — the drain ITSELF, not its per-message lines.
+        #
+        # ``DRAIN_<TIER>_MESSAGE`` is emitted PER DRAINED MESSAGE, so silence
+        # means BOTH "the drain never ran" and "it ran and saw an empty
+        # queue".  Those are different bugs and no existing log separates
+        # them: absent and empty, in the instrument.
+        #
+        # ``queue_at_entry`` is the discriminator.  A send that was told
+        # "busy" put a message on this session's queue, so if the drain
+        # enters with 0 the message is not where the sender thinks it is --
+        # a different failure from a drain that never ran at all.
+        #
+        # Daemon log, deliberately: the per-message lines go to the provider
+        # trace, which is a silent no-op unless JAATO_PROVIDER_TRACE is set,
+        # and a diagnostic that needs an env var gets read after the run it
+        # was needed for.  Greppable token: DRAIN_SUMMARY.
+        _queue_at_entry = len(self._message_queue)
         _MAX_DRAIN_PASSES = 100
         for _pass in range(_MAX_DRAIN_PASSES):
             for tier_label, tier in (
@@ -1643,6 +1660,13 @@ class JaatoSession:
                 "remainder for the next turn rather than spinning",
                 self._agent_id, len(self._message_queue), _MAX_DRAIN_PASSES,
             )
+
+        logger.info(
+            "DRAIN_SUMMARY: agent_id=%s queue_at_entry=%d drained=%d "
+            "passes=%d queue_at_exit=%d",
+            self._agent_id, _queue_at_entry, drained_count, _pass + 1,
+            len(self._message_queue),
+        )
 
         collected_text = "\n\n".join(collected_messages)
 
