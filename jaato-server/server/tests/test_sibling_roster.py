@@ -16,6 +16,7 @@ LIVE ∪ COLD    sessions unload on ORPHAN constantly; a roster from the live
                table alone would make idle stages blink out, turning
                ``no_such_sibling`` into a race rather than a fact.
 """
+import threading
 from types import SimpleNamespace as NS
 
 import pytest
@@ -34,9 +35,18 @@ def _mgr(live=(), cold=(), boom=False):
         if boom:
             raise OSError("index unreadable")
         return list(cold)
-    return NS(_sessions={s.session_id: s for s in live},
-              _get_persisted_sessions=_persisted,
-              _roster_profile_name=SessionManager._roster_profile_name)
+    mgr = NS(_sessions={s.session_id: s for s in live},
+             _lock=threading.RLock(),
+             _get_persisted_sessions=_persisted,
+             _roster_profile_name=SessionManager._roster_profile_name)
+    # The roster derives the cascade's workspace so the cold half reads the
+    # right storage dir (omitting it read the plugin's DEFAULT dir, and every
+    # resting sibling vanished).  Bind the REAL method rather than stubbing
+    # it, so this fixture keeps exercising that derivation.
+    mgr._cascade_storage_workspace = (
+        SessionManager._cascade_storage_workspace.__get__(mgr, SessionManager)
+    )
+    return mgr
 
 
 def _cold(sid, name, cid, desc=None, profile=None):
