@@ -84,6 +84,20 @@ class ToolInfo:
     name: str
     discoverability: str = DISCOVERABILITY_DEFERRED
     description: str = ""
+    #: The tool's JSON-Schema ``parameters`` block, verbatim.
+    #:
+    #: Carried so a consumer can machine-check a tool SIGNATURE without a
+    #: live session.  Its absence was a real gap: the cascade-coordination
+    #: example wanted to validate its published spec against the framework
+    #: and found ``explain plugin --json`` surfaced name, discoverability and
+    #: description only -- so the signature its document specified could not
+    #: be compared to the one that shipped, and four drifts (a parameter that
+    #: was never implemented, a renamed one, and two stale return shapes)
+    #: went unnoticed in a public repo.
+    #:
+    #: ``None`` when the plugin's schema omitted it, which is distinct from
+    #: ``{}`` -- a tool that genuinely takes no arguments.
+    parameters: "Optional[Dict[str, Any]]" = None
 
 
 @dataclass
@@ -350,10 +364,15 @@ def plugins() -> Dict[str, PluginInfo]:
         # tools (best-effort)
         try:
             for schema in plugin.get_tool_schemas() or []:
+                _params = getattr(schema, "parameters", None)
                 info.tools.append(ToolInfo(
                     name=getattr(schema, "name", "?"),
                     discoverability=getattr(schema, "discoverability", DISCOVERABILITY_DEFERRED),
                     description=(getattr(schema, "description", "") or "").split("\n")[0],
+                    # Copied, not referenced: a consumer mutating what it was
+                    # handed must not reshape the live plugin's schema.
+                    parameters=(dict(_params) if isinstance(_params, dict)
+                                else None),
                 ))
         except Exception:
             info.dynamic = True
