@@ -1582,28 +1582,67 @@ class JaatoSession:
         # Order is an authority statement: high-priority first (a human or a
         # parent may steer), then idle-only (a child reports, a sibling
         # coordinates) — neither of which may interrupt work in progress.
-        for tier_label, tier in (
-            ("PRIORITY", HIGH_PRIORITY_SOURCES),
-            ("IDLE_ONLY", IDLE_ONLY_SOURCES),
-        ):
-            while True:
-                msg = self._message_queue.pop_first_matching(
-                    lambda _m: True, source_types=set(tier),
-                )
-                if msg is None:
-                    break
+        # DRAIN UNTIL THE QUEUE IS EMPTY, not once.
+        #
+        # A single pass leaves a hole for a message that arrives WHILE the
+        # pass is running: the sender sees the target still busy (the daemon
+        # clears ``_model_running`` only after this RPC unwinds), so it takes
+        # the QUEUE branch -- onto a tier whose drainer has already gone past.
+        # Nothing pops it afterwards, because ``_on_continuation_needed`` is
+        # restored to None when the RPC returns.  The message is accepted and
+        # then stranded, permanently.
+        #
+        # Reported by the perpetual-monologue cascade, where it is not a rare
+        # race but the STEADY STATE: in a symmetric two-sibling loop the
+        # sender's post-send narration keeps it "busy" across exactly the
+        # interval when the fast half replies.  The tighter the loop, the more
+        # reliably it strands.  A request/response cascade never sees it,
+        # because the target's next turn drains it.
+        #
+        # The re-check is what ends the turn: every pass happens while the
+        # continuation callback is still installed, so a late message either
+        # lands before a check (drained here) or after the busy flag clears
+        # (target reads IDLE -> the sender DRIVES it).
+        #
+        # Bounded: each pass POPS, so it can only spin against a producer
+        # that never stops -- and an unbounded loop in turn teardown would
+        # hang the turn rather than lose a message.  The cap is generous and
+        # loud, never silent.
+        _MAX_DRAIN_PASSES = 100
+        for _pass in range(_MAX_DRAIN_PASSES):
+            for tier_label, tier in (
+                ("PRIORITY", HIGH_PRIORITY_SOURCES),
+                ("IDLE_ONLY", IDLE_ONLY_SOURCES),
+            ):
+                while True:
+                    msg = self._message_queue.pop_first_matching(
+                        lambda _m: True, source_types=set(tier),
+                    )
+                    if msg is None:
+                        break
 
-                drained_count += 1
-                collected_messages.append(msg.text)
-                self._trace(
-                    f"DRAIN_{tier_label}_MESSAGE: agent_id={self._agent_id}, "
-                    f"source_type={msg.source_type.value}, "
-                    f"source_id={msg.source_id}, text={msg.text[:100]}..."
-                )
+                    drained_count += 1
+                    collected_messages.append(msg.text)
+                    self._trace(
+                        f"DRAIN_{tier_label}_MESSAGE: agent_id={self._agent_id}, "
+                        f"source_type={msg.source_type.value}, "
+                        f"source_id={msg.source_id}, text={msg.text[:100]}..."
+                    )
 
-                # Log the message for tracing (UI visibility)
-                if self._on_prompt_injected:
-                    self._on_prompt_injected(msg.text)
+                    # Log the message for tracing (UI visibility)
+                    if self._on_prompt_injected:
+                        self._on_prompt_injected(msg.text)
+
+            # Anything that arrived during the pass above goes round again.
+            if len(self._message_queue) == 0:
+                break
+        else:
+            logger.warning(
+                "DRAIN_MESSAGES: agent_id=%s still had %d queued after %d "
+                "passes — a producer is outpacing the drain; leaving the "
+                "remainder for the next turn rather than spinning",
+                self._agent_id, len(self._message_queue), _MAX_DRAIN_PASSES,
+            )
 
         collected_text = "\n\n".join(collected_messages)
 

@@ -215,6 +215,10 @@ class CommandRouter:
                 self._handle_snapshot_workspace(client_id, event.args, workspace_path)
                 return
 
+            elif cmd == "session.save":
+                self._handle_session_save(client_id, session_id, event.args)
+                return
+
             elif cmd == "session.send":
                 self._handle_session_send(client_id, event.args, event.payload)
                 return
@@ -510,6 +514,50 @@ class CommandRouter:
                     session_env=attached.server.get_all_session_env(),
                 )
             self._event_sink.set_client_session(client_id, target_session_id)
+
+    def _handle_session_save(
+        self, client_id: str, session_id: str, args: list,
+    ) -> None:
+        """Handle ``session.save`` — flush a LIVE session's state to disk.
+
+        ``SessionManager.save_session`` has always existed; nothing exposed
+        it.  So a driver that wanted a session's transcript on disk had to
+        force an unload — attach elsewhere and let the orphan sweep save it —
+        which is a side effect standing in for an interface, and one that
+        silently does nothing when the client is already attached elsewhere.
+
+        Reported by the perpetual-monologue cascade, whose evidence for its
+        strongest claim stayed a model's paraphrase rather than an artifact
+        because the sending session's transcript was never re-saved.
+
+        Saves the CALLER's session by default; pass a session id to save
+        another (a driver saving a stage it is not attached to).  Saving is
+        idempotent and does not disturb a running turn -- it writes the state
+        as it stands.
+        """
+        from jaato_sdk.events import ErrorEvent, SystemMessageEvent
+        target = (args[0] if args else None) or session_id
+        if not target:
+            self._event_sink.send_event(client_id, ErrorEvent(
+                error=("session.save: no session — attach first, or pass "
+                       "a session id"),
+                error_type="UsageError",
+                recoverable=True,
+            ))
+            return
+        if self._session_manager.save_session(target):
+            self._event_sink.send_event(client_id, SystemMessageEvent(
+                message=f"session.save: {target} written to disk",
+            ))
+            return
+        # False means NOT LOADED — a distinct fact from a write failure, and
+        # the caller needs it: an unloaded session is already on disk.
+        self._event_sink.send_event(client_id, ErrorEvent(
+            error=(f"session.save: {target} is not loaded in memory "
+                   f"(an unloaded session is already persisted)"),
+            error_type="SessionSaveError",
+            recoverable=True,
+        ))
 
     def _handle_session_send(
         self, client_id: str, args: list, payload: Optional[dict],
@@ -1126,6 +1174,9 @@ class CommandRouter:
             ("", ""),
             ("    delete <id>       Delete a session permanently", "dim"),
             ("                      Removes both memory and disk state", "dim"),
+            ("", ""),
+            ("    save [id]         Flush a live session's state to disk", "dim"),
+            ("                      Defaults to the attached session.", "dim"),
             ("", ""),
             ("    send <cid> <name> <message>", "dim"),
             ("                      Nudge a NAMED session in a cascade directly.", "dim"),
