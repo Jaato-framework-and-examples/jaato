@@ -20,6 +20,7 @@ history mutation (``_remove_tool_results_from_history``).
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Callable, List
 
 from jaato_sdk.plugins.model_provider.types import ToolResult
@@ -169,11 +170,16 @@ def truncate_results_to_fit(
         )
         truncated_content = kept_text + notice
 
-        truncated[idx] = ToolResult(
-            call_id=tr.call_id,
-            name=tr.name,
+        # ``replace`` rather than a fresh ToolResult: rebuilding by hand
+        # silently dropped every field not listed, and the one that
+        # mattered was ``untrusted``.  The inversion was the dangerous
+        # part -- the BIGGER an untrusted result, the likelier it was
+        # truncated, so the payloads most worth wrapping were exactly the
+        # ones that lost their boundary.  ``replace`` also means the next
+        # field added to ToolResult cannot be dropped here by omission.
+        truncated[idx] = replace(
+            tr,
             result=truncated_content,
-            is_error=tr.is_error,
             attachments=None,  # Drop attachments to reduce size
         )
         tokens_removed += removed_tokens
@@ -284,11 +290,11 @@ def cap_tool_results(
             f"(cap={per_result_cap_tokens})"
         )
 
-        truncated.append(ToolResult(
-            call_id=tr.call_id,
-            name=tr.name,
+        # See the note in ``truncate_results_to_fit`` -- same rebuild,
+        # same dropped untrusted mark, same fix.
+        truncated.append(replace(
+            tr,
             result=kept_text + notice,
-            is_error=tr.is_error,
             attachments=None,  # Drop attachments to reduce size
         ))
 
