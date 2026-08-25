@@ -63,9 +63,15 @@ def _sm(*sessions, on_disk=(), disk_by_workspace=None):
     sm._lock = threading.RLock()
     sm._sibling_pending, sm._sibling_exchanges = {}, {}
     sm.delivered = []
+    # Both mechanisms recorded: busy peers are queued (inject), idle peers
+    # are DRIVEN (send_message_to_session).  Stubbing only the injector
+    # would make "the idle peer ran" look like "nothing was delivered".
     sm.inject_prompt_to_session = (
         lambda sid, t, source_id=None, source_type=None:
         sm.delivered.append(sid) or True
+    )
+    sm.send_message_to_session = (
+        lambda sid, t: sm.delivered.append(sid) or True
     )
     sm._get_persisted_sessions = lambda workspace_path=None: list(
         disk.get(workspace_path, []))

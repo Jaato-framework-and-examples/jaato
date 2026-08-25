@@ -5206,14 +5206,17 @@ class SessionManager:
         expressible (design §8).  The receipt says what happened to the
         MESSAGE, never what the peer decided:
 
-        ``accepted``   the peer was idle; ``inject_prompt`` fired its
-                       continuation, so a turn started ON THE PEER'S OWN
-                       SESSION.  Its cost lands on the peer and depletes the
+        ``accepted``   the peer was idle, so a turn was DRIVEN on its own
+                       session.  Its cost lands on the peer and depletes the
                        shared cid pool via ``_accumulate_cascade_budget`` --
                        a sibling cannot spend a budget nobody can see.
         ``queued``     the peer was mid-turn.  SIBLING is an idle-only tier,
                        so the message waits for the current turn to end
-                       rather than interrupting it.
+                       rather than interrupting it, and is drained at that
+                       boundary by ``JaatoSession._drain_child_messages``.
+
+        QUEUED-AND-UNDRAINED IS NOT A STATE THIS CAN PRODUCE, and it used to
+        be the common one -- see ``shared.message_delivery``.
         ``no_such_sibling`` / ``sibling_cold`` / ``refused``
 
         ``queued`` and ``accepted`` are both about DELIVERY.  Neither claims
@@ -5316,12 +5319,38 @@ class SessionManager:
         wrapped = wrap_untrusted_content(
             text, source=f"sibling:{sender_name or sender_session_id}")
 
-        delivered = self.inject_prompt_to_session(
-            target_id, wrapped,
-            source_id=sender_name or sender_session_id,
-            source_type=SourceType.SIBLING,
+        # The SAME decision send_to_subagent makes, from the same module:
+        # busy -> queue on this sender's tier, idle -> DRIVE a turn.  Only the
+        # two mechanisms differ (daemon-to-runner RPC here, in-process there).
+        #
+        # This used to inject in BOTH branches and report ``accepted``.  An
+        # injection into an idle peer starts nothing — ``inject_prompt`` fires
+        # a turn only while ``_on_continuation_needed`` is installed, which is
+        # for the duration of a send_message RPC — so the message queued on a
+        # tier with no drainer and was discarded on unload.
+        from shared.message_delivery import QUEUED, deliver
+        reached: Dict[str, bool] = {}
+
+        def _queue() -> None:
+            reached["ok"] = self.inject_prompt_to_session(
+                target_id, wrapped,
+                source_id=sender_name or sender_session_id,
+                source_type=SourceType.SIBLING,
+            )
+
+        def _drive() -> None:
+            # Runs a turn on the peer's OWN session, keeping its id, so the
+            # cost lands on the peer and depletes the shared cid pool.  The
+            # SIBLING tier is moot here: it exists to stop a peer interrupting
+            # work in progress, and there is none.  The body is already
+            # wrapped as untrusted content with the sender stamped by the
+            # daemon, so the receiving model still sees the boundary.
+            reached["ok"] = self.send_message_to_session(target_id, wrapped)
+
+        outcome = deliver(
+            is_busy=lambda: busy, queue=_queue, drive=_drive,
         )
-        if not delivered:
+        if not reached.get("ok"):
             return {"status": "refused",
                     "error": (f"send_to_sibling: {sibling_name!r} could not be "
                               f"reached (no live runner channel).")}
@@ -5335,7 +5364,7 @@ class SessionManager:
                 # queuing, so whatever was waiting has drained with it.
                 self._sibling_pending.pop(target_id, None)
 
-        return {"status": "queued" if busy else "accepted",
+        return {"status": outcome,
                 "sibling_name": sibling_name,
                 "bytes": size}
 
