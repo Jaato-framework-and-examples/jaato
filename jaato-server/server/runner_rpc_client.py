@@ -90,7 +90,37 @@ class RunnerCallError(RuntimeError):
 
     Distinct from a tool-level failure (which surfaces in the
     response envelope's ``error`` payload, not as an exception).
+
+    Carries the runner-side ``traceback`` when the envelope had one.  The
+    runner sanitizes and ships frames in ``ErrorPayload.traceback``
+    (``runner/rpc.py`` on every executor exception; ``envelope.py`` puts it
+    on the wire) and NOTHING daemon-side read it.  So a crash inside a model
+    loop reached every consumer as one sanitized line — exception type and
+    message intact, frames gone — and the line reads like a finished error,
+    which is worse than an obviously truncated one: a reader assumes they
+    have the wrong log rather than that the frames were dropped.
     """
+
+    def __init__(self, message: str, *, traceback_text: Optional[str] = None):
+        super().__init__(message)
+        #: Runner-side frames, or ``None`` when the envelope carried none.
+        self.traceback_text = traceback_text
+
+
+def _call_error(prefix: str, response: "ResponseEnvelope") -> RunnerCallError:
+    """Build a :class:`RunnerCallError` that KEEPS the runner's frames.
+
+    One helper rather than three copies of the same two lines: the frames
+    were dropped identically at every site, and a fourth site would have
+    dropped them again.  See :class:`RunnerCallError` for what was lost.
+    """
+    err = response.error
+    err_type = err.type if err else "UnknownError"
+    err_msg = err.message if err else "no error message"
+    return RunnerCallError(
+        f"{prefix} failed: {err_type}: {err_msg}",
+        traceback_text=(err.traceback if err else None),
+    )
 
 
 class RunnerRPCClient:
@@ -856,11 +886,7 @@ class RunnerRPCClient:
             response = await coro
 
         if not response.ok or response.error is not None:
-            err_type = response.error.type if response.error else "UnknownError"
-            err_msg = response.error.message if response.error else "no message"
-            raise RunnerCallError(
-                f"session.bootstrap failed: {err_type}: {err_msg}"
-            )
+            raise _call_error("session.bootstrap", response)
         result = response.result if isinstance(response.result, dict) else {}
         return result
 
@@ -2405,11 +2431,7 @@ class RunnerRPCClient:
         else:
             response = await coro
         if not response.ok or response.error is not None:
-            err_type = response.error.type if response.error else "UnknownError"
-            err_msg = response.error.message if response.error else "no error message"
-            raise RunnerCallError(
-                f"session.send_message failed: {err_type}: {err_msg}"
-            )
+            raise _call_error("session.send_message", response)
         if not isinstance(response.result, dict):
             raise RunnerCallError(
                 f"session.send_message: unexpected result type "
@@ -2511,11 +2533,7 @@ class RunnerRPCClient:
         else:
             response = await coro
         if not response.ok or response.error is not None:
-            err_type = response.error.type if response.error else "UnknownError"
-            err_msg = response.error.message if response.error else "no error message"
-            raise RunnerCallError(
-                f"{method} failed: {err_type}: {err_msg}"
-            )
+            raise _call_error(method, response)
         if not isinstance(response.result, dict):
             raise RunnerCallError(
                 f"{method}: unexpected result type "

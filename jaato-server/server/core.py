@@ -4909,13 +4909,33 @@ class JaatoServer:
                 # vendor-correct message (Fix #1a in PR #118) without
                 # needing to parse the binary IPC frame separately.
                 # Greppable token: MODEL_THREAD_TERMINAL_ERROR.
+                #
+                # RUNNER-SIDE FRAMES, when the failure came from across the
+                # RPC boundary.  The runner sanitizes and ships them in
+                # ``ErrorPayload.traceback``; ``RunnerCallError`` now carries
+                # them here.  Without this the crash reached every consumer
+                # as ONE SANITIZED LINE -- exception type and message intact,
+                # frames gone -- and the line reads like a finished error, so
+                # a reader assumes they have the wrong log rather than that
+                # the frames were dropped.
+                #
+                # They go to BOTH witnesses on purpose: the log for whoever
+                # is on the machine, ``details`` for a client that is not.
+                _runner_tb = getattr(e, "traceback_text", None)
                 logger.info(
                     "MODEL_THREAD_TERMINAL_ERROR error_type=%s error=%s",
                     type(e).__name__, str(e),
                 )
+                if _runner_tb:
+                    logger.error(
+                        "MODEL_THREAD_TERMINAL_ERROR runner traceback:\n%s",
+                        _runner_tb,
+                    )
                 server.emit(ErrorEvent(
                     error=str(e),
                     error_type=type(e).__name__,
+                    details=({"runner_traceback": _runner_tb}
+                             if _runner_tb else None),
                 ))
                 terminal_error = e
             finally:
