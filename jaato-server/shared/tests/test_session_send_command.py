@@ -27,12 +27,12 @@ from shared.message_queue import SourceType
 from server.session_manager import SessionManager
 
 
-def _session(sid, cid="cid-1", name=None):
+def _session(sid, cid="cid-1", name=None, running=False):
     s = type("S", (), {})()
     s.session_id = sid
     s.cascade_driver_id = cid
     s.sibling_name = name
-    s.server = type("V", (), {"_model_running": False})()
+    s.server = type("V", (), {"_model_running": running})()
     s.attached_clients = []
     s.description = None
     return s
@@ -44,10 +44,16 @@ def _sm(*sessions):
     sm._lock = threading.RLock()
     sm._sibling_pending = {}
     sm._sibling_exchanges = {}
+    # Both mechanisms, because the choice between them is under test: a BUSY
+    # target is queued mid-turn (operator authority), an IDLE one is DRIVEN.
     sm.delivered = []
     sm.inject_prompt_to_session = (
         lambda sid, text, source_id=None, source_type=None:
         sm.delivered.append((sid, text, source_id, source_type)) or True
+    )
+    sm.send_message_to_session = (
+        lambda sid, text:
+        sm.delivered.append((sid, text, "driven", None)) or True
     )
     sm._get_persisted_sessions = lambda **kw: []
     return sm
@@ -56,13 +62,19 @@ def _sm(*sessions):
 def test_a_named_session_is_reachable_without_its_id():
     sm = _sm(_session("s-b", name="builder"))
     r = sm.send_to_named_session("cid-1", "builder", "the file is free now")
-    assert r["status"] == "delivered"
+    assert r["status"] == "accepted", "an idle target is DRIVEN, not queued"
     assert r["session_id"] == "s-b", "resolved the opaque id for the caller"
 
 
 def test_the_operator_speaks_with_user_authority():
-    """Tier is an authority statement, not a routing convenience."""
-    sm = _sm(_session("s-b", name="builder"))
+    """Tier is an authority statement, not a routing convenience.
+
+    Checked on the QUEUED path: USER is a high-priority tier, so an operator
+    reaching a BUSY session is picked up mid-turn rather than waiting for the
+    turn to end.  That is the authority difference from a sibling, and it is
+    only observable when there is a turn to interrupt.
+    """
+    sm = _sm(_session("s-b", name="builder", running=True))
     sm.send_to_named_session("cid-1", "builder", "stop and re-read the spec")
     _sid, _text, source_id, source_type = sm.delivered[0]
     assert source_type is SourceType.USER

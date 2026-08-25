@@ -30,6 +30,7 @@ from jaato_sdk.plugins.model_provider.types import (
     DISCOVERABILITY_DEFERRED,
 )
 from ..gc import load_gc_plugin, GCConfig
+from ...message_delivery import QUEUED, deliver
 from ...message_queue import SourceType
 
 if TYPE_CHECKING:
@@ -1033,9 +1034,10 @@ class SubagentPlugin(DaemonForwardingMixin):
                 'FIRE AND FORGET: this returns a delivery receipt, never the '
                 "peer's reply — there is no way to wait for one, so you "
                 'cannot deadlock with a peer that is waiting for you. '
-                'status is one of: accepted (the peer was idle and is now '
-                'taking a turn), queued (the peer is mid-turn; your message '
-                'waits until it finishes), no_such_sibling, sibling_cold '
+                'status is one of: accepted (the peer was idle; a turn '
+                'has been started on it), queued (the peer is mid-turn; your '
+                'message is delivered when that turn ends), '
+                'no_such_sibling, sibling_cold '
                 '(the peer is resting and is NOT woken by a message), or '
                 'refused (with a reason). '
                 'NEITHER accepted NOR queued means the peer read it, agreed, '
@@ -2064,51 +2066,63 @@ class SubagentPlugin(DaemonForwardingMixin):
             session = session_info['session']
             agent_id = session_info['agent_id']
 
-            # Check if subagent is currently processing
-            if session.is_running:
-                # Subagent is busy - queue for mid-turn processing
-                # Use PARENT source type for priority processing
-                logger.info(f"SEND_TO_SUBAGENT: {subagent_id} is busy, queuing message")
+            # Busy -> queue on the PARENT tier (mid-turn: a parent may steer
+            # a child's work in progress).  Idle -> DRIVE a turn, because an
+            # injection into an idle session starts nothing.
+            #
+            # The choice lives in ``shared.message_delivery`` so every sender
+            # makes it the same way; this call site supplies only the two
+            # mechanisms, which really are per-tier.  See that module for why
+            # cloning the decision produced a receipt that lied.
+            def _queue() -> None:
+                logger.info(
+                    f"SEND_TO_SUBAGENT: {subagent_id} is busy, queuing message")
                 session.inject_prompt(
                     message,
-                    source_id=self._parent_session._agent_id if self._parent_session else "main",
-                    source_type=SourceType.PARENT
+                    source_id=(self._parent_session._agent_id
+                               if self._parent_session else "main"),
+                    source_type=SourceType.PARENT,
                 )
+
+            def _drive() -> None:
+                # Non-blocking: the running-state callback emits active/idle
+                # as send_message() transitions the activity phase, and the
+                # session auto-forwards COMPLETED/IDLE/ERROR to the parent
+                # via _forward_to_parent.
+                logger.info(
+                    f"SEND_TO_SUBAGENT: {subagent_id} is idle, "
+                    f"dispatching to background thread")
+                if self._ui_hooks:
+                    self._ui_hooks.on_agent_output(
+                        agent_id=agent_id, source="parent",
+                        text=message, mode="write",
+                    )
+                self._executor.submit(
+                    self._process_send_to_subagent_async,
+                    session, agent_id, message,
+                )
+
+            outcome = deliver(
+                is_busy=lambda: bool(session.is_running),
+                queue=_queue,
+                drive=_drive,
+            )
+            # This tool's OWN vocabulary is kept: ``dispatched`` is what
+            # send_to_subagent has always returned for the idle branch, and
+            # renaming a shipped tool's status would change a contract the
+            # model and its personas read.  The DECISION is what needed
+            # sharing, not the wording.
+            if outcome == QUEUED:
                 return {
                     'success': True,
                     'status': 'queued',
-                    'message': f'Subagent is busy. Message queued for processing.'
+                    'message': 'Subagent is busy. Message queued for processing.',
                 }
-
-            # Subagent is idle - dispatch to background thread.
-            # The running-state callback on the session will emit
-            # active/idle status automatically when send_message()
-            # transitions the activity phase.  The session also
-            # auto-forwards COMPLETED/IDLE/ERROR events to the parent
-            # via _forward_to_parent, so we do not need to block here.
-            logger.info(f"SEND_TO_SUBAGENT: {subagent_id} is idle, dispatching to background thread")
-
-            # Emit the parent's message to UI
-            if self._ui_hooks:
-                self._ui_hooks.on_agent_output(
-                    agent_id=agent_id,
-                    source="parent",
-                    text=message,
-                    mode="write"
-                )
-
-            # Submit to thread pool (non-blocking, like spawn_subagent)
-            self._executor.submit(
-                self._process_send_to_subagent_async,
-                session,
-                agent_id,
-                message
-            )
-
             return {
                 'success': True,
                 'status': 'dispatched',
-                'message': f'Message dispatched to idle subagent. Response will arrive as a COMPLETED event.'
+                'message': ('Message dispatched to idle subagent. '
+                            'Response will arrive as a COMPLETED event.'),
             }
 
         except Exception as e:

@@ -17,7 +17,13 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Callable, Dict, FrozenSet, List, Literal, Optional, Set, Tuple, TYPE_CHECKING
 
-from .message_queue import MessageQueue, QueuedMessage, SourceType
+from .message_queue import (
+    HIGH_PRIORITY_SOURCES,
+    IDLE_ONLY_SOURCES,
+    MessageQueue,
+    QueuedMessage,
+    SourceType,
+)
 from .session_history import SessionHistory
 from .gc_support import (
     apply_gc_removal_list as _gc_apply_removal_list,
@@ -1564,39 +1570,40 @@ class JaatoSession:
         drained_count = 0
         collected_messages: List[str] = []
 
-        # First drain high-priority messages (USER, PARENT, SYSTEM)
-        # These take precedence - if the user/parent sends a message, it should
-        # be processed before subagent status updates
-        while True:
-            msg = self._message_queue.pop_first_parent_message()
-            if msg is None:
-                break
+        # Drained BY TIER SET, not by named accessor.  ``message_queue``
+        # already declares membership once (HIGH_PRIORITY_SOURCES /
+        # IDLE_ONLY_SOURCES); enumerating tiers here as well meant adding a
+        # source type required remembering to edit this function, and
+        # forgetting was a SILENT DISCARD — the message sat in a tier nobody
+        # popped and died with the session.  That is exactly what happened to
+        # SIBLING: the tier and its accessors shipped with the addressing
+        # work, and no drainer was ever wired.
+        #
+        # Order is an authority statement: high-priority first (a human or a
+        # parent may steer), then idle-only (a child reports, a sibling
+        # coordinates) — neither of which may interrupt work in progress.
+        for tier_label, tier in (
+            ("PRIORITY", HIGH_PRIORITY_SOURCES),
+            ("IDLE_ONLY", IDLE_ONLY_SOURCES),
+        ):
+            while True:
+                msg = self._message_queue.pop_first_matching(
+                    lambda _m: True, source_types=set(tier),
+                )
+                if msg is None:
+                    break
 
-            drained_count += 1
-            collected_messages.append(msg.text)
-            self._trace(
-                f"DRAIN_PRIORITY_MESSAGE: agent_id={self._agent_id}, "
-                f"source_type={msg.source_type.value}, source_id={msg.source_id}, "
-                f"text={msg.text[:100]}..."
-            )
+                drained_count += 1
+                collected_messages.append(msg.text)
+                self._trace(
+                    f"DRAIN_{tier_label}_MESSAGE: agent_id={self._agent_id}, "
+                    f"source_type={msg.source_type.value}, "
+                    f"source_id={msg.source_id}, text={msg.text[:100]}..."
+                )
 
-            # Log the message for tracing (UI visibility)
-            if self._on_prompt_injected:
-                self._on_prompt_injected(msg.text)
-
-        # Then drain child messages (subagent status updates)
-        # These are lower priority and processed after user/parent messages
-        while True:
-            msg = self._message_queue.pop_first_child_message()
-            if msg is None:
-                break
-
-            drained_count += 1
-            collected_messages.append(msg.text)
-            self._trace(
-                f"DRAIN_CHILD_MESSAGE: agent_id={self._agent_id}, "
-                f"source_id={msg.source_id}, text={msg.text[:100]}..."
-            )
+                # Log the message for tracing (UI visibility)
+                if self._on_prompt_injected:
+                    self._on_prompt_injected(msg.text)
 
             # Log the child message for tracing (UI visibility)
             if self._on_prompt_injected:
