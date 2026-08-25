@@ -3047,6 +3047,42 @@ class SessionManager:
 
         return server, session
 
+    def _wire_session_manager_into_plugins(self, server: Any) -> None:
+        """Give every plugin that asks for it a handle on this manager.
+
+        Duck-typed on the method, like the rest of the plugin lifecycle:
+        wiring by NAME (``get_plugin("session_ops")``) meant a second plugin
+        needing daemon-side session state had to edit this file, and a plugin
+        that GREW the hook without editing it would silently never receive
+        the manager.
+
+        Called from :meth:`_construct_and_initialize_server` -- the single
+        sanctioned construction funnel (see
+        ``server/tests/test_bootstrap_partition.py``) -- so create and
+        disk-restore are wired by the same line.  The standalone WS-server
+        path constructs its own ``JaatoServer`` and is deliberately NOT
+        wired: that mode has no ``SessionManager`` and no cascade, so the
+        plugins' "no session manager is attached" answer is accurate there
+        rather than a defect.
+
+        A failure to wire ONE plugin must not abort session construction, so
+        each is attempted independently and logged at WARNING -- loud enough
+        to find, not fatal.
+        """
+        registry = getattr(server, "registry", None)
+        if registry is None:
+            return
+        for name in registry.list_exposed():
+            plugin = registry.get_plugin(name)
+            if plugin is not None and hasattr(plugin, "set_session_manager"):
+                try:
+                    plugin.set_session_manager(self)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "set_session_manager failed for plugin %s: %s",
+                        name, exc,
+                    )
+
     def _construct_and_initialize_server(
         self,
         envelope: 'BootstrapEnvelope',
@@ -3200,6 +3236,16 @@ class SessionManager:
         # for a redundant SessionError here.
         if not server.initialize():
             return None, None
+
+        # Hand the manager to every plugin that asks for it.  MUST live here,
+        # in the ONE construction funnel, not at a caller: this helper is
+        # shared by session CREATE and by disk-RESTORE (which is what an
+        # ``attach`` to an unloaded session runs).  It used to sit in
+        # ``_create_session_impl``, so a session reached by attach came back
+        # with its tools present and their daemon wiring absent -- and the
+        # tools that need it answered "no session manager is attached", the
+        # same words a real misconfiguration produces.
+        self._wire_session_manager_into_plugins(server)
 
         # Reactor-bus sink: forward every event on this session's per-session
         # EventBus into the daemon-wide reactor bus, so a reactor that
@@ -5872,26 +5918,6 @@ class SessionManager:
             self._restore_budget_usage(
                 server, budget_usage, None, session_id,
             )
-
-        # Wire SessionManager into the session_ops plugin so its
-        # interrogate_session tool can fork_ask other daemon sessions.
-        if server.registry:
-            # Wire the manager into EVERY plugin that asks for it, rather than
-            # naming one.  The by-name form (``get_plugin("session_ops")``)
-            # meant a second plugin needing daemon-side session state had to
-            # edit this file — and a plugin that grew the hook without editing
-            # it would silently never receive the manager.  Duck-typed on the
-            # method, like the rest of the plugin lifecycle.
-            for _pname in server.registry.list_exposed():
-                _plugin = server.registry.get_plugin(_pname)
-                if _plugin is not None and hasattr(_plugin, "set_session_manager"):
-                    try:
-                        _plugin.set_session_manager(self)
-                    except Exception as exc:  # noqa: BLE001
-                        logger.warning(
-                            "set_session_manager failed for plugin %s: %s",
-                            _pname, exc,
-                        )
 
         # Switch to session-based event emission now that init is complete
         server.set_event_callback(lambda e: self._emit_to_session(session_id, e))

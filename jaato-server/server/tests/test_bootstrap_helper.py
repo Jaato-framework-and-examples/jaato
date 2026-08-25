@@ -204,6 +204,16 @@ def _bind_helper(fake_mgr: _FakeSessionManager):
             fake_mgr, SessionManager,
         )
     )
+    # Same reason as above: the funnel wires the manager into every plugin
+    # that asks for it, so an unbound fake raises AttributeError mid-helper.
+    # Binding the REAL method (rather than stubbing it) keeps the wiring
+    # under test — it is the line whose absence on the disk-restore path
+    # cost re-attached sessions their sibling verbs.
+    fake_mgr._wire_session_manager_into_plugins = (
+        SessionManager._wire_session_manager_into_plugins.__get__(
+            fake_mgr, SessionManager,
+        )
+    )
     return SessionManager._bootstrap_session.__get__(fake_mgr, SessionManager)
 
 

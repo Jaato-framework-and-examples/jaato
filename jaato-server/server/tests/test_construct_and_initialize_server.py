@@ -155,6 +155,15 @@ def _patch_jaato_server():
 def _bind_subhelper(fake_mgr: _FakeSessionManager):
     """Bind the real ``_construct_and_initialize_server`` to *fake_mgr*."""
     from server.session_manager import SessionManager
+    # The funnel wires the manager into every plugin that asks for it.
+    # Bind the REAL method so that line stays under test — its absence on
+    # the disk-restore path is what cost re-attached sessions their
+    # sibling verbs.
+    fake_mgr._wire_session_manager_into_plugins = (
+        SessionManager._wire_session_manager_into_plugins.__get__(
+            fake_mgr, SessionManager,
+        )
+    )
     return SessionManager._construct_and_initialize_server.__get__(
         fake_mgr, SessionManager,
     )
