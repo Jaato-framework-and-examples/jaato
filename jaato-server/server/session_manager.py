@@ -5053,6 +5053,35 @@ class SessionManager:
         with self._lock:
             self._reserved_session_ids.discard(session_id)
 
+    def _cascade_storage_workspace(
+        self, viewer_session_id: Optional[str], cid: Optional[str] = None,
+    ) -> Optional[str]:
+        """The workspace whose on-disk sessions hold this cascade's cold members.
+
+        ``_get_persisted_sessions(workspace_path=None)`` does NOT mean "every
+        workspace" -- it falls through to the session plugin's DEFAULT storage
+        path (``target_dir = storage_dir or self._storage_path``).  For a
+        workspace-scoped daemon that is a different directory, so the listing
+        comes back empty and a resting sibling reads as one that never
+        existed.  Absent and empty again, one layer down.
+
+        Derived here rather than asked of callers: the two sibling paths both
+        forgot to pass it, and a parameter that is silently wrong when omitted
+        is a worse contract than no parameter.
+
+        Prefers the viewer's own workspace; falls back to any loaded session
+        in the same cascade, since a cascade shares a workspace.
+        """
+        with self._lock:
+            viewer = self._sessions.get(viewer_session_id) if viewer_session_id else None
+            if viewer is not None and getattr(viewer, "workspace_path", None):
+                return viewer.workspace_path
+            if cid:
+                for s in self._sessions.values():
+                    if s.cascade_driver_id == cid and getattr(s, "workspace_path", None):
+                        return s.workspace_path
+        return None
+
     def build_sibling_roster(
         self, viewer_session_id: str, workspace_path: Optional[str] = None,
     ) -> Dict[str, Any]:
@@ -5098,6 +5127,12 @@ class SessionManager:
         you = getattr(viewer, "sibling_name", None) if viewer else None
         if cid is None:
             return {"you": you, "siblings": []}
+
+        # The plugin calls this with the session id alone, so without this
+        # the cold half listed the DEFAULT storage dir and came back empty --
+        # a resting sibling vanished from the roster it owns an address in.
+        if workspace_path is None:
+            workspace_path = self._cascade_storage_workspace(viewer_session_id, cid)
 
         rows: List[Dict[str, Any]] = []
         live_ids = set()
@@ -5404,7 +5439,15 @@ class SessionManager:
                 if s.cascade_driver_id == cid and s.sibling_name == sibling_name:
                     return sid, "live"
         try:
-            for info in self._get_persisted_sessions():
+            # Scoped to the cascade's workspace.  Omitting it read the
+            # DEFAULT storage dir, so every cold sibling resolved as
+            # "absent" -- and the sender was told the address does not
+            # exist, which is a different fact and needs a different
+            # response than "the peer is resting".
+            for info in self._get_persisted_sessions(
+                workspace_path=self._cascade_storage_workspace(
+                    viewer_session_id, cid),
+            ):
                 if info.session_id == viewer_session_id:
                     continue
                 if (getattr(info, "cascade_driver_id", None) == cid
