@@ -5258,6 +5258,87 @@ class SessionManager:
                 "sibling_name": sibling_name,
                 "bytes": size}
 
+    def send_to_named_session(
+        self, cascade_driver_id: str, sibling_name: str, text: str,
+    ) -> Dict[str, Any]:
+        """Deliver operator text to a cascade member BY NAME.  DAEMON-SIDE.
+
+        The client-tier counterpart of ``send_to_sibling`` (design §9): a
+        human or script nudges a named stage without the model relaying and
+        without knowing an opaque session id.  Named addressing is the whole
+        point -- an id you never saw cannot be typed by a human, put in a
+        profile, or written into a persona (§4).
+
+        THREE DELIBERATE DIFFERENCES FROM THE SIBLING PATH, each because the
+        sender is an OPERATOR and not a peer:
+
+        1. ``SourceType.USER``, not ``SIBLING``.  The tier is an AUTHORITY
+           statement, and a human reaching a session really does hold user
+           authority -- so this is processed mid-turn like any user message.
+           Labelling it SIBLING to get idle-only behaviour would be a lie
+           about who is speaking.
+        2. NOT wrapped as untrusted content.  The transport is the
+           authentication boundary (IPC socket mode / WS bearer token), and
+           wrapping an authenticated operator's words would teach the model
+           to discount a boundary that exists for attacker-authored text.
+        3. NO §8 caps.  Those bound an agent-to-agent ping-pong; the caps are
+           daemon-side precisely because no single agent can see the whole
+           conversation.  An operator is not in that loop and rate-limiting a
+           human at 200 messages per cascade would be theatre.
+
+        The §7 grammar refusal DOES still apply.  A client with a coordination
+        channel must not be able to forge a permission or clarification
+        answer through it -- those have their own typed request
+        (``PermissionResponseRequest``), which is where authority is checked.
+        Accepting them here would create a second, unchecked door to the same
+        decision.
+
+        COLD SESSIONS ARE NOT REVIVED.  ``session.wake`` is the primitive for
+        that, and it has the signature checks and event-id dedup this path
+        does not.  A nudge that silently resurrected a resting stage would be
+        a much bigger act than it looks.
+
+        Returns:
+            ``{"status": "delivered"|..., ...}``.  ``delivered`` means handed
+            to the session, never that it was read or acted on.
+        """
+        if not cascade_driver_id or not sibling_name:
+            return {"status": "refused",
+                    "error": "session.send requires a cascade id and a sibling name."}
+        if not text or not text.strip():
+            return {"status": "refused", "error": "session.send: message is empty."}
+
+        violation = self._sibling_grammar_violation(text)
+        if violation:
+            return {"status": "refused",
+                    "error": (f"session.send: <{violation}> is not accepted here. "
+                              f"Answer permission and clarification requests "
+                              f"through their own request type, where authority "
+                              f"is checked.")}
+
+        target_id, status = self._resolve_sibling(
+            None, cascade_driver_id, sibling_name)
+        if status == "absent":
+            return {"status": "no_such_sibling",
+                    "error": (f"session.send: no session named {sibling_name!r} "
+                              f"in cascade {cascade_driver_id!r}.")}
+        if status == "cold":
+            return {"status": "sibling_cold",
+                    "error": (f"session.send: {sibling_name!r} is resting "
+                              f"(unloaded). Use session.wake to revive it.")}
+
+        from shared.message_queue import SourceType
+        if not self.inject_prompt_to_session(
+            target_id, text, source_id="operator",
+            source_type=SourceType.USER,
+        ):
+            return {"status": "refused",
+                    "error": (f"session.send: {sibling_name!r} could not be "
+                              f"reached (no live runner channel).")}
+        return {"status": "delivered",
+                "sibling_name": sibling_name,
+                "session_id": target_id}
+
     def _resolve_sibling(
         self, viewer_session_id: str, cid: str, sibling_name: str,
     ) -> "Tuple[Optional[str], str]":
