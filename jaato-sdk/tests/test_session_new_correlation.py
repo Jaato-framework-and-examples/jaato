@@ -123,6 +123,16 @@ def test_the_gate_is_the_PROTOCOL_version_not_the_package_version():
 
 
 def test_the_protocol_minor_was_bumped_for_the_additive_field():
-    assert PROTOCOL_VERSION == "1.1"
+    """The correlation floor must be MET, and old clients must still connect.
+
+    This asserted ``PROTOCOL_VERSION == "1.1"`` — the literal rather than
+    the property — so the next additive field (``session_id`` on the base
+    ``Event``, 1.2) broke it while nothing about correlation had changed.
+    A version assertion that has to be edited on every unrelated bump
+    stops being read and starts being updated reflexively.
+    """
+    assert _protocol_compatible(
+        PROTOCOL_VERSION, IPCClient.MIN_CORRELATION_PROTOCOL), (
+        "the shipped protocol must satisfy the correlation floor")
     assert _protocol_compatible(PROTOCOL_VERSION, "1.0"), (
         "clients declaring 1.0 must still connect — the field is additive")

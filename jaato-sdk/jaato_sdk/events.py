@@ -56,7 +56,7 @@ from pydantic import BaseModel, ConfigDict, Field
 # and ErrorEvent, so a client can tell WHICH session.new a given answer
 # belongs to.  Minor bump per the compat rule -- same major, additive
 # optional fields -- so clients declaring 1.0 still connect.
-PROTOCOL_VERSION = "1.1"
+PROTOCOL_VERSION = "1.2"
 
 
 # =============================================================================
@@ -325,6 +325,35 @@ class Event(BaseModel):
     timestamp: str = Field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
     )
+    # WHICH SESSION THIS EVENT IS ABOUT (protocol 1.2+).
+    #
+    # Stamped centrally by ``SessionManager._emit_to_session`` — the one
+    # fan-out chokepoint that knows the session and feeds BOTH the
+    # direct-attach clients and the cascade-observer dispatch — so no
+    # emit site has to remember, and an observer can attribute every
+    # event it receives regardless of type.
+    #
+    # Before this, 12 of 112 event types declared their own
+    # ``session_id`` and the rest had none.  The split was not random:
+    # LIFECYCLE events (created / woken / restored / terminated) carried
+    # it; ACTIVITY events (turn, tool, agent output) did not.  So a
+    # cascade observer could watch sessions appear, sleep and die — but
+    # never watch them WORK, which is most of what an observer is for.
+    # Two siblings running under one cid were indistinguishable on the
+    # bus, because ``agent_id`` is ``"main"`` for every top-level
+    # session.
+    #
+    # Reading it with ``getattr(ev, "session_id", "")`` — the idiom the
+    # framework's own client scaffold used to teach — could not tell
+    # "this event type has no such field" from "the field is blank".
+    # Declaring it here collapses that to ONE meaning: empty means the
+    # event did not travel a routed path.
+    #
+    # An emitter may set it explicitly, and the router NEVER overwrites a
+    # populated value: an event ABOUT another session (e.g.
+    # ``SlotSettledEvent``, "the session that just ended") must keep its
+    # own subject rather than being relabelled with whoever emitted it.
+    session_id: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialization.

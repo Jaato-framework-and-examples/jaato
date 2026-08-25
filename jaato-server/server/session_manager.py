@@ -441,6 +441,35 @@ def compute_peer_role(
     return "unrelated"
 
 
+def _stamp_session_id(event: Any, session_id: Optional[str]) -> None:
+    """Attribute *event* to *session_id* — unless it already names one.
+
+    NEVER OVERWRITES.  An emitter that set ``session_id`` explicitly is
+    stating the event's SUBJECT, which is not always the session it was
+    routed through: ``SlotSettledEvent`` means "the session that just
+    ended", ``GateReleasedEvent`` means "the originating session".
+    Relabelling those with whoever emitted them would replace a true
+    fact with a plausible one — worse than leaving them blank, because
+    a wrong attribution is indistinguishable from a right one.
+
+    Tolerant of events that predate the base-class field (and of test
+    doubles that aren't ``Event`` at all): a failure to stamp must never
+    break event delivery.  The read side treats empty as "not routed",
+    so an unstamped event degrades to exactly the pre-1.2 behaviour
+    rather than to a wrong answer.
+    """
+    if not session_id:
+        return
+    try:
+        if not getattr(event, "session_id", ""):
+            event.session_id = session_id
+    except (AttributeError, ValueError):
+        # Pydantic raises ValueError for an undeclared field; a plain
+        # object raises AttributeError.  Neither is worth failing a
+        # delivery over.
+        pass
+
+
 class SessionManager:
     """Manages multiple named sessions with persistence.
 
@@ -3786,8 +3815,16 @@ class SessionManager:
         direct_client_id: Optional[str],
         cascade_driver_id: Optional[str],
         event: Event,
+        session_id: Optional[str] = None,
     ) -> None:
         """Centralized bootstrap-time event router (server 0.6.166+).
+
+        Stamps ``event.session_id`` (protocol 1.2+) for the same reason
+        :meth:`_emit_to_session` does — bootstrap-time events bypass that
+        chokepoint entirely (the Session isn't in ``self._sessions``
+        yet), so without stamping here the FIRST events of a session's
+        life — precisely the ones an observer uses to notice it exists —
+        would arrive unattributed.
 
         Replaces the previous ``on_event_during_init`` lambda pattern
         which routed ONLY to the requesting client via
@@ -3842,6 +3879,7 @@ class SessionManager:
         match a real cascade-observer's client_id, so the
         skip-branch is a no-op for that load-bearing path.
         """
+        _stamp_session_id(event, session_id)
         if direct_client_id is not None:
             self._emit_to_client(direct_client_id, event)
         if cascade_driver_id is not None:
@@ -4112,7 +4150,22 @@ class SessionManager:
     # ------------------------------------------------------------------
 
     def _emit_to_session(self, session_id: str, event: Event) -> None:
-        """Emit an event to all clients attached to a session."""
+        """Emit an event to all clients attached to a session.
+
+        Also STAMPS the event's ``session_id`` (protocol 1.2+).  This is
+        the one fan-out chokepoint that knows the session and feeds both
+        delivery paths — the direct-attach clients below and the
+        cascade-observer dispatch — so stamping here attributes every
+        routed event without any emit site having to remember.
+
+        Why it is done here and not at the emit sites: attribution used
+        to exist on 12 of 112 event types, and the 100 without it were
+        exactly the ACTIVITY events (turn, tool, agent output) an
+        observer needs in order to tell two siblings of one cascade
+        apart.  ``agent_id`` cannot do it — it is ``"main"`` for every
+        top-level session.
+        """
+        _stamp_session_id(event, session_id)
         with self._lock:
             session = self._sessions.get(session_id)
             if session:
@@ -5476,7 +5529,7 @@ class SessionManager:
             # sessions (client_id == _HEADLESS_CLIENT_ID).  See the
             # _route_bootstrap_event docstring for the audit context.
             on_event_during_init=lambda e: self._route_bootstrap_event(
-                client_id, cascade_driver_id, e,
+                client_id, cascade_driver_id, e, session_id,
             ),
         )
         server, session = self._bootstrap_session(envelope)
@@ -6871,7 +6924,7 @@ class SessionManager:
         # _emit_to_session (covers the no-client restore branch).
         if client_id:
             init_callback = lambda e: self._route_bootstrap_event(
-                client_id, None, e,
+                client_id, None, e, session_id,
             )
         else:
             init_callback = lambda e: self._emit_to_session(session_id, e)

@@ -243,6 +243,7 @@ export type EventType =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp = string;
+export type SessionId = string;
 export type ProtocolVersion = string;
 /**
  * All event types in the protocol.
@@ -362,13 +363,13 @@ export type EventType1 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp1 = string;
+export type SessionId1 = string;
 export type AgentId = string;
 export type AgentName = string;
 export type AgentType = string;
 export type ProfileName = string | null;
 export type ParentAgentId = string | null;
 export type CreatedAt = string | null;
-export type SessionId = string;
 /**
  * All event types in the protocol.
  */
@@ -487,6 +488,7 @@ export type EventType2 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp2 = string;
+export type SessionId2 = string;
 export type AgentId1 = string;
 export type Source = string;
 export type Text = string;
@@ -609,6 +611,7 @@ export type EventType3 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp3 = string;
+export type SessionId3 = string;
 export type AgentId2 = string;
 export type Status = string;
 export type Error = string | null;
@@ -730,6 +733,7 @@ export type EventType4 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp4 = string;
+export type SessionId4 = string;
 export type AgentId3 = string;
 export type CompletedAt = string;
 export type Success = boolean;
@@ -859,8 +863,8 @@ export type EventType5 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp5 = string;
+export type SessionId5 = string;
 export type AgentId4 = string;
-export type SessionId1 = string;
 export type ErrorType = string;
 export type ErrorSummary = string;
 export type RequestId = string | null;
@@ -986,7 +990,7 @@ export type EventType6 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp6 = string;
-export type SessionId2 = string;
+export type SessionId6 = string;
 export type AgentId5 = string | null;
 export type Reason = string;
 export type ErrorSummary1 = string | null;
@@ -1112,7 +1116,7 @@ export type EventType7 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp7 = string;
-export type SessionId3 = string;
+export type SessionId7 = string;
 export type PendingToolCallCount = number;
 /**
  * All event types in the protocol.
@@ -1232,7 +1236,7 @@ export type EventType8 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp8 = string;
-export type SessionId4 = string;
+export type SessionId8 = string;
 export type AgentId6 = string | null;
 export type CascadeDriverId = string | null;
 export type WasWarm = boolean;
@@ -1356,6 +1360,7 @@ export type EventType9 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp9 = string;
+export type SessionId9 = string;
 export type AgentId7 = string;
 export type ToolName = string;
 export type CallId = string | null;
@@ -1477,6 +1482,7 @@ export type EventType10 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp10 = string;
+export type SessionId10 = string;
 export type AgentId8 = string;
 export type ToolName1 = string;
 export type CallId1 = string | null;
@@ -1606,6 +1612,7 @@ export type EventType11 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp11 = string;
+export type SessionId11 = string;
 export type AgentId9 = string;
 export type CallId2 = string;
 export type Chunk = string;
@@ -1727,6 +1734,7 @@ export type EventType12 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp12 = string;
+export type SessionId12 = string;
 export type AgentId10 = string;
 export type RequestId1 = string;
 export type ToolName2 = string;
@@ -1855,6 +1863,7 @@ export type EventType13 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp13 = string;
+export type SessionId13 = string;
 export type AgentId11 = string;
 export type RequestId2 = string;
 export type ToolName3 = string;
@@ -1986,6 +1995,7 @@ export type EventType14 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp14 = string;
+export type SessionId14 = string;
 export type AgentId12 = string;
 export type RequestId3 = string;
 export type ToolName4 = string;
@@ -2110,6 +2120,7 @@ export type EventType15 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp15 = string;
+export type SessionId15 = string;
 export type EffectiveDefault = string;
 export type SuspensionScope = string | null;
 /**
@@ -2230,6 +2241,7 @@ export type EventType16 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp16 = string;
+export type SessionId16 = string;
 export type AgentId13 = string;
 export type RequestId4 = string;
 export type ToolName5 = string;
@@ -2353,6 +2365,7 @@ export type EventType17 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp17 = string;
+export type SessionId17 = string;
 export type AgentId14 = string;
 export type RequestId5 = string;
 export type ToolName6 = string;
@@ -2476,6 +2489,7 @@ export type EventType18 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp18 = string;
+export type SessionId18 = string;
 export type AgentId15 = string;
 export type RequestId6 = string;
 export type QuestionIndex1 = number;
@@ -2605,6 +2619,7 @@ export type EventType19 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp19 = string;
+export type SessionId19 = string;
 export type AgentId16 = string;
 export type RequestId7 = string;
 export type ToolName7 = string;
@@ -2727,6 +2742,7 @@ export type EventType20 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp20 = string;
+export type SessionId20 = string;
 export type AgentId17 = string;
 export type RequestId8 = string;
 export type ToolName8 = string;
@@ -2852,6 +2868,7 @@ export type EventType21 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp21 = string;
+export type SessionId21 = string;
 export type RequestId9 = string;
 export type Answers = string[];
 /**
@@ -2972,6 +2989,7 @@ export type EventType22 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp22 = string;
+export type SessionId22 = string;
 export type AgentId18 = string;
 export type RequestId10 = string;
 export type ToolName9 = string;
@@ -3094,6 +3112,7 @@ export type EventType23 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp23 = string;
+export type SessionId23 = string;
 export type AgentId19 = string;
 export type RequestId11 = string;
 export type ToolName10 = string;
@@ -3216,6 +3235,7 @@ export type EventType24 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp24 = string;
+export type SessionId24 = string;
 export type RequestId12 = string;
 export type Response = string;
 /**
@@ -3336,8 +3356,8 @@ export type EventType25 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp25 = string;
+export type SessionId25 = string;
 export type RequestId13 = string;
-export type SessionId5 = string;
 export type SessionWorkspace = string;
 export type ClientWorkspace = string;
 export type ResponseOptions2 = {
@@ -3462,8 +3482,8 @@ export type EventType26 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp26 = string;
+export type SessionId26 = string;
 export type RequestId14 = string;
-export type SessionId6 = string;
 export type Action = string;
 export type NewSessionId = string | null;
 /**
@@ -3584,6 +3604,7 @@ export type EventType27 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp27 = string;
+export type SessionId27 = string;
 export type RequestId15 = string;
 export type Response1 = string;
 /**
@@ -3704,6 +3725,7 @@ export type EventType28 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp28 = string;
+export type SessionId28 = string;
 export type RequestId16 = string;
 export type ProviderName = string;
 export type ProviderDisplayName = string;
@@ -3832,6 +3854,7 @@ export type EventType29 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp29 = string;
+export type SessionId29 = string;
 export type RequestId17 = string;
 export type Connect = boolean;
 export type ModelName = string;
@@ -3954,6 +3977,7 @@ export type EventType30 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp30 = string;
+export type SessionId30 = string;
 export type AgentId20 = string;
 export type PlanName = string;
 export type Steps = {
@@ -4077,6 +4101,7 @@ export type EventType31 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp31 = string;
+export type SessionId31 = string;
 export type AgentId21 = string;
 export type StepId = string;
 export type Sequence = number;
@@ -4215,6 +4240,7 @@ export type EventType32 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp32 = string;
+export type SessionId32 = string;
 export type AgentId22 = string;
 /**
  * All event types in the protocol.
@@ -4334,6 +4360,7 @@ export type EventType33 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp33 = string;
+export type SessionId33 = string;
 export type AgentId23 = string;
 export type PromptTokens = number;
 export type OutputTokens = number;
@@ -4466,6 +4493,7 @@ export type EventType34 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp34 = string;
+export type SessionId34 = string;
 export type AgentId24 = string;
 export type Threshold = number | null;
 export type Strategy = string | null;
@@ -4589,6 +4617,7 @@ export type EventType35 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp35 = string;
+export type SessionId35 = string;
 export type AgentId25 = string;
 /**
  * All event types in the protocol.
@@ -4708,6 +4737,7 @@ export type EventType36 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp36 = string;
+export type SessionId36 = string;
 export type AgentId26 = string;
 export type TurnNumber = number;
 export type DurationSeconds1 = number;
@@ -4834,6 +4864,7 @@ export type EventType37 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp37 = string;
+export type SessionId37 = string;
 export type AgentId27 = string;
 export type ContextLimit1 = number;
 export type PercentUsed1 = number;
@@ -4957,6 +4988,7 @@ export type EventType38 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp38 = string;
+export type SessionId38 = string;
 export type Message = string;
 export type Style = string;
 /**
@@ -5077,6 +5109,7 @@ export type EventType39 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp39 = string;
+export type SessionId39 = string;
 export type Lines = unknown[][];
 /**
  * All event types in the protocol.
@@ -5196,6 +5229,7 @@ export type EventType40 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp40 = string;
+export type SessionId40 = string;
 export type Step = string;
 export type Status2 = string;
 export type Message1 = string;
@@ -5319,6 +5353,7 @@ export type EventType41 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp41 = string;
+export type SessionId41 = string;
 export type Error3 = string;
 export type ErrorType2 = string;
 export type Recoverable = boolean;
@@ -5444,6 +5479,7 @@ export type EventType42 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp42 = string;
+export type SessionId42 = string;
 export type Message2 = string;
 export type Attempt1 = number;
 export type MaxAttempts = number;
@@ -5567,6 +5603,7 @@ export type EventType43 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp43 = string;
+export type SessionId43 = string;
 export type Sessions = {
   [k: string]: unknown;
 }[];
@@ -5688,6 +5725,7 @@ export type EventType44 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp44 = string;
+export type SessionId44 = string;
 export type AgentId28 = string;
 export type Phase = string;
 export type TriggerReason = string | null;
@@ -5819,8 +5857,8 @@ export type EventType45 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp45 = string;
+export type SessionId45 = string;
 export type RequestId19 = string | null;
-export type SessionId7 = string;
 export type SessionName = string;
 export type ModelProvider = string;
 export type ModelName1 = string;
@@ -5960,6 +5998,7 @@ export type EventType46 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp46 = string;
+export type SessionId46 = string;
 export type Memories1 = {
   [k: string]: unknown;
 }[];
@@ -6081,6 +6120,7 @@ export type EventType47 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp47 = string;
+export type SessionId47 = string;
 export type Paths = {
   [k: string]: string;
 }[];
@@ -6202,6 +6242,7 @@ export type EventType48 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp48 = string;
+export type SessionId48 = string;
 export type Services1 = {
   [k: string]: unknown;
 }[];
@@ -6323,7 +6364,7 @@ export type EventType49 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp49 = string;
-export type SessionId8 = string;
+export type SessionId49 = string;
 export type Description = string;
 /**
  * All event types in the protocol.
@@ -6443,6 +6484,7 @@ export type EventType50 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp50 = string;
+export type SessionId50 = string;
 export type Name = string;
 export type Description1 = string;
 export type Plugins = string[];
@@ -6588,6 +6630,7 @@ export type EventType51 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp51 = string;
+export type SessionId51 = string;
 export type Text1 = string;
 export type Attachments = {
   [k: string]: unknown;
@@ -6711,6 +6754,7 @@ export type EventType52 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp52 = string;
+export type SessionId52 = string;
 export type RequestId20 = string;
 export type Response2 = string;
 export type EditedArguments = {
@@ -6834,6 +6878,7 @@ export type EventType53 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp53 = string;
+export type SessionId53 = string;
 export type RequestId21 = string;
 export type QuestionIndex2 = number;
 export type Response3 = string;
@@ -6955,6 +7000,7 @@ export type EventType54 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp54 = string;
+export type SessionId54 = string;
 export type AgentId29 = string | null;
 /**
  * All event types in the protocol.
@@ -7074,6 +7120,7 @@ export type EventType55 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp55 = string;
+export type SessionId55 = string;
 export type Name2 = string;
 /**
  * All event types in the protocol.
@@ -7193,6 +7240,7 @@ export type EventType56 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp56 = string;
+export type SessionId56 = string;
 export type AgentId30 = string;
 export type EventNames = string[];
 /**
@@ -7313,6 +7361,7 @@ export type EventType57 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp57 = string;
+export type SessionId57 = string;
 export type Command = string;
 export type Args = string[];
 export type Payload1 = {
@@ -7436,6 +7485,7 @@ export type EventType58 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp58 = string;
+export type SessionId58 = string;
 export type AgentId31 = string | null;
 /**
  * All event types in the protocol.
@@ -7555,6 +7605,7 @@ export type EventType59 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp59 = string;
+export type SessionId59 = string;
 /**
  * All event types in the protocol.
  */
@@ -7673,6 +7724,7 @@ export type EventType60 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp60 = string;
+export type SessionId60 = string;
 export type Commands = {
   [k: string]: string;
 }[];
@@ -7794,6 +7846,7 @@ export type EventType61 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp61 = string;
+export type SessionId61 = string;
 /**
  * All event types in the protocol.
  */
@@ -7912,6 +7965,7 @@ export type EventType62 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp62 = string;
+export type SessionId62 = string;
 export type Tools1 = {
   [k: string]: unknown;
 }[];
@@ -8034,6 +8088,7 @@ export type EventType63 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp63 = string;
+export type SessionId63 = string;
 /**
  * All event types in the protocol.
  */
@@ -8152,6 +8207,7 @@ export type EventType64 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp64 = string;
+export type SessionId64 = string;
 export type ToolName11 = string;
 /**
  * All event types in the protocol.
@@ -8271,6 +8327,7 @@ export type EventType65 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp65 = string;
+export type SessionId65 = string;
 export type Tools2 = {
   [k: string]: unknown;
 }[];
@@ -8392,6 +8449,7 @@ export type EventType66 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp66 = string;
+export type SessionId66 = string;
 export type CallId4 = string;
 export type AgentId32 = string;
 export type ToolName12 = string;
@@ -8513,6 +8571,7 @@ export type EventType67 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp67 = string;
+export type SessionId67 = string;
 export type CallId5 = string;
 export type Result1 = string;
 export type Error6 = string;
@@ -8634,6 +8693,7 @@ export type EventType68 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp68 = string;
+export type SessionId68 = string;
 export type AgentId33 = string;
 /**
  * All event types in the protocol.
@@ -8753,6 +8813,7 @@ export type EventType69 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp69 = string;
+export type SessionId69 = string;
 export type AgentId34 = string;
 export type History = {
   [k: string]: unknown;
@@ -8878,6 +8939,7 @@ export type EventType70 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp70 = string;
+export type SessionId70 = string;
 export type TraceLogPath = string | null;
 export type ProviderTraceLog = string | null;
 export type WorkingDir = string | null;
@@ -9006,6 +9068,7 @@ export type EventType71 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp71 = string;
+export type SessionId71 = string;
 export type Text2 = string;
 export type PositionInQueue = number;
 /**
@@ -9126,6 +9189,7 @@ export type EventType72 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp72 = string;
+export type SessionId72 = string;
 export type Text3 = string;
 /**
  * All event types in the protocol.
@@ -9245,6 +9309,7 @@ export type EventType73 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp73 = string;
+export type SessionId73 = string;
 export type PartialResponseChars = number;
 export type UserPromptPreview = string;
 /**
@@ -9365,7 +9430,7 @@ export type EventType74 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp74 = string;
-export type SessionId9 = string;
+export type SessionId74 = string;
 export type AgentId35 = string;
 export type RecoveredCalls = number;
 export type ActionTaken = string;
@@ -9487,6 +9552,7 @@ export type EventType75 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp75 = string;
+export type SessionId75 = string;
 /**
  * All event types in the protocol.
  */
@@ -9605,6 +9671,7 @@ export type EventType76 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp76 = string;
+export type SessionId76 = string;
 export type Root = string;
 export type Workspaces = {
   [k: string]: unknown;
@@ -9727,6 +9794,7 @@ export type EventType77 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp77 = string;
+export type SessionId77 = string;
 export type Name3 = string;
 /**
  * All event types in the protocol.
@@ -9846,6 +9914,7 @@ export type EventType78 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp78 = string;
+export type SessionId78 = string;
 export type Name4 = string;
 export type Path = string;
 /**
@@ -9966,6 +10035,7 @@ export type EventType79 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp79 = string;
+export type SessionId79 = string;
 export type Name5 = string;
 /**
  * All event types in the protocol.
@@ -10085,6 +10155,7 @@ export type EventType80 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp80 = string;
+export type SessionId80 = string;
 export type Workspace = string;
 export type Configured = boolean;
 export type Provider1 = string | null;
@@ -10209,6 +10280,7 @@ export type EventType81 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp81 = string;
+export type SessionId81 = string;
 export type Provider2 = string;
 export type Model2 = string | null;
 export type ApiKey = string | null;
@@ -10330,6 +10402,7 @@ export type EventType82 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp82 = string;
+export type SessionId82 = string;
 export type Workspace1 = string;
 export type Provider3 = string;
 export type Model3 = string | null;
@@ -10453,6 +10526,7 @@ export type EventType83 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp83 = string;
+export type SessionId83 = string;
 export type Changes = {
   [k: string]: string;
 }[];
@@ -10574,6 +10648,7 @@ export type EventType84 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp84 = string;
+export type SessionId84 = string;
 export type Files = {
   [k: string]: string;
 }[];
@@ -10696,6 +10771,7 @@ export type EventType85 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp85 = string;
+export type SessionId85 = string;
 export type WorkspaceId = string;
 export type Name6 = string;
 export type Size = number;
@@ -10820,6 +10896,7 @@ export type EventType86 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp86 = string;
+export type SessionId86 = string;
 export type WorkspaceId1 = string;
 export type Staged = string[];
 export type Failed = {
@@ -10943,6 +11020,7 @@ export type EventType87 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp87 = string;
+export type SessionId87 = string;
 export type ServerId = string;
 export type ServerName = string;
 export type ServerVersion = string;
@@ -11075,6 +11153,7 @@ export type EventType88 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp88 = string;
+export type SessionId88 = string;
 export type RequestId22 = string;
 export type OriginServer = string;
 export type AgentName1 = string;
@@ -11204,6 +11283,7 @@ export type EventType89 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp89 = string;
+export type SessionId89 = string;
 export type RequestId23 = string;
 export type RemoteAgentId = string;
 /**
@@ -11324,6 +11404,7 @@ export type EventType90 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp90 = string;
+export type SessionId90 = string;
 export type RequestId24 = string;
 export type Reason1 = string;
 /**
@@ -11444,6 +11525,7 @@ export type EventType91 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp91 = string;
+export type SessionId91 = string;
 export type RequestId25 = string;
 export type RemoteAgentId1 = string;
 export type Text4 = string;
@@ -11566,6 +11648,7 @@ export type EventType92 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp92 = string;
+export type SessionId92 = string;
 export type RequestId26 = string;
 export type RemoteAgentId2 = string;
 export type Success4 = boolean;
@@ -11690,6 +11773,7 @@ export type EventType93 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp93 = string;
+export type SessionId93 = string;
 export type RequestId27 = string;
 export type RemoteAgentId3 = string;
 /**
@@ -11810,6 +11894,7 @@ export type EventType94 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp94 = string;
+export type SessionId94 = string;
 export type RequestId28 = string;
 export type RemoteAgentId4 = string;
 /**
@@ -11930,6 +12015,7 @@ export type EventType95 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp95 = string;
+export type SessionId95 = string;
 export type GateName = string;
 export type TenantId = string;
 export type Owner = string;
@@ -12052,8 +12138,8 @@ export type EventType96 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp96 = string;
+export type SessionId96 = string;
 export type GateName1 = string;
-export type SessionId10 = string;
 export type TenantId1 = string;
 export type Owner1 = string;
 export type Outcome = {
@@ -12179,6 +12265,7 @@ export type EventType97 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp97 = string;
+export type SessionId97 = string;
 export type GateName2 = string;
 export type TenantId2 = string;
 export type State = string;
@@ -12308,6 +12395,7 @@ export type EventType98 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp98 = string;
+export type SessionId98 = string;
 export type Text5 = string;
 export type SourceType = string;
 export type SourceId = string | null;
@@ -12429,6 +12517,7 @@ export type EventType99 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp99 = string;
+export type SessionId99 = string;
 export type RequestId29 = string;
 export type Messages =
   | {
@@ -12554,6 +12643,7 @@ export type EventType100 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp100 = string;
+export type SessionId100 = string;
 export type RequestId30 = string;
 export type ResponseText = string;
 export type Error9 = string;
@@ -12675,6 +12765,7 @@ export type EventType101 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp101 = string;
+export type SessionId101 = string;
 export type RequestId31 = string;
 export type AfterMessage = number | null;
 export type AfterToolCall = string | null;
@@ -12797,6 +12888,7 @@ export type EventType102 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp102 = string;
+export type SessionId102 = string;
 export type RequestId32 = string;
 export type ForkIndex = number;
 export type Error10 = string;
@@ -12918,6 +13010,7 @@ export type EventType103 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp103 = string;
+export type SessionId103 = string;
 export type WakeRef = string;
 export type Outcome1 = string;
 export type Detail = string;
@@ -13041,7 +13134,7 @@ export type EventType104 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp104 = string;
-export type SessionId11 = string;
+export type SessionId104 = string;
 export type WakeRef1 = string;
 export type Source2 = string;
 /**
@@ -13162,6 +13255,7 @@ export type EventType105 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp105 = string;
+export type SessionId105 = string;
 export type Tools3 = string[];
 export type Patterns = string[];
 /**
@@ -13282,6 +13376,7 @@ export type EventType106 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp106 = string;
+export type SessionId106 = string;
 export type Tools4 = string[];
 export type Patterns1 = string[];
 /**
@@ -13402,6 +13497,7 @@ export type EventType107 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp107 = string;
+export type SessionId107 = string;
 export type Target = string;
 export type Tools5 = string[];
 export type Patterns2 = string[];
@@ -13523,6 +13619,7 @@ export type EventType108 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp108 = string;
+export type SessionId108 = string;
 export type Target1 = string;
 /**
  * All event types in the protocol.
@@ -13642,6 +13739,7 @@ export type EventType109 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp109 = string;
+export type SessionId109 = string;
 export type Policy = string;
 /**
  * All event types in the protocol.
@@ -13761,6 +13859,7 @@ export type EventType110 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp110 = string;
+export type SessionId110 = string;
 export type RequestId33 = string;
 /**
  * All event types in the protocol.
@@ -13880,6 +13979,7 @@ export type EventType111 =
   | "gate.released"
   | "gates.snapshot";
 export type Timestamp111 = string;
+export type SessionId111 = string;
 export type RequestId34 = string;
 export type DefaultPolicy = string;
 export type SessionDefaultPolicy = string | null;
@@ -13896,6 +13996,7 @@ export type SessionBlacklist = string[];
 export interface ConnectedEvent {
   type?: EventType;
   timestamp?: Timestamp;
+  session_id?: SessionId;
   protocol_version?: ProtocolVersion;
   server_info?: ServerInfo;
 }
@@ -13934,13 +14035,13 @@ export interface ServerInfo {
 export interface AgentCreatedEvent {
   type?: EventType1;
   timestamp?: Timestamp1;
+  session_id?: SessionId1;
   agent_id?: AgentId;
   agent_name?: AgentName;
   agent_type?: AgentType;
   profile_name?: ProfileName;
   parent_agent_id?: ParentAgentId;
   created_at?: CreatedAt;
-  session_id?: SessionId;
 }
 /**
  * Streaming text output from an agent.
@@ -13948,6 +14049,7 @@ export interface AgentCreatedEvent {
 export interface AgentOutputEvent {
   type?: EventType2;
   timestamp?: Timestamp2;
+  session_id?: SessionId2;
   agent_id?: AgentId1;
   source?: Source;
   text?: Text;
@@ -13959,6 +14061,7 @@ export interface AgentOutputEvent {
 export interface AgentStatusChangedEvent {
   type?: EventType3;
   timestamp?: Timestamp3;
+  session_id?: SessionId3;
   agent_id?: AgentId2;
   status?: Status;
   error?: Error;
@@ -13977,6 +14080,7 @@ export interface AgentStatusChangedEvent {
 export interface AgentCompletedEvent {
   type?: EventType4;
   timestamp?: Timestamp4;
+  session_id?: SessionId4;
   agent_id?: AgentId3;
   completed_at?: CompletedAt;
   success?: Success;
@@ -14032,8 +14136,8 @@ export interface AgentCompletedEvent {
 export interface AgentErrorEvent {
   type?: EventType5;
   timestamp?: Timestamp5;
+  session_id?: SessionId5;
   agent_id?: AgentId4;
-  session_id?: SessionId1;
   error_type?: ErrorType;
   error_summary?: ErrorSummary;
   request_id?: RequestId;
@@ -14096,7 +14200,7 @@ export interface AgentErrorEvent {
 export interface SessionTerminatedEvent {
   type?: EventType6;
   timestamp?: Timestamp6;
-  session_id?: SessionId2;
+  session_id?: SessionId6;
   agent_id?: AgentId5;
   reason?: Reason;
   error_summary?: ErrorSummary1;
@@ -14126,7 +14230,7 @@ export interface SessionTerminatedEvent {
 export interface SessionRestoredEvent {
   type?: EventType7;
   timestamp?: Timestamp7;
-  session_id?: SessionId3;
+  session_id?: SessionId7;
   pending_tool_call_count?: PendingToolCallCount;
 }
 /**
@@ -14156,7 +14260,7 @@ export interface SessionRestoredEvent {
 export interface SlotSettledEvent {
   type?: EventType8;
   timestamp?: Timestamp8;
-  session_id?: SessionId4;
+  session_id?: SessionId8;
   agent_id?: AgentId6;
   cascade_driver_id?: CascadeDriverId;
   was_warm?: WasWarm;
@@ -14169,6 +14273,7 @@ export interface SlotSettledEvent {
 export interface ToolCallStartEvent {
   type?: EventType9;
   timestamp?: Timestamp9;
+  session_id?: SessionId9;
   agent_id?: AgentId7;
   tool_name?: ToolName;
   tool_args?: ToolArgs;
@@ -14183,6 +14288,7 @@ export interface ToolArgs {
 export interface ToolCallEndEvent {
   type?: EventType10;
   timestamp?: Timestamp10;
+  session_id?: SessionId10;
   agent_id?: AgentId8;
   tool_name?: ToolName1;
   call_id?: CallId1;
@@ -14201,6 +14307,7 @@ export interface ToolCallEndEvent {
 export interface ToolOutputEvent {
   type?: EventType11;
   timestamp?: Timestamp11;
+  session_id?: SessionId11;
   agent_id?: AgentId9;
   call_id?: CallId2;
   chunk?: Chunk;
@@ -14213,6 +14320,7 @@ export interface ToolOutputEvent {
 export interface PermissionRequestedEvent {
   type?: EventType12;
   timestamp?: Timestamp12;
+  session_id?: SessionId12;
   agent_id?: AgentId10;
   request_id?: RequestId1;
   tool_name?: ToolName2;
@@ -14235,6 +14343,7 @@ export interface ToolArgs1 {
 export interface PermissionInputModeEvent {
   type?: EventType13;
   timestamp?: Timestamp13;
+  session_id?: SessionId13;
   agent_id?: AgentId11;
   request_id?: RequestId2;
   tool_name?: ToolName3;
@@ -14249,6 +14358,7 @@ export interface PermissionInputModeEvent {
 export interface PermissionResolvedEvent {
   type?: EventType14;
   timestamp?: Timestamp14;
+  session_id?: SessionId14;
   agent_id?: AgentId12;
   request_id?: RequestId3;
   tool_name?: ToolName4;
@@ -14265,6 +14375,7 @@ export interface PermissionResolvedEvent {
 export interface PermissionStatusEvent {
   type?: EventType15;
   timestamp?: Timestamp15;
+  session_id?: SessionId15;
   effective_default?: EffectiveDefault;
   suspension_scope?: SuspensionScope;
 }
@@ -14274,6 +14385,7 @@ export interface PermissionStatusEvent {
 export interface ClarificationRequestedEvent {
   type?: EventType16;
   timestamp?: Timestamp16;
+  session_id?: SessionId16;
   agent_id?: AgentId13;
   request_id?: RequestId4;
   tool_name?: ToolName5;
@@ -14289,6 +14401,7 @@ export interface ClarificationRequestedEvent {
 export interface ClarificationInputModeEvent {
   type?: EventType17;
   timestamp?: Timestamp17;
+  session_id?: SessionId17;
   agent_id?: AgentId14;
   request_id?: RequestId5;
   tool_name?: ToolName6;
@@ -14301,6 +14414,7 @@ export interface ClarificationInputModeEvent {
 export interface ClarificationQuestionEvent {
   type?: EventType18;
   timestamp?: Timestamp18;
+  session_id?: SessionId18;
   agent_id?: AgentId15;
   request_id?: RequestId6;
   question_index?: QuestionIndex1;
@@ -14315,6 +14429,7 @@ export interface ClarificationQuestionEvent {
 export interface ClarificationResolvedEvent {
   type?: EventType19;
   timestamp?: Timestamp19;
+  session_id?: SessionId19;
   agent_id?: AgentId16;
   request_id?: RequestId7;
   tool_name?: ToolName7;
@@ -14330,6 +14445,7 @@ export interface ClarificationResolvedEvent {
 export interface ClarificationBatchEvent {
   type?: EventType20;
   timestamp?: Timestamp20;
+  session_id?: SessionId20;
   agent_id?: AgentId17;
   request_id?: RequestId8;
   tool_name?: ToolName8;
@@ -14342,6 +14458,7 @@ export interface ClarificationBatchEvent {
 export interface ClarificationBatchResponseEvent {
   type?: EventType21;
   timestamp?: Timestamp21;
+  session_id?: SessionId21;
   request_id?: RequestId9;
   answers?: Answers;
 }
@@ -14354,6 +14471,7 @@ export interface ClarificationBatchResponseEvent {
 export interface ReferenceSelectionRequestedEvent {
   type?: EventType22;
   timestamp?: Timestamp22;
+  session_id?: SessionId22;
   agent_id?: AgentId18;
   request_id?: RequestId10;
   tool_name?: ToolName9;
@@ -14365,6 +14483,7 @@ export interface ReferenceSelectionRequestedEvent {
 export interface ReferenceSelectionResolvedEvent {
   type?: EventType23;
   timestamp?: Timestamp23;
+  session_id?: SessionId23;
   agent_id?: AgentId19;
   request_id?: RequestId11;
   tool_name?: ToolName10;
@@ -14376,6 +14495,7 @@ export interface ReferenceSelectionResolvedEvent {
 export interface ReferenceSelectionResponseRequest {
   type?: EventType24;
   timestamp?: Timestamp24;
+  session_id?: SessionId24;
   request_id?: RequestId12;
   response?: Response;
 }
@@ -14389,8 +14509,8 @@ export interface ReferenceSelectionResponseRequest {
 export interface WorkspaceMismatchRequestedEvent {
   type?: EventType25;
   timestamp?: Timestamp25;
+  session_id?: SessionId25;
   request_id?: RequestId13;
-  session_id?: SessionId5;
   session_workspace?: SessionWorkspace;
   client_workspace?: ClientWorkspace;
   response_options?: ResponseOptions2;
@@ -14402,8 +14522,8 @@ export interface WorkspaceMismatchRequestedEvent {
 export interface WorkspaceMismatchResolvedEvent {
   type?: EventType26;
   timestamp?: Timestamp26;
+  session_id?: SessionId26;
   request_id?: RequestId14;
-  session_id?: SessionId6;
   action?: Action;
   new_session_id?: NewSessionId;
 }
@@ -14413,6 +14533,7 @@ export interface WorkspaceMismatchResolvedEvent {
 export interface WorkspaceMismatchResponseRequest {
   type?: EventType27;
   timestamp?: Timestamp27;
+  session_id?: SessionId27;
   request_id?: RequestId15;
   response?: Response1;
 }
@@ -14425,6 +14546,7 @@ export interface WorkspaceMismatchResponseRequest {
 export interface PostAuthSetupEvent {
   type?: EventType28;
   timestamp?: Timestamp28;
+  session_id?: SessionId28;
   request_id?: RequestId16;
   provider_name?: ProviderName;
   provider_display_name?: ProviderDisplayName;
@@ -14440,6 +14562,7 @@ export interface PostAuthSetupEvent {
 export interface PostAuthSetupResponse {
   type?: EventType29;
   timestamp?: Timestamp29;
+  session_id?: SessionId29;
   request_id?: RequestId17;
   connect?: Connect;
   model_name?: ModelName;
@@ -14451,6 +14574,7 @@ export interface PostAuthSetupResponse {
 export interface PlanUpdatedEvent {
   type?: EventType30;
   timestamp?: Timestamp30;
+  session_id?: SessionId30;
   agent_id?: AgentId20;
   plan_name?: PlanName;
   steps?: Steps;
@@ -14469,6 +14593,7 @@ export interface PlanUpdatedEvent {
 export interface PlanStepUpdatedEvent {
   type?: EventType31;
   timestamp?: Timestamp31;
+  session_id?: SessionId31;
   agent_id?: AgentId21;
   step_id?: StepId;
   sequence?: Sequence;
@@ -14486,6 +14611,7 @@ export interface PlanStepUpdatedEvent {
 export interface PlanClearedEvent {
   type?: EventType32;
   timestamp?: Timestamp32;
+  session_id?: SessionId32;
   agent_id?: AgentId22;
 }
 /**
@@ -14504,6 +14630,7 @@ export interface PlanClearedEvent {
 export interface ContextUpdatedEvent {
   type?: EventType33;
   timestamp?: Timestamp33;
+  session_id?: SessionId33;
   agent_id?: AgentId23;
   usage?: UsageBreakdown;
   context_limit?: ContextLimit;
@@ -14553,6 +14680,7 @@ export interface UsageBreakdown {
 export interface GCConfigEvent {
   type?: EventType34;
   timestamp?: Timestamp34;
+  session_id?: SessionId34;
   agent_id?: AgentId24;
   threshold?: Threshold;
   strategy?: Strategy;
@@ -14574,6 +14702,7 @@ export interface GCConfigEvent {
 export interface InstructionBudgetEvent {
   type?: EventType35;
   timestamp?: Timestamp35;
+  session_id?: SessionId35;
   agent_id?: AgentId25;
   budget_snapshot?: BudgetSnapshot;
 }
@@ -14592,6 +14721,7 @@ export interface BudgetSnapshot {
 export interface TurnCompletedEvent {
   type?: EventType36;
   timestamp?: Timestamp36;
+  session_id?: SessionId36;
   agent_id?: AgentId26;
   turn_number?: TurnNumber;
   usage?: UsageBreakdown;
@@ -14611,6 +14741,7 @@ export interface TurnCompletedEvent {
 export interface TurnProgressEvent {
   type?: EventType37;
   timestamp?: Timestamp37;
+  session_id?: SessionId37;
   agent_id?: AgentId27;
   usage?: UsageBreakdown;
   context_limit?: ContextLimit1;
@@ -14624,6 +14755,7 @@ export interface TurnProgressEvent {
 export interface SystemMessageEvent {
   type?: EventType38;
   timestamp?: Timestamp38;
+  session_id?: SessionId38;
   message?: Message;
   style?: Style;
 }
@@ -14636,6 +14768,7 @@ export interface SystemMessageEvent {
 export interface HelpTextEvent {
   type?: EventType39;
   timestamp?: Timestamp39;
+  session_id?: SessionId39;
   lines?: Lines;
 }
 /**
@@ -14647,6 +14780,7 @@ export interface HelpTextEvent {
 export interface InitProgressEvent {
   type?: EventType40;
   timestamp?: Timestamp40;
+  session_id?: SessionId40;
   step?: Step;
   status?: Status2;
   message?: Message1;
@@ -14659,6 +14793,7 @@ export interface InitProgressEvent {
 export interface ErrorEvent {
   type?: EventType41;
   timestamp?: Timestamp41;
+  session_id?: SessionId41;
   error?: Error3;
   error_type?: ErrorType2;
   recoverable?: Recoverable;
@@ -14674,6 +14809,7 @@ export interface ErrorEvent {
 export interface RetryEvent {
   type?: EventType42;
   timestamp?: Timestamp42;
+  session_id?: SessionId42;
   message?: Message2;
   attempt?: Attempt1;
   max_attempts?: MaxAttempts;
@@ -14686,6 +14822,7 @@ export interface RetryEvent {
 export interface SessionListEvent {
   type?: EventType43;
   timestamp?: Timestamp43;
+  session_id?: SessionId43;
   sessions?: Sessions;
 }
 /**
@@ -14729,6 +14866,7 @@ export interface SessionListEvent {
 export interface GCEvent {
   type?: EventType44;
   timestamp?: Timestamp44;
+  session_id?: SessionId44;
   agent_id?: AgentId28;
   phase?: Phase;
   trigger_reason?: TriggerReason;
@@ -14757,8 +14895,8 @@ export interface GCEvent {
 export interface SessionInfoEvent {
   type?: EventType45;
   timestamp?: Timestamp45;
+  session_id?: SessionId45;
   request_id?: RequestId19;
-  session_id?: SessionId7;
   session_name?: SessionName;
   model_provider?: ModelProvider;
   model_name?: ModelName1;
@@ -14781,6 +14919,7 @@ export interface ToolIdMappings {
 export interface MemoryListEvent {
   type?: EventType46;
   timestamp?: Timestamp46;
+  session_id?: SessionId46;
   memories?: Memories1;
 }
 /**
@@ -14792,6 +14931,7 @@ export interface MemoryListEvent {
 export interface SandboxPathsEvent {
   type?: EventType47;
   timestamp?: Timestamp47;
+  session_id?: SessionId47;
   paths?: Paths;
 }
 /**
@@ -14803,6 +14943,7 @@ export interface SandboxPathsEvent {
 export interface ServiceListEvent {
   type?: EventType48;
   timestamp?: Timestamp48;
+  session_id?: SessionId48;
   services?: Services1;
 }
 /**
@@ -14811,7 +14952,7 @@ export interface ServiceListEvent {
 export interface SessionDescriptionUpdatedEvent {
   type?: EventType49;
   timestamp?: Timestamp49;
-  session_id?: SessionId8;
+  session_id?: SessionId49;
   description?: Description;
 }
 /**
@@ -14834,6 +14975,7 @@ export interface SessionDescriptionUpdatedEvent {
 export interface SessionProfilesEvent {
   type?: EventType50;
   timestamp?: Timestamp50;
+  session_id?: SessionId50;
   profiles?: Profiles;
   parse_errors?: ParseErrors;
 }
@@ -14892,6 +15034,7 @@ export interface ProfileParseError {
 export interface SendMessageRequest {
   type?: EventType51;
   timestamp?: Timestamp51;
+  session_id?: SessionId51;
   text?: Text1;
   attachments?: Attachments;
   parallel_tools?: ParallelTools;
@@ -14902,6 +15045,7 @@ export interface SendMessageRequest {
 export interface PermissionResponseRequest {
   type?: EventType52;
   timestamp?: Timestamp52;
+  session_id?: SessionId52;
   request_id?: RequestId20;
   response?: Response2;
   edited_arguments?: EditedArguments;
@@ -14912,6 +15056,7 @@ export interface PermissionResponseRequest {
 export interface ClarificationResponseRequest {
   type?: EventType53;
   timestamp?: Timestamp53;
+  session_id?: SessionId53;
   request_id?: RequestId21;
   question_index?: QuestionIndex2;
   response?: Response3;
@@ -14922,6 +15067,7 @@ export interface ClarificationResponseRequest {
 export interface StopRequest {
   type?: EventType54;
   timestamp?: Timestamp54;
+  session_id?: SessionId54;
   agent_id?: AgentId29;
 }
 /**
@@ -14933,6 +15079,7 @@ export interface StopRequest {
 export interface ExternalEventRequest {
   type?: EventType55;
   timestamp?: Timestamp55;
+  session_id?: SessionId55;
   name?: Name2;
   data?: Data;
 }
@@ -14949,6 +15096,7 @@ export interface Data {
 export interface EventsSubscribedEvent {
   type?: EventType56;
   timestamp?: Timestamp56;
+  session_id?: SessionId56;
   agent_id?: AgentId30;
   event_names?: EventNames;
 }
@@ -14971,6 +15119,7 @@ export interface EventsSubscribedEvent {
 export interface CommandRequest {
   type?: EventType57;
   timestamp?: Timestamp57;
+  session_id?: SessionId57;
   command?: Command;
   args?: Args;
   payload?: Payload1;
@@ -14984,6 +15133,7 @@ export interface CommandRequest {
 export interface GetInstructionBudgetRequest {
   type?: EventType58;
   timestamp?: Timestamp58;
+  session_id?: SessionId58;
   agent_id?: AgentId31;
 }
 /**
@@ -14992,6 +15142,7 @@ export interface GetInstructionBudgetRequest {
 export interface CommandListRequest {
   type?: EventType59;
   timestamp?: Timestamp59;
+  session_id?: SessionId59;
 }
 /**
  * List of available commands from server/plugins.
@@ -14999,6 +15150,7 @@ export interface CommandListRequest {
 export interface CommandListEvent {
   type?: EventType60;
   timestamp?: Timestamp60;
+  session_id?: SessionId60;
   commands?: Commands;
 }
 /**
@@ -15011,6 +15163,7 @@ export interface CommandListEvent {
 export interface CommandListRefreshEvent {
   type?: EventType61;
   timestamp?: Timestamp61;
+  session_id?: SessionId61;
 }
 /**
  * Tool status information for client display.
@@ -15018,6 +15171,7 @@ export interface CommandListRefreshEvent {
 export interface ToolStatusEvent {
   type?: EventType62;
   timestamp?: Timestamp62;
+  session_id?: SessionId62;
   tools?: Tools1;
   message?: Message3;
 }
@@ -15034,6 +15188,7 @@ export interface ToolStatusEvent {
 export interface ToolIdRegistryEvent {
   type?: EventType63;
   timestamp?: Timestamp63;
+  session_id?: SessionId63;
   mappings?: Mappings;
 }
 export interface Mappings {
@@ -15048,6 +15203,7 @@ export interface Mappings {
 export interface ToolDisableRequest {
   type?: EventType64;
   timestamp?: Timestamp64;
+  session_id?: SessionId64;
   tool_name?: ToolName11;
 }
 /**
@@ -15060,6 +15216,7 @@ export interface ToolDisableRequest {
 export interface ToolsRegisterClientRequest {
   type?: EventType65;
   timestamp?: Timestamp65;
+  session_id?: SessionId65;
   tools?: Tools2;
   categories?: Categories;
 }
@@ -15072,6 +15229,7 @@ export interface Categories {
 export interface ToolExecuteRequestEvent {
   type?: EventType66;
   timestamp?: Timestamp66;
+  session_id?: SessionId66;
   call_id?: CallId4;
   agent_id?: AgentId32;
   tool_name?: ToolName12;
@@ -15086,6 +15244,7 @@ export interface ToolArgs3 {
 export interface ToolExecuteResultEvent {
   type?: EventType67;
   timestamp?: Timestamp67;
+  session_id?: SessionId67;
   call_id?: CallId5;
   result?: Result1;
   error?: Error6;
@@ -15096,6 +15255,7 @@ export interface ToolExecuteResultEvent {
 export interface HistoryRequest {
   type?: EventType68;
   timestamp?: Timestamp68;
+  session_id?: SessionId68;
   agent_id?: AgentId33;
 }
 /**
@@ -15104,6 +15264,7 @@ export interface HistoryRequest {
 export interface HistoryEvent {
   type?: EventType69;
   timestamp?: Timestamp69;
+  session_id?: SessionId69;
   agent_id?: AgentId34;
   history?: History;
   turn_accounting?: TurnAccounting;
@@ -15118,6 +15279,7 @@ export interface HistoryEvent {
 export interface ClientConfigRequest {
   type?: EventType70;
   timestamp?: Timestamp70;
+  session_id?: SessionId70;
   trace_log_path?: TraceLogPath;
   provider_trace_log?: ProviderTraceLog;
   working_dir?: WorkingDir;
@@ -15137,6 +15299,7 @@ export interface ClientConfigRequest {
 export interface MidTurnPromptQueuedEvent {
   type?: EventType71;
   timestamp?: Timestamp71;
+  session_id?: SessionId71;
   text?: Text2;
   position_in_queue?: PositionInQueue;
 }
@@ -15149,6 +15312,7 @@ export interface MidTurnPromptQueuedEvent {
 export interface MidTurnPromptInjectedEvent {
   type?: EventType72;
   timestamp?: Timestamp72;
+  session_id?: SessionId72;
   text?: Text3;
 }
 /**
@@ -15161,6 +15325,7 @@ export interface MidTurnPromptInjectedEvent {
 export interface MidTurnInterruptEvent {
   type?: EventType73;
   timestamp?: Timestamp73;
+  session_id?: SessionId73;
   partial_response_chars?: PartialResponseChars;
   user_prompt_preview?: UserPromptPreview;
 }
@@ -15174,7 +15339,7 @@ export interface MidTurnInterruptEvent {
 export interface InterruptedTurnRecoveredEvent {
   type?: EventType74;
   timestamp?: Timestamp74;
-  session_id?: SessionId9;
+  session_id?: SessionId74;
   agent_id?: AgentId35;
   recovered_calls?: RecoveredCalls;
   action_taken?: ActionTaken;
@@ -15185,6 +15350,7 @@ export interface InterruptedTurnRecoveredEvent {
 export interface WorkspaceListRequest {
   type?: EventType75;
   timestamp?: Timestamp75;
+  session_id?: SessionId75;
 }
 /**
  * Response to workspace.list - list of available workspaces.
@@ -15192,6 +15358,7 @@ export interface WorkspaceListRequest {
 export interface WorkspaceListEvent {
   type?: EventType76;
   timestamp?: Timestamp76;
+  session_id?: SessionId76;
   root?: Root;
   workspaces?: Workspaces;
 }
@@ -15201,6 +15368,7 @@ export interface WorkspaceListEvent {
 export interface WorkspaceCreateRequest {
   type?: EventType77;
   timestamp?: Timestamp77;
+  session_id?: SessionId77;
   name?: Name3;
 }
 /**
@@ -15209,6 +15377,7 @@ export interface WorkspaceCreateRequest {
 export interface WorkspaceCreatedEvent {
   type?: EventType78;
   timestamp?: Timestamp78;
+  session_id?: SessionId78;
   name?: Name4;
   path?: Path;
 }
@@ -15218,6 +15387,7 @@ export interface WorkspaceCreatedEvent {
 export interface WorkspaceSelectRequest {
   type?: EventType79;
   timestamp?: Timestamp79;
+  session_id?: SessionId79;
   name?: Name5;
 }
 /**
@@ -15226,6 +15396,7 @@ export interface WorkspaceSelectRequest {
 export interface ConfigStatusEvent {
   type?: EventType80;
   timestamp?: Timestamp80;
+  session_id?: SessionId80;
   workspace?: Workspace;
   configured?: Configured;
   provider?: Provider1;
@@ -15239,6 +15410,7 @@ export interface ConfigStatusEvent {
 export interface ConfigUpdateRequest {
   type?: EventType81;
   timestamp?: Timestamp81;
+  session_id?: SessionId81;
   provider?: Provider2;
   model?: Model2;
   api_key?: ApiKey;
@@ -15249,6 +15421,7 @@ export interface ConfigUpdateRequest {
 export interface ConfigUpdatedEvent {
   type?: EventType82;
   timestamp?: Timestamp82;
+  session_id?: SessionId82;
   workspace?: Workspace1;
   provider?: Provider3;
   model?: Model3;
@@ -15271,6 +15444,7 @@ export interface ConfigUpdatedEvent {
 export interface WorkspaceFilesChangedEvent {
   type?: EventType83;
   timestamp?: Timestamp83;
+  session_id?: SessionId83;
   changes?: Changes;
 }
 /**
@@ -15283,6 +15457,7 @@ export interface WorkspaceFilesChangedEvent {
 export interface WorkspaceFilesSnapshotEvent {
   type?: EventType84;
   timestamp?: Timestamp84;
+  session_id?: SessionId84;
   files?: Files;
   total?: Total;
 }
@@ -15328,6 +15503,7 @@ export interface WorkspaceFilesSnapshotEvent {
 export interface StageFilesRequest {
   type?: EventType85;
   timestamp?: Timestamp85;
+  session_id?: SessionId85;
   workspace_id?: WorkspaceId;
   files?: Files1;
 }
@@ -15377,6 +15553,7 @@ export interface StagedFileSpec {
 export interface StageFilesEvent {
   type?: EventType86;
   timestamp?: Timestamp86;
+  session_id?: SessionId86;
   workspace_id?: WorkspaceId1;
   staged?: Staged;
   failed?: Failed;
@@ -15391,6 +15568,7 @@ export interface StageFilesEvent {
 export interface PeerHeartbeatEvent {
   type?: EventType87;
   timestamp?: Timestamp87;
+  session_id?: SessionId87;
   server_id?: ServerId;
   server_name?: ServerName;
   server_version?: ServerVersion;
@@ -15417,6 +15595,7 @@ export interface PeerHeartbeatEvent {
 export interface PeerSpawnRequestEvent {
   type?: EventType88;
   timestamp?: Timestamp88;
+  session_id?: SessionId88;
   request_id?: RequestId22;
   origin_server?: OriginServer;
   agent_name?: AgentName1;
@@ -15438,6 +15617,7 @@ export interface PeerSpawnRequestEvent {
 export interface PeerSpawnAcceptedEvent {
   type?: EventType89;
   timestamp?: Timestamp89;
+  session_id?: SessionId89;
   request_id?: RequestId23;
   remote_agent_id?: RemoteAgentId;
 }
@@ -15450,6 +15630,7 @@ export interface PeerSpawnAcceptedEvent {
 export interface PeerSpawnRejectedEvent {
   type?: EventType90;
   timestamp?: Timestamp90;
+  session_id?: SessionId90;
   request_id?: RequestId24;
   reason?: Reason1;
 }
@@ -15463,6 +15644,7 @@ export interface PeerSpawnRejectedEvent {
 export interface PeerAgentOutputEvent {
   type?: EventType91;
   timestamp?: Timestamp91;
+  session_id?: SessionId91;
   request_id?: RequestId25;
   remote_agent_id?: RemoteAgentId1;
   text?: Text4;
@@ -15478,6 +15660,7 @@ export interface PeerAgentOutputEvent {
 export interface PeerAgentCompletedEvent {
   type?: EventType92;
   timestamp?: Timestamp92;
+  session_id?: SessionId92;
   request_id?: RequestId26;
   remote_agent_id?: RemoteAgentId2;
   success?: Success4;
@@ -15494,6 +15677,7 @@ export interface PeerAgentCompletedEvent {
 export interface PeerStopRequestEvent {
   type?: EventType93;
   timestamp?: Timestamp93;
+  session_id?: SessionId93;
   request_id?: RequestId27;
   remote_agent_id?: RemoteAgentId3;
 }
@@ -15503,6 +15687,7 @@ export interface PeerStopRequestEvent {
 export interface PeerStopAcknowledgedEvent {
   type?: EventType94;
   timestamp?: Timestamp94;
+  session_id?: SessionId94;
   request_id?: RequestId28;
   remote_agent_id?: RemoteAgentId4;
 }
@@ -15517,6 +15702,7 @@ export interface PeerStopAcknowledgedEvent {
 export interface GateAnnouncedEvent {
   type?: EventType95;
   timestamp?: Timestamp95;
+  session_id?: SessionId95;
   gate_name?: GateName;
   tenant_id?: TenantId;
   owner?: Owner;
@@ -15538,8 +15724,8 @@ export interface Intent {
 export interface GateReleasedEvent {
   type?: EventType96;
   timestamp?: Timestamp96;
+  session_id?: SessionId96;
   gate_name?: GateName1;
-  session_id?: SessionId10;
   tenant_id?: TenantId1;
   owner?: Owner1;
   outcome?: Outcome;
@@ -15556,6 +15742,7 @@ export interface GateReleasedEvent {
 export interface GatesSnapshotEvent {
   type?: EventType97;
   timestamp?: Timestamp97;
+  session_id?: SessionId97;
   gates?: Gates;
   snapshot_at?: SnapshotAt;
 }
@@ -15599,6 +15786,7 @@ export interface GateState {
 export interface InjectPromptRequest {
   type?: EventType98;
   timestamp?: Timestamp98;
+  session_id?: SessionId98;
   text?: Text5;
   source_type?: SourceType;
   source_id?: SourceId;
@@ -15620,6 +15808,7 @@ export interface InjectPromptRequest {
 export interface ReplayMessagesRequest {
   type?: EventType99;
   timestamp?: Timestamp99;
+  session_id?: SessionId99;
   request_id?: RequestId29;
   messages?: Messages;
   timeout_seconds?: TimeoutSeconds;
@@ -15630,6 +15819,7 @@ export interface ReplayMessagesRequest {
 export interface ReplayMessagesResultEvent {
   type?: EventType100;
   timestamp?: Timestamp100;
+  session_id?: SessionId100;
   request_id?: RequestId30;
   response_text?: ResponseText;
   error?: Error9;
@@ -15652,6 +15842,7 @@ export interface ReplayMessagesResultEvent {
 export interface ResolveForkPointRequest {
   type?: EventType101;
   timestamp?: Timestamp101;
+  session_id?: SessionId101;
   request_id?: RequestId31;
   after_message?: AfterMessage;
   after_tool_call?: AfterToolCall;
@@ -15663,6 +15854,7 @@ export interface ResolveForkPointRequest {
 export interface ResolveForkPointResultEvent {
   type?: EventType102;
   timestamp?: Timestamp102;
+  session_id?: SessionId102;
   request_id?: RequestId32;
   fork_index?: ForkIndex;
   error?: Error10;
@@ -15679,6 +15871,7 @@ export interface ResolveForkPointResultEvent {
 export interface WakeBindResultEvent {
   type?: EventType103;
   timestamp?: Timestamp103;
+  session_id?: SessionId103;
   wake_ref?: WakeRef;
   outcome?: Outcome1;
   detail?: Detail;
@@ -15707,7 +15900,7 @@ export interface WakeBindResultEvent {
 export interface SessionWokenEvent {
   type?: EventType104;
   timestamp?: Timestamp104;
-  session_id?: SessionId11;
+  session_id?: SessionId104;
   wake_ref?: WakeRef1;
   source?: Source2;
 }
@@ -15722,6 +15915,7 @@ export interface SessionWokenEvent {
 export interface PermissionAddWhitelistRequest {
   type?: EventType105;
   timestamp?: Timestamp105;
+  session_id?: SessionId105;
   tools?: Tools3;
   patterns?: Patterns;
 }
@@ -15735,6 +15929,7 @@ export interface PermissionAddWhitelistRequest {
 export interface PermissionAddBlacklistRequest {
   type?: EventType106;
   timestamp?: Timestamp106;
+  session_id?: SessionId106;
   tools?: Tools4;
   patterns?: Patterns1;
 }
@@ -15747,6 +15942,7 @@ export interface PermissionAddBlacklistRequest {
 export interface PermissionRemoveRequest {
   type?: EventType107;
   timestamp?: Timestamp107;
+  session_id?: SessionId107;
   target?: Target;
   tools?: Tools5;
   patterns?: Patterns2;
@@ -15762,6 +15958,7 @@ export interface PermissionRemoveRequest {
 export interface PermissionClearRequest {
   type?: EventType108;
   timestamp?: Timestamp108;
+  session_id?: SessionId108;
   target?: Target1;
 }
 /**
@@ -15774,6 +15971,7 @@ export interface PermissionClearRequest {
 export interface PermissionSetDefaultRequest {
   type?: EventType109;
   timestamp?: Timestamp109;
+  session_id?: SessionId109;
   policy?: Policy;
 }
 /**
@@ -15782,6 +15980,7 @@ export interface PermissionSetDefaultRequest {
 export interface PermissionPolicySnapshotRequest {
   type?: EventType110;
   timestamp?: Timestamp110;
+  session_id?: SessionId110;
   request_id?: RequestId33;
 }
 /**
@@ -15795,6 +15994,7 @@ export interface PermissionPolicySnapshotRequest {
 export interface PermissionPolicySnapshotEvent {
   type?: EventType111;
   timestamp?: Timestamp111;
+  session_id?: SessionId111;
   request_id?: RequestId34;
   default_policy?: DefaultPolicy;
   session_default_policy?: SessionDefaultPolicy;
