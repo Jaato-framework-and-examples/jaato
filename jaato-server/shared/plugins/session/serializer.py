@@ -59,7 +59,17 @@ def serialize_part(part: Part) -> Dict[str, Any]:
             'call_id': fr.call_id,
             'name': fr.name,
             'result': fr.result,
-            'is_error': fr.is_error
+            'is_error': fr.is_error,
+            # The untrusted-content boundary must survive persistence.
+            # Without these two keys a restored session re-sends
+            # sibling-/web-/MCP-authored text to the model as ORDINARY
+            # content: the provider converter wraps on the MARK, so an
+            # unmarked result is never wrapped and never escaped.  The
+            # security property silently weakened at exactly the moment
+            # nothing looked different -- same history, same text, no
+            # boundary.
+            'untrusted': fr.untrusted,
+            'untrusted_source': fr.untrusted_source,
         }
 
     # Inline data (images, etc.)
@@ -108,7 +118,13 @@ def deserialize_part(data: Dict[str, Any]) -> Part:
             call_id=data.get('call_id', ''),
             name=data['name'],
             result=data.get('result'),
-            is_error=data.get('is_error', False)
+            is_error=data.get('is_error', False),
+            # ``.get`` with a safe default: transcripts written before
+            # these keys existed restore as trusted, which is the
+            # pre-existing behaviour rather than a new claim.  Anything
+            # written since carries its real mark.
+            untrusted=data.get('untrusted', False),
+            untrusted_source=data.get('untrusted_source'),
         ))
 
     if part_type == 'inline_data':
