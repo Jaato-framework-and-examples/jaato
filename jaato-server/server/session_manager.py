@@ -4630,6 +4630,30 @@ class SessionManager:
         ``as_payload()`` — exhausted dimensions, both min() inputs, and the
         rendered detail — so the refusal is evidence the framework handed
         over rather than something the driver inferred from a timeout.
+
+        DELIVERED TWICE, to two different audiences:
+
+        1. The requesting client, which is waiting on this specific spawn.
+        2. Every cascade OBSERVER of the cid — the design's own observation
+           surface, and the audience a *cascade-budget* refusal is most
+           obviously for.  Emitting only to the requester meant a driver
+           watching the cascade stream saw a session that never appeared and
+           no reason, which is the timeout-versus-refusal ambiguity this
+           method exists to remove, surviving on the one surface built to
+           watch a cascade.
+
+        It also matters for a spawn with no real requester: a reactor- or
+        cascade-driven child carries the synthetic ``_HEADLESS_CLIENT_ID``,
+        so step 1 reaches nobody and the refusal existed only as a log line.
+
+        The cid comes off the EXCEPTION rather than a parameter — the
+        refusal already carries it, and a second source could disagree with
+        the first.  ``skip_client_id`` dedups the requester when it is also
+        an observer on the same connection.
+
+        The event is stamped with the refused ``session_id`` (protocol 1.2+),
+        because on a shared cascade stream "a spawn was refused" is not
+        actionable without knowing WHICH one.
         """
         from jaato_sdk.events import ErrorEvent
         try:
@@ -4637,13 +4661,21 @@ class SessionManager:
             logger.warning(
                 "cascade refused spawn of %s: %s", session_id, payload,
             )
+            event = ErrorEvent(
+                error=str(exc),
+                error_type="CascadeExhaustedError",
+                recoverable=False,
+                details=payload,
+                session_id=session_id,
+            )
             if client_id:
-                self._emit_to_client(client_id, ErrorEvent(
-                    error=str(exc),
-                    error_type="CascadeExhaustedError",
-                    recoverable=False,
-                    details=payload,
-                ))
+                self._emit_to_client(client_id, event)
+            cid = getattr(exc, "cascade_driver_id", None) or payload.get(
+                "cascade_driver_id")
+            if cid:
+                self._dispatch_to_cascade_clients_by_cid(
+                    cid, event, skip_client_id=client_id,
+                )
         except Exception as emit_exc:  # noqa: BLE001 — defensive
             logger.warning(
                 "cascade refusal emit failed for %s (root cause %s): %s",

@@ -10,6 +10,7 @@ agent) or a human table.  No metadata is computed here — it all comes from
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -784,6 +785,171 @@ def profile() -> Rendered:
         "    To scope DOWN per stage, use tool_scopes (per-plugin allow-list) or the permission\n"
         "    plugin's whitelist — NOT the plugins list, which only ADDS to the inherited set.")
     return data, "\n".join(lines)
+
+
+def profile_cost(name: str, workspace: str) -> Rendered:
+    """What a session built from *name* INHERITS, and what it costs.
+
+    A profile file says what it ADDS.  It never says what it INHERITS -- and
+    the inherited instruction layers are prepended to every session in the
+    workspace.  A 48KB ``.jaato/instructions/`` folder is ~12k tokens on
+    EVERY turn of EVERY session, and nothing in the authoring surface says
+    so: it shows up later as a cascade budget refusal, three sessions
+    downstream of the decision that caused it.
+
+    Measured from the SAME search order ``JaatoRuntime._load_base_system_instructions``
+    uses -- premium tier, then the first of (workspace|config_root) /
+    (user home) that yields content -- so this reports what would actually
+    load, not a plausible reconstruction of it.
+
+    Token figures are ESTIMATES (bytes / 4), labelled as such.  A real count
+    needs the model's tokenizer; the point here is the order of magnitude
+    that makes a knob worth reaching for.
+    """
+    from shared.instruction_suppression import (
+        PIECE_DISK, normalize_suppression,
+    )
+    ws = Path(workspace).resolve()
+
+    prof, where = _find_profile_file(ws, name)
+    if prof is None:
+        return ({"profile": name, "found": False},
+                f"no profile {name!r} under {ws}/.jaato/profiles/")
+
+    suppressed = normalize_suppression(prof.get("suppress_base_instructions"))
+    disk_suppressed = PIECE_DISK in suppressed
+
+    layers = []
+    for label, d in _instruction_search_order(ws):
+        if not d.is_dir():
+            continue
+        files = sorted(d.glob("*.md"))
+        if not files:
+            continue
+        size = sum(f.stat().st_size for f in files)
+        # Content digest, so two tiers holding the SAME text are reported as
+        # a duplicate rather than as two costs that happen to match.  A copy
+        # of the premium instructions left in ~/.jaato/instructions is loaded
+        # by BOTH tiers -- the runtime layers them, it does not dedupe -- so
+        # the identical bytes reach the model twice and the only visible
+        # symptom is a prompt that is twice as large as the file.
+        digest = hashlib.md5(
+            b"".join(f.read_bytes() for f in files)).hexdigest()
+        layers.append({
+            "layer": label, "dir": str(d), "files": len(files),
+            "bytes": size, "approx_tokens": size // 4, "digest": digest,
+        })
+        # The runtime stops at the FIRST of workspace/user that yields
+        # content; mirroring that here is the difference between reporting
+        # what loads and reporting what exists.
+        if label in ("workspace", "user"):
+            break
+
+    persona = ws / ".jaato" / "agents" / f"{name}.md"
+    persona_bytes = persona.stat().st_size if persona.is_file() else 0
+
+    seen_digests = {}
+    for l in layers:
+        seen_digests.setdefault(l["digest"], []).append(l["layer"])
+    duplicates = [ls for ls in seen_digests.values() if len(ls) > 1]
+
+    inherited = 0 if disk_suppressed else sum(l["bytes"] for l in layers)
+    total = inherited + persona_bytes
+    data = {
+        "profile": name, "found": True, "profile_file": str(where),
+        "suppress_base_instructions": sorted(suppressed),
+        "disk_layer_suppressed": disk_suppressed,
+        "layers": layers,
+        "persona_bytes": persona_bytes,
+        "inherited_bytes": inherited,
+        "total_bytes": total,
+        "approx_total_tokens": total // 4,
+        "duplicate_layers": duplicates,
+        "note": "token figures are estimates (bytes/4), not a tokenizer count",
+    }
+
+    lines = [f"instruction cost for profile {name!r}  ({where})", ""]
+    if not layers:
+        lines.append("  no instruction layers found on the search path")
+    for l in layers:
+        mark = "  (SUPPRESSED)" if disk_suppressed else ""
+        lines.append(
+            f"  {l['layer']:10} {l['files']:>3} file(s)  {l['bytes']:>8,} B  "
+            f"~{l['approx_tokens']:>6,} tok{mark}")
+        lines.append(f"             {l['dir']}")
+    if persona_bytes:
+        lines.append(
+            f"  {'persona':10} {1:>3} file(s)  {persona_bytes:>8,} B  "
+            f"~{persona_bytes // 4:>6,} tok")
+    lines += [
+        "",
+        f"  inherited on EVERY turn : {inherited:,} B  (~{inherited // 4:,} tok)",
+        f"  total with persona      : {total:,} B  (~{total // 4:,} tok)",
+        "",
+        "  token figures are ESTIMATES (bytes/4), not a tokenizer count.",
+    ]
+    for dup in duplicates:
+        dup_bytes = next(l["bytes"] for l in layers if l["layer"] == dup[0])
+        lines += [
+            "",
+            f"  DUPLICATE: {' and '.join(dup)} hold IDENTICAL content.",
+            f"  The runtime LAYERS these tiers, it does not dedupe — so those",
+            f"  {dup_bytes:,} B (~{dup_bytes // 4:,} tok) reach the model TWICE",
+            "  every turn.  Removing the copy halves this cost without",
+            "  changing any profile.",
+        ]
+    if not disk_suppressed and inherited:
+        lines += [
+            "",
+            "  This profile INHERITS the disk instruction layer.  If its persona",
+            "  is self-contained, opt out with:",
+            "      suppress_base_instructions: {disk: true}",
+            "  (the security boundary is KEPT unless you name it explicitly)",
+        ]
+    return (data, "\n".join(lines))
+
+
+def _find_profile_file(ws: Path, name: str):
+    """The profile's parsed dict + its path, or ``(None, None)``.
+
+    Searches the set subdirectories and the tier-1 root, matching the layout
+    ``discover_profiles`` reads.
+    """
+    import yaml
+    pdir = ws / ".jaato" / "profiles"
+    if not pdir.is_dir():
+        return None, None
+    for cand in sorted(pdir.rglob("*.y*ml")) + sorted(pdir.rglob("*.json")):
+        if cand.stem != name:
+            continue
+        try:
+            with open(cand, "r", encoding="utf-8") as fh:
+                parsed = yaml.safe_load(fh) or {}
+        except Exception:
+            continue
+        if isinstance(parsed, dict):
+            return parsed, cand
+    return None, None
+
+
+def _instruction_search_order(ws: Path):
+    """The tiers ``JaatoRuntime`` consults, in its order.
+
+    Kept as one list so a change to the runtime's order is a change to ONE
+    place here -- reporting a different order than the runtime loads would
+    be worse than not reporting at all.
+    """
+    order = []
+    try:
+        from shared.jaato_runtime import _get_premium_content_path
+        premium = _get_premium_content_path("instructions")
+        if premium:
+            order.append(("premium", Path(premium)))
+    except Exception:
+        pass
+    order.append(("workspace", ws / ".jaato" / "instructions"))
+    order.append(("user", Path.home() / ".jaato" / "instructions"))
+    return order
 
 
 def paths() -> Rendered:
