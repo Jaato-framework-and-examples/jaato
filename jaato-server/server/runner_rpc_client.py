@@ -1910,9 +1910,11 @@ class RunnerRPCClient:
             source_id: Optional sender id (defaults to "unknown"
                 runner-side).
             source_type: Optional ``SourceType`` enum value as
-                string (one of "parent", "child", "user", "system",
-                "event"; defaults to "user" runner-side).  Daemon-
-                side callers typically have a
+                string — any member of the enum (defaults to "user"
+                runner-side).  Not re-listed here: the enum owns the
+                set and a prose copy drifts, which is exactly what
+                happened when ``sibling`` was added.  Daemon-side
+                callers typically have a
                 :class:`shared.message_queue.SourceType` enum
                 instance — pass ``source_type=enum.value`` to
                 serialize.

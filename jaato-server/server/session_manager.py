@@ -6384,10 +6384,14 @@ class SessionManager:
             source_id: Identifier of the sender (e.g. ``"reactor"``,
                 ``"webhook:github"``).  Defaults to ``"unknown"``
                 downstream.
-            source_type: ``SourceType`` enum value controlling priority
-                (USER/PARENT/SYSTEM/EVENT/CHILD).  Defaults to USER
-                downstream.  Typed as ``Any`` here to avoid a top-level
-                import of the SDK enum.
+            source_type: ``SourceType`` enum value controlling priority.
+                Any member of the enum; not re-listed here because a prose
+                copy of it drifts (``sibling`` shipped while this said
+                five).  Whether a tier may interrupt a turn in progress is
+                declared by ``HIGH_PRIORITY_SOURCES`` /
+                ``IDLE_ONLY_SOURCES``.  Defaults to USER downstream.
+                Typed as ``Any`` here to avoid a top-level import of the
+                SDK enum.
 
         Returns:
             ``True`` if the prompt was delivered (queued or fired

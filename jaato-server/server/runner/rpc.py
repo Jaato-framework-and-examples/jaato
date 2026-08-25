@@ -1818,10 +1818,18 @@ class RunnerRPC:
             text: required str — the prompt text.
             source_id: optional str — sender identifier (defaults
                 to "unknown" inside JaatoSession).
-            source_type: optional str — one of the
-                :class:`shared.message_queue.SourceType` enum
-                values ("parent", "child", "user", "system",
-                "event").  Defaults to "user" inside JaatoSession.
+            source_type: optional str — ANY
+                :class:`shared.message_queue.SourceType` value.
+                Deliberately NOT re-listed here: the enum owns the
+                set, and a prose copy drifts the moment one is added
+                (``sibling`` shipped and this list kept saying five).
+                The runtime check below reads the enum, so it was
+                only the DOCUMENTATION that was wrong — which is its
+                own hazard, because a caller trusts it.
+                Tier semantics — who may interrupt a turn in progress
+                — live in ``HIGH_PRIORITY_SOURCES`` /
+                ``IDLE_ONLY_SOURCES``.  Defaults to "user" inside
+                JaatoSession.
 
         Returns ``{"ok": True}`` on success.
 
