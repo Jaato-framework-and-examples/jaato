@@ -5409,8 +5409,12 @@ class SessionManager:
         a much bigger act than it looks.
 
         Returns:
-            ``{"status": "delivered"|..., ...}``.  ``delivered`` means handed
-            to the session, never that it was read or acted on.
+            ``{"status": "accepted"|"queued"|...}`` -- the SAME vocabulary
+            ``send_to_sibling`` uses, because it is the same act.  There is
+            no separate ``delivered``: it used to mean both "a turn is
+            running" and "it is queued", which is exactly the one-word-two-
+            outcomes shape that made these receipts untrustworthy.  Neither
+            status claims the target read or acted on anything.
         """
         if not cascade_driver_id or not sibling_name:
             return {"status": "refused",
@@ -5437,15 +5441,38 @@ class SessionManager:
                     "error": (f"session.send: {sibling_name!r} is resting "
                               f"(unloaded). Use session.wake to revive it.")}
 
+        # The SAME decision every other sender makes.  This path used to
+        # inject unconditionally and report ``delivered`` either way -- so an
+        # IDLE target was queued rather than driven, and ``delivered`` covered
+        # both "it is being worked on" and "it is sitting in a queue nobody
+        # will pop".  One word for two outcomes is the shape this whole class
+        # of bug takes.
+        from shared.message_delivery import deliver
         from shared.message_queue import SourceType
-        if not self.inject_prompt_to_session(
-            target_id, text, source_id="operator",
-            source_type=SourceType.USER,
-        ):
+        with self._lock:
+            target = self._sessions.get(target_id)
+            busy = bool(target is not None and target.server is not None
+                        and getattr(target.server, "_model_running", False))
+        reached: Dict[str, bool] = {}
+
+        def _queue() -> None:
+            # USER is a HIGH-priority tier, so an operator's words are picked
+            # up MID-TURN rather than waiting for the turn to end.  That is
+            # the authority difference between an operator and a sibling.
+            reached["ok"] = self.inject_prompt_to_session(
+                target_id, text, source_id="operator",
+                source_type=SourceType.USER,
+            )
+
+        def _drive() -> None:
+            reached["ok"] = self.send_message_to_session(target_id, text)
+
+        outcome = deliver(is_busy=lambda: busy, queue=_queue, drive=_drive)
+        if not reached.get("ok"):
             return {"status": "refused",
                     "error": (f"session.send: {sibling_name!r} could not be "
                               f"reached (no live runner channel).")}
-        return {"status": "delivered",
+        return {"status": outcome,
                 "sibling_name": sibling_name,
                 "session_id": target_id}
 

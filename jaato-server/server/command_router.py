@@ -550,7 +550,10 @@ class CommandRouter:
             return
 
         receipt = self._session_manager.send_to_named_session(cid, name, text)
-        if receipt.get("status") != "delivered":
+        # ``accepted`` (a turn was started) and ``queued`` (the target is
+        # mid-turn) are both successful DELIVERIES; everything else is a
+        # refusal with a reason.
+        if receipt.get("status") not in ("accepted", "queued"):
             self._event_sink.send_event(client_id, ErrorEvent(
                 error=receipt.get("error", "session.send refused"),
                 error_type="SessionSendError",
@@ -560,7 +563,7 @@ class CommandRouter:
         # A receipt, not a reply: this says the message was handed to the
         # session, never that it was read or acted on.
         self._event_sink.send_event(client_id, SystemMessageEvent(
-            message=f"session.send: delivered to {name!r}",
+            message=f"session.send: {receipt['status']} → {name!r}",
         ))
 
     def _handle_session_wake(

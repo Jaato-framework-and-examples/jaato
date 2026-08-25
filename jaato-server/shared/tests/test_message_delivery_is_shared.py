@@ -27,6 +27,24 @@ from shared.message_delivery import ACCEPTED, QUEUED, deliver
 # The decision itself
 # ----------------------------------------------------------------------
 
+def test_only_two_delivery_words_exist():
+    """``delivered`` is gone, and must not come back.
+
+    ``session.send`` used to report ``delivered`` for BOTH outcomes -- a turn
+    running and a message sitting in a queue -- while never driving at all.
+    One word covering two outcomes is the shape every bug in this arc took;
+    two words that each mean one thing is the fix.
+    """
+    import shared.message_delivery as md
+    words = {v for k, v in vars(md).items()
+             if k.isupper() and isinstance(v, str) and not k.startswith("_")}
+    assert words == {"queued", "accepted"}, f"unexpected vocabulary: {words}"
+
+    src = pathlib.Path(
+        "jaato-server/server/session_manager.py").read_text(encoding="utf-8")
+    assert '"status": "delivered"' not in src
+
+
 def test_a_busy_target_is_queued():
     calls = []
     out = deliver(is_busy=lambda: True,
@@ -67,9 +85,11 @@ def test_a_failing_delivery_is_not_reported_as_success():
 
 _SENDERS = [
     ("jaato-server/shared/plugins/subagent/plugin.py",
-     "_execute_send_to_subagent"),
+     "_execute_send_to_subagent"),      # parent -> child
     ("jaato-server/server/session_manager.py",
-     "deliver_sibling_message"),
+     "deliver_sibling_message"),        # sibling -> sibling
+    ("jaato-server/server/session_manager.py",
+     "send_to_named_session"),          # operator -> named session
 ]
 
 
