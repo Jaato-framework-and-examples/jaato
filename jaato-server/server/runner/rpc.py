@@ -424,9 +424,16 @@ class RunnerRPC:
             if ok:
                 self._emit_response(env.id, ok=True, result=result)
             else:
+                # A domain-failure dict may carry its own frames -- see the
+                # model-loop catch in ``_handle_session_send_message``.  It is
+                # the only source of a traceback on this branch, because
+                # nothing raised: without reading it, ``ErrorPayload.traceback``
+                # is None and every consumer downstream gets the summary line
+                # and nothing else.
                 err = ErrorPayload(
                     type="ToolError",
                     message=_extract_error_message(result),
+                    traceback=_extract_error_traceback(result),
                 )
                 self._emit_response(
                     env.id, ok=False, result=result, error=err,
@@ -1811,10 +1818,18 @@ class RunnerRPC:
             text: required str — the prompt text.
             source_id: optional str — sender identifier (defaults
                 to "unknown" inside JaatoSession).
-            source_type: optional str — one of the
-                :class:`shared.message_queue.SourceType` enum
-                values ("parent", "child", "user", "system",
-                "event").  Defaults to "user" inside JaatoSession.
+            source_type: optional str — ANY
+                :class:`shared.message_queue.SourceType` value.
+                Deliberately NOT re-listed here: the enum owns the
+                set, and a prose copy drifts the moment one is added
+                (``sibling`` shipped and this list kept saying five).
+                The runtime check below reads the enum, so it was
+                only the DOCUMENTATION that was wrong — which is its
+                own hazard, because a caller trusts it.
+                Tier semantics — who may interrupt a turn in progress
+                — live in ``HIGH_PRIORITY_SOURCES`` /
+                ``IDLE_ONLY_SOURCES``.  Defaults to "user" inside
+                JaatoSession.
 
         Returns ``{"ok": True}`` on success.
 
@@ -3081,10 +3096,26 @@ class RunnerRPC:
                         "error": str(exc) or "Cancelled",
                         "stage": "cancelled",
                     }
+                # CAPTURE THE FRAMES HERE.  This path RETURNS a dict rather
+                # than raising, so the envelope's ErrorPayload is built by
+                # ``_extract_error_message`` from that dict -- there is no
+                # exception left for the dispatcher to read a traceback off.
+                # Stringifying the exception produced a message that LOOKS
+                # like a complete report ("model loop raised AttributeError:
+                # <text>") while being a summary, so the discarded frames
+                # were invisible in its own output.
+                #
+                # Sanitized like every other traceback crossing this boundary
+                # (§3.1): the daemon log and any forwarded event are
+                # potentially cross-tenant surfaces.
+                from .sanitize import sanitize_traceback
                 return False, {
                     "error": (
                         f"session.send_message: model loop raised "
                         f"{type(exc).__name__}: {exc}"
+                    ),
+                    "traceback": sanitize_traceback(
+                        traceback.format_exc(), self._workspace_root,
                     ),
                     "stage": "send",
                 }
@@ -5172,6 +5203,21 @@ def _coerce_for_json(value: Any) -> Any:
     if isinstance(value, tuple):
         return [_coerce_for_json(v) for v in value]
     return value
+
+
+def _extract_error_traceback(result: Any) -> "Optional[str]":
+    """Frames a domain-failure result dict chose to carry, or ``None``.
+
+    Sibling of :func:`_extract_error_message`.  A path that RETURNS a failure
+    rather than raising has no exception for the dispatcher to introspect, so
+    the frames can only come from the dict itself.  Absent stays absent -- a
+    placeholder here would read like evidence to whoever is debugging.
+    """
+    if isinstance(result, dict):
+        tb = result.get("traceback")
+        if isinstance(tb, str) and tb:
+            return tb
+    return None
 
 
 def _extract_error_message(result: Any) -> str:
