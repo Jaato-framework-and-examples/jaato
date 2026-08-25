@@ -5217,6 +5217,13 @@ class SessionManager:
 
         QUEUED-AND-UNDRAINED IS NOT A STATE THIS CAN PRODUCE, and it used to
         be the common one -- see ``shared.message_delivery``.
+
+        ``queued`` is decided from the peer's state AT THE MOMENT OF THE
+        CHECK.  If the peer goes idle between that check and the delivery,
+        ``inject_prompt_to_session`` drives it instead -- a strictly better
+        outcome that the receipt does not distinguish.  The receipt's promise
+        holds either way: the message is delivered and will be acted on.  It
+        is not a claim about which mechanism carried it.
         ``no_such_sibling`` / ``sibling_cold`` / ``refused``
 
         ``queued`` and ``accepted`` are both about DELIVERY.  Neither claims
@@ -6402,6 +6409,30 @@ class SessionManager:
             session = self._sessions.get(target_session_id)
         if session is None:
             return False
+
+        # AN IDLE TARGET IS DRIVEN, NOT INJECTED.
+        #
+        # ``JaatoSession.inject_prompt`` starts a turn only while
+        # ``_on_continuation_needed`` is installed -- and that is for the
+        # DURATION of a ``session.send_message`` RPC, not whenever the
+        # session happens to be idle.  So injecting into an idle target that
+        # nobody is driving queues the message and NOTHING drains it: the
+        # call reports success and the message is discarded on unload.
+        #
+        # That made the documented cascade-watchdog pattern a no-op --
+        # reported by the perpetual-monologue cascade, whose 180s nudges
+        # fired twice and produced no turn at all.  Reactor rules and webhook
+        # handlers reach sessions through here too and had the same hole.
+        #
+        # ``send_to_sibling`` fixed its own copy of this in #612; this is the
+        # shared primitive, so the fix belongs here rather than at each
+        # caller -- see ``shared.message_delivery`` for why cloning the
+        # queue-or-drive decision is what produced the bug in the first place.
+        busy = bool(session.server is not None
+                    and getattr(session.server, "_model_running", False))
+        if not busy:
+            return self.send_message_to_session(target_session_id, text)
+
         # Phase 3 §7c step 6.6.3.6: forward to runner-side via the
         # existing ``session.inject_prompt`` RPC (§7c step 6.1
         # (3/3) at commit 14e57709).  ``SourceType`` enum
