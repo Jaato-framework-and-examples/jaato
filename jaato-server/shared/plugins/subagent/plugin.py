@@ -643,6 +643,7 @@ class SubagentPlugin(DaemonForwardingMixin):
         """Return function declarations for subagent tools."""
         declarations = [
             self._list_siblings_schema(),
+            self._send_to_sibling_schema(),
             ToolSchema(
                 name='spawn_subagent',
                 description=(
@@ -1007,6 +1008,114 @@ class SubagentPlugin(DaemonForwardingMixin):
             traits=frozenset({TRAIT_UNTRUSTED_CONTENT}),
         )
 
+    def _send_to_sibling_schema(self) -> ToolSchema:
+        """Schema for ``send_to_sibling``.
+
+        NO ``TRAIT_UNTRUSTED_CONTENT``: the RECEIPT is framework-authored
+        (a status word, the address you supplied, a byte count).  Nothing a
+        peer wrote comes back through this tool -- it is fire-and-forget, so
+        there is no reply to carry a payload.  Marking it untrusted would
+        wrap the framework's own words and teach the model to discount the
+        boundary where it does matter.
+
+        The INBOUND side is where the peer's text appears, and that is
+        wrapped daemon-side before it reaches the receiving model.
+
+        Permission-gated, and the prompt names the TARGET rather than the
+        body: an operator approving a send needs to know who is being
+        reached far more often than what was said, and a body in the prompt
+        is both noisier and attacker-authored (design §11 Q3).
+        """
+        return ToolSchema(
+            name='send_to_sibling',
+            description=(
+                'Send a message to another session in your cascade. '
+                'FIRE AND FORGET: this returns a delivery receipt, never the '
+                "peer's reply — there is no way to wait for one, so you "
+                'cannot deadlock with a peer that is waiting for you. '
+                'status is one of: accepted (the peer was idle and is now '
+                'taking a turn), queued (the peer is mid-turn; your message '
+                'waits until it finishes), no_such_sibling, sibling_cold '
+                '(the peer is resting and is NOT woken by a message), or '
+                'refused (with a reason). '
+                'NEITHER accepted NOR queued means the peer read it, agreed, '
+                'or acted — only that the message was delivered. '
+                'Use for coordination the driver should not have to relay '
+                '("are you done with the file I need?", "I found the config '
+                'you wanted"), NOT for pipeline control flow — results still '
+                'go back through your completion payload. '
+                'You cannot approve, grant or cancel anything for a sibling; '
+                'permission and clarification responses are refused.'
+            ),
+            parameters={
+                'type': 'object',
+                'properties': {
+                    'sibling_name': {
+                        'type': 'string',
+                        'description': (
+                            'The address from list_siblings — NOT a profile '
+                            'name or a description.'
+                        ),
+                    },
+                    'message': {
+                        'type': 'string',
+                        'description': (
+                            'What to tell them. Keep it short; a sibling '
+                            'message is a nudge, not a document.'
+                        ),
+                    },
+                },
+                'required': ['sibling_name', 'message'],
+            },
+        )
+
+    def _execute_send_to_sibling(self, args: Dict[str, Any]):
+        """Deliver a message to a cascade sibling.  Runs DAEMON-SIDE.
+
+        Daemon-forwarded for the same reason as ``list_siblings``: the
+        cascade lives in ``SessionManager`` and a runner-side instance can
+        see none of it.  It is also the reason the sender's identity is
+        SAFE -- the daemon reads it from its own session table, so a peer
+        cannot claim to be another (design §7).
+        """
+        mgr = getattr(self, "_session_manager", None)
+        if mgr is None:
+            return False, {
+                "status": "error",
+                "error": (
+                    "send_to_sibling is unavailable: no session manager is "
+                    "attached (this build routes it daemon-side)."
+                ),
+            }
+        registry = getattr(self, "_plugin_registry", None)
+        sid = getattr(registry, "session_id", None) if registry else None
+        if not sid:
+            return False, {
+                "status": "error",
+                "error": (
+                    "send_to_sibling could not determine the calling session: "
+                    "the daemon-side plugin registry carries no session_id."
+                ),
+            }
+
+        sibling_name = (args.get("sibling_name") or "").strip()
+        message = args.get("message") or ""
+        if not sibling_name:
+            return False, {"status": "error",
+                           "error": "send_to_sibling: sibling_name is required."}
+        if not message.strip():
+            # An empty nudge still costs the peer a turn.
+            return False, {"status": "error",
+                           "error": "send_to_sibling: message is empty."}
+
+        receipt = mgr.deliver_sibling_message(sid, sibling_name, message)
+        # A refusal is a FAILED call, not a successful one reporting bad news
+        # -- both consumer-side checks must see it (the executor contract
+        # flag AND the deeper body check).
+        if receipt.get("status") in ("accepted", "queued"):
+            return receipt
+        return False, receipt
+
     def _execute_list_siblings(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Return the cascade roster.  Runs DAEMON-SIDE.
 
@@ -1089,13 +1198,15 @@ class SubagentPlugin(DaemonForwardingMixin):
 
     def get_executors(self) -> Dict[str, Callable[[Dict[str, Any]], Any]]:
         """Return mapping of tool names to executor functions."""
-        # ``list_siblings`` alone is daemon-forwarded: the roster lives in
-        # SessionManager, and a runner-side instance cannot see sibling
-        # sessions.  Every OTHER tool here already works runner-side, so
-        # wrapping them too would change six working tools for no reason —
-        # the mixin takes a dict, so a subset is legitimate.
+        # The two SIBLING tools are daemon-forwarded: the cascade lives in
+        # SessionManager, and a runner-side instance can see none of it —
+        # its ``_active_sessions`` holds only subagents IT spawned.  Every
+        # OTHER tool here already works runner-side, so wrapping them too
+        # would change six working tools for no reason — the mixin takes a
+        # dict, so a subset is legitimate.
         forwarded = self.wrap_executors_for_daemon_forwarding({
             'list_siblings': self._execute_list_siblings,
+            'send_to_sibling': self._execute_send_to_sibling,
         })
         return {
             **forwarded,
@@ -1414,8 +1525,9 @@ class SubagentPlugin(DaemonForwardingMixin):
 
     def get_auto_approved_tools(self) -> List[str]:
         """Return tools that should be auto-approved."""
-        # Read-only tools are safe and can be auto-approved
-        # spawn_subagent and send_to_subagent require permission
+        # Read-only tools are safe and can be auto-approved.
+        # spawn_subagent / send_to_subagent / send_to_sibling require
+        # permission: each of them causes ANOTHER agent to spend a turn.
         return ['list_subagent_profiles', 'list_active_subagents', 'validateProfile']
 
     def get_user_commands(self) -> List[UserCommand]:

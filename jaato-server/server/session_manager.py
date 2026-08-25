@@ -342,6 +342,37 @@ class CascadeClientEntry:
 SIBLING_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
 
 
+# ----------------------------------------------------------------------
+# Sibling messaging caps (design §8)
+# ----------------------------------------------------------------------
+#
+# ``budget_control`` is the real terminator -- a ping-pong between siblings
+# burns turns, and a cascade budget counts turns/seconds/tools/spend across
+# every session under the cid, so a runaway conversation hits a ceiling that
+# already exists and DEGRADES before it stops.  These three caps are
+# backpressure in front of that ceiling, not a replacement for it.
+
+SIBLING_MESSAGE_MAX_BYTES = 8 * 1024
+"""Size cap: one sibling must not be able to blow another's context in a
+single message.  UTF-8 bytes, not characters -- a character count would let
+a multi-byte payload through at several times the intended size."""
+
+SIBLING_PENDING_CAP = 20
+"""Per-target backpressure: how many messages may pile up on a sibling that
+has been BUSY the whole time.
+
+Counts consecutive ``queued`` deliveries to one target.  Resets the moment a
+delivery finds that target idle, because an idle target has drained -- SIBLING
+is an idle-only tier, and ``inject_prompt`` fires the continuation rather than
+queuing when the session is idle.  So the counter measures exactly what it
+claims: a backlog against a peer that never came up for air."""
+
+SIBLING_CID_EXCHANGE_CAP = 200
+"""Per-cascade total sends.  The blunt terminator for a two-sibling ping-pong
+that stays under the pending cap by alternating.  Monotonic per cid; never
+reset, because the thing it bounds is the CONVERSATION, not a backlog."""
+
+
 def validate_sibling_name(
     sibling_name: str,
     cascade_driver_id: Optional[str],
@@ -577,6 +608,15 @@ class SessionManager:
         # SessionManager).
         self._cascade_clients: Dict[str, List["CascadeClientEntry"]] = {}
         self._cascade_clients_lock = threading.Lock()
+        # Sibling-messaging caps (design §8).  Both are daemon-side because
+        # the daemon is the only party that sees every send in a cascade --
+        # a sender-side counter would be per-session and a ping-pong between
+        # two siblings would never reach either one's limit.
+        #
+        # ``_sibling_pending``: target session_id -> consecutive queued sends.
+        # ``_sibling_exchanges``: cid -> total sends, monotonic.
+        self._sibling_pending: Dict[str, int] = {}
+        self._sibling_exchanges: Dict[str, int] = {}
         # Per-cid AGGREGATE budget ceilings (design note §8/b).  Declared by
         # the cascade OWNER at launch — deliberately not a leaf-profile field,
         # because a cascade cap is a runtime aggregate over a live cid, not a
@@ -5051,6 +5091,207 @@ class SessionManager:
         rows = [r for r in rows if r["sibling_name"]]
         rows.sort(key=lambda r: r["sibling_name"])
         return {"you": you, "siblings": rows}
+
+    # ``permission_response`` / ``clarification_response`` are PARENT
+    # authority.  ``send_to_subagent``'s own instructions document sending
+    # them through that channel -- a parent answering its child's request.
+    # A sibling edge that reused the channel naively would let any peer
+    # grant permissions to any other peer, which defeats the permission
+    # system outright (design §7).
+    #
+    # Matched on the OPENING TAG ONLY, and case-insensitively: a sender
+    # that can get the daemon to accept `<Permission_Response ...>` has
+    # already won, and a closing-tag check would miss a self-closing form.
+    _SIBLING_FORBIDDEN_TAGS = ("permission_response", "clarification_response")
+
+    def _sibling_grammar_violation(self, text: str) -> Optional[str]:
+        """Return the forbidden tag *text* attempts to use, or ``None``."""
+        lowered = text.lower()
+        for tag in self._SIBLING_FORBIDDEN_TAGS:
+            if f"<{tag}" in lowered:
+                return tag
+        return None
+
+    def deliver_sibling_message(
+        self,
+        sender_session_id: str,
+        sibling_name: str,
+        text: str,
+    ) -> Dict[str, Any]:
+        """Deliver *text* from one cascade member to another.  DAEMON-SIDE.
+
+        FIRE AND FORGET WITH A RECEIPT.  There is no reply channel and no
+        blocking form, so two siblings awaiting each other is not
+        expressible (design §8).  The receipt says what happened to the
+        MESSAGE, never what the peer decided:
+
+        ``accepted``   the peer was idle; ``inject_prompt`` fired its
+                       continuation, so a turn started ON THE PEER'S OWN
+                       SESSION.  Its cost lands on the peer and depletes the
+                       shared cid pool via ``_accumulate_cascade_budget`` --
+                       a sibling cannot spend a budget nobody can see.
+        ``queued``     the peer was mid-turn.  SIBLING is an idle-only tier,
+                       so the message waits for the current turn to end
+                       rather than interrupting it.
+        ``no_such_sibling`` / ``sibling_cold`` / ``refused``
+
+        ``queued`` and ``accepted`` are both about DELIVERY.  Neither claims
+        the peer read, understood, or acted on anything -- a receipt that
+        implied processing would be a blocking call wearing a non-blocking
+        name.
+
+        COLD PEERS ARE NOT WOKEN.  Reaching a resting session is a bigger,
+        more surprising act than reaching a running one, and it belongs
+        behind an explicit request rather than as a side effect of ordinary
+        coordination (design §11 Q2).  ``sibling_cold`` says the address is
+        real and the peer is resting, which is a different fact from
+        ``no_such_sibling`` and needs a different response.
+
+        Args:
+            sender_session_id: The asking session.  The daemon reads the
+                sender's identity from ITS OWN table -- the sender never
+                supplies it, so a peer cannot claim to be someone else
+                (design §7).
+            sibling_name: Cascade-scoped address of the target.
+            text: The message body.
+
+        Returns:
+            A receipt dict.  ``status`` is one of the five above; failures
+            carry ``error`` (the key ``tool_result_is_error`` reads).
+        """
+        with self._lock:
+            sender = self._sessions.get(sender_session_id)
+            if sender is None:
+                return {"status": "refused",
+                        "error": "send_to_sibling: the calling session is not loaded."}
+            cid = getattr(sender, "cascade_driver_id", None)
+            sender_name = getattr(sender, "sibling_name", None)
+
+        if not cid:
+            # Not a failure of addressing -- a statement about scope.  The
+            # cid IS the blast radius (design §2/§10); a session outside a
+            # cascade has no siblings to reach, and saying "no such sibling"
+            # would misdescribe that as a lookup miss.
+            return {"status": "refused",
+                    "error": ("send_to_sibling: this session is not part of a "
+                              "cascade, so it has no siblings. The cascade "
+                              "(cascade_driver_id) is the addressing boundary.")}
+
+        violation = self._sibling_grammar_violation(text)
+        if violation:
+            return {"status": "refused",
+                    "error": (f"send_to_sibling: <{violation}> is parent authority "
+                              f"and cannot travel sideways. Siblings coordinate; "
+                              f"they do not approve, grant or cancel for one "
+                              f"another.")}
+
+        size = len(text.encode("utf-8"))
+        if size > SIBLING_MESSAGE_MAX_BYTES:
+            return {"status": "refused",
+                    "error": (f"send_to_sibling: message is {size} bytes, over the "
+                              f"{SIBLING_MESSAGE_MAX_BYTES}-byte cap. Send a "
+                              f"pointer to the work, not the work.")}
+
+        with self._lock:
+            exchanges = self._sibling_exchanges.get(cid, 0)
+        if exchanges >= SIBLING_CID_EXCHANGE_CAP:
+            return {"status": "refused",
+                    "error": (f"send_to_sibling: this cascade has used its "
+                              f"{SIBLING_CID_EXCHANGE_CAP} sibling messages. "
+                              f"Coordinate through the driver.")}
+
+        target_id, target_status = self._resolve_sibling(sender_session_id, cid,
+                                                         sibling_name)
+        if target_status == "absent":
+            return {"status": "no_such_sibling",
+                    "error": (f"send_to_sibling: no sibling named {sibling_name!r} "
+                              f"in this cascade. Use list_siblings for the roster.")}
+        if target_status == "cold":
+            return {"status": "sibling_cold",
+                    "error": (f"send_to_sibling: {sibling_name!r} is resting "
+                              f"(unloaded). Cold siblings are not woken by a "
+                              f"sibling message.")}
+
+        with self._lock:
+            target = self._sessions.get(target_id)
+            busy = bool(target is not None and target.server is not None
+                        and getattr(target.server, "_model_running", False))
+            pending = self._sibling_pending.get(target_id, 0)
+        if busy and pending >= SIBLING_PENDING_CAP:
+            return {"status": "refused",
+                    "error": (f"send_to_sibling: {sibling_name!r} has "
+                              f"{pending} messages waiting and has not been idle "
+                              f"since. Let it work.")}
+
+        # The DAEMON stamps the sender, never the sender itself (design §7),
+        # and the body is wrapped as untrusted content so the receiving model
+        # treats it as a claim to weigh rather than an instruction to follow.
+        # Both imported at call time, matching this module's existing
+        # convention (see the SourceType import in the external-event
+        # handler) -- session_manager stays importable from contexts that
+        # don't load the shared tier.
+        from jaato_sdk.plugins.model_provider.types import wrap_untrusted_content
+        from shared.message_queue import SourceType
+        wrapped = wrap_untrusted_content(
+            text, source=f"sibling:{sender_name or sender_session_id}")
+
+        delivered = self.inject_prompt_to_session(
+            target_id, wrapped,
+            source_id=sender_name or sender_session_id,
+            source_type=SourceType.SIBLING,
+        )
+        if not delivered:
+            return {"status": "refused",
+                    "error": (f"send_to_sibling: {sibling_name!r} could not be "
+                              f"reached (no live runner channel).")}
+
+        with self._lock:
+            self._sibling_exchanges[cid] = exchanges + 1
+            if busy:
+                self._sibling_pending[target_id] = pending + 1
+            else:
+                # Idle target: inject_prompt fired the continuation instead of
+                # queuing, so whatever was waiting has drained with it.
+                self._sibling_pending.pop(target_id, None)
+
+        return {"status": "queued" if busy else "accepted",
+                "sibling_name": sibling_name,
+                "bytes": size}
+
+    def _resolve_sibling(
+        self, viewer_session_id: str, cid: str, sibling_name: str,
+    ) -> "Tuple[Optional[str], str]":
+        """Resolve *sibling_name* within *cid* to ``(session_id, status)``.
+
+        ``status`` is ``"live"`` / ``"cold"`` / ``"absent"``.  Live is checked
+        first and on-disk second, mirroring ``build_sibling_roster``'s LIVE
+        UNION COLD: an address stays owned by a session that has unloaded, so
+        resolving only against ``self._sessions`` would report a resting
+        sibling as absent -- and ``no_such_sibling`` would become a race
+        rather than a fact.
+        """
+        with self._lock:
+            for sid, s in self._sessions.items():
+                if sid == viewer_session_id:
+                    continue
+                if s.cascade_driver_id == cid and s.sibling_name == sibling_name:
+                    return sid, "live"
+        try:
+            for info in self._get_persisted_sessions():
+                if info.session_id == viewer_session_id:
+                    continue
+                if (getattr(info, "cascade_driver_id", None) == cid
+                        and getattr(info, "sibling_name", None) == sibling_name):
+                    return info.session_id, "cold"
+        except Exception as exc:  # noqa: BLE001
+            # WARNING, not debug: without the on-disk half a resting sibling
+            # is indistinguishable from one that never existed, and the
+            # caller would be told the address is free.
+            logger.warning(
+                "sibling resolution could not read persisted sessions (%s) -- "
+                "a cold sibling may be reported as absent", exc,
+            )
+        return None, "absent"
 
     @staticmethod
     def _roster_profile_name(session: Any) -> Optional[str]:
