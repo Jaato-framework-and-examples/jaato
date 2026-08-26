@@ -164,6 +164,41 @@ class _ActiveCall:
     cancel_token: CancelToken
 
 
+#: RPC methods that RUN MODEL OR USER CODE, and are therefore unbounded in
+#: duration.  These get the WORK lane.
+#:
+#: **The criterion is "does this handler run model or user code?"**, not "is
+#: it slow today".  That matters because the second question cannot be
+#: answered by whoever adds the next verb and the first one can: a handler
+#: that calls the provider, replays the model loop, or invokes a tool or a
+#: user command belongs here; one that reads or sets session state does not.
+#:
+#: WHY THE SPLIT EXISTS.  Every method except ``session.bootstrap`` used to
+#: share one 8-worker pool.  ``session.send_message`` holds a worker for an
+#: ENTIRE TURN and ``tool.execute`` is called with ``timeout=None``, while
+#: ``session.offer_message`` is a lock, a bool read and a list append.  A
+#: control-plane operation's latency was bounded by the slowest work in the
+#: pool -- so a delivery could be reported ``unreachable`` on a 2s timeout
+#: because an unrelated tool was still running.
+#:
+#: ``session.bootstrap`` is in NEITHER set: it runs synchronously on the main
+#: thread so ``aa_change_profile`` confines the thread that later spawns the
+#: workers (per-thread in the kernel apparmor module).  See the dispatch site.
+WORK_LANE_METHODS = frozenset({
+    "tool.execute",              # runs the tool
+    "session.send_message",      # runs an entire turn
+    "session.replay_messages",   # re-runs the model loop
+    "session.execute_user_command",   # runs a user command
+    "echo",                      # §8.3 RPC-overhead benchmark; deliberately
+                                 # in the work lane so a benchmark cannot
+                                 # measure the control lane's latency
+})
+
+#: Runs on the main thread, in neither pool.  Kept as an explicit name so the
+#: "every method is classified" guard can account for it.
+MAIN_THREAD_METHODS = frozenset({"session.bootstrap"})
+
+
 class RunnerRPC:
     """Bidirectional dispatcher serving on a blocking Unix socket.
 
@@ -191,6 +226,7 @@ class RunnerRPC:
         execute_fn: ExecuteFn,
         *,
         max_workers: int = 8,
+        control_workers: int = 4,
         workspace_root: Optional[str] = None,
     ) -> None:
         """Construct the dispatcher.
@@ -198,7 +234,13 @@ class RunnerRPC:
         Args:
             sock: The inherited socketpair fd (typically fd 3).
             execute_fn: Tool-execution callable.
-            max_workers: Concurrent tool-call cap.
+            max_workers: Concurrent cap for the WORK lane -- the methods
+                in :data:`WORK_LANE_METHODS`, which run model or user code
+                and are unbounded in duration.
+            control_workers: Concurrent cap for the CONTROL lane, which
+                serves everything else.  Small on purpose: the work there is
+                a lock and a dict lookup, so this is about never QUEUEING
+                behind a turn, not about throughput.
             workspace_root: Per-session workspace root, for traceback
                 sanitization (Phase 3 §3.1).  When set, captured
                 tracebacks have ``<workspace_root>/...`` paths
@@ -211,7 +253,14 @@ class RunnerRPC:
         self._workspace_root = workspace_root
         self._pool = ThreadPoolExecutor(
             max_workers=max_workers,
-            thread_name_prefix="runner-rpc",
+            thread_name_prefix="runner-rpc-work",
+        )
+        # Separate lane so a control-plane RPC never waits behind a turn or a
+        # tool.  Distinct thread_name_prefix so a stack dump says which lane
+        # a wedged thread is in.
+        self._control_pool = ThreadPoolExecutor(
+            max_workers=control_workers,
+            thread_name_prefix="runner-rpc-ctl",
         )
         self._write_lock = threading.Lock()
         self._active_calls: Dict[int, _ActiveCall] = {}
@@ -4644,9 +4693,16 @@ class RunnerRPC:
                         # cold-spawn uses in ``__main__.py`` step 2
                         # — pool slot now mirrors it.
                         self._handle_request(env)
-                    else:
-                        # Dispatch to a worker thread.
+                    elif env.method in WORK_LANE_METHODS:
+                        # Unbounded: runs model or user code.
                         self._pool.submit(self._handle_request, env)
+                    else:
+                        # Control plane -- bounded work, its own lane, so it
+                        # cannot queue behind a turn or a tool.  Unclassified
+                        # methods land here by falling through; the guard in
+                        # ``test_every_rpc_method_has_a_lane`` makes that a
+                        # test failure rather than a silent latency cliff.
+                        self._control_pool.submit(self._handle_request, env)
                 elif kind == KIND_CANCEL:
                     try:
                         frame = CancelFrame.from_dict(payload)
@@ -4712,6 +4768,7 @@ class RunnerRPC:
                         )
                 self._outgoing_calls.clear()
             self._pool.shutdown(wait=False, cancel_futures=True)
+            self._control_pool.shutdown(wait=False, cancel_futures=True)
 
     # ---------------------- runner → daemon outgoing -------------------
 
