@@ -31,6 +31,8 @@ from typing import Iterable, List, Optional, Set
 
 from .models import (
     ACTIVE_MATURITIES,
+    MATURITY_DISMISSED,
+    PROMOTES_OUT_OF_RAW,
     MATURITY_RAW,
     Memory,
 )
@@ -324,13 +326,22 @@ class MemoryStore:
         in_curated = self._curated.get_by_id(memory.id) is not None
 
         if in_raw:
-            if memory.maturity in ACTIVE_MATURITIES.union({"escalated"}):
+            # PROMOTES_OUT_OF_RAW, not ACTIVE_MATURITIES.  The active set
+            # contains RAW -- it answers "is this usable?" -- so testing
+            # against it moved a memory out of the queue on ANY update,
+            # including the usage-counter bump ``_execute_retrieve`` does on
+            # every read.  The docstring above always said "validated/
+            # escalated"; the condition did not.
+            if memory.maturity in PROMOTES_OUT_OF_RAW:
                 self._curated.upsert(memory)
                 self._raw.remove(memory.id)
-            elif memory.maturity == "dismissed":
+            elif memory.maturity == MATURITY_DISMISSED:
                 self._raw.remove(memory.id)
             else:
-                # Unknown / new maturity: keep it as raw, replace file.
+                # STILL RAW -> stays in the queue, updated in place.  This
+                # branch already existed and was unreachable for ``raw``.
+                # ``RawStore.add`` is an atomic per-id file write, so this is
+                # an idempotent upsert with no shared-file contention.
                 self._raw.add(memory)
         elif in_curated:
             if memory.maturity == "dismissed":

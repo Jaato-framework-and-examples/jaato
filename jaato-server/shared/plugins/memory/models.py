@@ -40,7 +40,25 @@ VALID_SCOPES = frozenset({SCOPE_PROJECT, SCOPE_UNIVERSAL})
 # Maturity states that should be surfaced in prompt enrichment hints.
 # Escalated memories are represented by their reference entry instead;
 # dismissed memories are hidden from the model entirely.
+#: Maturities that count a memory as ACTIVE — eligible to be surfaced.
+#: Answers "should this be used?", and RAW is deliberately in it: a raw
+#: memory is usable, it just has not been vetted.
 ACTIVE_MATURITIES = frozenset({MATURITY_RAW, MATURITY_VALIDATED})
+
+#: Maturities that mean a memory has LEFT the raw queue — the curator has
+#: made a decision about it.
+#:
+#: A SEPARATE set from :data:`ACTIVE_MATURITIES` on purpose, because it
+#: answers a different question.  ``MemoryStore.update`` used the active set
+#: for this test, and since RAW is active, ANY update of a raw memory --
+#: including a usage-counter bump on retrieval -- moved it into the curated
+#: store still marked raw.  The curator's own discovery call emptied the queue
+#: it was reading, and an unvetted memory became enrichment material by being
+#: LOOKED AT.  Measured: 18 raw against 1 validated in the curated store.
+#:
+#: One set answering two questions is the same defect as a value meaning two
+#: things; the fix is a second name, not a smarter condition.
+PROMOTES_OUT_OF_RAW = frozenset({MATURITY_VALIDATED, MATURITY_ESCALATED})
 
 
 @dataclass
