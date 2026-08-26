@@ -107,6 +107,34 @@ class RunnerCallError(RuntimeError):
         self.traceback_text = traceback_text
 
 
+class RunnerRPCTimeout(TimeoutError):
+    """A timeout raised by THIS transport, not by a model or a provider.
+
+    **Subclasses ``TimeoutError`` deliberately.**  ``ipc.py``,
+    ``command_router.py``, ``session_manager.py`` and ``apparmor.py`` all
+    catch ``TimeoutError``; a fresh exception type would stop being caught by
+    every one of them.  What the subclass adds is the ability to tell OUR
+    plumbing failing from the agent failing -- which the daemon's model-thread
+    handler needs and could not previously do.
+
+    Why that matters: the model thread ends on a bare ``except Exception`` and
+    terminates the session for anything it catches.  A daemon-side timeout --
+    our own event loop not scheduling a coroutine -- was therefore treated
+    exactly like a provider rejecting us permanently, and killed a healthy
+    cascade half.  Observed twice on two builds: a stalled loop took out a
+    session mid-run, the cascade policy unloaded it, and its sibling spent the
+    rest of the run sending into a session that could no longer be woken.
+    """
+
+
+class DaemonLoopTimeout(RunnerRPCTimeout):
+    """The daemon's event loop did not run a scheduled coroutine in time."""
+
+
+class RunnerAnswerTimeout(RunnerRPCTimeout):
+    """The runner did not answer an RPC that its loop DID run."""
+
+
 async def _await_runner(coro: Any, timeout: Optional[float], method: str) -> Any:
     """Await *coro*, and if it times out say WHICH timeout that was.
 
@@ -131,7 +159,7 @@ async def _await_runner(coro: Any, timeout: Optional[float], method: str) -> Any
     try:
         return await asyncio.wait_for(coro, timeout)
     except TimeoutError as exc:
-        raise TimeoutError(
+        raise RunnerAnswerTimeout(
             f"runner did not answer {method} within {timeout}s "
             f"(runner-side: the RPC was sent and no response came back)"
         ) from exc
@@ -165,7 +193,7 @@ def _result_from_loop(future: Any, timeout: Optional[float], method: str) -> Any
     try:
         return future.result(timeout=timeout)
     except TimeoutError as exc:
-        raise TimeoutError(
+        raise DaemonLoopTimeout(
             f"daemon loop did not deliver {method} within {timeout}s "
             f"(daemon-side: the coroutine was scheduled onto the loop and "
             f"did not complete)"
