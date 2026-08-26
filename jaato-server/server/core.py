@@ -5003,13 +5003,22 @@ class JaatoServer:
                         error_type=type(e).__name__,
                         recoverable=True,
                     ))
-                    # NOT stamped as terminal_error, and NOT re-raised.
-                    # ``terminal_error`` stays None, so the ``finally`` skips
-                    # the termination branch and winds the turn down its
-                    # ordinary way -- pending continuation, status, the lot.
-                    # Re-raising would run the finally and THEN escape the
-                    # thread target as an unhandled thread exception, which
-                    # leaves the session loaded but the wind-down noisy.
+                    # RETURN.  Without it the terminal path below runs anyway:
+                    # ``terminal_error = e`` is reached unconditionally and the
+                    # finally takes the termination branch, so the session dies
+                    # exactly as before with a better log line above it.  #628
+                    # shipped that way -- the comment described the control
+                    # flow and nothing implemented it -- and a cascade half
+                    # still died 3.5 minutes in, WARNING and INFO one
+                    # millisecond apart on the same exception.
+                    #
+                    # ``return`` from inside ``except`` still runs the
+                    # ``finally``, which is the point: the turn winds down its
+                    # ordinary way (pending continuation, status) with
+                    # ``terminal_error`` left None, so the session stays
+                    # loaded.  Re-raising instead would run the finally and
+                    # then escape the thread target unhandled.
+                    return
 
                 _runner_tb = getattr(e, "traceback_text", None)
                 logger.info(

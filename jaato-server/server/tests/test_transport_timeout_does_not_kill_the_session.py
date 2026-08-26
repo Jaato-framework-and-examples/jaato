@@ -67,39 +67,95 @@ def test_both_layers_are_distinguishable_by_type_now():
     assert not issubclass(DaemonLoopTimeout, RunnerAnswerTimeout)
 
 
-def test_the_model_thread_spares_the_session_for_transport_timeouts():
-    """Checked in source: the branch must exist and must not set terminal_error.
+def test_the_transport_branch_EXITS_and_cannot_fall_through():
+    """The branch must EXIT, checked by parsing it rather than reading near it.
 
-    A runtime test would need a live model thread, a stalled loop and a
-    cascade policy; the property that matters is one branch, and its absence
-    is what killed the sessions.
+    #628 shipped this branch with no ``return``.  The comment inside it said
+    "``terminal_error`` stays None, so the finally skips the termination
+    branch" -- and nothing implemented that.  ``terminal_error = e`` sat below,
+    outside any ``else``, and ran unconditionally.  A cascade half still died
+    3.5 minutes in, with the new WARNING and the old fatal INFO one
+    millisecond apart on the same exception.
+
+    The guard that shipped alongside it asserted ``terminal_error`` did not
+    appear BETWEEN the branch and the terminal log line -- a window that could
+    not contain the assignment, which sits after both.  It was vacuous in the
+    only direction that mattered and passed on broken code.
+
+    So this reads the AST: find the ``isinstance(e, RunnerRPCTimeout)`` guard
+    and require its body to end in a statement that leaves the handler.
     """
+    import ast
+    import inspect
+    import textwrap
+
     import server.core as core_mod
 
-    src = inspect.getsource(core_mod)
-    idx = src.index("MODEL_THREAD_TERMINAL_ERROR error_type=%s")
-    # the guard must come BEFORE the terminal branch
-    head = src[:idx]
-    guard = head.rindex("isinstance(e, RunnerRPCTimeout)")
-    assert guard > head.rindex("except Exception as e:"), (
-        "the transport-timeout guard must sit inside the catch-all, before "
-        "the terminal path"
+    tree = ast.parse(inspect.getsource(core_mod))
+
+    branches = [
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.If)
+        and "RunnerRPCTimeout" in ast.dump(node.test)
+        and "isinstance" in ast.dump(node.test)
+    ]
+    assert len(branches) == 1, (
+        f"expected exactly one transport-timeout guard, found {len(branches)}"
+    )
+    branch = branches[0]
+
+    last = branch.body[-1]
+    assert isinstance(last, (ast.Return, ast.Raise, ast.Continue)), (
+        f"the transport branch ends in {type(last).__name__}, so control "
+        f"FALLS THROUGH into the terminal path below it and the session dies "
+        f"anyway.  It must end in a statement that leaves the handler."
+    )
+    assert not branch.orelse, (
+        "an else here would mean the terminal path is reachable only via it; "
+        "that is a different (also valid) shape -- update this guard "
+        "deliberately rather than letting both drift"
     )
 
-    # CODE ONLY.  The branch's comment explains what it deliberately does
-    # NOT do and names terminal_error while doing so -- a raw substring check
-    # reads the explanation as the behaviour.  Third time today; the rule is
-    # that a guard must look at what runs, not at what is written near it.
-    window = "\n".join(
-        line for line in src[guard:idx].splitlines()
-        if line.strip() and not line.strip().startswith("#")
+
+def test_the_terminal_assignment_is_unreachable_for_transport_timeouts():
+    """Complement: the fatal assignment must sit AFTER the branch's exit.
+
+    Stated as a property of the source rather than of a window, because the
+    previous version of this test proved a window empty and proved nothing.
+    """
+    import ast
+    import inspect
+
+    import server.core as core_mod
+
+    tree = ast.parse(inspect.getsource(core_mod))
+    handlers = [
+        h for h in ast.walk(tree)
+        if isinstance(h, ast.ExceptHandler)
+        and any(
+            isinstance(n, ast.If) and "RunnerRPCTimeout" in ast.dump(n.test)
+            for n in ast.walk(h)
+        )
+    ]
+    assert len(handlers) == 1, "expected one handler carrying the guard"
+    handler = handlers[0]
+
+    guard_idx = next(
+        i for i, stmt in enumerate(handler.body)
+        if isinstance(stmt, ast.If) and "RunnerRPCTimeout" in ast.dump(stmt.test)
     )
-    assert "terminal_error" not in window, (
-        "the transport branch must NOT stamp terminal_error -- that is what "
-        "routes it to SessionTerminatedEvent(reason='error')"
-    )
-    assert "recoverable=True" in window, (
-        "the emitted ErrorEvent must say the session survives"
+    assigns_after = [
+        t.id
+        for stmt in handler.body[guard_idx + 1:]
+        for n in ast.walk(stmt)
+        if isinstance(n, ast.Assign)
+        for t in n.targets
+        if isinstance(t, ast.Name)
+    ]
+    assert "terminal_error" in assigns_after, (
+        "terminal_error is no longer assigned after the guard -- either the "
+        "terminal path moved (update this test) or it was removed, which "
+        "would let a PROVIDER error survive and nudge-cycle"
     )
 
 
