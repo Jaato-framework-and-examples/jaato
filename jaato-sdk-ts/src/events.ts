@@ -112,6 +112,7 @@ export type JaatoEvents =
   | GateReleasedEvent
   | GatesSnapshotEvent
   | InjectPromptRequest
+  | InjectPromptResultEvent
   | ReplayMessagesRequest
   | ReplayMessagesResultEvent
   | ResolveForkPointRequest
@@ -217,6 +218,7 @@ export type EventType =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -337,6 +339,7 @@ export type EventType1 =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -462,6 +465,7 @@ export type EventType2 =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -585,6 +589,7 @@ export type EventType3 =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -707,6 +712,7 @@ export type EventType4 =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -837,6 +843,7 @@ export type EventType5 =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -964,6 +971,7 @@ export type EventType6 =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -1090,6 +1098,7 @@ export type EventType7 =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -1210,6 +1219,7 @@ export type EventType8 =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -1334,6 +1344,7 @@ export type EventType9 =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -1456,6 +1467,7 @@ export type EventType10 =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -1586,6 +1598,7 @@ export type EventType11 =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -1708,6 +1721,7 @@ export type EventType12 =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -1837,6 +1851,7 @@ export type EventType13 =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -1969,6 +1984,7 @@ export type EventType14 =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -2094,6 +2110,7 @@ export type EventType15 =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -2215,6 +2232,7 @@ export type EventType16 =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -2339,6 +2357,7 @@ export type EventType17 =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -2463,6 +2482,7 @@ export type EventType18 =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -2593,6 +2613,7 @@ export type EventType19 =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -2716,6 +2737,7 @@ export type EventType20 =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -2842,6 +2864,7 @@ export type EventType21 =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -2963,6 +2986,7 @@ export type EventType22 =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -3086,6 +3110,7 @@ export type EventType23 =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -3209,6 +3234,7 @@ export type EventType24 =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -3330,6 +3356,7 @@ export type EventType25 =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -3456,6 +3483,7 @@ export type EventType26 =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -3578,6 +3606,7 @@ export type EventType27 =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -3699,6 +3728,7 @@ export type EventType28 =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -3828,6 +3858,7 @@ export type EventType29 =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -3951,6 +3982,7 @@ export type EventType30 =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -4075,6 +4107,7 @@ export type EventType31 =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -4214,6 +4247,7 @@ export type EventType32 =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -4334,6 +4368,7 @@ export type EventType33 =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -4467,6 +4502,7 @@ export type EventType34 =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -4591,6 +4627,7 @@ export type EventType35 =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -4711,6 +4748,7 @@ export type EventType36 =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -4838,6 +4876,7 @@ export type EventType37 =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -4962,6 +5001,7 @@ export type EventType38 =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -5083,6 +5123,7 @@ export type EventType39 =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -5203,6 +5244,7 @@ export type EventType40 =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -5327,6 +5369,7 @@ export type EventType41 =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -5453,6 +5496,7 @@ export type EventType42 =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -5577,6 +5621,7 @@ export type EventType43 =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -5699,6 +5744,7 @@ export type EventType44 =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -5831,6 +5877,7 @@ export type EventType45 =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -5972,6 +6019,7 @@ export type EventType46 =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -6094,6 +6142,7 @@ export type EventType47 =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -6216,6 +6265,7 @@ export type EventType48 =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -6338,6 +6388,7 @@ export type EventType49 =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -6458,6 +6509,7 @@ export type EventType50 =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -6604,6 +6656,7 @@ export type EventType51 =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -6728,6 +6781,7 @@ export type EventType52 =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -6852,6 +6906,7 @@ export type EventType53 =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -6974,6 +7029,7 @@ export type EventType54 =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -7094,6 +7150,7 @@ export type EventType55 =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -7214,6 +7271,7 @@ export type EventType56 =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -7335,6 +7393,7 @@ export type EventType57 =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -7459,6 +7518,7 @@ export type EventType58 =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -7579,6 +7639,7 @@ export type EventType59 =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -7698,6 +7759,7 @@ export type EventType60 =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -7820,6 +7882,7 @@ export type EventType61 =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -7939,6 +8002,7 @@ export type EventType62 =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -8062,6 +8126,7 @@ export type EventType63 =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -8181,6 +8246,7 @@ export type EventType64 =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -8301,6 +8367,7 @@ export type EventType65 =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -8423,6 +8490,7 @@ export type EventType66 =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -8545,6 +8613,7 @@ export type EventType67 =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -8667,6 +8736,7 @@ export type EventType68 =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -8787,6 +8857,7 @@ export type EventType69 =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -8913,6 +8984,7 @@ export type EventType70 =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -9042,6 +9114,7 @@ export type EventType71 =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -9163,6 +9236,7 @@ export type EventType72 =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -9283,6 +9357,7 @@ export type EventType73 =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -9404,6 +9479,7 @@ export type EventType74 =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -9526,6 +9602,7 @@ export type EventType75 =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -9645,6 +9722,7 @@ export type EventType76 =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -9768,6 +9846,7 @@ export type EventType77 =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -9888,6 +9967,7 @@ export type EventType78 =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -10009,6 +10089,7 @@ export type EventType79 =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -10129,6 +10210,7 @@ export type EventType80 =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -10254,6 +10336,7 @@ export type EventType81 =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -10376,6 +10459,7 @@ export type EventType82 =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -10500,6 +10584,7 @@ export type EventType83 =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -10622,6 +10707,7 @@ export type EventType84 =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -10745,6 +10831,7 @@ export type EventType85 =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -10870,6 +10957,7 @@ export type EventType86 =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -10994,6 +11082,7 @@ export type EventType87 =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -11127,6 +11216,7 @@ export type EventType88 =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -11257,6 +11347,7 @@ export type EventType89 =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -11378,6 +11469,7 @@ export type EventType90 =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -11499,6 +11591,7 @@ export type EventType91 =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -11622,6 +11715,7 @@ export type EventType92 =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -11747,6 +11841,7 @@ export type EventType93 =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -11868,6 +11963,7 @@ export type EventType94 =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -11989,6 +12085,7 @@ export type EventType95 =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -12112,6 +12209,7 @@ export type EventType96 =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -12239,6 +12337,7 @@ export type EventType97 =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -12369,6 +12468,7 @@ export type EventType98 =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -12399,6 +12499,7 @@ export type SessionId98 = string;
 export type Text5 = string;
 export type SourceType = string;
 export type SourceId = string | null;
+export type RequestId29 = string | null;
 /**
  * All event types in the protocol.
  */
@@ -12491,6 +12592,7 @@ export type EventType99 =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -12518,13 +12620,9 @@ export type EventType99 =
   | "gates.snapshot";
 export type Timestamp99 = string;
 export type SessionId99 = string;
-export type RequestId29 = string;
-export type Messages =
-  | {
-      [k: string]: unknown;
-    }[]
-  | null;
-export type TimeoutSeconds = number;
+export type RequestId30 = string;
+export type Status3 = string;
+export type Detail = string | null;
 /**
  * All event types in the protocol.
  */
@@ -12617,6 +12715,7 @@ export type EventType100 =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -12644,9 +12743,13 @@ export type EventType100 =
   | "gates.snapshot";
 export type Timestamp100 = string;
 export type SessionId100 = string;
-export type RequestId30 = string;
-export type ResponseText = string;
-export type Error9 = string;
+export type RequestId31 = string;
+export type Messages =
+  | {
+      [k: string]: unknown;
+    }[]
+  | null;
+export type TimeoutSeconds = number;
 /**
  * All event types in the protocol.
  */
@@ -12739,6 +12842,7 @@ export type EventType101 =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -12766,10 +12870,9 @@ export type EventType101 =
   | "gates.snapshot";
 export type Timestamp101 = string;
 export type SessionId101 = string;
-export type RequestId31 = string;
-export type AfterMessage = number | null;
-export type AfterToolCall = string | null;
-export type AfterTimestamp = string | null;
+export type RequestId32 = string;
+export type ResponseText = string;
+export type Error9 = string;
 /**
  * All event types in the protocol.
  */
@@ -12862,6 +12965,7 @@ export type EventType102 =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -12889,9 +12993,10 @@ export type EventType102 =
   | "gates.snapshot";
 export type Timestamp102 = string;
 export type SessionId102 = string;
-export type RequestId32 = string;
-export type ForkIndex = number;
-export type Error10 = string;
+export type RequestId33 = string;
+export type AfterMessage = number | null;
+export type AfterToolCall = string | null;
+export type AfterTimestamp = string | null;
 /**
  * All event types in the protocol.
  */
@@ -12984,6 +13089,7 @@ export type EventType103 =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -13011,11 +13117,9 @@ export type EventType103 =
   | "gates.snapshot";
 export type Timestamp103 = string;
 export type SessionId103 = string;
-export type WakeRef = string;
-export type Outcome1 = string;
-export type Detail = string;
-export type ExpiresAt1 = number;
-export type Endpoint = string;
+export type RequestId34 = string;
+export type ForkIndex = number;
+export type Error10 = string;
 /**
  * All event types in the protocol.
  */
@@ -13108,6 +13212,7 @@ export type EventType104 =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -13135,8 +13240,11 @@ export type EventType104 =
   | "gates.snapshot";
 export type Timestamp104 = string;
 export type SessionId104 = string;
-export type WakeRef1 = string;
-export type Source2 = string;
+export type WakeRef = string;
+export type Outcome1 = string;
+export type Detail1 = string;
+export type ExpiresAt1 = number;
+export type Endpoint = string;
 /**
  * All event types in the protocol.
  */
@@ -13229,6 +13337,7 @@ export type EventType105 =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -13256,8 +13365,8 @@ export type EventType105 =
   | "gates.snapshot";
 export type Timestamp105 = string;
 export type SessionId105 = string;
-export type Tools3 = string[];
-export type Patterns = string[];
+export type WakeRef1 = string;
+export type Source2 = string;
 /**
  * All event types in the protocol.
  */
@@ -13350,6 +13459,7 @@ export type EventType106 =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -13377,8 +13487,8 @@ export type EventType106 =
   | "gates.snapshot";
 export type Timestamp106 = string;
 export type SessionId106 = string;
-export type Tools4 = string[];
-export type Patterns1 = string[];
+export type Tools3 = string[];
+export type Patterns = string[];
 /**
  * All event types in the protocol.
  */
@@ -13471,6 +13581,7 @@ export type EventType107 =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -13498,9 +13609,8 @@ export type EventType107 =
   | "gates.snapshot";
 export type Timestamp107 = string;
 export type SessionId107 = string;
-export type Target = string;
-export type Tools5 = string[];
-export type Patterns2 = string[];
+export type Tools4 = string[];
+export type Patterns1 = string[];
 /**
  * All event types in the protocol.
  */
@@ -13593,6 +13703,7 @@ export type EventType108 =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -13620,7 +13731,9 @@ export type EventType108 =
   | "gates.snapshot";
 export type Timestamp108 = string;
 export type SessionId108 = string;
-export type Target1 = string;
+export type Target = string;
+export type Tools5 = string[];
+export type Patterns2 = string[];
 /**
  * All event types in the protocol.
  */
@@ -13713,6 +13826,7 @@ export type EventType109 =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -13740,7 +13854,7 @@ export type EventType109 =
   | "gates.snapshot";
 export type Timestamp109 = string;
 export type SessionId109 = string;
-export type Policy = string;
+export type Target1 = string;
 /**
  * All event types in the protocol.
  */
@@ -13833,6 +13947,7 @@ export type EventType110 =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -13860,7 +13975,7 @@ export type EventType110 =
   | "gates.snapshot";
 export type Timestamp110 = string;
 export type SessionId110 = string;
-export type RequestId33 = string;
+export type Policy = string;
 /**
  * All event types in the protocol.
  */
@@ -13953,6 +14068,7 @@ export type EventType111 =
   | "workspace.files_snapshot"
   | "event.external"
   | "inject_prompt.request"
+  | "inject_prompt.result"
   | "replay_messages.request"
   | "replay_messages.result"
   | "resolve_fork_point.request"
@@ -13980,7 +14096,128 @@ export type EventType111 =
   | "gates.snapshot";
 export type Timestamp111 = string;
 export type SessionId111 = string;
-export type RequestId34 = string;
+export type RequestId35 = string;
+/**
+ * All event types in the protocol.
+ */
+export type EventType112 =
+  | "connected"
+  | "disconnected"
+  | "agent.created"
+  | "agent.output"
+  | "agent.status_changed"
+  | "agent.completed"
+  | "agent.error"
+  | "session.terminated"
+  | "slot.settled"
+  | "session.restored"
+  | "tool.call_start"
+  | "tool.call_end"
+  | "tool.output"
+  | "permission.requested"
+  | "permission.input_mode"
+  | "permission.resolved"
+  | "permission.response"
+  | "permission.status"
+  | "clarification.requested"
+  | "clarification.input_mode"
+  | "clarification.question"
+  | "clarification.resolved"
+  | "clarification.response"
+  | "clarification.batch"
+  | "clarification.batch_response"
+  | "reference_selection.requested"
+  | "reference_selection.resolved"
+  | "reference_selection.response"
+  | "workspace_mismatch.requested"
+  | "workspace_mismatch.resolved"
+  | "workspace_mismatch.response"
+  | "plan.updated"
+  | "plan.step_updated"
+  | "plan.cleared"
+  | "context.updated"
+  | "turn.completed"
+  | "turn.progress"
+  | "instruction_budget.updated"
+  | "gc.config"
+  | "gc"
+  | "instruction_budget.request"
+  | "system.message"
+  | "help.text"
+  | "error"
+  | "init.progress"
+  | "retry"
+  | "session.list"
+  | "session.info"
+  | "session.description_updated"
+  | "memory.list"
+  | "sandbox.paths"
+  | "service.list"
+  | "message.send"
+  | "session.stop"
+  | "command.execute"
+  | "command.list_request"
+  | "command.list"
+  | "command.list_refresh"
+  | "tools.status"
+  | "tools.id_registry"
+  | "tools.disable"
+  | "tools.register_client"
+  | "tool.execute_request"
+  | "tool.execute_result"
+  | "history.request"
+  | "history"
+  | "client.config"
+  | "mid_turn_prompt.queued"
+  | "mid_turn_prompt.injected"
+  | "mid_turn_prompt.interrupt"
+  | "session.interrupted_turn_recovered"
+  | "auth.setup"
+  | "auth.setup_response"
+  | "workspace.list"
+  | "workspace.list_response"
+  | "workspace.create"
+  | "workspace.created"
+  | "workspace.select"
+  | "config.status"
+  | "config.update"
+  | "config.updated"
+  | "workspace.files.stage_request"
+  | "workspace.files.staged"
+  | "session.profiles"
+  | "workspace.files_changed"
+  | "workspace.files_snapshot"
+  | "event.external"
+  | "inject_prompt.request"
+  | "inject_prompt.result"
+  | "replay_messages.request"
+  | "replay_messages.result"
+  | "resolve_fork_point.request"
+  | "resolve_fork_point.result"
+  | "session.wake_bind_result"
+  | "session.woken"
+  | "permission.add_whitelist"
+  | "permission.add_blacklist"
+  | "permission.remove"
+  | "permission.clear"
+  | "permission.set_default"
+  | "permission.policy_snapshot.request"
+  | "permission.policy_snapshot"
+  | "events.subscribed"
+  | "peer.heartbeat"
+  | "peer.spawn_request"
+  | "peer.spawn_accepted"
+  | "peer.spawn_rejected"
+  | "peer.agent_output"
+  | "peer.agent_completed"
+  | "peer.stop_request"
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
+export type Timestamp112 = string;
+export type SessionId112 = string;
+export type RequestId36 = string;
 export type DefaultPolicy = string;
 export type SessionDefaultPolicy = string | null;
 export type WhitelistTools = string[];
@@ -15790,6 +16027,48 @@ export interface InjectPromptRequest {
   text?: Text5;
   source_type?: SourceType;
   source_id?: SourceId;
+  request_id?: RequestId29;
+}
+/**
+ * Server's response to :class:`InjectPromptRequest`.
+ *
+ * Answers the only question an injecting caller actually has: **after
+ * this call, will the target act on the message?**  The pre-1.3 verb
+ * could not answer it — the runner's ``{"ok": True}`` was discarded by
+ * the daemon and the SDK method returned ``None`` — so a driver got the
+ * same silence whether its target was busy, idle, stranded, or dead.
+ *
+ * ``status`` is one of the constants in ``shared.message_delivery``:
+ *
+ * * ``"accepted"``    — the target was idle, so a turn was STARTED on it.
+ * * ``"queued"``      — the target is mid-turn; its running turn will
+ *   drain the message.
+ * * ``"terminated"``  — the target is loaded but terminal and will run no
+ *   further turns.  Reported from the target's own terminal stamp, never
+ *   inferred from silence.
+ * * ``"no_session"``  — no session with that id is loaded.
+ * * ``"unreachable"`` — loaded and live, but the delivery mechanism failed
+ *   (no runner channel, or the forward raised).  A transport fault, not a
+ *   decision by the target.
+ *
+ * Only ``accepted`` and ``queued`` mean the message will be acted on
+ * (``shared.message_delivery.DELIVERED``).  The rest are failures and must
+ * not be read as success: a caller that assumes delivery and is wrong gets
+ * a silent stall it cannot attribute, which is the expensive direction to
+ * be wrong in.
+ *
+ * ``detail`` carries a human-readable elaboration when one exists.  It is
+ * **omitted rather than filled with a placeholder** when there is nothing
+ * to say — a reader of ``"unknown"`` is back where they started, so
+ * absence is left checkable instead of forgeable.
+ */
+export interface InjectPromptResultEvent {
+  type?: EventType99;
+  timestamp?: Timestamp99;
+  session_id?: SessionId99;
+  request_id?: RequestId30;
+  status?: Status3;
+  detail?: Detail;
 }
 /**
  * Re-run the model loop against an explicit message list.
@@ -15806,10 +16085,10 @@ export interface InjectPromptRequest {
  * flows compose this with ``resolve_fork_point``.
  */
 export interface ReplayMessagesRequest {
-  type?: EventType99;
-  timestamp?: Timestamp99;
-  session_id?: SessionId99;
-  request_id?: RequestId29;
+  type?: EventType100;
+  timestamp?: Timestamp100;
+  session_id?: SessionId100;
+  request_id?: RequestId31;
   messages?: Messages;
   timeout_seconds?: TimeoutSeconds;
 }
@@ -15817,10 +16096,10 @@ export interface ReplayMessagesRequest {
  * Server's response to :class:`ReplayMessagesRequest`.
  */
 export interface ReplayMessagesResultEvent {
-  type?: EventType100;
-  timestamp?: Timestamp100;
-  session_id?: SessionId100;
-  request_id?: RequestId30;
+  type?: EventType101;
+  timestamp?: Timestamp101;
+  session_id?: SessionId101;
+  request_id?: RequestId32;
   response_text?: ResponseText;
   error?: Error9;
 }
@@ -15840,10 +16119,10 @@ export interface ReplayMessagesResultEvent {
  * tool uses internally.
  */
 export interface ResolveForkPointRequest {
-  type?: EventType101;
-  timestamp?: Timestamp101;
-  session_id?: SessionId101;
-  request_id?: RequestId31;
+  type?: EventType102;
+  timestamp?: Timestamp102;
+  session_id?: SessionId102;
+  request_id?: RequestId33;
   after_message?: AfterMessage;
   after_tool_call?: AfterToolCall;
   after_timestamp?: AfterTimestamp;
@@ -15852,10 +16131,10 @@ export interface ResolveForkPointRequest {
  * Server's response to :class:`ResolveForkPointRequest`.
  */
 export interface ResolveForkPointResultEvent {
-  type?: EventType102;
-  timestamp?: Timestamp102;
-  session_id?: SessionId102;
-  request_id?: RequestId32;
+  type?: EventType103;
+  timestamp?: Timestamp103;
+  session_id?: SessionId103;
+  request_id?: RequestId34;
   fork_index?: ForkIndex;
   error?: Error10;
 }
@@ -15869,12 +16148,12 @@ export interface ResolveForkPointResultEvent {
  * binding's Unix expiry — the values the caller's waker keys on.
  */
 export interface WakeBindResultEvent {
-  type?: EventType103;
-  timestamp?: Timestamp103;
-  session_id?: SessionId103;
+  type?: EventType104;
+  timestamp?: Timestamp104;
+  session_id?: SessionId104;
   wake_ref?: WakeRef;
   outcome?: Outcome1;
-  detail?: Detail;
+  detail?: Detail1;
   expires_at?: ExpiresAt1;
   endpoint?: Endpoint;
 }
@@ -15898,9 +16177,9 @@ export interface WakeBindResultEvent {
  * notification is a signal to attach, not the untrusted payload).
  */
 export interface SessionWokenEvent {
-  type?: EventType104;
-  timestamp?: Timestamp104;
-  session_id?: SessionId104;
+  type?: EventType105;
+  timestamp?: Timestamp105;
+  session_id?: SessionId105;
   wake_ref?: WakeRef1;
   source?: Source2;
 }
@@ -15913,9 +16192,9 @@ export interface SessionWokenEvent {
  * additive.
  */
 export interface PermissionAddWhitelistRequest {
-  type?: EventType105;
-  timestamp?: Timestamp105;
-  session_id?: SessionId105;
+  type?: EventType106;
+  timestamp?: Timestamp106;
+  session_id?: SessionId106;
   tools?: Tools3;
   patterns?: Patterns;
 }
@@ -15927,9 +16206,9 @@ export interface PermissionAddWhitelistRequest {
  * both lists are additive.
  */
 export interface PermissionAddBlacklistRequest {
-  type?: EventType106;
-  timestamp?: Timestamp106;
-  session_id?: SessionId106;
+  type?: EventType107;
+  timestamp?: Timestamp107;
+  session_id?: SessionId107;
   tools?: Tools4;
   patterns?: Patterns1;
 }
@@ -15940,9 +16219,9 @@ export interface PermissionAddBlacklistRequest {
  * ``"blacklist"``.  Empty lists are no-ops.
  */
 export interface PermissionRemoveRequest {
-  type?: EventType107;
-  timestamp?: Timestamp107;
-  session_id?: SessionId107;
+  type?: EventType108;
+  timestamp?: Timestamp108;
+  session_id?: SessionId108;
   target?: Target;
   tools?: Tools5;
   patterns?: Patterns2;
@@ -15956,9 +16235,9 @@ export interface PermissionRemoveRequest {
  * session-level overrides.
  */
 export interface PermissionClearRequest {
-  type?: EventType108;
-  timestamp?: Timestamp108;
-  session_id?: SessionId108;
+  type?: EventType109;
+  timestamp?: Timestamp109;
+  session_id?: SessionId109;
   target?: Target1;
 }
 /**
@@ -15969,19 +16248,19 @@ export interface PermissionClearRequest {
  * the base default for this session only.
  */
 export interface PermissionSetDefaultRequest {
-  type?: EventType109;
-  timestamp?: Timestamp109;
-  session_id?: SessionId109;
+  type?: EventType110;
+  timestamp?: Timestamp110;
+  session_id?: SessionId110;
   policy?: Policy;
 }
 /**
  * Request a structured snapshot of the current permission policy.
  */
 export interface PermissionPolicySnapshotRequest {
-  type?: EventType110;
-  timestamp?: Timestamp110;
-  session_id?: SessionId110;
-  request_id?: RequestId33;
+  type?: EventType111;
+  timestamp?: Timestamp111;
+  session_id?: SessionId111;
+  request_id?: RequestId35;
 }
 /**
  * Structured permission policy snapshot.
@@ -15992,10 +16271,10 @@ export interface PermissionPolicySnapshotRequest {
  * the stringly-typed ``permissions check`` command.
  */
 export interface PermissionPolicySnapshotEvent {
-  type?: EventType111;
-  timestamp?: Timestamp111;
-  session_id?: SessionId111;
-  request_id?: RequestId34;
+  type?: EventType112;
+  timestamp?: Timestamp112;
+  session_id?: SessionId112;
+  request_id?: RequestId36;
   default_policy?: DefaultPolicy;
   session_default_policy?: SessionDefaultPolicy;
   whitelist_tools?: WhitelistTools;
@@ -16114,6 +16393,7 @@ export const EventTypeValue = {
   WORKSPACE_FILES_SNAPSHOT: "workspace.files_snapshot",
   EVENT_EXTERNAL: "event.external",
   INJECT_PROMPT_REQUEST: "inject_prompt.request",
+  INJECT_PROMPT_RESULT: "inject_prompt.result",
   REPLAY_MESSAGES_REQUEST: "replay_messages.request",
   REPLAY_MESSAGES_RESULT: "replay_messages.result",
   RESOLVE_FORK_POINT_REQUEST: "resolve_fork_point.request",

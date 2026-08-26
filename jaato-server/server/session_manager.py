@@ -6422,6 +6422,139 @@ class SessionManager:
             return None
         return getattr(state, "history", None)
 
+    def deliver_prompt_to_session(
+        self,
+        target_session_id: str,
+        text: str,
+        source_id: Optional[str] = None,
+        source_type: Optional[Any] = None,
+    ) -> str:
+        """Deliver a prompt to a loaded session and REPORT what happened.
+
+        The status-returning form of :meth:`inject_prompt_to_session`, and
+        the one every new caller should use.  It answers the question an
+        injecting caller actually has -- **after this returns, will the
+        target act on the message?** -- which a boolean cannot express,
+        because "queued into a live turn" and "the target is dead" were
+        both ``False``-or-``True`` depending on which failure you hit.
+
+        Returns one of the ``shared.message_delivery`` constants:
+
+        ``ACCEPTED``
+            The target was idle, so a turn was STARTED on it.
+        ``QUEUED``
+            The target is mid-turn; its running turn will drain the message.
+        ``TERMINATED``
+            The target is loaded but terminal (``_terminal_reason`` stamped
+            by the model thread on an error or an exhausted budget) and will
+            run no further turns.  Read from the target's OWN stamp -- never
+            inferred from silence, because a slow target and a dead one
+            produce identical nothing and a caller that infers cannot be
+            wrong and know it.
+        ``NO_SESSION``
+            No session with that id is loaded.  Deliberately distinct from
+            ``TERMINATED``: "gone" and "dead but present" are different
+            situations for a driver.
+        ``UNREACHABLE``
+            Loaded and live, but the delivery mechanism failed -- no runner
+            channel, or the forward raised.  A transport fault, not a
+            decision by the target, which is why it is not ``refused``.
+
+        Only ``ACCEPTED`` and ``QUEUED`` mean the message will be acted on
+        (``message_delivery.DELIVERED``).
+
+        AN IDLE TARGET IS DRIVEN, NOT INJECTED.
+
+        ``JaatoSession.inject_prompt`` starts a turn only while
+        ``_on_continuation_needed`` is installed -- and that is for the
+        DURATION of a ``session.send_message`` RPC, not whenever the session
+        happens to be idle.  So injecting into an idle target that nobody is
+        driving queues the message and NOTHING drains it: the call reported
+        success and the message was discarded on unload.  That made the
+        documented cascade-watchdog pattern a no-op, and worse, self-sealing
+        -- the nudge sent to rescue a stalled session landed in the same dead
+        queue as the message it was rescuing, so the recovery mechanism could
+        not work by construction.
+
+        ``send_to_sibling`` fixed its own copy of this in #612; this is the
+        shared primitive, so the fix belongs here rather than at each caller
+        -- see ``shared.message_delivery`` for why cloning the queue-or-drive
+        decision is what produced the bug in the first place.
+
+        Thread-safe.
+
+        Args:
+            target_session_id: The destination session.  Must be loaded in
+                ``self._sessions`` (not just persisted on disk -- attach
+                first if needed).
+            text: The prompt to deliver.
+            source_id: Identifier of the sender (e.g. ``"reactor"``,
+                ``"webhook:github"``).  Defaults to ``"unknown"`` downstream.
+            source_type: ``SourceType`` enum value controlling priority.  Any
+                member of the enum; not re-listed here because a prose copy
+                of it drifts (``sibling`` shipped while this said five).
+                Whether a tier may interrupt a turn in progress is declared
+                by ``HIGH_PRIORITY_SOURCES`` / ``IDLE_ONLY_SOURCES``.
+                Defaults to USER downstream.  Typed as ``Any`` here to avoid
+                a top-level import of the SDK enum.
+
+        Returns:
+            One of the status constants described above.
+        """
+        from shared.message_delivery import (
+            ACCEPTED, NO_SESSION, QUEUED, TERMINATED, UNREACHABLE,
+        )
+
+        with self._lock:
+            session = self._sessions.get(target_session_id)
+        if session is None:
+            return NO_SESSION
+        server = session.server
+        if server is None:
+            return UNREACHABLE
+
+        # Terminal targets are REPORTED, not delivered to.  Without this the
+        # only way a driver learned its target was dead was that nothing ever
+        # happened -- which is exactly what a busy target looks like.
+        if getattr(server, "_terminal_reason", None):
+            return TERMINATED
+
+        busy = bool(getattr(server, "_model_running", False))
+        if not busy:
+            if self.send_message_to_session(target_session_id, text):
+                return ACCEPTED
+            return UNREACHABLE
+
+        # Phase 3 §7c step 6.6.3.6: forward to runner-side via the existing
+        # ``session.inject_prompt`` RPC (§7c step 6.1 (3/3) at commit
+        # 14e57709).  ``SourceType`` enum serialized as its lowercase string
+        # value across the wire.
+        rpc = getattr(server, "_runner_rpc", None)
+        if rpc is None:
+            return UNREACHABLE
+        forwarder = getattr(rpc, "session_inject_prompt_threadsafe", None)
+        if not callable(forwarder):
+            return UNREACHABLE
+        try:
+            forwarder(
+                text,
+                source_id=source_id,
+                source_type=(
+                    source_type.value if source_type is not None else None
+                ),
+                # 2.0 is this primitive's long-standing value, and it now
+                # governs the SDK path too (which used 5.0 before the two
+                # were consolidated).  Deliberate: one path, one timeout.
+                # Residual, unchanged by this fix: a forward that TIMES OUT
+                # may still have been enqueued runner-side, so UNREACHABLE
+                # here means "not confirmed", not "definitely not delivered".
+                timeout=2.0,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("inject_prompt forward failed: %s", exc)
+            return UNREACHABLE
+        return QUEUED
+
     def inject_prompt_to_session(
         self,
         target_session_id: str,
@@ -6431,90 +6564,31 @@ class SessionManager:
     ) -> bool:
         """Deliver a prompt to a loaded session by ID.
 
-        Routing primitive used by daemon extensions (reactor rules,
-        webhook handlers, peer-clustering message routers) that need
-        to deliver a prompt to a session other than the one whose
-        event triggered them.  Generalises ``JaatoSession.inject_prompt``
-        from "self-targeting" to "addressable by ID".
+        Boolean adapter over :meth:`deliver_prompt_to_session`, kept for the
+        daemon extensions (reactor rules, webhook handlers, peer-clustering
+        message routers) that already call it.  ``True`` iff the status is
+        one that means the message will be acted on
+        (``message_delivery.DELIVERED`` -- ``accepted`` or ``queued``).
 
-        Thread-safe.  ``inject_prompt`` itself queues mid-turn for
-        busy sessions, so the caller doesn't need to check session
-        state — this method only fails when the target isn't loaded.
+        Prefer :meth:`deliver_prompt_to_session` in new code: a boolean
+        cannot distinguish a target that is dead from one that is merely
+        busy, and a caller that cannot tell those apart has no way to
+        recover from the first.
 
         Args:
-            target_session_id: The destination session.  Must be loaded
-                in ``self._sessions`` (not just persisted on disk —
-                attach first if needed).
-            text: The prompt to inject.
-            source_id: Identifier of the sender (e.g. ``"reactor"``,
-                ``"webhook:github"``).  Defaults to ``"unknown"``
-                downstream.
+            target_session_id: The destination session.
+            text: The prompt to deliver.
+            source_id: Identifier of the sender.
             source_type: ``SourceType`` enum value controlling priority.
-                Any member of the enum; not re-listed here because a prose
-                copy of it drifts (``sibling`` shipped while this said
-                five).  Whether a tier may interrupt a turn in progress is
-                declared by ``HIGH_PRIORITY_SOURCES`` /
-                ``IDLE_ONLY_SOURCES``.  Defaults to USER downstream.
-                Typed as ``Any`` here to avoid a top-level import of the
-                SDK enum.
 
         Returns:
-            ``True`` if the prompt was delivered (queued or fired
-            immediately), ``False`` if the session isn't loaded or
-            doesn't yet have an active ``JaatoSession``.
+            ``True`` if the prompt will be acted on, ``False`` otherwise.
         """
-        with self._lock:
-            session = self._sessions.get(target_session_id)
-        if session is None:
-            return False
-
-        # AN IDLE TARGET IS DRIVEN, NOT INJECTED.
-        #
-        # ``JaatoSession.inject_prompt`` starts a turn only while
-        # ``_on_continuation_needed`` is installed -- and that is for the
-        # DURATION of a ``session.send_message`` RPC, not whenever the
-        # session happens to be idle.  So injecting into an idle target that
-        # nobody is driving queues the message and NOTHING drains it: the
-        # call reports success and the message is discarded on unload.
-        #
-        # That made the documented cascade-watchdog pattern a no-op --
-        # reported by the perpetual-monologue cascade, whose 180s nudges
-        # fired twice and produced no turn at all.  Reactor rules and webhook
-        # handlers reach sessions through here too and had the same hole.
-        #
-        # ``send_to_sibling`` fixed its own copy of this in #612; this is the
-        # shared primitive, so the fix belongs here rather than at each
-        # caller -- see ``shared.message_delivery`` for why cloning the
-        # queue-or-drive decision is what produced the bug in the first place.
-        busy = bool(session.server is not None
-                    and getattr(session.server, "_model_running", False))
-        if not busy:
-            return self.send_message_to_session(target_session_id, text)
-
-        # Phase 3 §7c step 6.6.3.6: forward to runner-side via the
-        # existing ``session.inject_prompt`` RPC (§7c step 6.1
-        # (3/3) at commit 14e57709).  ``SourceType`` enum
-        # serialized as its lowercase string value across the
-        # wire.
-        rpc = getattr(session.server, "_runner_rpc", None)
-        if rpc is None:
-            return False
-        forwarder = getattr(rpc, "session_inject_prompt_threadsafe", None)
-        if not callable(forwarder):
-            return False
-        try:
-            forwarder(
-                text,
-                source_id=source_id,
-                source_type=(
-                    source_type.value if source_type is not None else None
-                ),
-                timeout=2.0,
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.debug("inject_prompt forward failed: %s", exc)
-            return False
-        return True
+        from shared.message_delivery import DELIVERED
+        return self.deliver_prompt_to_session(
+            target_session_id, text,
+            source_id=source_id, source_type=source_type,
+        ) in DELIVERED
 
     def send_message_to_session(
         self,
@@ -9606,6 +9680,7 @@ class SessionManager:
             GetInstructionBudgetRequest,
             InstructionBudgetEvent,
             InjectPromptRequest,
+            InjectPromptResultEvent,
             ReplayMessagesRequest,
             ReplayMessagesResultEvent,
             ResolveForkPointRequest,
@@ -9866,13 +9941,26 @@ class SessionManager:
         # See ``project_backlog_sdk_feature_parity.md``.
 
         elif isinstance(event, InjectPromptRequest):
-            # Phase 3 §7c step 6.6.3.6: forward to runner-side via
-            # the existing ``session.inject_prompt`` RPC (§7c step
-            # 6.1 (3/3) at commit 14e57709) instead of reaching
-            # into the daemon-side session.  The runner-side
-            # handler validates source_type itself, but we pre-
-            # validate daemon-side to surface the typed error
-            # to clients without an RPC round-trip.
+            # ROUTE THROUGH THE QUEUE-OR-DRIVE DECISION.
+            #
+            # This handler used to call ``session_inject_prompt_threadsafe``
+            # directly -- bypassing ``inject_prompt_to_session``, and with it
+            # ``shared.message_delivery.deliver`` -- so it made NO busy/idle
+            # decision at all.  It could not drive a turn under any
+            # circumstances, in any session state.  Since the runner-side
+            # ``inject_prompt`` only starts a turn while a ``send_message``
+            # RPC is in flight, an inject into an idle session queued into a
+            # queue with no drainer, forever: the session became permanently
+            # UNREACHABLE, and a watchdog's nudge-on-silence landed in the
+            # same dead queue as the message it was sent to rescue.
+            #
+            # Trace evidence (perpetual-monologue cascade, runs 10 and 11,
+            # session_20260825_232315): queue_size_after 1 -> 2 -> 3 across a
+            # sibling message and two user nudges six minutes apart, never a
+            # single pop.  This was the FOURTH copy of the queue-or-drive
+            # decision and the only one that omitted it rather than getting
+            # it wrong.
+            from shared.message_delivery import DELIVERED
             from shared.message_queue import SourceType
             try:
                 source_type = SourceType(event.source_type)
@@ -9883,36 +9971,38 @@ class SessionManager:
                         f"Valid values: {[s.value for s in SourceType]}"
                     ),
                     error_type="ValidationError",
+                    request_id=event.request_id,
                 ))
                 return
-            rpc = getattr(server, "_runner_rpc", None)
-            if rpc is None:
+
+            status = self.deliver_prompt_to_session(
+                session_id, event.text,
+                source_id=event.source_id,
+                source_type=source_type,
+            )
+
+            if event.request_id:
+                # Protocol 1.3+ caller asked to be told.  A status is a
+                # status -- failures ride the same event as successes, so a
+                # caller waiting on one correlation id never waits on two
+                # channels to learn one outcome.
+                self._emit_to_client(client_id, InjectPromptResultEvent(
+                    request_id=event.request_id,
+                    status=status,
+                ))
+            elif status not in DELIVERED:
+                # Pre-1.3 caller: no result channel, so a failure has to
+                # surface as an error or it is silent.  Silence is the
+                # expensive direction -- the caller assumes delivery and
+                # stalls somewhere it cannot attribute.
                 self._emit_to_client(client_id, ErrorEvent(
-                    error="No active JaatoSession",
+                    error=(
+                        f"inject_prompt was not delivered (status={status}). "
+                        f"Pass a request_id to receive an "
+                        f"InjectPromptResultEvent instead."
+                    ),
                     error_type="SessionError",
                 ))
-            else:
-                forwarder = getattr(
-                    rpc, "session_inject_prompt_threadsafe", None,
-                )
-                if callable(forwarder):
-                    try:
-                        forwarder(
-                            event.text,
-                            source_id=event.source_id,
-                            source_type=source_type.value,
-                            timeout=5.0,
-                        )
-                    except Exception as exc:  # noqa: BLE001
-                        self._emit_to_client(client_id, ErrorEvent(
-                            error=f"inject_prompt forward failed: {exc}",
-                            error_type="SessionError",
-                        ))
-                else:
-                    self._emit_to_client(client_id, ErrorEvent(
-                        error="No active JaatoSession",
-                        error_type="SessionError",
-                    ))
 
         elif isinstance(event, ReplayMessagesRequest):
             # Phase 3 §7c step 6.6.3.6: forward to runner-side via

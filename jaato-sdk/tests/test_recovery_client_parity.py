@@ -47,6 +47,14 @@ INTENTIONALLY_ABSENT = {
     "MIN_PROTOCOL_VERSION":
         "protocol floor is negotiated by the inner IPCClient; recovery takes "
         "`min_protocol_version` as a constructor argument instead",
+    "MIN_INJECT_RESULT_PROTOCOL":
+        "implementation detail of the INNER IPCClient's inject_prompt "
+        "delivery reporting; recovery delegates inject_prompt to it and "
+        "never consults the constant itself -- same reasoning as "
+        "MIN_CORRELATION_PROTOCOL above.  The METHOD is forwarded with a "
+        "matching signature (asserted in "
+        "jaato_sdk/tests/test_sdk_parity_methods.py), which is the part a "
+        "caller can observe",
 }
 
 

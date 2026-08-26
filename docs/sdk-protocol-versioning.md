@@ -74,6 +74,44 @@ won't see any field that was added after its minimum.
 
 ## CHANGELOG
 
+### 1.3 — inject_prompt reports its delivery
+
+`InjectPromptRequest.request_id` (optional) plus the new
+`InjectPromptResultEvent` (`inject_prompt.result`), so an inject can answer
+the only question its caller has: **after this returns, will the target
+act?**
+
+Before 1.3 it could not. The runner's `{"ok": True}` was discarded by the
+daemon handler, and `IPCClient.inject_prompt` returned `None`, so a driver
+got identical silence whether its target was busy, idle, stranded, or dead —
+and a cascade driver read that silence as "sent". Status is one of
+`accepted` / `queued` / `terminated` / `no_session` / `unreachable`; only the
+first two mean the message will be acted on.
+
+Additive and backward compatible: a client that sends no `request_id` gets
+the previous fire-and-forget behaviour, and a client talking to a pre-1.3
+daemon gets `None` (meaning "not told", distinct from "not delivered") after
+a one-time warning rather than a hang.
+
+### 1.2 — every event says which session it is about
+
+`session_id` added to the base `Event`, so a multi-session consumer can
+attribute any event without tracking request order (#603).
+
+Note: this bump did **not** regenerate
+`jaato-sdk/jaato_sdk/tests/baselines/events_wire_format/*.json`, so
+`test_events_wire_format.py` has been failing for ~102 of its event types
+since — every event gained a field its frozen baseline does not have. The
+guard is currently dead weight; regenerating the baselines is a separate
+cleanup.
+
+### 1.1 — answers say which request they answer
+
+Optional `request_id` on `SessionInfoEvent` and `ErrorEvent`, so a client can
+tell WHICH `session.new` a given answer belongs to. Without it, a stale
+buffered event from an earlier create could satisfy a later wait and return
+an id that call never created.
+
 ### 1.0 — current baseline (post gap 1-4)
 
 Initial wire-protocol contract following the daruma-operate integration

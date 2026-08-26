@@ -928,14 +928,24 @@ class IPCRecoveryClient:
         text: str,
         source_type: str = "user",
         source_id: Optional[str] = None,
-    ) -> None:
+        timeout: float = 10.0,
+    ) -> Optional[str]:
         """Inject a prompt into the session's message queue.
 
-        See :meth:`IPCClient.inject_prompt` for full docs.
+        See :meth:`IPCClient.inject_prompt` for full docs, including what
+        each status means and why ``None`` is "not told" rather than
+        "not delivered".
+
+        Returns ``None`` when no underlying client is connected — the same
+        unknown-status signal the delegate uses, since a recovery client
+        between connections has not been told anything either.
         """
         self._check_can_send()
         if self._client:
-            await self._client.inject_prompt(text, source_type, source_id)
+            return await self._client.inject_prompt(
+                text, source_type, source_id, timeout=timeout,
+            )
+        return None
 
     async def replay_messages(
         self,

@@ -1,0 +1,8 @@
+{
+  "type": "inject_prompt.result",
+  "timestamp": "<TIMESTAMP>",
+  "session_id": "",
+  "request_id": "",
+  "status": "",
+  "detail": null
+}

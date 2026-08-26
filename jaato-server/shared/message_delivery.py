@@ -42,6 +42,39 @@ QUEUED = "queued"
 #: NOT a claim that the target agreed, understood, or acted.
 ACCEPTED = "accepted"
 
+#: The target is loaded but TERMINAL -- its model thread ended with an error
+#: or an exhausted budget and it will run no further turns.  Reported by the
+#: DAEMON from the target's own terminal stamp, never inferred by the caller
+#: from silence: a slow target and a dead one produce the same nothing, so a
+#: caller that infers cannot be wrong-and-know-it.
+TERMINATED = "terminated"
+
+#: No session with that id is loaded.  Distinct from :data:`TERMINATED` on
+#: purpose -- "gone" and "dead but present" are different situations for a
+#: driver, and collapsing them is what makes an absence claim unfalsifiable.
+NO_SESSION = "no_session"
+
+#: The session is loaded and live, but the delivery mechanism failed -- no
+#: runner channel, or the forward raised.  A transport fault, NOT a decision
+#: by the target, which is why it is not spelled ``refused``.
+UNREACHABLE = "unreachable"
+
+#: The statuses that mean the message WILL be acted on.
+#:
+#: This set is the whole point of the vocabulary.  The failure states above
+#: must never render as success, because a caller that assumes delivery and
+#: is wrong gets a silent stall it cannot attribute -- the expensive
+#: direction.  Anything not in here is a delivery that did not happen.
+#:
+#: Note what :data:`QUEUED` does and does not promise.  It promises a drainer
+#: exists (the target is mid-turn, and a turn drains its queue at every yield
+#: point and again when it ends).  It does NOT yet promise the drainer will
+#: still be there a millisecond later: the runner's final drain runs strictly
+#: BEFORE the daemon's busy flag clears, so a message routed into that tail is
+#: queued against a turn that will never drain again.  Closing that requires
+#: moving the decision to the runner, which owns the authoritative flag.
+DELIVERED = frozenset({ACCEPTED, QUEUED})
+
 
 def deliver(
     *,
