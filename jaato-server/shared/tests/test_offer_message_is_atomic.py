@@ -125,3 +125,56 @@ def test_callbacks_fire_outside_the_lock():
 
     assert seen["text"] == "with callback"
     assert seen["locked"] is False, "callback fired while holding the lock"
+
+
+def test_a_failed_offer_says_why_and_not_at_debug():
+    """``unreachable`` must be explicable, and a TIMEOUT must not render blank.
+
+    The failure reported live was ``replica_busy=True thread_alive=True
+    outcome=unreachable`` against a session that was demonstrably alive on
+    both sides of it -- i.e. the 2.0s offer timeout.  The reason was logged at
+    DEBUG (invisible by default) via ``str(exc)``, and
+    ``str(TimeoutError())`` is the EMPTY STRING, so even with debug on the
+    line read "offer_message failed: " and named nothing.
+    """
+    import logging
+    import threading as _threading
+
+    from server.session_manager import SessionManager
+    from shared.message_delivery import UNREACHABLE
+
+    class _RPC:
+        def session_offer_message_threadsafe(self, text, **kw):
+            raise TimeoutError()          # str() == ""
+
+    sm = SessionManager.__new__(SessionManager)
+    sess = type("S", (), {})()
+    sess.session_id = "s-1"
+    sess.server = type("V", (), {
+        "_runner_rpc": _RPC(), "_terminal_reason": None, "_model_running": True,
+    })()
+    sm._sessions = {"s-1": sess}
+    sm._lock = _threading.RLock()
+
+    records = []
+
+    class _Cap(logging.Handler):
+        def emit(self, record):
+            records.append(record)
+
+    logger = logging.getLogger("server.session_manager")
+    handler = _Cap()
+    logger.addHandler(handler)
+    prev = logger.level
+    logger.setLevel(logging.WARNING)
+    try:
+        assert sm.deliver_prompt_to_session("s-1", "hello") == UNREACHABLE
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(prev)
+
+    assert records, "a reported failure logged nothing at WARNING"
+    text = records[-1].getMessage()
+    assert "TimeoutError" in text, (
+        f"the cause must be named even when str(exc) is empty; got: {text!r}"
+    )

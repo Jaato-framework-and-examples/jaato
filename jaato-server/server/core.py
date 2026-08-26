@@ -4248,12 +4248,17 @@ class JaatoServer:
                         timeout=2.0,
                     )
                 except Exception as exc:  # noqa: BLE001 — boundary
+                    # ``exc_message``: the likeliest exception is the 2.0s
+                    # timeout, and ``str(TimeoutError())`` is the EMPTY
+                    # STRING -- this rendered as "RPC failed () -- falling
+                    # back", naming no cause at all.
+                    from shared.utils.errors import exc_message
                     logger.warning(
-                        "offer_message RPC failed (%s) -- falling back to "
+                        "offer_message RPC failed (%s: %s) -- falling back to "
                         "starting a turn, which is the safe direction: a "
                         "duplicate turn is visible, a swallowed message is "
                         "not",
-                        exc,
+                        type(exc).__name__, exc_message(exc),
                     )
 
         if outcome == "queued":
