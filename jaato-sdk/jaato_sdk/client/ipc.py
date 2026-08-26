@@ -2086,12 +2086,19 @@ class IPCClient:
             One of ``"accepted"`` (the target was idle, so a turn was
             STARTED), ``"queued"`` (the target is mid-turn and its running
             turn will drain the message), ``"terminated"`` (loaded but dead),
-            ``"no_session"`` (not loaded), or ``"unreachable"`` (live, but
-            the delivery mechanism failed).
+            ``"no_session"`` (not loaded), ``"unreachable"`` (live, but
+            nothing was sent -- re-sending is SAFE), or ``"not_confirmed"``
+            (an offer was made and its answer was lost -- re-sending MAY
+            DUPLICATE).
 
             Only ``"accepted"`` and ``"queued"`` mean the message will be
             acted on.  **Do not treat the rest as success** — a caller that
             assumes delivery and is wrong gets a silent stall.
+
+            The two transport failures are separate words because they call
+            for OPPOSITE responses on retry.  Branch on membership of the
+            delivered set for correctness; branch on these two only when
+            deciding whether to re-send.
 
             ``None`` means the status is UNKNOWN, not that delivery failed:
             either the daemon predates protocol 1.3 and cannot answer, or

@@ -42,6 +42,7 @@ class _FakeRunnerRPC:
         *,
         source_id: Optional[str] = None,
         source_type: Optional[str] = None,
+        require_idle: bool = False,
         timeout: Optional[float] = None,
     ) -> str:
         """Stand-in for the runner's ATOMIC queue-or-report.
@@ -51,6 +52,13 @@ class _FakeRunnerRPC:
         the call in ``calls`` only on the queued branch mirrors that: a
         ``needs_turn`` answer enqueues NOTHING, so there is nothing to
         record and the daemon must drive instead.
+
+        THE SIGNATURE IS PART OF THE FIXTURE.  ``require_idle`` shipped on the
+        real method and not on this one, so every call landed in the caller's
+        ``except`` branch: five tests named for the queue/drive decision were
+        in fact exercising the delivery-failed path, and passed nothing they
+        claimed to.  ``test_the_fake_matches_the_real_signature`` below is the
+        guard -- a fixture that drifts from its subject tests the drift.
         """
         if self._raise:
             raise RuntimeError("RPC unavailable")
@@ -343,3 +351,34 @@ class TestDeliverPromptToSession:
             assert ok is (status in DELIVERED), (
                 f"{label}: bool={ok} disagrees with status={status}"
             )
+
+
+def test_the_fake_matches_the_real_signature():
+    """A fake whose signature has drifted silently tests the ``except`` branch.
+
+    ``require_idle`` was added to the real ``session_offer_message_threadsafe``
+    and not to ``_FakeRunnerRPC``, so every call raised ``TypeError`` and
+    ``deliver_prompt_to_session`` reported a delivery failure.  Five tests in
+    this file named for the queue-or-drive decision never reached it.  They
+    did not go green-and-wrong -- they went red, in a file CI does not run, so
+    nothing said so.
+
+    Compared as a SET of accepted keywords rather than by exact signature: the
+    fake may narrow defaults or annotations freely, but it must not reject a
+    keyword the caller actually passes.
+    """
+    import inspect
+
+    from .runner_rpc_client import RunnerRPCClient
+
+    real = set(inspect.signature(
+        RunnerRPCClient.session_offer_message_threadsafe).parameters)
+    fake = set(inspect.signature(
+        _FakeRunnerRPC.session_offer_message_threadsafe).parameters)
+
+    missing = real - fake
+    assert not missing, (
+        f"the fake rejects {sorted(missing)}, which the daemon passes; every "
+        "call would land in the caller's except branch and the tests above "
+        "would exercise delivery-failure instead of what they are named for"
+    )

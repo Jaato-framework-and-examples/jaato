@@ -40,6 +40,19 @@ def test_every_word_means_exactly_one_thing():
     to the other half.  A boolean had to render "queued into a live turn"
     and "the target is dead" with the same token, so a driver could not tell
     a busy peer from a gone one -- and could not recover from the second.
+
+    It grew once more when ``unreachable`` was found to be FIVE outcomes
+    wearing one word.  The split is on the only axis a sender can act on --
+    was anything put in flight? -- so ``not_confirmed`` (an offer was made
+    and its answer lost: RE-SENDING MAY DUPLICATE) is a different word from
+    ``unreachable`` (nothing was sent: re-sending is SAFE).  The four
+    mechanisms underneath ``unreachable`` deliberately did NOT become words:
+    a sender cannot act on "no runner channel" differently from "no server
+    attached", so those live in the log.
+
+    THE TEST OF WHETHER A WORD BELONGS HERE is whether a correct sender would
+    DO something different on seeing it.  That is why five mechanisms
+    produced one addition and not four.
     """
     import shared.message_delivery as md
     words = {v for k, v in vars(md).items()
@@ -47,6 +60,7 @@ def test_every_word_means_exactly_one_thing():
     assert words == {
         "queued", "accepted",            # the message will be acted on
         "terminated", "no_session", "unreachable",   # it will not
+        "not_confirmed",                 # it MIGHT have; retry may duplicate
         "busy",                          # backpressure: the TARGET said so
     }, f"unexpected vocabulary: {words}"
 
@@ -69,8 +83,16 @@ def test_failure_words_are_never_delivered():
     stall it cannot attribute -- the expensive direction to be wrong in.
     """
     import shared.message_delivery as md
-    for failure in (md.TERMINATED, md.NO_SESSION, md.UNREACHABLE, md.BUSY):
+    for failure in (md.TERMINATED, md.NO_SESSION, md.UNREACHABLE,
+                    md.NOT_CONFIRMED, md.BUSY):
         assert failure not in md.DELIVERED
+
+    # NOT_CONFIRMED is the one that could plausibly have been argued into
+    # DELIVERED -- the message may genuinely be in the target's queue.  It is
+    # not, and must not be: a MAYBE rendered as a YES is the same silent
+    # stall as any other failure read as success, and the caller loses the
+    # one thing the word exists to tell it.
+    assert md.NOT_CONFIRMED not in md.DELIVERED
 
 
 def test_a_busy_target_is_queued():

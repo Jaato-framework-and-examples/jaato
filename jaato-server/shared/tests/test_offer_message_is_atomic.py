@@ -128,7 +128,7 @@ def test_callbacks_fire_outside_the_lock():
 
 
 def test_a_failed_offer_says_why_and_not_at_debug():
-    """``unreachable`` must be explicable, and a TIMEOUT must not render blank.
+    """A lost answer must be explicable, and a TIMEOUT must not render blank.
 
     The failure reported live was ``replica_busy=True thread_alive=True
     outcome=unreachable`` against a session that was demonstrably alive on
@@ -141,7 +141,7 @@ def test_a_failed_offer_says_why_and_not_at_debug():
     import threading as _threading
 
     from server.session_manager import SessionManager
-    from shared.message_delivery import UNREACHABLE
+    from shared.message_delivery import NOT_CONFIRMED
 
     class _RPC:
         def session_offer_message_threadsafe(self, text, **kw):
@@ -168,7 +168,12 @@ def test_a_failed_offer_says_why_and_not_at_debug():
     prev = logger.level
     logger.setLevel(logging.WARNING)
     try:
-        assert sm.deliver_prompt_to_session("s-1", "hello") == UNREACHABLE
+        # NOT_CONFIRMED, not UNREACHABLE: the offer WAS made and only its
+        # answer was lost, which is the one delivery failure where re-sending
+        # can duplicate.  It shared a word with four failures that send
+        # nothing, and the shared prose described THIS case -- so the four
+        # inherited a duplicate warning that could not apply to them.
+        assert sm.deliver_prompt_to_session("s-1", "hello") == NOT_CONFIRMED
     finally:
         logger.removeHandler(handler)
         logger.setLevel(prev)
