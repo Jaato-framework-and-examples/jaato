@@ -1253,11 +1253,30 @@ class MemoryPlugin(RunnerForwardingMixin):
                     "message": f"No memories found for tags: {tags}"
                 }
 
-        # Update usage statistics
+        # Record usage BY ID, not by writing the object back.
+        #
+        # This used to be ``self._storage.update(mem)`` with the full
+        # retrieved object -- which routed on the maturity the memory had AT
+        # RETRIEVAL TIME.  Under parallel tool execution a curator decision
+        # landing between the read and this write-back was silently undone:
+        # a validation reverted (stale-raw upserted over it), a dismissal
+        # resurrected (stale object re-added via the "not anywhere yet"
+        # branch).  10 of 32 live decisions lost, and a re-decide livelock.
+        #
+        # It also wrote every memory through the PROJECT store regardless of
+        # which store it came from, so a global-store memory would have been
+        # copied into the project raw queue.  ``record_usage`` no-ops on a
+        # store that does not hold the id, so offering it to both is exact.
         for mem in memories:
+            # The response reflects THIS read (the in-hand copy is display
+            # only -- it is never written back, so it cannot carry staleness
+            # anywhere).  Persistence goes through record_usage by id.
             mem.usage_count += 1
             mem.last_accessed = datetime.now().isoformat()
-            self._storage.update(mem)
+            if self._storage:
+                self._storage.record_usage(mem.id)
+            if self._global_storage:
+                self._global_storage.record_usage(mem.id)
 
         # Compute summary stats for telemetry
         maturities_retrieved = list({m.maturity for m in memories})
