@@ -116,47 +116,69 @@ def test_save_session_async_spawns_daemon_thread() -> None:
     t.join(timeout=2.0)
 
 
-def test_save_session_async_serializes_concurrent_invocations() -> None:
-    """Pin: ``_async_save_lock`` serializes concurrent async saves
-    so parallel ToolCallStartEvents produce consistent ordering."""
-    from server.session_manager import SessionManager
+def test_save_session_async_serializes_saves_of_ONE_session() -> None:
+    """Path H's ordering requirement, restated for a per-session guard.
+
+    This used to pin ``_async_save_lock`` -- ONE GLOBAL lock, taken by
+    ``_save_session_async`` around its call.  It asserted that saves of THREE
+    DIFFERENT sessions ran one at a time, which was an accident of the lock's
+    granularity and never a requirement: different sessions write different
+    files and their relative order is meaningless.
+
+    Meanwhile eight OTHER call sites reached ``_save_session`` with no lock at
+    all, so the guard did not deliver the property even for one session -- an
+    explicit ``session.save`` could interleave with an async one, both writing
+    ``<id>.json.tmp``, and the loser got ENOENT.
+
+    The guard now lives inside ``_save_session``, keyed on the session.  What
+    Path H actually needs -- parallel ToolCallStartEvents, which all belong to
+    ONE session, producing consistent last-writer-wins ordering -- still
+    holds, and now holds for every caller.
+
+    NOTE the stub below deliberately goes through ``session.save_lock``:
+    replacing ``_save_session`` replaces the function that holds the guard, so
+    a test that stubs it must take the lock the real one takes.  Serialization
+    against the REAL ``_save_session`` is covered in
+    ``test_save_serializes_per_session.py``.
+    """
+    import threading as _threading
+
+    from server.session_manager import Session, SessionManager
 
     sm = SessionManager.__new__(SessionManager)
-    sm._async_save_lock = threading.Lock()
 
     save_order: List[str] = []
-    save_done = threading.Event()
+    order_lock = _threading.Lock()
 
     def _fake_save(session):
-        save_order.append(f"start-{session.session_id}")
-        time.sleep(0.05)  # simulate slow save
-        save_order.append(f"end-{session.session_id}")
+        with session.save_lock:          # the guard _save_session now holds
+            with order_lock:
+                save_order.append(f"start-{session.session_id}")
+            time.sleep(0.05)
+            with order_lock:
+                save_order.append(f"end-{session.session_id}")
         return True
 
     sm._save_session = _fake_save
 
-    sessions = [MagicMock(session_id=f"s{i}") for i in range(3)]
-    for s in sessions:
-        sm._save_session_async(s)
+    # ONE session, three parallel saves -- the real Path H shape.
+    session = Session(
+        session_id="s0", name="s0",
+        server=object(),  # type: ignore[arg-type]
+        created_at="2026-08-26T00:00:00Z",
+    )
+    for _ in range(3):
+        sm._save_session_async(session)
 
-    # Wait for all to finish.
-    for _ in range(20):
+    for _ in range(40):
         if len(save_order) == 6:
             break
         time.sleep(0.05)
 
-    # Each save's start/end pair should be adjacent (no interleaving)
-    # because of the lock.
-    for i in range(0, 6, 2):
-        assert save_order[i].startswith("start-"), (
-            f"Path H regression: lock didn't serialize.  "
-            f"save_order={save_order}"
-        )
-        sid = save_order[i][6:]
-        assert save_order[i + 1] == f"end-{sid}", (
-            f"Path H regression: save interleaved across sessions.  "
-            f"save_order={save_order}"
-        )
+    assert save_order == ["start-s0", "end-s0"] * 3, (
+        f"saves of ONE session interleaved: {save_order}.  Two writers in the "
+        f"same window both target <id>.json.tmp; the loser gets ENOENT."
+    )
 
 
 def test_save_session_async_swallows_errors() -> None:

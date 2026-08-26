@@ -160,6 +160,25 @@ class Session:
     attached_clients: Set[str] = field(default_factory=set)
     description: Optional[str] = None
     is_dirty: bool = False  # True if has unsaved changes
+    #: Serializes saves OF THIS SESSION.  Lives on the session because the
+    #: thing it protects is per-session: ``_save_session`` writes
+    #: ``<session_id>.json.tmp`` and renames it, so two concurrent saves of
+    #: ONE session race — the first rename wins and the second gets ENOENT on
+    #: a temp file that no longer exists.
+    #:
+    #: Per-session and NOT global on purpose.  A global lock would also
+    #: prevent the collision, by serializing saves of sessions that never
+    #: shared a path — making unrelated sessions wait for each other to fix a
+    #: race they were not in.
+    #:
+    #: On the record rather than in a ``Dict[str, Lock]`` so it is created and
+    #: destroyed with the session: no lifecycle, no eviction, and no
+    #: possibility of a lock outliving what it guarded.
+    #:
+    #: ``compare=False``/``repr=False``: a lock is identity, not state.
+    save_lock: threading.Lock = field(
+        default_factory=threading.Lock, repr=False, compare=False,
+    )
     workspace_path: Optional[str] = None  # Client's working directory
     config_root: Optional[str] = None  # Read-only framework-config root override
     user_inputs: List[str] = field(default_factory=list)  # Command history for prompt restoration
@@ -675,10 +694,12 @@ class SessionManager:
         # Path H (cycle 10): serialize concurrent async saves so
         # parallel ToolCallStartEvents (parallel tool execution)
         # don't trample each other.  atomic_write_json already
-        # prevents file tear; this lock gives consistent last-
-        # writer-wins ordering across concurrent _save_session_async
-        # invocations for the same session.
-        self._async_save_lock = threading.Lock()
+        # prevents file tear.  Ordering across concurrent saves of ONE
+        # session is now given by ``Session.save_lock``, held inside
+        # ``_save_session`` itself, so every caller inherits it.  The global
+        # lock that used to live here guarded a single call site and made
+        # unrelated sessions wait on each other; it is gone rather than left
+        # as a decoy for the next reader to trust.
 
         # Client to session mapping
         self._client_to_session: Dict[str, str] = {}
@@ -8274,20 +8295,28 @@ class SessionManager:
         Trade-off: the daemon-crash recovery window for IN-PROGRESS
         tool calls is narrowed (was synchronous fsync; becomes best-
         effort async fsync).  Recovery for COMPLETED turns is
-        unaffected — the natural-boundary save still runs
-        synchronously on the AgentStatusChangedEvent(status=done) path.
+        unaffected — the natural-boundary save on the
+        AgentStatusChangedEvent(status=done) path also routes through this
+        helper.  (This paragraph used to say that path was still synchronous;
+        it stopped being so and the sentence did not follow.)
 
         Concurrent invocations for the same session serialize via
-        ``self._async_save_lock`` so parallel ToolCallStartEvents
-        produce consistent last-writer-wins ordering.
+        ``Session.save_lock``, held inside ``_save_session`` itself, so
+        parallel ToolCallStartEvents produce consistent last-writer-wins
+        ordering.  Previously that guard was a global lock taken HERE, which
+        serialized this one call site while the other eight ran unguarded.
 
         Args:
             session: The session to save.
         """
         def _do_save() -> None:
             try:
-                with self._async_save_lock:
-                    self._save_session(session)
+                # No lock taken HERE any more.  ``_save_session`` now holds
+                # ``session.save_lock`` itself, so wrapping it again would
+                # self-deadlock on a non-reentrant Lock -- and the outer take
+                # was the bug: it guarded this ONE call site while eight
+                # others ran unguarded.
+                self._save_session(session)
             except Exception as exc:  # noqa: BLE001 — best-effort
                 logger.warning(
                     "async save for session %s failed: %s",
@@ -8310,226 +8339,240 @@ class SessionManager:
         Returns:
             True if saved successfully.
         """
-        try:
-            # Get history directly from JaatoClient to ensure we capture
-            # in-progress turns (the agent state cache is only updated at turn end)
-            # Phase 3 §7c step 6.6.4.5b: fetch history via the
-            # ``session.get_history`` RPC instead of the daemon-side
-            # JaatoClient indirection.  Captures in-progress turns
-            # (the agent state cache only updates at turn end).
-            history = []
-            if session.server and session.server._runner_rpc is not None:
-                history = session.server._runner_rpc.session_get_history_threadsafe()
-            turn_accounting = []
+        # SERIALIZED PER SESSION.  Nine call sites reach this
+        # function and, before this change, exactly ONE of them held a
+        # lock -- the wrapper in ``_save_session_async``.  The other
+        # eight ran unguarded, so two saves of one session could
+        # interleave: both write ``<id>.json.tmp``, the first rename
+        # wins, the second raises ENOENT on a file that no longer
+        # exists.  Observed live, and each of those saves also issues
+        # its own ``session_get_history`` RPC.
+        #
+        # The guard is HERE, not at the call sites, so a tenth caller
+        # inherits it instead of having to know it exists.  That is the
+        # defect the old placement had: adding a caller looked like
+        # read-only work while silently opting out of the only guard.
+        with session.save_lock:
+            try:
+                # Get history directly from JaatoClient to ensure we capture
+                # in-progress turns (the agent state cache is only updated at turn end)
+                # Phase 3 §7c step 6.6.4.5b: fetch history via the
+                # ``session.get_history`` RPC instead of the daemon-side
+                # JaatoClient indirection.  Captures in-progress turns
+                # (the agent state cache only updates at turn end).
+                history = []
+                if session.server and session.server._runner_rpc is not None:
+                    history = session.server._runner_rpc.session_get_history_threadsafe()
+                turn_accounting = []
 
-            if session.server:
-                main_id = session.server.main_agent_id
-                if main_id in session.server._agents:
-                    turn_accounting = session.server._agents[main_id].turn_accounting
+                if session.server:
+                    main_id = session.server.main_agent_id
+                    if main_id in session.server._agents:
+                        turn_accounting = session.server._agents[main_id].turn_accounting
 
-            # Resolve storage directory from workspace
-            if session.workspace_path:
-                storage_dir = self._session_storage_dir(session.workspace_path)
-                # Keep the wake index current: this is the authoritative
-                # session_id → workspace mapping, used to revive a cold session
-                # by id alone (session.wake) without a caller-supplied path.
-                self._session_workspace_index.record(
-                    session.session_id, session.workspace_path)
-            else:
-                storage_dir = pathlib.Path(self._session_config.storage_path)
+                # Resolve storage directory from workspace
+                if session.workspace_path:
+                    storage_dir = self._session_storage_dir(session.workspace_path)
+                    # Keep the wake index current: this is the authoritative
+                    # session_id → workspace mapping, used to revive a cold session
+                    # by id alone (session.wake) without a caller-supplied path.
+                    self._session_workspace_index.record(
+                        session.session_id, session.workspace_path)
+                else:
+                    storage_dir = pathlib.Path(self._session_config.storage_path)
 
-            # Get subagent state if subagent plugin is available
-            subagent_metadata = {}
-            if session.server and session.server.registry:
-                subagent_plugin = session.server.registry.get_plugin("subagent")
-                if subagent_plugin and hasattr(subagent_plugin, 'get_persistence_state'):
-                    subagent_registry = subagent_plugin.get_persistence_state()
-                    if subagent_registry.get('agents'):
-                        subagent_metadata['subagents'] = subagent_registry
+                # Get subagent state if subagent plugin is available
+                subagent_metadata = {}
+                if session.server and session.server.registry:
+                    subagent_plugin = session.server.registry.get_plugin("subagent")
+                    if subagent_plugin and hasattr(subagent_plugin, 'get_persistence_state'):
+                        subagent_registry = subagent_plugin.get_persistence_state()
+                        if subagent_registry.get('agents'):
+                            subagent_metadata['subagents'] = subagent_registry
 
-                        # Save per-agent state files
-                        self._save_subagent_states(
-                            session.session_id,
-                            subagent_plugin,
-                            subagent_registry.get('agents', []),
-                            storage_dir=storage_dir,
+                            # Save per-agent state files
+                            self._save_subagent_states(
+                                session.session_id,
+                                subagent_plugin,
+                                subagent_registry.get('agents', []),
+                                storage_dir=storage_dir,
+                            )
+
+                # Save TODO plugin state
+                session_dir = storage_dir / session.session_id
+                if session.server:
+                    self._save_todo_state(session.server, session_dir)
+
+                # Generic plugin state persistence: iterate all exposed plugins
+                # and collect state from any that implement get_persistence_state().
+                # Plugins with dedicated persistence (subagent, todo) are skipped
+                # since they're handled above with their own file-based storage.
+                plugin_states = {}
+                _DEDICATED_PLUGINS = {'subagent', 'todo'}
+                if session.server and session.server.registry:
+                    for plugin_name in session.server.registry.list_exposed():
+                        if plugin_name in _DEDICATED_PLUGINS:
+                            continue
+                        plugin = session.server.registry.get_plugin(plugin_name)
+                        if plugin and hasattr(plugin, 'get_persistence_state'):
+                            try:
+                                pstate = plugin.get_persistence_state()
+                                if pstate:
+                                    plugin_states[plugin_name] = pstate
+                            except Exception as e:
+                                logger.warning(
+                                    f"Failed to get persistence state for plugin "
+                                    f"'{plugin_name}': {e}"
+                                )
+                if plugin_states:
+                    subagent_metadata['plugin_states'] = plugin_states
+
+                # Get conversation budget for persistence (other budget sources are
+                # automatically recreated when the session is restored).
+                # Phase 3 §7c step 6.6.3.6: forward to runner-side via
+                # the new ``session.snapshot_conversation_budget`` RPC
+                # (§7c step 6.6.3.2 at commit abd7ec08) instead of
+                # reaching into the daemon-side session's
+                # instruction_budget.
+                budget_state = None
+                if session.server is not None:
+                    rpc = getattr(session.server, "_runner_rpc", None)
+                    if rpc is not None:
+                        snapshotter = getattr(
+                            rpc,
+                            "session_snapshot_conversation_budget_threadsafe",
+                            None,
                         )
+                        if callable(snapshotter):
+                            try:
+                                budget_state = snapshotter(timeout=5.0)
+                            except Exception as exc:  # noqa: BLE001
+                                logger.debug(
+                                    "snapshot_conversation_budget forward failed: %s",
+                                    exc,
+                                )
 
-            # Save TODO plugin state
-            session_dir = storage_dir / session.session_id
-            if session.server:
-                self._save_todo_state(session.server, session_dir)
+                # budget_control usage.  Separate from ``budget_state`` above
+                # (that is the conversation budget).  BudgetTracker accumulates in
+                # memory only, so without this an unloaded session came back with
+                # a zeroed tracker and every cross-turn ceiling silently
+                # restarted -- and sessions unload on ORPHAN, so a suspend/resume
+                # driver is evicted on every wait.
+                budget_usage = None
+                budget_exhausted_reason = None
+                # The CEILING this session ran under, recorded on the server when
+                # its runner envelope was built (runner_spawn: server.
+                # _effective_budget_control).  Read from the server rather than
+                # the profile: a cascade-declared budget never touches the
+                # profile, and the effective value is post-clamp.
+                budget_control_cfg = getattr(
+                    session.server, "_effective_budget_control", None,
+                ) if session.server is not None else None
+                if session.server is not None:
+                    rpc = getattr(session.server, "_runner_rpc", None)
+                    if rpc is not None:
+                        usage_reader = getattr(
+                            rpc, "session_get_budget_usage_threadsafe", None,
+                        )
+                        if callable(usage_reader):
+                            try:
+                                # tracker_only: persistence must never write the
+                                # unbudgeted ``{"tokens": N}`` fallback over a
+                                # real multi-dimension snapshot.  Doing so turns
+                                # "the ceiling stopped applying" into "the
+                                # ceiling can never be restored again" -- the
+                                # only layer of this class that poisons the
+                                # input to its own fix.
+                                budget_usage = usage_reader(
+                                    tracker_only=True, timeout=5.0) or None
+                            except Exception as exc:  # noqa: BLE001
+                                logger.debug(
+                                    "budget usage snapshot failed: %s", exc)
 
-            # Generic plugin state persistence: iterate all exposed plugins
-            # and collect state from any that implement get_persistence_state().
-            # Plugins with dedicated persistence (subagent, todo) are skipped
-            # since they're handled above with their own file-based storage.
-            plugin_states = {}
-            _DEDICATED_PLUGINS = {'subagent', 'todo'}
-            if session.server and session.server.registry:
-                for plugin_name in session.server.registry.list_exposed():
-                    if plugin_name in _DEDICATED_PLUGINS:
-                        continue
-                    plugin = session.server.registry.get_plugin(plugin_name)
-                    if plugin and hasattr(plugin, 'get_persistence_state'):
-                        try:
-                            pstate = plugin.get_persistence_state()
-                            if pstate:
-                                plugin_states[plugin_name] = pstate
-                        except Exception as e:
-                            logger.warning(
-                                f"Failed to get persistence state for plugin "
-                                f"'{plugin_name}': {e}"
-                            )
-            if plugin_states:
-                subagent_metadata['plugin_states'] = plugin_states
+                        # The ENFORCEMENT latch travels with the usage. Usage
+                        # alone left a reloaded session at its ceiling with no
+                        # memory of being stopped, so it served one more turn.
+                        reason_reader = getattr(
+                            rpc, "session_get_budget_exhausted_threadsafe", None,
+                        )
+                        if callable(reason_reader):
+                            try:
+                                budget_exhausted_reason = (
+                                    reason_reader(timeout=5.0) or None)
+                            except Exception as exc:  # noqa: BLE001
+                                logger.debug(
+                                    "budget latch snapshot failed: %s", exc)
 
-            # Get conversation budget for persistence (other budget sources are
-            # automatically recreated when the session is restored).
-            # Phase 3 §7c step 6.6.3.6: forward to runner-side via
-            # the new ``session.snapshot_conversation_budget`` RPC
-            # (§7c step 6.6.3.2 at commit abd7ec08) instead of
-            # reaching into the daemon-side session's
-            # instruction_budget.
-            budget_state = None
-            if session.server is not None:
-                rpc = getattr(session.server, "_runner_rpc", None)
-                if rpc is not None:
-                    snapshotter = getattr(
-                        rpc,
-                        "session_snapshot_conversation_budget_threadsafe",
-                        None,
-                    )
-                    if callable(snapshotter):
-                        try:
-                            budget_state = snapshotter(timeout=5.0)
-                        except Exception as exc:  # noqa: BLE001
-                            logger.debug(
-                                "snapshot_conversation_budget forward failed: %s",
-                                exc,
-                            )
+                # Get workspace file tracking state for persistence
+                workspace_files = None
+                monitor = self._workspace_monitors.get(session.session_id)
+                if monitor:
+                    workspace_files = monitor.get_tracked_dict() or None
 
-            # budget_control usage.  Separate from ``budget_state`` above
-            # (that is the conversation budget).  BudgetTracker accumulates in
-            # memory only, so without this an unloaded session came back with
-            # a zeroed tracker and every cross-turn ceiling silently
-            # restarted -- and sessions unload on ORPHAN, so a suspend/resume
-            # driver is evicted on every wait.
-            budget_usage = None
-            budget_exhausted_reason = None
-            # The CEILING this session ran under, recorded on the server when
-            # its runner envelope was built (runner_spawn: server.
-            # _effective_budget_control).  Read from the server rather than
-            # the profile: a cascade-declared budget never touches the
-            # profile, and the effective value is post-clamp.
-            budget_control_cfg = getattr(
-                session.server, "_effective_budget_control", None,
-            ) if session.server is not None else None
-            if session.server is not None:
-                rpc = getattr(session.server, "_runner_rpc", None)
-                if rpc is not None:
-                    usage_reader = getattr(
-                        rpc, "session_get_budget_usage_threadsafe", None,
-                    )
-                    if callable(usage_reader):
-                        try:
-                            # tracker_only: persistence must never write the
-                            # unbudgeted ``{"tokens": N}`` fallback over a
-                            # real multi-dimension snapshot.  Doing so turns
-                            # "the ceiling stopped applying" into "the
-                            # ceiling can never be restored again" -- the
-                            # only layer of this class that poisons the
-                            # input to its own fix.
-                            budget_usage = usage_reader(
-                                tracker_only=True, timeout=5.0) or None
-                        except Exception as exc:  # noqa: BLE001
-                            logger.debug(
-                                "budget usage snapshot failed: %s", exc)
+                # Persist provisioned flag in metadata so restored sessions
+                # know their workspace is server-managed.
+                if session.provisioned:
+                    subagent_metadata['provisioned'] = True
 
-                    # The ENFORCEMENT latch travels with the usage. Usage
-                    # alone left a reloaded session at its ceiling with no
-                    # memory of being stopped, so it served one more turn.
-                    reason_reader = getattr(
-                        rpc, "session_get_budget_exhausted_threadsafe", None,
-                    )
-                    if callable(reason_reader):
-                        try:
-                            budget_exhausted_reason = (
-                                reason_reader(timeout=5.0) or None)
-                        except Exception as exc:  # noqa: BLE001
-                            logger.debug(
-                                "budget latch snapshot failed: %s", exc)
+                # Create SessionState.  Post-2.3: persist ``profile_name``
+                # (denormalised from the server's bound SubagentProfile) so
+                # disk-restore can re-resolve the full provider recipe
+                # (model + provider + plugin_configs + system_instructions +
+                # GC) via the profile registry at load time.  The legacy
+                # ``model`` field on SessionState was retired alongside
+                # ``project`` / ``location`` — they were Google-GenAI-era
+                # connection scaffolding.
+                server_profile = getattr(session.server, "_profile", None) if session.server else None
+                profile_name = getattr(server_profile, "name", None) if server_profile else None
+                # Persona identity (``--agent``), so orphan-revive rebinds the same
+                # persona (see SessionState.agent_name) — else a revived multimodal
+                # session loses its enter_tier guidance and confabulates on images.
+                agent_name = (
+                    getattr(session.server, "_main_agent_display_name", None)
+                    if session.server else None
+                )
+                state = SessionState(
+                    session_id=session.session_id,
+                    history=history,
+                    created_at=datetime.fromisoformat(session.created_at),
+                    updated_at=datetime.now(),
+                    description=session.description or session.name,
+                    turn_count=len(history) // 2,  # Approximate
+                    turn_accounting=turn_accounting,
+                    user_inputs=session.user_inputs,  # Command history for prompt restoration
+                    profile_name=profile_name,
+                    # Persist the UNRESOLVED inline spec (if any) so disk-restore
+                    # reconstructs an inline profile's recipe by id alone — the
+                    # named-profile ``profile_name`` ("<inline>") isn't
+                    # re-resolvable.  None for named-profile sessions.
+                    profile_spec=session.inline_profile_spec,
+                    budget_control=budget_control_cfg,
+                    sibling_name=session.sibling_name,
+                    cascade_driver_id=session.cascade_driver_id,
+                    workspace_path=session.workspace_path,
+                    config_root=session.config_root,
+                    # Persist confinement so orphan-revive / disk-restore re-applies
+                    # the SAME AppArmor mode on runner re-spawn (else the revive read
+                    # of state.sandbox_mode was always None → unconfined revive).
+                    sandbox_mode=session.sandbox_mode,
+                    agent_name=agent_name,
+                    metadata=subagent_metadata,
+                    budget_state=budget_state,
+                    budget_usage=budget_usage,
+                    budget_exhausted_reason=budget_exhausted_reason,
+                    interrupted_turn=session.interrupted_turn,  # For recovery on restart
+                    workspace_files=workspace_files,
+                )
 
-            # Get workspace file tracking state for persistence
-            workspace_files = None
-            monitor = self._workspace_monitors.get(session.session_id)
-            if monitor:
-                workspace_files = monitor.get_tracked_dict() or None
+                self._session_plugin.save(state, storage_dir=storage_dir)
+                session.is_dirty = False
 
-            # Persist provisioned flag in metadata so restored sessions
-            # know their workspace is server-managed.
-            if session.provisioned:
-                subagent_metadata['provisioned'] = True
+                logger.debug(f"Saved session: {session.session_id}")
+                return True
 
-            # Create SessionState.  Post-2.3: persist ``profile_name``
-            # (denormalised from the server's bound SubagentProfile) so
-            # disk-restore can re-resolve the full provider recipe
-            # (model + provider + plugin_configs + system_instructions +
-            # GC) via the profile registry at load time.  The legacy
-            # ``model`` field on SessionState was retired alongside
-            # ``project`` / ``location`` — they were Google-GenAI-era
-            # connection scaffolding.
-            server_profile = getattr(session.server, "_profile", None) if session.server else None
-            profile_name = getattr(server_profile, "name", None) if server_profile else None
-            # Persona identity (``--agent``), so orphan-revive rebinds the same
-            # persona (see SessionState.agent_name) — else a revived multimodal
-            # session loses its enter_tier guidance and confabulates on images.
-            agent_name = (
-                getattr(session.server, "_main_agent_display_name", None)
-                if session.server else None
-            )
-            state = SessionState(
-                session_id=session.session_id,
-                history=history,
-                created_at=datetime.fromisoformat(session.created_at),
-                updated_at=datetime.now(),
-                description=session.description or session.name,
-                turn_count=len(history) // 2,  # Approximate
-                turn_accounting=turn_accounting,
-                user_inputs=session.user_inputs,  # Command history for prompt restoration
-                profile_name=profile_name,
-                # Persist the UNRESOLVED inline spec (if any) so disk-restore
-                # reconstructs an inline profile's recipe by id alone — the
-                # named-profile ``profile_name`` ("<inline>") isn't
-                # re-resolvable.  None for named-profile sessions.
-                profile_spec=session.inline_profile_spec,
-                budget_control=budget_control_cfg,
-                sibling_name=session.sibling_name,
-                cascade_driver_id=session.cascade_driver_id,
-                workspace_path=session.workspace_path,
-                config_root=session.config_root,
-                # Persist confinement so orphan-revive / disk-restore re-applies
-                # the SAME AppArmor mode on runner re-spawn (else the revive read
-                # of state.sandbox_mode was always None → unconfined revive).
-                sandbox_mode=session.sandbox_mode,
-                agent_name=agent_name,
-                metadata=subagent_metadata,
-                budget_state=budget_state,
-                budget_usage=budget_usage,
-                budget_exhausted_reason=budget_exhausted_reason,
-                interrupted_turn=session.interrupted_turn,  # For recovery on restart
-                workspace_files=workspace_files,
-            )
-
-            self._session_plugin.save(state, storage_dir=storage_dir)
-            session.is_dirty = False
-
-            logger.debug(f"Saved session: {session.session_id}")
-            return True
-
-        except Exception as e:
-            logger.error(f"Failed to save session {session.session_id}: {e}")
-            return False
+            except Exception as e:
+                logger.error(f"Failed to save session {session.session_id}: {e}")
+                return False
 
     def _get_todo_plugin(self, server: JaatoServer) -> Optional[Any]:
         """Get the TODO plugin from a server's registry.
