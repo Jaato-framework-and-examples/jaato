@@ -205,20 +205,29 @@ def test_runner_rpc_get_context_limit_calls_present() -> None:
     core_calls = _module_calls_runner_rpc_method(
         core_module, "session_get_context_limit_threadsafe",
     )
-    # Path E (cycle 6): the demuxer-branch in-band RPC at the
-    # ``usage_update`` handler was REMOVED — context_limit now
-    # arrives in the notification payload (E.1).  Two aspect
-    # callbacks (on_agent_context_updated + on_turn_progress) keep
-    # their off-band RPC fallback for first-callback-before-cache-
-    # populated paths (E.2 cache-or-fetch pattern), so they still
-    # contribute callsites even though the in-band race is closed.
-    # Net: ≥5 (was ≥6 pre-Path-E).  Migration sites: initialize()
-    # ×1, model-thread ×3 (post-loop ×1 + 2 aspect callbacks ×2),
-    # auth-completion ×1.
-    assert len(core_calls) >= 5, (
-        f"Expected ≥5 ``session_get_context_limit_threadsafe`` calls in "
-        f"server/core.py; found {len(core_calls)}.  Path E removed the "
-        f"in-band demuxer-branch call (race fix); other sites preserved."
+    # Path E removed the in-band demuxer-branch call (race fix).  The two
+    # aspect-callback fallbacks (on_agent_context_updated + on_turn_progress)
+    # that this pin used to count were removed too: those callbacks run on
+    # the RPC read loop's thread, where a ``*_threadsafe`` round-trip
+    # SELF-DEADLOCKS -- the loop blocks on a coroutine only it could run,
+    # broken only by the 10s timeout, whose exception path kept the cache
+    # unhealed so the miss repeated on every streaming notification.
+    # Diagnosed by #631's watchdog (seven stalls, seven identical stacks,
+    # deepest frame this very method).  They now emit with the limit unknown
+    # and schedule a NON-BLOCKING off-band fill instead.
+    # Remaining sites: initialize() x1, model-thread post-loop x1,
+    # auth-completion x1.
+    assert len(core_calls) >= 3, (
+        f"Expected >=3 ``session_get_context_limit_threadsafe`` calls in "
+        f"server/core.py; found {len(core_calls)}.  If this dropped below 3, "
+        f"a legitimate off-thread site was removed; if new sites appeared, "
+        f"make sure none of them is reachable from the notification path."
+    )
+    assert len(core_calls) <= 4, (
+        f"{len(core_calls)} call sites -- a NEW site was added.  Verify it "
+        f"cannot run on the RPC read loop's thread before raising this "
+        f"bound: that exact mistake was a 10s loop stall per streaming "
+        f"notification, forever."
     )
 
 

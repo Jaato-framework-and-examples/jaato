@@ -897,6 +897,43 @@ class RunnerRPCClient:
 
     # --------- threadsafe wrapper for the cli plugin's sync stub ---------
 
+    def _guard_not_on_loop(self, method: str) -> None:
+        """Refuse a blocking threadsafe call made FROM the loop thread.
+
+        Every ``*_threadsafe`` wrapper schedules a coroutine onto
+        ``self._loop`` and then BLOCKS on the future.  From a worker thread
+        that is correct and is what they exist for.  From the loop thread it
+        is a self-deadlock: the thread is waiting for a coroutine that only
+        it could run.  It breaks only on timeout — observed live as a
+        constant-width 10s stall per streaming-progress notification,
+        diagnosed by the loop watchdog in its first ninety seconds (#631):
+        seven stalls, seven identical stacks, deepest frame
+        ``session_get_context_limit_threadsafe`` under
+        ``_read_loop -> cb(...)``.
+
+        Raising HERE, before scheduling, is the load-bearing detail: raising
+        after ``run_coroutine_threadsafe`` would leave the coroutine queued
+        to run with its side effects once the loop frees up, detached from
+        any caller.
+
+        This converts every future instance of the class -- any callback
+        anyone ever adds to a loop-side path that makes a threadsafe
+        round-trip -- from a silent, recurring, timeout-width stall into a
+        loud one-time failure at the exact line.
+        """
+        try:
+            running = asyncio.get_running_loop()
+        except RuntimeError:
+            return                       # not on any loop thread: fine
+        if running is self._loop:
+            raise RuntimeError(
+                f"{method} called from the event-loop thread it targets. "
+                f"This self-deadlocks: the call blocks the loop waiting for "
+                f"a coroutine only the loop can run, and breaks only on "
+                f"timeout. Call it from a worker thread, or use the async "
+                f"variant and await it."
+            )
+
     def call_threadsafe(
         self,
         method: str,
@@ -922,6 +959,7 @@ class RunnerRPCClient:
             concurrent.futures.TimeoutError: when *timeout* fires.
             RunnerCallError: transport failure.
         """
+        self._guard_not_on_loop("call_threadsafe")
         coro = self.call(
             method, args, on_output=on_output, cancel_token=cancel_token,
         )
@@ -995,6 +1033,7 @@ class RunnerRPCClient:
         ``asyncio.run_coroutine_threadsafe`` boilerplate at every
         call site.
         """
+        self._guard_not_on_loop("bootstrap_session_threadsafe")
         coro = self.bootstrap_session(envelope, timeout=timeout)
         future = asyncio.run_coroutine_threadsafe(coro, self._loop)
         return _result_from_loop(
@@ -2637,6 +2676,7 @@ class RunnerRPCClient:
         through to the underlying async wrapper for the 9-callback
         collapse demuxer used by ``_start_model_thread``.
         """
+        self._guard_not_on_loop("session_send_message_threadsafe")
         coro = self.session_send_message(
             prompt,
             on_output=on_output,
@@ -2723,6 +2763,7 @@ class RunnerRPCClient:
     ) -> Any:
         """Synchronous wrapper for the named-method coroutines from
         worker threads.  Mirrors ``bootstrap_session_threadsafe``."""
+        self._guard_not_on_loop("_run_threadsafe")
         future = asyncio.run_coroutine_threadsafe(coro, self._loop)
         return _result_from_loop(
             future,
