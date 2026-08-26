@@ -113,6 +113,40 @@ async def test_no_timeout_means_no_wrapper_in_the_way():
     assert await _await_runner(_quick(), None, "m") == "done"
 
 
+def test_every_stacked_caller_has_an_inner_smaller_than_its_outer():
+    """The invariant that makes the outer branch DIAGNOSTIC rather than vague.
+
+    ``_result_from_loop``'s message says the loop did not deliver.  That is
+    only informative if the inner timeout would have fired first had the
+    coroutine actually run -- which requires every caller's inner budget to be
+    strictly smaller than the outer it is wrapped in.
+
+    If a caller ever passed an inner >= its outer, the outer would win by
+    arithmetic rather than by the loop stalling, and "daemon loop did not
+    deliver" would start being emitted for a slow RUNNER.  That would be an
+    attribution bug in the fix that exists to give attribution.
+    """
+    import inspect
+    import re
+
+    import server.runner_rpc_client as mod
+
+    src = inspect.getsource(mod)
+    # ``_run_threadsafe``-style wrappers pass (timeout + 5.0) as the outer.
+    assert "timeout + 5.0" in src, (
+        "the outer budget is no longer derived from the inner; this test's "
+        "premise needs rechecking rather than the assertion relaxing"
+    )
+    # +5.0 keeps outer > inner for any non-negative inner.
+    offsets = set(re.findall(r"timeout \+ ([0-9.]+)", src))
+    assert offsets, "no outer offset found"
+    for off in offsets:
+        assert float(off) > 0, (
+            f"outer budget offset {off} does not exceed the inner timeout, so "
+            f"the outer can win without the loop having stalled"
+        )
+
+
 def test_a_result_that_arrives_is_returned_untouched():
     fut = concurrent.futures.Future()
     threading.Thread(target=lambda: fut.set_result("payload"), daemon=True).start()
