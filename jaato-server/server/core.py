@@ -1392,6 +1392,50 @@ class JaatoServer:
             spend_total_tokens=spend_total_tokens,
         )
 
+    def _schedule_context_limit_fill(self) -> None:
+        """Heal ``_cached_context_limit`` WITHOUT blocking, from any thread.
+
+        The miss path in the notification hooks used to call
+        ``session_get_context_limit_threadsafe`` inline.  Those hooks run on
+        the RPC read loop's thread, where every ``*_threadsafe`` call
+        self-deadlocks (the thread blocks on a coroutine only it could run,
+        broken only by the 10s timeout).  Worse, the timeout's exception path
+        left the cache unhealed, so the ONE cold miss repeated on every
+        streaming-progress notification forever -- a 10s loop stall per
+        event, diagnosed by #631's watchdog in its first ninety seconds.
+
+        ``run_coroutine_threadsafe`` WITHOUT blocking on the future is safe
+        from any thread including the loop's own: it only enqueues.  The
+        fill lands the cache for the NEXT notification; the current one
+        emits with the limit unknown (0), which is the established
+        honest-unknown semantics (#541) rather than a new state.
+
+        Single-flight: a stampede of notifications during one miss schedules
+        one fill, not one per event.
+        """
+        if getattr(self, "_context_limit_fill_inflight", False):
+            return
+        rpc = self._runner_rpc
+        if rpc is None:
+            return
+        loop = getattr(rpc, "_loop", None)
+        if loop is None or not loop.is_running():
+            return
+        self._context_limit_fill_inflight = True
+
+        async def _fill() -> None:
+            try:
+                limit = await rpc.session_get_context_limit(timeout=5.0)
+                if limit:
+                    self._cached_context_limit = int(limit)
+            except Exception:  # noqa: BLE001 — best-effort heal
+                pass
+            finally:
+                self._context_limit_fill_inflight = False
+
+        import asyncio
+        asyncio.run_coroutine_threadsafe(_fill(), loop)
+
     def emit(self, event: Event) -> None:
         """Emit an event to all subscribed clients and to the EventBus.
 
@@ -3251,16 +3295,15 @@ class JaatoServer:
                 # RPC only if cache miss (uninitialized — first
                 # callback before initialize completed).
                 context_limit = getattr(server, "_cached_context_limit", None) or 0
-                if context_limit == 0 and server._runner_rpc is not None:
-                    try:
-                        context_limit = (
-                            server._runner_rpc.session_get_context_limit_threadsafe()
-                        )
-                        if context_limit:
-                            server._cached_context_limit = int(context_limit)
-                    except Exception:  # noqa: BLE001 — never fail
-                        # the aspect callback because of a cache miss
-                        context_limit = 0
+                if context_limit == 0:
+                    # MISS: emit with the limit unknown (honest-unknown, #541)
+                    # and heal the cache OFF-BAND for the next notification.
+                    # This callback runs on the RPC read loop's thread, where
+                    # a ``*_threadsafe`` round-trip self-deadlocks -- the old
+                    # inline fetch here was a 10s loop stall per streaming
+                    # notification, forever, because its own timeout kept the
+                    # cache from healing.
+                    server._schedule_context_limit_fill()
                 # Pull cache tokens from the most recent turn entry so the
                 # usage matches Turn{Completed,Progress}Event in expressivity.
                 # The protocol callback doesn't carry them, but we have the
@@ -3453,16 +3496,15 @@ class JaatoServer:
                 # in-band, racing against the runner's active
                 # send_message.
                 context_limit = getattr(server, "_cached_context_limit", None) or 0
-                if context_limit == 0 and server._runner_rpc is not None:
-                    try:
-                        context_limit = (
-                            server._runner_rpc.session_get_context_limit_threadsafe()
-                        )
-                        if context_limit:
-                            server._cached_context_limit = int(context_limit)
-                    except Exception:  # noqa: BLE001 — never fail
-                        # the aspect callback because of a cache miss
-                        context_limit = 0
+                if context_limit == 0:
+                    # MISS: emit with the limit unknown (honest-unknown, #541)
+                    # and heal the cache OFF-BAND for the next notification.
+                    # This callback runs on the RPC read loop's thread, where
+                    # a ``*_threadsafe`` round-trip self-deadlocks -- the old
+                    # inline fetch here was a 10s loop stall per streaming
+                    # notification, forever, because its own timeout kept the
+                    # cache from healing.
+                    server._schedule_context_limit_fill()
                 server.emit(TurnProgressEvent(
                     agent_id=agent_id,
                     usage=server._build_usage(
@@ -4509,6 +4551,13 @@ class JaatoServer:
                     # value → 0.  ``0`` keeps the event well-formed
                     # while signaling unknown-limit downstream.
                     payload_limit = int(payload.get("context_limit", 0) or 0)
+                    # E.1 HEALS THE CACHE.  The /model invalidation comment
+                    # always claimed it did; it never wrote it -- one of the
+                    # two promised recovery paths did not exist, and the
+                    # other (the hooks' inline re-fetch) self-deadlocked.
+                    if payload_limit and not getattr(
+                            server, "_cached_context_limit", None):
+                        server._cached_context_limit = payload_limit
                     context_limit = (
                         payload_limit
                         or (getattr(server, "_cached_context_limit", None) or 0)
@@ -5645,10 +5694,13 @@ class JaatoServer:
                     self._model_name = result["current_model"]
                     # Path E (cycle 6) E.3: invalidate cached
                     # context_limit — different model can have a
-                    # different context window.  Next in-band reader
-                    # will re-fetch via off-band RPC, OR the next
-                    # ``usage_update`` notification will carry the
-                    # new value via E.1 batching.
+                    # different context window.  Healed by the next
+                    # ``usage_update`` notification that carries a limit
+                    # (E.1 now actually writes the cache), or by the
+                    # non-blocking off-band fill the hooks schedule on a
+                    # miss.  (An earlier version of this comment promised
+                    # an in-band re-fetch that in fact self-deadlocked,
+                    # and an E.1 heal that did not exist.)
                     self._cached_context_limit = None
                     self.emit(SystemMessageEvent(
                         message=f"Model changed to: {self._model_name}",
