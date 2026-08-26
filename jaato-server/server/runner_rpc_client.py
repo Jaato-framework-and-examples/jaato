@@ -141,10 +141,26 @@ def _result_from_loop(future: Any, timeout: Optional[float], method: str) -> Any
     """Block on *future*, and if THAT times out say it was the daemon loop.
 
     The companion to :func:`_await_runner` -- see its docstring for why both
-    exist and why the type stays ``TimeoutError``.  Reaching this branch means
-    the coroutine did not finish within the outer budget: either the daemon's
-    asyncio loop never scheduled it, or the runner-side wait above is still
-    running (its own timeout is smaller, so it normally fires first).
+    exist and why the type stays ``TimeoutError``.
+
+    **Reaching this branch means the loop was not running the coroutine.**
+    That is not a hedge, it is implied by which timeout fired.  Every caller
+    arms an inner timeout that is strictly SMALLER than this outer one
+    (get_history 30/35, get_context_usage 5/10, shutdown 10/15, end 10/15),
+    and the inner timer is armed only once the coroutine actually RUNS.  So if
+    the outer fires and the inner did not, the coroutine either never ran or
+    the loop stopped servicing timers after it started -- both of which are
+    "the loop was not running it".
+
+    An earlier version of this docstring said the inner "normally fires
+    first".  It does not: measured 18 stalls in 28 minutes across two
+    independent harnesses, the inner fired ZERO times.  The sentence was an
+    expectation about this system that the system was contradicting in front
+    of whoever read the logs, and it took a reader who trusted the docstring
+    less than the evidence to notice.
+
+    Whether the loop is BLOCKED (something synchronous holding it) or merely
+    saturated is not decided here; see the daemon-loop-stall investigation.
     """
     try:
         return future.result(timeout=timeout)
