@@ -4284,9 +4284,17 @@ class JaatoServer:
         with self._pending_continuation_lock:
             if self._model_running:
                 self._pending_continuations.append(text)
-                self._trace(
-                    f"SEND_WHILE_UNWINDING: stashed {len(text)} chars for "
-                    f"the model thread's finally to pick up",
+                # INFO, not debug.  This and its partner below are the ONLY
+                # witnesses that #623's accumulate path ran, and #623 shipped
+                # on inspection with no live reproduction -- so at debug the
+                # evidence for a fix nobody has observed working is itself
+                # unobservable on a default daemon.  Low volume by
+                # construction: fires only when a send lands in the
+                # wind-down window, which is the rare case.
+                logger.info(
+                    "SEND_WHILE_UNWINDING: stashed %d chars for the model "
+                    "thread's finally to pick up (%d now waiting)",
+                    len(text), len(self._pending_continuations),
                 )
                 return
 
@@ -5034,9 +5042,17 @@ class JaatoServer:
                 # Taking only one would re-introduce the loss with extra steps.
                 pending = "\n\n".join(stashed) if stashed else None
                 if pending:
-                    server._trace(
-                        f"CONTINUATION: Processing {len(stashed)} stashed "
-                        f"message(s), {len(pending)} chars"
+                    # INFO for the same reason as SEND_WHILE_UNWINDING above.
+                    # ``count>1`` is the case that USED to lose messages: the
+                    # stash was a single slot until #623, so every message but
+                    # the last was silently overwritten.  Named in the line so
+                    # one grep separates "the fix ran" from "the fix mattered".
+                    logger.info(
+                        "CONTINUATION: Processing %d stashed message(s), "
+                        "%d chars%s",
+                        len(stashed), len(pending),
+                        "  <- MULTIPLE: pre-#623 this lost all but the last"
+                        if len(stashed) > 1 else "",
                     )
                     server.emit(AgentStatusChangedEvent(
                         agent_id=server._main_agent_id,
