@@ -6567,7 +6567,23 @@ class SessionManager:
                 timeout=2.0,
             )
         except Exception as exc:  # noqa: BLE001
-            logger.debug("offer_message failed: %s", exc)
+            # WARNING, not debug: the caller is being told the delivery
+            # FAILED, so the reason has to be somewhere.  At debug it was
+            # generated and discarded -- the same shape as a retry notice
+            # nobody can read.
+            #
+            # ``exc_message`` because the most likely exception here is the
+            # 2.0s timeout, and ``str(TimeoutError())`` is the EMPTY STRING:
+            # the line rendered as "offer_message failed: " with nothing
+            # after it, which is the absent-vs-empty trap this helper exists
+            # to close.
+            logger.warning(
+                "offer_message to session %s failed (%s: %s) -- reporting "
+                "unreachable.  NOTE: a TIMEOUT here means NOT CONFIRMED, not "
+                "not-delivered: the message may still have been enqueued "
+                "runner-side.",
+                target_session_id, type(exc).__name__, exc_message(exc),
+            )
             return UNREACHABLE
 
         if outcome == "queued":
