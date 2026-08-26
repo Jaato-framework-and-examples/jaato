@@ -1204,19 +1204,40 @@ class MemoryPlugin(RunnerForwardingMixin):
         # ── Tag search path (legacy) ────────────────────────────────
         else:
             self._trace(f"retrieve_memories: tags={tags}, limit={limit}, scope={scope}, maturity={maturity}")
-            # Determine active_only based on maturity filter
-            active_only = maturity is None  # default: only active (raw, validated)
-
-            # Search the appropriate store(s)
             memories = []
-            if scope != SCOPE_UNIVERSAL and self._storage:
-                memories.extend(self._storage.search_by_tags(tags, limit=limit, active_only=active_only))
-            if scope != SCOPE_PROJECT and self._global_storage:
-                memories.extend(self._global_storage.search_by_tags(tags, limit=limit, active_only=active_only))
-
-            # Filter by specific maturity if requested
             if maturity is not None:
-                memories = [m for m in memories if m.maturity == maturity]
+                # MATURITY QUERIES GO TO THE MATURITY STORE.
+                #
+                # ``search_by_tags`` reads ``self._curated.load_all()`` only.
+                # Since 3f019999 split the raw queue (a folder) from the
+                # curated store (a file), NO tag-search query can return a raw
+                # memory however well tagged -- the store that path reads no
+                # longer contains any.  ``search_by_maturity`` was added in
+                # that same commit to source ``raw`` from the raw queue, and
+                # the tool handler was never repointed at it: it had zero
+                # production callers, only its own test.
+                #
+                # So ``retrieve_memories(maturity="raw")`` -- which the
+                # shipped memory-advisor persona opens Pass 2 with, and which
+                # this plugin's own docstring and the tool schema both promise
+                # -- returned nothing, always.  Two curator sessions concluded
+                # their store was empty with twelve files on disk.
+                for store in (
+                    self._storage if scope != SCOPE_UNIVERSAL else None,
+                    self._global_storage if scope != SCOPE_PROJECT else None,
+                ):
+                    if store is not None:
+                        memories.extend(
+                            store.search_by_maturity({maturity}, limit=limit)
+                        )
+            else:
+                # Tagless/active search keeps the legacy path: no maturity was
+                # asked for, so the curated store is the right source.
+                active_only = True   # only active (raw, validated)
+                if scope != SCOPE_UNIVERSAL and self._storage:
+                    memories.extend(self._storage.search_by_tags(tags, limit=limit, active_only=active_only))
+                if scope != SCOPE_PROJECT and self._global_storage:
+                    memories.extend(self._global_storage.search_by_tags(tags, limit=limit, active_only=active_only))
 
             # Filter by specific scope if requested
             if scope is not None:

@@ -4972,6 +4972,45 @@ class JaatoServer:
                 #
                 # They go to BOTH witnesses on purpose: the log for whoever
                 # is on the machine, ``details`` for a client that is not.
+                # OUR PLUMBING FAILING IS NOT THE AGENT FAILING.
+                #
+                # This handler terminates the session for anything it catches.
+                # A ``RunnerRPCTimeout`` is the daemon's own transport --
+                # typically its event loop not scheduling a coroutine -- and
+                # the session behind it is healthy.  Terminating for one
+                # killed a cascade half mid-run, twice on two builds: the
+                # cascade policy unloads on reason=error, the session goes
+                # cold, and a cold sibling is not woken by a sibling message,
+                # so the surviving half sent into a corpse for the rest of the
+                # run.
+                #
+                # Enumerating what must NOT terminate, rather than what must:
+                # a framework-internal type nobody listed here still dies (the
+                # status quo), whereas listing what must terminate would let
+                # an unlisted PROVIDER error survive and COMPLETION_NUDGE
+                # cycle on it -- the bug this terminal path exists to stop.
+                from server.runner_rpc_client import RunnerRPCTimeout
+
+                if isinstance(e, RunnerRPCTimeout):
+                    logger.warning(
+                        "MODEL_THREAD_TRANSPORT_ERROR error_type=%s error=%s "
+                        "-- the TURN failed; the SESSION stays loaded. This "
+                        "is daemon-side plumbing, not the agent.",
+                        type(e).__name__, str(e),
+                    )
+                    server.emit(ErrorEvent(
+                        error=str(e),
+                        error_type=type(e).__name__,
+                        recoverable=True,
+                    ))
+                    # NOT stamped as terminal_error, and NOT re-raised.
+                    # ``terminal_error`` stays None, so the ``finally`` skips
+                    # the termination branch and winds the turn down its
+                    # ordinary way -- pending continuation, status, the lot.
+                    # Re-raising would run the finally and THEN escape the
+                    # thread target as an unhandled thread exception, which
+                    # leaves the session loaded but the wind-down noisy.
+
                 _runner_tb = getattr(e, "traceback_text", None)
                 logger.info(
                     "MODEL_THREAD_TERMINAL_ERROR error_type=%s error=%s",
