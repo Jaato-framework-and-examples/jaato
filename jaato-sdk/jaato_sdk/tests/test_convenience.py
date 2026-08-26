@@ -13,7 +13,16 @@ from types import SimpleNamespace
 
 import pytest
 
-from jaato_sdk import AgentError, IPCRecoveryClient, PermissionUnhandled, Session, ask
+from jaato_sdk import (
+    AgentError,
+    IPCRecoveryClient,
+    PermissionUnhandled,
+    ReconnectingError,
+    SessionCreateFailed,
+    SessionRefused,
+    Session,
+    ask,
+)
 from jaato_sdk.events import EventType
 from jaato_sdk.client.convenience import _SessionContext, open_session
 
@@ -37,8 +46,22 @@ class FakeClient:
         return self._connect_ok
 
     async def create_session(self, **kwargs):
+        """Mirror the real contract: return an id, or RAISE.
+
+        ``sid=None`` used to mean "creation failed" and the facade checked for
+        it.  Under the current contract ``None`` is not a value
+        ``create_session`` can produce -- failures raise -- so the fake
+        expresses failure the way the real client does.  A fake that kept
+        returning ``None`` would be testing a state the production code can no
+        longer be in, and the facade would build a Session around it.
+        """
         self.create_kwargs = kwargs
         self.calls.append(("create_session", kwargs))
+        if self._sid is None:
+            raise SessionRefused(
+                "the daemon refused session.new: no such profile",
+                error_type="ProfileNotFoundError",
+            )
         return self._sid
 
     async def register_client_tools(self, tools):
@@ -339,10 +362,48 @@ async def test_session_new_failure_raises_and_disconnects():
             super().__init__(sid=None, **ctor)
             captured["instance"] = self
 
-    with pytest.raises(RuntimeError):
+    # RuntimeError, still: ``SessionCreateFailed`` subclasses it precisely so
+    # handlers written against the old "caller raises RuntimeError" contract
+    # keep catching.  Asserting the base here (not the subclass) is the point
+    # -- it is the compatibility guarantee out-of-tree consumers rely on.
+    with pytest.raises(RuntimeError) as excinfo:
         async with open_session(_Cls, profile="x"):
             pass
+    assert isinstance(excinfo.value, SessionCreateFailed)
+    # The daemon's own reason reaches the caller.  The facade used to replace
+    # it with a guess -- "check provider auth" -- which was wrong for every
+    # refusal that was not an auth failure.
+    assert "no such profile" in str(excinfo.value)
+    assert excinfo.value.may_exist is False
     assert ("disconnect",) in captured["instance"].calls
+
+
+async def test_the_facade_disconnects_even_when_create_raises():
+    """The connection must not leak on the exception path.
+
+    The old ``if not sid: disconnect(); raise`` ran the disconnect only on the
+    falsy-return path.  An exception out of ``create_session`` -- already
+    possible before this change, since ``IPCRecoveryClient`` raises
+    ``ReconnectingError`` / ``ConnectionClosedError`` from ``_check_can_send``
+    -- skipped it and leaked the client.
+    """
+    captured = {}
+
+    class _Boom(FakeClient):
+        def __init__(self, **ctor):
+            super().__init__(**ctor)
+            captured["instance"] = self
+
+        async def create_session(self, **kwargs):
+            self.calls.append(("create_session", kwargs))
+            raise ReconnectingError()
+
+    with pytest.raises(ReconnectingError):
+        async with open_session(_Boom, profile="x"):
+            pass
+    assert ("disconnect",) in captured["instance"].calls, (
+        "an exception out of create_session leaked the connection"
+    )
 
 
 # --------------------------------------------------------------- module ask()

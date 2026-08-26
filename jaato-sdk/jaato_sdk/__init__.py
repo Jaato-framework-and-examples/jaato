@@ -19,6 +19,22 @@ from jaato_sdk.client.convenience import (
     PermissionUnhandled,
     ask,
 )
+# Exported from the package root ON PURPOSE.  The SDK's existing connection
+# exceptions (``ReconnectingError``, ``ConnectionClosedError``) are NOT, so a
+# consumer cannot catch them without reaching into ``jaato_sdk.client.recovery``
+# -- and two out-of-tree consumers were found writing ``except ConnectionError``
+# against the BUILTIN, which the SDK's same-named class does not subclass.  An
+# exception nobody can conveniently import is one nobody catches.
+from jaato_sdk.client.errors import (
+    SessionCreateFailed,
+    SessionNotConfirmed,
+    SessionNotSent,
+    SessionRefused,
+)
+from jaato_sdk.client.recovery import (
+    ConnectionClosedError,
+    ReconnectingError,
+)
 from jaato_sdk.events import (
     Event,
     EventType,
@@ -55,6 +71,12 @@ __all__ = [
     "Session",
     "AgentError",
     "PermissionUnhandled",
+    "SessionCreateFailed",
+    "SessionNotConfirmed",
+    "SessionNotSent",
+    "SessionRefused",
+    "ConnectionClosedError",
+    "ReconnectingError",
     "ask",
     # Events
     "Event",

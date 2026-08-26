@@ -74,6 +74,7 @@ async def run_headless_mode(
         root_logger.setLevel(logging.DEBUG)
 
     from jaato_sdk.client.recovery import IPCRecoveryClient
+    from jaato_sdk.client.errors import SessionCreateFailed
     from jaato_sdk.events import (
         AgentOutputEvent,
         AgentCreatedEvent,
@@ -147,8 +148,26 @@ async def run_headless_mode(
         return
 
     # Request new session if specified (recommended for headless to ensure isolation)
+    #
+    # The return value used to be DISCARDED.  A create failure was invisible
+    # here: headless mode went on to set the permission policy, disable
+    # clarification, and send the prompt -- against no session -- and the
+    # operator saw a confusing downstream failure instead of "the session was
+    # never created".  There is no interactive user to notice, which is what
+    # made it worth handling rather than merely logging.
     if new_session or profile or agent:
-        await client.create_session(profile=profile, agent=agent)
+        try:
+            await client.create_session(profile=profile, agent=agent)
+        except SessionCreateFailed as exc:
+            print(f"[headless] Session creation failed: {exc}", file=sys.stderr)
+            if exc.may_exist:
+                # Do NOT retry blind: session.new has no idempotency key, so a
+                # second attempt is a second session with its own runner.
+                print("[headless] A session may have been created despite "
+                      "this — check `session.list` before retrying.",
+                      file=sys.stderr)
+            renderer.shutdown()
+            return
 
     # Set default permission policy to "allow" for headless mode
     # This auto-approves all tools not in blacklist, avoiding per-prompt responses

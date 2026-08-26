@@ -320,12 +320,24 @@ class _SessionContext:
         # dance.  See register_client_tools().
         if self._client_tools:
             await self._client.register_client_tools(self._client_tools)
-        sid = await self._client.create_session(**self._create_kwargs)
-        if not sid:
+        # No ``if not sid`` guard: ``create_session`` raises now, and its
+        # exception STATES the cause.  What stood here guessed one --
+        # "check provider auth" -- which is one of five causes and wrong for
+        # the other four: a failed socket write, a refusal for an unknown
+        # profile, a timeout, a dropped connection.  A hardcoded likely-cause
+        # sends the reader to the wrong place with full confidence, which is
+        # worse than saying nothing.
+        #
+        # The disconnect stays, and moves into a ``finally``-shaped guard: it
+        # used to run only on the ``not sid`` path, so an EXCEPTION out of
+        # create_session (already possible today -- the recovery client raises
+        # ReconnectingError / ConnectionClosedError from _check_can_send)
+        # leaked the connection.
+        try:
+            sid = await self._client.create_session(**self._create_kwargs)
+        except BaseException:
             await self._client.disconnect()
-            raise RuntimeError(
-                "session.new failed — check provider auth / the daemon log"
-            )
+            raise
         return Session(self._client, sid, self._on_permission)
 
     async def __aexit__(self, *exc: Any) -> bool:

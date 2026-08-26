@@ -31,17 +31,43 @@ def _make_client_capture():
 
     async def fake_send_event(event):
         captured.append(event)
+        # MUST report success.  ``_send_event`` returns whether the write
+        # actually went, and ``create_session`` now fails fast on a falsy
+        # answer rather than waiting out the timeout for a reply to a command
+        # it knows it never sent.  A fake that returns ``None`` is claiming
+        # the socket was gone, and every test here would assert on the
+        # not-sent path instead of the argv shape it is named for.
+        return True
 
-    async def fake_await_session_info():
+    async def fake_await_session_info(request_id=None):
         # Short-circuit the post-send wait so the test asserts only on
-        # the CommandRequest shape.  In SDK 0.13.0+ create_session
-        # always calls _await_session_info; mocking it returns control
-        # to the test immediately.
-        return None
+        # the CommandRequest shape.  Returns an id because create_session
+        # returns ``str`` now -- failures raise, so ``None`` is not a value
+        # this can produce.
+        return "sess-fake"
 
     client._send_event = fake_send_event
     client._await_session_info = fake_await_session_info
     return client, captured
+
+
+def _spec_payload(cmd):
+    """The payload MINUS the correlation token.
+
+    ``create_session`` stamps ``payload["request_id"]`` on every send so the
+    answering event can be matched to this call.  These tests are about
+    profile routing, so they assert on what is left after removing it --
+    rather than on a bare ``payload is None``, which stopped being true the
+    day correlation landed and left all nine tests in this file red.
+    """
+    if cmd.payload is None:
+        return None
+    rest = {k: v for k, v in cmd.payload.items() if k != "request_id"}
+    assert "request_id" in cmd.payload, (
+        "every session.new must carry a request_id — without it a stale "
+        "SessionInfoEvent from an earlier create can satisfy this wait"
+    )
+    return rest or None
 
 
 @pytest.mark.asyncio
@@ -57,7 +83,7 @@ async def test_profile_string_routes_to_argv():
     assert cmd.command == "session.new"
     assert "--profile" in cmd.args
     assert "researcher" in cmd.args
-    assert cmd.payload is None
+    assert _spec_payload(cmd) is None
 
 
 @pytest.mark.asyncio
@@ -74,7 +100,7 @@ async def test_profile_dict_routes_to_payload():
 
     cmd = captured[0]
     assert "--profile" not in cmd.args
-    assert cmd.payload == {"spec": spec}
+    assert _spec_payload(cmd) == {"spec": spec}
 
 
 @pytest.mark.asyncio
@@ -93,7 +119,7 @@ async def test_profile_dict_with_name_and_agent():
     # Name is the first bare arg
     assert cmd.args[0] == "ops-task"
     # Inline spec rides on payload, not args
-    assert cmd.payload == {"spec": {"model": "claude-sonnet-4-5"}}
+    assert _spec_payload(cmd) == {"spec": {"model": "claude-sonnet-4-5"}}
     # Agent and params still work
     assert "--agent" in cmd.args
     assert "reviewer" in cmd.args
@@ -115,7 +141,7 @@ async def test_profile_string_with_agent_orthogonal():
     assert "researcher" in cmd.args
     assert "--agent" in cmd.args
     assert "reviewer" in cmd.args
-    assert cmd.payload is None
+    assert _spec_payload(cmd) is None
 
 
 @pytest.mark.asyncio
@@ -127,7 +153,7 @@ async def test_profile_none_omits_both_paths():
 
     cmd = captured[0]
     assert "--profile" not in cmd.args
-    assert cmd.payload is None
+    assert _spec_payload(cmd) is None
 
 
 @pytest.mark.asyncio

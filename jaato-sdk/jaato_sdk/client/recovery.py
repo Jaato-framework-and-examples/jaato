@@ -47,6 +47,12 @@ from jaato_sdk.client._handler_registry import (
     _HandlerRegistry,
 )
 from jaato_sdk.client.config import RecoveryConfig
+from jaato_sdk.client.errors import (
+    SessionCreateFailed,
+    SessionNotConfirmed,
+    SessionNotSent,
+    SessionRefused,
+)
 from jaato_sdk.client.ipc import DEFAULT_SOCKET_PATH, IPCClient, IncompatibleServerError
 from jaato_sdk.events import ClientType
 from jaato_sdk.events import (
@@ -80,8 +86,21 @@ class ConnectionState(Enum):
     CLOSED = "closed"
 
 
-class ConnectionError(Exception):
-    """Error related to IPC connection."""
+class ConnectionError(Exception):  # noqa: A001 — shadows the builtin, see below
+    """Error related to IPC connection.
+
+    .. warning::
+
+       This SHADOWS the builtin ``ConnectionError`` and does **not** subclass
+       it.  A consumer writing the obvious ``except ConnectionError`` catches
+       the *builtin* and silently fails to catch this one, unless it imported
+       this name explicitly.  Two out-of-tree consumers were found doing
+       exactly that.
+
+       Left as-is here because renaming is a breaking change with its own
+       blast radius, and it is not this change's subject.  Recorded so the
+       next reader does not have to rediscover it.
+    """
     pass
 
 
@@ -573,27 +592,43 @@ class IPCRecoveryClient:
                 config + ``connect(timeout=)``).
 
         Returns:
-            Session ID if created, None otherwise.
+            The new session ID.  Never ``None`` — a failure raises.
 
         Raises:
             ReconnectingError: If currently reconnecting.
             ConnectionClosedError: If connection is closed.
+            SessionNotSent: the command never left this process — including
+                the case where this recovery client has no inner client at
+                all, which used to return a bare ``None`` indistinguishable
+                from a daemon refusal.
+            SessionRefused: the daemon answered and refused.
+            SessionNotConfirmed: sent, unanswered — a session MAY exist.
             TypeError: If ``profile`` is not None, str, or dict.
+
+        See :meth:`IPCClient.create_session` for the full contract; this
+        wrapper adds only the recovery-state gate in front of it.
         """
         self._check_can_send()
 
-        if self._client:
-            session_id = await self._client.create_session(
-                name, profile=profile, agent=agent,
-                agent_params=agent_params,
-                cascade_driver_id=cascade_driver_id,
-                sibling_name=sibling_name,
-                timeout=timeout,
+        if self._client is None:
+            # Reachable when the recovery client is constructed but has not
+            # built an inner client yet.  It returned ``None`` here — the same
+            # answer as a daemon refusal, from a state where nothing was even
+            # attempted.
+            raise SessionNotSent(
+                "no inner client: this recovery client has not connected, so "
+                "session.new was never sent and no session was created."
             )
-            if session_id:
-                self._session_id = session_id
-            return session_id
-        return None
+
+        session_id = await self._client.create_session(
+            name, profile=profile, agent=agent,
+            agent_params=agent_params,
+            cascade_driver_id=cascade_driver_id,
+            sibling_name=sibling_name,
+            timeout=timeout,
+        )
+        self._session_id = session_id
+        return session_id
 
     async def list_profiles(self) -> None:
         """Request list of available agent profiles.

@@ -41,6 +41,12 @@ import time
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Tuple, Union
 
+from jaato_sdk.client.errors import (
+    SessionCreateFailed,
+    SessionNotConfirmed,
+    SessionNotSent,
+    SessionRefused,
+)
 from jaato_sdk.client._handler_registry import (
     EventHandler,
     Unsubscribe,
@@ -1328,10 +1334,28 @@ class IPCClient:
             # Surface a ConnectionError to callers if they want to handle it
             raise ConnectionError("Connection lost") from e
 
-    async def _send_event(self, event: Event) -> None:
-        """Send an event to the server."""
+    async def _send_event(self, event: Event) -> bool:
+        """Send an event to the server.  Returns whether it actually went.
+
+        The swallow-and-disconnect behaviour is deliberate and unchanged:
+        ``stop()`` and other commands may be called while the connection is
+        already shutting down, and an unhandled exception in a background
+        task is worse than a dropped command.
+
+        What changed is that the answer is now AVAILABLE.  Returning ``None``
+        made "sent" and "the socket is gone" the same outcome to every caller,
+        and ``create_session`` — which had just been told the send failed, one
+        line earlier, in this method — went on to wait the full 60s for a
+        reply to a command that never left the process, then reported a
+        TIMEOUT.  Measured: 1.00s of a 1.00s budget with the write raising
+        immediately.  The blame landed on the daemon for a local socket fault.
+
+        Existing callers ignore the return and are unaffected; a caller that
+        cannot act sensibly on a silently-dropped command should check it.
+        """
         try:
             await self._write_message(serialize_event(event))
+            return True
         except ConnectionError as e:
             # Log and swallow the error to avoid unhandled exceptions in
             # background tasks (stop()/other commands may be called when
@@ -1342,7 +1366,7 @@ class IPCClient:
                 await self.disconnect()
             except Exception:
                 logger.debug("_send_event: error while disconnecting after send failure", exc_info=True)
-            return
+            return False
 
     # =========================================================================
     # Session Management
@@ -1357,7 +1381,7 @@ class IPCClient:
         cascade_driver_id: Optional[str] = None,
         sibling_name: Optional[str] = None,
         timeout: float = 60.0,
-    ) -> Optional[str]:
+    ) -> str:
         """Create a new session on the server.
 
         Sends a ``session.new`` command and, when no other coroutine is
@@ -1425,11 +1449,37 @@ class IPCClient:
                 provider, so the default is generous.
 
         Returns:
-            The new session ID, or None if fire-and-forget / failed /
-            timed out.
+            The new session ID.  Never ``None`` — a failure raises.
 
         Raises:
+            SessionNotSent: the command never left this process (the socket
+                write failed).  Nothing was created; retry after
+                reconnecting.
+            SessionRefused: the daemon answered and refused — unknown
+                profile/agent, invalid spec, failed spawn-payload validation,
+                exhausted budget, provider auth.  The daemon's own reason is
+                carried on the exception; it is not summarised or guessed at.
+                Nothing was created; retry is futile unless the request
+                changes.
+            SessionNotConfirmed: the command was sent and no answer arrived
+                (timeout, or the connection dropped).  **A session may exist
+                on the daemon.**  ``session.new`` has no idempotency key, so
+                retrying makes a SECOND session with its own runner and pool
+                slot — check ``list_sessions()`` first.
             TypeError: If ``profile`` is not None, str, or dict.
+
+        All three share the base ``SessionCreateFailed``; catch that to treat
+        every creation failure alike, and ``.may_exist`` to branch on the only
+        axis that changes what a caller should DO.
+
+        IT USED TO RETURN ``None`` FOR ALL OF THEM.  Measured, the five
+        failure paths returned the same ``None`` from the same call and four
+        were indistinguishable even by elapsed time — so a caller could not
+        tell "I never sent it" from "the daemon said no" from "a session may
+        be running right now".  Two of this repository's own callers did not
+        even read the value, which is how a create failure became invisible:
+        headless mode went on to set policies and send prompts with no
+        session.
         """
         args: List[str] = [name] if name else []
         payload: Optional[Dict[str, Any]] = None
@@ -1468,11 +1518,20 @@ class IPCClient:
         # rides it so no new CommandRequest field is needed.
         payload = dict(payload or {})
         payload["request_id"] = req_id
-        await self._send_event(CommandRequest(
+        sent = await self._send_event(CommandRequest(
             command="session.new",
             args=args,
             payload=payload,
         ))
+        if not sent:
+            # FAIL FAST.  Waiting here would burn the whole timeout on a reply
+            # to a command that never left the process, and then blame the
+            # daemon for a local socket fault.
+            raise SessionNotSent(
+                "session.new was not sent — the connection dropped while "
+                "writing it, so the daemon never saw the request and no "
+                "session was created.  Reconnect before retrying."
+            )
 
         # Wait for the daemon's SessionInfoEvent via the drain loop.
         # SDK 0.13.0+: no more ``_events_active`` gate — the drain task
@@ -1485,12 +1544,23 @@ class IPCClient:
                 self._await_session_info(req_id), timeout=timeout
             )
         except asyncio.TimeoutError:
+            # NOT CONFIRMED, not "not created": the command WAS sent, so the
+            # daemon may have made the session and only the answer was lost.
+            # ``session.new`` has no idempotency key -- ``request_id`` is
+            # echoed for correlation, never used to dedupe -- so a blind retry
+            # makes a SECOND session with its own runner and pool slot.
             logger.warning(
-                "create_session: timed out after %ss waiting for "
-                "SessionInfoEvent or ErrorEvent",
+                "create_session: no answer within %ss — a session MAY have "
+                "been created; look for it before creating another",
                 timeout,
             )
-            return None
+            raise SessionNotConfirmed(
+                f"session.new was sent but not answered within {timeout}s. "
+                "The daemon may have created the session and only the "
+                "confirmation was lost — retrying may create a SECOND "
+                "session. Check list_sessions() first.",
+                cause="timeout",
+            ) from None
 
     #: Wire-protocol minor from which the daemon echoes ``request_id`` on the
     #: events answering ``session.new``.  Gated on the PROTOCOL version, not the
@@ -1537,7 +1607,7 @@ class IPCClient:
 
     async def _await_session_info(
         self, request_id: Optional[str] = None,
-    ) -> Optional[str]:
+    ) -> str:
         """Subscribe to the drain loop and wait for SessionInfoEvent.
 
         Filters the subscriber queue for ``SessionInfoEvent`` (success)
@@ -1568,8 +1638,16 @@ class IPCClient:
         (avoiding duplicates).
 
         Returns:
-            The session ID from the SessionInfoEvent, or None on
-            error / disconnect / timeout.
+            The session ID from the ``SessionInfoEvent``.
+
+        Raises:
+            SessionRefused: the daemon answered with an ``ErrorEvent``.
+            SessionNotConfirmed: the connection dropped before any answer.
+
+        It no longer returns ``None``.  It used to return it for BOTH of the
+        above, and the caller then returned that same ``None`` for a timeout
+        and for a failed send — collapsing five distinct outcomes, with
+        opposite correct responses, into one value.
         """
         q = self._subscribe_events()
         # Events to re-buffer for a future events() call, but only when
@@ -1579,10 +1657,18 @@ class IPCClient:
             while True:
                 event = await q.get()
                 if event is None:
-                    # drain loop signalled disconnection
+                    # drain loop signalled disconnection.  Same reasoning as
+                    # the timeout: the command was already on the wire, so the
+                    # daemon may have created the session before the socket
+                    # went.  Unknown, not "no".
                     if len(self._event_subscribers) == 1 and incidental:
                         self._buffered_events.extend(incidental)
-                    return None
+                    raise SessionNotConfirmed(
+                        "the connection dropped before session.new was "
+                        "answered. The daemon may have created the session — "
+                        "retrying may create a SECOND one.",
+                        cause="disconnect",
+                    )
 
                 solo = len(self._event_subscribers) == 1
 
@@ -1612,7 +1698,14 @@ class IPCClient:
                     if solo:
                         incidental.append(event)
                         self._buffered_events.extend(incidental)
-                    return None
+                    # The daemon STATED the reason.  Carry it; do not
+                    # summarise it into a likely cause -- the caller that
+                    # used to guess "check provider auth" was wrong for
+                    # every refusal that was not an auth failure.
+                    raise SessionRefused(
+                        f"the daemon refused session.new: {event.error}",
+                        error_type=event.error_type,
+                    )
 
                 # Non-target event — track for re-buffer when solo.
                 if solo:
