@@ -107,6 +107,55 @@ class RunnerCallError(RuntimeError):
         self.traceback_text = traceback_text
 
 
+async def _await_runner(coro: Any, timeout: Optional[float], method: str) -> Any:
+    """Await *coro*, and if it times out say WHICH timeout that was.
+
+    Two timeouts are stacked on every threadsafe call: this one (the RUNNER
+    did not answer) and ``_run_threadsafe``'s ``future.result`` (the DAEMON
+    LOOP never delivered the result).  In this Python
+    ``asyncio.TimeoutError``, ``concurrent.futures.TimeoutError`` and
+    ``TimeoutError`` are THE SAME CLASS, so a caller logging
+    ``type(exc).__name__`` gets ``TimeoutError`` for both and cannot tell a
+    busy runner from a saturated daemon loop.  Reported live: an
+    ``unreachable`` delivery whose log line named the type and still did not
+    identify the layer.
+
+    The TYPE is deliberately unchanged -- several call sites catch
+    ``TimeoutError`` (ipc.py, command_router.py, session_manager.py:4786,
+    apparmor.py) and would stop catching a new one.  What changes is that the
+    exception carries a MESSAGE: ``str(TimeoutError())`` is the empty string,
+    which is why these rendered blank wherever they were logged.
+    """
+    if timeout is None:
+        return await coro
+    try:
+        return await asyncio.wait_for(coro, timeout)
+    except TimeoutError as exc:
+        raise TimeoutError(
+            f"runner did not answer {method} within {timeout}s "
+            f"(runner-side: the RPC was sent and no response came back)"
+        ) from exc
+
+
+def _result_from_loop(future: Any, timeout: Optional[float], method: str) -> Any:
+    """Block on *future*, and if THAT times out say it was the daemon loop.
+
+    The companion to :func:`_await_runner` -- see its docstring for why both
+    exist and why the type stays ``TimeoutError``.  Reaching this branch means
+    the coroutine did not finish within the outer budget: either the daemon's
+    asyncio loop never scheduled it, or the runner-side wait above is still
+    running (its own timeout is smaller, so it normally fires first).
+    """
+    try:
+        return future.result(timeout=timeout)
+    except TimeoutError as exc:
+        raise TimeoutError(
+            f"daemon loop did not deliver {method} within {timeout}s "
+            f"(daemon-side: the coroutine was scheduled onto the loop and "
+            f"did not complete)"
+        ) from exc
+
+
 def _call_error(prefix: str, response: "ResponseEnvelope") -> RunnerCallError:
     """Build a :class:`RunnerCallError` that KEEPS the runner's frames.
 
@@ -833,7 +882,7 @@ class RunnerRPCClient:
             method, args, on_output=on_output, cancel_token=cancel_token,
         )
         future = asyncio.run_coroutine_threadsafe(coro, self._loop)
-        return future.result(timeout=timeout)
+        return _result_from_loop(future, timeout, method)
 
     # --------------------- session.bootstrap (Phase 3 §3.3c) -------------
 
@@ -880,10 +929,7 @@ class RunnerRPCClient:
             )
 
         coro = self.call("session.bootstrap", envelope.to_dict())
-        if timeout is not None:
-            response = await asyncio.wait_for(coro, timeout)
-        else:
-            response = await coro
+        response = await _await_runner(coro, timeout, "session.bootstrap")
 
         if not response.ok or response.error is not None:
             raise _call_error("session.bootstrap", response)
@@ -907,8 +953,10 @@ class RunnerRPCClient:
         """
         coro = self.bootstrap_session(envelope, timeout=timeout)
         future = asyncio.run_coroutine_threadsafe(coro, self._loop)
-        return future.result(
-            timeout=(timeout + 5.0 if timeout is not None else None),
+        return _result_from_loop(
+            future,
+            (timeout + 5.0 if timeout is not None else None),
+            "session.bootstrap",
         )
 
     # ------------------------------------------------------------------
@@ -2512,10 +2560,7 @@ class RunnerRPCClient:
             on_notification=on_notification,
             cancel_token=cancel_token,
         )
-        if timeout is not None:
-            response = await asyncio.wait_for(coro, timeout)
-        else:
-            response = await coro
+        response = await _await_runner(coro, timeout, "session.send_message")
         if not response.ok or response.error is not None:
             raise _call_error("session.send_message", response)
         if not isinstance(response.result, dict):
@@ -2558,8 +2603,10 @@ class RunnerRPCClient:
             on_result=on_result,
         )
         future = asyncio.run_coroutine_threadsafe(coro, self._loop)
-        return future.result(
-            timeout=(timeout + 5.0 if timeout is not None else None),
+        return _result_from_loop(
+            future,
+            (timeout + 5.0 if timeout is not None else None),
+            "session.send_message",
         )
 
     async def session_shutdown(
@@ -2614,10 +2661,7 @@ class RunnerRPCClient:
         ``bootstrap_session`` template).
         """
         coro = self.call(method, args)
-        if timeout is not None:
-            response = await asyncio.wait_for(coro, timeout)
-        else:
-            response = await coro
+        response = await _await_runner(coro, timeout, method)
         if not response.ok or response.error is not None:
             raise _call_error(method, response)
         if not isinstance(response.result, dict):
@@ -2636,6 +2680,8 @@ class RunnerRPCClient:
         """Synchronous wrapper for the named-method coroutines from
         worker threads.  Mirrors ``bootstrap_session_threadsafe``."""
         future = asyncio.run_coroutine_threadsafe(coro, self._loop)
-        return future.result(
-            timeout=(timeout + 5.0 if timeout is not None else None),
+        return _result_from_loop(
+            future,
+            (timeout + 5.0 if timeout is not None else None),
+            getattr(coro, "__qualname__", None) or "a runner RPC",
         )
