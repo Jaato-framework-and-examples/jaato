@@ -406,6 +406,17 @@ class JaatoDaemon:
         """
         from server.event_sink import CompositeEventSink
         from server.command_router import CommandRouter
+        from server.loop_watchdog import LoopWatchdog
+
+        # FIRST, before any wiring: the loop-stall witness.  The daemon's
+        # loop is known to stop running scheduled coroutines for 5-35s at a
+        # stretch (see loop_watchdog.py for the evidence chain); everything
+        # observing it from inside the loop goes silent for exactly the
+        # duration that matters.  The watchdog's monitor lives on a plain
+        # thread, so when the loop stalls it captures the loop thread's
+        # stack mid-stall -- the next stall names its own cause in the log.
+        self._loop_watchdog = LoopWatchdog()
+        self._loop_watchdog.start()
 
         # Phase 2 (confined runner): the daemon never confines its own
         # threads to per-session AppArmor profiles — confinement happens
@@ -755,6 +766,10 @@ class JaatoDaemon:
 
     async def stop(self) -> None:
         """Signal shutdown."""
+        watchdog = getattr(self, "_loop_watchdog", None)
+        if watchdog is not None:
+            watchdog.stop()
+
         logger.info("Shutdown requested...")
         self._shutdown_event.set()
 
