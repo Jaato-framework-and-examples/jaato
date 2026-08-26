@@ -54,10 +54,34 @@ TERMINATED = "terminated"
 #: driver, and collapsing them is what makes an absence claim unfalsifiable.
 NO_SESSION = "no_session"
 
-#: The session is loaded and live, but the delivery mechanism failed -- no
-#: runner channel, or the forward raised.  A transport fault, NOT a decision
-#: by the target, which is why it is not spelled ``refused``.
+#: The session is loaded and live, but NOTHING WAS PUT IN FLIGHT -- there is
+#: no server attached, no runner channel, the runner is too old to answer the
+#: offer verb, or the drive that was supposed to start a turn failed.  A
+#: transport fault, NOT a decision by the target, which is why it is not
+#: spelled ``refused``.
+#:
+#: RETRY IS SAFE HERE, and that is the whole reason this is a separate word
+#: from :data:`NOT_CONFIRMED`.  No offer reached the target, so a retry cannot
+#: duplicate anything.  It is also unlikely to help until whatever is missing
+#: is restored -- the daemon log names which of the four it was.
 UNREACHABLE = "unreachable"
+
+#: An offer WAS made and the answer was lost -- the offer RPC raised or timed
+#: out.  The message may be sitting in the target's queue right now, or may
+#: never have arrived; from here those are indistinguishable.
+#:
+#: RETRY MAY DUPLICATE.  This is the one delivery failure where the caller's
+#: correct move depends on something the caller cannot see, so it gets its own
+#: word rather than being folded into :data:`UNREACHABLE`.
+#:
+#: Splitting these was not cosmetic.  Both used to be ``unreachable``, and the
+#: single prose reason attached to that word described THIS case -- "the
+#: message may still have been enqueued and only the acknowledgement lost".
+#: Applied to the four structural cases it was not vague, it was FALSE: it
+#: warned a sender about a duplicate that could not exist, and a careful
+#: sender therefore declined to re-send a message that had definitely never
+#: arrived.  The word that was meant to prevent a wrong action caused one.
+NOT_CONFIRMED = "not_confirmed"
 
 #: The target is mid-turn and the caller asked NOT to add to its queue --
 #: backpressure, requested via ``require_idle``.  Nothing was enqueued.
@@ -68,6 +92,13 @@ UNREACHABLE = "unreachable"
 BUSY = "busy"
 
 #: The statuses that mean the message WILL be acted on.
+#:
+#: Membership is the ONLY thing a caller must branch on to be correct.  The
+#: failure words differentiate what to do NEXT (retry safe / retry may
+#: duplicate / target gone / target dead), never whether it arrived -- so a
+#: consumer that only knows this set stays correct when a new failure word is
+#: added, which is why :data:`NOT_CONFIRMED` could be introduced without
+#: touching a single caller.
 #:
 #: This set is the whole point of the vocabulary.  The failure states above
 #: must never render as success, because a caller that assumes delivery and

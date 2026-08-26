@@ -500,10 +500,20 @@ def compute_peer_role(
 #: delivery timed out because the daemon's event loop did not schedule the
 #: coroutine within 7s.  The sender was told its sibling had no channel.
 #:
-#: UNREACHABLE deliberately says NOT CONFIRMED rather than "not delivered":
-#: the offer may have been enqueued runner-side and only the answer lost.  A
-#: sender that retries on it may duplicate; a sender that gives up on it may
-#: abandon a message that arrived.  Saying so is the only honest option.
+#: The same collapse then happened one level down, inside ``unreachable``
+#: itself.  FIVE producers shared the word -- no server attached, no runner
+#: channel, runner too old for the offer verb, the offer raised, and the
+#: DRIVE failing after the target answered ``needs_turn`` -- and the single
+#: prose reason described only the fourth ("may still have been enqueued and
+#: only the acknowledgement lost").  For the other four nothing was ever
+#: offered, so that sentence was not vague, it was FALSE: it warned about a
+#: duplicate that could not exist, and a careful sender therefore declined to
+#: re-send a message that had definitely never arrived.
+#:
+#: They are split on the ONE axis a sender can act on -- was anything put in
+#: flight? -- not on mechanism.  Mechanism is what the log names; a sender
+#: cannot do anything differently for "no runner channel" than for "no server
+#: attached", so those do not earn separate words.
 _DELIVERY_FAILURE_REASON = {
     "no_session": (
         "is not loaded (no session with that id is in memory; it may have "
@@ -514,10 +524,19 @@ _DELIVERY_FAILURE_REASON = {
         "session itself, not inferred from silence)"
     ),
     "unreachable": (
-        "could not be reached -- the delivery mechanism failed. NOT "
-        "CONFIRMED rather than not-delivered: on a timeout the message may "
-        "still have been enqueued and only the acknowledgement lost. The "
-        "daemon log names the exception and which layer it came from"
+        "could not be reached -- NOTHING WAS SENT. The session is loaded but "
+        "has no delivery path right now (no server attached, no runner "
+        "channel, a runner too old to accept the offer, or a turn that could "
+        "not be started). Re-sending is SAFE -- nothing was enqueued, so it "
+        "cannot duplicate -- but will keep failing until the path is "
+        "restored. The daemon log names which of the four it was"
+    ),
+    "not_confirmed": (
+        "was sent an offer whose answer was lost (the delivery call raised "
+        "or timed out). The message may be in its queue right now, or may "
+        "never have arrived -- from here those are indistinguishable. "
+        "RE-SENDING MAY DELIVER IT TWICE. The daemon log names the exception "
+        "and which layer it came from"
     ),
     "busy": (
         "is mid-turn and has too many messages already waiting; the target "
@@ -6534,12 +6553,31 @@ class SessionManager:
             mid-turn, so nothing was enqueued.  Backpressure that asks the
             target rather than guessing from a replica.
         ``UNREACHABLE``
-            Loaded and live, but the delivery mechanism failed -- no runner
-            channel, or the forward raised.  A transport fault, not a
-            decision by the target, which is why it is not ``refused``.
+            Loaded and live, but NOTHING WAS PUT IN FLIGHT: no server
+            attached, no runner channel, a runner too old to accept the offer
+            verb, or a drive that failed after the target answered
+            ``needs_turn``.  A transport fault, not a decision by the target,
+            which is why it is not ``refused``.  RETRY IS SAFE -- nothing was
+            enqueued, so it cannot duplicate.
+        ``NOT_CONFIRMED``
+            An offer WAS made and its answer was lost (the RPC raised or timed
+            out).  The message may be in the target's queue right now, or may
+            never have arrived; from here those are indistinguishable.  RETRY
+            MAY DUPLICATE.
 
         Only ``ACCEPTED`` and ``QUEUED`` mean the message will be acted on
         (``message_delivery.DELIVERED``).
+
+        UNREACHABLE AND NOT_CONFIRMED ARE THE SAME AXIS, SPLIT ONCE.
+
+        They were one word, and the prose reason attached to it described
+        only NOT_CONFIRMED's case.  For the four structural producers that
+        sentence was FALSE, not vague -- it warned about a duplicate that
+        could not exist, so a careful sender declined to re-send a message
+        that had definitely never arrived.  Mechanism detail below that
+        (which of the four) stays in the log: a sender cannot act on "no
+        runner channel" differently from "no server attached", and a word it
+        cannot act on is one more thing to get wrong.
 
         AN IDLE TARGET IS DRIVEN, NOT INJECTED.
 
@@ -6580,7 +6618,8 @@ class SessionManager:
             One of the status constants described above.
         """
         from shared.message_delivery import (
-            ACCEPTED, BUSY, NO_SESSION, QUEUED, TERMINATED, UNREACHABLE,
+            ACCEPTED, BUSY, NO_SESSION, NOT_CONFIRMED, QUEUED, TERMINATED,
+            UNREACHABLE,
         )
 
         with self._lock:
@@ -6589,6 +6628,17 @@ class SessionManager:
             return NO_SESSION
         server = session.server
         if server is None:
+            # Each structural site logs its OWN mechanism.  The caller gets
+            # one word (all four are equally retry-safe and equally futile
+            # until repaired); the operator gets which of the four, because
+            # "no server attached" and "runner too old" want completely
+            # different fixes and the status deliberately cannot say that.
+            logger.warning(
+                "DELIVERY_UNREACHABLE session=%s cause=no_server -- the "
+                "session is loaded but has no JaatoServer attached, so there "
+                "is no delivery path at all.  Nothing was enqueued.",
+                target_session_id,
+            )
             return UNREACHABLE
 
         # Terminal targets are REPORTED, not delivered to.  Without this the
@@ -6612,9 +6662,25 @@ class SessionManager:
         # guarantee rather than a prediction.
         rpc = getattr(server, "_runner_rpc", None)
         if rpc is None:
+            logger.warning(
+                "DELIVERY_UNREACHABLE session=%s cause=no_runner_channel -- "
+                "the session has a server but no runner RPC client, so the "
+                "offer could not be made.  Nothing was enqueued.",
+                target_session_id,
+            )
             return UNREACHABLE
         offer = getattr(rpc, "session_offer_message_threadsafe", None)
         if not callable(offer):
+            # A VERSION statement, not a fault: the runner predates the
+            # atomic offer verb (#620).  Worth its own token because the fix
+            # is "restart the runner on current code", which no other
+            # unreachable cause shares.
+            logger.warning(
+                "DELIVERY_UNREACHABLE session=%s cause=offer_verb_absent -- "
+                "the runner does not expose session_offer_message (it "
+                "predates the atomic offer verb).  Nothing was enqueued.",
+                target_session_id,
+            )
             return UNREACHABLE
         try:
             outcome = offer(
@@ -6624,9 +6690,11 @@ class SessionManager:
                     source_type.value if source_type is not None else None
                 ),
                 require_idle=require_idle,
-                # Residual, unchanged: an offer that TIMES OUT may still have
-                # been enqueued runner-side, so UNREACHABLE means "not
-                # confirmed", not "definitely not delivered".
+                # An offer that TIMES OUT may still have been enqueued
+                # runner-side.  That residual is real and unfixable from
+                # here -- what changed is that it now has its OWN status
+                # (NOT_CONFIRMED) instead of sharing one with four cases
+                # that never sent anything.
                 timeout=2.0,
             )
         except Exception as exc:  # noqa: BLE001
@@ -6641,13 +6709,13 @@ class SessionManager:
             # after it, which is the absent-vs-empty trap this helper exists
             # to close.
             logger.warning(
-                "offer_message to session %s failed (%s: %s) -- reporting "
-                "unreachable.  NOTE: a TIMEOUT here means NOT CONFIRMED, not "
-                "not-delivered: the message may still have been enqueued "
-                "runner-side.",
+                "DELIVERY_NOT_CONFIRMED session=%s cause=offer_failed "
+                "(%s: %s) -- the offer WAS made and its answer was lost, so "
+                "the message may be enqueued runner-side or may never have "
+                "arrived.  Re-sending may deliver it twice.",
                 target_session_id, type(exc).__name__, exc_message(exc),
             )
-            return UNREACHABLE
+            return NOT_CONFIRMED
 
         if outcome == "queued":
             return QUEUED
@@ -6660,6 +6728,17 @@ class SessionManager:
         # ever drain this.  It was deliberately NOT enqueued -- drive instead.
         if self.send_message_to_session(target_session_id, text):
             return ACCEPTED
+        # The target told us it was idle and the drive still did not start a
+        # turn.  Nothing was enqueued on either path -- the offer declined to
+        # queue (that is what ``needs_turn`` MEANS) and the drive failed --
+        # so this is retry-safe, not not-confirmed.  ``send_message_to_session``
+        # logs which of its own three ways it failed.
+        logger.warning(
+            "DELIVERY_UNREACHABLE session=%s cause=drive_failed -- the target "
+            "answered needs_turn (idle) but dispatching a turn failed.  "
+            "Nothing was enqueued on either path.",
+            target_session_id,
+        )
         return UNREACHABLE
 
     def inject_prompt_to_session(
@@ -6720,12 +6799,27 @@ class SessionManager:
         ``create_headless_session(initial_history=..., initial_prompt=...)`` —
         a forked continuation with a new id.
 
-        Thread-safe.  Returns ``True`` if a turn was dispatched, ``False`` if
-        the target isn't loaded in ``self._sessions``.
+        Thread-safe.
+
+        Returns ``True`` if a turn was dispatched.  ``False`` has TWO causes,
+        which the boolean cannot distinguish and the log therefore must: the
+        target is not loaded in ``self._sessions``, or the dispatch raised.
+        The docstring used to name only the first, so the second read as the
+        first at every call site.
+
+        Callers get a bool because that is all they can act on -- a drive
+        either happened or did not.  ``deliver_prompt_to_session`` maps a
+        ``False`` here onto ``UNREACHABLE`` (retry-safe: nothing was enqueued
+        on either path).
         """
         with self._lock:
             session = self._sessions.get(target_session_id)
         if session is None:
+            logger.warning(
+                "DRIVE_FAILED session=%s cause=not_loaded -- no session with "
+                "that id is in self._sessions; no turn was dispatched.",
+                target_session_id,
+            )
             return False
         from jaato_sdk.events import SendMessageRequest
         try:
@@ -6735,7 +6829,19 @@ class SessionManager:
                 SendMessageRequest(text=text),
             )
         except Exception as exc:  # noqa: BLE001 — a reactor resume must not crash the caller
-            logger.debug("send_message_to_session dispatch failed: %s", exc)
+            # WARNING, not debug, and for the reason #626 gave one layer up:
+            # the caller is being told the drive FAILED, so the reason has to
+            # be somewhere.  At debug it was generated and discarded.
+            #
+            # ``exc_message`` and the type name because ``str(TimeoutError())``
+            # is the EMPTY STRING -- the old line could render as
+            # "dispatch failed: " with nothing after it, which is precisely
+            # the absent-vs-empty trap this codebase keeps re-finding.
+            logger.warning(
+                "DRIVE_FAILED session=%s cause=dispatch_raised (%s: %s) -- "
+                "no turn was dispatched.",
+                target_session_id, type(exc).__name__, exc_message(exc),
+            )
             return False
         return True
 

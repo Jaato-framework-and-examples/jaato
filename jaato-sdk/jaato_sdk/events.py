@@ -1799,9 +1799,20 @@ class InjectPromptResultEvent(Event):
       further turns.  Reported from the target's own terminal stamp, never
       inferred from silence.
     * ``"no_session"``  — no session with that id is loaded.
-    * ``"unreachable"`` — loaded and live, but the delivery mechanism failed
-      (no runner channel, or the forward raised).  A transport fault, not a
-      decision by the target.
+    * ``"unreachable"`` — loaded and live, but NOTHING WAS SENT: no server
+      attached, no runner channel, a runner too old to accept the offer verb,
+      or a drive that failed.  A transport fault, not a decision by the
+      target.  **Re-sending is safe** — nothing was enqueued, so it cannot
+      duplicate — though it will keep failing until the path is restored.
+    * ``"not_confirmed"`` — an offer WAS made and its answer was lost (the
+      call raised or timed out).  The message may be in the target's queue
+      right now, or may never have arrived; from here those are
+      indistinguishable.  **Re-sending may deliver it twice.**
+
+    A consumer that only checks membership of the delivered set stays correct
+    when a word is added here -- which is how ``not_confirmed`` was split out
+    of ``unreachable`` without touching a caller.  Branch on the set, not on
+    the individual failure words, unless you are choosing whether to retry.
 
     Only ``accepted`` and ``queued`` mean the message will be acted on
     (``shared.message_delivery.DELIVERED``).  The rest are failures and must
