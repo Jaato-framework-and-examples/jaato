@@ -266,7 +266,7 @@ def _make_server_with_hooks() -> tuple:
     srv.emit = lambda e: srv._emitted_events.append(e)
     srv._main_agent_id = "main"
     srv._model_running = False
-    srv._pending_continuation = None
+    srv._pending_continuations = []
     srv._traces = []
     srv._trace = lambda m: srv._traces.append(m)
     srv._cached_context_limit = 100_000

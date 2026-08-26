@@ -572,11 +572,19 @@ class JaatoServer:
         # advancement on an error-terminated session (the recovery path
         # re-spawns it).  See docs/design/agent-error-recovery-event.md.
         self._terminal_reason: Optional[str] = None
-        # Continuation text stashed by continuation_callback when called from
-        # _drain_child_messages() while _model_running is still True.  Processed
-        # in the model_thread finally block after _model_running is cleared.
-        self._pending_continuation: Optional[str] = None
-        #: Guards :attr:`_pending_continuation`.  The stash is written from
+        # Texts stashed for the model thread's ``finally`` to turn into the
+        # next turn: continuations drained from child/sibling messages, and
+        # sends that arrived for an idle SESSION while THIS thread was still
+        # unwinding its previous turn.
+        #
+        # A LIST, not a slot.  #620 added the second writer above and kept the
+        # single-slot assignment, so N messages landing in one wind-down window
+        # overwrote each other and only the last became a turn -- silent loss,
+        # reproduced live at 4 deliveries -> 2 turn inputs.  Before #620 that
+        # path went to the runner's ``_message_queue``, which is a real queue;
+        # the regression was replacing a queue with a variable.
+        self._pending_continuations: List[str] = []
+        #: Guards :attr:`_pending_continuations`.  The stash is written from
         #: the RPC client's asyncio READ LOOP (notification dispatch, see
         #: ``runner_rpc_client._read_loop``) and from ``send_message`` on a
         #: caller thread, but READ on the MODEL thread.  A prior comment here
@@ -4270,7 +4278,7 @@ class JaatoServer:
         # actually IS (is MY thread alive), not as a proxy for session state.
         with self._pending_continuation_lock:
             if self._model_running:
-                self._pending_continuation = text
+                self._pending_continuations.append(text)
                 self._trace(
                     f"SEND_WHILE_UNWINDING: stashed {len(text)} chars for "
                     f"the model thread's finally to pick up",
@@ -4391,7 +4399,7 @@ class JaatoServer:
 
         Each branch mirrors the pre-§7c-step-6.6.4.3b daemon-side
         callback body — same emit-events, same trace logs, same
-        side effects (e.g. ``_pending_continuation`` stash, recursive
+        side effects (e.g. ``_pending_continuations`` stash, recursive
         ``_start_model_thread`` for parent-idle continuation).
         """
         server = self
@@ -4429,7 +4437,7 @@ class JaatoServer:
                     else:
                         # Stash for the model_thread finally block to pick up.
                         with server._pending_continuation_lock:
-                            server._pending_continuation = child_messages
+                            server._pending_continuations.append(child_messages)
                         server._trace(
                             f"CONTINUATION: Stashed {len(child_messages)} "
                             f"chars (model still running)",
@@ -5014,10 +5022,17 @@ class JaatoServer:
                 # notification-driven write since.  The lost update it allowed
                 # was silent: the stashed text simply never became a turn.
                 with server._pending_continuation_lock:
-                    pending = server._pending_continuation
-                    server._pending_continuation = None
+                    stashed = server._pending_continuations
+                    server._pending_continuations = []
+                # ALL of them, joined -- the same shape
+                # ``_drain_child_messages`` uses for a batch it collected.
+                # Taking only one would re-introduce the loss with extra steps.
+                pending = "\n\n".join(stashed) if stashed else None
                 if pending:
-                    server._trace(f"CONTINUATION: Processing stashed {len(pending)} chars")
+                    server._trace(
+                        f"CONTINUATION: Processing {len(stashed)} stashed "
+                        f"message(s), {len(pending)} chars"
+                    )
                     server.emit(AgentStatusChangedEvent(
                         agent_id=server._main_agent_id,
                         status="active",
@@ -5035,7 +5050,7 @@ class JaatoServer:
                 # already restored to None — queued it with no drainer (see
                 # ``JaatoSession.inject_prompt`` / ``try_drain_pending_user``).
                 # Atomically pop it and start a fresh turn.  Mirrors the
-                # ``_pending_continuation`` drain above; runner-tier only
+                # ``_pending_continuations`` drain above; runner-tier only
                 # (daemon-local sessions have no ``_runner_rpc``).
                 if server._runner_rpc is not None:
                     drained = None
@@ -5082,7 +5097,7 @@ class JaatoServer:
                 # Completion-nudge guard for top-level sessions.  When
                 # the loop is about to terminate (status="done") AND
                 # the agent never called ``signal_completion``, inject
-                # a framework reminder via ``_pending_continuation``
+                # a framework reminder via ``_pending_continuations``
                 # and restart the model thread — the existing pending
                 # path above will pick it up next iteration.  Bounded
                 # by ``MAX_COMPLETION_NUDGES`` so a model that keeps

@@ -308,7 +308,7 @@ def _make_server_for_demuxer() -> JaatoServer:
     srv.emit = lambda e: srv._emitted_events.append(e)  # type: ignore[method-assign]
     srv._main_agent_id = "main"
     srv._model_running = False
-    srv._pending_continuation = None
+    srv._pending_continuations = []
     # The stash is written from the RPC read loop and read on the model
     # thread, so production guards it; a double without the lock would
     # diverge from the shape the demuxer actually runs against.
@@ -384,7 +384,10 @@ def test_demuxer_continuation_when_model_running_stashes() -> None:
     handler("continuation_needed", {"child_messages": "stash me"})
 
     # Stashed for the model_thread finally block.
-    assert srv._pending_continuation == "stash me"
+    assert srv._pending_continuations == ["stash me"], (
+        "a stash must ACCUMULATE -- a single slot silently drops all but "
+        "the last when several land in one wind-down window"
+    )
     # No recursive start.
     assert srv._start_model_thread_calls == []
     # No event emitted (status change happens at finally-block boundary).
@@ -399,7 +402,7 @@ def test_demuxer_continuation_with_empty_text_is_noop() -> None:
 
     assert srv._emitted_events == []
     assert srv._start_model_thread_calls == []
-    assert srv._pending_continuation is None
+    assert srv._pending_continuations == []
 
 
 def test_demuxer_retry_emits_event_with_rate_limit_classification() -> None:
