@@ -25,6 +25,7 @@ import pytest
 from jaato_sdk.plugins.model_provider.types import UNTRUSTED_OPEN
 from shared.message_queue import SourceType
 from shared.tool_result_builder import split_executor_result
+from .offer_double import wire_offer
 from server.session_manager import (
     SIBLING_CID_EXCHANGE_CAP,
     SIBLING_MESSAGE_MAX_BYTES,
@@ -36,6 +37,10 @@ from server.session_manager import (
 class _Server:
     def __init__(self, running=False):
         self._model_running = running
+        # Present so ``deliver_prompt_to_session`` can reach the session;
+        # wired to the recording sink by ``_sm``.
+        self._runner_rpc = None
+        self._terminal_reason = None
 
 
 def _session(sid, cid="cid-1", name=None, running=False):
@@ -71,6 +76,11 @@ def _sm(*sessions):
         sm.delivered.append((sid, text, "driven", None)) or True
     )
     sm._get_persisted_sessions = lambda **kw: []
+    # Wire each peer's offer RPC to the SAME ordered list, so "queued" and
+    # "driven" stay comparable in one sequence -- the choice between them is
+    # what these tests are about.
+    for _s in sessions:
+        wire_offer(_s, sm.delivered)
     return sm
 
 

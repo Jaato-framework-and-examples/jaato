@@ -5337,14 +5337,23 @@ class SessionManager:
 
         with self._lock:
             target = self._sessions.get(target_id)
-            busy = bool(target is not None and target.server is not None
-                        and getattr(target.server, "_model_running", False))
+            # The REPLICA of the peer's turn state, kept ONLY as a witness in
+            # the diagnostic below -- it is no longer consulted for any
+            # decision.  It clears later than the peer's own flag, which is
+            # what made "queued" mean "stranded" for ~30s after every turn.
+            replica_busy = bool(
+                target is not None and target.server is not None
+                and getattr(target.server, "_model_running", False))
             pending = self._sibling_pending.get(target_id, 0)
-        if busy and pending >= SIBLING_PENDING_CAP:
-            return {"status": "refused",
-                    "error": (f"send_to_sibling: {sibling_name!r} has "
-                              f"{pending} messages waiting and has not been idle "
-                              f"since. Let it work.")}
+        # Backpressure ASKS rather than assumes.  ``pending`` counts
+        # consecutive queued sends, so reaching the cap means "N sends with no
+        # turn of its own" -- but whether the peer is STILL working is the
+        # peer's fact, not the daemon's.  At the cap the delivery below is made
+        # with ``require_idle``, so it lands only if a turn would start, and
+        # the peer itself tells us when it did not.  The old form -- refusing
+        # here on the daemon's ``_model_running`` -- could refuse a peer that
+        # had drained its backlog half a minute earlier.
+        at_cap = pending >= SIBLING_PENDING_CAP
 
         # The DAEMON stamps the sender, never the sender itself (design §7),
         # and the body is wrapped as untrusted content so the receiving model
@@ -5358,37 +5367,37 @@ class SessionManager:
         wrapped = wrap_untrusted_content(
             text, source=f"sibling:{sender_name or sender_session_id}")
 
-        # The SAME decision send_to_subagent makes, from the same module:
-        # busy -> queue on this sender's tier, idle -> DRIVE a turn.  Only the
-        # two mechanisms differ (daemon-to-runner RPC here, in-process there).
+        # ONE primitive, and it asks the peer rather than a replica of it.
         #
-        # This used to inject in BOTH branches and report ``accepted``.  An
-        # injection into an idle peer starts nothing — ``inject_prompt`` fires
-        # a turn only while ``_on_continuation_needed`` is installed, which is
-        # for the duration of a send_message RPC — so the message queued on a
-        # tier with no drainer and was discarded on unload.
-        from shared.message_delivery import QUEUED, deliver
-        reached: Dict[str, bool] = {}
-
-        def _queue() -> None:
-            reached["ok"] = self.inject_prompt_to_session(
-                target_id, wrapped,
-                source_id=sender_name or sender_session_id,
-                source_type=SourceType.SIBLING,
-            )
-
-        def _drive() -> None:
-            # Runs a turn on the peer's OWN session, keeping its id, so the
-            # cost lands on the peer and depletes the shared cid pool.  The
-            # SIBLING tier is moot here: it exists to stop a peer interrupting
-            # work in progress, and there is none.  The body is already
-            # wrapped as untrusted content with the sender stamped by the
-            # daemon, so the receiving model still sees the boundary.
-            reached["ok"] = self.send_message_to_session(target_id, wrapped)
-
-        outcome = deliver(
-            is_busy=lambda: busy, queue=_queue, drive=_drive,
+        # This used to inject in BOTH branches and report ``accepted``, then
+        # (from #612) branch on the daemon's ``_model_running``.  Both were
+        # decisions taken away from the state they were about: the daemon's
+        # flag clears only after ``session.send_message`` returns, so a peer
+        # that had finished its turn ~30s earlier still read as busy and the
+        # message was queued behind a drain that had already run.
+        #
+        # ``deliver_prompt_to_session`` now offers the message to the peer's
+        # OWN session, which answers atomically against its live
+        # ``_is_running``: queued (a drain WILL collect it) or a turn is
+        # driven.  A driven turn runs on the peer's own session, keeping its
+        # id, so the cost lands on the peer and depletes the shared cid pool.
+        # The body is already wrapped as untrusted content with the sender
+        # stamped by the daemon, so the receiving model still sees the
+        # boundary on either branch.
+        from shared.message_delivery import BUSY, DELIVERED, QUEUED
+        status = self.deliver_prompt_to_session(
+            target_id, wrapped,
+            source_id=sender_name or sender_session_id,
+            source_type=SourceType.SIBLING,
+            require_idle=at_cap,
         )
+        if status == BUSY:
+            return {"status": "refused",
+                    "error": (f"send_to_sibling: {sibling_name!r} has "
+                              f"{pending} messages waiting and has not been "
+                              f"idle since. Let it work.")}
+        reached: Dict[str, bool] = {"ok": status in DELIVERED}
+        outcome = status
 
         # DIAGNOSTIC — the busy decision, at the moment it was made.
         #
@@ -5409,10 +5418,11 @@ class SessionManager:
         # it was needed for.  Greppable token: SIBLING_DELIVERY.
         _thread = getattr(getattr(target, "server", None), "_model_thread", None)
         logger.info(
-            "SIBLING_DELIVERY: from=%s to=%s target_session=%s busy=%s "
-            "thread_alive=%s outcome=%s bytes=%d",
+            "SIBLING_DELIVERY: from=%s to=%s target_session=%s "
+            "replica_busy=%s thread_alive=%s outcome=%s bytes=%d",
             sender_name or sender_session_id, sibling_name, target_id,
-            busy, (_thread is not None and getattr(_thread, "is_alive", lambda: None)()),
+            replica_busy,
+            (_thread is not None and getattr(_thread, "is_alive", lambda: None)()),
             outcome, size,
         )
         if not reached.get("ok"):
@@ -5422,11 +5432,14 @@ class SessionManager:
 
         with self._lock:
             self._sibling_exchanges[cid] = exchanges + 1
-            if busy:
+            if outcome == QUEUED:
                 self._sibling_pending[target_id] = pending + 1
             else:
-                # Idle target: inject_prompt fired the continuation instead of
-                # queuing, so whatever was waiting has drained with it.
+                # Driven: a turn was STARTED on the peer, and its end-of-turn
+                # drain collects everything that was waiting -- so the backlog
+                # is gone.  Keyed off the peer's OWN answer now, not off a
+                # replica that could say "busy" about a session idle for half
+                # a minute.
                 self._sibling_pending.pop(target_id, None)
 
         return {"status": outcome,
@@ -5512,27 +5525,24 @@ class SessionManager:
         # both "it is being worked on" and "it is sitting in a queue nobody
         # will pop".  One word for two outcomes is the shape this whole class
         # of bug takes.
-        from shared.message_delivery import deliver
+        from shared.message_delivery import DELIVERED
         from shared.message_queue import SourceType
-        with self._lock:
-            target = self._sessions.get(target_id)
-            busy = bool(target is not None and target.server is not None
-                        and getattr(target.server, "_model_running", False))
-        reached: Dict[str, bool] = {}
-
-        def _queue() -> None:
-            # USER is a HIGH-priority tier, so an operator's words are picked
-            # up MID-TURN rather than waiting for the turn to end.  That is
-            # the authority difference between an operator and a sibling.
-            reached["ok"] = self.inject_prompt_to_session(
-                target_id, text, source_id="operator",
-                source_type=SourceType.USER,
-            )
-
-        def _drive() -> None:
-            reached["ok"] = self.send_message_to_session(target_id, text)
-
-        outcome = deliver(is_busy=lambda: busy, queue=_queue, drive=_drive)
+        # USER is a HIGH-priority tier, so an operator's words are picked up
+        # MID-TURN rather than waiting for the turn to end.  That is the
+        # authority difference between an operator and a sibling, and it is
+        # carried by the tier -- not by which branch delivery takes.
+        #
+        # The branch itself is no longer decided here: ``deliver_prompt_to_
+        # session`` offers the message to the target's OWN session, which
+        # answers against its live ``_is_running``.  The daemon-side flag this
+        # used to read clears ~30s later, so an operator send could be queued
+        # behind a drain that had already run.
+        outcome = self.deliver_prompt_to_session(
+            target_id, text,
+            source_id="operator",
+            source_type=SourceType.USER,
+        )
+        reached: Dict[str, bool] = {"ok": outcome in DELIVERED}
         if not reached.get("ok"):
             return {"status": "refused",
                     "error": (f"session.send: {sibling_name!r} could not be "
@@ -6428,6 +6438,7 @@ class SessionManager:
         text: str,
         source_id: Optional[str] = None,
         source_type: Optional[Any] = None,
+        require_idle: bool = False,
     ) -> str:
         """Deliver a prompt to a loaded session and REPORT what happened.
 
@@ -6455,6 +6466,10 @@ class SessionManager:
             No session with that id is loaded.  Deliberately distinct from
             ``TERMINATED``: "gone" and "dead but present" are different
             situations for a driver.
+        ``BUSY``
+            Only when *require_idle* is set: the target confirmed it is
+            mid-turn, so nothing was enqueued.  Backpressure that asks the
+            target rather than guessing from a replica.
         ``UNREACHABLE``
             Loaded and live, but the delivery mechanism failed -- no runner
             channel, or the forward raised.  A transport fault, not a
@@ -6502,7 +6517,7 @@ class SessionManager:
             One of the status constants described above.
         """
         from shared.message_delivery import (
-            ACCEPTED, NO_SESSION, QUEUED, TERMINATED, UNREACHABLE,
+            ACCEPTED, BUSY, NO_SESSION, QUEUED, TERMINATED, UNREACHABLE,
         )
 
         with self._lock:
@@ -6519,41 +6534,54 @@ class SessionManager:
         if getattr(server, "_terminal_reason", None):
             return TERMINATED
 
-        busy = bool(getattr(server, "_model_running", False))
-        if not busy:
-            if self.send_message_to_session(target_session_id, text):
-                return ACCEPTED
-            return UNREACHABLE
-
-        # Phase 3 §7c step 6.6.3.6: forward to runner-side via the existing
-        # ``session.inject_prompt`` RPC (§7c step 6.1 (3/3) at commit
-        # 14e57709).  ``SourceType`` enum serialized as its lowercase string
-        # value across the wire.
+        # ASK THE SESSION, DO NOT READ THE REPLICA.
+        #
+        # ``server._model_running`` is a daemon-side replica of the session's
+        # ``_is_running`` and clears strictly LATER -- only once
+        # ``session.send_message`` returns and the model thread unwinds,
+        # which is after the session has finished its turn AND run its final
+        # drain.  Deciding here would therefore decide on state that can
+        # already be stale, and a message queued into a turn that has ended
+        # is drained by nothing.  Measured live at ~30s of staleness.
+        #
+        # ``session.offer_message`` makes the check-and-enqueue atomic
+        # against the turn's own ``_is_running`` flip, so ``queued`` is a
+        # guarantee rather than a prediction.
         rpc = getattr(server, "_runner_rpc", None)
         if rpc is None:
             return UNREACHABLE
-        forwarder = getattr(rpc, "session_inject_prompt_threadsafe", None)
-        if not callable(forwarder):
+        offer = getattr(rpc, "session_offer_message_threadsafe", None)
+        if not callable(offer):
             return UNREACHABLE
         try:
-            forwarder(
+            outcome = offer(
                 text,
                 source_id=source_id,
                 source_type=(
                     source_type.value if source_type is not None else None
                 ),
-                # 2.0 is this primitive's long-standing value, and it now
-                # governs the SDK path too (which used 5.0 before the two
-                # were consolidated).  Deliberate: one path, one timeout.
-                # Residual, unchanged by this fix: a forward that TIMES OUT
-                # may still have been enqueued runner-side, so UNREACHABLE
-                # here means "not confirmed", not "definitely not delivered".
+                require_idle=require_idle,
+                # Residual, unchanged: an offer that TIMES OUT may still have
+                # been enqueued runner-side, so UNREACHABLE means "not
+                # confirmed", not "definitely not delivered".
                 timeout=2.0,
             )
         except Exception as exc:  # noqa: BLE001
-            logger.debug("inject_prompt forward failed: %s", exc)
+            logger.debug("offer_message failed: %s", exc)
             return UNREACHABLE
-        return QUEUED
+
+        if outcome == "queued":
+            return QUEUED
+        if outcome == "busy":
+            # Only reachable with require_idle: the caller applies
+            # backpressure and the TARGET confirmed it is still working.
+            return BUSY
+
+        # ``needs_turn``: the session has no turn running, so nothing would
+        # ever drain this.  It was deliberately NOT enqueued -- drive instead.
+        if self.send_message_to_session(target_session_id, text):
+            return ACCEPTED
+        return UNREACHABLE
 
     def inject_prompt_to_session(
         self,

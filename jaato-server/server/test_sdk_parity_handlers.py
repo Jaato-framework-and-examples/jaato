@@ -153,8 +153,37 @@ class _FakeRunnerRPC:
     against inject_calls / replay_calls / resolve_calls / etc.
     """
 
-    def __init__(self, session: _FakeJaatoSession) -> None:
+    def __init__(self, session: _FakeJaatoSession, is_running=None) -> None:
         self._session = session
+        # Lazy so a test can flip the server's flag AFTER construction.
+        # Defaults to "a turn is running" so the source_type-mapping tests
+        # below exercise the queue branch, which is what they are about.
+        self._is_running = is_running or (lambda: True)
+
+    def session_offer_message_threadsafe(
+        self,
+        text: str,
+        *,
+        source_id: Optional[str] = None,
+        source_type: Optional[str] = None,
+        timeout: Optional[float] = None,
+    ) -> str:
+        """Stand-in for the runner's atomic queue-or-report.
+
+        Mirrors the real contract: ``"queued"`` enqueues (a running turn's
+        drain will collect it), ``"needs_turn"`` enqueues NOTHING and tells
+        the daemon to start a turn.  The real one decides under a lock
+        against the session's own ``_is_running``; this one reads the fake
+        server's flag through a lazy callable so tests can set it.
+        """
+        if not self._is_running():
+            return "needs_turn"
+        from shared.message_queue import SourceType
+        st_enum = SourceType(source_type) if source_type is not None else None
+        self._session.inject_prompt(
+            text, source_id=source_id, source_type=st_enum,
+        )
+        return "queued"
 
     def session_inject_prompt_threadsafe(
         self,
@@ -223,7 +252,9 @@ class _FakeJaatoServer:
         permission_plugin: Optional[_FakePermissionPlugin] = None,
     ) -> None:
         self._jaato = _FakeJaatoClient(jaato_session)
-        self._runner_rpc = _FakeRunnerRPC(jaato_session)
+        self._runner_rpc = _FakeRunnerRPC(
+            jaato_session, is_running=lambda: self._model_running,
+        )
         self.registry = _FakeRegistry(permission_plugin)
         # BUSY by default.  The inject handler routes through the
         # queue-or-drive decision, and an IDLE target is DRIVEN rather than

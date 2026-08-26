@@ -29,10 +29,35 @@ class _FakeRunnerRPC:
     ``test_session_inject_prompt_rpc.py``.
     """
 
-    def __init__(self, raise_on_call: bool = False) -> None:
+    def __init__(self, raise_on_call: bool = False, is_running=None) -> None:
         # Each tuple: (text, source_id, source_type-string)
         self.calls: List[Tuple[str, Optional[str], Optional[str]]] = []
         self._raise = raise_on_call
+        # Lazy so a test can flip the server's flag after construction.
+        self._is_running = is_running or (lambda: True)
+
+    def session_offer_message_threadsafe(
+        self,
+        text: str,
+        *,
+        source_id: Optional[str] = None,
+        source_type: Optional[str] = None,
+        timeout: Optional[float] = None,
+    ) -> str:
+        """Stand-in for the runner's ATOMIC queue-or-report.
+
+        The real one decides under ``_delivery_lock`` against the session's
+        own ``_is_running``; the daemon no longer decides at all.  Recording
+        the call in ``calls`` only on the queued branch mirrors that: a
+        ``needs_turn`` answer enqueues NOTHING, so there is nothing to
+        record and the daemon must drive instead.
+        """
+        if self._raise:
+            raise RuntimeError("RPC unavailable")
+        if not self._is_running():
+            return "needs_turn"
+        self.calls.append((text, source_id, source_type))
+        return "queued"
 
     def session_inject_prompt_threadsafe(
         self,
@@ -65,7 +90,9 @@ class _FakeJaatoServer:
         if raise_on_get_session:
             self._runner_rpc = None
         else:
-            self._runner_rpc = _FakeRunnerRPC()
+            self._runner_rpc = _FakeRunnerRPC(
+                is_running=lambda: self._model_running,
+            )
         # Defaults to BUSY so the forwarding tests below exercise the
         # forward path.  An IDLE target is DRIVEN, not injected -- injecting
         # into one queues into a queue with no drainer, which is the bug

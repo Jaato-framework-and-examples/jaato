@@ -59,6 +59,14 @@ NO_SESSION = "no_session"
 #: by the target, which is why it is not spelled ``refused``.
 UNREACHABLE = "unreachable"
 
+#: The target is mid-turn and the caller asked NOT to add to its queue --
+#: backpressure, requested via ``require_idle``.  Nothing was enqueued.
+#:
+#: Answered by the TARGET, not inferred from a daemon-side replica: a peer
+#: that has drained its backlog and gone idle must not be refused for a
+#: backlog it no longer has.
+BUSY = "busy"
+
 #: The statuses that mean the message WILL be acted on.
 #:
 #: This set is the whole point of the vocabulary.  The failure states above

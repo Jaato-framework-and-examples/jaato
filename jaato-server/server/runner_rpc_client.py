@@ -1889,6 +1889,90 @@ class RunnerRPCClient:
             timeout=timeout,
         )
 
+    async def session_offer_message(
+        self,
+        text: str,
+        *,
+        source_id: Optional[str] = None,
+        source_type: Optional[str] = None,
+        require_idle: bool = False,
+        timeout: Optional[float] = 5.0,
+    ) -> str:
+        """Ask the SESSION to queue this message, or to say a turn is needed.
+
+        Step 2.  The daemon-side ``_model_running`` is a REPLICA of the
+        session's ``_is_running`` and clears strictly later -- only once
+        ``session.send_message`` returns and the model thread unwinds.  Any
+        queue-or-drive decision taken against that replica can therefore be
+        taken against stale state, and a message queued into a turn that has
+        already ended is drained by nothing.  This verb moves the decision to
+        the side that owns the state, and makes it atomic there.
+
+        Prefer this over :meth:`session_inject_prompt` for delivery.  Inject
+        queues unconditionally and reports only whether the call raised --
+        the same answer whether a drain is coming or the message will sit
+        forever.
+
+        Returns:
+            ``"queued"``     -- a running turn's drain WILL collect it.
+            ``"busy"``       -- only when *require_idle*: a turn is running
+            and the caller asked not to add to the queue in that case.
+            Nothing was enqueued.
+
+            ``"needs_turn"`` -- nothing would drain it; it was NOT enqueued,
+            and the caller must start a turn with this text.  A session
+            cannot start its own turn, which is why the answer comes back
+            here rather than being acted on runner-side.
+
+        Raises:
+            RunnerCallError: on transport failure or a malformed response --
+            an undelivered message must never be reported as delivered.
+        """
+        if not isinstance(text, str):
+            raise ValueError(
+                f"session_offer_message: text must be str; "
+                f"got {type(text).__name__}"
+            )
+        body: Dict[str, Any] = {"text": text}
+        if source_id is not None:
+            body["source_id"] = source_id
+        if source_type is not None:
+            body["source_type"] = source_type
+        if require_idle:
+            body["require_idle"] = True
+        result = await self._call_named(
+            "session.offer_message", body, timeout=timeout,
+        )
+        outcome = (result or {}).get("outcome")
+        if outcome not in ("queued", "needs_turn", "busy"):
+            # A shape we cannot read is NOT a delivery.  Reporting it as one
+            # is the failure this whole change exists to remove.
+            raise RunnerCallError(
+                f"session.offer_message returned an unreadable outcome "
+                f"{outcome!r}; expected 'queued', 'needs_turn' or 'busy'"
+            )
+        return outcome
+
+    def session_offer_message_threadsafe(
+        self,
+        text: str,
+        *,
+        source_id: Optional[str] = None,
+        source_type: Optional[str] = None,
+        require_idle: bool = False,
+        timeout: Optional[float] = 5.0,
+    ) -> str:
+        return self._run_threadsafe(
+            self.session_offer_message(
+                text,
+                source_id=source_id,
+                source_type=source_type,
+                require_idle=require_idle,
+                timeout=timeout,
+            ),
+            timeout=timeout,
+        )
+
     async def session_inject_prompt(
         self,
         text: str,

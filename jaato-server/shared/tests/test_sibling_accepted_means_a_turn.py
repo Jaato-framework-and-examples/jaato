@@ -26,7 +26,13 @@ import threading
 import pytest
 
 from shared.message_queue import MessageQueue, SourceType
+from .offer_double import wire_offer
 from server.session_manager import SessionManager
+
+
+def queued_on(sm):
+    """(session_id, source_type) for every message QUEUED on a peer."""
+    return [(sid, st) for sid, _text, _src, st in sm.offers]
 
 
 def _session(sid, name=None, running=False):
@@ -42,15 +48,22 @@ def _sm(*sessions):
     sm._sessions = {s.session_id: s for s in sessions}
     sm._lock = threading.RLock()
     sm._sibling_pending, sm._sibling_exchanges = {}, {}
-    sm.injected, sm.driven = [], []
-    sm.inject_prompt_to_session = (
-        lambda sid, text, source_id=None, source_type=None:
-        sm.injected.append((sid, source_type)) or True
-    )
+    sm.driven = []
     sm.send_message_to_session = (
         lambda sid, text: sm.driven.append((sid, text)) or True
     )
     sm._get_persisted_sessions = lambda workspace_path=None: []
+    # The decision now belongs to the TARGET session, so the double has
+    # to answer it -- reading a daemon-side flag is exactly what step 2
+    # removed.
+    # A message that gets QUEUED now lands via the session's own
+    # ``offer_message`` rather than the daemon's injector, so the double
+    # records it.  ``queued_on()`` below reads it back in the
+    # (session_id, source_type) shape these tests already assert on.
+    sm.offers = []
+    for _s in sessions:
+        wire_offer(_s, sm.offers)
+
     return sm
 
 
@@ -70,7 +83,7 @@ def test_an_idle_peer_is_DRIVEN_not_merely_injected():
     assert r["status"] == "accepted"
     assert [sid for sid, _ in sm.driven] == ["s-b"], (
         "accepted was returned without driving a turn")
-    assert sm.injected == [], "an idle peer must not be injected-and-stranded"
+    assert queued_on(sm) == [], "an idle peer must not be queued-and-stranded"
 
 
 def test_the_driven_text_still_carries_the_untrusted_boundary():
@@ -99,7 +112,7 @@ def test_a_busy_peer_is_queued_on_the_sibling_tier():
     r = sm.deliver_sibling_message("s-a", "bob", "hello")
 
     assert r["status"] == "queued"
-    assert sm.injected == [("s-b", SourceType.SIBLING)]
+    assert queued_on(sm) == [("s-b", SourceType.SIBLING)]
     assert sm.driven == [], "a busy peer must not be preempted"
 
 

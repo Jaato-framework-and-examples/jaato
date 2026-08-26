@@ -24,6 +24,7 @@ import threading
 import pytest
 
 from shared.message_queue import SourceType
+from .offer_double import wire_offer
 from server.session_manager import SessionManager
 
 
@@ -56,6 +57,12 @@ def _sm(*sessions):
         sm.delivered.append((sid, text, "driven", None)) or True
     )
     sm._get_persisted_sessions = lambda **kw: []
+    # The decision now belongs to the TARGET session, so the double has
+    # to answer it -- reading a daemon-side flag is exactly what step 2
+    # removed.
+    for _s in sessions:
+        wire_offer(_s, sm.delivered)
+
     return sm
 
 

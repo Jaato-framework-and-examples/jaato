@@ -576,6 +576,15 @@ class JaatoServer:
         # _drain_child_messages() while _model_running is still True.  Processed
         # in the model_thread finally block after _model_running is cleared.
         self._pending_continuation: Optional[str] = None
+        #: Guards :attr:`_pending_continuation`.  The stash is written from
+        #: the RPC client's asyncio READ LOOP (notification dispatch, see
+        #: ``runner_rpc_client._read_loop``) and from ``send_message`` on a
+        #: caller thread, but READ on the MODEL thread.  A prior comment here
+        #: asserted writer and reader "both run on the same model_thread, so
+        #: no race condition" -- that is false for every notification-driven
+        #: write, and the lost update it allows is silent: the stashed text
+        #: simply never becomes a turn.
+        self._pending_continuation_lock = threading.Lock()
 
         # Model info
         self._model_provider: str = ""
@@ -4214,39 +4223,59 @@ class JaatoServer:
         # return`` guard dropped (always-true branch post-seat-flip;
         # daemon-direct ``self._runtime`` is populated synchronously by
         # initialize()).
-        if self._model_running:
-            # Inject directly into the session's queue (USER source — high priority).
-            #
-            # Phase 3 §7c step 6.3: daemon-side leg dropped.  The
-            # runner-side ``session.inject_prompt`` RPC (added in
-            # §7c step 6.1 (3/3) at commit 14e57709) is now the
-            # only source of truth for the mid-turn prompt queue.
-            # ``SourceType`` enum serialized as its lowercase
-            # string value across the wire.
-            rpc = self._runner_rpc
-            if rpc is not None:
-                forwarder = getattr(
-                    rpc, "session_inject_prompt_threadsafe", None,
-                )
-                if callable(forwarder):
-                    try:
-                        forwarder(
-                            text,
-                            source_id="user",
-                            source_type=SourceType.USER.value,
-                            timeout=2.0,
-                        )
-                    except Exception as exc:  # noqa: BLE001 — boundary
-                        logger.warning(
-                            "inject_prompt RPC failed (%s) — mid-turn "
-                            "prompt was not queued",
-                            exc,
-                        )
+        # ASK THE SESSION WHETHER A TURN WILL DRAIN THIS.
+        #
+        # This used to read ``self._model_running`` -- a daemon-side REPLICA
+        # of the session's ``_is_running`` that clears strictly later (only
+        # once ``session.send_message`` returns and this thread unwinds).  A
+        # send arriving in that window was queued as a mid-turn prompt
+        # against a turn that had already ended and already run its final
+        # drain, so nothing collected it.  That is the defect
+        # ``try_drain_pending_user`` was added to rescue after the fact.
+        #
+        # ``session.offer_message`` puts the decision where the state lives
+        # and makes the check-and-enqueue atomic there.
+        outcome = "needs_turn"
+        rpc = self._runner_rpc
+        if rpc is not None:
+            offerer = getattr(rpc, "session_offer_message_threadsafe", None)
+            if callable(offerer):
+                try:
+                    outcome = offerer(
+                        text,
+                        source_id="user",
+                        source_type=SourceType.USER.value,
+                        timeout=2.0,
+                    )
+                except Exception as exc:  # noqa: BLE001 — boundary
+                    logger.warning(
+                        "offer_message RPC failed (%s) -- falling back to "
+                        "starting a turn, which is the safe direction: a "
+                        "duplicate turn is visible, a swallowed message is "
+                        "not",
+                        exc,
+                    )
+
+        if outcome == "queued":
             self.emit(MidTurnPromptQueuedEvent(
                 text=text,
                 position_in_queue=0,
             ))
             return
+
+        # ``needs_turn``: the SESSION is idle.  This daemon-side model thread
+        # may nonetheless still be unwinding its previous turn, and starting a
+        # second one would race it -- so hand the text to the thread that is
+        # already finishing.  ``_model_running`` is read here for what it
+        # actually IS (is MY thread alive), not as a proxy for session state.
+        with self._pending_continuation_lock:
+            if self._model_running:
+                self._pending_continuation = text
+                self._trace(
+                    f"SEND_WHILE_UNWINDING: stashed {len(text)} chars for "
+                    f"the model thread's finally to pick up",
+                )
+                return
 
         # Track input
         self._original_inputs.append({"text": text, "local": False})
@@ -4399,7 +4428,8 @@ class JaatoServer:
                         server._start_model_thread(child_messages)
                     else:
                         # Stash for the model_thread finally block to pick up.
-                        server._pending_continuation = child_messages
+                        with server._pending_continuation_lock:
+                            server._pending_continuation = child_messages
                         server._trace(
                             f"CONTINUATION: Stashed {len(child_messages)} "
                             f"chars (model still running)",
@@ -4972,11 +5002,20 @@ class JaatoServer:
                     clear_logging_context()
                     return
 
-                # Process continuation stashed during _drain_child_messages().
-                # The stash write (in continuation_callback) and this read both
-                # run on the same model_thread, so no race condition.
-                pending = server._pending_continuation
-                server._pending_continuation = None
+                # Process continuation stashed during _drain_child_messages()
+                # or by a send that arrived while this thread was unwinding.
+                #
+                # The stash is written from the RPC read loop and from caller
+                # threads, and read here on the model thread -- so it is taken
+                # under ``_pending_continuation_lock``.  The comment this
+                # replaces claimed writer and reader "both run on the same
+                # model_thread, so no race condition", which was true only of
+                # the original in-process path and false for every
+                # notification-driven write since.  The lost update it allowed
+                # was silent: the stashed text simply never became a turn.
+                with server._pending_continuation_lock:
+                    pending = server._pending_continuation
+                    server._pending_continuation = None
                 if pending:
                     server._trace(f"CONTINUATION: Processing stashed {len(pending)} chars")
                     server.emit(AgentStatusChangedEvent(
