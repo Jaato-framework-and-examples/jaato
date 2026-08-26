@@ -25,6 +25,8 @@ refactor with no migration commitment.
 import json
 import os
 import tempfile
+import threading
+from datetime import datetime
 from dataclasses import asdict, fields as dc_fields
 from pathlib import Path
 from typing import Iterable, List, Optional, Set
@@ -269,6 +271,27 @@ class MemoryStore:
         self._base_dir = base
         self._raw = RawStore(base)
         self._curated = CuratedStore(base)
+        #: Serializes every read-route-write against THIS store.  The store
+        #: had no lock of any kind while ``update`` routes between two
+        #: sub-stores and ``CuratedStore.upsert``/``remove`` are
+        #: read-modify-rewrite of one shared file -- and the memory tools
+        #: have no parallel opt-out, so a curator emitting one retrieve plus
+        #: several update_memory calls in a single response runs them
+        #: CONCURRENTLY (up to 8).  Measured: 10 of 32 curator decisions
+        #: silently undone, 1ms apart.
+        #:
+        #: The guard lives INSIDE the store so every caller inherits it --
+        #: a guard at one call site is how #626's save race happened.
+        #:
+        #: IN-PROCESS ONLY, knowingly.  Sessions in separate runner
+        #: processes sharing one workspace store can still interleave; full
+        #: cross-process safety means flock on every operation.  Every
+        #: observed contradiction was in-process (parallel tool threads in
+        #: one runner), the curator pattern has ONE curator by design, and
+        #: producers use the per-file atomic ``add`` path -- so flock waits
+        #: for a cross-process interleaving to be OBSERVED rather than being
+        #: built against a hypothesis.
+        self._lock = threading.RLock()
 
     @property
     def raw(self) -> RawStore:
@@ -291,9 +314,10 @@ class MemoryStore:
         ``maturity`` field.  The curator promotes them to the curated
         store later.
         """
-        self._raw.add(memory)
+        with self._lock:
+            self._raw.add(memory)
 
-    # ── Consumer / curator API ──────────────────────────────────────
+        # ── Consumer / curator API ──────────────────────────────────────
 
     def load_curated(self) -> List[Memory]:
         """All curated memories.  Source of truth for enrichment."""
@@ -322,6 +346,10 @@ class MemoryStore:
         - If it's already curated → upsert into the curated store
           (covers maturity transitions, content edits, tag updates).
         """
+        with self._lock:
+            self._update_locked(memory)
+
+    def _update_locked(self, memory: Memory) -> None:
         in_raw = self._raw.get(memory.id) is not None
         in_curated = self._curated.get_by_id(memory.id) is not None
 
@@ -352,13 +380,48 @@ class MemoryStore:
             # Not anywhere yet — treat as a new write.  Goes to raw.
             self._raw.add(memory)
 
+    def record_usage(self, memory_id: str) -> None:
+        """Bump usage stats on the CURRENT object, wherever it now lives.
+
+        The usage write-back used to be ``update(stale_object)`` -- a full
+        Memory carrying the maturity it had AT RETRIEVAL TIME, pushed through
+        the routing logic after an arbitrary delay.  Under parallel tool
+        execution a curator's decision could land in that window, and the
+        stale write-back then either REVERTED it (stale-raw upserted over a
+        now-validated curated entry) or RESURRECTED it (stale-raw re-added to
+        the queue after a dismissal unlinked it -- via the "not anywhere yet,
+        goes to raw" branch).  10 of 32 live curator decisions were undone
+        that way, producing a re-decide livelock on the same ids.
+
+        This method carries only the FACT ("this id was read"), not the
+        object: it re-reads the current state under the store lock, mutates
+        the usage fields alone, and writes back to the store it found the
+        memory in.  A memory that was dismissed in the meantime is GONE, and
+        recording usage on it would be resurrection -- so absent is a no-op,
+        deliberately.
+        """
+        with self._lock:
+            mem = self._raw.get(memory_id)
+            if mem is not None:
+                mem.usage_count += 1
+                mem.last_accessed = datetime.now().isoformat()
+                self._raw.add(mem)          # atomic per-id file: in-place
+                return
+            mem = self._curated.get_by_id(memory_id)
+            if mem is not None:
+                mem.usage_count += 1
+                mem.last_accessed = datetime.now().isoformat()
+                self._curated.upsert(mem)
+            # else: dismissed/deleted since retrieval -- no-op, NOT a re-add.
+
     def delete(self, memory_id: str) -> bool:
         """Hard-delete a memory wherever it lives."""
-        removed_raw = self._raw.remove(memory_id)
-        removed_curated = self._curated.remove(memory_id)
-        return removed_raw or removed_curated
+        with self._lock:
+            removed_raw = self._raw.remove(memory_id)
+            removed_curated = self._curated.remove(memory_id)
+            return removed_raw or removed_curated
 
-    # ── Tag/maturity queries (used by tools, advisor) ───────────────
+        # ── Tag/maturity queries (used by tools, advisor) ───────────────
 
     def search_by_tags(
         self,
