@@ -644,6 +644,17 @@ class JaatoSession:
         self._cancel_token: Optional[CancelToken] = None
         self._parent_cancel_token: Optional[CancelToken] = None  # For parent→child propagation
         self._is_running: bool = False
+        #: Guards the ONE question a delivering caller must not get wrong:
+        #: "will a turn drain what I enqueue?"  Held across BOTH the
+        #: check-and-enqueue in :meth:`offer_message` and the
+        #: ``_is_running = False`` flip at the end of ``_run_chat_loop``, so
+        #: the two cannot interleave.  See :meth:`offer_message` for why a
+        #: lock rather than a timing argument.
+        #:
+        #: Held for microseconds, with NO callbacks invoked inside it -- the
+        #: drain's ``_on_prompt_injected`` / ``_on_continuation_needed`` fire
+        #: outside, so this lock has no re-entrancy surface.
+        self._delivery_lock = threading.Lock()
         self._use_streaming: bool = True  # Enable streaming by default if provider supports it
 
         # Activity phase tracking (for parent agents/UIs to understand what we're doing)
@@ -1347,6 +1358,89 @@ class JaatoSession:
             self._completion_nudges_fired += 1
             return True, self._completion_nudges_fired
         return False, getattr(self, "_completion_nudges_fired", 0)
+
+    def offer_message(
+        self,
+        text: str,
+        source_id: Optional[str] = None,
+        source_type: Optional[SourceType] = None,
+        require_idle: bool = False,
+    ) -> str:
+        """Atomically enqueue this message, or report that a turn is needed.
+
+        **This session is the authority on whether it is mid-turn**, and this
+        is the only method that answers with that authority.  Callers on the
+        far side of the RPC (the daemon) hold a REPLICA of that state which
+        clears later than this one -- the daemon's ``_model_running`` stays
+        True until ``session.send_message`` returns and the daemon's model
+        thread unwinds, which is strictly after this session finished its
+        turn.  A delivery decided on the replica is therefore decided on a
+        state that can already be stale, and a message queued into a turn
+        that has ended is never drained by anything.
+
+        Returns:
+            ``"queued"`` -- a turn is running and its end-of-turn drain WILL
+            collect this message.  Not a guess: the enqueue happened while
+            ``_is_running`` was True and could not have been overtaken by the
+            flip to False, because both hold ``_delivery_lock``.  The final
+            drain runs after that flip, so it necessarily sees this message.
+
+            ``"busy"`` -- ONLY when *require_idle* is set: a turn is
+            running and the caller asked not to add to the queue in that
+            case.  Nothing was enqueued.
+
+            ``"needs_turn"`` -- no turn is running, so nothing would ever
+            drain this.  The message is deliberately NOT enqueued; the caller
+            must start a turn with it.  A session cannot start its own turn
+            (``inject_prompt``'s continuation callback exists only for the
+            duration of a ``session.send_message`` RPC), so the decision is
+            made here and the turn is started by whoever can.
+
+        WHY A LOCK AND NOT A TIMING ARGUMENT.  The unlocked version reads
+        ``_is_running``, and between that read and the enqueue the turn can
+        end and run its final drain -- leaving the message queued behind a
+        drain that has already happened.  That window is small and the
+        failure is invisible: the caller is told "queued", which is what a
+        healthy delivery also says.  Holding the lock across the check and
+        the enqueue, and across the flip, removes the window rather than
+        making it narrower.
+        """
+        actual_source_id = source_id or "unknown"
+        actual_source_type = source_type or SourceType.USER
+
+        with self._delivery_lock:
+            if self._is_running:
+                if require_idle:
+                    # Backpressure probe: the caller has decided this peer is
+                    # too far behind to take another queued message, and asks
+                    # to deliver ONLY if a turn would start.  Answered here
+                    # rather than from a daemon-side replica so a peer that
+                    # went idle is not refused for a backlog it has drained.
+                    return "busy"
+                self._message_queue.put(
+                    text, actual_source_id, actual_source_type,
+                )
+                queued = True
+            else:
+                queued = False
+
+        # Callbacks OUTSIDE the lock -- see ``_delivery_lock``'s note on
+        # keeping it free of re-entrancy.
+        if queued:
+            self._trace(
+                f"OFFER_MESSAGE: queued for a running turn, agent_id="
+                f"{self._agent_id}, source_type={actual_source_type.value}, "
+                f"queue_size={len(self._message_queue)}"
+            )
+            if self._on_prompt_injected:
+                self._on_prompt_injected(text)
+            return "queued"
+
+        self._trace(
+            f"OFFER_MESSAGE: no turn running, agent_id={self._agent_id}, "
+            f"source_type={actual_source_type.value} -- caller must drive"
+        )
+        return "needs_turn"
 
     def inject_prompt(
         self,
@@ -5278,7 +5372,8 @@ NOTES
 
         # Initialize cancellation support
         self._cancel_token = CancelToken()
-        self._is_running = True
+        with self._delivery_lock:
+            self._is_running = True
         self._turn_complete.clear()
         cancellation_notified = False  # Track if we've already shown cancellation message
         terminal_event_sent = False  # Track if abnormal termination (CANCELLED/ERROR) occurred
@@ -5797,8 +5892,16 @@ NOTES
             # Update instruction budget with conversation tokens
             self._update_conversation_budget()
 
-            # Clean up cancellation state and activity phase
-            self._is_running = False
+            # Clean up cancellation state and activity phase.
+            #
+            # UNDER ``_delivery_lock``: an ``offer_message`` that has already
+            # observed ``_is_running`` True must finish its enqueue BEFORE
+            # this flip, or its message would land after the final drain
+            # below and never be collected.  That is the whole strand, and a
+            # lock is what makes its absence a fact rather than an argument
+            # about instruction ordering.
+            with self._delivery_lock:
+                self._is_running = False
             self._turn_complete.set()
             self._cancel_token = None
             self._set_activity_phase(ActivityPhase.IDLE)

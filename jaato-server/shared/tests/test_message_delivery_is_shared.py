@@ -47,6 +47,7 @@ def test_every_word_means_exactly_one_thing():
     assert words == {
         "queued", "accepted",            # the message will be acted on
         "terminated", "no_session", "unreachable",   # it will not
+        "busy",                          # backpressure: the TARGET said so
     }, f"unexpected vocabulary: {words}"
 
     # The banned word, checked as a VALUE rather than by name: the predicate
@@ -68,7 +69,7 @@ def test_failure_words_are_never_delivered():
     stall it cannot attribute -- the expensive direction to be wrong in.
     """
     import shared.message_delivery as md
-    for failure in (md.TERMINATED, md.NO_SESSION, md.UNREACHABLE):
+    for failure in (md.TERMINATED, md.NO_SESSION, md.UNREACHABLE, md.BUSY):
         assert failure not in md.DELIVERED
 
 
@@ -133,9 +134,24 @@ def test_each_sender_uses_the_shared_decision(path, fn):
     node = _fn_source(path, fn)
     calls = {c.func.id for c in ast.walk(node)
              if isinstance(c, ast.Call) and isinstance(c.func, ast.Name)}
-    assert "deliver" in calls, (
-        f"{fn} does not call shared.message_delivery.deliver — a re-derived "
-        f"queue/drive branch is how this bug class returns"
+    calls |= {c.func.attr for c in ast.walk(node)
+              if isinstance(c, ast.Call) and isinstance(c.func, ast.Attribute)}
+    # TWO delegates, one per locality, and a sender must use whichever fits:
+    #
+    #   deliver()                    -- the state is LOCAL (parent and
+    #                                   subagent share a process, so
+    #                                   ``session.is_running`` is the truth)
+    #   deliver_prompt_to_session()  -- the state is ACROSS THE RPC, so the
+    #                                   decision is made by asking the target
+    #                                   session (``session.offer_message``)
+    #                                   rather than reading the daemon's
+    #                                   replica of its turn state
+    #
+    # What is forbidden is the same in both cases: deciding here.
+    assert calls & {"deliver", "deliver_prompt_to_session"}, (
+        f"{fn} neither calls shared.message_delivery.deliver nor delegates to "
+        f"deliver_prompt_to_session — a re-derived queue/drive branch is how "
+        f"this bug class returns"
     )
 
 

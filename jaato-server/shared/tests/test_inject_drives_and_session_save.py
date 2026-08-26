@@ -28,13 +28,37 @@ from server.session_manager import SessionManager
 
 
 def _sm(running):
+    """A SessionManager whose target answers the OFFER, not a flag.
+
+    ``running`` sets what the target session says when asked -- which is now
+    the only thing that decides delivery.  ``_model_running`` is still set on
+    the fake server so a test that regressed to reading the replica would be
+    reading a value that DISAGREES with the session, and would fail loudly
+    rather than accidentally agreeing.
+    """
     sm = SessionManager.__new__(SessionManager)
+    offered = []
+
+    class _RPC:
+        def session_offer_message_threadsafe(self, text, *, source_id=None,
+                                             source_type=None,
+                                             require_idle=False, timeout=None):
+            offered.append((text, source_id, source_type))
+            return "queued" if running else "needs_turn"
+
     s = type("S", (), {})()
     s.session_id = "s-1"
-    s.server = type("V", (), {"_model_running": running, "_runner_rpc": None})()
+    # The replica is deliberately the OPPOSITE of the truth: any code that
+    # regresses to reading it gets the wrong answer, every time, on purpose.
+    s.server = type("V", (), {
+        "_model_running": not running,
+        "_runner_rpc": _RPC(),
+        "_terminal_reason": None,
+    })()
     sm._sessions = {"s-1": s}
     sm._lock = threading.RLock()
     sm.drove = []
+    sm.offered = offered
     sm.send_message_to_session = lambda sid, text: sm.drove.append((sid, text)) or True
     return sm
 
@@ -46,15 +70,30 @@ def test_an_idle_target_is_driven_not_queued():
     assert sm.drove == [("s-1", "are you stuck?")]
 
 
-def test_a_busy_target_is_still_injected():
-    """A running turn must not be preempted — that is the tier's whole point.
-
-    ``_runner_rpc`` is None here, so the inject path reports failure rather
-    than driving; the assertion is that it did NOT drive.
-    """
+def test_a_busy_target_is_still_queued_not_preempted():
+    """A running turn must not be preempted — that is the tier's whole point."""
     sm = _sm(running=True)
-    sm.inject_prompt_to_session("s-1", "mid-turn steer")
+    assert sm.inject_prompt_to_session("s-1", "mid-turn steer") is True
     assert sm.drove == [], "a busy target was preempted"
+    assert len(sm.offered) == 1, "the message must reach the session's queue"
+
+
+def test_the_decision_ignores_the_daemon_side_replica():
+    """The step-2 invariant, stated as a test.
+
+    ``_sm`` sets ``_model_running`` to the OPPOSITE of what the session
+    answers.  If any of this path regressed to reading the daemon's replica
+    it would take the wrong branch here — which is precisely the live failure:
+    a peer idle for ~30s still read as busy, so its message was queued behind
+    a drain that had already run.
+    """
+    idle = _sm(running=False)          # replica says busy, session says idle
+    assert idle.inject_prompt_to_session("s-1", "wake up") is True
+    assert idle.drove == [("s-1", "wake up")], "followed the stale replica"
+
+    busy = _sm(running=True)           # replica says idle, session says busy
+    assert busy.inject_prompt_to_session("s-1", "steer") is True
+    assert busy.drove == [], "followed the stale replica"
 
 
 def test_an_unloaded_target_is_still_refused():

@@ -771,6 +771,17 @@ class RunnerRPC:
             # has no budget yet (pre-configure).  args = ``{}``.
             return self._handle_session_snapshot_instruction_budget()
 
+        if env.method == "session.offer_message":
+            # Step 2: ATOMIC queue-or-report.  The session is the authority on
+            # whether it is mid-turn; the daemon holds a replica that clears
+            # LATER (only once ``session.send_message`` returns and its model
+            # thread unwinds), so a delivery decided daemon-side can be
+            # decided on stale state -- and a message queued into a turn that
+            # has already ended is drained by nothing.  args = ``{"text":
+            # str, "source_id": str?, "source_type": str?}``; returns
+            # ``{"outcome": "queued"|"needs_turn"}``.
+            return self._handle_session_offer_message(env.args)
+
         if env.method == "session.inject_prompt":
             # Phase 3 §7c step 6.1: inject a prompt into the
             # runner-side session's message queue (mid-turn or
@@ -1800,6 +1811,104 @@ class RunnerRPC:
         # further nested.
         import copy
         return True, {"snapshot": copy.deepcopy(raw)}
+
+    def _handle_session_offer_message(
+        self, args: Dict[str, Any],
+    ) -> "tuple[bool, Any]":
+        """Atomically enqueue a message, or report that a turn is needed.
+
+        The runner-side half of step 2.  Delegates to
+        :meth:`JaatoSession.offer_message`, which holds ``_delivery_lock``
+        across the check-and-enqueue so it cannot interleave with the turn's
+        ``_is_running = False`` flip.
+
+        Distinct from ``session.inject_prompt`` on purpose: inject QUEUES
+        unconditionally and answers only "did that raise", which is the same
+        answer whether a drain is coming or the message will sit forever.
+        This verb answers the question the caller actually has.
+
+        Wire shape mirrors ``session.inject_prompt`` so the two are decodable
+        by the same client code.  Returns ``{"outcome": "queued"}`` or
+        ``{"outcome": "needs_turn"}``; the daemon starts the turn on the
+        latter, since a session cannot start its own.
+        """
+        from shared.message_queue import SourceType
+
+        text = args.get("text")
+        if not isinstance(text, str):
+            return False, {
+                "error": (
+                    f"session.offer_message: 'text' must be a str; "
+                    f"got {type(text).__name__}"
+                ),
+                "stage": "decode",
+            }
+        source_id = args.get("source_id")
+        if source_id is not None and not isinstance(source_id, str):
+            return False, {
+                "error": (
+                    f"session.offer_message: 'source_id' must be a str "
+                    f"or omitted; got {type(source_id).__name__}"
+                ),
+                "stage": "decode",
+            }
+        source_type_str = args.get("source_type")
+        source_type_enum: Any = None
+        if source_type_str is not None:
+            if not isinstance(source_type_str, str):
+                return False, {
+                    "error": (
+                        f"session.offer_message: 'source_type' must be a str "
+                        f"or omitted; got {type(source_type_str).__name__}"
+                    ),
+                    "stage": "decode",
+                }
+            try:
+                source_type_enum = SourceType(source_type_str)
+            except ValueError:
+                valid = sorted(s.value for s in SourceType)
+                return False, {
+                    "error": (
+                        f"session.offer_message: 'source_type' must be one "
+                        f"of {valid}; got {source_type_str!r}"
+                    ),
+                    "stage": "decode",
+                }
+        ready, err, session = self._require_ready_session()
+        if not ready:
+            return err
+        offer = getattr(session, "offer_message", None)
+        if not callable(offer):
+            return False, {
+                "error": (
+                    "session.offer_message: session has no offer_message "
+                    "method (rolling-upgrade gap?)"
+                ),
+                "stage": "missing_method",
+            }
+        require_idle = args.get("require_idle", False)
+        if not isinstance(require_idle, bool):
+            return False, {
+                "error": (
+                    f"session.offer_message: 'require_idle' must be a bool "
+                    f"or omitted; got {type(require_idle).__name__}"
+                ),
+                "stage": "decode",
+            }
+        try:
+            outcome = offer(
+                text, source_id=source_id, source_type=source_type_enum,
+                require_idle=require_idle,
+            )
+        except Exception as exc:  # noqa: BLE001 — boundary
+            return False, {
+                "error": (
+                    f"session.offer_message: offer raised "
+                    f"{type(exc).__name__}: {exc}"
+                ),
+                "stage": "offer",
+            }
+        return True, {"outcome": outcome}
 
     def _handle_session_inject_prompt(
         self, args: Dict[str, Any],

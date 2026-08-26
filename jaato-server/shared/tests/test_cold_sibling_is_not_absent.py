@@ -28,6 +28,7 @@ import threading
 
 import pytest
 
+from .offer_double import wire_offer
 from server.session_manager import SessionManager
 
 
@@ -76,6 +77,12 @@ def _sm(*sessions, on_disk=(), disk_by_workspace=None):
     sm._get_persisted_sessions = lambda workspace_path=None: list(
         disk.get(workspace_path, []))
     sm._roster_profile_name = lambda s: None
+    # The decision now belongs to the TARGET session, so the double has
+    # to answer it -- reading a daemon-side flag is exactly what step 2
+    # removed.
+    for _s in sessions:
+        wire_offer(_s, sm.delivered)
+
     return sm
 
 

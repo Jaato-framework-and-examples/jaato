@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import socket
+import threading
 from typing import Any, Dict, List, Optional, Tuple
 from unittest.mock import MagicMock
 
@@ -308,6 +309,10 @@ def _make_server_for_demuxer() -> JaatoServer:
     srv._main_agent_id = "main"
     srv._model_running = False
     srv._pending_continuation = None
+    # The stash is written from the RPC read loop and read on the model
+    # thread, so production guards it; a double without the lock would
+    # diverge from the shape the demuxer actually runs against.
+    srv._pending_continuation_lock = threading.Lock()
     srv._traces: List[str] = []
     srv._trace = lambda msg: srv._traces.append(msg)  # type: ignore[method-assign]
     srv._start_model_thread_calls: List[str] = []
