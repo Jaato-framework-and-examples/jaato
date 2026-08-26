@@ -1,0 +1,37 @@
+# Minimal end-to-end task: enough to exercise every stage of the engine
+# without needing a toolchain installed.
+#
+# It is deliberately trivial as a *benchmark* — a task every model passes
+# carries no information (see docs/design/eval-environments-layer.md on
+# difficulty calibration).  Its job is to be the smoke test for the
+# harness, not a measurement.
+id: example/echo-a-file
+description: >
+  Write a file named answer.txt containing the word READY.
+  Exercises: fixture materialisation, one session, a script grader.
+
+environment:
+  fixture: fixture
+  config_root: config
+  apparmor: false
+  runtime_limits:
+    tool_timeout_seconds: 60
+
+input:
+  prompt: |
+    Create a file called answer.txt in the workspace root whose entire
+    contents are the single word READY (no trailing punctuation).
+  agent_params: {}
+
+harness:
+  profile: worker
+
+budget:
+  usd: 0.05
+  turns: 8
+
+graders:
+  - kind: script
+    run: "test -f answer.txt && grep -qx READY answer.txt"
+
+repeats: 1

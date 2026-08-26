@@ -2,7 +2,9 @@
 
 ## Status
 
-Design sketch. No implementation. Written 2026-08-26 after surveying
+Design + reference implementation. The spine described below is built in
+[`jaato-eval/`](../../jaato-eval/) (69 tests, no daemon required for the
+offline half). Written 2026-08-26 after surveying
 `jaato`, `jaato-cascade-based-prototype`, `jaato-cascade-coordination-example`
 and `perpetual-monologue-cascade`.
 
@@ -64,12 +66,13 @@ Article vocabulary → the jaato primitive that already implements it.
 | Per-run safety ceiling | `budget_control.limits` (usd / tokens / seconds / tool_calls / turns) | `shared/budget_control.py` | exists |
 | World spec | agent persona + curated memory scope (raw→curated curator) | `docs/design/agent-continuity.md` | pattern documented |
 | Post-training consumer | — | `kb-stage-agent-LoRA-training` (separate repo) | exists |
-| **Task manifest** | — | — | **missing** |
-| **Fixture materialisation** | — | — | **missing** |
-| **Sweep driver** | — | — | **missing** |
-| **Result store / report** | partial (`processors/_report.py` aggregates rejections only) | — | **missing** |
+| Task manifest | `task.yaml` | `jaato-eval/jaato_eval/manifest.py` | built |
+| Fixture materialisation | hermetic per-arm workspace copy | `jaato-eval/jaato_eval/fixture.py` | built |
+| Sweep driver | task × profile set × repeat | `jaato-eval/jaato_eval/sweep.py` | built |
+| Result store / report | JSONL + pivot | `jaato-eval/jaato_eval/results.py`, `report.py` | built |
 
-Fourteen of eighteen rows exist. The missing four are the spine.
+Fourteen of eighteen rows already existed. The four that did not are the
+spine, and they are now in `jaato-eval/`.
 
 ---
 
@@ -291,6 +294,45 @@ too easy" but "which cognitive step actually needs the expensive model".
 - **No averaging over BLOCKED.** Structural, not a policy knob.
 
 ---
+
+## What building it found
+
+The SDK-only constraint earned its keep immediately: it surfaced a real
+framework gap that the design could not have predicted from reading.
+
+**The tool-call ledger cannot be reconstructed over the SDK.** Completion
+processors pair calls to responses by `call_id`, and the framework's
+`build_tool_call_ledger` does exactly that server-side. But the history
+serializer (`server/command_router.py::_serialize_part`) emits `call_id`
+on the `function_response` branch and **not** on the `function_call`
+branch. The identifier the pairing depends on exists on only one side once
+it crosses the wire.
+
+Pairing by name in arrival order is the obvious substitute and is wrong in
+precisely the case that matters: an agent that calls a tool, fails, and
+retries produces two calls and two responses with the same name, and a
+positional pairing credits the retry's success to the call that failed. A
+grader built on that would report a fabricated file as verified — which is
+the exact defect `codegen_files_exist.py` exists to catch.
+
+So `jaato-eval`'s processor grader detects (by AST, not substring — every
+such processor *documents* `tool_calls` in its docstring) that a processor
+reads the ledger, and returns BLOCKED when the ledger is unfaithful. The
+three-valued verdict earned its place on its first real use, before any
+model was involved.
+
+The fix is one line in `_serialize_part` plus exposing
+`build_tool_call_ledger` through the SDK, after which
+`jaato-eval/jaato_eval/ledger.py` can be deleted rather than kept in sync.
+It is not applied here because this document's own rule says the eval layer
+ships no core framework code; it is the first thing to land if the
+processor grader is wanted.
+
+Two smaller findings, both caught by the package's own tests rather than by
+review: an empty ledger reported itself *unfaithful* (the absent/empty
+collapse, inside the module written to refuse it), and a `prompt:` key
+present with a null value became the literal string `"None"` and would have
+run as a task instruction.
 
 ## Open questions
 
