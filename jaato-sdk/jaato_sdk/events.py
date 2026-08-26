@@ -56,7 +56,12 @@ from pydantic import BaseModel, ConfigDict, Field
 # and ErrorEvent, so a client can tell WHICH session.new a given answer
 # belongs to.  Minor bump per the compat rule -- same major, additive
 # optional fields -- so clients declaring 1.0 still connect.
-PROTOCOL_VERSION = "1.2"
+# 1.3 (2026-08-26): additive optional ``request_id`` on InjectPromptRequest
+# plus the new ``inject_prompt.result`` event, so an inject can report whether
+# the target will ACT on the message rather than only that it was accepted
+# into a queue.  Older clients that send no ``request_id`` get the previous
+# fire-and-forget behaviour unchanged.
+PROTOCOL_VERSION = "1.3"
 
 
 # =============================================================================
@@ -252,6 +257,7 @@ class EventType(str, Enum):
     # reach the primitives directly.  See
     # ``project_backlog_sdk_feature_parity.md``.
     INJECT_PROMPT_REQUEST = "inject_prompt.request"   # Client -> Server
+    INJECT_PROMPT_RESULT = "inject_prompt.result"     # Server -> Client
     REPLAY_MESSAGES_REQUEST = "replay_messages.request"  # Client -> Server
     REPLAY_MESSAGES_RESULT = "replay_messages.result"    # Server -> Client
     RESOLVE_FORK_POINT_REQUEST = "resolve_fork_point.request"  # Client -> Server
@@ -1768,6 +1774,50 @@ class InjectPromptRequest(Event):
     text: str = ""
     source_type: str = "user"  # "user" | "child" | "system" | "event" | "parent"
     source_id: Optional[str] = None  # caller identifier for telemetry / logs
+    #: Correlates this inject with the :class:`InjectPromptResultEvent` that
+    #: answers it.  ``None`` (the default, and what every pre-1.3 client
+    #: sends) keeps the historical fire-and-forget behaviour: the daemon
+    #: still routes the prompt, it just emits no result event.
+    request_id: Optional[str] = None
+
+
+class InjectPromptResultEvent(Event):
+    """Server's response to :class:`InjectPromptRequest`.
+
+    Answers the only question an injecting caller actually has: **after
+    this call, will the target act on the message?**  The pre-1.3 verb
+    could not answer it — the runner's ``{"ok": True}`` was discarded by
+    the daemon and the SDK method returned ``None`` — so a driver got the
+    same silence whether its target was busy, idle, stranded, or dead.
+
+    ``status`` is one of the constants in ``shared.message_delivery``:
+
+    * ``"accepted"``    — the target was idle, so a turn was STARTED on it.
+    * ``"queued"``      — the target is mid-turn; its running turn will
+      drain the message.
+    * ``"terminated"``  — the target is loaded but terminal and will run no
+      further turns.  Reported from the target's own terminal stamp, never
+      inferred from silence.
+    * ``"no_session"``  — no session with that id is loaded.
+    * ``"unreachable"`` — loaded and live, but the delivery mechanism failed
+      (no runner channel, or the forward raised).  A transport fault, not a
+      decision by the target.
+
+    Only ``accepted`` and ``queued`` mean the message will be acted on
+    (``shared.message_delivery.DELIVERED``).  The rest are failures and must
+    not be read as success: a caller that assumes delivery and is wrong gets
+    a silent stall it cannot attribute, which is the expensive direction to
+    be wrong in.
+
+    ``detail`` carries a human-readable elaboration when one exists.  It is
+    **omitted rather than filled with a placeholder** when there is nothing
+    to say — a reader of ``"unknown"`` is back where they started, so
+    absence is left checkable instead of forgeable.
+    """
+    type: EventType = Field(default=EventType.INJECT_PROMPT_RESULT)
+    request_id: str = ""
+    status: str = ""
+    detail: Optional[str] = None
 
 
 class ReplayMessagesRequest(Event):
@@ -2696,6 +2746,7 @@ _EVENT_CLASSES: Dict[str, type] = {
     EventType.GATES_SNAPSHOT.value: GatesSnapshotEvent,
     # SDK feature parity — session-primitive verbs
     EventType.INJECT_PROMPT_REQUEST.value: InjectPromptRequest,
+    EventType.INJECT_PROMPT_RESULT.value: InjectPromptResultEvent,
     EventType.REPLAY_MESSAGES_REQUEST.value: ReplayMessagesRequest,
     EventType.REPLAY_MESSAGES_RESULT.value: ReplayMessagesResultEvent,
     EventType.RESOLVE_FORK_POINT_REQUEST.value: ResolveForkPointRequest,

@@ -11,6 +11,8 @@ forward via the runner-RPC ``session.inject_prompt`` instead of
 reaching into the daemon-side session.  Tests updated accordingly.
 """
 
+import pytest
+
 from datetime import datetime, timezone
 from typing import Any, List, Optional, Tuple
 
@@ -54,11 +56,22 @@ class _FakeJaatoServer:
     real JaatoServer's runner_rpc is None until spawn completes).
     """
 
-    def __init__(self, raise_on_get_session: bool = False) -> None:
+    def __init__(
+        self,
+        raise_on_get_session: bool = False,
+        model_running: bool = True,
+        terminal_reason: Optional[str] = None,
+    ) -> None:
         if raise_on_get_session:
             self._runner_rpc = None
         else:
             self._runner_rpc = _FakeRunnerRPC()
+        # Defaults to BUSY so the forwarding tests below exercise the
+        # forward path.  An IDLE target is DRIVEN, not injected -- injecting
+        # into one queues into a queue with no drainer, which is the bug
+        # ``deliver_prompt_to_session`` exists to prevent.
+        self._model_running = model_running
+        self._terminal_reason = terminal_reason
 
     @property
     def session(self):
@@ -82,9 +95,15 @@ def _make_session(session_id: str, server: _FakeJaatoServer) -> Session:
 def _make_manager_with_session(
     session_id: str = "sess_1",
     raise_on_get_session: bool = False,
+    model_running: bool = True,
+    terminal_reason: Optional[str] = None,
 ) -> Tuple[SessionManager, _FakeJaatoServer]:
     manager = SessionManager()
-    server = _FakeJaatoServer(raise_on_get_session=raise_on_get_session)
+    server = _FakeJaatoServer(
+        raise_on_get_session=raise_on_get_session,
+        model_running=model_running,
+        terminal_reason=terminal_reason,
+    )
     session = _make_session(session_id, server)
     # Bypass the full create flow — we just want a session record present
     # so the routing helper has something to look up.
@@ -166,3 +185,134 @@ class TestInjectPromptToSession:
         manager.inject_prompt_to_session("sess_3", "plain")
 
         assert server.session.calls == [("plain", None, None)]
+
+
+class TestDeliverPromptToSession:
+    """The STATUS-returning form: what the caller is TOLD, not just whether.
+
+    The boolean form cannot distinguish "queued into a live turn" from "the
+    target is dead", so a driver that got ``False`` -- or worse, the silent
+    ``ok: True`` the SDK used to discard -- had no way to tell a busy peer
+    from a gone one.  A caller that cannot tell those apart cannot recover
+    from the second.
+    """
+
+    def test_idle_target_is_driven_not_injected(self):
+        """The black-hole case: injecting into an idle session queues into a
+        queue nothing drains, so an idle target must have a turn STARTED."""
+        from shared.message_delivery import ACCEPTED
+
+        manager, server = _make_manager_with_session(
+            "sess_idle", model_running=False,
+        )
+        driven: List[Tuple[str, str]] = []
+        manager.send_message_to_session = (  # type: ignore[method-assign]
+            lambda sid, text: (driven.append((sid, text)), True)[1]
+        )
+
+        status = manager.deliver_prompt_to_session("sess_idle", "wake up")
+
+        assert status == ACCEPTED
+        assert driven == [("sess_idle", "wake up")]
+        # And crucially NOT forwarded as an inject, which would have been
+        # accepted into a queue with no drainer.
+        assert server.session.calls == []
+
+    def test_busy_target_is_queued(self):
+        """A mid-turn target keeps the queue path: its running turn drains."""
+        from shared.message_delivery import QUEUED
+
+        manager, server = _make_manager_with_session(
+            "sess_busy", model_running=True,
+        )
+
+        status = manager.deliver_prompt_to_session("sess_busy", "later")
+
+        assert status == QUEUED
+        assert server.session.calls == [("later", None, None)]
+
+    def test_terminated_target_is_reported_not_delivered(self):
+        """A dead target is reported from its OWN terminal stamp.
+
+        Never inferred from silence: a slow target and a dead one produce
+        identical nothing, so a caller that infers cannot be wrong and know
+        it.  This is the state that had no spelling at all before.
+        """
+        from shared.message_delivery import DELIVERED, TERMINATED
+
+        manager, server = _make_manager_with_session(
+            "sess_dead", model_running=False, terminal_reason="error",
+        )
+        manager.send_message_to_session = (  # type: ignore[method-assign]
+            lambda sid, text: pytest.fail(
+                "a terminated session must not be driven"
+            )
+        )
+
+        status = manager.deliver_prompt_to_session("sess_dead", "anyone there")
+
+        assert status == TERMINATED
+        assert status not in DELIVERED
+        assert server.session.calls == []
+
+    def test_missing_session_is_no_session_not_terminated(self):
+        """"Gone" and "dead but present" are different situations.
+
+        Collapsing them is what makes an absence claim unfalsifiable.
+        """
+        from shared.message_delivery import NO_SESSION, TERMINATED
+
+        manager = SessionManager()
+
+        status = manager.deliver_prompt_to_session("sess_missing", "hello")
+
+        assert status == NO_SESSION
+        assert status != TERMINATED
+
+    def test_no_runner_channel_is_unreachable_not_refused(self):
+        """A transport fault is not a decision by the target."""
+        from shared.message_delivery import UNREACHABLE
+
+        manager, _server = _make_manager_with_session(
+            "sess_pending", raise_on_get_session=True,
+        )
+
+        status = manager.deliver_prompt_to_session("sess_pending", "too early")
+
+        assert status == UNREACHABLE
+
+    def test_only_accepted_and_queued_count_as_delivered(self):
+        """The invariant the whole vocabulary exists for.
+
+        "It will be consumed" and "it went nowhere" must not both render as
+        success -- a caller that assumes delivery and is wrong gets a silent
+        stall it cannot attribute, which is the expensive direction.
+        """
+        from shared.message_delivery import (
+            ACCEPTED, DELIVERED, NO_SESSION, QUEUED, TERMINATED, UNREACHABLE,
+        )
+
+        assert DELIVERED == {ACCEPTED, QUEUED}
+        for failure in (TERMINATED, NO_SESSION, UNREACHABLE):
+            assert failure not in DELIVERED
+
+    def test_bool_adapter_agrees_with_the_status(self):
+        """``inject_prompt_to_session`` must stay a pure view of the status,
+        so the two forms can never disagree about the same delivery."""
+        from shared.message_delivery import DELIVERED
+
+        for label, kwargs in (
+            ("busy", {"model_running": True}),
+            ("idle", {"model_running": False}),
+            ("dead", {"model_running": False, "terminal_reason": "error"}),
+            ("no-rpc", {"raise_on_get_session": True}),
+        ):
+            manager, _ = _make_manager_with_session(f"sess_{label}", **kwargs)
+            manager.send_message_to_session = (  # type: ignore[method-assign]
+                lambda sid, text: True
+            )
+            status = manager.deliver_prompt_to_session(f"sess_{label}", "x")
+            ok = manager.inject_prompt_to_session(f"sess_{label}", "x")
+            assert ok is (status in DELIVERED), (
+                f"{label}: bool={ok} disagrees with status={status}"
+            )

@@ -70,9 +70,46 @@ def test_the_shared_primitive_is_what_changed():
     one method — cloning the queue-or-drive decision per caller is what
     produced the original bug (see shared.message_delivery).
     """
-    src = inspect.getsource(SessionManager.inject_prompt_to_session)
+    src = inspect.getsource(SessionManager.deliver_prompt_to_session)
     assert "send_message_to_session" in src
     assert "_model_running" in src
+
+    # And the boolean form must stay a pure VIEW of that one decision.  If it
+    # ever re-implements the busy check, the two forms can disagree about the
+    # same delivery -- which is the cloning this whole module exists to stop.
+    bool_src = inspect.getsource(SessionManager.inject_prompt_to_session)
+    assert "deliver_prompt_to_session" in bool_src
+    assert "_model_running" not in bool_src, (
+        "inject_prompt_to_session must delegate, not re-decide"
+    )
+
+
+def test_the_sdk_inject_handler_goes_through_the_decision():
+    """The fourth clone -- the one that made no decision at all.
+
+    ``InjectPromptRequest`` used to call the runner's inject directly,
+    bypassing the shared primitive, so an SDK/driver inject could not start a
+    turn under any circumstances.  Into an idle session that queued into a
+    queue with no drainer, permanently: the session became unreachable, and a
+    watchdog's nudge landed in the same dead queue as the message it was sent
+    to rescue.
+    """
+    src = inspect.getsource(SessionManager.handle_request)
+    marker = "elif isinstance(event, InjectPromptRequest):"
+    assert marker in src
+    handler = src.split(marker, 1)[1].split("elif isinstance(", 1)[0]
+
+    # CODE ONLY.  The handler's comment explains what it no longer does and
+    # names the old call, so a raw substring check reads the explanation as
+    # the behaviour -- an over-broad guard that fails on its own docs.
+    code = "\n".join(
+        line for line in handler.splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    )
+    assert "deliver_prompt_to_session" in code
+    assert "session_inject_prompt_threadsafe" not in code, (
+        "the handler must not reach past the queue-or-drive decision"
+    )
 
 
 # ----------------------------------------------------------------------

@@ -27,22 +27,49 @@ from shared.message_delivery import ACCEPTED, QUEUED, deliver
 # The decision itself
 # ----------------------------------------------------------------------
 
-def test_only_two_delivery_words_exist():
+def test_every_word_means_exactly_one_thing():
     """``delivered`` is gone, and must not come back.
 
     ``session.send`` used to report ``delivered`` for BOTH outcomes -- a turn
     running and a message sitting in a queue -- while never driving at all.
     One word covering two outcomes is the shape every bug in this arc took;
-    two words that each mean one thing is the fix.
+    words that each mean one thing are the fix.
+
+    The vocabulary GREW when inject learned to report (protocol 1.3): the
+    three additions are FAILURE states, which is the same principle applied
+    to the other half.  A boolean had to render "queued into a live turn"
+    and "the target is dead" with the same token, so a driver could not tell
+    a busy peer from a gone one -- and could not recover from the second.
     """
     import shared.message_delivery as md
     words = {v for k, v in vars(md).items()
              if k.isupper() and isinstance(v, str) and not k.startswith("_")}
-    assert words == {"queued", "accepted"}, f"unexpected vocabulary: {words}"
+    assert words == {
+        "queued", "accepted",            # the message will be acted on
+        "terminated", "no_session", "unreachable",   # it will not
+    }, f"unexpected vocabulary: {words}"
+
+    # The banned word, checked as a VALUE rather than by name: the predicate
+    # set ``DELIVERED`` is named for the question it answers, not for a
+    # status, and must never become one.
+    assert "delivered" not in words
+    assert md.DELIVERED == {md.ACCEPTED, md.QUEUED}
 
     src = pathlib.Path(
         "jaato-server/server/session_manager.py").read_text(encoding="utf-8")
     assert '"status": "delivered"' not in src
+
+
+def test_failure_words_are_never_delivered():
+    """The invariant the vocabulary exists for.
+
+    "It will be consumed" and "it went nowhere" must not both render as
+    success.  A caller that assumes delivery and is wrong gets a silent
+    stall it cannot attribute -- the expensive direction to be wrong in.
+    """
+    import shared.message_delivery as md
+    for failure in (md.TERMINATED, md.NO_SESSION, md.UNREACHABLE):
+        assert failure not in md.DELIVERED
 
 
 def test_a_busy_target_is_queued():

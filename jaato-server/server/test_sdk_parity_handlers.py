@@ -225,6 +225,12 @@ class _FakeJaatoServer:
         self._jaato = _FakeJaatoClient(jaato_session)
         self._runner_rpc = _FakeRunnerRPC(jaato_session)
         self.registry = _FakeRegistry(permission_plugin)
+        # BUSY by default.  The inject handler routes through the
+        # queue-or-drive decision, and an IDLE target is DRIVEN rather than
+        # injected -- so a fake that looks idle would exercise the drive path
+        # instead of the source_type mapping these tests are about.
+        self._model_running = True
+        self._terminal_reason = None
 
     # The dispatch path also touches these — provide minimal stubs.
     def get_all_session_env(self):
@@ -289,6 +295,82 @@ class TestInjectPromptHandler:
         )
 
         assert jaato_session.inject_calls == [("follow up", None, SourceType.CHILD)]
+
+    def test_idle_session_is_driven_not_queued(self):
+        """The handler must make the queue-or-drive decision at all.
+
+        It used to call the runner's inject directly, bypassing
+        ``inject_prompt_to_session`` and therefore ``message_delivery``, so
+        it could not start a turn under ANY circumstances.  Since the
+        runner-side inject only starts a turn while a ``send_message`` RPC is
+        in flight, an inject into an idle session queued into a queue with no
+        drainer -- permanently.  A watchdog's nudge-on-silence then landed in
+        the same dead queue as the message it was sent to rescue.
+        """
+        manager, server, jaato_session, _ = _setup()
+        server._model_running = False
+        driven: List[str] = []
+        manager.send_message_to_session = (  # type: ignore[method-assign]
+            lambda sid, text: (driven.append(text), True)[1]
+        )
+
+        manager.handle_request(
+            "c", "sess_1",
+            InjectPromptRequest(text="wake up", source_type="user"),
+        )
+
+        assert driven == ["wake up"]
+        assert jaato_session.inject_calls == []  # NOT queued into the void
+
+    def test_request_id_is_answered_with_a_result_event(self):
+        """A caller that asks to be told gets the status on one channel."""
+        from jaato_sdk.events import InjectPromptResultEvent
+        from shared.message_delivery import QUEUED
+
+        manager, _, _, captured = _setup()
+
+        manager.handle_request(
+            "c", "sess_1",
+            InjectPromptRequest(
+                text="steer", source_type="user", request_id="req_abc",
+            ),
+        )
+
+        assert len(captured) == 1
+        _, event = captured[0]
+        assert isinstance(event, InjectPromptResultEvent)
+        assert event.request_id == "req_abc"
+        assert event.status == QUEUED
+
+    def test_failure_without_request_id_still_fails_loudly(self):
+        """A pre-1.3 caller has no result channel, so a failure has to
+        surface as an error or it is silent -- and silence is the expensive
+        direction: the caller assumes delivery and stalls somewhere it
+        cannot attribute."""
+        manager, server, _, captured = _setup()
+        server._terminal_reason = "error"       # target is dead
+
+        manager.handle_request(
+            "c", "sess_1",
+            InjectPromptRequest(text="anyone there", source_type="user"),
+        )
+
+        assert len(captured) == 1
+        _, event = captured[0]
+        assert event.error_type == "SessionError"
+        assert "terminated" in event.error
+
+    def test_success_without_request_id_stays_silent(self):
+        """Backward compatibility: the pre-1.3 fire-and-forget success path
+        emits nothing, exactly as before."""
+        manager, _, _, captured = _setup()
+
+        manager.handle_request(
+            "c", "sess_1",
+            InjectPromptRequest(text="steer", source_type="user"),
+        )
+
+        assert captured == []
 
     def test_invalid_source_type_emits_error(self):
         manager, _, jaato_session, captured = _setup()

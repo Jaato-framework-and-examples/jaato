@@ -12,6 +12,7 @@ three layers cover the full SDK feature parity contract — see
 ``project_backlog_sdk_feature_parity.md``.
 """
 
+import asyncio
 from typing import List
 
 import pytest
@@ -21,6 +22,7 @@ from jaato_sdk.events import ClientType
 from jaato_sdk.events import (
     Event,
     InjectPromptRequest,
+    InjectPromptResultEvent,
     PermissionAddBlacklistRequest,
     PermissionAddWhitelistRequest,
     PermissionClearRequest,
@@ -90,6 +92,94 @@ class TestSessionPrimitives:
         ev = captured[0]
         assert ev.source_type == "child"
         assert ev.source_id == "ui"
+
+    @pytest.mark.asyncio
+    async def test_inject_prompt_reports_status_when_daemon_can_answer(
+        self, client_capture,
+    ):
+        """Protocol 1.3+: the call correlates and RETURNS the status.
+
+        Before this the method returned ``None`` unconditionally -- the
+        runner's receipt was discarded by the daemon and nothing reached the
+        caller -- so a driver got identical silence whether its target was
+        busy, idle, stranded, or dead, and read that silence as "sent".
+        """
+        client, captured = client_capture
+        client._server_protocol_version = "1.3"
+
+        async def fake_await(request_id):
+            assert request_id, "must correlate the wait with the request"
+            return "queued"
+
+        client._await_inject_result = fake_await  # type: ignore[assignment]
+
+        status = await client.inject_prompt("steer me")
+
+        assert status == "queued"
+        assert captured[0].request_id, "1.3 request must carry a request_id"
+
+    @pytest.mark.asyncio
+    async def test_inject_prompt_returns_none_on_older_daemon(
+        self, client_capture,
+    ):
+        """An older daemon cannot answer, so the status is UNKNOWN.
+
+        ``None`` means "I was not told", not "delivery failed" -- returned
+        rather than a placeholder string so the difference stays checkable.
+        The request still goes out with no ``request_id``, preserving the
+        pre-1.3 fire-and-forget shape.
+        """
+        client, captured = client_capture
+        client._server_protocol_version = "1.2"
+
+        status = await client.inject_prompt("steer me")
+
+        assert status is None
+        assert captured[0].request_id is None
+
+    @pytest.mark.asyncio
+    async def test_await_inject_result_ignores_another_call_s_result(self):
+        """Correlation is what makes the wait about THIS inject.
+
+        Matching on shape alone would let a concurrent inject's result
+        satisfy this wait -- the same defect ``_correlates`` was added to
+        fix for ``session.new``.
+        """
+        client = IPCClient(client_type=ClientType.API)
+        # ``_await_inject_result`` subscribes its OWN queue, and
+        # ``_subscribe_events`` drains ``_buffered_events`` into it first --
+        # so seeding the buffer is how a test feeds it deterministically,
+        # with no sleep and no race against the subscribe.
+        client._buffered_events = [
+            InjectPromptResultEvent(request_id="req_other", status="terminated"),
+            InjectPromptResultEvent(request_id="req_mine", status="accepted"),
+        ]
+
+        status = await asyncio.wait_for(
+            client._await_inject_result("req_mine"), timeout=2.0,
+        )
+
+        assert status == "accepted", (
+            "the other call's 'terminated' must not satisfy this wait"
+        )
+
+    def test_recovery_client_mirrors_the_inject_signature(self):
+        """The recovery client must expose the SAME inject signature.
+
+        Recovery-client parity has broken on two separate axes before (#585:
+        the method surface AND constructor args), and a recovery client that
+        silently kept the old ``-> None`` shape would hand a reconnecting
+        driver the exact ambiguity this change removes -- only intermittently,
+        which is worse than always.
+        """
+        import inspect
+
+        from jaato_sdk.client.recovery import IPCRecoveryClient
+
+        assert (
+            inspect.signature(IPCRecoveryClient.inject_prompt)
+            == inspect.signature(IPCClient.inject_prompt)
+        )
 
     @pytest.mark.asyncio
     async def test_replay_messages_omitted_messages_means_continue(self, client_capture):

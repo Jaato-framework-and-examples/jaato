@@ -72,6 +72,7 @@ from jaato_sdk.events import (
     PresentationContext,
     SessionInfoEvent,
     InjectPromptRequest,
+    InjectPromptResultEvent,
     ReplayMessagesRequest,
     ResolveForkPointRequest,
     PermissionAddWhitelistRequest,
@@ -2046,12 +2047,18 @@ class IPCClient:
     # ``project_backlog_sdk_feature_parity.md``.
     # =========================================================================
 
+    #: Wire-protocol minor from which the daemon answers an inject carrying a
+    #: ``request_id`` with an :class:`InjectPromptResultEvent`.  Below this,
+    #: nothing answers, so waiting would hang every call.
+    MIN_INJECT_RESULT_PROTOCOL = "1.3"
+
     async def inject_prompt(
         self,
         text: str,
         source_type: str = "user",
         source_id: Optional[str] = None,
-    ) -> None:
+        timeout: float = 10.0,
+    ) -> Optional[str]:
         """Inject a prompt into the session's message queue.
 
         Single verb covering both "steer" (USER priority — interrupts
@@ -2059,18 +2066,132 @@ class IPCClient:
         priority — queued behind in-flight work) patterns via the
         ``source_type`` dimension.
 
+        Returns the delivery status, so a caller can tell whether the
+        target will ACT on the message rather than only that the call did
+        not raise.  Before SDK 0.14 this returned ``None`` unconditionally:
+        the runner's receipt was discarded by the daemon and this method
+        returned nothing, so a driver got identical silence whether its
+        target was busy, idle, stranded, or dead.  A cascade driver read
+        that silence as "sent" and stalled with no way to attribute it.
+
         Args:
             text: Prompt text to inject.
             source_type: Queue priority — ``"user"`` (steer),
                 ``"child"`` (follow-up), or ``"system"`` / ``"event"``
                 / ``"parent"`` for reactor / hook callers.
             source_id: Caller identifier for telemetry / logs.
+            timeout: Seconds to wait for the daemon's result event.
+
+        Returns:
+            One of ``"accepted"`` (the target was idle, so a turn was
+            STARTED), ``"queued"`` (the target is mid-turn and its running
+            turn will drain the message), ``"terminated"`` (loaded but dead),
+            ``"no_session"`` (not loaded), or ``"unreachable"`` (live, but
+            the delivery mechanism failed).
+
+            Only ``"accepted"`` and ``"queued"`` mean the message will be
+            acted on.  **Do not treat the rest as success** — a caller that
+            assumes delivery and is wrong gets a silent stall.
+
+            ``None`` means the status is UNKNOWN, not that delivery failed:
+            either the daemon predates protocol 1.3 and cannot answer, or
+            the wait timed out.  It is returned rather than a placeholder
+            string so that "I was not told" stays checkable instead of
+            being mistaken for a real state.
         """
+        if not _protocol_compatible(
+                self.server_protocol_version,
+                self.MIN_INJECT_RESULT_PROTOCOL):
+            # Older daemon: it still routes the prompt, it just cannot report.
+            # Say so once rather than hanging until the timeout on every call.
+            if not getattr(self, "_warned_no_inject_result", False):
+                self._warned_no_inject_result = True
+                logger.warning(
+                    "daemon protocol %s predates inject_prompt delivery "
+                    "reporting (needs >= %s); inject_prompt will return None "
+                    "and the delivery status is unavailable",
+                    self.server_protocol_version,
+                    self.MIN_INJECT_RESULT_PROTOCOL,
+                )
+            await self._send_event(InjectPromptRequest(
+                text=text,
+                source_type=source_type,
+                source_id=source_id,
+            ))
+            return None
+
+        req_id = f"req_{uuid.uuid4().hex[:16]}"
         await self._send_event(InjectPromptRequest(
             text=text,
             source_type=source_type,
             source_id=source_id,
+            request_id=req_id,
         ))
+        try:
+            return await asyncio.wait_for(
+                self._await_inject_result(req_id), timeout=timeout
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "inject_prompt: timed out after %ss waiting for "
+                "InjectPromptResultEvent", timeout,
+            )
+            return None
+
+    async def _await_inject_result(self, request_id: str) -> Optional[str]:
+        """Subscribe to the drain loop and wait for this inject's result.
+
+        Mirrors :meth:`_await_session_info`: filters the subscriber queue for
+        the :class:`InjectPromptResultEvent` (or a correlated
+        :class:`ErrorEvent`, which the daemon emits for a rejected
+        ``source_type``) carrying ``request_id``, and re-buffers incidental
+        events when this is the only active subscriber so a later ``events()``
+        call can still replay them.
+
+        Returns:
+            The status string, or ``None`` on error / disconnect.
+        """
+        q = self._subscribe_events()
+        incidental: list[Event] = []
+        try:
+            while True:
+                event = await q.get()
+                if event is None:
+                    if len(self._event_subscribers) == 1 and incidental:
+                        self._buffered_events.extend(incidental)
+                    return None
+
+                solo = len(self._event_subscribers) == 1
+
+                if isinstance(event, InjectPromptResultEvent):
+                    if event.request_id != request_id:
+                        if solo:
+                            incidental.append(event)
+                        continue
+                    if solo:
+                        incidental.append(event)
+                        self._buffered_events.extend(incidental)
+                    return event.status
+
+                if isinstance(event, ErrorEvent):
+                    if getattr(event, "request_id", None) != request_id:
+                        if solo:
+                            incidental.append(event)
+                        continue
+                    logger.warning(
+                        "inject_prompt: daemon reported error "
+                        "(error_type=%s): %s",
+                        event.error_type, event.error,
+                    )
+                    if solo:
+                        incidental.append(event)
+                        self._buffered_events.extend(incidental)
+                    return None
+
+                if solo:
+                    incidental.append(event)
+        finally:
+            self._unsubscribe_events(q)
 
     async def replay_messages(
         self,
