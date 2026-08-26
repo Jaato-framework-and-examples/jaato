@@ -491,6 +491,48 @@ def compute_peer_role(
     return "unrelated"
 
 
+#: Why a delivery did not happen, in words the SENDING MODEL can act on.
+#:
+#: ``deliver_prompt_to_session`` distinguishes five outcomes; the refusals
+#: that quote them used to collapse all of them into "no live runner
+#: channel" -- a hardcoded likely-cause that was WRONG for four of the five.
+#: Observed live: a peer that was alive, whose runner channel was fine, whose
+#: delivery timed out because the daemon's event loop did not schedule the
+#: coroutine within 7s.  The sender was told its sibling had no channel.
+#:
+#: UNREACHABLE deliberately says NOT CONFIRMED rather than "not delivered":
+#: the offer may have been enqueued runner-side and only the answer lost.  A
+#: sender that retries on it may duplicate; a sender that gives up on it may
+#: abandon a message that arrived.  Saying so is the only honest option.
+_DELIVERY_FAILURE_REASON = {
+    "no_session": (
+        "is not loaded (no session with that id is in memory; it may have "
+        "been unloaded or never existed)"
+    ),
+    "terminated": (
+        "has terminated and will run no further turns (reported by the "
+        "session itself, not inferred from silence)"
+    ),
+    "unreachable": (
+        "could not be reached -- the delivery mechanism failed. NOT "
+        "CONFIRMED rather than not-delivered: on a timeout the message may "
+        "still have been enqueued and only the acknowledgement lost. The "
+        "daemon log names the exception and which layer it came from"
+    ),
+    "busy": (
+        "is mid-turn and has too many messages already waiting; the target "
+        "itself declined to take another"
+    ),
+}
+
+
+def _delivery_failure_reason(status: str) -> str:
+    """Render *status* for a sender.  Unknown statuses are NOT guessed at."""
+    return _DELIVERY_FAILURE_REASON.get(
+        status, f"could not be delivered (status={status!r})"
+    )
+
+
 def _stamp_session_id(event: Any, session_id: Optional[str]) -> None:
     """Attribute *event* to *session_id* — unless it already names one.
 
@@ -5448,8 +5490,8 @@ class SessionManager:
         )
         if not reached.get("ok"):
             return {"status": "refused",
-                    "error": (f"send_to_sibling: {sibling_name!r} could not be "
-                              f"reached (no live runner channel).")}
+                    "error": (f"send_to_sibling: {sibling_name!r} "
+                              f"{_delivery_failure_reason(status)}.")}
 
         with self._lock:
             self._sibling_exchanges[cid] = exchanges + 1
@@ -5566,8 +5608,8 @@ class SessionManager:
         reached: Dict[str, bool] = {"ok": outcome in DELIVERED}
         if not reached.get("ok"):
             return {"status": "refused",
-                    "error": (f"session.send: {sibling_name!r} could not be "
-                              f"reached (no live runner channel).")}
+                    "error": (f"session.send: {sibling_name!r} "
+                              f"{_delivery_failure_reason(outcome)}.")}
         return {"status": outcome,
                 "sibling_name": sibling_name,
                 "session_id": target_id}
