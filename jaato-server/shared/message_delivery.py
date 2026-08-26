@@ -74,13 +74,18 @@ BUSY = "busy"
 #: is wrong gets a silent stall it cannot attribute -- the expensive
 #: direction.  Anything not in here is a delivery that did not happen.
 #:
-#: Note what :data:`QUEUED` does and does not promise.  It promises a drainer
-#: exists (the target is mid-turn, and a turn drains its queue at every yield
-#: point and again when it ends).  It does NOT yet promise the drainer will
-#: still be there a millisecond later: the runner's final drain runs strictly
-#: BEFORE the daemon's busy flag clears, so a message routed into that tail is
-#: queued against a turn that will never drain again.  Closing that requires
-#: moving the decision to the runner, which owns the authoritative flag.
+#: :data:`QUEUED` is a GUARANTEE, not a prediction (#620).  It is answered by
+#: the target session's own :meth:`JaatoSession.offer_message` under
+#: ``_delivery_lock``, which is held across BOTH the check-and-enqueue and the
+#: turn's ``_is_running = False`` flip.  So an offer that observed a running
+#: turn finishes its enqueue before that flip, and the end-of-turn drain runs
+#: after it -- the message is necessarily collected.
+#:
+#: Before #620 this said the opposite, and said it here, in the module
+#: consumers read to learn what the word means.  The daemon used to decide
+#: from its own ``_model_running``, a replica that clears ~30s later, so
+#: ``queued`` could mean "queued behind a drain that already ran".  That is
+#: fixed; the caveat that described it is gone rather than softened.
 DELIVERED = frozenset({ACCEPTED, QUEUED})
 
 
