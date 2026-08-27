@@ -15,7 +15,7 @@ injecting events into the drain loop's fan-out path.
 import asyncio
 import pytest
 
-from jaato_sdk import IPCClient
+from jaato_sdk import IPCClient, SessionRefused
 from jaato_sdk.events import (
     AgentCompletedEvent,
     ClientType,
@@ -180,6 +180,10 @@ async def test_back_to_back_events_then_create_session_no_race():
     captured = []
     async def fake_send_event(ev):
         captured.append(ev)
+        # True = "the write went".  create_session fails fast on a falsy
+        # answer now, so a fake that returns None asserts the not-sent path
+        # rather than the race this test is named for.
+        return True
     client._send_event = fake_send_event
 
     async def driver():
@@ -230,13 +234,17 @@ async def test_await_session_info_terminates_on_recoverable_error_event():
         ),
     )
 
-    sid = await asyncio.wait_for(task, 1.0)
-    assert sid is None, (
-        "create_session must resolve to None when the daemon emits any "
-        "ErrorEvent during session.new — recoverable=True is the "
-        "daemon-side convention for 'connection survives' but is still "
-        "terminal for this single create_session call"
-    )
+    with pytest.raises(SessionRefused) as excinfo:
+        await asyncio.wait_for(task, 1.0)
+    # The INVARIANT is unchanged and is what this test is for: any ErrorEvent
+    # terminates this wait, because recoverable=True is the daemon's
+    # convention for "the connection survives", not "keep waiting".  What
+    # changed is the signal -- it raises instead of resolving to None, so the
+    # caller learns WHY rather than being handed the same None a timeout and a
+    # failed send produced.
+    assert "not found" in str(excinfo.value)
+    assert excinfo.value.error_type == "ProfileNotFoundError"
+    assert excinfo.value.may_exist is False
 
 
 @pytest.mark.asyncio
@@ -257,5 +265,6 @@ async def test_await_session_info_terminates_on_non_recoverable_error_event():
         ),
     )
 
-    sid = await asyncio.wait_for(task, 1.0)
-    assert sid is None
+    with pytest.raises(SessionRefused) as excinfo:
+        await asyncio.wait_for(task, 1.0)
+    assert excinfo.value.error_type == "RuntimeError"
