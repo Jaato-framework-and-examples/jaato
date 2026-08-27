@@ -9,7 +9,8 @@ actually reached the client:
   D  pool declared with limits={"tokens": 0}, spawn attempted
 
 Usage:
-    python repro_cascade_event_routing.py <socket> <workspace> <config_root> [profile]
+    python repro_cascade_event_routing.py <socket> <workspace> \
+        <config_root> [profile] [profile_set]
 
 <config_root> must contain profiles/<profile>.yaml (default profile:
 "worker").  jaato-eval's tasks/example-echo/.jaato works as-is.
@@ -18,6 +19,18 @@ A/B/C each send one short prompt, so the run costs three model turns.
 D sends nothing and costs none.
 """
 import asyncio
+import sys as _sys
+
+# Line-buffer stdout: redirected to a file, Python block-buffers and
+# the log stays EMPTY until exit — which reads as 'hung' for a script
+# whose scenarios take minutes each.
+try:
+    _sys.stdout.reconfigure(line_buffering=True)
+except AttributeError:  # pragma: no cover - Python < 3.7
+    pass
+
+import os
+import pathlib
 import sys
 import uuid
 
@@ -27,6 +40,19 @@ from jaato_sdk.events import (ClientType, ErrorEvent, EventType, HistoryEvent,
 
 SOCK, WS, CFG = sys.argv[1], sys.argv[2], sys.argv[3]
 PROFILE = sys.argv[4] if len(sys.argv) > 4 else "worker"
+PROFILE_SET = sys.argv[5] if len(sys.argv) > 5 else os.environ.get(
+    "JAATO_PROFILE_SET", "")
+
+# The daemon reads JAATO_PROFILE_SET from the WORKSPACE's .env, never from
+# this process's environment.  Writing it here is what makes the script
+# self-contained: without it a tier-2 profile is invisible and every
+# create_session waits out its full timeout on a COLD daemon -- while
+# appearing to work against one that happened to discover the set during
+# some earlier run.  A repro whose result depends on daemon history is not
+# a repro; this one did, until it wrote its own .env.
+pathlib.Path(WS).mkdir(parents=True, exist_ok=True)
+pathlib.Path(WS, ".env").write_text(
+    f"JAATO_PROFILE_SET={PROFILE_SET}\n" if PROFILE_SET else "")
 # MUST drive the profile to its declared terminus.  A prompt the model can
 # answer in prose ends the turn with finish_reason="stop" and never calls
 # signal_completion — which is the very path under test, so a chatty prompt
@@ -63,9 +89,17 @@ async def scenario(label, *, cid=None, register=False, send=True):
         if name == "HISTORY":
             loop.call_soon_threadsafe(got_history.set)
 
+    errors = []
+
+    def on_err(e):
+        errors.append(f"{getattr(e, 'error_type', None)}: "
+                      f"{str(getattr(e, 'error', ''))[:110]}")
+
     c = await _client()
     for et in WATCH:
         c.subscribe(et, lambda e, et=et: note(str(et).split(".")[-1]))
+    for et in (EventType.ERROR, EventType.AGENT_ERROR):
+        c.subscribe(et, on_err)
     if cid and register:
         await c.cascade_register(cid, "observer",
                                  [TurnCompletedEvent, HistoryEvent,
@@ -108,6 +142,8 @@ async def scenario(label, *, cid=None, register=False, send=True):
     for name in seen:
         counts[name] = counts.get(name, 0) + 1
     print(f"[{label}] events received: {counts or '(none)'}")
+    for e in errors:
+        print(f"[{label}]   error -> {e}")
     await c.disconnect()
 
 
@@ -155,9 +191,15 @@ async def main():
     await via_facade("F nocid-facade-complete", None)
 
     zero = f"repro-zero-{uuid.uuid4().hex[:8]}"
-    await owner.cascade_budget_set(zero, limits={"tokens": 0})
+    owner_errors = []
+    for et in (EventType.ERROR, EventType.AGENT_ERROR):
+        owner.subscribe(et, lambda e: owner_errors.append(
+            f"{getattr(e, 'error_type', None)}: {str(getattr(e, 'error', ''))[:140]}"))
     print("=" * 62)
     print(f"declared cid={zero} limits={{'tokens': 0}}  (no degrade)")
+    await owner.cascade_budget_set(zero, limits={"tokens": 0})
+    await asyncio.sleep(5)
+    print(f"[D declare] owner errors: {owner_errors or '(none — silent)'}")
     await scenario("D zero-pool", cid=zero, register=True, send=False)
     await owner.disconnect()
 

@@ -279,8 +279,16 @@ class _ArmSession:
         tried against a live daemon and changed nothing, which is worth
         recording so the next reader does not re-derive it.
 
-        What DOES restore a pooled arm's turn stream is the observer
-        registration below; the two were tested separately.
+        This class once also registered as a cascade observer, because a
+        cid'd session that reached its signal_completion terminus received
+        no TURN_COMPLETED and no HISTORY at all.  jaato #643 found the
+        cause — SessionTerminatedEvent was emitted BEFORE the final
+        TurnCompletedEvent, so a policy that detached on the terminal
+        event stranded the turn event — and fixed it for every consumer.
+        Retested on 9a4bf437: a pooled arm reports turns=1 with no
+        registration, where it reported turns=0 before.  The call is gone
+        rather than kept as insurance; it encoded an explanation that is
+        now false, which is worse than a redundant RPC.
         """
         from jaato_sdk.client.convenience import Session
         from jaato_sdk.client.ipc import IPCClient
@@ -306,25 +314,6 @@ class _ArmSession:
             self._client.subscribe(event_type, on_error)
         for name, handler in self._handlers.items():
             self._client.subscribe(getattr(EventType, name), handler)
-
-        # A session stamped with a cascade id has its events fanned out to
-        # the cid's registered CASCADE-CLIENTS, not to the connection that
-        # created it: measured, such an arm delivered only
-        # AgentStatusChangedEvent and AgentOutputEvent, so it came back
-        # turns=0, tokens=0 with an empty ledger while its file was written
-        # and its completion payload arrived.  A silent zero that reads as
-        # "the model did nothing".  Registering as an observer for the cid
-        # is what puts the turn stream back.  Arms register as observers,
-        # never owner — a cid admits one owner, and N arms share a cid.
-        cid = create_kwargs.get("cascade_driver_id")
-        if cid:
-            from jaato_sdk.events import (ErrorEvent, HistoryEvent,
-                                          SessionTerminatedEvent,
-                                          TurnCompletedEvent)
-            await self._client.cascade_register(
-                cid, "observer",
-                [TurnCompletedEvent, HistoryEvent, SessionTerminatedEvent,
-                 ErrorEvent])
 
         try:
             sid = await self._client.create_session(**create_kwargs)

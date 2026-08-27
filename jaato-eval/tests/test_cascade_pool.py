@@ -7,6 +7,15 @@ task's arms so that ``repeats: N`` cannot run away.
 
 These pin the engine's half: one pool per budgeted task, none for a task
 that declared none, and the cid reaching the arms that should draw on it.
+
+Two tests pinning a cascade-observer registration were REMOVED once
+jaato #643 landed.  They asserted the engine called ``cascade_register``,
+which was a workaround for a cid'd session receiving no TURN_COMPLETED at
+its signal_completion terminus — an event-ordering bug, since fixed for
+every consumer.  Retested on 9a4bf437: a pooled arm reports turns=1 with
+no registration.  A test asserting an absent call pins an implementation
+detail rather than a behaviour, so the reasoning lives in
+``runner._ArmSession`` instead.
 """
 import asyncio
 import sys
@@ -115,29 +124,6 @@ class CascadePoolCase(unittest.TestCase):
             b["subscribed_before_create"],
             {"TURN_COMPLETED", "SESSION_TERMINATED", "HISTORY", "ERROR"},
             "a subscription installed after create_session receives nothing")
-
-    def test_pooled_arms_register_as_observers_before_create(self):
-        """Without this an arm sees no turns and no history at all.
-
-        Measured live: a cid'd arm whose client did not register received
-        only AgentStatusChangedEvent and AgentOutputEvent, and came back
-        turns=0, tokens=0 with an empty ledger while its file was written.
-        Observer, never owner — a cid admits one owner and N arms share one.
-        """
-        b = {"writes": "READY\n"}
-        self._sweep([self._task("a", BUDGETED)], b)
-        obs = b.get("observers", [])
-        self.assertTrue(obs, "a pooled arm must observe its cid")
-        for o in obs:
-            self.assertEqual(o["role"], "observer")
-            self.assertTrue(o["before_create"])
-            self.assertIn("TurnCompletedEvent", o["event_types"])
-            self.assertIn("HistoryEvent", o["event_types"])
-
-    def test_an_unpooled_arm_registers_no_observer(self):
-        b = {"writes": "READY\n"}
-        self._sweep([self._task("p", UNBUDGETED)], b)
-        self.assertEqual(b.get("observers", []), [])
 
     def test_a_task_with_no_budget_gets_no_pool_and_no_owner(self):
         """Opening an owner connection anyway taxes every sweep."""

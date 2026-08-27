@@ -266,6 +266,53 @@ verdict names the pool.
 
 ### A pooled arm has no tool-call ledger
 
+A session stamped with a cascade id is unloaded by the daemon's default
+cascade policy on its own terminal event, so a history request from the
+connection that created it finds nothing to serve. Since jaato #645 that is
+answered with a typed `ERROR` rather than met with silence — the request no
+longer hangs — but a pooled arm still has **no** ledger.
+
+Absent is not empty, and the engine keeps them apart: `build_ledger_result`
+returns unfaithful with a reason, and ledger-reading graders BLOCK. Collapsing
+the two produced a real fabricated verdict — *"the agent reports writing
+answer.txt but the ledger holds no call to writeNewFile"*, about an agent that
+had written the file in a call the engine simply never saw.
+
+So a task that grades against the ledger uses the per-arm ceiling, not a pool.
+`tasks/example-echo` carries the pool; `tasks/ledger-probe` carries the ceiling.
+
+Turn events, by contrast, now arrive for a pooled arm without any special
+handling. They did not before jaato #643: `SessionTerminatedEvent` was emitted
+before the final `TurnCompletedEvent`, so a policy detaching on the terminal
+event stranded the turn event, and a pooled arm reported turns=0 with its file
+written on disk. The engine briefly worked around that by registering as a
+cascade observer; that call is gone, because it encoded an explanation which is
+no longer true.
+
+## Two budget gates, and they are independent
+
+jaato has two budget mechanisms. A sweep wants both, for different reasons,
+and they do not compose on one session.
+
+| | per-arm ceiling | task pool |
+|---|---|---|
+| declared in | the arm's profile, `budget_control:` | the manifest's `budget:` |
+| scope | one session, its own books | every arm of the task (repeats × sets) |
+| clamped by a pool? | never | n/a |
+| depletes a pool? | never | yes |
+| engine code | none — the daemon enforces it | `jaato_eval/pool.py` |
+
+A session carrying its own `budget_control` **does not draw on a pool**, so
+declaring both leaves the pool untouched. That is the framework's rule, not
+this engine's. Verified live: two arms passed on a 5000-token pool that could
+not fund one of them, because each ran on its profile's own 60000 ceiling.
+
+An arm stopped by either gate is BLOCKED, never FAIL — it produced no signal
+about the thing under test. A pool with no headroom refuses the spawn, and the
+verdict names the pool.
+
+### A pooled arm has no tool-call ledger
+
 A session stamped with a cascade id has its events fanned out to the cid's
 registered **cascade-clients** rather than to the connection that created it.
 The engine registers each pooled arm as an observer (`cascade_register`), which
