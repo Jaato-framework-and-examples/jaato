@@ -687,6 +687,9 @@ class JaatoClient:
                 spend_total_tokens=last_turn.get('spend_total'),
                 finish_reason=last_turn.get('finish_reason', 'stop'),
             )
+            # After the turn's own events — SessionTerminatedEvent must be
+            # the last thing a consumer sees for this session.
+            self._session.flush_session_quiescent()
 
             # Update context usage
             usage = self._session.get_context_usage()
