@@ -490,6 +490,13 @@ def _configure_runtime_plugins(
     )
 
 
+#: The slot's environment as inherited from the template, captured before
+#: the FIRST session's ``session_env`` is applied.  A reused slot is restored
+#: to this between sessions so one session's resolved secrets cannot reach
+#: the next.  ``None`` until the first apply.
+_PRISTINE_ENVIRON: Optional[Dict[str, str]] = None
+
+
 def _apply_envelope_session_env(envelope: SessionInitEnvelope) -> Dict[str, str]:
     """Apply ``envelope.session_env`` to the runner's ``os.environ``.
 
@@ -516,6 +523,31 @@ def _apply_envelope_session_env(envelope: SessionInitEnvelope) -> Dict[str, str]
     shape (this method) puts secret resolution back where the
     process is unconfined.
     """
+    # RESTORE FIRST, THEN APPLY.  This ran set-only, and a pool slot serves
+    # MORE THAN ONE SESSION -- so a key session A declared and session B does
+    # not was left exactly as A left it.  ``session_env`` carries values
+    # resolved from ``pass://`` / ``vault://`` (that resolution exists because
+    # the literal URI reaching a runner produced provider 401s), so what
+    # persisted was A's DECODED credentials, in the environment of a runner
+    # now serving B, readable by any tool B runs.
+    #
+    # Absent-versus-empty again: "B does not mention this key" was read as
+    # "leave it alone" when it means "B must not have it".
+    #
+    # The snapshot is taken ONCE, before the first session's env is applied,
+    # so it is the slot's pristine inherited environment -- not session A's.
+    # Taking it per-session would snapshot A's leak and faithfully restore it.
+    global _PRISTINE_ENVIRON
+    if _PRISTINE_ENVIRON is None:
+        _PRISTINE_ENVIRON = dict(os.environ)
+    else:
+        # Drop keys no session before B set, and restore any the previous
+        # session overwrote.  ``clear()`` + ``update()`` rather than a diff:
+        # a diff has to enumerate what changed, and anything it fails to
+        # enumerate survives -- which is the bug being fixed.
+        os.environ.clear()
+        os.environ.update(_PRISTINE_ENVIRON)
+
     if not envelope.session_env:
         return {}
     applied: Dict[str, str] = dict(envelope.session_env)

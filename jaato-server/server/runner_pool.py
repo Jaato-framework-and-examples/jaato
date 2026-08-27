@@ -57,6 +57,19 @@ class PoolSlot:
             the daemon's subreaper bit (or by shutdown_all on exit).
         sock: Daemon-side end of the slot's RPC socket.  Closing this
             socket signals the slot to exit (peer-EOF).
+        config_root: The ``.jaato`` config root the slot's WARM PLUGIN STATE
+            was built from.  Reuse requires a match.
+
+            ``cascade_driver_id`` alone was the whole reuse key, so two
+            sessions differing in config root -- different profiles, agents,
+            prompt library, permission config -- shared a slot as long as the
+            cascade id matched.  The path variables self-heal (the runner
+            re-runs ``set_config_root`` every bootstrap); what does not is
+            everything DERIVED from that root during the first session's
+            bootstrap, which the pool exists to keep warm.  A slot's identity
+            has to include what the slot actually carries.
+
+            ``None`` for a slot that has never served.
         cascade_id: Optional cascade-driver ID this slot is currently
             affined to.  ``None`` for a fresh slot or a slot that has
             never served a session (PURE IDLE).  Set when a session
@@ -74,6 +87,7 @@ class PoolSlot:
     pid: int
     sock: socket.socket
     cascade_id: Optional[str] = None
+    config_root: Optional[str] = None
     last_session_end_ts: Optional[float] = None
     # Phase 3 cascade-sharing (server 0.6.146+): identifier of the
     # most recent session this slot served.  Set when the slot
@@ -283,6 +297,7 @@ class PoolManager:
 
     def acquire_slot(
         self, cascade_driver_id: Optional[str] = None,
+        config_root: Optional[str] = None,
     ) -> Optional[PoolSlot]:
         """Pop an idle slot off the pool — cascade-affinity aware (Phase 2).
 
@@ -327,7 +342,14 @@ class PoolManager:
             # Path (1): cascade-affinity match.
             if cascade_driver_id is not None:
                 for i, slot in enumerate(self._idle_slots):
-                    if slot.cascade_id == cascade_driver_id:
+                    # BOTH must match.  The cascade id says "same cascade";
+                    # the config root says "same warm state".  Matching on the
+                    # id alone let a session reuse a slot warmed from a
+                    # different .jaato -- different profiles, agents, prompts,
+                    # permission config -- and inherit whatever the first
+                    # session's bootstrap had already derived from it.
+                    if (slot.cascade_id == cascade_driver_id
+                            and slot.config_root == config_root):
                         slot = self._idle_slots.pop(i)
                         self._incr("pool_slot_acquired_total")
                         self._incr("cascade_slot_reuse_hits_total")
@@ -358,6 +380,10 @@ class PoolManager:
         # now affined for the rest of its life.
         if cascade_driver_id is not None:
             slot.cascade_id = cascade_driver_id
+            # Stamped together: the pair IS the slot's identity, and a slot
+            # affined to a cascade without recording what it was warmed from
+            # is a slot whose reuse check cannot be right.
+            slot.config_root = config_root
             logger.info(
                 "PoolManager.acquire_slot: cascade reuse MISS — fresh "
                 "slot pid=%d stamped cascade=%s",

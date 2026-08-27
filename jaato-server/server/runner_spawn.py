@@ -204,6 +204,11 @@ def spawn_session_runner(
     ):
         slot = pool_manager.acquire_slot(
             cascade_driver_id=cascade_driver_id,
+            # A slot's warm plugin state was built from ITS config root.
+            # Reusing across roots hands the next session whatever the first
+            # one's bootstrap derived -- profiles, agents, prompt library,
+            # permission config.
+            config_root=getattr(server, "config_root", None),
         )
         if slot is not None:
             spawned = SpawnedRunner(
