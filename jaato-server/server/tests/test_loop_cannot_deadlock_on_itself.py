@@ -132,6 +132,12 @@ def _bare_server():
     srv._cached_context_limit = None
     srv._context_limit_fill_inflight = False
     srv._runner_rpc = None
+    # ``__init__`` always sets this (core.py:401) and the ``session_id``
+    # PROPERTY reads it, so a fixture that omits it is not a leaner server --
+    # it is a shape production never has.  It went unnoticed until the heal
+    # path started naming the session in its log lines, at which point a
+    # helper missing one attribute failed a test about deadlocks.
+    srv._session_id = "sess-bare"
     return srv
 
 
