@@ -1412,15 +1412,48 @@ class JaatoServer:
 
         Single-flight: a stampede of notifications during one miss schedules
         one fill, not one per event.
+
+        Returns:
+            Whether a fill was actually scheduled by THIS call.  The caller
+            logs the miss only when it did, so a stampede produces one line
+            rather than one per notification.
+
+        IT USED TO SAY NOTHING AT ALL.  Every path out of here was silent --
+        three early returns and a bare ``except: pass`` on the heal -- so the
+        branch could not be observed from outside the daemon.  A consumer
+        verifying #633 could establish that no bad outcome occurred, but not
+        that the code under test had run: zero honest-unknown readings looks
+        identical whether the heal beat the first notification or the miss
+        path never executed.  That is not a limit of external observation, it
+        is this function declining to testify.
+
+        Worse, the silent ``except`` hid the state that used to be permanent.
+        A heal that keeps failing leaves the cache cold forever, and the only
+        symptom is ``percent_used=0`` on every event with nothing saying why
+        -- the same self-sustaining shape #633 fixed, one notch quieter.
         """
         if getattr(self, "_context_limit_fill_inflight", False):
-            return
+            return False            # a fill is already on its way; not a miss to report
         rpc = self._runner_rpc
         if rpc is None:
-            return
+            # Expected during bootstrap and the ONLY reason the cache is cold
+            # on a healthy session -- but it is also indistinguishable from a
+            # runner that died, so it says which it is rather than nothing.
+            logger.info(
+                "CONTEXT_LIMIT_HEAL_SKIPPED session=%s reason=no_runner_rpc "
+                "-- emitting with the limit unknown until the runner is wired",
+                self.session_id,
+            )
+            return False
         loop = getattr(rpc, "_loop", None)
         if loop is None or not loop.is_running():
-            return
+            logger.warning(
+                "CONTEXT_LIMIT_HEAL_SKIPPED session=%s reason=no_running_loop "
+                "-- the cache stays cold and percent_used stays 0 until it is "
+                "healed by another path",
+                self.session_id,
+            )
+            return False
         self._context_limit_fill_inflight = True
 
         async def _fill() -> None:
@@ -1428,13 +1461,40 @@ class JaatoServer:
                 limit = await rpc.session_get_context_limit(timeout=5.0)
                 if limit:
                     self._cached_context_limit = int(limit)
-            except Exception:  # noqa: BLE001 — best-effort heal
-                pass
+                    logger.info(
+                        "CONTEXT_LIMIT_HEALED session=%s limit=%s",
+                        self.session_id, limit,
+                    )
+                else:
+                    # NOT a failure: a provider that reports 0 is honestly
+                    # saying it does not know (#541), and caching that would
+                    # turn an honest unknown into a wrong denominator.
+                    logger.info(
+                        "CONTEXT_LIMIT_HEAL_EMPTY session=%s -- the provider "
+                        "reports no context window; percent_used stays 0 by "
+                        "design, not from a stale cache",
+                        self.session_id,
+                    )
+            except Exception as exc:  # noqa: BLE001 — best-effort heal
+                # Local import, matching this module's existing style at the
+                # offer_message boundary; core.py has no module-level import.
+                from shared.utils.errors import exc_message
+                # WARNING, and it names the exception TYPE: this is the path
+                # that leaves the cache cold, and it used to ``pass``.
+                # ``exc_message`` because str(TimeoutError()) is the empty
+                # string.
+                logger.warning(
+                    "CONTEXT_LIMIT_HEAL_FAILED session=%s (%s: %s) -- the "
+                    "cache stays cold, so the next notification misses again "
+                    "and reschedules",
+                    self.session_id, type(exc).__name__, exc_message(exc),
+                )
             finally:
                 self._context_limit_fill_inflight = False
 
         import asyncio
         asyncio.run_coroutine_threadsafe(_fill(), loop)
+        return True
 
     def emit(self, event: Event) -> None:
         """Emit an event to all subscribed clients and to the EventBus.
@@ -3303,7 +3363,21 @@ class JaatoServer:
                     # inline fetch here was a 10s loop stall per streaming
                     # notification, forever, because its own timeout kept the
                     # cache from healing.
-                    server._schedule_context_limit_fill()
+                    #
+                    # Logged only when a fill was actually SCHEDULED, so a
+                    # stampede of notifications during one cold period makes
+                    # one line rather than one per event -- and so the branch
+                    # can be OBSERVED at all.  Without it, zero honest-unknown
+                    # readings looks identical whether the heal beat the first
+                    # notification or this path never ran, which is exactly the
+                    # ambiguity a consumer verifying #633 hit.
+                    if server._schedule_context_limit_fill():
+                        logger.info(
+                            "CONTEXT_LIMIT_MISS session=%s hook=%s -- emitting "
+                            "with the limit unknown (0, the #541 semantics) and "
+                            "healing off-band for the next notification",
+                            server.session_id, "agent_context_updated",
+                        )
                 # Pull cache tokens from the most recent turn entry so the
                 # usage matches Turn{Completed,Progress}Event in expressivity.
                 # The protocol callback doesn't carry them, but we have the
@@ -3504,7 +3578,21 @@ class JaatoServer:
                     # inline fetch here was a 10s loop stall per streaming
                     # notification, forever, because its own timeout kept the
                     # cache from healing.
-                    server._schedule_context_limit_fill()
+                    #
+                    # Logged only when a fill was actually SCHEDULED, so a
+                    # stampede of notifications during one cold period makes
+                    # one line rather than one per event -- and so the branch
+                    # can be OBSERVED at all.  Without it, zero honest-unknown
+                    # readings looks identical whether the heal beat the first
+                    # notification or this path never ran, which is exactly the
+                    # ambiguity a consumer verifying #633 hit.
+                    if server._schedule_context_limit_fill():
+                        logger.info(
+                            "CONTEXT_LIMIT_MISS session=%s hook=%s -- emitting "
+                            "with the limit unknown (0, the #541 semantics) and "
+                            "healing off-band for the next notification",
+                            server.session_id, "turn_progress",
+                        )
                 server.emit(TurnProgressEvent(
                     agent_id=agent_id,
                     usage=server._build_usage(
