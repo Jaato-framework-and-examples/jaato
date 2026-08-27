@@ -476,7 +476,7 @@ class _FakePoolManager:
         self.acquire_calls = 0
         self.last_cascade_id = None
 
-    def acquire_slot(self, cascade_driver_id=None):
+    def acquire_slot(self, cascade_driver_id=None, config_root=None):
         self.acquire_calls += 1
         self.last_cascade_id = cascade_driver_id
         return self.slot
