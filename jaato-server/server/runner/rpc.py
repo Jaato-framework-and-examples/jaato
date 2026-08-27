@@ -3476,6 +3476,7 @@ class RunnerRPC:
                 cache_read_tokens=last_turn.get("cache_read"),
                 cache_creation_tokens=last_turn.get("cache_creation"),
                 spend_total_tokens=last_turn.get("spend_total"),
+                cost_usd=last_turn.get("cost_usd"),
                 finish_reason=last_turn.get("finish_reason", "stop"),
             )
             usage = session.get_context_usage()
@@ -5181,6 +5182,7 @@ class _AgentUIHooksNotificationShim:
         cache_read_tokens: Optional[int] = None,
         cache_creation_tokens: Optional[int] = None,
         spend_total_tokens: Optional[int] = None,
+        cost_usd: Optional[float] = None,
         finish_reason: str = "stop",
     ) -> None:
         """Forward ``on_agent_turn_completed`` across the wire.
@@ -5209,6 +5211,13 @@ class _AgentUIHooksNotificationShim:
                     "output_tokens": int(output_tokens or 0),
                     "total_tokens": int(total_tokens or 0),
                     "duration_seconds": float(duration_seconds or 0.0),
+                    # None stays None across the wire: "the provider
+                    # reported no cost" and "the cost was zero" are
+                    # different answers, and ``float(x or 0.0)`` would
+                    # collapse them.
+                    "cost_usd": (
+                        float(cost_usd) if cost_usd is not None else None
+                    ),
                     "function_calls": list(function_calls or []),
                     "cache_read_tokens": cache_read_tokens,
                     "cache_creation_tokens": cache_creation_tokens,

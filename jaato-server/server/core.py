@@ -3314,6 +3314,7 @@ class JaatoServer:
                                         function_calls, cache_read_tokens=None,
                                         cache_creation_tokens=None,
                                         spend_total_tokens=None,
+                                        cost_usd=None,
                                         finish_reason="stop"):
                 # Flush any remaining buffered content from the agent's formatter pipeline
                 agent_pipeline = server._get_agent_pipeline(agent_id)
@@ -3354,6 +3355,12 @@ class JaatoServer:
                     agent_id=agent_id,
                     turn_number=turn_number,
                     usage=server._build_usage(
+                        # THE PROVIDER'S OWN FIGURE, when it reported one.
+                        # Without it the event carried None for every provider
+                        # that reports a real cost, while the SAME measurement
+                        # survived on the telemetry-span path -- two readers of
+                        # one number, one of them empty.
+                        cost_usd_override=cost_usd,
                         prompt_tokens=prompt_tokens,
                         output_tokens=output_tokens,
                         total_tokens=total_tokens,
@@ -4899,6 +4906,10 @@ class JaatoServer:
                             cache_read_tokens=payload.get("cache_read_tokens"),
                             cache_creation_tokens=payload.get("cache_creation_tokens"),
                             spend_total_tokens=payload.get("spend_total_tokens"),
+                            # ``.get`` without a default: absent and null both
+                            # mean the provider reported no cost, and a 0.0
+                            # default would claim it reported free.
+                            cost_usd=payload.get("cost_usd"),
                             finish_reason=payload.get("finish_reason", "stop"),
                         )
                     return

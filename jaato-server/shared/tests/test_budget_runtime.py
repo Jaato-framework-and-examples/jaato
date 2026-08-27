@@ -321,7 +321,7 @@ def test_spend_accumulates_on_every_path_not_just_streaming():
         return SimpleNamespace(usage=SimpleNamespace(
             prompt_tokens=p, output_tokens=o, total_tokens=t,
             cache_read_tokens=None, cache_creation_tokens=None,
-            thinking_tokens=0))
+            thinking_tokens=0, cost_usd=None))
 
     sess = SimpleNamespace(_update_thinking_budget=lambda n: None)
     JaatoSession._accumulate_turn_tokens(sess, resp(2000, 150, 2150), td)
