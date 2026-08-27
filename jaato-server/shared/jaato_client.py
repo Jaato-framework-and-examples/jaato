@@ -685,6 +685,7 @@ class JaatoClient:
                 cache_read_tokens=last_turn.get('cache_read'),
                 cache_creation_tokens=last_turn.get('cache_creation'),
                 spend_total_tokens=last_turn.get('spend_total'),
+                cost_usd=last_turn.get('cost_usd'),
                 finish_reason=last_turn.get('finish_reason', 'stop'),
             )
             # After the turn's own events — SessionTerminatedEvent must be

@@ -5398,6 +5398,19 @@ NOTES
             'spend_total': 0,
             'spend_prompt': 0,
             'spend_output': 0,
+            # PROVIDER-REPORTED cost for this turn, accumulated across the
+            # turn's responses exactly like ``spend_total``.  ``None`` means
+            # the provider reported none -- distinct from ``0.0``, which
+            # means it reported free.
+            #
+            # It used to be dropped: the turn-completed hook carried no cost
+            # parameter, so ``_build_usage`` -- which HAS a
+            # ``cost_usd_override`` -- was never given one, and the event
+            # carried None for every provider that reports a real figure.
+            # ``_resolve_span_cost`` meanwhile read ``usage.cost_usd`` for
+            # telemetry, so ONE measurement survived on the span path and
+            # died on the event path.
+            'cost_usd': None,
             'start_time': turn_start.isoformat(),
             'end_time': None,
             'duration_seconds': None,
@@ -8081,6 +8094,15 @@ NOTES
                 turn_tokens.get('spend_prompt', 0) + response.usage.prompt_tokens)
             turn_tokens['spend_output'] = (
                 turn_tokens.get('spend_output', 0) + response.usage.output_tokens)
+            # Cost accumulates for the SAME reason spend does: a turn with a
+            # tool call has >= 2 responses and each is billed, so replacing
+            # would report only the last one.  Stays None when the provider
+            # reports nothing, so "no cost reported" and "the cost was zero"
+            # remain different answers.
+            if response.usage.cost_usd is not None:
+                turn_tokens['cost_usd'] = (
+                    (turn_tokens.get('cost_usd') or 0.0)
+                    + response.usage.cost_usd)
 
         # Cache tokens: replace when present (same semantics as prompt/output)
         if response.usage.cache_read_tokens is not None:
