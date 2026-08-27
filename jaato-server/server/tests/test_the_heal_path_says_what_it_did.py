@@ -21,11 +21,26 @@ outside -- which is the defect class #633 itself was about, one notch quieter.
 The tokens, all greppable:
 
     CONTEXT_LIMIT_MISS          the branch ran; emitting limit-unknown
-    CONTEXT_LIMIT_HEALED        cache filled; next notification is fine
+    CONTEXT_LIMIT_HEALED        cache filled -- and ``source=`` says WHICH
+                                writer did it (off_band_fill / usage_payload)
     CONTEXT_LIMIT_HEAL_EMPTY    provider reports no window (#541 honest-zero)
     CONTEXT_LIMIT_HEAL_FAILED   the cache stays COLD -- the state that used
                                 to be permanent and silent
     CONTEXT_LIMIT_HEAL_SKIPPED  declined before scheduling, with the reason
+
+THE FIRST VERSION OF THIS LEFT ONE WRITER SILENT, and it was the one doing the
+work.  The same consumer re-ran on the shipped tokens and got ALL FIVE absent
+after two verified ``/model`` invalidations -- which, because MISS and
+HEAL_SKIPPED are complementary (the caller logs MISS only when the scheduler
+returns True, and the scheduler logs HEAL_SKIPPED when it returns False), means
+the miss branch was never ENTERED: the cache was non-zero at every hook.
+
+But the cache had been set to ``None`` twice.  Something refilled it and no
+token named that either, so they identified the writer BY ELIMINATION from the
+source rather than by reading a log.  Deduction by elimination is what a
+missing log line costs, and it is only available to someone holding the code.
+E.1 -- the usage-payload write -- now announces itself, and both heal sites
+carry ``source=`` so "which writer" is answerable rather than inferable.
 """
 
 from __future__ import annotations
@@ -233,3 +248,80 @@ def test_both_notification_hooks_log_the_miss():
     assert not bare, (
         f"{len(bare)} unguarded _schedule_context_limit_fill call(s): the miss "
         "would heal without saying it happened")
+
+
+def test_every_cache_writer_either_logs_or_is_named_here():
+    """No silent writer of ``_cached_context_limit`` may be added.
+
+    The cache has FOUR writers and they are not interchangeable:
+
+        initialize()        the normal fill; a cold cache after it means
+                            something declined, and that path logs
+        off-band fill       announces HEALED source=off_band_fill
+        E.1 usage payload   announces HEALED source=usage_payload
+        /model invalidation sets None on purpose -- the one write that is
+                            supposed to be quiet, because the SystemMessage
+                            it emits one statement later IS its record
+
+    A fifth writer added silently puts the cache back in the state this whole
+    arc was about: a value that changes for reasons nothing records, so the
+    next person verifying a fix deduces the cause by elimination instead of
+    reading it.  Pinned by COUNT, so adding one is a deliberate act.
+    """
+    import ast
+    import pathlib
+
+    src = pathlib.Path("jaato-server/server/core.py").read_text(encoding="utf-8")
+    tree = ast.parse(src)
+
+    writes = [
+        n for n in ast.walk(tree)
+        if isinstance(n, ast.Assign)
+        for t in n.targets
+        if isinstance(t, ast.Attribute) and t.attr == "_cached_context_limit"
+    ]
+
+    assert len(writes) == 4, (
+        f"expected the four known writers of _cached_context_limit, found "
+        f"{len(writes)} at lines {[w.lineno for w in writes]}.  A new one must "
+        "either emit CONTEXT_LIMIT_HEALED with a source= naming it, or be the "
+        "deliberate invalidation — and this bound moved on purpose."
+    )
+
+    # Both heal sites must distinguish themselves.
+    healed = [
+        a.value for n in ast.walk(tree)
+        if isinstance(n, ast.Call)
+        and isinstance(n.func, ast.Attribute)
+        and n.func.attr == "info"
+        for a in n.args
+        if isinstance(a, ast.Constant) and isinstance(a.value, str)
+        and "CONTEXT_LIMIT_HEALED" in a.value
+    ]
+    assert len(healed) == 2, f"expected 2 HEALED emitters, found {len(healed)}"
+    assert all("source=" in h for h in healed), (
+        "a HEALED line does not say which writer produced it; with two "
+        "writers the token alone cannot answer the question it exists for"
+    )
+
+
+def test_session_id_honours_its_own_annotation():
+    """``session_id`` is typed ``Optional[str]`` and could not return None.
+
+    It could return a ``str`` or RAISE ``AttributeError`` -- never ``None``.
+    Fifteen test modules build ``JaatoServer`` via ``__new__`` and every one
+    of them was one property-read away from that AttributeError; adding a log
+    line that named the session turned two of them red and left thirteen
+    waiting.
+
+    A class-level ``_session_id = None`` makes the declared type true.  The
+    test is here rather than in a types file because the failure mode is a
+    RAISE, which no annotation check would have caught.
+    """
+    from server.core import JaatoServer
+
+    srv = JaatoServer.__new__(JaatoServer)      # __init__ deliberately skipped
+    assert srv.session_id is None, (
+        "reading session_id on a __new__-built server must return None, not "
+        "raise — the annotation says Optional[str]"
+    )
