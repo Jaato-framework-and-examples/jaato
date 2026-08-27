@@ -160,6 +160,17 @@ class Session:
     attached_clients: Set[str] = field(default_factory=set)
     description: Optional[str] = None
     is_dirty: bool = False  # True if has unsaved changes
+    #: Correlation id of the ``session.new`` that created this session, so an
+    #: event answering that create can be matched to it by the CLIENT.
+    #:
+    #: The SDK filters the create-wait on ``request_id`` -- an event without
+    #: one is filed as incidental and never satisfies the wait.  So a refusal
+    #: emitted without it is INVISIBLE to the caller, which waits out its own
+    #: timeout and reports a cause that is not the real one.  That is exactly
+    #: what a cascade-exhausted refusal did: the daemon logged the real reason
+    #: and emitted a well-typed ErrorEvent, and the caller got a 30s
+    #: runner-not-ready timeout naming nothing.
+    create_request_id: Optional[str] = None
     #: Serializes saves OF THIS SESSION.  Lives on the session because the
     #: thing it protects is per-session: ``_save_session`` writes
     #: ``<session_id>.json.tmp`` and renames it, so two concurrent saves of
@@ -1642,7 +1653,10 @@ class SessionManager:
                         getattr(server, "_profile", None)
                         and getattr(server._profile, "budget_control", None))
                 except CascadeExhaustedError as exc:
-                    self._emit_cascade_refusal(client_id, session_id, exc)
+                    _sess = self._sessions.get(session_id)
+                    self._emit_cascade_refusal(
+                        client_id, session_id, exc,
+                        request_id=getattr(_sess, "create_request_id", None))
                     return False
 
             spawn_session_runner(
@@ -4699,6 +4713,7 @@ class SessionManager:
 
     def _emit_cascade_refusal(
         self, client_id: Optional[str], session_id: str, exc: Any,
+        request_id: Optional[str] = None,
     ) -> None:
         """Tell the requesting client its child was refused, and why.
 
@@ -4743,12 +4758,35 @@ class SessionManager:
             logger.warning(
                 "cascade refused spawn of %s: %s", session_id, payload,
             )
+            # THE CORRELATION IS WHAT MAKES THIS REACH THE CALLER.
+            #
+            # Without ``request_id`` the SDK's create-wait files this as an
+            # incidental event and keeps waiting -- so the caller sees a 30s
+            # runner-not-ready timeout while the real answer sits in the log.
+            # The SDK's own ``SessionRefused`` contract names
+            # ``CascadeExhaustedError`` as its example and could not fire on
+            # the one path that produces it, because the event it was waiting
+            # for was unaddressed.
+            #
+            # ``None`` stays ``None``: a spawn with no originating request
+            # (reactor- or cascade-driven, carrying the synthetic headless
+            # client id) has nothing to correlate, and inventing an id would
+            # let this event satisfy some other caller's wait.
+            #
+            # PASSED IN, never looked up.  The first version read
+            # ``self._sessions`` here -- and this method's ``except
+            # Exception`` (which exists so a failing sink cannot break a
+            # spawn) swallowed the resulting AttributeError and emitted
+            # NOTHING.  A defensive catch around a new dependency turns a
+            # crash into a silent no-emit, which is the failure this whole
+            # method exists to prevent.
             event = ErrorEvent(
                 error=str(exc),
                 error_type="CascadeExhaustedError",
                 recoverable=False,
                 details=payload,
                 session_id=session_id,
+                request_id=request_id,
             )
             if client_id:
                 self._emit_to_client(client_id, event)
@@ -6165,6 +6203,49 @@ class SessionManager:
 
         logger.info(f"Server initialized successfully for session {session_id}")
 
+        # ---------------------------------------------------------------
+        # NEVER HAND BACK A HANDLE TO A SESSION THAT CANNOT RUN.
+        #
+        # The cascade ceiling was checked only in the runner spawn, which
+        # happens AFTER this method has emitted SessionInfoEvent and returned
+        # the id.  So an exhausted pool produced an ordinary session id, and
+        # the refusal -- correct, well-typed, correctly logged -- arrived too
+        # late to be the answer: the caller's create-wait had already been
+        # satisfied by the SessionInfoEvent.  Measured: pool of 1200 tokens,
+        # one turn charging 1200, and the next create still returned a
+        # handle while the daemon logged ``cascade_remaining=0.0``.
+        #
+        # Refusing HERE, before the handle exists, is what makes the SDK's
+        # ``SessionRefused`` contract true on the one path that produces
+        # ``CascadeExhaustedError``.  The spawn-side check stays: it is the
+        # backstop for sessions that reach a ceiling by a route this one does
+        # not see (a reload, a fork pre-charged with usage).
+        #
+        # A profile carrying its OWN ``budget_control`` is deliberately
+        # exempt, matching the spawn-side rule: it keeps separate books, is
+        # not clamped, and an exhausted pot does not refuse it.
+        if cascade_driver_id:
+            _pool = self.get_cascade_budget(cascade_driver_id)
+            if _pool is not None and getattr(
+                    server, "_draws_on_parent_budget", True):
+                from shared.budget_control import CascadeExhaustedError
+                try:
+                    _pool.child_config(
+                        getattr(server, "_profile", None)
+                        and getattr(server._profile, "budget_control", None))
+                except CascadeExhaustedError as exc:
+                    self._emit_cascade_refusal(
+                        client_id, session_id, exc, request_id=request_id)
+                    self._release_session_id(session_id)
+                    try:
+                        server.shutdown()
+                    except Exception:  # noqa: BLE001 — best-effort
+                        logger.debug(
+                            "server.shutdown after cascade refusal raised",
+                            exc_info=True,
+                        )
+                    return ""
+
         # Caller-supplied USAGE, pre-charged onto the fresh session via the
         # same RPC a reload uses.  Safe in this window because the session has
         # not served a turn.  Without it a fork starts at ZERO against a full
@@ -6204,6 +6285,11 @@ class SessionManager:
             # ``cascade_driver_id`` field; getattr returned None for
             # every cascade session, defeating dispatch + GC-skip.
             session.cascade_driver_id = cascade_driver_id
+            # Stamped here for the same reason as the cid above: BEFORE the
+            # session enters ``_sessions``, because the spawn that can refuse
+            # it looks the session up by id and would otherwise find no
+            # correlation to echo.
+            session.create_request_id = request_id
             # Whether this child draws on the parent's shared pot or keeps
             # its own books (see _spawn_session_runner_unconditional).
             session.draws_on_parent_budget = getattr(
