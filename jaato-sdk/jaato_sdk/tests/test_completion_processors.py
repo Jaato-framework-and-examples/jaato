@@ -28,14 +28,34 @@ def test_toolcallentry_exported_from_package_root():
 
 
 def test_toolcallentry_field_set_matches_ledger_contract():
-    """Field names + types match the ledger entry shape documented
-    in :func:`shared.completion_processors.build_tool_call_ledger`
-    (server-side).  Drift here breaks every kb-side cascade processor.
+    """The type must match what the builder EMITS — checked by building one.
+
+    This assertion used to hold a hardcoded six-name set while claiming, in
+    this docstring, to match the builder's contract.  The builder documented
+    and emitted SEVEN: ``enrichment_metadata`` was there from the start.  So
+    the guard was a second copy of the contract that had already drifted from
+    it, and it asserted agreement with a document it never read — passing
+    for exactly as long as nobody compared them.
+
+    Now it builds a real ledger and compares.  A field added to either side
+    fails here, and no third copy of the field list exists to go stale.
     """
-    hints = get_type_hints(ToolCallEntry)
-    assert set(hints.keys()) == {
-        "name", "args", "result", "success", "call_id", "turn_index",
-    }
+    from jaato_sdk.completion_processors import build_ledger
+
+    ledger = build_ledger([
+        {"role": "model", "parts": [
+            {"type": "function_call", "name": "t", "args": {},
+             "call_id": "c"}]},
+        {"role": "user", "parts": [
+            {"type": "function_response", "name": "t", "call_id": "c",
+             "response": {"ok": True}, "is_error": False}]},
+    ])
+
+    assert ledger, "the fixture produced no ledger entry to compare against"
+    assert set(get_type_hints(ToolCallEntry)) == set(ledger[0]), (
+        "ToolCallEntry and the builder's output have diverged; the published "
+        "type describes a different dict from the one consumers receive"
+    )
 
 
 def test_toolcallentry_accepts_runtime_dict_shape():
@@ -50,6 +70,7 @@ def test_toolcallentry_accepts_runtime_dict_shape():
         "success": True,
         "call_id": "call_123",
         "turn_index": 3,
+        "enrichment_metadata": None,
     }
     # Access every documented field — fails at type-check time if
     # the TypedDict shape regressed.
