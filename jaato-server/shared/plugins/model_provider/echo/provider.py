@@ -29,12 +29,26 @@ lmstudio read ``extra.get("host")`` etc.):
         tool_call:                          # optional dict
           name: spawn_subagent
           args: {profile: researcher, prompt: "go"}
+        usage:                              # optional dict — a SIMULATED spend
+          prompt_tokens: 1000               # reported identically every turn
+          output_tokens: 200
+          cost_usd: 0.0042
+
+* **Simulated spend.**  Echo costs nothing but can REPORT a cost, so the
+  budget subsystem becomes assertable without a provider that actually
+  spends.  Every ceiling test -- does a limit refuse, does a reported cost
+  reach ``UsageBreakdown``, does ``limits={"tokens": 0}`` mean zero headroom
+  rather than unbounded -- otherwise needs a real endpoint charging real
+  money nondeterministically, which is why those tests do not exist.  Keys
+  are ``TokenUsage`` field names; unknown keys raise rather than being
+  ignored.
 
 The provider is stateless w.r.t. conversation history (the session owns the
 message list and passes it to ``complete()`` each turn), matching the
 ``ModelProviderPlugin`` contract.
 """
 
+import dataclasses
 import json
 import logging
 from typing import Any, Dict, List, Optional, Set
@@ -138,8 +152,12 @@ class EchoProvider(ModalityCapabilityMixin):
         # Config knobs, populated in initialize().
         self._tool_call: Optional[Dict[str, Any]] = None
         self._response: Optional[str] = None
-        # Usage from the last complete() call (always zero — echo costs nothing).
+        # Usage from the last complete() call.  Zero unless the profile
+        # configures ``plugin_configs.echo.usage`` -- echo costs nothing, but
+        # it can REPORT a cost so the budget subsystem is assertable without
+        # a provider that spends.
         self._last_usage: TokenUsage = TokenUsage()
+        self._usage: TokenUsage = TokenUsage()
 
     @property
     def name(self) -> str:
@@ -156,13 +174,61 @@ class EchoProvider(ModalityCapabilityMixin):
         read their knobs from.
 
         Args:
-            config: Optional provider config.  ``extra["tool_call"]`` (dict)
-                and ``extra["response"]`` (str) drive ``complete()``.
+            config: Optional provider config.  ``extra["tool_call"]`` (dict),
+                ``extra["response"]`` (str) and ``extra["usage"]`` (dict)
+                drive ``complete()``.
         """
         if config is None:
             config = ProviderConfig()
         self._tool_call = config.extra.get("tool_call")
         self._response = config.extra.get("response")
+        self._usage = self._build_usage(config.extra.get("usage"))
+
+    @staticmethod
+    def _build_usage(spec: Optional[Dict[str, Any]]) -> TokenUsage:
+        """Turn the ``usage`` knob into the usage every turn will report.
+
+        WHY A PROVIDER THAT COSTS NOTHING REPORTS A COST.  Every assertion
+        about the budget subsystem -- does a ceiling refuse, does a reported
+        cost survive to ``UsageBreakdown``, does ``limits={"tokens": 0}`` mean
+        zero headroom -- currently requires a provider that ACTUALLY SPENDS,
+        nondeterministically, against a real endpoint.  That is why those
+        tests do not exist and why defects in that subsystem reached
+        consumers.  Making spend a configured value turns them into
+        assertions that cost nothing and never vary.
+
+        The numbers are ARBITRARY BY CONSTRUCTION -- they are whatever the
+        test declares, not an estimate of anything.  They are deliberately
+        NOT derived from ``count_tokens``: a simulated spend that tracked the
+        prompt would drift with the fixture's wording, which is the opposite
+        of what a budget test needs.
+
+        ``total_tokens`` defaults to ``prompt + output`` when unset, because a
+        caller writing ``{"prompt_tokens": 10, "output_tokens": 5}`` means a
+        15-token turn, and a silent 0 total would make a ceiling test pass by
+        never charging anything -- passing for the wrong reason, which is the
+        failure this knob exists to prevent.
+
+        Unknown keys RAISE rather than being ignored: a typo'd ``cost`` for
+        ``cost_usd`` would otherwise leave the cost at ``None`` and the test
+        asserting it would read the framework's silence as its own bug.
+        """
+        if not spec:
+            return TokenUsage()
+        allowed = {f.name for f in dataclasses.fields(TokenUsage)}
+        unknown = set(spec) - allowed
+        if unknown:
+            raise ValueError(
+                f"echo: unknown usage key(s) {sorted(unknown)}; "
+                f"TokenUsage accepts {sorted(allowed)}"
+            )
+        fields = dict(spec)
+        if "total_tokens" not in fields:
+            fields["total_tokens"] = (
+                int(fields.get("prompt_tokens", 0) or 0)
+                + int(fields.get("output_tokens", 0) or 0)
+            )
+        return TokenUsage(**fields)
 
     def verify_auth(
         self,
@@ -270,7 +336,11 @@ class EchoProvider(ModalityCapabilityMixin):
 
         The provider is stateless: it inspects ``messages`` but mutates nothing.
         """
-        self._last_usage = TokenUsage()
+        # The configured spend, reported IDENTICALLY on every turn.  A budget
+        # test reaches a ceiling by running turns, so per-turn constancy is
+        # what makes "how many turns until it refuses" arithmetic rather than
+        # observation.
+        self._last_usage = self._usage
 
         if self._tool_call is not None and not self._has_tool_result(messages):
             # First-turn tool-call mode: emit the configured call VERBATIM.
