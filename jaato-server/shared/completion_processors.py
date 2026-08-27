@@ -79,105 +79,31 @@ logger = logging.getLogger(__name__)
 def build_tool_call_ledger(history: List[Any]) -> List[Dict[str, Any]]:
     """Walk session history; pair function_calls with their responses.
 
-    Iterates the message list, builds a chronological ledger of
-    every tool call.  Pairing is by ``call_id`` (the provider's
-    tool-call identifier carried on both the call Part and the
-    response Part).  Calls without a matching response (e.g. the
-    final turn whose tool calls are still pending) are emitted with
-    ``success=False`` and ``result={"error": "no_response"}`` so a
-    validator's "claimed in payload but no successful call" check
-    fires deterministically.
+    **Thin alias of** :func:`jaato_sdk.completion_processors.build_ledger`.
+    The pairing rule lives in the SDK because that is the layer a consumer
+    can import: the SDK published the ledger entry TYPE and no way to obtain
+    a ledger, so anyone wanting one wrote their own pairing, and every copy
+    had to re-derive that pairing is by IDENTIFIER and not by name-in-order.
+    Copies of a rule rot independently unless something executes the
+    comparison; there is now one rule instead of one per consumer.
 
-    Ledger entry shape (stable dict contract — no framework type
-    imports needed for kb authors)::
-
-        {
-            "name": str,            # e.g. "renderTemplateToFile"
-            "args": dict,           # the args the agent emitted
-            "result": dict,         # tool result; failed calls carry
-                                    # {"error": "...", "message": "..."}
-            "success": bool,        # True iff "error" not in result
-            "call_id": str,         # provider call_id for cross-ref
-            "turn_index": int,      # 0-based session turn
-            "enrichment_metadata": Optional[dict],
-                                    # Structured per-plugin metadata
-                                    # from tool-result enrichment
-                                    # (e.g. LSP diagnostics, artifact
-                                    # tracking).  Keyed by plugin name:
-                                    # ``{"lsp": {"files_with_diagnostics":
-                                    # [...], "total_errors": int,
-                                    # "diagnostics": {path: [...]}, ...}}``.
-                                    # ``None`` when enrichment didn't
-                                    # produce metadata for this call,
-                                    # or when the call is in the
-                                    # "no_response" pending state.
-                                    # In-memory only; not persisted
-                                    # across disk-restore.
-        }
+    Kept as a name because completion processors and the cascade machinery
+    call it, and because it takes the in-process ``Message`` carrier while
+    the SDK function takes either. Behaviour is unchanged — see the SDK
+    docstring for the full contract (pairing, the ``no_response`` pending
+    state, the ``"error" not in result`` success rule, and the fact that
+    ``enrichment_metadata`` is in-memory only).
 
     Args:
         history: List of ``Message`` objects from
             ``JaatoSession.get_history()``.
 
     Returns:
-        Chronological list of ledger dicts.  Empty when no tool
-        calls fired.
+        Chronological list of ledger dicts.  Empty when no tool calls fired.
     """
-    # First pass: collect responses keyed by call_id.  ``Part.function_response``
-    # is a ``ToolResult`` whose ``.result`` attribute carries the dict
-    # the tool returned, and whose ``.enrichment_metadata`` attribute
-    # carries the per-plugin structured metadata from tool-result
-    # enrichment (LSP, artifact_tracker, etc.).
-    responses_by_call_id: Dict[
-        str, Tuple[int, Dict[str, Any], Optional[Dict[str, Any]]]
-    ] = {}
-    for turn_index, message in enumerate(history):
-        parts = getattr(message, "parts", None) or []
-        for part in parts:
-            fr = getattr(part, "function_response", None)
-            if fr is None:
-                continue
-            call_id = getattr(fr, "call_id", None) or ""
-            response_body = getattr(fr, "result", None)
-            if not isinstance(response_body, dict):
-                # Tool returned a non-dict (string, number, None); wrap
-                # so validators see a consistent shape and can still
-                # use the ``"error" not in dict`` heuristic.
-                response_body = {"result": response_body}
-            enrichment_metadata = getattr(fr, "enrichment_metadata", None)
-            responses_by_call_id[call_id] = (
-                turn_index, response_body, enrichment_metadata,
-            )
+    from jaato_sdk.completion_processors import build_ledger
 
-    ledger: List[Dict[str, Any]] = []
-    for turn_index, message in enumerate(history):
-        parts = getattr(message, "parts", None) or []
-        for part in parts:
-            fc = getattr(part, "function_call", None)
-            if fc is None:
-                continue
-            call_id = getattr(fc, "id", None) or ""
-            name = getattr(fc, "name", "") or ""
-            raw_args = getattr(fc, "args", None)
-            args = raw_args if isinstance(raw_args, dict) else {"_raw": raw_args}
-            paired = responses_by_call_id.get(call_id)
-            if paired is None:
-                result: Dict[str, Any] = {"error": "no_response"}
-                success = False
-                enrichment_metadata = None
-            else:
-                _, result, enrichment_metadata = paired
-                success = "error" not in result
-            ledger.append({
-                "name": name,
-                "args": args,
-                "result": result,
-                "success": success,
-                "call_id": call_id,
-                "turn_index": turn_index,
-                "enrichment_metadata": enrichment_metadata,
-            })
-    return ledger
+    return build_ledger(history)
 
 
 # ---------------------------------------------------------------------------
