@@ -45,7 +45,7 @@ from jaato_sdk.events import (
     deserialize_event,
 )
 from jaato_sdk.constants import PRERENDERED_LINE_PREFIX
-from jaato_sdk.helpers import compute_cache_hit_percent
+from jaato_sdk.helpers import compute_cache_hit_percent, truncation_reason
 from jaato_sdk.templates import (
     HELPER_KEYWORDS,
     classify_template_evaluation_kind,
@@ -71,6 +71,7 @@ __all__ = [
     "Session",
     "AgentError",
     "PermissionUnhandled",
+    "truncation_reason",
     "SessionCreateFailed",
     "SessionNotConfirmed",
     "SessionNotSent",
