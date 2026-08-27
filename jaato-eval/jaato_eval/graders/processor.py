@@ -14,19 +14,20 @@ THE LEDGER GATE
 ===============
 
 Most processors worth reusing cross-reference the agent's claims against
-``context.tool_calls``.  Over the SDK wire that ledger cannot be paired
-faithfully — see :mod:`jaato_eval.ledger` for why (the serialized
-``function_call`` Part carries no ``call_id``).
+``context.tool_calls``.  That ledger now comes from
+``jaato_sdk.completion_processors.build_ledger`` (jaato #640), so on a
+current daemon these processors run here exactly as they do in-band.
 
-Rather than hand a processor a plausible-looking ledger that may
-mis-attribute a retry's success to the call that failed, this adapter
-detects that the processor reads ``tool_calls`` and returns BLOCKED.  A
-grader that cannot be run correctly must say so; a grader that runs on
-bad data and reports PASS is the vacuous pass this whole engine is built
-to refuse.
+The gate remains for one case: a daemon predating jaato #639 emits call
+Parts with no identifier, and nothing can be paired.  Rather than hand a
+processor a ledger that may mis-attribute a retry's success to the call
+that failed, this adapter detects that the processor reads ``tool_calls``
+and returns BLOCKED.  A grader that cannot be run correctly must say so;
+a grader that runs on bad data and reports PASS is the vacuous pass this
+whole engine is built to refuse.
 
 Processors that only inspect the payload and the filesystem are
-unaffected and run normally.
+unaffected and run regardless of daemon version.
 """
 from __future__ import annotations
 

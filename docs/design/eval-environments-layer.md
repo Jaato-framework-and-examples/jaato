@@ -56,7 +56,7 @@ Article vocabulary → the jaato primitive that already implements it.
 | Harness *variants* | profile sets selected by one env var | `JAATO_PROFILE_SET` → `.jaato/profiles/<set>/` | exists |
 | Task input | prompt + `agent_params` (persona `{{param}}` substitution) | `open_session(agent_params=…)` | exists |
 | Output contract | `completion_payload_schema` → typed `signal_completion` payload | profile field; `Session.complete()` returns it | exists |
-| Grader — programmatic | completion processors: `validate(payload, context) -> list[str]`, with `context.tool_calls` ledger + `context.workspace_path` | prototype `.jaato/scripts/processors/` | exists |
+| Grader — programmatic | completion processors: `validate(payload, context) -> list[str]`, with `context.tool_calls` ledger + `context.workspace_path` | prototype `.jaato/scripts/processors/`; ledger via `jaato_sdk.completion_processors.build_ledger` (#640) | exists |
 | Grader — LLM judge | a session whose profile declares a rubric completion schema | prototype `build_judge` stage | exists |
 | Grader — behavioural claim | `Verdict(claim_id, state, evidence, revert)` | `certify/verdict.py` | exists |
 | Determinism / repeatability | canonical-JSON sha256 of the payload | `orchestrator/sdk_harness.py::hash_payload` | exists |
@@ -298,41 +298,62 @@ too easy" but "which cognitive step actually needs the expensive model".
 ## What building it found
 
 The SDK-only constraint earned its keep immediately: it surfaced a real
-framework gap that the design could not have predicted from reading.
+framework gap that the design could not have predicted from reading, and
+that gap is now closed **in the framework** rather than worked around in
+the eval layer.
 
-**The tool-call ledger cannot be reconstructed over the SDK.** Completion
-processors pair calls to responses by `call_id`, and the framework's
+**The tool-call ledger could not be reconstructed over the SDK.**
+Completion processors pair calls to responses by identifier, and
 `build_tool_call_ledger` does exactly that server-side. But the history
-serializer (`server/command_router.py::_serialize_part`) emits `call_id`
-on the `function_response` branch and **not** on the `function_call`
-branch. The identifier the pairing depends on exists on only one side once
-it crosses the wire.
+serializer (`server/command_router.py::_serialize_part`) emitted the
+identifier on the `function_response` branch and not on the
+`function_call` branch, so it survived on only one side of the wire.
 
 Pairing by name in arrival order is the obvious substitute and is wrong in
-precisely the case that matters: an agent that calls a tool, fails, and
-retries produces two calls and two responses with the same name, and a
-positional pairing credits the retry's success to the call that failed. A
-grader built on that would report a fabricated file as verified — which is
-the exact defect `codegen_files_exist.py` exists to catch.
+precisely the case that matters: a tool that errors and is retried
+produces two calls and two responses sharing a name, and positional
+pairing credits the retry's success to the call that failed. A grader
+built on that reports a fabricated artefact as verified — it *inverts* the
+verdict rather than weakening it, which is the exact defect
+`codegen_files_exist.py` exists to catch.
 
-So `jaato-eval`'s processor grader detects (by AST, not substring — every
-such processor *documents* `tool_calls` in its docstring) that a processor
-reads the ledger, and returns BLOCKED when the ledger is unfaithful. The
-three-valued verdict earned its place on its first real use, before any
-model was involved.
+Two PRs closed it:
 
-The fix is one line in `_serialize_part` plus exposing
-`build_tool_call_ledger` through the SDK, after which
-`jaato-eval/jaato_eval/ledger.py` can be deleted rather than kept in sync.
-It is not applied here because this document's own rule says the eval layer
-ships no core framework code; it is the first thing to land if the
-processor grader is wanted.
+- **#639** put the identifier on the wire. Notably, the obvious one-line
+  fix would have been a **silent no-op**: the field is `fc.id` on the call
+  and `fr.call_id` on the response, so mirroring the response branch —
+  `getattr(fc, "call_id", "")`, which is what anyone would write — emits
+  the empty string forever. The PR verified this by sabotage: that version
+  fails four of its six tests, and the two that survive are the ones
+  checking wire *shape* rather than value.
+- **#640** put the single pairing rule in
+  `jaato_sdk.completion_processors.build_ledger`, taking either carrier
+  (in-process `Message` objects or serialized wire dicts).
+  `shared.completion_processors.build_tool_call_ledger` became a thin
+  alias — 104 lines to 30 — with all 23 existing ledger tests passing
+  unchanged as the evidence that behaviour was preserved.
 
-Two smaller findings, both caught by the package's own tests rather than by
-review: an empty ledger reported itself *unfaithful* (the absent/empty
+`jaato-eval/jaato_eval/ledger.py` was then **deleted as a
+reimplementation** and rebuilt as a thin wrapper. What remains in it is
+one question the SDK cannot answer because it is a property of the
+deployment rather than the data: did this daemon emit identifiers at all?
+A pre-#639 daemon yields an unpairable history, and the processor grader
+returns BLOCKED rather than grading on it. The three-valued verdict
+earned its place twice — first as a capability gate, now as a
+version-skew guard.
+
+This is also the third defect of one shape in that single serializer
+function (tool results were previously sent as Python reprs, #600–#610,
+whose comment is still in the file). Each time, a `getattr`/`hasattr`
+fallback made a wrong or missing attribute produce something that *looked*
+like a value, so nothing failed. That is the pattern `certify/`'s README
+names, recurring in the place it was already documented.
+
+Two smaller findings, both caught by the package's own tests rather than
+by review: an empty ledger reported itself *unfaithful* (the absent/empty
 collapse, inside the module written to refuse it), and a `prompt:` key
-present with a null value became the literal string `"None"` and would have
-run as a task instruction.
+present with a null value became the literal string `"None"` and would
+have run as a task instruction.
 
 ## Open questions
 

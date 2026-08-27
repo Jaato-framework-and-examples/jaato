@@ -94,6 +94,13 @@ class _FakeSession:
         return b.get("payload")
 
 
+#: Module names the stub occupies.  Tracked so teardown restores exactly
+#: what was displaced instead of wiping the namespace — another test may
+#: have loaded the real completion_processors from the checkout.
+_STUBBED = ("jaato_sdk", "jaato_sdk.client", "jaato_sdk.client.ipc",
+            "jaato_sdk.events")
+
+
 def _install_stub_sdk(behaviour):
     """Put a minimal jaato_sdk into sys.modules for the duration of a test."""
     class _Ctx:
@@ -134,13 +141,24 @@ class RunnerCase(unittest.TestCase):
         (self.root / "cfg").mkdir()
         (self.root / "task.yaml").write_text(TASK)
         self.task = load_manifest(self.root / "task.yaml")
+        self._displaced = {name: sys.modules[name] for name in _STUBBED
+                           if name in sys.modules}
         self.addCleanup(self.tmp.cleanup)
         self.addCleanup(self._uninstall)
 
     def _uninstall(self):
-        for name in list(sys.modules):
-            if name == "jaato_sdk" or name.startswith("jaato_sdk."):
+        """Restore sys.modules to exactly what it was before the stub.
+
+        Deleting every ``jaato_sdk*`` entry would also evict the real
+        ``completion_processors`` that ``tests/_real_sdk`` loads from the
+        checkout, making an unrelated test class pass or fail depending on
+        collection order.
+        """
+        for name in _STUBBED:
+            if name in sys.modules:
                 del sys.modules[name]
+        for name, module in self._displaced.items():
+            sys.modules[name] = module
 
     def _run(self, behaviour, **kw):
         from jaato_eval.runner import run_arm

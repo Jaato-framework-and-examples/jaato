@@ -4,8 +4,10 @@ This is the only module that talks to the daemon, and it does so through
 ``jaato_sdk`` alone — never ``shared.*``.  The constraint is load-bearing:
 if the eval engine can be built on the SDK, the SDK is sufficient for
 third-party drivers.  Where it cannot, the gap is a real SDK defect and
-belongs in the SDK, not in a private import here.  (One such gap is
-already live — see :mod:`jaato_eval.ledger`.)
+belongs in the SDK, not in a private import here.  That constraint has
+already paid once: the tool-call ledger was unreachable over the SDK, and
+jaato #639 / #640 closed it in the SDK rather than here (see
+:mod:`jaato_eval.ledger`).
 
 FAILURE TAXONOMY
 ================
@@ -33,7 +35,7 @@ from typing import Any, Dict, List, Optional
 from .arm import ArmResult, ArmSpec
 from .fixture import FixtureError, Workspace, discard, materialise
 from .graders import REGISTRY, GraderContext
-from .ledger import LedgerResult, build_ledger
+from .ledger import build_ledger_result
 from .results import canonical_hash
 from .verdict import Verdict
 
@@ -131,7 +133,7 @@ async def run_arm(spec: ArmSpec, *, workspace_root: Path,
     if payload is not None:
         result.payload_hash = canonical_hash(payload)
 
-    ledger = build_ledger(history)
+    ledger = build_ledger_result(history)
     context = GraderContext(
         workspace_path=workspace.path,
         config_root=task.resolved_config_root(),

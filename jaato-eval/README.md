@@ -133,28 +133,33 @@ a broken runner, and a report that hid the eight would read as success.
 A cell that exercised nothing prints `—`, not `0%`. Zero would say "it
 always failed"; the truth is "we never found out".
 
-## Known gap: the tool-call ledger
+## The tool-call ledger
 
-Completion processors that cross-reference `context.tool_calls` **cannot
-currently be run post-hoc over the SDK**, and this package reports that as
-`BLOCKED` rather than grading on bad data.
+Completion processors that cross-reference `context.tool_calls` run here
+exactly as they do in-band, because the ledger comes from the SDK:
 
-The framework pairs calls to responses by `call_id`. The SDK's history
-serializer (`server/command_router.py::_serialize_part`) emits `call_id`
-on the `function_response` branch but **not** on the `function_call`
-branch, so the identifier the pairing depends on exists on only one side
-once it crosses the wire. Pairing by name in arrival order is the obvious
-substitute and is wrong in exactly the case that matters: an agent that
-calls a tool, fails, and retries produces two calls and two responses with
-the same name, and a positional pairing credits the retry's success to the
-call that failed. A grader built on that reports a fabricated file as
-verified.
+```python
+from jaato_sdk.completion_processors import build_ledger
+```
 
-The fix is one line in that serializer, plus exposing the framework's
-`build_tool_call_ledger` through the SDK so `jaato_eval/ledger.py` can be
-deleted rather than kept in sync. Until then the gate in
-`graders/processor.py` holds, and `tests/test_ledger.py` covers both the
-current wire shape and the post-fix one.
+That function is the single pairing rule (jaato #640); the server-side
+`build_tool_call_ledger` is now a thin alias of it, so there is one
+implementation rather than one per consumer. This package holds no copy —
+`jaato_eval/ledger.py` is a thin wrapper, not a reimplementation.
+
+**Pairing is by identifier, never by name and order.** A tool that errors
+and is retried produces two calls and two responses sharing a name, and
+positional pairing credits the retry's success to the call that failed —
+reporting a fabricated artefact as verified. `tests/test_ledger.py`
+exercises exactly that case against the real SDK builder loaded from the
+checkout, not a stub.
+
+**One guard remains**, and it is about deployment rather than data: a
+daemon predating jaato #639 emits `function_call` Parts with no
+identifier, so nothing can be paired. `history_carries_call_ids()`
+witnesses the key rather than inferring it from an empty pairing, and the
+processor grader returns BLOCKED on such a history instead of grading.
+Upgrade the daemon rather than trusting the result.
 
 ## Concurrency and the runner pool
 
@@ -186,7 +191,12 @@ propagation.
 ## Constraint: SDK only
 
 This package imports `jaato_sdk` and never `shared.*`. If something here
-cannot be built on the SDK, that is an SDK gap to be fixed in the SDK —
-which is how the ledger gap above was found. `certify/` enforces the same
-discipline with a facade guard; adopting that guard here is the obvious
-next hardening step.
+cannot be built on the SDK, that is an SDK gap to be fixed in the SDK.
+
+That is not hypothetical: building this found the tool-call ledger
+unreachable over the SDK, and the fix landed in the framework (#639, #640)
+rather than as a private workaround here — after which the workaround was
+deleted. The rule paid for itself once already.
+
+`certify/` enforces the same discipline with a facade guard; adopting that
+guard here is the obvious next hardening step.
