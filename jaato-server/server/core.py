@@ -297,6 +297,17 @@ class JaatoServer:
     requests via the public methods.
     """
 
+    #: Declared at class scope so the ``session_id`` property can honour its
+    #: own ``Optional[str]`` annotation.  ``__init__`` always assigns it, but
+    #: fifteen test modules construct this class via ``__new__`` to exercise
+    #: one method without standing up a session -- and on those, reading the
+    #: property raised ``AttributeError`` instead of returning ``None``.
+    #:
+    #: Not a fallback: it makes ``__init__``'s assignment an override of a
+    #: declared default rather than the attribute's only creation, which is
+    #: what the annotation already claimed.
+    _session_id: Optional[str] = None
+
     def __init__(
         self,
         env_file: str = ".env",
@@ -634,7 +645,24 @@ class JaatoServer:
 
     @property
     def session_id(self) -> Optional[str]:
-        """Get the session identifier for this server instance."""
+        """Get the session identifier for this server instance.
+
+        Returns ``None`` on a server whose ``__init__`` has not run -- which
+        is a real shape: fifteen test modules build ``JaatoServer`` via
+        ``__new__`` to exercise one method without standing up a session.
+
+        THE ANNOTATION WAS ALREADY ``Optional[str]`` AND COULD NOT HONOUR IT.
+        Without the class-level default below, this could return a ``str`` or
+        RAISE ``AttributeError`` -- never ``None``.  The signature promised a
+        value the code could not produce, so every caller that trusted it was
+        wrong in a way no type checker could see.  Adding a log line that read
+        this property turned that latent lie into two failing tests and
+        thirteen more waiting.
+
+        This is a declaration, not a fallback: ``_session_id`` is genuinely
+        ``Optional`` and ``__init__``'s assignment is now an override of a
+        declared default rather than the attribute's only creation.
+        """
         return self._session_id
 
     @property
@@ -1462,7 +1490,8 @@ class JaatoServer:
                 if limit:
                     self._cached_context_limit = int(limit)
                     logger.info(
-                        "CONTEXT_LIMIT_HEALED session=%s limit=%s",
+                        "CONTEXT_LIMIT_HEALED session=%s limit=%s "
+                        "source=off_band_fill",
                         self.session_id, limit,
                     )
                 else:
@@ -4643,9 +4672,25 @@ class JaatoServer:
                     # always claimed it did; it never wrote it -- one of the
                     # two promised recovery paths did not exist, and the
                     # other (the hooks' inline re-fetch) self-deadlocked.
+                    #
+                    # AND IT SAYS SO.  #637 gave every OTHER outcome a token
+                    # and left this write silent, which turned out to leave
+                    # the interesting case unnamed: after a mid-session
+                    # ``/model`` invalidation only two writers can refill the
+                    # cache -- the off-band fill (which announces itself) and
+                    # this one.  A consumer verifying the heal observed the
+                    # cache going from None to non-zero with NO token
+                    # explaining it, and correctly deduced this line by
+                    # elimination rather than by reading a log.  Deduction by
+                    # elimination is what a missing log line costs.
                     if payload_limit and not getattr(
                             server, "_cached_context_limit", None):
                         server._cached_context_limit = payload_limit
+                        logger.info(
+                            "CONTEXT_LIMIT_HEALED session=%s limit=%s "
+                            "source=usage_payload",
+                            server.session_id, payload_limit,
+                        )
                     context_limit = (
                         payload_limit
                         or (getattr(server, "_cached_context_limit", None) or 0)
