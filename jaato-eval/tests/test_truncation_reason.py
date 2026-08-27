@@ -70,3 +70,43 @@ class ScriptGraderHonoursItCase(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BudgetCeilingIsNamedCase(unittest.TestCase):
+    """A ceiling stop must not read as an ordinary truncation.
+
+    Verified live: a profile budget_control of tokens:2000 against a ~26k
+    system prompt blocked the arm with 'ended mid-tool-loop', while the
+    daemon log said 'stopped at its budget ceiling: budget_exhausted
+    (self-enforced: tokens 1314%)'.  The engine had the signal and
+    discarded it.
+    """
+
+    def test_budget_exhausted_outranks_the_turn_stream(self):
+        """It must win even when finish_reason says the turn ended fine.
+
+        The refusal short-circuits BEFORE a turn runs, so finish_reason
+        still holds whatever the previous turn left — often 'stop'.
+        """
+        ctx = _ctx(finish_reason="stop",
+                   termination_reason="budget_exhausted",
+                   termination_detail="self-enforced: tokens 1314%")
+        reason = ctx.truncation_reason
+        self.assertIn("budget ceiling", reason)
+        self.assertIn("1314%", reason)
+
+    def test_budget_exhausted_outranks_a_payload(self):
+        """A payload cannot mean 'complete' if the session then refused."""
+        ctx = _ctx(payload={"done": True}, termination_reason="budget_exhausted")
+        self.assertIsNotNone(ctx.truncation_reason)
+
+    def test_session_error_names_itself(self):
+        ctx = _ctx(termination_reason="error", termination_detail="402 Payment Required")
+        self.assertIn("402", ctx.truncation_reason)
+
+    def test_natural_windown_is_not_truncation(self):
+        """natural/client_request/stopped are ordinary wind-downs."""
+        for reason in ("natural", "client_request", "stopped"):
+            with self.subTest(reason=reason):
+                ctx = _ctx(finish_reason="stop", termination_reason=reason)
+                self.assertIsNone(ctx.truncation_reason)

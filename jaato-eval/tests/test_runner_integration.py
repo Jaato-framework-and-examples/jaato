@@ -2,8 +2,8 @@
 
 The daemon is not available in unit-test environments, but the runner's
 contract with the SDK is small and stable: open a session, subscribe to
-``TURN_COMPLETED``, call ``complete()``, call ``request_history()``, read
-``HISTORY``.  Stubbing exactly that surface exercises the whole arm —
+``TURN_COMPLETED`` and ``SESSION_TERMINATED``, call ``complete()``, call
+``request_history()``, read ``HISTORY``.  Stubbing exactly that surface exercises the whole arm —
 fixture materialisation, usage accumulation, ledger reconstruction,
 grader dispatch, verdict roll-up — without a live model.
 
@@ -59,6 +59,20 @@ class _HistoryEvent:
         self.history = history
 
 
+class _TerminatedEvent:
+    """Mirrors ``SessionTerminatedEvent``'s consumed surface.
+
+    Every real session emits one.  ``reason="natural"`` is the ordinary
+    wind-down; ``budget_exhausted`` / ``error`` are the two that name a
+    stop the turn stream cannot report.
+    """
+
+    def __init__(self, reason="natural", details="", error_summary=None):
+        self.reason = reason
+        self.details = details
+        self.error_summary = error_summary
+
+
 class _FakeClient:
     def __init__(self, workspace, behaviour):
         self.workspace = Path(workspace)
@@ -91,6 +105,12 @@ class _FakeSession:
             (self.client.workspace / "answer.txt").write_text(b["writes"])
         self.client._emit("TURN_COMPLETED",
                           _TurnEvent(finish_reason=b.get("finish_reason", "stop")))
+        # A real session always winds down with one of these; omitting it
+        # would let the engine's SESSION_TERMINATED handling go untested
+        # while every stubbed test still passed.
+        self.client._emit("SESSION_TERMINATED", _TerminatedEvent(
+            reason=b.get("termination_reason", "natural"),
+            details=b.get("termination_detail", "")))
         return b.get("payload")
 
 
@@ -126,7 +146,8 @@ def _install_stub_sdk(behaviour):
     ipc_mod.IPCClient = _IPCClient
     events_mod = types.ModuleType("jaato_sdk.events")
     events_mod.EventType = types.SimpleNamespace(
-        TURN_COMPLETED="TURN_COMPLETED", HISTORY="HISTORY")
+        TURN_COMPLETED="TURN_COMPLETED", HISTORY="HISTORY",
+        SESSION_TERMINATED="SESSION_TERMINATED")
     for name, mod in (("jaato_sdk", sdk), ("jaato_sdk.client", client_mod),
                       ("jaato_sdk.client.ipc", ipc_mod),
                       ("jaato_sdk.events", events_mod)):
@@ -188,6 +209,29 @@ class RunnerCase(unittest.TestCase):
         result = self._run({"writes": "READY\n", "finish_reason": "max_tokens"})
         self.assertEqual(result.state, BLOCKED)
         self.assertEqual(result.finish_reason, "max_tokens")
+
+    def test_budget_ceiling_blocks_the_arm_and_names_itself(self):
+        """The ceiling stop must survive all the way to the verdict.
+
+        The whole arm looks successful from the turn stream: the file is
+        written and finish_reason is 'stop'.  Only SESSION_TERMINATED
+        knows the session then refused further turns, so this is the test
+        that fails if the engine ever stops subscribing to it.
+        """
+        result = self._run({
+            "writes": "READY\n",
+            "termination_reason": "budget_exhausted",
+            "termination_detail": "self-enforced: tokens 1314%",
+        })
+        self.assertEqual(result.state, BLOCKED)
+        reason = " ".join(v.blocked_reason for v in result.verdicts)
+        self.assertIn("budget ceiling", reason)
+        self.assertIn("1314%", reason)
+
+    def test_ordinary_windown_does_not_block(self):
+        """reason='natural' is every healthy session; it must stay silent."""
+        result = self._run({"writes": "READY\n", "termination_reason": "natural"})
+        self.assertEqual(result.state, PASS)
 
     def test_profile_set_reaches_the_env_file(self):
         """The sweep's model axis travels via .env in the workspace."""

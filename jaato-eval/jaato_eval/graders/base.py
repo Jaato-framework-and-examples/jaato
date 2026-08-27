@@ -36,6 +36,12 @@ class GraderContext:
             Do NOT read this directly to decide whether the arm ran to
             completion — use :attr:`truncation_reason`.  ``"tool_use"``
             means two opposite things (see that property).
+        termination_reason: ``SessionTerminatedEvent.reason`` — the only
+            place an abnormal stop names itself.  ``budget_exhausted``
+            never reaches ``finish_reason`` at all, because the refusal
+            short-circuits before any turn runs.
+        termination_detail: The refusal prose / error summary that came
+            with it, so a BLOCKED verdict can quote the mechanism.
         turns: How many turns the arm consumed.
         error: Terminal error text, when the arm ended in an error.
         prior_verdicts: ``grader_id`` -> state, for graders already run
@@ -53,6 +59,8 @@ class GraderContext:
     history: List[Dict[str, Any]] = field(default_factory=list)
     usage: Dict[str, Any] = field(default_factory=dict)
     finish_reason: str = "stop"
+    termination_reason: str = ""
+    termination_detail: str = ""
     turns: int = 0
     error: Optional[str] = None
     prior_verdicts: Dict[str, str] = field(default_factory=dict)
@@ -85,7 +93,23 @@ class GraderContext:
         ``safety``, or a bare ``"tool_use"`` with nothing signalled) cut
         the arm short, and the returned string names which — a BLOCKED
         verdict has to say what was absent.
+
+        ``termination_reason`` is consulted FIRST and outranks everything
+        below it, because a budget ceiling refuses turns *before any turn
+        runs*: no ``TurnCompletedEvent`` fires, so ``finish_reason`` keeps
+        whatever the previous turn left there and cannot mention the
+        ceiling.  Reading only the turn stream reports a ceiling stop as
+        an ordinary truncation — which is worse than useless here, since
+        an operator must be able to tell "the ceiling I set did its job"
+        from "the provider cut us off".
         """
+        if self.termination_reason == "budget_exhausted":
+            return (f"stopped at its budget ceiling: {self.termination_detail}"
+                    if self.termination_detail else
+                    "stopped at its budget ceiling")
+        if self.termination_reason == "error":
+            return (f"ended in a session error: {self.termination_detail}"
+                    if self.termination_detail else "ended in a session error")
         if self.payload is not None:
             return None
         if self.finish_reason == "stop":

@@ -62,6 +62,29 @@ class _TurnAccumulator:
         self.finish_reason = "stop"
         self.usage: Dict[str, Any] = {k: 0 for k in _SUMMED_USAGE}
         self.cost_usd: Optional[float] = None
+        self.termination_reason = ""
+        self.termination_detail = ""
+
+    def on_terminated(self, event: Any) -> None:
+        """Record why the session wound down.
+
+        ``SessionTerminatedEvent.reason`` is the only place an abnormal
+        stop names ITSELF.  A budget ceiling in particular short-circuits
+        BEFORE any turn runs, so no ``TurnCompletedEvent`` fires and the
+        per-turn ``finish_reason`` never mentions it — the SDK's own
+        docstring warns that a driver reading only turns reports "a
+        generic failure ... a ceiling stop indistinguishable from a
+        break".  That is exactly what this engine did until it subscribed
+        here.
+
+        ``natural`` / ``client_request`` / ``stopped`` are ordinary
+        wind-downs and say nothing about completeness; only
+        ``budget_exhausted`` and ``error`` name a stop.
+        """
+        self.termination_reason = getattr(event, "reason", "") or ""
+        detail = (getattr(event, "details", None)
+                  or getattr(event, "error_summary", None) or "")
+        self.termination_detail = str(detail)
 
     def on_turn(self, event: Any) -> None:
         self.turns += 1
@@ -143,6 +166,8 @@ async def run_arm(spec: ArmSpec, *, workspace_root: Path,
         history=history,
         usage=result.usage,
         finish_reason=accumulator.finish_reason,
+        termination_reason=accumulator.termination_reason,
+        termination_detail=accumulator.termination_detail,
         turns=accumulator.turns,
     )
 
@@ -207,6 +232,8 @@ async def _run_session(spec: ArmSpec, workspace: Workspace, *,
     async with IPCClient.session(**kwargs) as session:
         client = session.client
         unsub_turn = client.subscribe(EventType.TURN_COMPLETED, accumulator.on_turn)
+        unsub_term = client.subscribe(EventType.SESSION_TERMINATED,
+                                      accumulator.on_terminated)
 
         history_ready = asyncio.Event()
 
@@ -227,6 +254,7 @@ async def _run_session(spec: ArmSpec, workspace: Workspace, *,
                 pass
         finally:
             unsub_turn()
+            unsub_term()
             unsub_history()
 
     return payload, accumulator, history
