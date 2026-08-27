@@ -3490,6 +3490,16 @@ class RunnerRPC:
             ui_hooks.on_agent_history_updated(
                 agent_id=agent_id, history=session.get_history(),
             )
+            # LAST, and last for a reason: SessionTerminatedEvent is terminal
+            # by contract, so nothing may follow it.  The session detects
+            # quiescence inside ``send_message`` and records it; flushing it
+            # here puts the terminal event after this turn's own events
+            # instead of before them.
+            try:
+                session.flush_session_quiescent()
+            except Exception:  # noqa: BLE001 — never break the post-turn path
+                logger.warning(
+                    "flush_session_quiescent raised", exc_info=True)
         except Exception:  # noqa: BLE001 — best-effort forwarding
             logger.exception(
                 "post-turn AgentUIHooks forwarding raised — "

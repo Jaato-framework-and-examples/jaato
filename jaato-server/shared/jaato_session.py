@@ -5918,21 +5918,33 @@ NOTES
                 and not getattr(self, "_session_quiescent_emitted", False)
             ):
                 self._session_quiescent_emitted = True
-                hooks = getattr(self, "_ui_hooks", None) or getattr(
-                    self, "_callbacks", None
-                )
-                if hooks is not None and hasattr(hooks, "on_session_quiescent"):
-                    try:
-                        hooks.on_session_quiescent(
-                            agent_id=self._agent_id,
-                            reason="natural",
-                        )
-                    except Exception as exc:
-                        logger.warning(
-                            "on_session_quiescent hook raised: %s — "
-                            "event emission skipped, session will still "
-                            "wind down correctly", exc,
-                        )
+                # RECORDED AS DUE, NOT EMITTED HERE.
+                #
+                # This runs INSIDE ``send_message``, and every driver fires
+                # ``on_agent_turn_completed`` AFTER ``send_message`` returns.
+                # Emitting here therefore put ``SessionTerminatedEvent``
+                # BEFORE the final ``TurnCompletedEvent`` of the very turn it
+                # is reporting the end of -- measured at 6.92s/6.92s, terminal
+                # first.
+                #
+                # Nothing should follow a terminal event, and something did.
+                # Worse, a consumer acted on it: the daemon's cascade policy
+                # detaches a cid'd session's clients on SessionTerminated to
+                # release its slot, so the TurnCompletedEvent that arrived
+                # afterwards reached NOBODY.  A completion-gated cascade arm
+                # came back turns=0, tokens=0 with its work done and its file
+                # on disk -- a silent zero that reads as "the model did
+                # nothing".
+                #
+                # The session knows WHETHER quiescence is due; only the
+                # driver knows WHEN the turn's own events are finished.  So
+                # the flag is set here and flushed by
+                # :meth:`flush_session_quiescent` after the driver's
+                # turn-completed hook.
+                self._quiescent_due_reason = "natural"
+
+            # (quiescence is flushed by the driver — see
+            # ``flush_session_quiescent``)
 
             # Notify parent that this subagent is now idle
             # IDLE should be sent after COMPLETED (subagent ready for more work/cleanup),
@@ -8841,6 +8853,43 @@ NOTES
         for key, fn in self._state_providers.items():
             snapshot[key] = fn()
         return snapshot
+
+    def flush_session_quiescent(self) -> None:
+        """Emit the pending ``on_session_quiescent`` notification, if any.
+
+        MUST be called by a turn driver AFTER it has fired
+        ``on_agent_turn_completed`` for the turn that just ended.
+
+        ``SessionTerminatedEvent`` is terminal by contract, so it has to be
+        the LAST thing a consumer sees for that session.  It could not be
+        while the session emitted it inline: quiescence is detected inside
+        ``send_message``, and every driver fires the turn-completed hook
+        after ``send_message`` returns.  The terminal event therefore
+        preceded the final turn event of the turn it was reporting.
+
+        Idempotent, and safe to call after every turn: it does nothing unless
+        the agent called ``signal_completion`` during this one.
+
+        A driver that forgets to call it emits no terminal event at all --
+        deliberately louder than the alternative, which was emitting one too
+        early and having a consumer act on it.
+        """
+        reason = getattr(self, "_quiescent_due_reason", None)
+        if reason is None:
+            return
+        self._quiescent_due_reason = None
+        hooks = getattr(self, "_ui_hooks", None) or getattr(
+            self, "_callbacks", None
+        )
+        if hooks is None or not hasattr(hooks, "on_session_quiescent"):
+            return
+        try:
+            hooks.on_session_quiescent(agent_id=self._agent_id, reason=reason)
+        except Exception as exc:  # noqa: BLE001 — a hook must not break wind-down
+            logger.warning(
+                "on_session_quiescent hook raised: %s — event emission "
+                "skipped, session will still wind down correctly", exc,
+            )
 
     def get_turn_accounting(self) -> List[Dict[str, Any]]:
         """Get token usage and timing per turn."""
