@@ -1,0 +1,33 @@
+# Tier-1 base for the 'worker' stage — PROVIDER-AGNOSTIC.
+# Holds stage determinism (plugins, permission policy).  Active model +
+# provider live in profiles/<set>/worker.yaml, selected by
+# JAATO_PROFILE_SET.  This base MUST stay inherit-able (do not bind a
+# provider/model here — that breaks set-selection).
+name: _base_worker
+description: worker stage (base; bind provider/model in a set).
+
+# file_edit is preloaded: writeNewFile is a DISCOVERABLE tool, so under
+# deferred loading the model would have to call list_tools first.  For a
+# smoke test that turns one measurement into two, and a failure to
+# discover would be indistinguishable from a failure to write.
+plugins:
+  - environment
+  - file_edit(preload)
+  - permission
+
+plugin_configs:
+  permission:
+    policy:
+      # allow, and no whitelist.  The PLUGIN LIST above is the tool
+      # surface — there is no shell and no network tool in it.  A
+      # whitelist would restate that boundary in a second place, and
+      # any drift between the two resolves as a denial the model
+      # cannot route around, reported as the model failing.  That is a
+      # broken environment manufacturing a FAIL: neither "the agent did
+      # something wrong" nor "the agent was not exercised", so it lands
+      # in no bucket of the runner's failure taxonomy and averages
+      # straight into the pass rate.
+      #
+      # 'ask' would be worse still: there is no human on this session,
+      # so it hangs the arm until the budget trips.
+      defaultPolicy: allow

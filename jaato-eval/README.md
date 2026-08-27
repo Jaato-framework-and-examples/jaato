@@ -68,7 +68,7 @@ description: Add cursor pagination to an existing Spring REST controller.
 
 environment:
   fixture: fixture            # copied fresh per arm; the agent mutates the copy
-  config_root: config         # read-only: profiles, agents, schemas
+  config_root: .jaato         # read-only: profiles, agents, schemas
                               # do NOT name this `.jaato` — the jaato repo's
                               # root .gitignore excludes that path, and a
                               # task's config root is committed data
@@ -183,10 +183,35 @@ give you, and it costs nothing extra to collect.
 python3 -m unittest discover -s tests -t .      # no daemon, no SDK needed
 ```
 
-69 tests. The runner is covered end-to-end against a stubbed SDK
+80 tests. The runner is covered end-to-end against a stubbed SDK
 (`tests/test_runner_integration.py`) — PASS, FAIL and BLOCKED arms, usage
 accumulation, the `config_root`/workspace split, and `.env` profile-set
 propagation.
+
+### Validated against a live daemon
+
+Both shipped tasks have been run against a real daemon (openrouter /
+`openai/gpt-5-mini`), and each verdict state was reached deliberately
+rather than merely observed:
+
+| Checked | How |
+|---|---|
+| PASS is real | `answer.txt` on disk holding `READY` |
+| FAIL is reachable | grader mutated to expect `STEADY`; arm went FAIL, exit 1 — **not** BLOCKED |
+| the ledger is faithful | `ledger-probe`'s processor grader ran (the gate lets it) and its sabotaged run reported *"the ledger's write calls touched ['answer.txt']"* — a real `writeNewFile`, paired by identifier |
+| BLOCKED is not a dumping ground | pass rate renders `—`, not `0%`, when every arm blocked |
+
+That run is also what found the `tool_use` truncation defect below.
+
+### `finish_reason` is not a completeness signal
+
+A profile with a `completion_payload_schema` ends by calling
+`signal_completion`, which terminates the session on the spot — so the
+terminal turn of a *complete* arm reports `finish_reason="tool_use"`,
+the same value a genuinely truncated arm carries. Graders must read
+`GraderContext.truncation_reason`, which settles it on the declared
+terminus (a payload, or a `"stop"` turn) instead. Reading the raw field
+blocks every schema-driven arm as truncated.
 
 ## Constraint: SDK only
 

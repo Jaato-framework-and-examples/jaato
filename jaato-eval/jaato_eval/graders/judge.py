@@ -69,10 +69,11 @@ class JudgeGrader:
             return blocked(self.spec, "judge grader runs",
                            "manifest grader has no 'profile' key")
 
-        if context.finish_reason != "stop":
+        truncated = context.truncation_reason
+        if truncated:
             return blocked(self.spec, claim,
-                           f"arm ended with finish_reason={context.finish_reason!r}; "
-                           "nothing complete to judge")
+                           f"arm {truncated}; judging a truncated run "
+                           "would score the interruption, not the work")
 
         unmet = self._unmet_gates(context)
         if unmet:

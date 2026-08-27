@@ -33,9 +33,9 @@ class GraderContext:
         history: Raw serialized history, for graders that want it.
         usage: The arm's ``UsageBreakdown`` as a dict (tokens, cost).
         finish_reason: Provider finish reason for the terminal turn.
-            Anything other than ``"stop"`` means the arm was cut short and
-            most graders should return BLOCKED rather than judge a
-            truncated result.
+            Do NOT read this directly to decide whether the arm ran to
+            completion — use :attr:`truncation_reason`.  ``"tool_use"``
+            means two opposite things (see that property).
         turns: How many turns the arm consumed.
         error: Terminal error text, when the arm ended in an error.
         prior_verdicts: ``grader_id`` -> state, for graders already run
@@ -56,6 +56,44 @@ class GraderContext:
     turns: int = 0
     error: Optional[str] = None
     prior_verdicts: Dict[str, str] = field(default_factory=dict)
+
+    @property
+    def truncation_reason(self) -> Optional[str]:
+        """Why this arm never reached a terminus it declared, or ``None``.
+
+        ``finish_reason`` alone cannot answer this, because ``"tool_use"``
+        carries two OPPOSITE meanings.  The provider emits it for "stopped
+        to execute tools" — mid-loop, more turns expected.  But a profile
+        with a ``completion_payload_schema`` ends by calling
+        ``signal_completion``, which terminates the session on the spot, so
+        the terminal turn of a perfectly complete arm ALSO reports
+        ``"tool_use"`` and no further turn arrives to say ``"stop"``.
+        Reading the field directly therefore blocks every schema-driven
+        arm as truncated — which is most of the tasks this engine exists
+        to run.
+
+        The question graders actually need answered is whether the arm
+        reached a terminus it declared, and each profile shape declares a
+        different one:
+
+        - schema profile — the terminus is the completion payload, so a
+          payload's presence settles it regardless of finish reason;
+        - prose profile — the terminus is a turn that ended with no tool
+          calls, i.e. ``"stop"``.
+
+        Anything else (``max_tokens``, ``error``, ``cancelled``,
+        ``safety``, or a bare ``"tool_use"`` with nothing signalled) cut
+        the arm short, and the returned string names which — a BLOCKED
+        verdict has to say what was absent.
+        """
+        if self.payload is not None:
+            return None
+        if self.finish_reason == "stop":
+            return None
+        if self.finish_reason == "tool_use":
+            return ("ended mid-tool-loop (finish_reason='tool_use') having "
+                    "signalled no completion payload")
+        return f"finish_reason={self.finish_reason!r}"
 
     @property
     def tool_calls(self) -> List[Dict[str, Any]]:

@@ -55,10 +55,11 @@ class ScriptGrader:
             return blocked(self.spec, "script grader runs",
                            "manifest grader has no 'run' key")
 
-        if context.finish_reason != "stop":
+        truncated = context.truncation_reason
+        if truncated:
             return blocked(self.spec, claim,
-                           f"arm ended with finish_reason={context.finish_reason!r}; "
-                           "the workspace reflects a truncated run")
+                           f"arm {truncated}; the workspace reflects a "
+                           "truncated run")
 
         if not context.workspace_path.is_dir():
             return blocked(self.spec, claim,

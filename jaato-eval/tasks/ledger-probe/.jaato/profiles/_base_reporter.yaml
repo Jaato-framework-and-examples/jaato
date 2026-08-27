@@ -1,0 +1,37 @@
+# Tier-1 base — PROVIDER-AGNOSTIC.  Bind provider/model in a set.
+name: _base_reporter
+description: writes a file, then reports what it wrote (base).
+
+plugins:
+  - environment
+  - file_edit(preload)
+  - permission
+
+plugin_configs:
+  permission:
+    policy:
+      # See tasks/example-echo — the plugin list is the tool surface; a
+      # whitelist would be a second, drifting copy of it.
+      defaultPolicy: allow
+
+# The payload is what the processor grader cross-examines against the
+# ledger.  warnings[]/errors[] are the standing escape hatches: without
+# them a model with something to report has only the choice of inventing
+# a field or staying silent.
+completion_payload_schema:
+  type: object
+  additionalProperties: false
+  required: [file_written, content]
+  properties:
+    file_written:
+      type: string
+      description: Path of the file you created, relative to the workspace root.
+    content:
+      type: string
+      description: The exact contents you wrote into it.
+    warnings:
+      type: array
+      items: {type: string}
+    errors:
+      type: array
+      items: {type: string}

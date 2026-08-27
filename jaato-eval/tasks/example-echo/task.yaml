@@ -12,7 +12,7 @@ description: >
 
 environment:
   fixture: fixture
-  config_root: config
+  config_root: .jaato
   apparmor: false
   runtime_limits:
     tool_timeout_seconds: 60
