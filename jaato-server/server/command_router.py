@@ -1980,6 +1980,26 @@ class CommandRouter:
                 "type": "function_call",
                 "name": fc.name if hasattr(fc, 'name') else str(fc),
                 "args": fc.args if hasattr(fc, 'args') else {},
+                # THE IDENTIFIER IS ``fc.id`` HERE AND ``fr.call_id`` BELOW.
+                #
+                # Emitted under the response branch's key so the two Parts
+                # can be paired on the wire, which is what
+                # ``build_tool_call_ledger`` does in-process
+                # (``getattr(fc, "id")`` against ``getattr(fr, "call_id")``).
+                # Without it the call side carried NO identifier at all, so a
+                # client reading ``request_history`` could not rebuild the
+                # ledger that completion processors receive as
+                # ``context.tool_calls``.
+                #
+                # Writing ``getattr(fc, "call_id", "")`` here -- mirroring the
+                # branch below, which is the obvious thing to write -- would
+                # emit the empty string FOREVER: ``FunctionCall`` has no such
+                # field.  That is the same failure as the repr bug this
+                # function already carries a comment about, in the same
+                # function: a wrong attribute name and an absent one are
+                # indistinguishable to ``getattr``, and the fallback produces
+                # something that looks like a value.
+                "call_id": getattr(fc, 'id', ''),
             }
         elif hasattr(part, 'function_response') and part.function_response:
             fr = part.function_response
