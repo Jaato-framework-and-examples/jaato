@@ -203,6 +203,45 @@ rather than merely observed:
 
 That run is also what found the `tool_use` truncation defect below.
 
+## Every result records which code it exercised
+
+The branch does not determine what a sweep ran. An editable install resolves
+`jaato_sdk` through a MetaPathFinder to wherever it was installed *from* — for
+a git worktree that is the original checkout, so a branch can ship its own
+`jaato-sdk/` and never run a line of it. The recorded version is no better: an
+editable install stamps the version at install time.
+
+So each result carries a `provenance` block read from the live process:
+
+```json
+"provenance": {
+  "jaato_sdk_path": ".../jaato/jaato-sdk/jaato_sdk/__init__.py",
+  "jaato_sdk_version": "0.15.0"
+}
+```
+
+That example is real, and it is the point: the path is the main checkout while
+the sweep ran from a worktree, and the version reads 0.15.0 while that
+checkout's `pyproject.toml` says 0.16.0. A sweep's numbers are evidence about
+the code that ran, and nothing in the repository state establishes which code
+that was.
+
+## Reproducing daemon behaviour
+
+`tools/repro_cascade_event_routing.py` runs five scenarios against a live
+daemon and prints the events each one actually received — with and without a
+cascade id, with and without an observer registration, and through both the
+facade and `send_message`. It exists because a description of an event-routing
+bug is not checkable and a script is.
+
+Two things in it are load-bearing and commented as such: it waits on events
+rather than sleeping (a sleep short enough to keep it quick is also short
+enough to make a slow turn look like a missing event), and its prompt drives
+the profile to its **declared terminus**. A prompt the model can answer in
+prose ends with `finish_reason="stop"` and never calls `signal_completion` —
+and the routing difference under test only appears on the terminus path, so a
+chatty prompt makes every scenario pass while testing nothing.
+
 ## Two budget gates, and they are independent
 
 jaato has two budget mechanisms. A sweep wants both, for different reasons,

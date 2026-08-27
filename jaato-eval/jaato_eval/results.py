@@ -84,3 +84,4 @@ def merge(stores: Iterable["ResultStore"]) -> List[Dict[str, Any]]:
         for record in store.iter_records():
             merged[record.get("arm_id", "")] = record
     return list(merged.values())
+

@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from .manifest import TaskManifest
+from .provenance import provenance
 from .verdict import BLOCKED, Report, Verdict
 
 
@@ -101,4 +102,7 @@ class ArmResult:
             "finish_reason": self.finish_reason,
             "payload_hash": self.payload_hash,
             "error": self.error,
+            # Which code this arm actually exercised.  The branch does not
+            # determine it — see results.provenance.
+            "provenance": provenance(),
         }
