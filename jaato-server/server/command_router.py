@@ -1423,6 +1423,34 @@ class CommandRouter:
     # Daemon plugin commands
     # ------------------------------------------------------------------
 
+        else:
+            # ANSWER, OR SAY WHY.  This guard used to fall through to the
+            # end of the method and emit NOTHING, so a client could not tell
+            # "no history" from "not your session" and simply waited out its
+            # own timeout.  Absent and empty, collapsed on the wire.
+            #
+            # It is reachable in normal operation, not just on misuse: the
+            # cascade policy detaches a cid-stamped session's clients when it
+            # terminates (to release its slot), so a driver asking for the
+            # ledger of the arm that just finished arrives AFTER the
+            # detach and finds no session of its own.
+            #
+            # ``recoverable=True`` because the connection is fine -- this is
+            # an answer about one request, not a transport failure.
+            from jaato_sdk.events import ErrorEvent
+            self._event_sink.send_event(client_id, ErrorEvent(
+                error=(
+                    "history is unavailable: this connection has no session "
+                    "attached. A cascade session is detached from its "
+                    "creator when it terminates, so its history must be "
+                    "fetched before termination or read from the persisted "
+                    "session record."
+                ),
+                error_type="NoAttachedSession",
+                recoverable=True,
+                request_id=getattr(event, "request_id", None),
+            ))
+
     def _find_daemon_plugin_for_command(self, command: str):
         """Find a daemon-level plugin that provides a user command.
 
