@@ -73,11 +73,85 @@ class _TerminatedEvent:
         self.error_summary = error_summary
 
 
+class _ErrorEvent:
+    """Mirrors ``ErrorEvent``'s consumed surface.
+
+    A cascade pool refusing a spawn arrives this way and ONLY this way:
+    ``create_session`` still hands back a session id for the refused
+    session, so a stub that only made create raise would test a path the
+    daemon does not take.
+    """
+
+    def __init__(self, error_type, error=""):
+        self.error_type = error_type
+        self.error = error
+
+
 class _FakeClient:
-    def __init__(self, workspace, behaviour):
-        self.workspace = Path(workspace)
-        self.behaviour = behaviour
+    """Stands in for ``IPCClient`` in both roles the engine uses.
+
+    Arm side: connect -> subscribe -> create_session -> Session.  Owner
+    side: connect -> cascade_budget_set.  One class, as in the real SDK.
+    """
+
+    def __init__(self, **kwargs):
+        self.kwargs = kwargs
+        self.behaviour = _BEHAVIOUR[0]
+        self.workspace = Path(kwargs["workspace_path"]) if kwargs.get(
+            "workspace_path") else None
         self._handlers = {}
+        self.is_owner = False
+        self.created = False
+        self.disconnected = False
+        self.behaviour.setdefault("clients", []).append(self)
+
+    async def connect(self, timeout=None):
+        self.behaviour.setdefault("connected", []).append(timeout)
+        return True
+
+    async def disconnect(self):
+        self.disconnected = True
+
+    async def cascade_register(self, cid, role="observer", event_types=None):
+        """Arms must observe their cid or the daemon sends them nothing.
+
+        A cid'd session's events fan out to the cid's registered
+        cascade-clients rather than to the connection that created it.
+        Recorded so a test can hold that this happens, and BEFORE create.
+        """
+        self.behaviour.setdefault("observers", []).append(
+            {"cid": cid, "role": role,
+             "event_types": [getattr(e, "__name__", e) for e in (event_types or [])],
+             # Per-CLIENT, not per-behaviour: the behaviour dict is shared
+             # across a sweep's arms, so a global flag would read False for
+             # every arm after the first and quietly stop testing anything.
+             "before_create": not self.created})
+
+    async def cascade_budget_set(self, cid, limits, degrade=None):
+        # Marks this client as the pool owner, so a test can assert the
+        # OWNER was closed rather than merely that something was.
+        self.is_owner = True
+        self.behaviour.setdefault("pools", []).append(
+            {"cid": cid, "limits": limits, "degrade": degrade})
+
+    async def create_session(self, **create_kwargs):
+        self.behaviour["seen_kwargs"] = {**self.kwargs, **create_kwargs}
+        # Snapshot WHICH events were already subscribed.  With a
+        # cascade_driver_id the daemon delivers nothing to a client that
+        # subscribes after this point, so the order is load-bearing and a
+        # set captured here is the only way a stub can hold it.
+        self.behaviour["subscribed_before_create"] = set(self._handlers)
+        self.created = True
+        refuse = self.behaviour.get("refuse_spawn")
+        if refuse:
+            # Dispatched to handlers BEFORE the sid is returned — the
+            # ordering the SDK pins, and the reason a handler subscribed
+            # before create can latch the refusal at all.
+            self._emit("ERROR", _ErrorEvent(
+                refuse, "cascade has no headroom left on tokens"))
+        if self.behaviour.get("raise"):
+            raise RuntimeError(self.behaviour["raise"])
+        return "sid-1"
 
     def subscribe(self, event_type, handler):
         self._handlers.setdefault(event_type, []).append(handler)
@@ -94,13 +168,14 @@ class _FakeClient:
 
 
 class _FakeSession:
-    def __init__(self, client):
+    """Stands in for ``convenience.Session`` — owns ``complete()``."""
+
+    def __init__(self, client, session_id=None, on_permission=None):
         self.client = client
+        self.session_id = session_id
 
     async def complete(self, prompt):
         b = self.client.behaviour
-        if b.get("raise"):
-            raise RuntimeError(b["raise"])
         if b.get("writes") is not None:
             (self.client.workspace / "answer.txt").write_text(b["writes"])
         self.client._emit("TURN_COMPLETED",
@@ -114,42 +189,44 @@ class _FakeSession:
         return b.get("payload")
 
 
+#: The behaviour dict the fakes read.  A one-slot box rather than a
+#: constructor argument, because the engine now builds its own clients and
+#: the stub cannot hand them anything.
+_BEHAVIOUR = [{}]
+
+
 #: Module names the stub occupies.  Tracked so teardown restores exactly
 #: what was displaced instead of wiping the namespace — another test may
 #: have loaded the real completion_processors from the checkout.
 _STUBBED = ("jaato_sdk", "jaato_sdk.client", "jaato_sdk.client.ipc",
-            "jaato_sdk.events")
+            "jaato_sdk.client.convenience", "jaato_sdk.events")
 
 
 def _install_stub_sdk(behaviour):
     """Put a minimal jaato_sdk into sys.modules for the duration of a test."""
-    class _Ctx:
-        def __init__(self, kwargs):
-            self.kwargs = kwargs
-
-        async def __aenter__(self):
-            client = _FakeClient(self.kwargs["workspace_path"], behaviour)
-            behaviour["seen_kwargs"] = self.kwargs
-            return _FakeSession(client)
-
-        async def __aexit__(self, *exc):
-            return False
-
-    class _IPCClient:
-        @staticmethod
-        def session(**kwargs):
-            return _Ctx(kwargs)
+    _BEHAVIOUR[0] = behaviour
 
     sdk = types.ModuleType("jaato_sdk")
     client_mod = types.ModuleType("jaato_sdk.client")
     ipc_mod = types.ModuleType("jaato_sdk.client.ipc")
-    ipc_mod.IPCClient = _IPCClient
+    ipc_mod.IPCClient = _FakeClient
+    conv_mod = types.ModuleType("jaato_sdk.client.convenience")
+    conv_mod.Session = _FakeSession
     events_mod = types.ModuleType("jaato_sdk.events")
     events_mod.EventType = types.SimpleNamespace(
         TURN_COMPLETED="TURN_COMPLETED", HISTORY="HISTORY",
-        SESSION_TERMINATED="SESSION_TERMINATED")
+        SESSION_TERMINATED="SESSION_TERMINATED", ERROR="ERROR",
+        AGENT_ERROR="AGENT_ERROR")
+    events_mod.ClientType = types.SimpleNamespace(API="API")
+    # The event CLASSES the engine names when registering as a cascade
+    # observer.  cascade_register filters on type-name, so the stub only
+    # needs objects whose __name__ matches.
+    for cls_name in ("TurnCompletedEvent", "HistoryEvent",
+                     "SessionTerminatedEvent", "ErrorEvent"):
+        setattr(events_mod, cls_name, type(cls_name, (), {}))
     for name, mod in (("jaato_sdk", sdk), ("jaato_sdk.client", client_mod),
                       ("jaato_sdk.client.ipc", ipc_mod),
+                      ("jaato_sdk.client.convenience", conv_mod),
                       ("jaato_sdk.events", events_mod)):
         sys.modules[name] = mod
 
@@ -183,6 +260,7 @@ class RunnerCase(unittest.TestCase):
 
     def _run(self, behaviour, **kw):
         from jaato_eval.runner import run_arm
+        self.behaviour = behaviour
         _install_stub_sdk(behaviour)
         spec = ArmSpec(task=self.task, profile_set="cheap", repeat=0)
         return asyncio.run(run_arm(spec, workspace_root=self.root / "ws", **kw))
@@ -232,6 +310,34 @@ class RunnerCase(unittest.TestCase):
         """reason='natural' is every healthy session; it must stay silent."""
         result = self._run({"writes": "READY\n", "termination_reason": "natural"})
         self.assertEqual(result.state, PASS)
+
+    def test_pool_refusal_names_the_pool_not_a_daemon_fault(self):
+        """An exhausted pool and a broken daemon are opposite calls to action.
+
+        Both arrive as an exception out of session creation; only
+        ``error_type`` separates "the ceiling I declared did its job" from
+        "go look at the daemon".
+        """
+        result = self._run({"refuse_spawn": "CascadeExhaustedError"})
+        self.assertEqual(result.state, BLOCKED)
+        self.assertIn("cascade budget pool is exhausted", result.blocked_reason)
+
+    def test_refusal_of_an_unstated_type_is_not_given_one(self):
+        """A refusal the daemon did not type must not be guessed at."""
+        result = self._run({"raise": "daemon unreachable"})
+        self.assertEqual(result.state, BLOCKED)
+        self.assertNotIn("cascade", result.blocked_reason.lower())
+
+    def test_cascade_id_reaches_the_session(self):
+        result = self._run({"writes": "READY\n"}, cascade_driver_id="cid-42")
+        self.assertEqual(result.state, PASS)
+        self.assertEqual(self.behaviour["seen_kwargs"]["cascade_driver_id"],
+                         "cid-42")
+
+    def test_no_cascade_id_means_no_kwarg(self):
+        """An un-pooled arm must not send an empty cid the daemon would read."""
+        self._run({"writes": "READY\n"})
+        self.assertNotIn("cascade_driver_id", self.behaviour["seen_kwargs"])
 
     def test_profile_set_reaches_the_env_file(self):
         """The sweep's model axis travels via .env in the workspace."""

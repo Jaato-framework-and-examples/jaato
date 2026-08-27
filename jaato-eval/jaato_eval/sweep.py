@@ -30,6 +30,7 @@ from typing import Callable, List, Optional, Sequence
 
 from .arm import ArmResult, ArmSpec
 from .manifest import TaskManifest
+from .pool import CascadePools
 from .results import ResultStore
 from .runner import run_arm
 
@@ -100,11 +101,18 @@ async def run_sweep(arms: Sequence[ArmSpec], *, store: ResultStore,
     results: List[ArmResult] = []
     lock = asyncio.Lock()
 
-    async def one(spec: ArmSpec) -> None:
+    # One pool per budgeted task, declared before any arm starts and owned
+    # for the whole sweep: a cascade pool belongs to the connection that
+    # declared it, so an owner opened and closed around a single arm would
+    # take the pool with it.
+    tasks = {a.task.task_id: a.task for a in todo}
+
+    async def one(spec: ArmSpec, pools: CascadePools) -> None:
         async with semaphore:
             result = await run_arm(
                 spec, workspace_root=workspace_root,
-                socket_path=socket_path, keep_workspace=keep_workspaces)
+                socket_path=socket_path, keep_workspace=keep_workspaces,
+                cascade_driver_id=pools.cid_for(spec.task.task_id))
         # Serialise the append: JSONL tolerates interleaved *records* but
         # not interleaved *bytes* from concurrent writers.
         async with lock:
@@ -113,5 +121,7 @@ async def run_sweep(arms: Sequence[ArmSpec], *, store: ResultStore,
             if on_result is not None:
                 on_result(result)
 
-    await asyncio.gather(*(one(spec) for spec in todo))
+    async with CascadePools(list(tasks.values()), socket_path=socket_path,
+                            workspace_path=str(workspace_root)) as pools:
+        await asyncio.gather(*(one(spec, pools) for spec in todo))
     return results

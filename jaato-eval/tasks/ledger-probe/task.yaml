@@ -30,9 +30,11 @@ input:
 harness:
   profile: reporter
 
-budget:
-  usd: 0.05
-  turns: 8
+# No `budget:` pool here, and that is forced rather than stylistic: a
+# pooled arm's events go to the cid's cascade-clients and its history
+# request goes unanswered, so it has NO ledger — and this task grades the
+# agent's report AGAINST the ledger.  Its ceiling is per-arm instead, in
+# .jaato/profiles/_base_reporter.yaml.  example-echo carries the pool.
 
 graders:
   # The artefact check, as in example-echo: necessary, not sufficient.

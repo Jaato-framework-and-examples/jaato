@@ -203,6 +203,45 @@ rather than merely observed:
 
 That run is also what found the `tool_use` truncation defect below.
 
+## Two budget gates, and they are independent
+
+jaato has two budget mechanisms. A sweep wants both, for different reasons,
+and they do not compose on one session.
+
+| | per-arm ceiling | task pool |
+|---|---|---|
+| declared in | the arm's profile, `budget_control:` | the manifest's `budget:` |
+| scope | one session, its own books | every arm of the task (repeats × sets) |
+| clamped by a pool? | never | n/a |
+| depletes a pool? | never | yes |
+| engine code | none — the daemon enforces it | `jaato_eval/pool.py` |
+
+A session carrying its own `budget_control` **does not draw on a pool**, so
+declaring both leaves the pool untouched. That is the framework's rule, not
+this engine's. Verified live: two arms passed on a 5000-token pool that could
+not fund one of them, because each ran on its profile's own 60000 ceiling.
+
+An arm stopped by either gate is BLOCKED, never FAIL — it produced no signal
+about the thing under test. A pool with no headroom refuses the spawn, and the
+verdict names the pool.
+
+### A pooled arm has no tool-call ledger
+
+A session stamped with a cascade id has its events fanned out to the cid's
+registered **cascade-clients** rather than to the connection that created it.
+The engine registers each pooled arm as an observer (`cascade_register`), which
+restores the turn stream — but a history request from that connection still
+goes unanswered, so a pooled arm's ledger is **absent**.
+
+Absent is not empty, and the engine keeps them apart: `build_ledger_result`
+returns unfaithful with a reason, and ledger-reading graders BLOCK. Collapsing
+the two produced a real fabricated verdict — *"the agent reports writing
+answer.txt but the ledger holds no call to writeNewFile"*, about an agent that
+had written the file in a call the engine simply never saw.
+
+So a task that grades against the ledger uses the per-arm ceiling, not a pool.
+`tasks/example-echo` carries the pool; `tasks/ledger-probe` carries the ceiling.
+
 ### `finish_reason` is not a completeness signal
 
 A profile with a `completion_payload_schema` ends by calling

@@ -110,7 +110,8 @@ class _TurnAccumulator:
 
 async def run_arm(spec: ArmSpec, *, workspace_root: Path,
                   socket_path: Optional[str] = None,
-                  keep_workspace: bool = False) -> ArmResult:
+                  keep_workspace: bool = False,
+                  cascade_driver_id: Optional[str] = None) -> ArmResult:
     """Execute and grade one arm.
 
     Args:
@@ -119,6 +120,11 @@ async def run_arm(spec: ArmSpec, *, workspace_root: Path,
         socket_path: Daemon IPC socket; ``None`` uses the client default.
         keep_workspace: Leave the workspace on disk after grading.  Set
             when a human needs to inspect what the agent actually did.
+        cascade_driver_id: The task's cascade pool (see
+            :mod:`jaato_eval.pool`).  ``None`` runs the arm un-pooled.
+            An arm whose profile declares its own ``budget_control`` is on
+            its own books and does not draw on the pool even when given
+            one — that is the framework's rule, not this engine's.
 
     Returns:
         An :class:`ArmResult`, always — this coroutine does not raise for
@@ -141,9 +147,10 @@ async def run_arm(spec: ArmSpec, *, workspace_root: Path,
     started = time.monotonic()
     try:
         payload, accumulator, history = await _run_session(
-            spec, workspace, socket_path=socket_path)
+            spec, workspace, socket_path=socket_path,
+            cascade_driver_id=cascade_driver_id)
     except Exception as exc:  # noqa: BLE001 — any session failure is BLOCKED
-        result.blocked_reason = f"session: {exc!r}"
+        result.blocked_reason = _describe_session_failure(exc)
         result.duration_seconds = time.monotonic() - started
         if not keep_workspace:
             discard(workspace)
@@ -198,8 +205,146 @@ async def _grade(task, context: GraderContext) -> List[Verdict]:
     return verdicts
 
 
+def _describe_session_failure(exc: Exception) -> str:
+    """Name the failure, and name a pool refusal as itself.
+
+    The daemon states WHY it refused in ``SessionRefused.error_type``; a
+    cascade pool with no headroom refuses the spawn rather than starting
+    a session that cannot run a turn.  Reported as a bare ``repr`` that
+    reads as an unexplained daemon failure — the operator cannot tell "the
+    pool I declared did its job" from "the daemon is broken", which are
+    opposite calls to action.
+
+    The type is read, never inferred: a refusal whose type the daemon did
+    not supply keeps its generic description rather than being given a
+    likely-looking one.
+    """
+    if isinstance(exc, PoolRefused):
+        return (f"spawn refused: the task's cascade budget pool is exhausted "
+                f"({exc}) — no arm was started, so this says nothing about "
+                f"the configuration under test")
+    error_type = getattr(exc, "error_type", None)
+    if error_type and "CascadeExhausted" in str(error_type):
+        return (f"spawn refused: the task's cascade budget pool is exhausted "
+                f"({error_type}) — no arm was started, so this says nothing "
+                f"about the configuration under test")
+    if error_type:
+        return f"session refused by the daemon ({error_type}): {exc}"
+    return f"session: {exc!r}"
+
+
+class PoolRefused(RuntimeError):
+    """The task's cascade pool had no headroom and refused this spawn."""
+
+
+class _ArmSession:
+    """``IPCClient.session`` with the one hook the facade does not offer.
+
+    A cascade pool that refuses a spawn announces it as an ``ERROR`` event
+    carrying ``error_type="CascadeExhaustedError"`` — and ``create_session``
+    still returns a session id for the refused session.  Verified live: a
+    spawn into an exhausted pool comes back with a perfectly ordinary sid,
+    then dies thirty seconds later on a generic "session runner not ready"
+    timeout that names nothing.
+
+    So the refusal is only visible to a handler subscribed BEFORE
+    ``create_session``, which the facade gives no way to install (it
+    connects and creates inside ``__aenter__``).  This mirrors
+    ``_SessionContext`` — including disconnecting on any exception out of
+    create, which is where the facade's own comment records a leak it had
+    to fix — and adds the subscription.  The send-and-wait recipe still
+    comes from the public ``Session`` wrapper, so PR #399's
+    SESSION_TERMINATED-only hang is not reproduced here.
+
+    The SDK pins the ordering this relies on: handlers are dispatched
+    before ``create_session``'s waiter is released, so a refusal is
+    already latched by the time the sid is in hand.
+    """
+
+    def __init__(self, kwargs: Dict[str, Any],
+                 handlers: Dict[str, Any]) -> None:
+        self._kwargs = dict(kwargs)
+        self._handlers = dict(handlers)
+        self._client: Any = None
+        self.refusal: Optional[str] = None
+
+    async def __aenter__(self):
+        """Connect, subscribe, create — and in that order.
+
+        The ORDER is required for the refusal watch and only for it: a
+        cascade pool with no headroom announces the refusal while
+        ``create_session`` is still in flight, so a handler installed
+        afterwards never sees it.  The other subscriptions go in here for
+        consistency rather than necessity — moving them after create was
+        tried against a live daemon and changed nothing, which is worth
+        recording so the next reader does not re-derive it.
+
+        What DOES restore a pooled arm's turn stream is the observer
+        registration below; the two were tested separately.
+        """
+        from jaato_sdk.client.convenience import Session
+        from jaato_sdk.client.ipc import IPCClient
+        from jaato_sdk.events import ClientType, EventType
+
+        create_keys = ("profile", "agent", "agent_params", "cascade_driver_id")
+        create_kwargs = {k: v for k, v in self._kwargs.items() if k in create_keys}
+        ctor_kwargs = {k: v for k, v in self._kwargs.items() if k not in create_keys}
+        ctor_kwargs.setdefault("client_type", ClientType.API)
+
+        self._client = IPCClient(**ctor_kwargs)
+        if not await self._client.connect(timeout=120):
+            raise ConnectionError(
+                "could not connect to / autostart the jaato daemon — "
+                "run `python -m jaato_sdk.doctor`")
+
+        def on_error(event: Any) -> None:
+            error_type = str(getattr(event, "error_type", "") or "")
+            if "CascadeExhausted" in error_type:
+                self.refusal = (str(getattr(event, "error", "")) or error_type)
+
+        for event_type in (EventType.ERROR, EventType.AGENT_ERROR):
+            self._client.subscribe(event_type, on_error)
+        for name, handler in self._handlers.items():
+            self._client.subscribe(getattr(EventType, name), handler)
+
+        # A session stamped with a cascade id has its events fanned out to
+        # the cid's registered CASCADE-CLIENTS, not to the connection that
+        # created it: measured, such an arm delivered only
+        # AgentStatusChangedEvent and AgentOutputEvent, so it came back
+        # turns=0, tokens=0 with an empty ledger while its file was written
+        # and its completion payload arrived.  A silent zero that reads as
+        # "the model did nothing".  Registering as an observer for the cid
+        # is what puts the turn stream back.  Arms register as observers,
+        # never owner — a cid admits one owner, and N arms share a cid.
+        cid = create_kwargs.get("cascade_driver_id")
+        if cid:
+            from jaato_sdk.events import (ErrorEvent, HistoryEvent,
+                                          SessionTerminatedEvent,
+                                          TurnCompletedEvent)
+            await self._client.cascade_register(
+                cid, "observer",
+                [TurnCompletedEvent, HistoryEvent, SessionTerminatedEvent,
+                 ErrorEvent])
+
+        try:
+            sid = await self._client.create_session(**create_kwargs)
+        except BaseException:
+            await self._client.disconnect()
+            raise
+        if self.refusal:
+            await self._client.disconnect()
+            raise PoolRefused(self.refusal)
+        return Session(self._client, sid)
+
+    async def __aexit__(self, *exc: Any) -> bool:
+        if self._client is not None:
+            await self._client.disconnect()
+        return False
+
+
 async def _run_session(spec: ArmSpec, workspace: Workspace, *,
-                       socket_path: Optional[str]):
+                       socket_path: Optional[str],
+                       cascade_driver_id: Optional[str] = None):
     """Open the session, send the prompt, return payload + facts + history.
 
     The ``.env`` written into the workspace carries ``JAATO_PROFILE_SET``;
@@ -207,9 +352,6 @@ async def _run_session(spec: ArmSpec, workspace: Workspace, *,
     the sweep's model axis reaches profile discovery without the engine
     having to mutate the task's own configuration.
     """
-    from jaato_sdk.client.ipc import IPCClient
-    from jaato_sdk.events import EventType
-
     task = spec.task
     kwargs: Dict[str, Any] = {
         "profile": task.harness.profile,
@@ -225,36 +367,40 @@ async def _run_session(spec: ArmSpec, workspace: Workspace, *,
         kwargs["apparmor"] = True
     if socket_path:
         kwargs["socket_path"] = socket_path
+    if cascade_driver_id:
+        kwargs["cascade_driver_id"] = cascade_driver_id
 
     accumulator = _TurnAccumulator()
-    history: List[Dict[str, Any]] = []
+    # None until a HistoryEvent actually lands.  Seeding this with [] would
+    # make "no history arrived" indistinguishable from "the agent made no
+    # tool calls" — see build_ledger_result on why that difference decides
+    # whether a verdict is about the agent or about this engine.
+    history: Optional[List[Dict[str, Any]]] = None
+    history_ready = asyncio.Event()
 
-    async with IPCClient.session(**kwargs) as session:
+    def on_history(event: Any) -> None:
+        nonlocal history
+        history = list(getattr(event, "history", []) or [])
+        history_ready.set()
+
+    handlers = {
+        "TURN_COMPLETED": accumulator.on_turn,
+        "SESSION_TERMINATED": accumulator.on_terminated,
+        "HISTORY": on_history,
+    }
+
+    async with _ArmSession(kwargs, handlers) as session:
         client = session.client
-        unsub_turn = client.subscribe(EventType.TURN_COMPLETED, accumulator.on_turn)
-        unsub_term = client.subscribe(EventType.SESSION_TERMINATED,
-                                      accumulator.on_terminated)
-
-        history_ready = asyncio.Event()
-
-        def on_history(event: Any) -> None:
-            history.extend(getattr(event, "history", []) or [])
-            history_ready.set()
-
-        unsub_history = client.subscribe_once(EventType.HISTORY, on_history)
+        payload = await session.complete(task.input.prompt)
+        await client.request_history()
         try:
-            payload = await session.complete(task.input.prompt)
-            await client.request_history()
-            try:
-                await asyncio.wait_for(history_ready.wait(), timeout=30)
-            except asyncio.TimeoutError:
-                # No history means graders that need the ledger will find
-                # it empty and unfaithful, and will BLOCK — which is the
-                # correct outcome, not a reason to fail the arm here.
-                pass
-        finally:
-            unsub_turn()
-            unsub_term()
-            unsub_history()
+            await asyncio.wait_for(history_ready.wait(), timeout=30)
+        except asyncio.TimeoutError:
+            # ``history`` stays None, so the ledger comes back UNFAITHFUL
+            # and ledger-reading graders BLOCK.  This comment used to claim
+            # that outcome while the code seeded history with [] — which
+            # the ledger judged faithful-and-empty, so those graders ran on
+            # a phantom and returned FAIL about the agent instead.
+            pass
 
     return payload, accumulator, history

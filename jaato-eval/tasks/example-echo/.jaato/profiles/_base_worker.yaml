@@ -31,3 +31,8 @@ plugin_configs:
       # 'ask' would be worse still: there is no human on this session,
       # so it hangs the arm until the budget trips.
       defaultPolicy: allow
+
+# NO budget_control — deliberately.  A session carrying one is on its own
+# books and does not draw on a cascade pool, which would leave this task's
+# `budget:` pool untouched and its demonstration inert.  The per-arm
+# ceiling is shown in tasks/ledger-probe instead.

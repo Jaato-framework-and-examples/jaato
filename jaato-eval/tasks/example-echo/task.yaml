@@ -26,9 +26,21 @@ input:
 harness:
   profile: worker
 
+# THE TASK POOL — the cascade gate, shared by every arm of this task
+# (repeats x profile sets), so `repeats: N` cannot run away and no task can
+# starve another.  Arms are clamped at spawn, degraded at a rung, and
+# refused outright once it is empty.
+#
+# This task can afford a pool because its grader reads the FILESYSTEM.  A
+# pooled arm's events are fanned out to the cid's cascade-clients rather
+# than to the connection that created it, and a history request from that
+# connection goes unanswered — so a pooled arm has no tool-call ledger.
+# tasks/ledger-probe therefore uses the other gate.  See jaato_eval/pool.py.
 budget:
-  usd: 0.05
-  turns: 8
+  usd: 0.10
+  degrade:
+    - at: 100%
+      action: abort
 
 graders:
   - kind: script

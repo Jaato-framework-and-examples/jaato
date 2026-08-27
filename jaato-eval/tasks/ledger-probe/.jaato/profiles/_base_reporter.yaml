@@ -35,3 +35,18 @@ completion_payload_schema:
     errors:
       type: array
       items: {type: string}
+
+# THE PER-ARM CEILING — the profile gate.  A session carrying
+# budget_control is a delegation with its OWN BOOKS: it runs with exactly
+# what it declares, is never clamped to a cascade pool's remainder and
+# never depletes one.  That is what an arm needs, since an arm whose
+# ceiling moved with what earlier arms spent would not be a reproducible
+# measurement.  The engine does nothing for this gate — the daemon
+# enforces it, and an arm stopped by it comes back BLOCKED naming it.
+budget_control:
+  limits:
+    usd: 0.05
+    turns: 8
+  degrade:
+    - at: 100%
+      action: abort

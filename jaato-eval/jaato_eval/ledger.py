@@ -35,7 +35,7 @@ guard now, not a capability gap.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 
 @dataclass(frozen=True)
@@ -79,11 +79,22 @@ def history_carries_call_ids(history: List[Dict[str, Any]]) -> bool:
     return True
 
 
-def build_ledger_result(history: List[Dict[str, Any]]) -> LedgerResult:
+def build_ledger_result(
+        history: Optional[List[Dict[str, Any]]]) -> LedgerResult:
     """Build the ledger via the SDK and judge whether it can be graded on.
 
     Args:
-        history: ``HistoryEvent.history`` — serialized Message dicts.
+        history: ``HistoryEvent.history`` — serialized Message dicts — or
+            ``None`` when no ``HistoryEvent`` ever arrived.  The two are
+            NOT the same and must not share a representation: an empty
+            list means the agent made no tool calls, and grading on that
+            is correct; ``None`` means the engine never learned what the
+            agent did, and grading on it fabricates a verdict about the
+            model out of the engine's own blind spot.  Measured: a pooled
+            arm whose history request went unanswered produced "the agent
+            reports writing answer.txt but the ledger holds no call to any
+            of (writeNewFile, ...)" — about an agent that had written the
+            file, in a call the engine simply never saw.
 
     Returns:
         A :class:`LedgerResult`.  ``faithful`` is the gate; consult it
@@ -95,6 +106,14 @@ def build_ledger_result(history: List[Dict[str, Any]]) -> LedgerResult:
         against a mismatched install degrades to BLOCKED arms instead of
         dying — the same rule the rest of this package follows.
     """
+    if history is None:
+        return LedgerResult(
+            faithful=False,
+            reason="no HistoryEvent arrived, so there is no ledger to grade "
+                   "on — an absent history is not an empty one, and the "
+                   "difference is whether a 'never called it' verdict is "
+                   "about the agent or about this engine")
+
     try:
         from jaato_sdk.completion_processors import build_ledger
     except ImportError as exc:

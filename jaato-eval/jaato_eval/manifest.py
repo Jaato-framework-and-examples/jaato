@@ -123,15 +123,39 @@ class GraderSpec:
 
 @dataclass(frozen=True)
 class BudgetSpec:
-    """Per-arm ceilings.
+    """The task's CASCADE POOL — an aggregate over all of its arms.
 
-    A runaway arm must not be able to consume the sweep's whole budget.
-    Dimensions mirror the framework's ``budget_control.limits``: usd,
-    tokens, seconds, tool_calls, turns.  An arm that trips a ceiling is
-    BLOCKED, not FAIL — it produced no signal about the thing under test.
+    This is **not** the per-arm ceiling.  jaato has two independent budget
+    gates and this block drives only the second:
+
+    - **per-arm ceiling** — ``budget_control:`` in the arm's own profile,
+      under the task's ``config_root``.  A session carrying one is on its
+      own books: never clamped to a pool's remainder, never depleting it.
+      That is what an arm needs, since an arm whose ceiling moved with
+      what earlier arms spent would not be a reproducible measurement.
+      The engine does nothing for this gate — the daemon enforces what the
+      profile declares.
+    - **this pool** — shared by the task's arms (repeats × profile sets),
+      so ``repeats: 20`` cannot run away and no task can starve another.
+      Arms drawing on it are clamped at spawn, degraded mid-flight at a
+      rung, and refused once it is empty.
+
+    A session declaring its own ``budget_control`` does not draw here.  So
+    a task whose profiles all carry ceilings will leave its pool untouched
+    — correct, and worth knowing before reading an untouched pool as
+    evidence that nothing ran.
+
+    ``limits`` dimensions mirror ``budget_control.limits``: usd, tokens,
+    seconds, tool_calls, turns.  ``degrade`` is the optional rung ladder,
+    same grammar as a profile's — each entry an ``at:`` percentage plus
+    either ``model_tiers:`` (brownout) or ``action: abort``.
+
+    An arm stopped by either gate is BLOCKED, not FAIL: it produced no
+    signal about the thing under test.
     """
 
     limits: Dict[str, float] = field(default_factory=dict)
+    degrade: List[Dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -254,8 +278,18 @@ def load_manifest(path: Path) -> TaskManifest:
         graders.append(GraderSpec(kind=kind, config=config,
                                   weight=float(g.get("weight", 1.0))))
 
-    budget = BudgetSpec(limits={
-        k: float(v) for k, v in _mapping(raw.get("budget"), path, "budget").items()})
+    raw_budget = dict(_mapping(raw.get("budget"), path, "budget"))
+    raw_degrade = raw_budget.pop("degrade", None) or []
+    if not isinstance(raw_degrade, list):
+        raise ManifestError(
+            path, f"budget.degrade must be a list of rungs, got "
+                  f"{type(raw_degrade).__name__}")
+    try:
+        budget_limits = {k: float(v) for k, v in raw_budget.items()}
+    except (TypeError, ValueError) as exc:
+        raise ManifestError(
+            path, f"budget limits must be numbers: {exc}") from exc
+    budget = BudgetSpec(limits=budget_limits, degrade=list(raw_degrade))
 
     repeats = int(raw.get("repeats", 1))
     if repeats < 1:
