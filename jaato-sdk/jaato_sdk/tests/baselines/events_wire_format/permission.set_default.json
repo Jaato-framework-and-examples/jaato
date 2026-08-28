@@ -1,5 +1,6 @@
 {
   "type": "permission.set_default",
   "timestamp": "<TIMESTAMP>",
+  "session_id": "",
   "policy": "ask"
 }

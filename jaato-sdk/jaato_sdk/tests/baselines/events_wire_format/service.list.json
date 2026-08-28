@@ -1,5 +1,6 @@
 {
   "type": "service.list",
   "timestamp": "<TIMESTAMP>",
+  "session_id": "",
   "services": []
 }

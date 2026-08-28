@@ -1,6 +1,7 @@
 {
   "type": "config.updated",
   "timestamp": "<TIMESTAMP>",
+  "session_id": "",
   "workspace": "",
   "provider": "",
   "model": null,

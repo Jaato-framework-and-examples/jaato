@@ -2,6 +2,7 @@
   "type": "session.info",
   "timestamp": "<TIMESTAMP>",
   "session_id": "",
+  "request_id": null,
   "session_name": "",
   "model_provider": "",
   "model_name": "",

@@ -1,6 +1,7 @@
 {
   "type": "permission.add_whitelist",
   "timestamp": "<TIMESTAMP>",
+  "session_id": "",
   "tools": [],
   "patterns": []
 }

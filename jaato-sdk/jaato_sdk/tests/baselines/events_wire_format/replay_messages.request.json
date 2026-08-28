@@ -1,6 +1,7 @@
 {
   "type": "replay_messages.request",
   "timestamp": "<TIMESTAMP>",
+  "session_id": "",
   "request_id": "",
   "messages": null,
   "timeout_seconds": 120.0

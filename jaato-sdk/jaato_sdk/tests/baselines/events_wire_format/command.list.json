@@ -1,5 +1,6 @@
 {
   "type": "command.list",
   "timestamp": "<TIMESTAMP>",
+  "session_id": "",
   "commands": []
 }

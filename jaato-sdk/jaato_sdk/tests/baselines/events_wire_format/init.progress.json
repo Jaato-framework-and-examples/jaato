@@ -1,6 +1,7 @@
 {
   "type": "init.progress",
   "timestamp": "<TIMESTAMP>",
+  "session_id": "",
   "step": "",
   "status": "running",
   "message": "",

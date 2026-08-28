@@ -1,8 +1,10 @@
 {
   "type": "error",
   "timestamp": "<TIMESTAMP>",
+  "session_id": "",
   "error": "",
   "error_type": "",
   "recoverable": true,
-  "details": null
+  "details": null,
+  "request_id": null
 }

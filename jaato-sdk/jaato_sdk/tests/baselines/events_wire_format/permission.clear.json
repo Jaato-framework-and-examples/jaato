@@ -1,5 +1,6 @@
 {
   "type": "permission.clear",
   "timestamp": "<TIMESTAMP>",
+  "session_id": "",
   "target": "all"
 }

@@ -1,6 +1,7 @@
 {
   "type": "workspace.files.stage_request",
   "timestamp": "<TIMESTAMP>",
+  "session_id": "",
   "workspace_id": "",
   "files": []
 }

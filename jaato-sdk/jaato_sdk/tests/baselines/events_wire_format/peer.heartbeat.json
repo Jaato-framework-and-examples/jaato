@@ -1,6 +1,7 @@
 {
   "type": "peer.heartbeat",
   "timestamp": "<TIMESTAMP>",
+  "session_id": "",
   "server_id": "",
   "server_name": "",
   "server_version": "",

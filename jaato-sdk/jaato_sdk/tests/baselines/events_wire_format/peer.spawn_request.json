@@ -1,6 +1,7 @@
 {
   "type": "peer.spawn_request",
   "timestamp": "<TIMESTAMP>",
+  "session_id": "",
   "request_id": "",
   "origin_server": "",
   "agent_name": "",

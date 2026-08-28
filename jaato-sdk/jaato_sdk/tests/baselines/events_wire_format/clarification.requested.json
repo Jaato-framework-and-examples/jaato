@@ -1,6 +1,7 @@
 {
   "type": "clarification.requested",
   "timestamp": "<TIMESTAMP>",
+  "session_id": "",
   "agent_id": "",
   "request_id": "",
   "tool_name": "",

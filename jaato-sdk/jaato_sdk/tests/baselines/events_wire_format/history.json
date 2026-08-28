@@ -1,6 +1,7 @@
 {
   "type": "history",
   "timestamp": "<TIMESTAMP>",
+  "session_id": "",
   "agent_id": "main",
   "history": [],
   "turn_accounting": []

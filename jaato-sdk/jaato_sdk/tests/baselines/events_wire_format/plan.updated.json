@@ -1,6 +1,7 @@
 {
   "type": "plan.updated",
   "timestamp": "<TIMESTAMP>",
+  "session_id": "",
   "agent_id": "",
   "plan_name": "",
   "steps": []

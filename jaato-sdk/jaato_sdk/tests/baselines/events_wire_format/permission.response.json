@@ -1,6 +1,7 @@
 {
   "type": "permission.response",
   "timestamp": "<TIMESTAMP>",
+  "session_id": "",
   "request_id": "",
   "response": "",
   "edited_arguments": null

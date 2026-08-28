@@ -1,6 +1,7 @@
 {
   "type": "tools.status",
   "timestamp": "<TIMESTAMP>",
+  "session_id": "",
   "tools": [],
   "message": ""
 }

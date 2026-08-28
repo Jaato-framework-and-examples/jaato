@@ -1,5 +1,6 @@
 {
   "type": "tools.id_registry",
   "timestamp": "<TIMESTAMP>",
+  "session_id": "",
   "mappings": {}
 }
