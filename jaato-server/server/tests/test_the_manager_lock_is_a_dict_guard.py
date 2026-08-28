@@ -38,6 +38,29 @@ import ast
 import pathlib
 from typing import Dict, List, Set
 
+import sys as _sys
+_sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
+from shared.tests.test_every_guard_detects_its_own_reversion import Reversion
+
+#: The defect, put back: the save moved back INSIDE the manager lock, which
+#: is the circular wait #657 removed.
+REVERSIONS = [
+    Reversion(
+        target="jaato-server/server/session_manager.py",
+        find="""        with self._lock:
+            session = self._sessions.get(session_id)
+            if not session:
+                return False""",
+        replace="""        with self._lock:
+            session = self._sessions.get(session_id)
+            if not session:
+                return False
+            return self._save_session(session)""",
+        test="test_no_loop_bound_call_happens_under_the_manager_lock",
+        because="a loop-bound call made while holding the manager lock",
+    ),
+]
+
 MANAGER = (pathlib.Path(__file__).resolve().parents[1]
            / "session_manager.py")
 

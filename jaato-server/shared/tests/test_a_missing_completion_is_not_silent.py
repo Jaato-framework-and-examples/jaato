@@ -24,6 +24,27 @@ import ast
 import pathlib
 
 
+from shared.tests.test_every_guard_detects_its_own_reversion import Reversion
+
+#: The defect, put back.  ``not should_nudge`` alone is ALSO true when the
+#: agent signalled, so this stamps a completion gap on clean completions.
+REVERSIONS = [
+    Reversion(
+        target="jaato-server/server/core.py",
+        find="""                if (
+                    status == "done"
+                    and signal_completion_in_surface
+                    and not should_nudge
+                    and nudges_fired >= MAX_COMPLETION_NUDGES
+                ):""",
+        replace="""                if (
+                    not should_nudge
+                ):""",
+        test="test_the_gap_is_not_set_on_a_bare_should_nudge_false",
+        because="a predicate that cannot tell 'budget spent' from 'agent signalled'",
+    ),
+]
+
 CORE = (pathlib.Path(__file__).resolve().parents[2]
         / "server" / "core.py")
 GAP = "not_signalled_after_nudges"

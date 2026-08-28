@@ -12,12 +12,26 @@ Requires an interactive TTY. For non-TTY environments, use simple-client.
 """
 
 import asyncio
+import logging
 import os
 import sys
 import pathlib
 import tempfile
 import threading
 from typing import Any, Callable, Dict, List, Optional
+
+#: Module logger.  ``handle_input`` reported a failed ``session.delete``
+#: through a name nothing bound: the except handler raised NameError
+#: instead of logging, so the lines after it -- "Session ended.",
+#: ``should_exit = True``, ``display.stop()`` -- never ran.  A failed
+#: delete left the TUI with its display up and no way out.
+#:
+#: Only on the failure path, which is the one nobody exercises.  Found
+#: by running the pattern corpus's undefined-name guard against this
+#: checkout -- jaato's own tests could not see it, because they verify
+#: that primitives do what they say and this name is never reached
+#: unless one of them fails.
+logger = logging.getLogger(__name__)
 
 # Add project root to path for imports
 ROOT = pathlib.Path(__file__).resolve().parents[1]
