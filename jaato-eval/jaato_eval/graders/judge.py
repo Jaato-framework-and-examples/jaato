@@ -50,6 +50,11 @@ class JudgeGrader:
 
     Config keys:
         profile: Rubric profile name.  Required.
+        agent: Persona name (``.jaato/agents/<name>.md``).  Optional, but
+            required for any rubric using a PREFETCH — the ``{{!py:}}``
+            placeholder lives in the persona, so without an agent the
+            script never runs and the judge silently reverts to having
+            nothing but a file listing.
         threshold: Minimum ``score`` counted as PASS (default 0.7).
         score_field: Payload key holding the score (default ``"score"``).
         socket_path: Daemon socket.  Defaults to the client's own default.
@@ -187,6 +192,9 @@ class JudgeGrader:
             "workspace_path": str(context.workspace_path),
             "config_root": str(context.config_root),
         }
+        agent = self.spec.config.get("agent")
+        if agent:
+            kwargs["agent"] = str(agent)
         # The RUN's socket wins over a manifest override: the judge must
         # score on the same daemon the arm ran on, and only the sweep
         # knows which that was.  A manifest `socket_path` remains as an

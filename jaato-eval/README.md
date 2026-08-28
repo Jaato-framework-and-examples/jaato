@@ -215,25 +215,37 @@ reasoned from the agent's completion payload instead of opening the file. The
 schema now requires reading the artefact and quoting the bytes. A rubric that
 scores the claim measures the claim.
 
-### The judge is not yet a trustworthy instrument
+### The harness reads; the model judges
 
-Roughly one run in four, the judge **skips its verification step** — it does
-not call the tool, and says so, because the rubric requires it to. Three of
-four failures captured read "I did not open answer.txt"; only one was an
-actual tool error. That is a property of LLM judges, not a framework defect,
-and nothing in this package fixes it.
+The judge used to be told to open the artefact with `filesystem_query`, and
+roughly **1 run in 4 it simply did not** — saying so plainly: *"I did not open
+answer.txt."* Not a tool failure; the call was never made. Four hypotheses
+about the minority case that WAS a tool error were all refuted.
 
-What this package does is stop it being attributed to the thing under test.
-A judge reports any reason it could not carry out the assessment in
-`errors[]`, and a non-empty `errors[]` is **BLOCKED, never FAIL** — a judge
-that did not judge is not evidence about the agent. Before that, the
-admission sat in `reasoning` while `errors[]` was empty, and arms were
-recorded as failures with correct artefacts on disk.
+The fix was to stop asking. Reading a file is a **fact**, and a fact routed
+through a model's discretion is unreliable by construction. So a MANDATORY
+prefetch reads it and injects it before the first turn:
 
-So: `script` and `processor` graders are usable for measurement today. Do not
-publish judge-based numbers from this engine until the skip rate is
-understood; the per-arm records will show you BLOCKED rows rather than a
-pass rate that quietly averages them.
+```
+.jaato/agents/rubric.md              {{!py:scripts/prefetch_artefact.py answer.txt}}
+.jaato/scripts/prefetch_artefact.py  def render(context, args) -> str
+```
+
+`{{!py:}}` without `?` raises and aborts session-prep, so a judge that cannot
+get the artefact never starts. And `filesystem_query` is **removed** from the
+rubric profile rather than kept as a fallback: with no tool there is nothing to
+skip. Earlier attempts instructed the model more firmly, which competes with
+the judgement that was failing; this removes the capability.
+
+The `judge` grader takes `agent:` for this reason — the `{{!py:}}` placeholder
+lives in the persona, so a judge given only `profile:` never expands it and
+silently reverts to a bare file listing.
+
+Measured after: 8/8 runs scored correctly, each quoting `"READY\n"` **including
+the trailing newline** — a byte obtainable only from the injected content, so
+the mechanism is evidenced rather than inferred from a pass count. And it still
+discriminates: `NOT_READY` → 0.0, absent → 0.0, `ready` (wrong case) → 0.5, the
+rubric's "present but wrong" band, unprompted.
 
 **Report per arm, never averaged.** On a two-arm sample this engine appeared
 to show one model outscoring another; at four arms both models were scoring

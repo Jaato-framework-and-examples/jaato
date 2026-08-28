@@ -330,3 +330,42 @@ class TheFrameworkSaysWhyCase(unittest.TestCase):
         v = self._grade()
         self.assertEqual(v.state, BLOCKED)
         self.assertIn("either", v.blocked_reason)
+
+
+class PersonaReachesTheJudgeCase(unittest.TestCase):
+    """A rubric whose artefact arrives by PREFETCH needs its persona named.
+
+    The `{{!py:}}` placeholder lives in `.jaato/agents/<name>.md`, so a
+    judge created with `profile=` alone never expands it — the script does
+    not run and the judge is handed a file listing instead of the bytes,
+    silently.  That is the failure the prefetch was adopted to remove, so
+    losing the agent kwarg would restore it without any error.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.ws = Path(self.tmp.name)
+        self._displaced = {n: sys.modules[n] for n in _STUBBED if n in sys.modules}
+        self.addCleanup(self.tmp.cleanup)
+        self.addCleanup(self._uninstall)
+
+    def _uninstall(self):
+        for n in _STUBBED:
+            sys.modules.pop(n, None)
+        sys.modules.update(self._displaced)
+
+    def _kwargs(self, config):
+        seen = {}
+        _install(payload={"score": 1.0}, seen=seen)
+        ctx = GraderContext(workspace_path=self.ws, config_root=self.ws,
+                            payload={"ok": True})
+        JudgeGrader(GraderSpec(kind="judge", config=config)).grade(ctx)
+        return seen["kwargs"]
+
+    def test_the_agent_reaches_the_session(self):
+        k = self._kwargs({"profile": "rubric", "agent": "rubric"})
+        self.assertEqual(k["agent"], "rubric")
+
+    def test_no_agent_sends_no_agent_kwarg(self):
+        """A rubric with no persona must not be handed an empty one."""
+        self.assertNotIn("agent", self._kwargs({"profile": "rubric"}))

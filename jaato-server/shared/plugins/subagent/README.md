@@ -678,15 +678,31 @@ spawn_subagent(
 
 #### Failure modes
 
-`{{!py:...}}` placeholders never raise — they always emit replacement
-content so the agent has *something* to read. Three failure markers:
+Two forms, and the default is **strict** (server 0.6.48+).
+
+`{{!py:...}}` — MANDATORY. Any failure (script-not-found, load error,
+`render()` raising, a sentinel-string or non-string return) raises
+`DynamicInstructionsError` and **aborts session creation**, surfacing a
+structured `ErrorEvent` to the client. The agent never starts.
+
+`{{!py?:...}}` — BEST-EFFORT, the pre-0.6.48 behaviour, opt-in via the
+`?`. The failure is swallowed and one of three markers is substituted
+into the prompt, so the agent has *something* to read and can reason
+about the failure as observable evidence:
 
 - `[script not found: <ref>]` — resolution miss
 - `[script load error: <ref>]` — file present but import or symbol-lookup failed
 - `[script error: <ref>: <exception>]` — script raised at runtime
 
-The agent sees the failure as observable evidence and can reason
-about it (similar to today's `{{!command}}` shell expansion).
+**Default-strict is deliberate and this section previously documented the
+opposite.** Swallow-and-substitute means an agent runs with a hollow
+prompt — missing the very content the prefetch existed to supply — and
+fabricates output from the gap. That produced false byte-identicality at
+T=0 in the kb-enablement-2.0 cascade probe (see
+`DynamicInstructionsError` in `shared/dynamic_instructions.py`), which is
+what motivated the change. Reach for `?` only where the content is
+genuinely optional: a memory snapshot, ledger usage, ambient reference
+data. A mandatory pre-read should abort.
 
 #### Execution-context contract
 
