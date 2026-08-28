@@ -36,6 +36,12 @@ def _sm_with_help_prompt(emitted):
     """
     sm = SessionManager.__new__(SessionManager)
     sm._event_callback = lambda cid, ev: emitted.append((cid, ev))
+    # Production _emit_to_client attributes the event to the client's
+    # session, so a skeleton without this map is not a SessionManager
+    # any caller would meet.  Supplied rather than defended against in
+    # the method: a getattr fallback there would let a fixture drift
+    # further from production and hide the next divergence too.
+    sm._client_to_session = {}
     sm._save_session = lambda session: None
 
     # prompt_library stub: %foo --help resolves to HelpLines.
