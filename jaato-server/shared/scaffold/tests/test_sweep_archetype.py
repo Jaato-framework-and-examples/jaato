@@ -1,4 +1,4 @@
-"""The `sweep` archetype — N INDEPENDENT arms, none feeding another.
+"""The `sweep` archetype — N INDEPENDENT jobs, none feeding another.
 
 `new cascade` is a linear CHAIN: stage 1 then stage 2, output feeding
 forward, one session at a time.  A sweep is a different topology and a common
@@ -66,7 +66,7 @@ def test_it_subscribes_before_creating_the_session(rendered):
     """
     tree = ast.parse(rendered)
     fn = next(n for n in ast.walk(tree)
-              if isinstance(n, ast.AsyncFunctionDef) and n.name == "_run_arm")
+              if isinstance(n, ast.AsyncFunctionDef) and n.name == "_run_job")
 
     def _first_line(pred):
         return min((n.lineno for n in ast.walk(fn)
@@ -78,8 +78,8 @@ def test_it_subscribes_before_creating_the_session(rendered):
         lambda n: isinstance(n.func, ast.Attribute)
         and n.func.attr == "create_session")
 
-    assert subscribe is not None, "the arm never subscribes to errors"
-    assert create is not None, "the arm never creates a session"
+    assert subscribe is not None, "the job never subscribes to errors"
+    assert create is not None, "the job never creates a session"
     assert subscribe < create, (
         "create_session is called before the error subscription; a refusal "
         "announced during the create would reach no handler"
@@ -128,7 +128,7 @@ def test_the_owner_client_outlives_the_arms(rendered):
 
     assert budget and gather, "main no longer declares a pool or fans out"
     assert budget[0] < gather[0], (
-        "the pool is declared after the arms run; the arms would draw on "
+        "the pool is declared after the jobs run; the jobs would draw on "
         "nothing"
     )
 
@@ -138,7 +138,7 @@ def test_the_arms_run_concurrently_and_independently(rendered):
     with extra steps, and one whose failure propagates is not a sweep."""
     assert "asyncio.gather(" in rendered
     assert "Never raises" in rendered, (
-        "_run_arm's contract is not stated; an arm that raises takes its "
+        "_run_job's contract is not stated; a job that raises takes its "
         "siblings down through gather()"
     )
 
@@ -175,7 +175,7 @@ def test_it_does_not_emit_a_cascade_register_call(rendered):
 
     Observer registration WAS required: a cid'd session withheld
     TURN_COMPLETED unless the creator registered.  Fixing the terminal-event
-    ordering removed the need — a pooled arm reports turns=1 without it —
+    ordering removed the need — a pooled job reports turns=1 without it —
     and the consumer verified that by A/B before deleting theirs.  Emitting
     it now would ship a redundant RPC plus a comment explaining behaviour
     that no longer exists, and a wrong explanation in generated code costs
@@ -187,7 +187,7 @@ def test_it_does_not_emit_a_cascade_register_call(rendered):
 def test_the_sweep_varies_the_profile_not_the_model(rendered):
     """``model`` and ``provider`` are PROFILE properties.
 
-    The first version of this template gave every arm an identical inline
+    The first version of this template gave every job an identical inline
     ``{"model": MODEL, "provider": PROVIDER}`` — so the "matrix" varied
     nothing but the prompt, while the dict implied model/provider were the
     sweep dimension.  ``create_session(profile=...)`` takes a profile name,
@@ -196,16 +196,16 @@ def test_the_sweep_varies_the_profile_not_the_model(rendered):
     an agent is.
     """
     tree = ast.parse(rendered)
-    arms = next(
+    jobs = next(
         n.value for n in ast.walk(tree)
         if isinstance(n, ast.Assign)
-        and any(getattr(t, "id", None) == "ARMS" for t in n.targets)
+        and any(getattr(t, "id", None) == "JOBS" for t in n.targets)
     )
 
-    profiles = [row.elts[1] for row in arms.elts]        # (name, profile, agent, prompt)
+    profiles = [row.elts[1] for row in jobs.elts]        # (name, profile, agent, prompt)
     assert all(isinstance(p, ast.Constant) and isinstance(p.value, str)
                for p in profiles), (
-        "an arm's profile is not a name; the default sweep should vary "
+        "a job's profile is not a name; the default sweep should vary "
         "PROFILES, since model/provider are profile-expressible"
     )
     # NOT asserting the profiles differ: the shipped example varies the
@@ -250,15 +250,15 @@ def test_the_tuple_carries_the_persona(rendered):
     inconsistent with its own family.
     """
     tree = ast.parse(rendered)
-    arms = next(
+    jobs = next(
         n.value for n in ast.walk(tree)
         if isinstance(n, ast.Assign)
-        and any(getattr(t, "id", None) == "ARMS" for t in n.targets)
+        and any(getattr(t, "id", None) == "JOBS" for t in n.targets)
     )
 
-    widths = {len(row.elts) for row in arms.elts}
+    widths = {len(row.elts) for row in jobs.elts}
     assert widths == {4}, (
-        f"ARMS rows are {widths}-wide; expected 4 — "
+        f"JOBS rows are {widths}-wide; expected 4 — "
         "(name, profile, agent, prompt)"
     )
     assert "agent=agent" in rendered, (
@@ -275,18 +275,18 @@ def test_the_example_actually_sweeps_something(rendered):
     it must vary SOMETHING other than the label.
     """
     tree = ast.parse(rendered)
-    arms = next(
+    jobs = next(
         n.value for n in ast.walk(tree)
         if isinstance(n, ast.Assign)
-        and any(getattr(t, "id", None) == "ARMS" for t in n.targets)
+        and any(getattr(t, "id", None) == "JOBS" for t in n.targets)
     )
 
     rows = [
         tuple(getattr(e, "value", ast.dump(e)) for e in row.elts[1:])
-        for row in arms.elts
+        for row in jobs.elts
     ]
     assert len(set(rows)) == len(rows), (
-        f"every arm is identical apart from its name ({rows[0]}); the "
+        f"every job is identical apart from its name ({rows[0]}); the "
         "example demonstrates no axis at all"
     )
 
@@ -319,3 +319,25 @@ def test_the_sdk_does_not_call_the_agent_its_system_instructions():
             f"{path} describes the agent as BECOMING the system "
             "instructions; it is one layer of them"
         )
+
+
+def test_the_vocabulary_is_job_not_arm(rendered):
+    """One word for the unit, and it is ``job``.
+
+    ``arm`` is experiment-design jargon — precise for an A/B, opaque for the
+    other three uses this archetype serves (a batch, a work-list fan-out, an
+    eval sweep).  A scaffold's readers include people who have done none of
+    those, so the unit is named after what it is rather than after one
+    metaphor for it.
+
+    Pinned because a half-finished rename is worse than either name: the
+    reader sees two words for one thing and reasonably assumes they differ.
+    """
+    import re
+
+    stray = re.findall(r"\barms?\b|\bARMS\b|_run_arm", rendered, re.IGNORECASE)
+    stray = [w for w in stray if w.lower() != "warm"]
+    assert not stray, (
+        f"the sweep template still says {sorted(set(stray))}; the unit is a "
+        "job, and two words for one thing reads as two things"
+    )

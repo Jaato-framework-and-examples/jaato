@@ -325,13 +325,13 @@ import uuid
 
 from jaato_sdk import SessionCreateFailed, truncation_reason
 
-# The matrix.  N INDEPENDENT arms — none feeds another, each fully isolated,
-# results collected per-arm.  An eval sweep is one instance; so is any batch
+# The matrix.  N INDEPENDENT jobs — none feeds another, each fully isolated,
+# results collected per-job.  An eval sweep is one instance; so is any batch
 # job, any fan-out over a work-list, any A/B across profile sets.
 #
 # This is NOT the `cascade` archetype.  That one is a linear CHAIN: stage 1
 # then stage 2, output feeding forward, one session at a time.  Here nothing
-# feeds forward, and a failed arm must not stop its siblings.
+# feeds forward, and a failed job must not stop its siblings.
 # (name, profile, agent, prompt) -- and PROFILE AND AGENT ARE ORTHOGONAL.
 #
 #   profile  = CAPABILITIES: model, provider, plugins, GC strategy, ceilings
@@ -360,7 +360,7 @@ from jaato_sdk import SessionCreateFailed, truncation_reason
 # The example below varies the PERSONA with capabilities held fixed, which
 # is the cleanest demonstration of the orthogonality.  ``None`` in the agent
 # slot means "no persona" -- the profile's own instructions stand.
-ARMS = [
+JOBS = [
     ("baseline", "your-profile", "your-baseline-agent", "Do the thing."),
     ("variant",  "your-profile", "your-variant-agent",  "Do the thing."),
 ]
@@ -381,26 +381,26 @@ ARMS = [
 # Aggregate ceiling for the whole sweep, or None for no pool.
 #
 # TWO BUDGET GATES EXIST AND THEY DO NOT COMPOSE THE WAY THEY LOOK.  A
-# profile's own ``budget_control`` is OWN-BOOKS and per-arm; the pool below
+# profile's own ``budget_control`` is OWN-BOOKS and per-job; the pool below
 # is the AGGREGATE.  A session carrying its own ceiling does not draw on the
 # pool, so declaring both leaves the pool inert.  Pick one.
 POOL_LIMITS = {"tokens": 200_000}
 
-# A POOL FORECLOSES LEDGER-BASED GRADING.  A pooled arm is detached from
+# A POOL FORECLOSES LEDGER-BASED GRADING.  A pooled job is detached from
 # this connection when it terminates (that is what returns the warm slot),
 # so ``request_history`` afterwards answers with an error, not a ledger.  If
-# your grader needs the tool-call ledger, use per-arm ceilings and set
+# your grader needs the tool-call ledger, use per-job ceilings and set
 # POOL_LIMITS = None.
 
 
-async def _run_arm(owner_cid, name, profile, agent, prompt) -> dict:
-    """Run ONE arm to its terminus and return a result row.
+async def _run_job(owner_cid, name, profile, agent, prompt) -> dict:
+    """Run ONE job to its terminus and return a result row.
 
-    Never raises: a sweep whose arms can kill each other is not a sweep.
+    Never raises: a sweep whose jobs can kill each other is not a sweep.
     """
     client = _new_client()
     if not await client.connect(timeout=120.0):
-        return {"arm": name, "outcome": "BLOCKED",
+        return {"job": name, "outcome": "BLOCKED",
                 "detail": "could not connect/autostart the daemon"}
 
     # SUBSCRIBE BEFORE create_session, NOT AFTER.
@@ -438,7 +438,7 @@ async def _run_arm(owner_cid, name, profile, agent, prompt) -> dict:
             # means the ceiling did its job and nothing ran — a different
             # call to action from "the daemon is broken", and a driver that
             # conflates them reports infrastructure failures as budget stops.
-            return {"arm": name, "outcome": "BLOCKED",
+            return {"job": name, "outcome": "BLOCKED",
                     "detail": f"{type(exc).__name__}: {exc}",
                     "may_exist": exc.may_exist}
 
@@ -446,11 +446,11 @@ async def _run_arm(owner_cid, name, profile, agent, prompt) -> dict:
         try:
             await asyncio.wait_for(done.wait(), timeout=600.0)
         except asyncio.TimeoutError:
-            return {"arm": name, "outcome": "BLOCKED",
+            return {"job": name, "outcome": "BLOCKED",
                     "detail": "no terminal event within 600s"}
 
         # COMPLETENESS IS NOT ``finish_reason != "stop"``.  A schema-driven
-        # profile ends INSIDE a tool-use turn, so a finished arm reports
+        # profile ends INSIDE a tool-use turn, so a finished job reports
         # "tool_use" and never "stop".  The SDK owns this rule.
         why = truncation_reason(
             finish_reason=state.get("finish_reason"),
@@ -459,18 +459,18 @@ async def _run_arm(owner_cid, name, profile, agent, prompt) -> dict:
             termination_detail=state.get("termination_detail"),
         )
         if why is not None:
-            return {"arm": name, "outcome": "BLOCKED", "detail": why}
-        return {"arm": name, "outcome": "OK",
+            return {"job": name, "outcome": "BLOCKED", "detail": why}
+        return {"job": name, "outcome": "OK",
                 "finish_reason": state.get("finish_reason")}
     finally:
         await client.disconnect()
 
 
 async def main() -> int:
-    # ONE OWNER CLIENT DECLARES THE POOL AND OUTLIVES THE ARMS.
+    # ONE OWNER CLIENT DECLARES THE POOL AND OUTLIVES THE JOBS.
     #
     # A pool belongs to the connection that declared it: an owner opened and
-    # closed around a single arm takes the pool with it.  One client can
+    # closed around a single job takes the pool with it.  One client can
     # declare N cids, so N pools do not need N connections.
     owner = _new_client()
     if not await owner.connect(timeout=120.0):
@@ -491,8 +491,8 @@ async def main() -> int:
         print(f"# sdk={jaato_sdk.__file__}")
 
         rows = await asyncio.gather(
-            *(_run_arm(cid, name, profile, agent, prompt)
-              for name, profile, agent, prompt in ARMS)
+            *(_run_job(cid, name, profile, agent, prompt)
+              for name, profile, agent, prompt in JOBS)
         )
     finally:
         await owner.disconnect()
@@ -519,5 +519,5 @@ TEMPLATES = {
     "observer": ("OBSERVER_TEMPLATE", OBSERVER_TEMPLATE,
                  "Cascade observer — attach + live-trace events (read-only)."),
     "sweep": ("SWEEP_TEMPLATE", SWEEP_TEMPLATE,
-              "Sweep/matrix driver — N INDEPENDENT arms, none feeding another."),
+              "Sweep/matrix driver — N INDEPENDENT jobs, none feeding another."),
 }
