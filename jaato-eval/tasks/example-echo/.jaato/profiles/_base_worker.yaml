@@ -41,6 +41,18 @@ plugin_configs:
 # reads getattr(profile, "runtime_limits") in runner_spawn, and there is no
 # session-kwarg vehicle, so a copy in task.yaml could never have reached the
 # runner however it was plumbed.  (One was there, promising it did.)
+# WHICH HALF ACTUALLY BITES DEPENDS ON HOW THE SESSION WAS SERVED.
+# RuntimeLimits splits across two enforcement layers: memory_max_mb,
+# pids_max and cpu_weight are kernel-enforced through cgroup v2, while
+# tool_timeout_seconds and max_output_bytes are userspace.
+#
+# runner_spawn.py consults the pre-warm pool only `if ... cgroup_attach is
+# None`, so a pool-served session gets NO cgroup attachment — observed
+# here as `cgroup_attach=no` on every spawn.  On that path the kernel half
+# is inert and the userspace half still applies.  Declaring memory_max_mb
+# and assuming it holds is therefore a mistake worth not making silently;
+# set JAATO_RUNNER_POOL_ENABLED=false to trade the warm slot (~7s) for a
+# cold spawn (~30s) that can carry one.
 runtime_limits:
   tool_timeout_seconds: 60
 
