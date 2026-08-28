@@ -52,7 +52,8 @@ jobs:
             jaato-server/shared/tests/test_reset_for_next_session.py \
             jaato-server/shared/tests/test_enrichment_plugin.py \
             jaato-server/shared/tests/test_a_cache_is_published_only_when_complete.py \
-            jaato-server/shared/tests/test_cyclomatic_complexity_audit.py
+            jaato-server/shared/tests/test_cyclomatic_complexity_audit.py \
+            jaato-server/shared/tests/test_every_guard_detects_its_own_reversion.py
 
   # ---------------------------------------------------------------
   # REQUIRED CHECK (repo ruleset "contract-guards" on refs/heads/main, since

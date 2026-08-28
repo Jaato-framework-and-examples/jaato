@@ -34,6 +34,28 @@ import pathlib
 # Resolved from __file__, not the CWD.  A relative path would make a wrong
 # working directory fire the "guard is stale" anchor below, sending the reader
 # to hunt a rename that never happened.
+from shared.tests.test_every_guard_detects_its_own_reversion import Reversion
+
+#: The defect, put back.  Publishing the global before filling it is what
+#: #652 removed; a guard that does not notice this is decorative.
+REVERSIONS = [
+    Reversion(
+        target="jaato-server/shared/plugins/subagent/config.py",
+        find="""    with _resolvers_lock:
+        # Re-check: another thread may have completed discovery while this
+        # one waited.""",
+        replace="""    _resolvers = {}
+    _resolvers.update(_discover_secret_resolvers_uncached())
+    return _resolvers
+
+    with _resolvers_lock:
+        # Re-check: another thread may have completed discovery while this
+        # one waited.""",
+        test="test_the_cache_is_published_in_one_assignment_of_a_finished_value",
+        because="a cache published before it is filled",
+    ),
+]
+
 CONFIG = (pathlib.Path(__file__).resolve().parents[1]
           / "plugins" / "subagent" / "config.py")
 GLOBAL = "_resolvers"
