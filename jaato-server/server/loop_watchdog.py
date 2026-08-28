@@ -59,12 +59,14 @@ per-callback overhead taxes the healthy path.
 
 from __future__ import annotations
 
+import linecache
 import logging
+import os
 import sys
 import threading
 import time
 import traceback
-from typing import Optional
+from typing import Dict, List, Optional
 
 import asyncio
 
@@ -208,24 +210,58 @@ class LoopWatchdog:
                     self._all_thread_stacks(),
                 )
 
+    def _innermost_line(self, frame) -> str:
+        """The source line the thread is actually sitting on.
+
+        ``sys._current_frames()`` hands back each thread's INNERMOST frame, so
+        this is where it stopped -- not where it started.
+        """
+        return linecache.getline(
+            frame.f_code.co_filename, frame.f_lineno,
+        ).strip()
+
+    @staticmethod
+    def _is_waiting_for_a_lock(line: str) -> bool:
+        """Is this source line a thread blocking to ACQUIRE a lock?
+
+        Acquiring a ``threading.Lock`` blocks inside C, which creates no Python
+        frame -- so the innermost Python frame of a blocked thread IS the
+        ``with ...lock:`` statement itself.  That is what makes this decidable
+        from the frame alone.
+
+        A thread parked here is BLOCKED, never blocking: it holds nothing it
+        acquired at this line, because it never got it.
+        """
+        low = line.lower()
+        return (
+            (low.startswith("with ") and "lock" in low)
+            or ".acquire(" in low
+        )
+
     def _all_thread_stacks(self) -> str:
-        """Every thread's stack, named, with how long each has sat unchanged.
+        """Every thread, PARTITIONED into waiters and holder-candidates.
 
-        Two additions over a bare ``_current_frames()`` dump, both of which
-        exist because their absence makes two different bugs look identical:
+        WHY PARTITION.  The first version of this dump reported every thread
+        with how long it had sat on the same stack, on the theory that a
+        holder sits still while busy threads move.  Run against a real daemon
+        that turned out to answer the wrong question: 47 threads, and about
+        forty read "unchanged for 20.0s", because A PARKED THREAD IS UNCHANGED
+        BY DEFINITION.  Idle readers, reapers, pool threads and a dozen
+        blocked watchers all looked exactly like a holder.  The signal is
+        necessary and nowhere near sufficient.
 
-        * **Names**, from ``threading.enumerate()``.  A bare thread id cannot
-          say which subsystem it belongs to, so a dump of raw ids is a list
-          of numbers to correlate by hand.  A thread that appears in
-          ``_current_frames()`` but NOT in ``enumerate()`` is labelled as
-          such rather than given a placeholder name -- that combination means
-          a thread created outside ``threading`` (a C extension), which is
-          itself worth seeing.
+        What actually found the holder was reading stack CONTENT: waiters end
+        at a lock acquire, and the holder passes THROUGH and blocks somewhere
+        else.  That distinction is mechanical, so it belongs here rather than
+        in the reader's head.
 
-        * **Unchanged-for**, from digesting each stack and remembering when
-          that digest first appeared.  A thread holding one lock for the
-          whole stall and a thread churning through work both appear in every
-          dump; only the elapsed time on an IDENTICAL stack separates them.
+        Output order follows the question: candidates FIRST and in full, since
+        the holder is among them and they are the smaller set; waiters after,
+        GROUPED BY THE LINE THEY ARE BLOCKED ON, so a twelve-thread convoy is
+        one entry naming twelve threads instead of twelve near-identical
+        stacks.
+
+        Named by the perpetual-monologue bench, from the first live run.
         """
         frames = sys._current_frames()
         named = {t.ident: t.name for t in threading.enumerate()}
@@ -237,26 +273,60 @@ class LoopWatchdog:
             if ident not in frames:
                 del self._digest_seen[ident]
 
-        out = []
-        for ident, frame in sorted(frames.items()):
-            stack = "".join(traceback.format_stack(frame))
-            digest = hash(stack)
-            prev = self._digest_seen.get(ident)
-            if prev is not None and prev[0] == digest:
-                held = f", unchanged for {now - prev[1]:.1f}s"
-            else:
-                self._digest_seen[ident] = (digest, now)
-                held = ", first seen at this stack"
+        candidates: List[str] = []
+        waiters: Dict[str, List[str]] = {}
 
-            if ident in named:
-                name = named[ident]
+        for ident, frame in sorted(frames.items()):
+            label = self._label(ident, named, frame, now)
+            line = self._innermost_line(frame)
+            if self._is_waiting_for_a_lock(line):
+                where = (f"{os.path.basename(frame.f_code.co_filename)}:"
+                         f"{frame.f_lineno}  {line}")
+                waiters.setdefault(where, []).append(label)
             else:
-                name = "<not in threading.enumerate() -- created outside threading>"
-            marker = "  <-- THE LOOP" if ident == self._loop_thread_id else ""
-            out.append(
-                f"--- thread {ident} {name!r}{held}{marker}\n{stack}"
-            )
-        return "\n".join(out)
+                stack = "".join(traceback.format_stack(frame))
+                candidates.append(f"--- {label}\n{stack}")
+
+        return self._render(candidates, waiters)
+
+    def _label(self, ident: int, named: dict, frame, now: float) -> str:
+        """``thread <id> '<name>'`` plus how long it has sat on this stack."""
+        stack = "".join(traceback.format_stack(frame))
+        digest = hash(stack)
+        prev = self._digest_seen.get(ident)
+        if prev is not None and prev[0] == digest:
+            held = f", unchanged for {now - prev[1]:.1f}s"
+        else:
+            self._digest_seen[ident] = (digest, now)
+            held = ", first seen at this stack"
+
+        if ident in named:
+            name = named[ident]
+        else:
+            name = "<not in threading.enumerate() -- created outside threading>"
+        marker = "  <-- THE LOOP" if ident == self._loop_thread_id else ""
+        return f"thread {ident} {name!r}{held}{marker}"
+
+    @staticmethod
+    def _render(candidates: List[str], waiters: Dict[str, List[str]]) -> str:
+        blocked = sum(len(v) for v in waiters.values())
+        # The two headers must not be substrings of one another.  "NOT
+        # WAITING FOR A LOCK" contains "WAITING FOR A LOCK", so anything
+        # splitting the dump on the second lands inside the first -- which
+        # is exactly what happened to the first test written against it.
+        parts = [
+            f"=== HOLDER CANDIDATES ({len(candidates)}) -- THE HOLDER IS IN "
+            f"HERE. These threads got past every lock they asked for; one of "
+            f"them is sitting on the one everything else wants.",
+            *candidates,
+            f"=== BLOCKED ACQUIRING A LOCK ({blocked}) -- blocked, not "
+            f"blocking. Grouped by the line each is stopped on; a thread here "
+            f"holds nothing it acquired at that line, because it never got "
+            f"it.",
+        ]
+        for where, labels in sorted(waiters.items()):
+            parts.append(f"  {where}\n    " + "\n    ".join(sorted(labels)))
+        return "\n".join(parts)
 
     def _loop_stack(self) -> str:
         """The loop thread's stack, captured from outside, mid-stall."""
