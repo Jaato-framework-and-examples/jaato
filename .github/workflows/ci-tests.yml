@@ -117,16 +117,34 @@ jobs:
           pytest -q --continue-on-collection-errors \
             jaato-server/shared/plugins/
 
-      # jaato-sdk/tests was the LAST suite no workflow ran -- the same gap
-      # server/tests and shared/plugins had. It matters now because
+      # jaato-sdk/tests was believed to be the LAST suite no workflow ran --
+      # the same gap server/tests and shared/plugins had. It matters because
       # test_recovery_client_parity.py lives here: that guard exists to catch
       # IPCRecoveryClient falling behind IPCClient, and a guard CI never runs
       # is exactly the failure mode it was written for.
+      #
+      # It was NOT the last one. See the step below.
       - name: jaato-sdk/tests suite (SDK surface)
         if: always()
         run: |
           pytest -q --continue-on-collection-errors \
             jaato-sdk/tests/
+
+      # jaato-sdk/jaato_sdk/tests is a SECOND directory, one path segment away
+      # from the one above, that no workflow ran either.  The event
+      # wire-format baselines live here, and 102 of them had drifted
+      # unnoticed: 96 missing session_id since #603, four more with one extra
+      # field each, and GCEvent with no baseline at all -- an event type that
+      # reached the wire and was never captured.
+      #
+      # Nothing was tolerating those failures. Nobody was seeing them, because
+      # a green `full-suite` reads as covering the SDK surface and the
+      # covered directory is the one with almost the same name.
+      - name: jaato-sdk/jaato_sdk/tests suite (SDK package-internal)
+        if: always()
+        run: |
+          pytest -q --continue-on-collection-errors \
+            jaato-sdk/jaato_sdk/tests/
 
       # LIVE CONFORMANCE — the only suite here that starts a real daemon and
       # drives it the way a consumer does.

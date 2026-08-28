@@ -1,6 +1,7 @@
 {
   "type": "system.message",
   "timestamp": "<TIMESTAMP>",
+  "session_id": "",
   "message": "",
   "style": ""
 }

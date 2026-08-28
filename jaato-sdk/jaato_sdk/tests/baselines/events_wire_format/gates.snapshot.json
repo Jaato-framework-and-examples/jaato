@@ -1,6 +1,7 @@
 {
   "type": "gates.snapshot",
   "timestamp": "<TIMESTAMP>",
+  "session_id": "",
   "gates": [],
   "snapshot_at": ""
 }

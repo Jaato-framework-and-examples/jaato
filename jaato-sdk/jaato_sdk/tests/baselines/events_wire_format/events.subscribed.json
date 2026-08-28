@@ -1,6 +1,7 @@
 {
   "type": "events.subscribed",
   "timestamp": "<TIMESTAMP>",
+  "session_id": "",
   "agent_id": "",
   "event_names": []
 }

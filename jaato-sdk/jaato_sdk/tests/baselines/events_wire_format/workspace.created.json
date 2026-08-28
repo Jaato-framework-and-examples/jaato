@@ -1,6 +1,7 @@
 {
   "type": "workspace.created",
   "timestamp": "<TIMESTAMP>",
+  "session_id": "",
   "name": "",
   "path": ""
 }

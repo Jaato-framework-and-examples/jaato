@@ -1,6 +1,7 @@
 {
   "type": "event.external",
   "timestamp": "<TIMESTAMP>",
+  "session_id": "",
   "name": "",
   "data": {}
 }

@@ -1,6 +1,7 @@
 {
   "type": "resolve_fork_point.request",
   "timestamp": "<TIMESTAMP>",
+  "session_id": "",
   "request_id": "",
   "after_message": null,
   "after_tool_call": null,

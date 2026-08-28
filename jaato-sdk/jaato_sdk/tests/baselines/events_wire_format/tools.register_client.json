@@ -1,6 +1,7 @@
 {
   "type": "tools.register_client",
   "timestamp": "<TIMESTAMP>",
+  "session_id": "",
   "tools": [],
   "categories": {}
 }

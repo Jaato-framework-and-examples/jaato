@@ -1,0 +1,18 @@
+{
+  "type": "gc",
+  "timestamp": "<TIMESTAMP>",
+  "session_id": "",
+  "agent_id": "",
+  "phase": "",
+  "trigger_reason": null,
+  "strategy": null,
+  "percent_used": null,
+  "threshold": null,
+  "context_limit": null,
+  "success": null,
+  "items_collected": null,
+  "tokens_before": null,
+  "tokens_after": null,
+  "tokens_freed": null,
+  "error": null
+}

@@ -1,5 +1,6 @@
 {
   "type": "tools.disable",
   "timestamp": "<TIMESTAMP>",
+  "session_id": "",
   "tool_name": ""
 }

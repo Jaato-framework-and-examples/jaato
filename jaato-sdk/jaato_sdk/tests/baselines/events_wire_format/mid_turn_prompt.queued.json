@@ -1,6 +1,7 @@
 {
   "type": "mid_turn_prompt.queued",
   "timestamp": "<TIMESTAMP>",
+  "session_id": "",
   "text": "",
   "position_in_queue": 0
 }

@@ -1,6 +1,7 @@
 {
   "type": "agent.completed",
   "timestamp": "<TIMESTAMP>",
+  "session_id": "",
   "agent_id": "",
   "completed_at": "",
   "success": true,

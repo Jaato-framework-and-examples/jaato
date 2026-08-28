@@ -1,5 +1,6 @@
 {
   "type": "permission.policy_snapshot.request",
   "timestamp": "<TIMESTAMP>",
+  "session_id": "",
   "request_id": ""
 }

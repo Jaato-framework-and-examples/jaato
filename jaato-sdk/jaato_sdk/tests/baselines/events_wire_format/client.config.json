@@ -1,6 +1,7 @@
 {
   "type": "client.config",
   "timestamp": "<TIMESTAMP>",
+  "session_id": "",
   "trace_log_path": null,
   "provider_trace_log": null,
   "working_dir": null,

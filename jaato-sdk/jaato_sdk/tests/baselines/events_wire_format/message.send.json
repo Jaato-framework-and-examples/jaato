@@ -1,6 +1,7 @@
 {
   "type": "message.send",
   "timestamp": "<TIMESTAMP>",
+  "session_id": "",
   "text": "",
   "attachments": [],
   "parallel_tools": null

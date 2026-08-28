@@ -1,5 +1,6 @@
 {
   "type": "instruction_budget.request",
   "timestamp": "<TIMESTAMP>",
+  "session_id": "",
   "agent_id": null
 }

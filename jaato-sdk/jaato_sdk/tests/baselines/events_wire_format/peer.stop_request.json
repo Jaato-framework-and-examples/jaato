@@ -1,6 +1,7 @@
 {
   "type": "peer.stop_request",
   "timestamp": "<TIMESTAMP>",
+  "session_id": "",
   "request_id": "",
   "remote_agent_id": ""
 }

@@ -1,5 +1,6 @@
 {
   "type": "session.list",
   "timestamp": "<TIMESTAMP>",
+  "session_id": "",
   "sessions": []
 }

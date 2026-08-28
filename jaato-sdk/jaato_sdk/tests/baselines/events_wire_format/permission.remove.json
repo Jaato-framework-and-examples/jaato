@@ -1,6 +1,7 @@
 {
   "type": "permission.remove",
   "timestamp": "<TIMESTAMP>",
+  "session_id": "",
   "target": "whitelist",
   "tools": [],
   "patterns": []

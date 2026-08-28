@@ -1,6 +1,7 @@
 {
   "type": "plan.step_updated",
   "timestamp": "<TIMESTAMP>",
+  "session_id": "",
   "agent_id": "",
   "step_id": "",
   "sequence": 0,

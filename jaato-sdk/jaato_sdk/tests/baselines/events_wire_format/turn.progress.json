@@ -1,6 +1,7 @@
 {
   "type": "turn.progress",
   "timestamp": "<TIMESTAMP>",
+  "session_id": "",
   "agent_id": "",
   "usage": {
     "prompt_tokens": 0,

@@ -1,6 +1,7 @@
 {
   "type": "instruction_budget.updated",
   "timestamp": "<TIMESTAMP>",
+  "session_id": "",
   "agent_id": "",
   "budget_snapshot": {}
 }

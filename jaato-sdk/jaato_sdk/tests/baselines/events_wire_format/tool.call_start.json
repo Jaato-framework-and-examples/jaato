@@ -1,6 +1,7 @@
 {
   "type": "tool.call_start",
   "timestamp": "<TIMESTAMP>",
+  "session_id": "",
   "agent_id": "",
   "tool_name": "",
   "tool_args": {},

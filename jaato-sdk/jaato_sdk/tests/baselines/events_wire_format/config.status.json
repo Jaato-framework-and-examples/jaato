@@ -1,6 +1,7 @@
 {
   "type": "config.status",
   "timestamp": "<TIMESTAMP>",
+  "session_id": "",
   "workspace": "",
   "configured": false,
   "provider": null,
