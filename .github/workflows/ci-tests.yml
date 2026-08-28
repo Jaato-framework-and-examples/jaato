@@ -16,6 +16,12 @@ jobs:
   # enrichment-fixture bugs) is dropped at discovery with only a WARNING,
   # so without this gate it ships invisibly.
   #
+  # Also carries the cyclomatic-complexity ratchet: a baseline of the
+  # functions already over radon 15, guarding that new code stays under it
+  # and that baselined functions do not grow.  It is a source scan (radon,
+  # pure-Python, in the `dev` extra) rather than a behavioural test, so it
+  # adds ~6s and no new failure mode to a job that must stay reliable.
+  #
   # Kept deliberately light + reliable: the only optional backend any of
   # these guards imports is the interactive_shell plugin's `pexpect`
   # (.[interactive]). No system-dependency extras (notably `kerberos`,
@@ -45,7 +51,8 @@ jobs:
             jaato-server/shared/tests/test_tool_id_wire_conformance.py \
             jaato-server/shared/tests/test_reset_for_next_session.py \
             jaato-server/shared/tests/test_enrichment_plugin.py \
-            jaato-server/shared/tests/test_a_cache_is_published_only_when_complete.py
+            jaato-server/shared/tests/test_a_cache_is_published_only_when_complete.py \
+            jaato-server/shared/tests/test_cyclomatic_complexity_audit.py
 
   # ---------------------------------------------------------------
   # REQUIRED CHECK (repo ruleset "contract-guards" on refs/heads/main, since

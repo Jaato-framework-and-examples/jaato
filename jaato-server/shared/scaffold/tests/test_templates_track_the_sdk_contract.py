@@ -147,6 +147,29 @@ def test_create_session_really_does_raise_rather_than_return_none():
     )
 
 
+def _imported_names(tree: ast.AST) -> set:
+    """Every name an import statement BINDS in the module namespace."""
+    bound = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            bound.update(a.asname or a.name for a in node.names)
+        elif isinstance(node, ast.Import):
+            bound.update((a.asname or a.name).split(".")[0] for a in node.names)
+    return bound
+
+
+def _caught_names(tree: ast.AST) -> set:
+    """Every bare name used as an ``except`` type.
+
+    Tuple and attribute handlers are skipped deliberately: this checks the
+    simple ``except Foo:`` form, which is the one a template renders.
+    """
+    return {
+        h.type.id for h in ast.walk(tree)
+        if isinstance(h, ast.ExceptHandler) and isinstance(h.type, ast.Name)
+    }
+
+
 @pytest.mark.parametrize("name", CREATORS)
 def test_every_caught_exception_is_imported(name):
     """A caught name that is never bound is a NameError at the reader's
@@ -160,24 +183,12 @@ def test_every_caught_exception_is_imported(name):
     Found because a sabotage that removed the import came back INCONCLUSIVE:
     nothing failed, which meant nothing was checking.
     """
-    rendered = _render(name)
-    tree = ast.parse(rendered)
-
-    bound = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom):
-            bound.update(a.asname or a.name for a in node.names)
-        elif isinstance(node, ast.Import):
-            bound.update((a.asname or a.name).split(".")[0] for a in node.names)
-
-    caught = {
-        h.type.id for h in ast.walk(tree)
-        if isinstance(h, ast.ExceptHandler)
-        and isinstance(h.type, ast.Name)
-    }
-    builtins_ = set(dir(__builtins__)) if isinstance(__builtins__, dict) is False else set(__builtins__)
-
-    missing = {c for c in caught if c not in bound and c not in dir(__import__("builtins"))}
+    tree = ast.parse(_render(name))
+    missing = (
+        _caught_names(tree)
+        - _imported_names(tree)
+        - set(dir(__import__("builtins")))
+    )
     assert not missing, (
         f"{name} catches {sorted(missing)} without importing it; the script "
         "parses and then dies with NameError at the first real failure"

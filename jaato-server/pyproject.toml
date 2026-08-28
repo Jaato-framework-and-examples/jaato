@@ -49,6 +49,7 @@ Issues = "https://github.com/Jaato-framework-and-examples/jaato/issues"
 dev = [
     "pytest",
     "pytest-asyncio",
+    "radon",  # test_cyclomatic_complexity_audit.py: the CI complexity ratchet. Pure-Python (no build deps), so it is safe for the light `contract-guards` job.
 ]
 # --- Model provider extras ---
 google = [

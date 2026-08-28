@@ -1268,6 +1268,33 @@ config key) yourself. See
 
 ## Coding Policies
 
+### Cyclomatic Complexity
+
+New functions must score **15 or below** under radon. The gate is
+`jaato-server/shared/tests/test_cyclomatic_complexity_audit.py`, which runs in the
+required `contract-guards` CI job.
+
+It is a **ratchet, not a threshold**. The tree already carried 416 functions over
+15 when the guard went in, so those are frozen in a `BASELINE` dict with their
+scores. Three rules follow:
+
+- a function over 15 that is **not** in `BASELINE` fails — split it, or add a
+  baseline entry with a comment justifying it;
+- a **baselined** function may not grow past its recorded score;
+- a baselined function that gets **simpler or is deleted** fails as stale — lower
+  the number or drop the line. This is how the baseline shrinks.
+
+Regenerate the whole baseline (deliberate re-freeze only) with:
+
+```bash
+python jaato-server/shared/tests/test_cyclomatic_complexity_audit.py
+```
+
+Note that radon counts `and`/`or` and comprehensions as decision points, so a run
+of defensive `x.get(k) or ""` defaults can push an otherwise flat function over
+the line. The ceiling is 15 rather than 10 precisely to leave room for that; see
+the test module's docstring for the measurements behind the choice.
+
 ### Docstring Maintenance
 
 Whenever you read or modify code, check that the docstrings on the classes, methods, and functions you touch are **present, accurate, and complete**. If they are missing, outdated, or misleading, update them as part of the same change. Specifically:
