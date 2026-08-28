@@ -7,12 +7,14 @@
 name: _base_rubric
 description: scores an agent run against a typed rubric.
 
-# filesystem_query so the judge can READ what the agent wrote rather than
-# scoring the listing it was handed.  A judge that can only see filenames
-# grades the claim, not the artefact.
+# NO filesystem_query, deliberately.  The artefact is injected by a
+# MANDATORY prefetch (see agents/rubric.md -> scripts/prefetch_artefact.py),
+# so the judge cannot skip reading it — there is nothing to skip.  Giving
+# it a file tool back would restore the failure this removed: reading is a
+# FACT, and a fact routed through a model's discretion was unreliable ~1
+# run in 4 ("I did not open answer.txt" — the call was never made).
 plugins:
   - environment
-  - filesystem_query(preload)
   - permission
 
 plugin_configs:
@@ -30,17 +32,16 @@ completion_payload_schema:
       minimum: 0
       maximum: 1
       description: >
-        READ answer.txt with your tools before scoring — do not infer its
-        contents from the completion payload you were shown, which is the
-        agent's CLAIM and is the thing under test.  1.0 if answer.txt
-        exists and contains exactly READY; 0.0 if it is absent; between
-        the two if present but wrong.
+        Score the artefact QUOTED IN YOUR PROMPT — it was read for you
+        before this turn and is verbatim.  1.0 if answer.txt contains
+        exactly READY; 0.0 if it is absent; between the two if present but
+        wrong.  Do not infer contents from the agent's completion payload,
+        which is its CLAIM and is the thing under test.
     reasoning:
       type: string
       description: >
-        One sentence QUOTING the bytes you read from answer.txt.  If you
-        did not open it, say so instead of guessing — a rubric that
-        scores the claim rather than the artefact measures nothing.
+        One sentence QUOTING the bytes shown to you.  Quoting is what makes
+        a score checkable by someone who was not present for the run.
     warnings:
       type: array
       items: {type: string}
@@ -48,12 +49,10 @@ completion_payload_schema:
       type: array
       items: {type: string}
       description: >
-        PUT "I did not read the artefact" HERE, not only in reasoning.
-        Any reason you could not carry out the assessment belongs in this
-        field — you did not call the tool, the tool failed, the file was
-        unreadable.  The harness treats a non-empty errors[] as BLOCKED
-        rather than FAIL, because a judge that did not judge is not
-        evidence about the agent.  Measured: three of four failures said
-        "I did not open answer.txt" in `reasoning` with errors[] EMPTY,
-        so they were scored as the agent failing when the agent's file
-        was correct and on disk.
+        Any reason you could not carry out the assessment goes HERE, not
+        only in reasoning.  The harness treats a non-empty errors[] as
+        BLOCKED rather than FAIL, because a judge that did not judge is not
+        evidence about the agent.  An empty errors[] asserts that you did
+        assess it.  (This field mattered more when the judge had to fetch
+        the artefact itself and sometimes did not; the prefetch removed
+        that failure mode, and the field remains for the ones it cannot.)
