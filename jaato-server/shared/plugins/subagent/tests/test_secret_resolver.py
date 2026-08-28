@@ -1,6 +1,8 @@
 """Tests for secret URI resolution in expand_variables / _expand_string."""
 
 import os
+import threading
+import time
 from typing import FrozenSet, Optional
 from unittest.mock import patch
 
@@ -422,3 +424,133 @@ class TestLooksLikeMalformedSecretURI:
     def test_none_for_non_str(self):
         assert looks_like_malformed_secret_uri(None) is None
         assert looks_like_malformed_secret_uri(12345) is None
+
+
+# ---------------------------------------------------------------------------
+# Concurrent first use
+# ---------------------------------------------------------------------------
+
+class TestConcurrentDiscovery:
+    """The registry must never be observable half-built.
+
+    Discovery is slow -- ``entry_points()`` scans installed distributions and
+    ``ep.load()`` imports jaato-premium.  The cache used to be published
+    EMPTY at the top of the function and filled afterwards, so a second
+    thread arriving during that window took the ``is not None`` fast path and
+    received an empty registry: it reported "(available: none)" and passed a
+    literal ``pass://`` URI through to a provider as its api_key.
+
+    Reported from a cold daemon whose first two sessions started 1ms apart:
+    2 occurrences for 2 cold starts, 0 for 3 warm ones.  The distinguishing
+    condition is concurrency at FIRST USE, not elapsed time -- once the
+    registry is populated it is never empty again, which is why a warm daemon
+    never shows it.
+    """
+
+    def setup_method(self):
+        reset_secret_resolvers()
+
+    def teardown_method(self):
+        reset_secret_resolvers()
+
+    def _slow_discovery(self, barrier, delay=0.2):
+        """Stand in for the real entry-point scan, with its latency."""
+        def _fake_uncached():
+            barrier.wait(timeout=5)   # both threads are now inside
+            time.sleep(delay)         # ...the window the racer used to hit
+            return {"pass": FakeVaultResolver()}
+        return _fake_uncached
+
+    def test_second_caller_never_sees_an_empty_registry(self):
+        """A caller arriving mid-discovery waits, and gets the full registry.
+
+        Fails against the pre-fix code: the second thread returned ``{}``.
+        """
+        from .. import config as config_module
+
+        started = threading.Barrier(2)
+        seen = []
+
+        def _slow():
+            started.wait(timeout=5)
+            time.sleep(0.2)
+            return {"pass": FakeVaultResolver()}
+
+        def _first():
+            seen.append(("first", dict(_discover_secret_resolvers())))
+
+        def _second():
+            # Arrive while the first thread is inside discovery.
+            started.wait(timeout=5)
+            seen.append(("second", dict(_discover_secret_resolvers())))
+
+        with patch.object(config_module,
+                          "_discover_secret_resolvers_uncached",
+                          _slow):
+            t1 = threading.Thread(target=_first)
+            t2 = threading.Thread(target=_second)
+            t1.start()
+            t2.start()
+            t1.join(timeout=10)
+            t2.join(timeout=10)
+
+        assert len(seen) == 2, f"a thread did not finish: {seen}"
+        for who, registry in seen:
+            assert "pass" in registry, (
+                f"the {who} caller saw a registry without 'pass' "
+                f"(available: {', '.join(sorted(registry)) or 'none'}) -- "
+                f"a partially-built registry was published"
+            )
+
+    def test_discovery_runs_once_under_concurrency(self):
+        """Discovery runs once no matter how many callers arrive at once.
+
+        NOT a guard for the race above -- this passes against the pre-fix
+        code too, because publishing early also stopped the second caller
+        re-scanning.  It guards the caching itself.
+        """
+        from .. import config as config_module
+
+        calls = []
+
+        def _counting():
+            calls.append(1)
+            time.sleep(0.05)
+            return {"pass": FakeVaultResolver()}
+
+        with patch.object(config_module,
+                          "_discover_secret_resolvers_uncached",
+                          _counting):
+            threads = [threading.Thread(target=_discover_secret_resolvers)
+                       for _ in range(8)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(timeout=10)
+
+        assert len(calls) == 1, f"discovery ran {len(calls)} times, want 1"
+
+    def test_empty_result_is_still_cached(self):
+        """"Discovered, and there are none" must not re-scan every call.
+
+        The fix distinguishes absent (``None``) from empty (``{}``); an empty
+        result is a real answer and stays cached.
+
+        Also passes pre-fix; it pins the absent-vs-empty distinction the fix
+        now depends on, so a later simplification cannot quietly drop it.
+        """
+        from .. import config as config_module
+
+        calls = []
+
+        def _finds_nothing():
+            calls.append(1)
+            return {}
+
+        with patch.object(config_module,
+                          "_discover_secret_resolvers_uncached",
+                          _finds_nothing):
+            assert _discover_secret_resolvers() == {}
+            assert _discover_secret_resolvers() == {}
+
+        assert len(calls) == 1, "an empty registry was re-discovered"
