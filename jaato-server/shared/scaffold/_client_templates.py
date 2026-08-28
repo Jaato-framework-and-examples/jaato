@@ -380,6 +380,14 @@ from jaato_sdk import SessionCreateFailed, truncation_reason
 # The example below varies the PERSONA with capabilities held fixed, which
 # is the cleanest demonstration of the orthogonality.  ``None`` in the agent
 # slot means "no persona" -- the profile's own instructions stand.
+#: How long ONE job may run before the driver gives up on it.
+#:
+#: This lives here, visible, because the driver owns it.  A cascade task
+#: pool's ``seconds`` ceiling cannot do this job: a pool reconciles when a
+#: session ENDS, so it never charges for a job that has not finished, and a
+#: runaway job is exactly the one that has not finished.
+JOB_TIMEOUT_S = 600.0
+
 JOBS = [
     ("baseline", "your-profile", "your-baseline-agent", "Do the thing."),
     ("variant",  "your-profile", "your-variant-agent",  "Do the thing."),
@@ -464,10 +472,17 @@ async def _run_job(owner_cid, name, profile, agent, prompt) -> dict:
 
         await client.send_message(prompt)
         try:
-            await asyncio.wait_for(done.wait(), timeout=600.0)
+            # THE DRIVER OWNS ITS OWN WALL CLOCK.  It is tempting to delegate
+            # this to a cascade task pool's ``seconds`` ceiling, and that does
+            # not work: a pool is an aggregate over COMPLETED work, reconciled
+            # when a session ENDS.  A job that runs away never ends, so it
+            # never reconciles -- observed as ``cascade_remaining=578.4``
+            # unchanged across two spawns while a job ran past sixteen
+            # minutes.  The pool is coherent; it is simply not a timeout.
+            await asyncio.wait_for(done.wait(), timeout=JOB_TIMEOUT_S)
         except asyncio.TimeoutError:
             return {"job": name, "outcome": "BLOCKED",
-                    "detail": "no terminal event within 600s"}
+                    "detail": f"no terminal event within {JOB_TIMEOUT_S}s"}
 
         # COMPLETENESS IS NOT ``finish_reason != "stop"``.  A schema-driven
         # profile ends INSIDE a tool-use turn, so a finished job reports
@@ -480,7 +495,35 @@ async def _run_job(owner_cid, name, profile, agent, prompt) -> dict:
         )
         if why is not None:
             return {"job": name, "outcome": "BLOCKED", "detail": why}
+
+        # A JOB THAT COULD NOT DO ITS WORK IS NOT A RESULT.
+        #
+        # The completion-schema convention gives every payload an ``errors[]``
+        # escape hatch precisely so a job can say "I could not answer" instead
+        # of inventing an answer.  Reading a payload that reports errors as a
+        # normal outcome turns an unusable measurement into a data point, and
+        # a sweep then compares one job's real answer against another job's
+        # failure to produce one.
+        #
+        # This is not hypothetical.  A downstream eval reported "the cheaper
+        # model failed and the better one scored 1.000" off a two-job sample;
+        # a four-job rerun showed BOTH models scoring 1.0 on one repeat and
+        # 0.0 on another, because the grader intermittently could not read the
+        # file it was grading.  Its payload said so in ``errors[]`` the whole
+        # time.  BLOCKED and FAIL are different verdicts and only one of them
+        # is evidence about the job.
+        payload = state.get("payload") or {}
+        errors = payload.get("errors") or []
+        if errors:
+            return {"job": name, "outcome": "BLOCKED",
+                    "detail": "; ".join(str(e) for e in errors),
+                    "payload": payload}
+
+        # ``warnings[]`` deliberately does NOT block: it is the channel for
+        # "answered, with caveats", and treating it as failure would push
+        # authors to stop reporting caveats at all.
         return {"job": name, "outcome": "OK",
+                "warnings": payload.get("warnings") or [],
                 "finish_reason": state.get("finish_reason")}
     finally:
         await client.disconnect()

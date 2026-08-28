@@ -341,3 +341,90 @@ def test_the_vocabulary_is_job_not_arm(rendered):
         f"the sweep template still says {sorted(set(stray))}; the unit is a "
         "job, and two words for one thing reads as two things"
     )
+
+
+def test_a_job_that_reports_errors_is_blocked_not_ok(rendered):
+    """A job that could not do its work is not a result.
+
+    The completion-schema convention gives every payload an ``errors[]``
+    escape hatch so a job can say "I could not answer" instead of inventing
+    one.  Reading such a payload as a normal outcome turns an unusable
+    measurement into a data point, and the sweep then compares one job's
+    answer against another job's failure to produce one.
+
+    Observed downstream: a two-job sample reported as "the cheaper model
+    failed, the better one scored 1.000"; the four-job rerun had BOTH models
+    at 1.0 on one repeat and 0.0 on another, because the grader intermittently
+    could not read the file it was grading.  Its payload said so in
+    ``errors[]`` throughout.
+    """
+    code = "\n".join(line.split("#", 1)[0] for line in rendered.splitlines())
+    assert '"errors"' in code or "'errors'" in code, (
+        "the generated driver never reads payload['errors'], so a job that "
+        "reported it could not do its work is recorded as a normal outcome"
+    )
+
+    tree = ast.parse(rendered)
+    # The BLOCKED return that is guarded by the errors check.
+    blocked_on_errors = False
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.If):
+            continue
+        if not any(isinstance(n, ast.Name) and n.id == "errors"
+                   for n in ast.walk(node.test)):
+            continue
+        for ret in ast.walk(node):
+            if isinstance(ret, ast.Return) and "BLOCKED" in ast.unparse(ret):
+                blocked_on_errors = True
+    assert blocked_on_errors, (
+        "payload['errors'] is read but does not gate a BLOCKED outcome. "
+        "BLOCKED and FAIL are different verdicts and only one of them is "
+        "evidence about the job."
+    )
+
+
+def test_warnings_do_not_block(rendered):
+    """``warnings[]`` is "answered, with caveats" -- blocking on it would
+    teach authors to stop reporting caveats at all."""
+    tree = ast.parse(rendered)
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.If):
+            continue
+        names = {n.id for n in ast.walk(node.test) if isinstance(n, ast.Name)}
+        if "warnings" not in names:
+            continue
+        for ret in ast.walk(node):
+            if isinstance(ret, ast.Return) and "BLOCKED" in ast.unparse(ret):
+                raise AssertionError(
+                    "a non-empty warnings[] returns BLOCKED; warnings mean "
+                    "the job ANSWERED with caveats. Blocking on them makes "
+                    "reporting a caveat costlier than staying silent."
+                )
+
+
+def test_the_driver_owns_its_wall_clock(rendered):
+    """A task pool's ``seconds`` cannot bound a runaway job.
+
+    A pool is an aggregate over COMPLETED work, reconciled when a session
+    ENDS -- so it never charges for a job that has not finished, and a
+    runaway job is precisely the one that has not finished.  Observed as
+    ``cascade_remaining`` unchanged across two spawns while a job ran past
+    sixteen minutes.  The pool is coherent; it is simply not a timeout.
+    """
+    code = "\n".join(line.split("#", 1)[0] for line in rendered.splitlines())
+    assert "asyncio.wait_for(" in code, (
+        "the generated driver has no wall clock of its own; the first slow "
+        "model it meets will hang it, and no pool ceiling will stop that"
+    )
+    tree = ast.parse(rendered)
+    named = any(
+        isinstance(n, ast.Assign)
+        and any(isinstance(t, ast.Name) and t.id == "JOB_TIMEOUT_S"
+                for t in n.targets)
+        for n in ast.walk(tree)
+    )
+    assert named, (
+        "the per-job timeout is not a named module constant. It is the knob "
+        "an author must change first when a slow model shows up, so it has "
+        "to be visible rather than buried in a call."
+    )
