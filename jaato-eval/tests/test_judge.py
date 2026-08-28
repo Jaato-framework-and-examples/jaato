@@ -228,3 +228,62 @@ class JudgeUsesTheRunsDaemonCase(unittest.TestCase):
     def test_no_socket_anywhere_leaves_the_client_default(self):
         k = self._run({"profile": "rubric"})
         self.assertNotIn("socket_path", k)
+
+
+class AJudgeThatCouldNotJudgeCase(unittest.TestCase):
+    """`errors[]` on a rubric payload means the JUDGE failed, not the arm.
+
+    Measured live: an intermittent framework fault left the judge session's
+    filesystem plugin initialised with `workspace=none`, so its file reads
+    returned path-not-found.  The rubric reported that honestly in
+    `errors[]` and scored 0.0 — and the adapter recorded FAIL, blaming the
+    arm for a correct artefact sitting on disk.  Three of four identical
+    probes passed; the fourth did not, which is what a benchmark must never
+    average.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.ws = Path(self.tmp.name)
+        self._displaced = {n: sys.modules[n] for n in _STUBBED if n in sys.modules}
+        self.addCleanup(self.tmp.cleanup)
+        self.addCleanup(self._uninstall)
+
+    def _uninstall(self):
+        for n in _STUBBED:
+            sys.modules.pop(n, None)
+        sys.modules.update(self._displaced)
+
+    def _grade(self, payload, config=None):
+        _install(payload=payload)
+        cfg = {"profile": "rubric", "threshold": 0.9}
+        cfg.update(config or {})
+        ctx = GraderContext(workspace_path=self.ws, config_root=self.ws,
+                            payload={"ok": True})
+        return JudgeGrader(GraderSpec(kind="judge", config=cfg)).grade(ctx)
+
+    def test_errors_block_even_with_a_zero_score(self):
+        v = self._grade({"score": 0.0, "reasoning": "could not open it",
+                         "errors": ["file-read tool returned path-not-found"]})
+        self.assertEqual(v.state, BLOCKED)
+        self.assertIn("path-not-found", v.blocked_reason)
+
+    def test_errors_block_even_with_a_passing_score(self):
+        """A judge that hit an error did not complete the assessment,
+        whatever number it attached to it."""
+        v = self._grade({"score": 1.0, "errors": ["partial read"]})
+        self.assertEqual(v.state, BLOCKED)
+
+    def test_an_empty_errors_list_is_not_an_error(self):
+        """The field is present on every well-formed rubric payload."""
+        v = self._grade({"score": 1.0, "errors": []})
+        self.assertEqual(v.state, PASS)
+
+    def test_warnings_do_not_block(self):
+        """warnings[] is 'I noticed something', not 'I could not judge'."""
+        v = self._grade({"score": 1.0, "warnings": ["file had a trailing newline"]})
+        self.assertEqual(v.state, PASS)
+
+    def test_a_genuine_low_score_still_fails(self):
+        v = self._grade({"score": 0.1, "errors": []})
+        self.assertEqual(v.state, FAIL)

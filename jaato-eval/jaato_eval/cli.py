@@ -72,6 +72,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         arms, store=store, workspace_root=Path(args.workspaces),
         concurrency=args.concurrency, socket_path=args.socket,
         keep_workspaces=args.keep_workspaces, resume=args.resume,
+        arm_timeout_seconds=args.arm_timeout,
         on_result=_progress,
     ))
 
@@ -112,6 +113,12 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--socket", default=None, help="daemon IPC socket path")
     run.add_argument("--keep-workspaces", action="store_true",
                      help="leave scratch workspaces on disk for inspection")
+    run.add_argument("--arm-timeout", type=float, default=None,
+                     help="wall-clock ceiling per arm in seconds "
+                          "(default 900; 0 disables). An arm that exceeds it "
+                          "is BLOCKED — a task pool's `seconds` cannot bound "
+                          "this, because it is reconciled when a session ends "
+                          "and a session that never ends never consumes it.")
     run.add_argument("--resume", action="store_true",
                      help="skip arms already present in --out")
     run.set_defaults(func=cmd_run)

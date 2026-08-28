@@ -186,10 +186,34 @@ give you, and it costs nothing extra to collect.
 python3 -m unittest discover -s tests -t .      # no daemon, no SDK needed
 ```
 
-80 tests. The runner is covered end-to-end against a stubbed SDK
+113 tests. The runner is covered end-to-end against a stubbed SDK
 (`tests/test_runner_integration.py`) — PASS, FAIL and BLOCKED arms, usage
 accumulation, the `config_root`/workspace split, and `.env` profile-set
 propagation.
+
+### The judge is the expensive grader, and its guards are the point
+
+It opens a SECOND session per arm, so `gate_on` exists to skip it (BLOCKED,
+with the reason recorded) when the cheap graders already failed. Two things
+learned by running it for the first time, both now fixed:
+
+- **It must score on the daemon its arm ran on.** It read `socket_path` from
+  the manifest only, so a sweep pointed at a non-default daemon would have put
+  arms on one and judges on another — silently, since the client default
+  resolves to a real socket. The socket is a property of the **run**, so it
+  travels on `GraderContext`, not in `task.yaml`.
+- **A rubric profile is OFFERED `signal_completion`, not compelled to call
+  it.** With a correct schema and a prompt that only said "score this", the
+  judge answered in prose and every arm came back BLOCKED claiming the profile
+  declared no schema — pointing at the one thing that was fine. The adapter
+  now asks for the call explicitly, because every judge needs it and leaving
+  it to each rubric author reproduces the failure with a misleading message.
+
+And a rubric lesson that belongs to the profile, not the code: the first
+working judge scored **0.0 while `answer.txt` held `READY`**, because it
+reasoned from the agent's completion payload instead of opening the file. The
+schema now requires reading the artefact and quoting the bytes. A rubric that
+scores the claim measures the claim.
 
 ### Validated against a live daemon
 

@@ -176,6 +176,8 @@ class _FakeSession:
 
     async def complete(self, prompt):
         b = self.client.behaviour
+        if b.get("hang"):
+            await asyncio.sleep(b["hang"])
         if b.get("writes") is not None:
             (self.client.workspace / "answer.txt").write_text(b["writes"])
         self.client._emit("TURN_COMPLETED",
@@ -338,6 +340,30 @@ class RunnerCase(unittest.TestCase):
         """An un-pooled arm must not send an empty cid the daemon would read."""
         self._run({"writes": "READY\n"})
         self.assertNotIn("cascade_driver_id", self.behaviour["seen_kwargs"])
+
+    def test_an_arm_that_never_finishes_is_blocked_not_hung(self):
+        """A benchmark must bound its own arms.
+
+        A task pool's `seconds` cannot: it is reconciled when a session
+        ENDS, so a session that never ends never consumes it and the pool
+        cannot abort it.  Measured twice against a live daemon — a slow
+        model kept turning past sixteen minutes and each sweep died on the
+        operator's own `timeout`, losing the report and one arm with it.
+        """
+        result = self._run({"hang": 30}, arm_timeout_seconds=0.2)
+        self.assertEqual(result.state, BLOCKED)
+        self.assertIn("harness ceiling", result.blocked_reason)
+
+    def test_a_timed_out_arm_is_blocked_never_failed(self):
+        """It was cut short; that says nothing about the configuration."""
+        result = self._run({"hang": 30, "writes": "not ready\n"},
+                           arm_timeout_seconds=0.2)
+        self.assertEqual(result.state, BLOCKED)
+        self.assertEqual(result.verdicts, [])
+
+    def test_zero_disables_the_ceiling(self):
+        result = self._run({"writes": "READY\n"}, arm_timeout_seconds=0)
+        self.assertEqual(result.state, PASS)
 
     def test_profile_set_reaches_the_env_file(self):
         """The sweep's model axis travels via .env in the workspace."""

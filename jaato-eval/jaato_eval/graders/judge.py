@@ -115,6 +115,26 @@ class JudgeGrader:
             return blocked(self.spec, claim,
                            f"judge {field!r} is not numeric: {payload[field]!r}")
 
+        # A JUDGE THAT COULD NOT JUDGE MUST BLOCK, NOT FAIL.  `errors` is
+        # the standing escape hatch on a completion schema: it is where a
+        # judge says "I could not carry out the assessment", as distinct
+        # from "I assessed it and it was bad".  Scoring the first as FAIL
+        # blames the arm for the judge's own broken tooling — measured:
+        # a rubric reported `errors: ["Attempted to read answer.txt but
+        # file-read tool returned a path-not-found error"]` with score 0.0,
+        # and the arm was recorded as a failure although its artefact was
+        # correct and on disk.  (Root cause was framework-side and
+        # intermittent: FilesystemQueryPlugin initialised with
+        # `workspace=none`, so path tools could not resolve.)
+        reported = self.spec.config.get("errors_field", "errors")
+        judge_errors = payload.get(reported) or []
+        if judge_errors:
+            return blocked(
+                self.spec, claim,
+                f"the judge reported it could not complete the assessment: "
+                f"{_brief(judge_errors)} — BLOCKED rather than FAIL, because "
+                "this is the judge's failure and says nothing about the arm")
+
         threshold = float(self.spec.config.get("threshold", 0.7))
         state = PASS if score >= threshold else FAIL
         verdict = Verdict(

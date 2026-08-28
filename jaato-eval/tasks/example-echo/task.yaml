@@ -35,6 +35,18 @@ harness:
 # tasks/ledger-probe therefore uses the other gate.  See jaato_eval/pool.py.
 budget:
   usd: 0.10
+  # A WALL-CLOCK dimension, learned by losing a sweep to a slow arm.  A
+  # cheaper model on this task kept turning past sixteen minutes while
+  # gpt-5-mini finished in about one, and nothing bounded it: the pool's
+  # usd ceiling caps SPEND, not time, so a single slow arm consumed the
+  # whole run and three completed arms were reported without a fourth.
+  #
+  # It goes in the POOL rather than in a profile deliberately.  A session
+  # carrying its own budget_control is on its own books and stops drawing
+  # here, which would leave this pool inert — so bounding an arm's clock
+  # via the profile would silently disable the gate this task exists to
+  # demonstrate.
+  seconds: 600
   degrade:
     - at: 100%
       action: abort

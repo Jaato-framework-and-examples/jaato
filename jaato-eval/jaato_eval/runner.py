@@ -108,10 +108,21 @@ class _TurnAccumulator:
         return out
 
 
+#: Wall-clock ceiling for one arm's session, in seconds.  The harness owns
+#: this because nothing else can: a task pool's ``seconds`` is reconciled
+#: when a session ENDS, so a session that never ends never consumes it and
+#: the pool cannot abort it.  Measured twice — a slow model kept turning
+#: past sixteen minutes while its sibling finished in one, and each time the
+#: sweep died on the operator's own `timeout`, losing the report and one
+#: arm's result with it.
+DEFAULT_ARM_TIMEOUT_SECONDS = 900.0
+
+
 async def run_arm(spec: ArmSpec, *, workspace_root: Path,
                   socket_path: Optional[str] = None,
                   keep_workspace: bool = False,
-                  cascade_driver_id: Optional[str] = None) -> ArmResult:
+                  cascade_driver_id: Optional[str] = None,
+                  arm_timeout_seconds: Optional[float] = None) -> ArmResult:
     """Execute and grade one arm.
 
     Args:
@@ -120,6 +131,10 @@ async def run_arm(spec: ArmSpec, *, workspace_root: Path,
         socket_path: Daemon IPC socket; ``None`` uses the client default.
         keep_workspace: Leave the workspace on disk after grading.  Set
             when a human needs to inspect what the agent actually did.
+        arm_timeout_seconds: Wall-clock ceiling for the session.  An arm
+            that exceeds it is BLOCKED — it was cut short, so it says
+            nothing about the configuration under test.  ``None`` uses
+            :data:`DEFAULT_ARM_TIMEOUT_SECONDS`; pass ``0`` to disable.
         cascade_driver_id: The task's cascade pool (see
             :mod:`jaato_eval.pool`).  ``None`` runs the arm un-pooled.
             An arm whose profile declares its own ``budget_control`` is on
@@ -146,9 +161,21 @@ async def run_arm(spec: ArmSpec, *, workspace_root: Path,
 
     started = time.monotonic()
     try:
-        payload, accumulator, history = await _run_session(
-            spec, workspace, socket_path=socket_path,
-            cascade_driver_id=cascade_driver_id)
+        limit = (DEFAULT_ARM_TIMEOUT_SECONDS if arm_timeout_seconds is None
+                 else float(arm_timeout_seconds))
+        run = _run_session(spec, workspace, socket_path=socket_path,
+                           cascade_driver_id=cascade_driver_id)
+        payload, accumulator, history = (
+            await asyncio.wait_for(run, timeout=limit) if limit > 0 else await run)
+    except asyncio.TimeoutError:
+        result.blocked_reason = (
+            f"arm exceeded the harness ceiling of {limit:.0f}s and was cut "
+            "short — BLOCKED, not FAIL: a run that did not finish says "
+            "nothing about the configuration under test")
+        result.duration_seconds = time.monotonic() - started
+        if not keep_workspace:
+            discard(workspace)
+        return result
     except Exception as exc:  # noqa: BLE001 — any session failure is BLOCKED
         result.blocked_reason = _describe_session_failure(exc)
         result.duration_seconds = time.monotonic() - started
