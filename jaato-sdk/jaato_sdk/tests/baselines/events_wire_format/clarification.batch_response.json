@@ -1,6 +1,7 @@
 {
   "type": "clarification.batch_response",
   "timestamp": "<TIMESTAMP>",
+  "session_id": "",
   "request_id": "",
   "answers": []
 }

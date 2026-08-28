@@ -1,0 +1,71 @@
+# Minimal end-to-end task: enough to exercise every stage of the engine
+# without needing a toolchain installed.
+#
+# It is deliberately trivial as a *benchmark* — a task every model passes
+# carries no information (see docs/design/eval-environments-layer.md on
+# difficulty calibration).  Its job is to be the smoke test for the
+# harness, not a measurement.
+id: example/echo-a-file
+description: >
+  Write a file named answer.txt containing the word READY.
+  Exercises: fixture materialisation, one session, a script grader.
+
+environment:
+  fixture: fixture
+  config_root: .jaato
+
+input:
+  prompt: |
+    Create a file called answer.txt in the workspace root whose entire
+    contents are the single word READY (no trailing punctuation).
+  agent_params: {}
+
+harness:
+  profile: worker
+
+# THE TASK POOL — the cascade gate, shared by every arm of this task
+# (repeats x profile sets), so `repeats: N` cannot run away and no task can
+# starve another.  Arms are clamped at spawn, degraded at a rung, and
+# refused outright once it is empty.
+#
+# This task can afford a pool because its grader reads the FILESYSTEM.  A
+# pooled arm's events are fanned out to the cid's cascade-clients rather
+# than to the connection that created it, and a history request from that
+# connection goes unanswered — so a pooled arm has no tool-call ledger.
+# tasks/ledger-probe therefore uses the other gate.  See jaato_eval/pool.py.
+budget:
+  usd: 0.10
+  # A WALL-CLOCK dimension, learned by losing a sweep to a slow arm.  A
+  # cheaper model on this task kept turning past sixteen minutes while
+  # gpt-5-mini finished in about one, and nothing bounded it: the pool's
+  # usd ceiling caps SPEND, not time, so a single slow arm consumed the
+  # whole run and three completed arms were reported without a fourth.
+  #
+  # It goes in the POOL rather than in a profile deliberately.  A session
+  # carrying its own budget_control is on its own books and stops drawing
+  # here, which would leave this pool inert — so bounding an arm's clock
+  # via the profile would silently disable the gate this task exists to
+  # demonstrate.
+  seconds: 600
+  degrade:
+    - at: 100%
+      action: abort
+
+graders:
+  - kind: script
+    run: "test -f answer.txt && grep -qx READY answer.txt"
+
+  # The judge opens a SECOND session per arm, so it is gated behind the
+  # cheap check: `gate_on` skips it (BLOCKED, with the reason recorded)
+  # when the artefact test already failed, rather than spending a model
+  # call to score an arm known bad.  The rubric lives in the profile's
+  # completion_payload_schema, so the score arrives typed.
+  - kind: judge
+    profile: rubric
+    agent: rubric          # carries the MANDATORY artefact prefetch
+    threshold: 0.9
+    gate_on: ["script:test -f answer.txt && grep -qx READY answer.txt"]
+
+# Two repeats so `det` has something to compare: it reports the share of
+# arms sharing the modal payload hash, which is meaningless at N=1.
+repeats: 2

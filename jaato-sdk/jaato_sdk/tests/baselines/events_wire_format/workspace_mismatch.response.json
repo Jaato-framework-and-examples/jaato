@@ -1,6 +1,7 @@
 {
   "type": "workspace_mismatch.response",
   "timestamp": "<TIMESTAMP>",
+  "session_id": "",
   "request_id": "",
   "response": ""
 }

@@ -1,6 +1,7 @@
 {
   "type": "peer.spawn_accepted",
   "timestamp": "<TIMESTAMP>",
+  "session_id": "",
   "request_id": "",
   "remote_agent_id": ""
 }

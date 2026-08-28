@@ -29,6 +29,18 @@ NAMES the code holding the loop.
   code holding the loop, captured mid-stall, with no cooperation from the
   loop required.
 
+  Past ``all_threads_after`` it dumps EVERY thread's stack, named and
+  stamped with how long each has sat on the same frames.  This half exists
+  because the first half answers only half the question: when the loop is
+  parked on a lock, its own stack names the thread that is BLOCKED, and the
+  holder is somewhere else entirely.  Observed 2026-08-28 — a 36.5s stall
+  whose loop stack ended at ``session_manager.py:4351  with self._lock:``,
+  which says what the loop wanted and nothing about who had it.
+
+  ``sys._current_frames()`` is per-PROCESS, so this can only be done from
+  inside the daemon.  No client, harness or external observer can obtain it;
+  from outside they get their own threads.
+
 On recovery it logs the stall's total duration, so the log carries the pair
 the investigation needs: *what was running* and *for how long*.
 
@@ -47,12 +59,14 @@ per-callback overhead taxes the healthy path.
 
 from __future__ import annotations
 
+import linecache
 import logging
+import os
 import sys
 import threading
 import time
 import traceback
-from typing import Optional
+from typing import Dict, List, Optional
 
 import asyncio
 
@@ -79,6 +93,7 @@ class LoopWatchdog:
         interval: float = 1.0,
         threshold: float = 2.0,
         resample_every: float = 10.0,
+        all_threads_after: float = 10.0,
     ) -> None:
         """
         Args:
@@ -88,10 +103,29 @@ class LoopWatchdog:
             resample_every: While one stall persists, re-dump the stack at
                 most this often — a 30s stall yields ~3 stacks, enough to see
                 whether it is one frame or a churn, without flooding the log.
+            all_threads_after: Stall age past which EVERY thread's stack is
+                dumped, not just the loop's.  Below it the log is unchanged.
+
+                Why a second threshold rather than always-on: the loop thread
+                alone answers "what was the loop doing", and for a short stall
+                that is the whole question.  It does not answer "who was
+                holding the thing the loop waited on" — and a daemon has
+                enough threads that dumping all of them on every 2s hiccup
+                would cost more than it tells.  The default sits where the
+                two questions separate in practice: #633's stalls clustered
+                at 10-12s on a timeout ceiling and are understood; the
+                unexplained ones observed since run past 30s on a held mutex,
+                where the loop's own stack names only the BLOCKED party.
         """
         self._interval = interval
         self._threshold = threshold
         self._resample = resample_every
+        self._all_threads_after = all_threads_after
+        #: ident -> (stack digest, monotonic time that digest FIRST appeared).
+        #: Lets each dump say how long a thread has been sitting on the same
+        #: stack: one that appears once at 36s and one that appears in every
+        #: dump are different bugs, and without this they read identically.
+        self._digest_seen: dict = {}
         self._beat = time.monotonic()
         self._loop_thread_id: Optional[int] = None
         self._task: Optional[asyncio.Task] = None
@@ -114,10 +148,11 @@ class LoopWatchdog:
         # reader grepping for stalls must find only stalls, and a filter
         # matching the token must not fire on the announcement of it.
         logger.info(
-            "LoopWatchdog armed: interval=%.1fs threshold=%.1fs -- a stall "
-            "longer than the threshold logs the loop thread's stack at "
-            "WARNING",
-            self._interval, self._threshold,
+            "LoopWatchdog armed: interval=%.1fs threshold=%.1fs "
+            "all_threads_after=%.1fs -- a stall past the threshold logs the "
+            "loop thread's stack at WARNING, and past all_threads_after "
+            "every thread's stack as well",
+            self._interval, self._threshold, self._all_threads_after,
         )
 
     async def _heartbeat(self) -> None:
@@ -159,6 +194,139 @@ class LoopWatchdog:
                 "executing:\n%s", _STALL_TOKEN, age,
                 stack or "<loop thread not found>",
             )
+
+            # Past ``all_threads_after`` the loop's own stack is no longer the
+            # whole answer.  When it is parked on a lock, that stack names the
+            # BLOCKED party; the holder is another thread entirely, and no
+            # amount of detail about the waiter identifies it.  ``_current_
+            # frames()`` is per-PROCESS, so this can only be done from inside
+            # the daemon -- an out-of-process observer sees its own threads.
+            if age >= self._all_threads_after:
+                logger.warning(
+                    "%s: stall is %.1fs (>= %.1fs) -- every thread's stack "
+                    "follows; the loop thread above is the WAITER, look here "
+                    "for the holder:\n%s",
+                    _STALL_TOKEN, age, self._all_threads_after,
+                    self._all_thread_stacks(),
+                )
+
+    def _innermost_line(self, frame) -> str:
+        """The source line the thread is actually sitting on.
+
+        ``sys._current_frames()`` hands back each thread's INNERMOST frame, so
+        this is where it stopped -- not where it started.
+        """
+        return linecache.getline(
+            frame.f_code.co_filename, frame.f_lineno,
+        ).strip()
+
+    @staticmethod
+    def _is_waiting_for_a_lock(line: str) -> bool:
+        """Is this source line a thread blocking to ACQUIRE a lock?
+
+        Acquiring a ``threading.Lock`` blocks inside C, which creates no Python
+        frame -- so the innermost Python frame of a blocked thread IS the
+        ``with ...lock:`` statement itself.  That is what makes this decidable
+        from the frame alone.
+
+        A thread parked here is BLOCKED, never blocking: it holds nothing it
+        acquired at this line, because it never got it.
+        """
+        low = line.lower()
+        return (
+            (low.startswith("with ") and "lock" in low)
+            or ".acquire(" in low
+        )
+
+    def _all_thread_stacks(self) -> str:
+        """Every thread, PARTITIONED into waiters and holder-candidates.
+
+        WHY PARTITION.  The first version of this dump reported every thread
+        with how long it had sat on the same stack, on the theory that a
+        holder sits still while busy threads move.  Run against a real daemon
+        that turned out to answer the wrong question: 47 threads, and about
+        forty read "unchanged for 20.0s", because A PARKED THREAD IS UNCHANGED
+        BY DEFINITION.  Idle readers, reapers, pool threads and a dozen
+        blocked watchers all looked exactly like a holder.  The signal is
+        necessary and nowhere near sufficient.
+
+        What actually found the holder was reading stack CONTENT: waiters end
+        at a lock acquire, and the holder passes THROUGH and blocks somewhere
+        else.  That distinction is mechanical, so it belongs here rather than
+        in the reader's head.
+
+        Output order follows the question: candidates FIRST and in full, since
+        the holder is among them and they are the smaller set; waiters after,
+        GROUPED BY THE LINE THEY ARE BLOCKED ON, so a twelve-thread convoy is
+        one entry naming twelve threads instead of twelve near-identical
+        stacks.
+
+        Named by the perpetual-monologue bench, from the first live run.
+        """
+        frames = sys._current_frames()
+        named = {t.ident: t.name for t in threading.enumerate()}
+        now = time.monotonic()
+
+        # Retire threads that have gone away, so the map cannot grow across a
+        # long-lived daemon's many stalls.
+        for ident in list(self._digest_seen):
+            if ident not in frames:
+                del self._digest_seen[ident]
+
+        candidates: List[str] = []
+        waiters: Dict[str, List[str]] = {}
+
+        for ident, frame in sorted(frames.items()):
+            label = self._label(ident, named, frame, now)
+            line = self._innermost_line(frame)
+            if self._is_waiting_for_a_lock(line):
+                where = (f"{os.path.basename(frame.f_code.co_filename)}:"
+                         f"{frame.f_lineno}  {line}")
+                waiters.setdefault(where, []).append(label)
+            else:
+                stack = "".join(traceback.format_stack(frame))
+                candidates.append(f"--- {label}\n{stack}")
+
+        return self._render(candidates, waiters)
+
+    def _label(self, ident: int, named: dict, frame, now: float) -> str:
+        """``thread <id> '<name>'`` plus how long it has sat on this stack."""
+        stack = "".join(traceback.format_stack(frame))
+        digest = hash(stack)
+        prev = self._digest_seen.get(ident)
+        if prev is not None and prev[0] == digest:
+            held = f", unchanged for {now - prev[1]:.1f}s"
+        else:
+            self._digest_seen[ident] = (digest, now)
+            held = ", first seen at this stack"
+
+        if ident in named:
+            name = named[ident]
+        else:
+            name = "<not in threading.enumerate() -- created outside threading>"
+        marker = "  <-- THE LOOP" if ident == self._loop_thread_id else ""
+        return f"thread {ident} {name!r}{held}{marker}"
+
+    @staticmethod
+    def _render(candidates: List[str], waiters: Dict[str, List[str]]) -> str:
+        blocked = sum(len(v) for v in waiters.values())
+        # The two headers must not be substrings of one another.  "NOT
+        # WAITING FOR A LOCK" contains "WAITING FOR A LOCK", so anything
+        # splitting the dump on the second lands inside the first -- which
+        # is exactly what happened to the first test written against it.
+        parts = [
+            f"=== HOLDER CANDIDATES ({len(candidates)}) -- THE HOLDER IS IN "
+            f"HERE. These threads got past every lock they asked for; one of "
+            f"them is sitting on the one everything else wants.",
+            *candidates,
+            f"=== BLOCKED ACQUIRING A LOCK ({blocked}) -- blocked, not "
+            f"blocking. Grouped by the line each is stopped on; a thread here "
+            f"holds nothing it acquired at that line, because it never got "
+            f"it.",
+        ]
+        for where, labels in sorted(waiters.items()):
+            parts.append(f"  {where}\n    " + "\n    ".join(sorted(labels)))
+        return "\n".join(parts)
 
     def _loop_stack(self) -> str:
         """The loop thread's stack, captured from outside, mid-stall."""

@@ -34,7 +34,7 @@ def overview() -> Rendered:
         "providers": sorted(P),
         "plugins": len(PL),
         "gc_strategies": sorted(GC),
-        "archetypes": ["client", "fire", "cascade", "observer"],
+        "archetypes": ["client", "fire", "cascade", "observer", "sweep"],
     }
     text = (
         "jaato-scaffold — interrogate the installed framework, then build.\n\n"

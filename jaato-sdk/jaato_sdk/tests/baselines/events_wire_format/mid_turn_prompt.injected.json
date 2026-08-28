@@ -1,5 +1,6 @@
 {
   "type": "mid_turn_prompt.injected",
   "timestamp": "<TIMESTAMP>",
+  "session_id": "",
   "text": ""
 }

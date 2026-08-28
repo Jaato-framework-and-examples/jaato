@@ -107,6 +107,7 @@ from jaato_sdk.plugins.model_provider.types import (
     TurnOutcome,
     TurnResult,
     tool_result_is_error,
+    tool_result_status,
 )
 
 if TYPE_CHECKING:
@@ -6355,6 +6356,7 @@ NOTES
                         show_output=fc_show_output,
                         show_popup=fc_show_popup,
                         is_error_result=tool_result_is_error(fc_result_payload),
+                        result_status=tool_result_status(fc_result_payload),
                     )
 
         # Build results in original order
@@ -6628,6 +6630,7 @@ NOTES
                 show_output=fc_show_output,
                 show_popup=fc_show_popup,
                 is_error_result=tool_result_is_error(fc_result_payload),
+                result_status=tool_result_status(fc_result_payload),
             )
 
         return _ToolExecutionResult(
@@ -9653,6 +9656,7 @@ NOTES
                             show_output=fc_show_output,
                             show_popup=fc_show_popup,
                             is_error_result=tool_result_is_error(fc_result_payload),
+                            result_status=tool_result_status(fc_result_payload),
                         )
 
                     turn_data['function_calls'].append({

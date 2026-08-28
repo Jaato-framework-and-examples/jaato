@@ -673,6 +673,12 @@ class ToolCallEndEvent(Event):
     call_id: Optional[str] = None
     success: bool = True
     is_error_result: bool = False  # computed deeper error check — success=True but error body; distinct from `success`
+    # The tool result's own `status` string, copied verbatim when it declares
+    # one (`send_to_sibling` → accepted/queued/refused/sibling_cold/…).  None
+    # when the tool says nothing — which is NOT an outcome, just silence.
+    # `success`/`is_error_result` answer "did it fail"; this answers "how",
+    # without the consumer having to match on `error_message` prose.
+    result_status: Optional[str] = None
     duration_seconds: float = 0.0
     error_message: Optional[str] = None
     backgrounded: bool = False  # True when tool was auto-backgrounded (still producing output)
@@ -1123,6 +1129,26 @@ class TurnCompletedEvent(Event):
     agent_id: str = ""
     turn_number: int = 0
     usage: UsageBreakdown = Field(default_factory=UsageBreakdown)
+
+    #: Why this turn produced no typed completion, when one was expected.
+    #:
+    #: ``None`` on every normal turn, including every turn of a session that
+    #: never had a completion schema and every turn that legitimately has
+    #: more work to do.
+    #:
+    #: ``"not_signalled_after_nudges"`` means the framework EXPECTED a
+    #: completion here and gave up asking: ``signal_completion`` was in the
+    #: session's tool surface, the model ended its loop without calling it,
+    #: and the nudge budget (``MAX_COMPLETION_NUDGES``) is spent.
+    #:
+    #: This is the only signal a consumer gets in that state. No
+    #: ``AgentCompletedEvent`` fires (only ``signal_completion`` produces
+    #: one) and no ``SessionTerminatedEvent`` fires (quiescence is gated on
+    #: ``signal_completion`` having been called), so a cascade driver
+    #: otherwise sees a turn end and must INVENT a reason for the missing
+    #: payload -- typically blaming the schema, which is the one thing that
+    #: was fine.
+    completion_gap: Optional[str] = None
     duration_seconds: float = 0.0
     function_calls: List[Dict[str, Any]] = Field(default_factory=list)
     # Formatted output text (with syntax highlighting, validation, etc.)

@@ -1406,10 +1406,19 @@ class IPCClient:
                 server validates the dict and rejects it with a clear
                 ``ErrorEvent`` if ``model`` is missing.  The two forms
                 are mutually exclusive — pass one or the other.
-            agent: Optional agent name. The agent's rendered markdown
-                becomes the session's system instructions.  Orthogonal
-                to ``profile`` — agent describes the session's persona,
-                profile describes its capabilities; they compose freely.
+            agent: Optional agent name — WHO the session is.  Orthogonal
+                to ``profile``: the agent is the session's persona, the
+                profile its capabilities, and they compose freely.
+
+                The agent is NOT "the session's system instructions",
+                though it is easy to describe it that way.  Its rendered
+                markdown is ONE LAYER of an assembly that also carries the
+                ``.jaato/instructions/`` base layer, plugin instructions,
+                framework constants and the untrusted-content boundary —
+                and ``suppress_base_instructions`` can drop every one of
+                those layers EXCEPT the agent and its plugins.  The
+                instructions are how an agent reaches a turn; the agent is
+                what persists across turns, sessions and profiles.
             agent_params: Parameter values for the agent's ``{{param}}``
                 placeholders.  Only used when *agent* is specified.
             sibling_name: Cascade-scoped ADDRESS other sessions use to

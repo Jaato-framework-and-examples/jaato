@@ -1,5 +1,6 @@
 {
   "type": "plan.cleared",
   "timestamp": "<TIMESTAMP>",
+  "session_id": "",
   "agent_id": ""
 }

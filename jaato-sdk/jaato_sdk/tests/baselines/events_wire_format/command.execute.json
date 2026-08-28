@@ -1,6 +1,7 @@
 {
   "type": "command.execute",
   "timestamp": "<TIMESTAMP>",
+  "session_id": "",
   "command": "",
   "args": [],
   "payload": null

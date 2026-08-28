@@ -1,6 +1,7 @@
 {
   "type": "session.wake_bind_result",
   "timestamp": "<TIMESTAMP>",
+  "session_id": "",
   "wake_ref": "",
   "outcome": "",
   "detail": "",

@@ -1,6 +1,7 @@
 {
   "type": "auth.setup_response",
   "timestamp": "<TIMESTAMP>",
+  "session_id": "",
   "request_id": "",
   "connect": false,
   "model_name": "",

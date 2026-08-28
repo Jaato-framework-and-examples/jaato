@@ -1,0 +1,58 @@
+# Tier-1 base for the JUDGE — provider-agnostic.
+#
+# The rubric lives in the completion schema, not in this adapter: the
+# score comes back TYPED, enforced at sampling time and validated by the
+# framework before the payload is emitted.  Changing what "good" means is
+# a schema edit here, never a code change in jaato_eval.
+name: _base_rubric
+description: scores an agent run against a typed rubric.
+
+# NO filesystem_query, deliberately.  The artefact is injected by a
+# MANDATORY prefetch (see agents/rubric.md -> scripts/prefetch_artefact.py),
+# so the judge cannot skip reading it — there is nothing to skip.  Giving
+# it a file tool back would restore the failure this removed: reading is a
+# FACT, and a fact routed through a model's discretion was unreliable ~1
+# run in 4 ("I did not open answer.txt" — the call was never made).
+plugins:
+  - environment
+  - permission
+
+plugin_configs:
+  permission:
+    policy:
+      defaultPolicy: allow
+
+completion_payload_schema:
+  type: object
+  additionalProperties: false
+  required: [score, reasoning]
+  properties:
+    score:
+      type: number
+      minimum: 0
+      maximum: 1
+      description: >
+        Score the artefact QUOTED IN YOUR PROMPT — it was read for you
+        before this turn and is verbatim.  1.0 if answer.txt contains
+        exactly READY; 0.0 if it is absent; between the two if present but
+        wrong.  Do not infer contents from the agent's completion payload,
+        which is its CLAIM and is the thing under test.
+    reasoning:
+      type: string
+      description: >
+        One sentence QUOTING the bytes shown to you.  Quoting is what makes
+        a score checkable by someone who was not present for the run.
+    warnings:
+      type: array
+      items: {type: string}
+    errors:
+      type: array
+      items: {type: string}
+      description: >
+        Any reason you could not carry out the assessment goes HERE, not
+        only in reasoning.  The harness treats a non-empty errors[] as
+        BLOCKED rather than FAIL, because a judge that did not judge is not
+        evidence about the agent.  An empty errors[] asserts that you did
+        assess it.  (This field mattered more when the judge had to fetch
+        the artefact itself and sometimes did not; the prefetch removed
+        that failure mode, and the field remains for the ones it cannot.)

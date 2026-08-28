@@ -1,7 +1,9 @@
 {
   "type": "inject_prompt.request",
   "timestamp": "<TIMESTAMP>",
+  "session_id": "",
   "text": "",
   "source_type": "user",
-  "source_id": null
+  "source_id": null,
+  "request_id": null
 }

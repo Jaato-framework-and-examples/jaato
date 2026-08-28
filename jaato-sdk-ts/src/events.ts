@@ -1500,6 +1500,7 @@ export type ToolName1 = string;
 export type CallId1 = string | null;
 export type Success1 = boolean;
 export type IsErrorResult = boolean;
+export type ResultStatus = string | null;
 export type DurationSeconds = number;
 export type ErrorMessage = string | null;
 export type Backgrounded = boolean;
@@ -4778,6 +4779,7 @@ export type Timestamp36 = string;
 export type SessionId36 = string;
 export type AgentId26 = string;
 export type TurnNumber = number;
+export type CompletionGap = string | null;
 export type DurationSeconds1 = number;
 export type FunctionCalls = {
   [k: string]: unknown;
@@ -14531,6 +14533,7 @@ export interface ToolCallEndEvent {
   call_id?: CallId1;
   success?: Success1;
   is_error_result?: IsErrorResult;
+  result_status?: ResultStatus;
   duration_seconds?: DurationSeconds;
   error_message?: ErrorMessage;
   backgrounded?: Backgrounded;
@@ -14962,6 +14965,7 @@ export interface TurnCompletedEvent {
   agent_id?: AgentId26;
   turn_number?: TurnNumber;
   usage?: UsageBreakdown;
+  completion_gap?: CompletionGap;
   duration_seconds?: DurationSeconds1;
   function_calls?: FunctionCalls;
   formatted_text?: FormattedText;

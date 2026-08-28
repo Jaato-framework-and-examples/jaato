@@ -1,5 +1,6 @@
 {
   "type": "memory.list",
   "timestamp": "<TIMESTAMP>",
+  "session_id": "",
   "memories": []
 }

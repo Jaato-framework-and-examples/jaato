@@ -1,6 +1,7 @@
 {
   "type": "gc.config",
   "timestamp": "<TIMESTAMP>",
+  "session_id": "",
   "agent_id": "",
   "threshold": null,
   "strategy": null,

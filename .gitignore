@@ -83,3 +83,11 @@ shared/plugins/template/SINGLE_BRACE_SYNTAX_ANALYSIS.md
 knowledge/skills/code/soi/skill-020-microservice-java-spring/examples/example-01-customer-domain-api/template/src/
 knowledge/skills/code/soi/skill-020-microservice-java-spring/examples/example-01-customer-domain-api/template/src/.jaato
 .jaato
+
+# ...except an eval task's config root, which is DATA, not a developer's
+# local settings: it is the read-only half of the task definition
+# (profiles, agents, permissions) and must travel with the repository.
+# The directory itself has to be un-ignored before the negation on its
+# contents can apply — git does not descend into an excluded directory.
+!jaato-eval/tasks/*/.jaato/
+!jaato-eval/tasks/*/.jaato/**

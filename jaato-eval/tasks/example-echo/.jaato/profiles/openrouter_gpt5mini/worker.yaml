@@ -1,0 +1,13 @@
+# worker — openrouter set: openai/gpt-5-mini.
+name: worker
+inherits: [_base_worker]
+plugins: []  # empty keeps the inherited _base surface
+model: openai/gpt-5-mini
+provider: openrouter
+plugin_configs:
+  openrouter:
+    # Secret URI, resolved daemon-side.  Never substitute the literal key
+    # here — the task definition is committed.
+    api_key: "pass://jaato/openrouter/api-key"
+    api_params:
+      temperature: 0.0  # determinism knob

@@ -1,6 +1,7 @@
 {
   "type": "gate.announced",
   "timestamp": "<TIMESTAMP>",
+  "session_id": "",
   "gate_name": "",
   "tenant_id": "",
   "owner": "",

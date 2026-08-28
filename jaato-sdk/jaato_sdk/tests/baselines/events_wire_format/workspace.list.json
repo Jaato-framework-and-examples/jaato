@@ -1,4 +1,5 @@
 {
   "type": "workspace.list",
-  "timestamp": "<TIMESTAMP>"
+  "timestamp": "<TIMESTAMP>",
+  "session_id": ""
 }

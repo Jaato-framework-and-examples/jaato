@@ -1,6 +1,7 @@
 {
   "type": "tool.output",
   "timestamp": "<TIMESTAMP>",
+  "session_id": "",
   "agent_id": "",
   "call_id": "",
   "chunk": ""

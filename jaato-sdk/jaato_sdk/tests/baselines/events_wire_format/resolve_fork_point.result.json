@@ -1,6 +1,7 @@
 {
   "type": "resolve_fork_point.result",
   "timestamp": "<TIMESTAMP>",
+  "session_id": "",
   "request_id": "",
   "fork_index": -1,
   "error": ""

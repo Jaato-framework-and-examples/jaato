@@ -1,6 +1,7 @@
 {
   "type": "clarification.question",
   "timestamp": "<TIMESTAMP>",
+  "session_id": "",
   "agent_id": "",
   "request_id": "",
   "question_index": 0,

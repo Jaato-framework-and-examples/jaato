@@ -1,6 +1,7 @@
 {
   "type": "mid_turn_prompt.interrupt",
   "timestamp": "<TIMESTAMP>",
+  "session_id": "",
   "partial_response_chars": 0,
   "user_prompt_preview": ""
 }

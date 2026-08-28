@@ -223,6 +223,7 @@ class ToolCallCompletedPayload(TypedDict):
     call_id: NotRequired[Optional[str]]
     success: bool
     is_error_result: NotRequired[bool]  # computed deeper error check — success=True but error body; distinct from `success`
+    result_status: NotRequired[Optional[str]]  # the tool's own `status` string, verbatim (accepted/refused/sibling_cold/…); None = the tool declares none
     duration_seconds: float
     error_message: NotRequired[Optional[str]]
     backgrounded: NotRequired[bool]
@@ -278,7 +279,8 @@ class TurnCompletedPayload(TypedDict):
     reasoning/thinking tokens, optional ``cost_usd``).  ``finish_reason``
     is the terminal response's ``FinishReason`` value (``"stop"`` by
     default; ``"max_tokens"`` / ``"safety"`` / ``"error"`` flag an
-    abnormal/truncated turn).
+    abnormal/truncated turn).  ``completion_gap`` is set only when the
+    framework expected ``signal_completion`` and gave up asking.
     """
     agent_id: str
     turn_number: int
@@ -287,6 +289,14 @@ class TurnCompletedPayload(TypedDict):
     function_calls: List[Dict[str, Any]]
     formatted_text: NotRequired[Optional[str]]
     finish_reason: str
+    # Why this turn produced no typed completion when one was expected.
+    # ``None`` on every normal turn; ``"not_signalled_after_nudges"`` when
+    # the framework asked for ``signal_completion`` up to
+    # ``MAX_COMPLETION_NUDGES`` times and gave up.  It is the ONLY event a
+    # consumer receives in that state -- no AgentCompleted and no
+    # SessionTerminated fire -- so a driver that ignores it must invent a
+    # reason for the missing payload.
+    completion_gap: NotRequired[Optional[str]]
     # Which session this event is about (protocol 1.2+).  Mirrors the
     # base ``Event.session_id``, stamped centrally as the daemon routes;
     # NotRequired because a hand-built payload need not supply it.

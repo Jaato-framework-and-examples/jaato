@@ -5811,7 +5811,8 @@ class SessionManager:
                 by client config.
             created_by: Authenticated user who created the session.
             agent_name: Optional agent name. If provided, the agent's rendered
-                markdown becomes the session's system instructions. Resolved
+                markdown is ONE LAYER of the assembled system instructions -- not
+                the whole of them; see IPCClient.create_session. Resolved
                 from ``.jaato/agents/`` and ``.jaato/prompts/``.
             agent_params: Parameter values for the agent's ``{{param}}``
                 placeholders.
@@ -5998,7 +5999,7 @@ class SessionManager:
             )
 
         # Resolve agent if requested — the agent's rendered markdown
-        # becomes the session's system instructions.
+        # is one LAYER of the assembled system instructions.
         agent_instructions = None
         if agent_name:
             agent_result = self._resolve_agent(
@@ -9315,7 +9316,13 @@ class SessionManager:
             session = self._sessions.get(session_id)
             if not session:
                 return False
-            return self._save_session(session)
+        # The save happens OUTSIDE ``self._lock``.  ``_save_session`` issues
+        # ``session_get_history_threadsafe()``, which schedules a coroutine
+        # onto the daemon loop and blocks this thread until it completes --
+        # so holding the manager lock across it lets a worker wait for the
+        # loop while the loop waits for the lock.  See the module note on
+        # THE MANAGER LOCK IS A DICT GUARD.
+        return self._save_session(session)
 
     def delete_session(self, session_id: str) -> bool:
         """Delete a session from memory and disk.
@@ -9340,8 +9347,13 @@ class SessionManager:
                     ))
                     self._client_to_session.pop(client_id, None)
 
-                # Shutdown the server
-                session.server.shutdown()
+        # Shutdown the server OUTSIDE ``self._lock``.  ``JaatoServer.shutdown``
+        # issues ``session_end_threadsafe`` / ``session_shutdown_threadsafe``
+        # and closes the RPC via ``run_coroutine_threadsafe`` -- all of which
+        # block this thread until the daemon loop runs them.  The session is
+        # already popped above, so nothing else can reach it.
+        if session is not None:
+            session.server.shutdown()
 
         # Stop the session's egress proxy if one was started (Phase 5 §5.11).
         # Idempotent + guarded — a no-op for sessions without an allowlist.
@@ -9919,9 +9931,13 @@ class SessionManager:
             if session and session.interrupted_turn:
                 session.interrupted_turn["pending_tool_calls"] = function_calls
                 session.is_dirty = True
-                # Incremental save to persist pending tool calls before execution
-                self._save_session(session)
-                logger.debug(
+            else:
+                session = None
+        if session is not None:
+            # Outside the lock: the save round-trips to the loop.  The
+            # MUTATION above needs the lock; the save does not.
+            self._save_session(session)
+            logger.debug(
                     f"Updated pending tool calls for session {session_id}: "
                     f"{len(function_calls)} call(s)"
                 )
@@ -10608,13 +10624,12 @@ class SessionManager:
         Returns:
             Number of sessions saved.
         """
-        saved = 0
         with self._lock:
-            for session in self._sessions.values():
-                if session.is_dirty:
-                    if self._save_session(session):
-                        saved += 1
-        return saved
+            # Snapshot under the lock, save outside it.  Iterating the dict
+            # is what the lock is for; the save round-trips to the loop and
+            # must not be done while holding it.
+            dirty = [s for s in self._sessions.values() if s.is_dirty]
+        return sum(1 for session in dirty if self._save_session(session))
 
     # ------------------------------------------------------------------
     # Ephemeral sessions (Phase 3 — remote subagent delegation)
@@ -10919,11 +10934,17 @@ class SessionManager:
             self._stop_workspace_monitor(sid)
 
         with self._lock:
-            # Save all sessions
-            for session in self._sessions.values():
-                self._save_session(session)
-                session.server.shutdown()
+            # Snapshot under the lock; BOTH the save and the server shutdown
+            # below round-trip to the daemon loop, and holding the manager
+            # lock across either is what lets a worker wait for the loop while
+            # the loop waits for the lock.
+            closing = list(self._sessions.values())
 
+        for session in closing:
+            self._save_session(session)
+            session.server.shutdown()
+
+        with self._lock:
             self._sessions.clear()
             self._client_to_session.clear()
 

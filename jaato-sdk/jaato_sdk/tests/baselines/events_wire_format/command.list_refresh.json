@@ -1,4 +1,5 @@
 {
   "type": "command.list_refresh",
-  "timestamp": "<TIMESTAMP>"
+  "timestamp": "<TIMESTAMP>",
+  "session_id": ""
 }

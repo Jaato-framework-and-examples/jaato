@@ -1,6 +1,7 @@
 {
   "type": "turn.completed",
   "timestamp": "<TIMESTAMP>",
+  "session_id": "",
   "agent_id": "",
   "turn_number": 0,
   "usage": {
@@ -14,6 +15,7 @@
     "cost_usd": null,
     "spend_total_tokens": null
   },
+  "completion_gap": null,
   "duration_seconds": 0.0,
   "function_calls": [],
   "formatted_text": null,

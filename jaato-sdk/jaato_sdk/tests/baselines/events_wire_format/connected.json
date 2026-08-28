@@ -1,6 +1,7 @@
 {
   "type": "connected",
   "timestamp": "<TIMESTAMP>",
+  "session_id": "",
   "protocol_version": "1.0",
   "server_info": {}
 }

@@ -223,7 +223,8 @@ def run(args) -> int:
     archetype = args.archetype
     if archetype in (None, "profile-set", "set"):
         return _new_profile_set(args)
-    if archetype in ("client", "fire", "cascade", "observer", "host-tools"):
+    if archetype in ("client", "fire", "cascade", "observer", "host-tools",
+                     "sweep"):
         return _new_client_archetype(args, archetype)
     print(f"unknown archetype {archetype!r} — one of: profile-set, client, "
           "fire, cascade, observer, host-tools")

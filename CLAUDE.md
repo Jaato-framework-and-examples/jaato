@@ -1284,6 +1284,33 @@ config key) yourself. See
 
 ## Coding Policies
 
+### Cyclomatic Complexity
+
+New functions must score **15 or below** under radon. The gate is
+`jaato-server/shared/tests/test_cyclomatic_complexity_audit.py`, which runs in the
+required `contract-guards` CI job.
+
+It is a **ratchet, not a threshold**. The tree already carried 416 functions over
+15 when the guard went in, so those are frozen in a `BASELINE` dict with their
+scores. Three rules follow:
+
+- a function over 15 that is **not** in `BASELINE` fails — split it, or add a
+  baseline entry with a comment justifying it;
+- a **baselined** function may not grow past its recorded score;
+- a baselined function that gets **simpler or is deleted** fails as stale — lower
+  the number or drop the line. This is how the baseline shrinks.
+
+Regenerate the whole baseline (deliberate re-freeze only) with:
+
+```bash
+python jaato-server/shared/tests/test_cyclomatic_complexity_audit.py
+```
+
+Note that radon counts `and`/`or` and comprehensions as decision points, so a run
+of defensive `x.get(k) or ""` defaults can push an otherwise flat function over
+the line. The ceiling is 15 rather than 10 precisely to leave room for that; see
+the test module's docstring for the measurements behind the choice.
+
 ### Docstring Maintenance
 
 Whenever you read or modify code, check that the docstrings on the classes, methods, and functions you touch are **present, accurate, and complete**. If they are missing, outdated, or misleading, update them as part of the same change. Specifically:
@@ -1305,6 +1332,7 @@ This is not optional cleanup — treat missing or inaccurate docstrings as a def
 - [Reliability Policies Config](docs/reliability-policies-config.md) - JSON schema, per-tool thresholds, prerequisite policies, usage examples
 - [Daemon Extensions](docs/design/daemon-extensions.md) - Extension points for external packages (session hooks, WS interceptors, custom aspects, remote handlers)
 - [Payload-Schema Conventions](docs/design/payload-schema-conventions.md) - Symmetric authoring guide for `spawn_payload_schema` (input boundary) and `completion_payload_schema` (output boundary). Mirror prefetch required-keys; always carry `warnings[]` / `errors[]` escape hatches; persona ↔ schema consistency check; canonical-hash strip rules; `agent_params` interaction with agent-continuity (§6).
+- [Competitor Memory Systems](docs/design/competitor-memory-systems.md) - Survey of nine agent-memory products, sorted by what a *framework* owes: pattern (nothing) / seam (an extension point) / fidelity (a fix) / not ours. Records which items were already expressible as cascade patterns, which memory hot paths are not pluggable, and why the pattern corpus needs `certify/`-style contract tests run against `main`.
 - [Agent Continuity Pattern](docs/design/agent-continuity.md) - `{{continuity_scope}}` + memory plugin enrichment + raw/curated lifecycle: persona-level continuity across sessions composed from existing primitives, no new framework code. Reference impl in `jaato-knowledge-manager/.jaato.example/`.
 - [Model Tiers × Prompt Caching](docs/design/model-tier-prompt-cache.md) - What `enter_tier` costs when prompt caching is on: cache is keyed per model, so an in-place tier switch re-reads the whole prefix cold (break-even ~6 consecutive calls at the new tier). Covers the `_wire_cache_plugin` gap that made profile cache knobs inert, the system-block tier line that invalidates BP1, and the per-provider knob divergence + proposed common `cache:` field.
 - [AppArmor Setup](docs/apparmor-setup.md) - Kernel-enforced workspace isolation. WS deployments confine automatically when AppArmor is available; IPC clients opt in via `IPCClient(..., apparmor=True)` (defaults to `False`).

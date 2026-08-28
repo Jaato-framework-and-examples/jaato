@@ -1,11 +1,13 @@
 {
   "type": "tool.call_end",
   "timestamp": "<TIMESTAMP>",
+  "session_id": "",
   "agent_id": "",
   "tool_name": "",
   "call_id": null,
   "success": true,
   "is_error_result": false,
+  "result_status": null,
   "duration_seconds": 0.0,
   "error_message": null,
   "backgrounded": false,

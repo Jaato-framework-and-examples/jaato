@@ -1,6 +1,7 @@
 {
   "type": "auth.setup",
   "timestamp": "<TIMESTAMP>",
+  "session_id": "",
   "request_id": "",
   "provider_name": "",
   "provider_display_name": "",

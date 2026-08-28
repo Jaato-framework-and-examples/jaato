@@ -1,6 +1,7 @@
 {
   "type": "tool.execute_result",
   "timestamp": "<TIMESTAMP>",
+  "session_id": "",
   "call_id": "",
   "result": "",
   "error": ""
