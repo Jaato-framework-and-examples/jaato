@@ -2775,17 +2775,88 @@ class JaatoSession:
             self._provider_lazy_pending = None
             return self._provider
 
+    def _cache_plugin_config(self) -> Dict[str, Any]:
+        """The config dict handed to this session's cache plugin.
+
+        Reproduces the ``ProviderConfig.extra`` the ACTIVE provider was
+        built with, so a cache knob authored in a profile reaches the
+        cache plugin by the same route every other provider knob takes.
+
+        Two layers, child-wins, mirroring ``JaatoRuntime.create_provider``:
+
+        1. ``runtime._provider_config.extra`` — the runtime-level base.
+        2. ``plugin_configs[<provider>]`` — this session's profile knobs
+           (``plugin_configs.anthropic.enable_caching`` and friends).
+
+        Layer 2 is the one that was missing, and it was the only layer
+        that ever carried anything.  ``runtime._provider_config`` is
+        assigned exactly once — ``ProviderConfig(project=..., location=...)``
+        in ``JaatoRuntime.connect`` — with an empty ``extra`` that nothing
+        subsequently writes to.  ``create_provider`` merges the profile's
+        ``plugin_configs`` into a LOCAL copy via ``dataclasses.replace``
+        and never stores it back, so reading layer 1 alone handed every
+        cache plugin ``{}``.  Effect: ``enable_caching`` was silently
+        ignored wherever it was written, leaving Anthropic caching
+        reachable only through the ``JAATO_ANTHROPIC_ENABLE_CACHING`` env
+        default inside ``initialize()``, and Google's explicit
+        ``CachedContent`` path (a hard ``False`` default, no env
+        fallback) unreachable altogether.
+
+        ``api_key`` is dropped for the same reason ``create_provider``
+        drops it: that key is promoted to the top-level
+        ``ProviderConfig.api_key`` field and never lands in ``extra``, so
+        carrying it here would hand a credential to a plugin that has no
+        use for it AND misrepresent the provider's own config view.
+        Every other key (``oauth_token`` included) is passed through
+        exactly as the provider sees it.
+
+        The profile lookup is keyed on ``_active_provider_name`` — the
+        name the provider was CREATED under, which is the same key the
+        profile's ``plugin_configs`` uses.  ``provider.name`` is not
+        interchangeable with it (zhipuai subclasses anthropic and reports
+        the parent's name), and only the creation name selects the right
+        ``plugin_configs`` section.
+
+        Returns:
+            A fresh dict; callers may mutate it freely.
+        """
+        config: Dict[str, Any] = {}
+        if self._runtime and getattr(self._runtime, '_provider_config', None):
+            config = dict(self._runtime._provider_config.extra)
+
+        base = (getattr(self, '_tier_provider_base', None)
+                or getattr(self, '_provider_lazy_pending', None)
+                or {})
+        plugin_configs = base.get('plugin_configs') or {}
+        profile_key = self._active_provider_name or getattr(
+            self._provider, 'name', None)
+        if profile_key:
+            overrides = plugin_configs.get(profile_key)
+            if isinstance(overrides, dict):
+                config.update(overrides)
+        config.pop('api_key', None)
+        return config
+
     def _wire_cache_plugin(self) -> None:
         """Discover and attach the cache plugin matching the active provider.
 
         The cache plugin is selected by matching the provider's ``name``
         property against available cache plugins' ``provider_name``.
         When found:
-        - The plugin is initialized with provider config extras
+        - The plugin is initialized with the config from
+          :meth:`_cache_plugin_config` (runtime extras + this session's
+          ``plugin_configs[<provider>]`` profile knobs)
         - The current InstructionBudget is set on the plugin
         - The plugin is attached to the provider via ``set_cache_plugin()``
 
         This is a Variant A integration (provider delegates to plugin).
+
+        Called ONCE per session, from :meth:`_ensure_provider` after the
+        provider materializes.  Nothing re-runs it on a tier switch, so a
+        cross-provider tier currently runs with no cache plugin attached
+        (caching silently off) and the plugin's model name goes stale.
+        That is a known defect, not a design choice — see
+        ``docs/design/model-tier-prompt-cache.md`` §5.2.
         """
         if not self._provider:
             return
@@ -2800,10 +2871,7 @@ class JaatoSession:
         if not provider_name:
             return
 
-        # Build config from provider config extras
-        config = {}
-        if self._runtime and self._runtime._provider_config:
-            config = dict(self._runtime._provider_config.extra)
+        config = self._cache_plugin_config()
         # Include model name for threshold selection
         model_name = getattr(self._provider, 'model_name', None)
         if model_name:

@@ -40,7 +40,17 @@ PROVIDER_KNOBS = ProviderKnobs(layers=(
     KnobLayer("top_level", (
         KnobSpec("context_length", "int"),
         KnobSpec("modalities", "list"),
-    ), description="context / modality overrides"),
+        # Read flat off ``ProviderConfig.extra`` by
+        # ``GoogleGenAICachePlugin.initialize`` — declared here because that
+        # is the read site's actual position.  Unlike Anthropic's breakpoint
+        # scheme this creates a server-side ``CachedContent`` object bound to
+        # the active model, billed on creation and deleted at shutdown.
+        KnobSpec("enable_caching", "bool", False,
+                 "create a server-side CachedContent for system+tools "
+                 "(needs ~32k tokens of stable prefix to engage)"),
+        KnobSpec("cache_ttl", "str", "3600s",
+                 "CachedContent TTL, Google duration format (e.g. 3600s)"),
+    ), description="context / modality overrides + prompt-cache control"),
 ))
 PROVIDER_QUIRKS = frozenset()
 
