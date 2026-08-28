@@ -189,6 +189,10 @@ class PoolManager:
         """
         self._template_manager = template_manager
         self.target_size = max(0, int(target_size))
+        #: Slots dropped by the capacity check, awaiting teardown by the
+        #: replenish thread.  They are already out of ``_idle_slots``, so
+        #: the pool count is bounded the moment a slot is queued here.
+        self._pending_teardown: List[PoolSlot] = []
         self._idle_slots: List[PoolSlot] = []
         self._lock = threading.Lock()
         # Pool PR 4 replenishment thread state.
@@ -415,8 +419,62 @@ class PoolManager:
                 served a standalone session).
         """
         slot.last_session_end_ts = time.monotonic()
+        evicted: Optional[PoolSlot] = None
         with self._lock:
-            self._idle_slots.append(slot)
+            if len(self._idle_slots) >= self.target_size:
+                # AT CAPACITY.  ``target_size`` said how many to keep at
+                # LEAST and nothing said how many at most, so this list
+                # grew by one runner per cleanly-ended pool session and
+                # never shrank while the daemon lived.  Measured live at
+                # 32 slots / 4237 MB, surfacing as ``pass show`` failing
+                # because gpg could not fork -- a resource leak wearing a
+                # credentials error.
+                #
+                # PREFER EVICTING A PURE-IDLE SLOT.  A cascade-affine slot
+                # carries warm state the next stage of that cascade would
+                # reuse; a pure-idle one carries none.  Dropping the affine
+                # one to keep an unaffiliated one throws away the thing the
+                # pool exists for.
+                # DEFAULT: the RETURNING slot goes.  It has just served a
+                # session, so it carries that session's accumulated heap
+                # (measured 129-187 MB on long-lived trees), while a
+                # resident may still be a CoW-cheap template fork.  Keeping
+                # what is already here also avoids churning the pool on
+                # every return once it is full.
+                #
+                # EXCEPTION: an affine slot displaces a PURE-IDLE resident.
+                # ``slot.cascade_id`` means the next stage of that cascade
+                # would reuse this exact runner; a pure-idle resident has no
+                # such claim on it.  Trading the unaffiliated one for the
+                # affine one keeps the warm path the pool exists to serve.
+                victim_ix = (
+                    next((i for i, s in enumerate(self._idle_slots)
+                          if s.cascade_id is None), None)
+                    if slot.cascade_id is not None else None
+                )
+                if victim_ix is not None:
+                    evicted = self._idle_slots.pop(victim_ix)
+                    self._idle_slots.append(slot)
+                else:
+                    evicted = slot
+            else:
+                self._idle_slots.append(slot)
+
+        if evicted is not None:
+            # Handed to the replenish thread rather than torn down here.
+            # ``_teardown_slot`` blocks on the daemon loop, and THIS path
+            # runs wherever ``JaatoServer.shutdown`` runs.  The count is
+            # already bounded above; only the process teardown is deferred,
+            # by at most one replenish interval (~0.5s).
+            with self._lock:
+                self._pending_teardown.append(evicted)
+            self._incr("pool_slots_over_cap_total")
+            logger.info(
+                "PoolManager: pool at capacity (%d/%d); slot pid=%d "
+                "(cascade=%s) queued for teardown",
+                len(self._idle_slots), self.target_size,
+                evicted.pid, evicted.cascade_id or "(pure)",
+            )
         logger.info(
             "PoolManager.return_slot_after_session: slot pid=%d "
             "returned to pool (cascade=%s; idle_count=%d/%d)",
@@ -645,6 +703,84 @@ class PoolManager:
                 )
                 self._replenish_stop.wait(self._replenish_interval)
 
+    def _teardown_slot(self, slot: PoolSlot, *, reason: str) -> None:
+        """Close one idle slot's transport and reap its process.
+
+        ONE COPY, called by every path that drops a slot.  It was the
+        cascade-idle sweep's inline tail; the capacity check needs the
+        identical sequence, and a second copy of a forty-line teardown
+        is a second copy that rots.
+
+        MUST RUN OFF THE DAEMON LOOP.  It closes the rpc via
+        ``run_coroutine_threadsafe`` and BLOCKS on the future, so calling
+        it from the loop thread would have the loop wait for itself.
+        Both callers are the replenish thread, which is why the capacity
+        check hands slots here instead of tearing them down on the
+        session-return path -- that path runs wherever
+        ``JaatoServer.shutdown`` runs, and a cap is not worth inheriting
+        a thread-context assumption to enforce.
+        """
+        # Phase 3 hotfix (server 0.6.150+): close the slot's rpc
+        # client before tearing down the socket.  rpc.close()
+        # closes the writer + sigterm-ladder the runner pid;
+        # doing it via the rpc rather than bare ``sock.close()``
+        # cancels the read task + drains in-flight futures
+        # cleanly.  Falls back to bare sock.close() if no rpc
+        # was ever stashed (rare — slot has run zero sessions).
+        rpc = slot.rpc
+        if rpc is not None:
+            # Best-effort close via the daemon loop; we run
+            # close synchronously here because we're already
+            # in the replenish thread, not the daemon loop.
+            try:
+                import asyncio as _asyncio
+                loop = getattr(rpc, "_loop", None)
+                if loop is not None and loop.is_running():
+                    fut = _asyncio.run_coroutine_threadsafe(
+                        rpc.close(timeout=5.0), loop,
+                    )
+                    fut.result(timeout=8.0)
+                else:
+                    # No loop running — fall back to bare
+                    # socket close.  Runner gets EOF + dies.
+                    slot.sock.close()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "PoolManager cascade-idle sweep: rpc.close "
+                    "raised for pid=%d: %s — falling back to "
+                    "bare sock.close()", slot.pid, exc,
+                )
+                try:
+                    slot.sock.close()
+                except OSError:
+                    pass
+        else:
+            try:
+                slot.sock.close()
+            except OSError:
+                pass
+        try:
+            os.waitpid(slot.pid, 0)
+        except ChildProcessError:
+            pass
+
+    def _drain_pending_teardown(self) -> None:
+        """Tear down slots the capacity check dropped.
+
+        Runs in the replenish thread, which is the context
+        ``_teardown_slot`` requires.  Called from the sweep so both
+        reclaim paths share one caller and one thread.
+        """
+        with self._lock:
+            pending, self._pending_teardown = self._pending_teardown, []
+        for slot in pending:
+            self._teardown_slot(slot, reason="over-capacity")
+            self._incr("pool_slots_over_cap_torndown_total")
+            logger.info(
+                "PoolManager: torn down over-capacity slot pid=%d "
+                "(cascade=%s)", slot.pid, slot.cascade_id or "(pure)",
+            )
+
     def _sweep_cascade_idle(self) -> None:
         """Tear down IDLE_FOR_CASCADE slots whose idle window expired.
 
@@ -665,6 +801,8 @@ class PoolManager:
         Called every replenish iteration (~0.5s).  Cheap when the
         pool has no IDLE_FOR_CASCADE entries.
         """
+        self._drain_pending_teardown()
+
         now = time.monotonic()
         timeout = self._cascade_idle_timeout
         to_reap: List[PoolSlot] = []
@@ -683,49 +821,7 @@ class PoolManager:
                 self._idle_slots = survivors
 
         for slot in to_reap:
-            # Phase 3 hotfix (server 0.6.150+): close the slot's rpc
-            # client before tearing down the socket.  rpc.close()
-            # closes the writer + sigterm-ladder the runner pid;
-            # doing it via the rpc rather than bare ``sock.close()``
-            # cancels the read task + drains in-flight futures
-            # cleanly.  Falls back to bare sock.close() if no rpc
-            # was ever stashed (rare — slot has run zero sessions).
-            rpc = slot.rpc
-            if rpc is not None:
-                # Best-effort close via the daemon loop; we run
-                # close synchronously here because we're already
-                # in the replenish thread, not the daemon loop.
-                try:
-                    import asyncio as _asyncio
-                    loop = getattr(rpc, "_loop", None)
-                    if loop is not None and loop.is_running():
-                        fut = _asyncio.run_coroutine_threadsafe(
-                            rpc.close(timeout=5.0), loop,
-                        )
-                        fut.result(timeout=8.0)
-                    else:
-                        # No loop running — fall back to bare
-                        # socket close.  Runner gets EOF + dies.
-                        slot.sock.close()
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning(
-                        "PoolManager cascade-idle sweep: rpc.close "
-                        "raised for pid=%d: %s — falling back to "
-                        "bare sock.close()", slot.pid, exc,
-                    )
-                    try:
-                        slot.sock.close()
-                    except OSError:
-                        pass
-            else:
-                try:
-                    slot.sock.close()
-                except OSError:
-                    pass
-            try:
-                os.waitpid(slot.pid, 0)
-            except ChildProcessError:
-                pass
+            self._teardown_slot(slot, reason="cascade-idle")
             self._incr("cascade_slots_idle_torndown_total")
             logger.info(
                 "PoolManager cascade-idle sweep: torn down slot pid=%d "

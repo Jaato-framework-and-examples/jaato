@@ -78,7 +78,9 @@ class TestPoolSlotLastSessionId:
         that ID accessible to the NEXT session acquiring the slot."""
         from server.runner_pool import PoolManager
 
-        pool = PoolManager(template_manager=MagicMock(), target_size=0)
+        # target_size=8 — see the note in test_cascade_teardown_e2e: 0 is
+        # "pool disabled", not an inert value for a return-path test.
+        pool = PoolManager(template_manager=MagicMock(), target_size=8)
         slot = PoolSlot(
             pid=1, sock=MagicMock(),
             cascade_id="cascade-X",
