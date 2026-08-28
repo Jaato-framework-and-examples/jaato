@@ -320,6 +320,151 @@ if __name__ == "__main__":
 '''
 
 
+SWEEP_TEMPLATE = _COMMON_HEADER + '''
+import uuid
+
+from jaato_sdk import SessionCreateFailed, truncation_reason
+
+# The matrix.  N INDEPENDENT arms — none feeds another, each fully isolated,
+# results collected per-arm.  An eval sweep is one instance; so is any batch
+# job, any fan-out over a work-list, any A/B across profile sets.
+#
+# This is NOT the `cascade` archetype.  That one is a linear CHAIN: stage 1
+# then stage 2, output feeding forward, one session at a time.  Here nothing
+# feeds forward, and a failed arm must not stop its siblings.
+ARMS = [
+    ("arm-a", {"model": MODEL, "provider": PROVIDER}, "Do the thing, variant A."),
+    ("arm-b", {"model": MODEL, "provider": PROVIDER}, "Do the thing, variant B."),
+]
+
+# Aggregate ceiling for the whole sweep, or None for no pool.
+#
+# TWO BUDGET GATES EXIST AND THEY DO NOT COMPOSE THE WAY THEY LOOK.  A
+# profile's own ``budget_control`` is OWN-BOOKS and per-arm; the pool below
+# is the AGGREGATE.  A session carrying its own ceiling does not draw on the
+# pool, so declaring both leaves the pool inert.  Pick one.
+POOL_LIMITS = {"tokens": 200_000}
+
+# A POOL FORECLOSES LEDGER-BASED GRADING.  A pooled arm is detached from
+# this connection when it terminates (that is what returns the warm slot),
+# so ``request_history`` afterwards answers with an error, not a ledger.  If
+# your grader needs the tool-call ledger, use per-arm ceilings and set
+# POOL_LIMITS = None.
+
+
+async def _run_arm(owner_cid, name, profile, prompt) -> dict:
+    """Run ONE arm to its terminus and return a result row.
+
+    Never raises: a sweep whose arms can kill each other is not a sweep.
+    """
+    client = _new_client()
+    if not await client.connect(timeout=120.0):
+        return {"arm": name, "outcome": "BLOCKED",
+                "detail": "could not connect/autostart the daemon"}
+
+    # SUBSCRIBE BEFORE create_session, NOT AFTER.
+    #
+    # A refusal is announced WHILE the create is in flight, so a handler
+    # installed afterwards never sees it.  Current daemons raise
+    # SessionCreateFailed and you could rely on that — but a generated
+    # driver ships to whatever daemon the reader has, and against an older
+    # one the failure mode without this is a 30s timeout naming nothing.
+    refusals = []
+    client.subscribe(EventType.ERROR, lambda ev: refusals.append(ev))
+    client.subscribe(EventType.AGENT_ERROR, lambda ev: refusals.append(ev))
+
+    state = {}
+    done = asyncio.Event()
+
+    def on_turn(ev):
+        state["finish_reason"] = getattr(ev, "finish_reason", None)
+
+    def on_terminated(ev):
+        state["termination_reason"] = getattr(ev, "reason", None)
+        state["termination_detail"] = getattr(ev, "error", None)
+        done.set()
+
+    client.subscribe(EventType.TURN_COMPLETED, on_turn)
+    client.subscribe(EventType.SESSION_TERMINATED, on_terminated)
+
+    try:
+        try:
+            await client.create_session(
+                profile=profile, cascade_driver_id=owner_cid, timeout=60.0)
+        except SessionCreateFailed as exc:
+            # A REFUSAL IS A TYPED OUTCOME, NOT A TIMEOUT.  An exhausted pool
+            # means the ceiling did its job and nothing ran — a different
+            # call to action from "the daemon is broken", and a driver that
+            # conflates them reports infrastructure failures as budget stops.
+            return {"arm": name, "outcome": "BLOCKED",
+                    "detail": f"{type(exc).__name__}: {exc}",
+                    "may_exist": exc.may_exist}
+
+        await client.send_message(prompt)
+        try:
+            await asyncio.wait_for(done.wait(), timeout=600.0)
+        except asyncio.TimeoutError:
+            return {"arm": name, "outcome": "BLOCKED",
+                    "detail": "no terminal event within 600s"}
+
+        # COMPLETENESS IS NOT ``finish_reason != "stop"``.  A schema-driven
+        # profile ends INSIDE a tool-use turn, so a finished arm reports
+        # "tool_use" and never "stop".  The SDK owns this rule.
+        why = truncation_reason(
+            finish_reason=state.get("finish_reason"),
+            payload=state.get("payload"),
+            termination_reason=state.get("termination_reason"),
+            termination_detail=state.get("termination_detail"),
+        )
+        if why is not None:
+            return {"arm": name, "outcome": "BLOCKED", "detail": why}
+        return {"arm": name, "outcome": "OK",
+                "finish_reason": state.get("finish_reason")}
+    finally:
+        await client.disconnect()
+
+
+async def main() -> int:
+    # ONE OWNER CLIENT DECLARES THE POOL AND OUTLIVES THE ARMS.
+    #
+    # A pool belongs to the connection that declared it: an owner opened and
+    # closed around a single arm takes the pool with it.  One client can
+    # declare N cids, so N pools do not need N connections.
+    owner = _new_client()
+    if not await owner.connect(timeout=120.0):
+        print("could not connect/autostart the daemon — run the doctor")
+        return 1
+
+    cid = None
+    try:
+        if POOL_LIMITS:
+            cid = f"sweep-{uuid.uuid4().hex[:8]}"
+            await owner.cascade_budget_set(cid, limits=POOL_LIMITS)
+
+        # WHAT PRODUCED THESE NUMBERS, read from the live process.  The
+        # branch you have checked out does not determine which SDK ran —
+        # an editable install resolves elsewhere — so a harness that
+        # records results records what produced them.
+        import jaato_sdk
+        print(f"# sdk={jaato_sdk.__file__}")
+
+        rows = await asyncio.gather(
+            *(_run_arm(cid, name, profile, prompt)
+              for name, profile, prompt in ARMS)
+        )
+    finally:
+        await owner.disconnect()
+
+    for row in rows:
+        print(row)
+    return 0 if all(r["outcome"] == "OK" for r in rows) else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(asyncio.run(main()))
+'''
+
+
 TEMPLATES = {
     "host-tools": ("HOST_TOOLS_TEMPLATE", HOST_TOOLS_TEMPLATE,
                    "Client-provided ('host') tools — the agent calls a tool YOUR client runs."),
@@ -331,4 +476,6 @@ TEMPLATES = {
                 "Cascade driver — sequential multi-session stages."),
     "observer": ("OBSERVER_TEMPLATE", OBSERVER_TEMPLATE,
                  "Cascade observer — attach + live-trace events (read-only)."),
+    "sweep": ("SWEEP_TEMPLATE", SWEEP_TEMPLATE,
+              "Sweep/matrix driver — N INDEPENDENT arms, none feeding another."),
 }
