@@ -44,7 +44,8 @@ jobs:
             jaato-server/shared/tests/test_provider_knobs.py \
             jaato-server/shared/tests/test_tool_id_wire_conformance.py \
             jaato-server/shared/tests/test_reset_for_next_session.py \
-            jaato-server/shared/tests/test_enrichment_plugin.py
+            jaato-server/shared/tests/test_enrichment_plugin.py \
+            jaato-server/shared/tests/test_a_cache_is_published_only_when_complete.py
 
   # ---------------------------------------------------------------
   # REQUIRED CHECK (repo ruleset "contract-guards" on refs/heads/main, since
