@@ -352,8 +352,6 @@ async def _run_session(spec: ArmSpec, workspace: Workspace, *,
         kwargs["agent"] = task.input.agent
     if task.input.agent_params:
         kwargs["agent_params"] = dict(task.input.agent_params)
-    if task.environment.apparmor:
-        kwargs["apparmor"] = True
     if socket_path:
         kwargs["socket_path"] = socket_path
     if cascade_driver_id:

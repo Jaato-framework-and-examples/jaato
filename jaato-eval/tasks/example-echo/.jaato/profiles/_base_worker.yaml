@@ -36,3 +36,14 @@ plugin_configs:
 # books and does not draw on a cascade pool, which would leave this task's
 # `budget:` pool untouched and its demonstration inert.  The per-arm
 # ceiling is shown in tasks/ledger-probe instead.
+
+# Per-session resource caps.  These live HERE and only here: the framework
+# reads getattr(profile, "runtime_limits") in runner_spawn, and there is no
+# session-kwarg vehicle, so a copy in task.yaml could never have reached the
+# runner however it was plumbed.  (One was there, promising it did.)
+runtime_limits:
+  tool_timeout_seconds: 60
+
+# apparmor also belongs here rather than in the manifest.  It is left off
+# because these example tasks must run on a host without confinement
+# configured; a task that needs it sets `apparmor: true` in this file.

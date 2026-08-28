@@ -47,16 +47,27 @@ class EnvironmentSpec:
             completion schemas, permissions).  Kept *separate* from the
             workspace so the task definition cannot be edited by the agent
             under test.  Relative to the task directory.
-        apparmor: Request kernel-enforced confinement for the session.
-        runtime_limits: Per-session resource caps forwarded to the profile
-            layer (memory_max_mb, pids_max, cpu_weight,
-            tool_timeout_seconds, max_output_bytes).
+
+    This block holds only what a PROFILE CANNOT EXPRESS.  It used to carry
+    ``apparmor`` and ``runtime_limits`` as well; both are ``SubagentProfile``
+    fields, so a task declares them in its own profile like every other
+    session property.
+
+    ``runtime_limits`` was worse than duplication — it was structurally
+    dead.  ``runner_spawn.py`` reads ``getattr(profile, "runtime_limits")``
+    and there is no session-kwarg vehicle, so a value here could not have
+    reached the runner however it was plumbed, while this docstring claimed
+    it was "forwarded to the profile layer" and the shipped example
+    declared a ``tool_timeout_seconds`` that did nothing.
+
+    ``apparmor`` did work, via ``ClientConfigRequest.apparmor``.  It went
+    anyway: two writers for one setting means a precedence rule, and the
+    framework defines none — so the rule would have been this engine's
+    invention, applied to confinement.
     """
 
     fixture: Path
     config_root: Path
-    apparmor: bool = False
-    runtime_limits: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -239,8 +250,6 @@ def load_manifest(path: Path) -> TaskManifest:
     environment = EnvironmentSpec(
         fixture=Path(str(_require(env_raw, "fixture", path, "environment"))),
         config_root=Path(str(_require(env_raw, "config_root", path, "environment"))),
-        apparmor=bool(env_raw.get("apparmor", False)),
-        runtime_limits=_mapping(env_raw.get("runtime_limits"), path, "environment.runtime_limits"),
     )
 
     for label, resolved in (("fixture", root / environment.fixture),

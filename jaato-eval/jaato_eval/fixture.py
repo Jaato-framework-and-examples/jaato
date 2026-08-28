@@ -47,8 +47,7 @@ class Workspace:
 
 
 def materialise(fixture: Path, dest: Path, *,
-                profile_set: Optional[str] = None,
-                env: Optional[Dict[str, str]] = None) -> Workspace:
+                profile_set: Optional[str] = None) -> Workspace:
     """Copy ``fixture`` to ``dest`` and write the arm's ``.env``.
 
     Args:
@@ -57,9 +56,18 @@ def materialise(fixture: Path, dest: Path, *,
             overwrite is deliberate: silently reusing a dirty workspace is
             the contamination this module exists to prevent.
         profile_set: Written as ``JAATO_PROFILE_SET``.  Selects
-            ``<config_root>/profiles/<set>/`` at profile discovery.
-        env: Additional ``KEY=value`` pairs for the arm's ``.env`` (e.g.
-            ``VLLM_HOST`` for a self-hosted arm).
+            ``<config_root>/profiles/<set>/`` at profile discovery.  This
+            is the ONLY thing the engine writes into an arm's ``.env``,
+            because it is the one value the engine owns: it is the sweep's
+            axis, not a property of the task.
+
+            An ``env`` parameter used to sit here, offering arbitrary extra
+            pairs and citing ``VLLM_HOST`` as the case.  Nothing ever
+            passed it, and it should not have existed: ``env`` is a
+            ``SubagentProfile`` field, so a self-hosted arm declares its
+            host in the profile that binds that provider — beside the
+            model and the base URL it belongs with, rather than in a second
+            place the engine would have to merge.
 
     Returns:
         The materialised :class:`Workspace`.
@@ -84,8 +92,6 @@ def materialise(fixture: Path, dest: Path, *,
     lines = []
     if profile_set:
         lines.append(f"JAATO_PROFILE_SET={profile_set}")
-    for key, value in (env or {}).items():
-        lines.append(f"{key}={value}")
 
     env_file = dest / ".env"
     # An arm with no profile_set and no extra env still gets an empty

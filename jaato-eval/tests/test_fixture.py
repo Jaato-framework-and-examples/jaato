@@ -1,4 +1,12 @@
-"""Workspaces are hermetic, and refuse to be reused."""
+"""Workspaces are hermetic, and refuse to be reused.
+``test_extra_env_written`` was REMOVED with the ``env=`` parameter it
+pinned.  Nothing ever passed that parameter, and its own docstring cited
+``VLLM_HOST`` for a self-hosted arm — which is a ``SubagentProfile``
+field, so it belongs in the profile that binds that provider, beside the
+model and base URL, not in a second place the engine would have to merge.
+A test can pin a capability into existence; this one was pinning one that
+should not have existed.
+"""
 import tempfile
 import unittest
 from pathlib import Path
@@ -42,11 +50,6 @@ class FixtureCase(unittest.TestCase):
         with self.assertRaises(FixtureError):
             materialise(self.root / "absent", self.root / "ws4")
 
-    def test_extra_env_written(self):
-        ws = materialise(self.src, self.root / "ws5", profile_set="s",
-                         env={"VLLM_HOST": "http://x:8000"})
-        text = ws.env_file.read_text()
-        self.assertIn("VLLM_HOST=http://x:8000", text)
 
     def test_discard_removes(self):
         ws = materialise(self.src, self.root / "ws6")

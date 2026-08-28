@@ -66,14 +66,12 @@ to refuse. The code is distinct so that mistake has to be deliberate.
 id: customer-api/add-pagination
 description: Add cursor pagination to an existing Spring REST controller.
 
-environment:
+environment:                  # ONLY what a profile cannot express
   fixture: fixture            # copied fresh per arm; the agent mutates the copy
   config_root: .jaato         # read-only: profiles, agents, schemas
-                              # do NOT name this `.jaato` — the jaato repo's
-                              # root .gitignore excludes that path, and a
-                              # task's config root is committed data
-  apparmor: true
-  runtime_limits: {memory_max_mb: 2048, tool_timeout_seconds: 120}
+                              # the repo's root .gitignore excludes `.jaato`,
+                              # negated for jaato-eval/tasks/*/.jaato so a
+                              # task's config root travels with the repository
 
 input:
   agent: codegen
@@ -241,6 +239,31 @@ the profile to its **declared terminus**. A prompt the model can answer in
 prose ends with `finish_reason="stop"` and never calls `signal_completion` —
 and the routing difference under test only appears on the terminus path, so a
 chatty prompt makes every scenario pass while testing nothing.
+
+## The manifest holds only what a profile cannot express
+
+`apparmor`, `runtime_limits` and per-arm `env` are all `SubagentProfile`
+fields. A task declares them in its own profile, beside the model and provider
+they belong with — not in `task.yaml`.
+
+`runtime_limits` was the instructive one. It sat in the manifest with a
+docstring saying it was "forwarded to the profile layer", and the shipped
+example declared a `tool_timeout_seconds: 60`. It reached nothing:
+`runner_spawn.py` reads `getattr(profile, "runtime_limits")` and there is no
+session-kwarg vehicle, so no amount of plumbing could have delivered it. A
+field that cannot work is worse than a missing one, because the docstring
+recruits the reader into believing it does.
+
+`apparmor` did work, through `ClientConfigRequest.apparmor`. It was removed
+anyway: two writers for one setting requires a precedence rule, the framework
+defines none, so the rule would have been this engine's invention — applied to
+confinement.
+
+What stays is what has no profile representation: `fixture`, `config_root`,
+`prompt`, `agent` and `agent_params` (neither is a profile field), the profile
+selection itself, `graders`, `repeats`, and `budget` — the cascade pool, which
+is a runtime aggregate over one live cid rather than a property of a reusable
+template.
 
 ## Two budget gates, and they are independent
 

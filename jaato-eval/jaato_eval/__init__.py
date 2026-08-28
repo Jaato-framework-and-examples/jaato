@@ -2,7 +2,7 @@
 
 The framework already carries most of what an agent benchmark needs: the
 environment (workspace + read-only ``config_root`` + AppArmor +
-``runtime_limits``), the harness under test (profiles, and profile *sets*
+``config_root``), the harness under test (profiles, and profile *sets*
 selected by ``JAATO_PROFILE_SET``), the input axis (``agent_params``), a
 typed output boundary (``completion_payload_schema``), graders (completion
 processors, judge sessions), and the metrics (``UsageBreakdown.cost_usd``,
