@@ -123,9 +123,16 @@ class JudgeGrader:
         # a rubric reported `errors: ["Attempted to read answer.txt but
         # file-read tool returned a path-not-found error"]` with score 0.0,
         # and the arm was recorded as a failure although its artefact was
-        # correct and on disk.  (Root cause was framework-side and
-        # intermittent: FilesystemQueryPlugin initialised with
-        # `workspace=none`, so path tools could not resolve.)
+        # correct and on disk.
+        #
+        # The CAUSE of that flake is still unknown — 3 of 4 bare probes on
+        # identical fresh workspaces scored 1.0 and one scored 0.0, with no
+        # arm involved.  It is NOT runner-tier workspace resolution: every
+        # runner-tier filesystem_query init in that log resolved a real
+        # path (39 of 39).  An earlier note here blamed one; that compared
+        # a DAEMON-tier init against a runner-tier one and was withdrawn.
+        # This guard does not depend on the cause: whatever makes a judge
+        # unable to judge, the arm is not the evidence for it.
         reported = self.spec.config.get("errors_field", "errors")
         judge_errors = payload.get(reported) or []
         if judge_errors:
