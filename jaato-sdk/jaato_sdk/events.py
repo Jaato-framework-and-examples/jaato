@@ -1123,6 +1123,26 @@ class TurnCompletedEvent(Event):
     agent_id: str = ""
     turn_number: int = 0
     usage: UsageBreakdown = Field(default_factory=UsageBreakdown)
+
+    #: Why this turn produced no typed completion, when one was expected.
+    #:
+    #: ``None`` on every normal turn, including every turn of a session that
+    #: never had a completion schema and every turn that legitimately has
+    #: more work to do.
+    #:
+    #: ``"not_signalled_after_nudges"`` means the framework EXPECTED a
+    #: completion here and gave up asking: ``signal_completion`` was in the
+    #: session's tool surface, the model ended its loop without calling it,
+    #: and the nudge budget (``MAX_COMPLETION_NUDGES``) is spent.
+    #:
+    #: This is the only signal a consumer gets in that state. No
+    #: ``AgentCompletedEvent`` fires (only ``signal_completion`` produces
+    #: one) and no ``SessionTerminatedEvent`` fires (quiescence is gated on
+    #: ``signal_completion`` having been called), so a cascade driver
+    #: otherwise sees a turn end and must INVENT a reason for the missing
+    #: payload -- typically blaming the schema, which is the one thing that
+    #: was fine.
+    completion_gap: Optional[str] = None
     duration_seconds: float = 0.0
     function_calls: List[Dict[str, Any]] = Field(default_factory=list)
     # Formatted output text (with syntax highlighting, validation, etc.)
@@ -1132,12 +1152,26 @@ class TurnCompletedEvent(Event):
     # lowercase ``FinishReason`` enum value: ``"stop"`` (normal completion),
     # ``"max_tokens"`` (output-token limit — response truncated), ``"safety"``
     # (safety filter), ``"error"`` (provider error), plus ``"tool_use"`` /
-    # ``"cancelled"`` / ``"unknown"`` for completeness.  Defaults to ``"stop"``
-    # so a client can deterministically branch on ``finish_reason != "stop"``
-    # to flag an abnormal/truncated turn WITHOUT inferring it from empty
-    # output.  The framework also emits a human-readable ``source="system"``
-    # ``AgentOutputEvent`` banner alongside abnormal finishes for direct
-    # display; this field is the machine-readable companion.
+    # ``"cancelled"`` / ``"unknown"`` for completeness.  Defaults to ``"stop"``.
+    #
+    # DO NOT BRANCH ON ``finish_reason != "stop"`` TO DETECT TRUNCATION.
+    # This comment used to recommend exactly that, and it is wrong for every
+    # schema-driven profile.  A profile with a ``completion_payload_schema``
+    # ends by calling ``signal_completion``, which terminates the session
+    # INSIDE a tool-use turn — so a COMPLETE run's terminal turn reports
+    # ``"tool_use"`` and no later turn ever says ``"stop"``.  A consumer
+    # following the old advice blocked every schema-driven arm as truncated,
+    # with the finished artefact sitting on disk beside the verdict.
+    #
+    # The correct rule needs the SESSION's outcome as well as the turn's, so
+    # it does not fit in this field and is not this field's to state:
+    # ``jaato_sdk.helpers.truncation_reason()`` — ``termination_reason``
+    # outranks a payload, a payload outranks ``finish_reason``, and anything
+    # else is named rather than guessed.
+    #
+    # This field remains the machine-readable companion to the human-readable
+    # ``source="system"`` ``AgentOutputEvent`` banner emitted alongside
+    # abnormal finishes; it is one input to the rule, not the rule.
     finish_reason: str = "stop"
 
 

@@ -251,6 +251,10 @@ class AgentState:
         self.profile_name = profile_name
         self.parent_agent_id = parent_agent_id
         self.status = "idle"  # idle, active, done, error
+        # Set by the completion-nudge guard when the framework gives up
+        # asking for signal_completion; read and CLEARED by the next
+        # on_agent_turn_completed so it rides exactly one event.
+        self.completion_gap: Optional[str] = None
         self.created_at = datetime.now(timezone.utc).isoformat()
         self.completed_at: Optional[str] = None
         self.history: List[Any] = []
@@ -3314,6 +3318,7 @@ class JaatoServer:
                                         function_calls, cache_read_tokens=None,
                                         cache_creation_tokens=None,
                                         spend_total_tokens=None,
+                                        cost_usd=None,
                                         finish_reason="stop"):
                 # Flush any remaining buffered content from the agent's formatter pipeline
                 agent_pipeline = server._get_agent_pipeline(agent_id)
@@ -3350,10 +3355,28 @@ class JaatoServer:
                     if cache_creation_tokens is not None:
                         turn_entry['cache_creation'] = cache_creation_tokens
                     server._agents[agent_id].turn_accounting.append(turn_entry)
+
+                # Read AND CLEAR: the gap describes the turn that just ended,
+                # so it must ride exactly one event.  Leaving it set would
+                # re-report the same give-up on every later turn of a session
+                # that went on to do more work.
+                _gap = None
+                _agent_rec = server._agents.get(agent_id)
+                if _agent_rec is not None:
+                    _gap = _agent_rec.completion_gap
+                    _agent_rec.completion_gap = None
+
                 server.emit(TurnCompletedEvent(
                     agent_id=agent_id,
                     turn_number=turn_number,
+                    completion_gap=_gap,
                     usage=server._build_usage(
+                        # THE PROVIDER'S OWN FIGURE, when it reported one.
+                        # Without it the event carried None for every provider
+                        # that reports a real cost, while the SAME measurement
+                        # survived on the telemetry-span path -- two readers of
+                        # one number, one of them empty.
+                        cost_usd_override=cost_usd,
                         prompt_tokens=prompt_tokens,
                         output_tokens=output_tokens,
                         total_tokens=total_tokens,
@@ -4899,6 +4922,10 @@ class JaatoServer:
                             cache_read_tokens=payload.get("cache_read_tokens"),
                             cache_creation_tokens=payload.get("cache_creation_tokens"),
                             spend_total_tokens=payload.get("spend_total_tokens"),
+                            # ``.get`` without a default: absent and null both
+                            # mean the provider reported no cost, and a 0.0
+                            # default would claim it reported free.
+                            cost_usd=payload.get("cost_usd"),
                             finish_reason=payload.get("finish_reason", "stop"),
                         )
                     return
@@ -5425,6 +5452,26 @@ class JaatoServer:
                             f"raised {type(exc).__name__}: {exc} — "
                             f"skipping nudge this turn",
                         )
+                # The framework asked and gave up.  ``should_nudge`` is
+                # also False when the agent DID signal, so the count is what
+                # separates them: it is only at the ceiling when nudges
+                # actually fired and were ignored.
+                if (
+                    status == "done"
+                    and signal_completion_in_surface
+                    and not should_nudge
+                    and nudges_fired >= MAX_COMPLETION_NUDGES
+                ):
+                    _agent = server._agents.get(server._main_agent_id)
+                    if _agent is not None:
+                        _agent.completion_gap = "not_signalled_after_nudges"
+                    server._trace(
+                        f"COMPLETION_GAP: agent ended without "
+                        f"signal_completion after "
+                        f"{nudges_fired}/{MAX_COMPLETION_NUDGES} nudges — "
+                        f"no terminal event will fire for this session"
+                    )
+
                 if should_nudge:
                     server._trace(
                         f"COMPLETION_NUDGE: agent ended its loop without "

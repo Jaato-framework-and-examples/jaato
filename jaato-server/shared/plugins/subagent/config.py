@@ -6,6 +6,7 @@ import logging
 import os
 import re
 import sys
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, FrozenSet, List, Optional, Protocol, Tuple, Union
@@ -110,7 +111,18 @@ class SecretResolutionError(Exception):
 # Resolver registry — populated lazily from entry points.
 # ---------------------------------------------------------------------------
 
+#: Discovered resolvers, or ``None`` until discovery has COMPLETED.
+#:
+#: ``None`` means "not discovered yet"; an empty dict means "discovered, and
+#: there are none".  Those are different answers and the fast path below
+#: distinguishes them with ``is not None`` -- which only works if the dict is
+#: published when it is FINISHED.
 _resolvers: Optional[Dict[str, 'SecretResolver']] = None
+
+#: Serialises discovery.  Two threads may both find ``_resolvers is None``;
+#: only one should pay for the entry-point scan, and neither may observe a
+#: half-built registry.
+_resolvers_lock = threading.Lock()
 
 
 def _discover_secret_resolvers() -> Dict[str, 'SecretResolver']:
@@ -119,16 +131,48 @@ def _discover_secret_resolvers() -> Dict[str, 'SecretResolver']:
     Looks for the ``secret_resolvers`` entry point which must return
     an iterable of :class:`SecretResolver` instances.
 
-    Results are cached for the process lifetime.
+    Results are cached for the process lifetime, and the cache is
+    **published only once it is complete** -- a concurrent caller either
+    waits for discovery or sees the finished registry, never a partial one.
+    Discovery runs at most once; losers of the race pay only the lock.
 
     Returns:
-        Dict mapping URI scheme → resolver instance.
+        Dict mapping URI scheme → resolver instance.  Empty means
+        "discovered, and there are none" -- never "not discovered yet".
     """
     global _resolvers
     if _resolvers is not None:
         return _resolvers
 
-    _resolvers = {}
+    with _resolvers_lock:
+        # Re-check: another thread may have completed discovery while this
+        # one waited.
+        if _resolvers is not None:
+            return _resolvers
+        discovered = _discover_secret_resolvers_uncached()
+        # PUBLISHED ONLY WHEN COMPLETE.  This used to assign ``_resolvers =
+        # {}`` and then fill it, so a second thread arriving during the
+        # (slow) entry-point scan and premium import saw ``is not None``,
+        # took the fast path, and got an EMPTY registry -- reporting
+        # "(available: none)" and passing a literal ``pass://`` URI through
+        # to a provider as its api_key.
+        #
+        # Observed on a cold daemon's first two CONCURRENT sessions, 2 for 2;
+        # never on a warm one, because once populated the registry is never
+        # empty again.  The condition is first-use concurrency, not elapsed
+        # time.
+        _resolvers = discovered
+        return _resolvers
+
+
+def _discover_secret_resolvers_uncached() -> Dict[str, 'SecretResolver']:
+    """Do the discovery, into a LOCAL dict nothing else can observe.
+
+    Split out so the caller can publish the result atomically.  Everything
+    here is slow enough to matter: ``entry_points()`` scans installed
+    distributions and ``ep.load()`` imports jaato-premium.
+    """
+    resolvers: Dict[str, 'SecretResolver'] = {}
 
     eps = importlib.metadata.entry_points()
     if sys.version_info >= (3, 12):
@@ -143,17 +187,17 @@ def _discover_secret_resolvers() -> Dict[str, 'SecretResolver']:
     for ep in matches:
         try:
             provider_fn = ep.load()
-            resolvers = provider_fn()
-            for resolver in resolvers:
+            provider_fn_result = provider_fn()
+            for resolver in provider_fn_result:
                 for scheme in resolver.schemes:
-                    if scheme in _resolvers:
+                    if scheme in resolvers:
                         logger.warning(
                             "Duplicate secret resolver for scheme '%s' — "
                             "keeping first registered",
                             scheme,
                         )
                         continue
-                    _resolvers[scheme] = resolver
+                    resolvers[scheme] = resolver
                     logger.debug("Registered secret resolver: %s://", scheme)
         except Exception:
             logger.warning(
@@ -161,13 +205,13 @@ def _discover_secret_resolvers() -> Dict[str, 'SecretResolver']:
                 exc_info=True,
             )
 
-    if _resolvers:
+    if resolvers:
         logger.info(
             "Secret resolvers available for schemes: %s",
-            ", ".join(sorted(_resolvers.keys())),
+            ", ".join(sorted(resolvers.keys())),
         )
 
-    return _resolvers
+    return resolvers
 
 
 def _resolve_secret_uri(value: str) -> str:
@@ -296,9 +340,15 @@ def looks_like_malformed_secret_uri(value: Any) -> Optional[str]:
 
 
 def reset_secret_resolvers() -> None:
-    """Reset the cached secret resolvers (for testing)."""
+    """Reset the cached secret resolvers (for testing).
+
+    Takes the discovery lock so that *every* write to ``_resolvers`` happens
+    under it -- a reader can then rely on seeing either ``None`` or a
+    finished registry, with no third state.
+    """
     global _resolvers
-    _resolvers = None
+    with _resolvers_lock:
+        _resolvers = None
 
 
 # Valid values for the ``mode`` modifier knob.  ``discover`` (the

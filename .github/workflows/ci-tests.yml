@@ -16,6 +16,12 @@ jobs:
   # enrichment-fixture bugs) is dropped at discovery with only a WARNING,
   # so without this gate it ships invisibly.
   #
+  # Also carries the cyclomatic-complexity ratchet: a baseline of the
+  # functions already over radon 15, guarding that new code stays under it
+  # and that baselined functions do not grow.  It is a source scan (radon,
+  # pure-Python, in the `dev` extra) rather than a behavioural test, so it
+  # adds ~6s and no new failure mode to a job that must stay reliable.
+  #
   # Kept deliberately light + reliable: the only optional backend any of
   # these guards imports is the interactive_shell plugin's `pexpect`
   # (.[interactive]). No system-dependency extras (notably `kerberos`,
@@ -44,7 +50,9 @@ jobs:
             jaato-server/shared/tests/test_provider_knobs.py \
             jaato-server/shared/tests/test_tool_id_wire_conformance.py \
             jaato-server/shared/tests/test_reset_for_next_session.py \
-            jaato-server/shared/tests/test_enrichment_plugin.py
+            jaato-server/shared/tests/test_enrichment_plugin.py \
+            jaato-server/shared/tests/test_a_cache_is_published_only_when_complete.py \
+            jaato-server/shared/tests/test_cyclomatic_complexity_audit.py
 
   # ---------------------------------------------------------------
   # REQUIRED CHECK (repo ruleset "contract-guards" on refs/heads/main, since
@@ -119,3 +127,31 @@ jobs:
         run: |
           pytest -q --continue-on-collection-errors \
             jaato-sdk/tests/
+
+      # LIVE CONFORMANCE — the only suite here that starts a real daemon and
+      # drives it the way a consumer does.
+      #
+      # Every other suite supplies its own fixture, and a fixture cannot be
+      # wrong in the way production is wrong, because the person writing it
+      # is the person who believes the contract.  Around 3600 tests passed
+      # here while a consumer building against a live daemon found five real
+      # defects in an hour: an exhausted cascade handing back a usable-looking
+      # handle, a history request answered with silence, a terminal event
+      # emitted before the turn it was reporting, a provider-reported cost
+      # dropped at five consecutive links, and a rejected budget declaration
+      # nobody could see.  All five are asserted below.
+      #
+      # It costs NO tokens: the ``echo`` provider is deterministic,
+      # creds-free and network-free, and reports a CONFIGURED spend
+      # (``plugin_configs.echo.usage``) so ceilings and cost propagation are
+      # assertable without a provider that bills.
+      #
+      # ``-m conformance`` is required: these are deselected by default
+      # (pyproject ``addopts``) because they start a subprocess and are
+      # slower than a unit test.
+      - name: live conformance suite (real daemon, echo provider)
+        if: always()
+        timeout-minutes: 10
+        run: |
+          pytest -q -m conformance \
+            jaato-sdk/jaato_sdk/conformance/

@@ -47,6 +47,7 @@ Preflight first:
 """
 import asyncio
 __CLIENT_IMPORT__
+from jaato_sdk import SessionCreateFailed
 
 ENV_FILE = "__ENV_FILE__"
 WORKSPACE = "__WORKSPACE__"
@@ -97,11 +98,18 @@ async def main() -> int:
     client.subscribe_once(EventType.SESSION_TERMINATED, on_done)
     client.subscribe_once(EventType.TURN_COMPLETED, on_done)
 
-    # Inline spec — swap for profile="<name>", agent="<name>" to use a set.
-    sid = await client.create_session(
-        profile={"model": MODEL, "provider": PROVIDER}, timeout=60.0)
-    if not sid:
-        print("session.new failed — check provider auth / the daemon log")
+    # Inline spec so this runs before you have a profile.  Swap for
+    # profile="<name>", agent="<name>" to use a profile set: profile is
+    # WHAT IT CAN DO (model, plugins, ceilings), agent is WHO IT IS.
+    try:
+        sid = await client.create_session(
+            profile={"model": MODEL, "provider": PROVIDER}, timeout=60.0)
+    except SessionCreateFailed as exc:
+        # create_session RAISES; it does not return None.  The exception
+        # states the cause — do not guess one.  ``may_exist`` is True when
+        # the request was sent and the answer lost, in which case a blind
+        # retry creates a SECOND session.
+        print(f"session.new failed: {exc}")
         await client.disconnect()
         return 1
 
@@ -129,9 +137,14 @@ async def main() -> int:
     if not await client.connect(timeout=120.0):
         print("could not connect/autostart the daemon — run the doctor")
         return 1
-    sid = await client.create_session(
-        profile={"model": MODEL, "provider": PROVIDER}, timeout=60.0)
-    if not sid:
+    # Inline spec so this runs before you have a profile.  Swap for
+    # profile="<name>", agent="<name>" to use a profile set: profile is
+    # WHAT IT CAN DO (model, plugins, ceilings), agent is WHO IT IS.
+    try:
+        sid = await client.create_session(
+            profile={"model": MODEL, "provider": PROVIDER}, timeout=60.0)
+    except SessionCreateFailed as exc:
+        print(f"session.new failed: {exc}")
         await client.disconnect()
         return 1
     await client.send_message("Kick off the long-running task.")
@@ -178,12 +191,15 @@ async def _run_stage(client, cascade_id, profile, agent, prompt) -> str:
         done.set()
 
     client.subscribe_once(EventType.SESSION_TERMINATED, on_done)
-    sid = await client.create_session(
-        profile=profile, agent=agent,
-        cascade_driver_id=cascade_id,   # shared slot → warm imports across stages
-        timeout=60.0)
-    if not sid:
-        return "spawn_failed"
+    try:
+        sid = await client.create_session(
+            profile=profile, agent=agent,
+            cascade_driver_id=cascade_id,   # shared slot → warm imports
+            timeout=60.0)
+    except SessionCreateFailed as exc:
+        # A refused stage is a TYPED outcome, not a timeout: an exhausted
+        # cascade ceiling means the budget did its job and nothing ran.
+        return f"spawn_refused: {exc}"
     await client.send_message(prompt)
     await done.wait()
     return outcome.get("reason") or "unknown"
@@ -301,10 +317,14 @@ async def main() -> int:
     client.subscribe_once(EventType.SESSION_TERMINATED, on_done)
     client.subscribe_once(EventType.TURN_COMPLETED, on_done)
 
-    sid = await client.create_session(
-        profile={"model": MODEL, "provider": PROVIDER}, timeout=60.0)
-    if not sid:
-        print("session.new failed — check provider auth / the daemon log")
+    # Inline spec so this runs before you have a profile.  Swap for
+    # profile="<name>", agent="<name>" to use a profile set: profile is
+    # WHAT IT CAN DO (model, plugins, ceilings), agent is WHO IT IS.
+    try:
+        sid = await client.create_session(
+            profile={"model": MODEL, "provider": PROVIDER}, timeout=60.0)
+    except SessionCreateFailed as exc:
+        print(f"session.new failed: {exc}")
         await client.disconnect()
         return 1
 
@@ -313,6 +333,193 @@ async def main() -> int:
     print()
     await client.disconnect()
     return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(asyncio.run(main()))
+'''
+
+
+SWEEP_TEMPLATE = _COMMON_HEADER + '''
+import uuid
+
+from jaato_sdk import SessionCreateFailed, truncation_reason
+
+# The matrix.  N INDEPENDENT jobs — none feeds another, each fully isolated,
+# results collected per-job.  An eval sweep is one instance; so is any batch
+# job, any fan-out over a work-list, any A/B across profile sets.
+#
+# This is NOT the `cascade` archetype.  That one is a linear CHAIN: stage 1
+# then stage 2, output feeding forward, one session at a time.  Here nothing
+# feeds forward, and a failed job must not stop its siblings.
+# (name, profile, agent, prompt) -- and PROFILE AND AGENT ARE ORTHOGONAL.
+#
+#   profile  = CAPABILITIES: model, provider, plugins, GC strategy, ceilings
+#   agent    = the AGENT ITSELF -- who it is, kept in
+#              ``.jaato/agents/<name>.md``
+#
+# An agent is NOT "the system instructions", though it is often described
+# that way.  The system instructions are an ASSEMBLY -- the agent, plus the
+# ``.jaato/instructions/`` base layer, plus plugin instructions, framework
+# constants and the untrusted-content boundary -- and
+# ``suppress_base_instructions`` can drop every one of those layers EXCEPT
+# the agent and its plugins.  The instructions are how an agent reaches a
+# turn; the agent is what persists across turns, sessions and profiles.
+# Naming it after its transport is how it ends up looking swappable with a
+# prompt string
+#
+# They compose freely, so a sweep has TWO natural axes and this is the whole
+# reason the tuple carries both.  Vary the agent to ask "does this persona
+# work better?"; vary the profile to ask "does it hold up on a cheaper model
+# / fewer tools?"; vary both for a real matrix.
+#
+# ``model`` and ``provider`` are NOT axes here -- they are things a profile
+# expresses.  Putting them in this list as an inline spec would repeat,
+# identically, on every row and imply they were the dimension.
+#
+# The example below varies the PERSONA with capabilities held fixed, which
+# is the cleanest demonstration of the orthogonality.  ``None`` in the agent
+# slot means "no persona" -- the profile's own instructions stand.
+JOBS = [
+    ("baseline", "your-profile", "your-baseline-agent", "Do the thing."),
+    ("variant",  "your-profile", "your-variant-agent",  "Do the thing."),
+]
+
+# ``profile`` also accepts an inline spec dict, for when you genuinely want
+# to vary the model and have no profile for it.  ``model`` is required in
+# that form and the daemon rejects a spec without one:
+#
+#     ("cheap", {"model": MODEL, "provider": PROVIDER}, None, "Do the thing."),
+#
+# Prefer named profiles: an inline spec cannot carry plugins, GC strategy,
+# instructions or a completion schema, so a sweep built from specs can only
+# vary the thinnest part of what an agent is.
+#
+# An agent with ``{{param}}`` placeholders takes ``agent_params={...}`` on
+# create_session; add a fifth column if you need to sweep those too.
+
+# Aggregate ceiling for the whole sweep, or None for no pool.
+#
+# TWO BUDGET GATES EXIST AND THEY DO NOT COMPOSE THE WAY THEY LOOK.  A
+# profile's own ``budget_control`` is OWN-BOOKS and per-job; the pool below
+# is the AGGREGATE.  A session carrying its own ceiling does not draw on the
+# pool, so declaring both leaves the pool inert.  Pick one.
+POOL_LIMITS = {"tokens": 200_000}
+
+# A POOL FORECLOSES LEDGER-BASED GRADING.  A pooled job is detached from
+# this connection when it terminates (that is what returns the warm slot),
+# so ``request_history`` afterwards answers with an error, not a ledger.  If
+# your grader needs the tool-call ledger, use per-job ceilings and set
+# POOL_LIMITS = None.
+
+
+async def _run_job(owner_cid, name, profile, agent, prompt) -> dict:
+    """Run ONE job to its terminus and return a result row.
+
+    Never raises: a sweep whose jobs can kill each other is not a sweep.
+    """
+    client = _new_client()
+    if not await client.connect(timeout=120.0):
+        return {"job": name, "outcome": "BLOCKED",
+                "detail": "could not connect/autostart the daemon"}
+
+    # SUBSCRIBE BEFORE create_session, NOT AFTER.
+    #
+    # A refusal is announced WHILE the create is in flight, so a handler
+    # installed afterwards never sees it.  Current daemons raise
+    # SessionCreateFailed and you could rely on that — but a generated
+    # driver ships to whatever daemon the reader has, and against an older
+    # one the failure mode without this is a 30s timeout naming nothing.
+    refusals = []
+    client.subscribe(EventType.ERROR, lambda ev: refusals.append(ev))
+    client.subscribe(EventType.AGENT_ERROR, lambda ev: refusals.append(ev))
+
+    state = {}
+    done = asyncio.Event()
+
+    def on_turn(ev):
+        state["finish_reason"] = getattr(ev, "finish_reason", None)
+
+    def on_terminated(ev):
+        state["termination_reason"] = getattr(ev, "reason", None)
+        state["termination_detail"] = getattr(ev, "error", None)
+        done.set()
+
+    client.subscribe(EventType.TURN_COMPLETED, on_turn)
+    client.subscribe(EventType.SESSION_TERMINATED, on_terminated)
+
+    try:
+        try:
+            await client.create_session(
+                profile=profile, agent=agent,
+                cascade_driver_id=owner_cid, timeout=60.0)
+        except SessionCreateFailed as exc:
+            # A REFUSAL IS A TYPED OUTCOME, NOT A TIMEOUT.  An exhausted pool
+            # means the ceiling did its job and nothing ran — a different
+            # call to action from "the daemon is broken", and a driver that
+            # conflates them reports infrastructure failures as budget stops.
+            return {"job": name, "outcome": "BLOCKED",
+                    "detail": f"{type(exc).__name__}: {exc}",
+                    "may_exist": exc.may_exist}
+
+        await client.send_message(prompt)
+        try:
+            await asyncio.wait_for(done.wait(), timeout=600.0)
+        except asyncio.TimeoutError:
+            return {"job": name, "outcome": "BLOCKED",
+                    "detail": "no terminal event within 600s"}
+
+        # COMPLETENESS IS NOT ``finish_reason != "stop"``.  A schema-driven
+        # profile ends INSIDE a tool-use turn, so a finished job reports
+        # "tool_use" and never "stop".  The SDK owns this rule.
+        why = truncation_reason(
+            finish_reason=state.get("finish_reason"),
+            payload=state.get("payload"),
+            termination_reason=state.get("termination_reason"),
+            termination_detail=state.get("termination_detail"),
+        )
+        if why is not None:
+            return {"job": name, "outcome": "BLOCKED", "detail": why}
+        return {"job": name, "outcome": "OK",
+                "finish_reason": state.get("finish_reason")}
+    finally:
+        await client.disconnect()
+
+
+async def main() -> int:
+    # ONE OWNER CLIENT DECLARES THE POOL AND OUTLIVES THE JOBS.
+    #
+    # A pool belongs to the connection that declared it: an owner opened and
+    # closed around a single job takes the pool with it.  One client can
+    # declare N cids, so N pools do not need N connections.
+    owner = _new_client()
+    if not await owner.connect(timeout=120.0):
+        print("could not connect/autostart the daemon — run the doctor")
+        return 1
+
+    cid = None
+    try:
+        if POOL_LIMITS:
+            cid = f"sweep-{uuid.uuid4().hex[:8]}"
+            await owner.cascade_budget_set(cid, limits=POOL_LIMITS)
+
+        # WHAT PRODUCED THESE NUMBERS, read from the live process.  The
+        # branch you have checked out does not determine which SDK ran —
+        # an editable install resolves elsewhere — so a harness that
+        # records results records what produced them.
+        import jaato_sdk
+        print(f"# sdk={jaato_sdk.__file__}")
+
+        rows = await asyncio.gather(
+            *(_run_job(cid, name, profile, agent, prompt)
+              for name, profile, agent, prompt in JOBS)
+        )
+    finally:
+        await owner.disconnect()
+
+    for row in rows:
+        print(row)
+    return 0 if all(r["outcome"] == "OK" for r in rows) else 1
 
 
 if __name__ == "__main__":
@@ -331,4 +538,6 @@ TEMPLATES = {
                 "Cascade driver — sequential multi-session stages."),
     "observer": ("OBSERVER_TEMPLATE", OBSERVER_TEMPLATE,
                  "Cascade observer — attach + live-trace events (read-only)."),
+    "sweep": ("SWEEP_TEMPLATE", SWEEP_TEMPLATE,
+              "Sweep/matrix driver — N INDEPENDENT jobs, none feeding another."),
 }

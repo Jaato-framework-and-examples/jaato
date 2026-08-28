@@ -29,6 +29,18 @@ NAMES the code holding the loop.
   code holding the loop, captured mid-stall, with no cooperation from the
   loop required.
 
+  Past ``all_threads_after`` it dumps EVERY thread's stack, named and
+  stamped with how long each has sat on the same frames.  This half exists
+  because the first half answers only half the question: when the loop is
+  parked on a lock, its own stack names the thread that is BLOCKED, and the
+  holder is somewhere else entirely.  Observed 2026-08-28 — a 36.5s stall
+  whose loop stack ended at ``session_manager.py:4351  with self._lock:``,
+  which says what the loop wanted and nothing about who had it.
+
+  ``sys._current_frames()`` is per-PROCESS, so this can only be done from
+  inside the daemon.  No client, harness or external observer can obtain it;
+  from outside they get their own threads.
+
 On recovery it logs the stall's total duration, so the log carries the pair
 the investigation needs: *what was running* and *for how long*.
 
@@ -79,6 +91,7 @@ class LoopWatchdog:
         interval: float = 1.0,
         threshold: float = 2.0,
         resample_every: float = 10.0,
+        all_threads_after: float = 10.0,
     ) -> None:
         """
         Args:
@@ -88,10 +101,29 @@ class LoopWatchdog:
             resample_every: While one stall persists, re-dump the stack at
                 most this often — a 30s stall yields ~3 stacks, enough to see
                 whether it is one frame or a churn, without flooding the log.
+            all_threads_after: Stall age past which EVERY thread's stack is
+                dumped, not just the loop's.  Below it the log is unchanged.
+
+                Why a second threshold rather than always-on: the loop thread
+                alone answers "what was the loop doing", and for a short stall
+                that is the whole question.  It does not answer "who was
+                holding the thing the loop waited on" — and a daemon has
+                enough threads that dumping all of them on every 2s hiccup
+                would cost more than it tells.  The default sits where the
+                two questions separate in practice: #633's stalls clustered
+                at 10-12s on a timeout ceiling and are understood; the
+                unexplained ones observed since run past 30s on a held mutex,
+                where the loop's own stack names only the BLOCKED party.
         """
         self._interval = interval
         self._threshold = threshold
         self._resample = resample_every
+        self._all_threads_after = all_threads_after
+        #: ident -> (stack digest, monotonic time that digest FIRST appeared).
+        #: Lets each dump say how long a thread has been sitting on the same
+        #: stack: one that appears once at 36s and one that appears in every
+        #: dump are different bugs, and without this they read identically.
+        self._digest_seen: dict = {}
         self._beat = time.monotonic()
         self._loop_thread_id: Optional[int] = None
         self._task: Optional[asyncio.Task] = None
@@ -114,10 +146,11 @@ class LoopWatchdog:
         # reader grepping for stalls must find only stalls, and a filter
         # matching the token must not fire on the announcement of it.
         logger.info(
-            "LoopWatchdog armed: interval=%.1fs threshold=%.1fs -- a stall "
-            "longer than the threshold logs the loop thread's stack at "
-            "WARNING",
-            self._interval, self._threshold,
+            "LoopWatchdog armed: interval=%.1fs threshold=%.1fs "
+            "all_threads_after=%.1fs -- a stall past the threshold logs the "
+            "loop thread's stack at WARNING, and past all_threads_after "
+            "every thread's stack as well",
+            self._interval, self._threshold, self._all_threads_after,
         )
 
     async def _heartbeat(self) -> None:
@@ -159,6 +192,71 @@ class LoopWatchdog:
                 "executing:\n%s", _STALL_TOKEN, age,
                 stack or "<loop thread not found>",
             )
+
+            # Past ``all_threads_after`` the loop's own stack is no longer the
+            # whole answer.  When it is parked on a lock, that stack names the
+            # BLOCKED party; the holder is another thread entirely, and no
+            # amount of detail about the waiter identifies it.  ``_current_
+            # frames()`` is per-PROCESS, so this can only be done from inside
+            # the daemon -- an out-of-process observer sees its own threads.
+            if age >= self._all_threads_after:
+                logger.warning(
+                    "%s: stall is %.1fs (>= %.1fs) -- every thread's stack "
+                    "follows; the loop thread above is the WAITER, look here "
+                    "for the holder:\n%s",
+                    _STALL_TOKEN, age, self._all_threads_after,
+                    self._all_thread_stacks(),
+                )
+
+    def _all_thread_stacks(self) -> str:
+        """Every thread's stack, named, with how long each has sat unchanged.
+
+        Two additions over a bare ``_current_frames()`` dump, both of which
+        exist because their absence makes two different bugs look identical:
+
+        * **Names**, from ``threading.enumerate()``.  A bare thread id cannot
+          say which subsystem it belongs to, so a dump of raw ids is a list
+          of numbers to correlate by hand.  A thread that appears in
+          ``_current_frames()`` but NOT in ``enumerate()`` is labelled as
+          such rather than given a placeholder name -- that combination means
+          a thread created outside ``threading`` (a C extension), which is
+          itself worth seeing.
+
+        * **Unchanged-for**, from digesting each stack and remembering when
+          that digest first appeared.  A thread holding one lock for the
+          whole stall and a thread churning through work both appear in every
+          dump; only the elapsed time on an IDENTICAL stack separates them.
+        """
+        frames = sys._current_frames()
+        named = {t.ident: t.name for t in threading.enumerate()}
+        now = time.monotonic()
+
+        # Retire threads that have gone away, so the map cannot grow across a
+        # long-lived daemon's many stalls.
+        for ident in list(self._digest_seen):
+            if ident not in frames:
+                del self._digest_seen[ident]
+
+        out = []
+        for ident, frame in sorted(frames.items()):
+            stack = "".join(traceback.format_stack(frame))
+            digest = hash(stack)
+            prev = self._digest_seen.get(ident)
+            if prev is not None and prev[0] == digest:
+                held = f", unchanged for {now - prev[1]:.1f}s"
+            else:
+                self._digest_seen[ident] = (digest, now)
+                held = ", first seen at this stack"
+
+            if ident in named:
+                name = named[ident]
+            else:
+                name = "<not in threading.enumerate() -- created outside threading>"
+            marker = "  <-- THE LOOP" if ident == self._loop_thread_id else ""
+            out.append(
+                f"--- thread {ident} {name!r}{held}{marker}\n{stack}"
+            )
+        return "\n".join(out)
 
     def _loop_stack(self) -> str:
         """The loop thread's stack, captured from outside, mid-stall."""

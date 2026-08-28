@@ -54,8 +54,9 @@ include = ["jaato_sdk*", "jaato*"]
 [tool.pytest.ini_options]
 markers = [
     "load: load/perf tests — opt-in via -m load (skipped by default)",
+    "conformance: live tests against a real daemon — opt-in via -m conformance",
 ]
 # Skip load tests in normal runs.  To run only the load tests:
 #     pytest -m load jaato-sdk/jaato_sdk/tests/
-addopts = "-m 'not load'"
+addopts = "-m 'not load and not conformance'"
 asyncio_mode = "auto"

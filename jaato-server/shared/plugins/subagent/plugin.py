@@ -2201,6 +2201,7 @@ class SubagentPlugin(DaemonForwardingMixin):
                 on_output=output_callback,
                 on_usage_update=usage_callback
             )
+            session.flush_session_quiescent()
 
             # Update context after processing (match _run_subagent_async behavior)
             usage = session.get_context_usage()
@@ -3817,8 +3818,14 @@ class SubagentPlugin(DaemonForwardingMixin):
                         cache_read_tokens=turn.get('cache_read'),
                         cache_creation_tokens=turn.get('cache_creation'),
                         spend_total_tokens=turn.get('spend_total'),
+                        cost_usd=turn.get('cost_usd'),
                         finish_reason=turn.get('finish_reason', 'stop'),
                     )
+
+                # After this agent's turn events — the terminal
+                # notification must be the last thing the parent
+                # sees for this subagent.
+                session.flush_session_quiescent()
 
                 self._ui_hooks.on_agent_context_updated(
                     agent_id=agent_id,

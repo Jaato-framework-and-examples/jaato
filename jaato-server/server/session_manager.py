@@ -160,6 +160,17 @@ class Session:
     attached_clients: Set[str] = field(default_factory=set)
     description: Optional[str] = None
     is_dirty: bool = False  # True if has unsaved changes
+    #: Correlation id of the ``session.new`` that created this session, so an
+    #: event answering that create can be matched to it by the CLIENT.
+    #:
+    #: The SDK filters the create-wait on ``request_id`` -- an event without
+    #: one is filed as incidental and never satisfies the wait.  So a refusal
+    #: emitted without it is INVISIBLE to the caller, which waits out its own
+    #: timeout and reports a cause that is not the real one.  That is exactly
+    #: what a cascade-exhausted refusal did: the daemon logged the real reason
+    #: and emitted a well-typed ErrorEvent, and the caller got a 30s
+    #: runner-not-ready timeout naming nothing.
+    create_request_id: Optional[str] = None
     #: Serializes saves OF THIS SESSION.  Lives on the session because the
     #: thing it protects is per-session: ``_save_session`` writes
     #: ``<session_id>.json.tmp`` and renames it, so two concurrent saves of
@@ -1642,7 +1653,10 @@ class SessionManager:
                         getattr(server, "_profile", None)
                         and getattr(server._profile, "budget_control", None))
                 except CascadeExhaustedError as exc:
-                    self._emit_cascade_refusal(client_id, session_id, exc)
+                    _sess = self._sessions.get(session_id)
+                    self._emit_cascade_refusal(
+                        client_id, session_id, exc,
+                        request_id=getattr(_sess, "create_request_id", None))
                     return False
 
             spawn_session_runner(
@@ -4699,6 +4713,7 @@ class SessionManager:
 
     def _emit_cascade_refusal(
         self, client_id: Optional[str], session_id: str, exc: Any,
+        request_id: Optional[str] = None,
     ) -> None:
         """Tell the requesting client its child was refused, and why.
 
@@ -4743,12 +4758,35 @@ class SessionManager:
             logger.warning(
                 "cascade refused spawn of %s: %s", session_id, payload,
             )
+            # THE CORRELATION IS WHAT MAKES THIS REACH THE CALLER.
+            #
+            # Without ``request_id`` the SDK's create-wait files this as an
+            # incidental event and keeps waiting -- so the caller sees a 30s
+            # runner-not-ready timeout while the real answer sits in the log.
+            # The SDK's own ``SessionRefused`` contract names
+            # ``CascadeExhaustedError`` as its example and could not fire on
+            # the one path that produces it, because the event it was waiting
+            # for was unaddressed.
+            #
+            # ``None`` stays ``None``: a spawn with no originating request
+            # (reactor- or cascade-driven, carrying the synthetic headless
+            # client id) has nothing to correlate, and inventing an id would
+            # let this event satisfy some other caller's wait.
+            #
+            # PASSED IN, never looked up.  The first version read
+            # ``self._sessions`` here -- and this method's ``except
+            # Exception`` (which exists so a failing sink cannot break a
+            # spawn) swallowed the resulting AttributeError and emitted
+            # NOTHING.  A defensive catch around a new dependency turns a
+            # crash into a silent no-emit, which is the failure this whole
+            # method exists to prevent.
             event = ErrorEvent(
                 error=str(exc),
                 error_type="CascadeExhaustedError",
                 recoverable=False,
                 details=payload,
                 session_id=session_id,
+                request_id=request_id,
             )
             if client_id:
                 self._emit_to_client(client_id, event)
@@ -5773,7 +5811,8 @@ class SessionManager:
                 by client config.
             created_by: Authenticated user who created the session.
             agent_name: Optional agent name. If provided, the agent's rendered
-                markdown becomes the session's system instructions. Resolved
+                markdown is ONE LAYER of the assembled system instructions -- not
+                the whole of them; see IPCClient.create_session. Resolved
                 from ``.jaato/agents/`` and ``.jaato/prompts/``.
             agent_params: Parameter values for the agent's ``{{param}}``
                 placeholders.
@@ -5960,7 +5999,7 @@ class SessionManager:
             )
 
         # Resolve agent if requested — the agent's rendered markdown
-        # becomes the session's system instructions.
+        # is one LAYER of the assembled system instructions.
         agent_instructions = None
         if agent_name:
             agent_result = self._resolve_agent(
@@ -6165,6 +6204,49 @@ class SessionManager:
 
         logger.info(f"Server initialized successfully for session {session_id}")
 
+        # ---------------------------------------------------------------
+        # NEVER HAND BACK A HANDLE TO A SESSION THAT CANNOT RUN.
+        #
+        # The cascade ceiling was checked only in the runner spawn, which
+        # happens AFTER this method has emitted SessionInfoEvent and returned
+        # the id.  So an exhausted pool produced an ordinary session id, and
+        # the refusal -- correct, well-typed, correctly logged -- arrived too
+        # late to be the answer: the caller's create-wait had already been
+        # satisfied by the SessionInfoEvent.  Measured: pool of 1200 tokens,
+        # one turn charging 1200, and the next create still returned a
+        # handle while the daemon logged ``cascade_remaining=0.0``.
+        #
+        # Refusing HERE, before the handle exists, is what makes the SDK's
+        # ``SessionRefused`` contract true on the one path that produces
+        # ``CascadeExhaustedError``.  The spawn-side check stays: it is the
+        # backstop for sessions that reach a ceiling by a route this one does
+        # not see (a reload, a fork pre-charged with usage).
+        #
+        # A profile carrying its OWN ``budget_control`` is deliberately
+        # exempt, matching the spawn-side rule: it keeps separate books, is
+        # not clamped, and an exhausted pot does not refuse it.
+        if cascade_driver_id:
+            _pool = self.get_cascade_budget(cascade_driver_id)
+            if _pool is not None and getattr(
+                    server, "_draws_on_parent_budget", True):
+                from shared.budget_control import CascadeExhaustedError
+                try:
+                    _pool.child_config(
+                        getattr(server, "_profile", None)
+                        and getattr(server._profile, "budget_control", None))
+                except CascadeExhaustedError as exc:
+                    self._emit_cascade_refusal(
+                        client_id, session_id, exc, request_id=request_id)
+                    self._release_session_id(session_id)
+                    try:
+                        server.shutdown()
+                    except Exception:  # noqa: BLE001 — best-effort
+                        logger.debug(
+                            "server.shutdown after cascade refusal raised",
+                            exc_info=True,
+                        )
+                    return ""
+
         # Caller-supplied USAGE, pre-charged onto the fresh session via the
         # same RPC a reload uses.  Safe in this window because the session has
         # not served a turn.  Without it a fork starts at ZERO against a full
@@ -6204,6 +6286,11 @@ class SessionManager:
             # ``cascade_driver_id`` field; getattr returned None for
             # every cascade session, defeating dispatch + GC-skip.
             session.cascade_driver_id = cascade_driver_id
+            # Stamped here for the same reason as the cid above: BEFORE the
+            # session enters ``_sessions``, because the spawn that can refuse
+            # it looks the session up by id and would otherwise find no
+            # correlation to echo.
+            session.create_request_id = request_id
             # Whether this child draws on the parent's shared pot or keeps
             # its own books (see _spawn_session_runner_unconditional).
             session.draws_on_parent_budget = getattr(
@@ -9229,7 +9316,13 @@ class SessionManager:
             session = self._sessions.get(session_id)
             if not session:
                 return False
-            return self._save_session(session)
+        # The save happens OUTSIDE ``self._lock``.  ``_save_session`` issues
+        # ``session_get_history_threadsafe()``, which schedules a coroutine
+        # onto the daemon loop and blocks this thread until it completes --
+        # so holding the manager lock across it lets a worker wait for the
+        # loop while the loop waits for the lock.  See the module note on
+        # THE MANAGER LOCK IS A DICT GUARD.
+        return self._save_session(session)
 
     def delete_session(self, session_id: str) -> bool:
         """Delete a session from memory and disk.
@@ -9254,8 +9347,13 @@ class SessionManager:
                     ))
                     self._client_to_session.pop(client_id, None)
 
-                # Shutdown the server
-                session.server.shutdown()
+        # Shutdown the server OUTSIDE ``self._lock``.  ``JaatoServer.shutdown``
+        # issues ``session_end_threadsafe`` / ``session_shutdown_threadsafe``
+        # and closes the RPC via ``run_coroutine_threadsafe`` -- all of which
+        # block this thread until the daemon loop runs them.  The session is
+        # already popped above, so nothing else can reach it.
+        if session is not None:
+            session.server.shutdown()
 
         # Stop the session's egress proxy if one was started (Phase 5 §5.11).
         # Idempotent + guarded — a no-op for sessions without an allowlist.
@@ -9833,9 +9931,13 @@ class SessionManager:
             if session and session.interrupted_turn:
                 session.interrupted_turn["pending_tool_calls"] = function_calls
                 session.is_dirty = True
-                # Incremental save to persist pending tool calls before execution
-                self._save_session(session)
-                logger.debug(
+            else:
+                session = None
+        if session is not None:
+            # Outside the lock: the save round-trips to the loop.  The
+            # MUTATION above needs the lock; the save does not.
+            self._save_session(session)
+            logger.debug(
                     f"Updated pending tool calls for session {session_id}: "
                     f"{len(function_calls)} call(s)"
                 )
@@ -10522,13 +10624,12 @@ class SessionManager:
         Returns:
             Number of sessions saved.
         """
-        saved = 0
         with self._lock:
-            for session in self._sessions.values():
-                if session.is_dirty:
-                    if self._save_session(session):
-                        saved += 1
-        return saved
+            # Snapshot under the lock, save outside it.  Iterating the dict
+            # is what the lock is for; the save round-trips to the loop and
+            # must not be done while holding it.
+            dirty = [s for s in self._sessions.values() if s.is_dirty]
+        return sum(1 for session in dirty if self._save_session(session))
 
     # ------------------------------------------------------------------
     # Ephemeral sessions (Phase 3 — remote subagent delegation)
@@ -10833,11 +10934,17 @@ class SessionManager:
             self._stop_workspace_monitor(sid)
 
         with self._lock:
-            # Save all sessions
-            for session in self._sessions.values():
-                self._save_session(session)
-                session.server.shutdown()
+            # Snapshot under the lock; BOTH the save and the server shutdown
+            # below round-trip to the daemon loop, and holding the manager
+            # lock across either is what lets a worker wait for the loop while
+            # the loop waits for the lock.
+            closing = list(self._sessions.values())
 
+        for session in closing:
+            self._save_session(session)
+            session.server.shutdown()
+
+        with self._lock:
             self._sessions.clear()
             self._client_to_session.clear()
 
