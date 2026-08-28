@@ -12,6 +12,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Protocol
 
+from jaato_sdk import truncation_reason as _sdk_truncation_reason
+
 from ..ledger import LedgerResult
 from ..manifest import GraderSpec
 from ..verdict import Verdict
@@ -69,55 +71,22 @@ class GraderContext:
     def truncation_reason(self) -> Optional[str]:
         """Why this arm never reached a terminus it declared, or ``None``.
 
-        ``finish_reason`` alone cannot answer this, because ``"tool_use"``
-        carries two OPPOSITE meanings.  The provider emits it for "stopped
-        to execute tools" — mid-loop, more turns expected.  But a profile
-        with a ``completion_payload_schema`` ends by calling
-        ``signal_completion``, which terminates the session on the spot, so
-        the terminal turn of a perfectly complete arm ALSO reports
-        ``"tool_use"`` and no further turn arrives to say ``"stop"``.
-        Reading the field directly therefore blocks every schema-driven
-        arm as truncated — which is most of the tasks this engine exists
-        to run.
+        Delegates to :func:`jaato_sdk.truncation_reason`, which shipped in
+        jaato #648 carrying this rule and its ordering.  The logic used to
+        live here; it is gone rather than kept in sync, for the same reason
+        the ledger pairing went in #640 — a second copy of a rule rots
+        independently, and this one exists precisely because a consumer
+        following ``finish_reason != "stop"`` reaches the wrong verdict.
 
-        The question graders actually need answered is whether the arm
-        reached a terminus it declared, and each profile shape declares a
-        different one:
-
-        - schema profile — the terminus is the completion payload, so a
-          payload's presence settles it regardless of finish reason;
-        - prose profile — the terminus is a turn that ended with no tool
-          calls, i.e. ``"stop"``.
-
-        Anything else (``max_tokens``, ``error``, ``cancelled``,
-        ``safety``, or a bare ``"tool_use"`` with nothing signalled) cut
-        the arm short, and the returned string names which — a BLOCKED
-        verdict has to say what was absent.
-
-        ``termination_reason`` is consulted FIRST and outranks everything
-        below it, because a budget ceiling refuses turns *before any turn
-        runs*: no ``TurnCompletedEvent`` fires, so ``finish_reason`` keeps
-        whatever the previous turn left there and cannot mention the
-        ceiling.  Reading only the turn stream reports a ceiling stop as
-        an ordinary truncation — which is worse than useless here, since
-        an operator must be able to tell "the ceiling I set did its job"
-        from "the provider cut us off".
+        This property remains because it names the arm's four inputs and
+        hands them over; the RULE is the SDK's.
         """
-        if self.termination_reason == "budget_exhausted":
-            return (f"stopped at its budget ceiling: {self.termination_detail}"
-                    if self.termination_detail else
-                    "stopped at its budget ceiling")
-        if self.termination_reason == "error":
-            return (f"ended in a session error: {self.termination_detail}"
-                    if self.termination_detail else "ended in a session error")
-        if self.payload is not None:
-            return None
-        if self.finish_reason == "stop":
-            return None
-        if self.finish_reason == "tool_use":
-            return ("ended mid-tool-loop (finish_reason='tool_use') having "
-                    "signalled no completion payload")
-        return f"finish_reason={self.finish_reason!r}"
+        return _sdk_truncation_reason(
+            finish_reason=self.finish_reason,
+            payload=self.payload,
+            termination_reason=self.termination_reason,
+            termination_detail=self.termination_detail,
+        )
 
     @property
     def tool_calls(self) -> List[Dict[str, Any]]:

@@ -10,15 +10,16 @@ readme = "README.md"
 requires-python = ">=3.9"
 dependencies = [
     "PyYAML>=6.0",
-    # jaato-sdk is imported lazily by runner.py / graders/judge.py so the
-    # pure parts (manifest, fixture, ledger, script + processor graders,
-    # results, report) are usable and testable without a daemon.  Declared
-    # as an extra rather than a hard dependency to keep that true for
-    # anyone vendoring only the offline half.
+    # Required since the completeness rule and the tool-call ledger both
+    # moved INTO the SDK (jaato #640, #648) and this package deletes its
+    # copies rather than syncing them.  Importing the SDK still does not
+    # require a daemon, so the offline half — manifest, fixture, script and
+    # processor graders, results, report — remains testable without one;
+    # what changed is that it needs the library, not a running server.
+    "jaato-sdk",
 ]
 
 [project.optional-dependencies]
-run = ["jaato-sdk"]
 dev = ["pytest"]
 
 [project.scripts]

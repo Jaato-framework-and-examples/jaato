@@ -27,13 +27,18 @@ what an arm *is*, not which cell of the matrix it occupies.
 ## Install
 
 ```bash
-pip install -e jaato-eval/                 # offline half only
-pip install -e "jaato-eval/[run]"          # + jaato-sdk, to actually run arms
+pip install -e jaato-eval/
 ```
 
-`jaato_sdk` is imported lazily, so the manifest parser, fixture
-materialiser, ledger, script/processor graders, result store and report
-all work — and are tested — without a daemon.
+`jaato-sdk` is a hard dependency now. It was an optional extra while the
+tool-call ledger and the completeness rule lived here; both moved into the
+SDK (jaato #640, #648) and this package deleted its copies rather than
+keeping them in sync, so the grader layer imports the library directly.
+
+Importing the SDK still does not require a **daemon**: the manifest parser,
+fixture materialiser, ledger, script and processor graders, result store and
+report all work — and are tested — with nothing running. Only `runner.py`
+and the `judge` grader need a live session.
 
 ## Use
 

@@ -4,6 +4,20 @@ Found by the first live run against a real daemon: a schema-driven arm
 that wrote its file, signalled completion and produced a valid payload
 was reported BLOCKED, because the terminal turn's finish_reason was
 ``"tool_use"`` — the same value a genuinely truncated arm carries.
+
+These no longer test an implementation in this package.  The rule shipped
+as ``jaato_sdk.truncation_reason`` (jaato #648) and the local copy was
+deleted; ``GraderContext.truncation_reason`` now just names the arm's four
+inputs and hands them over.
+
+They are KEPT, as a consumer-side contract check rather than a duplicate
+of the SDK's own tests.  The distinction matters: a copy of an
+IMPLEMENTATION rots silently, but these assert what this engine needs to
+remain true — if the SDK's ordering ever changed, every verdict here would
+change with it, and that should fail loudly in this repository rather than
+be discovered from a sweep that reads wrong.  All 11 passed unchanged the
+moment the delegation landed, which is itself the cross-check: two
+independent implementations agreeing on both directions of the ambiguity.
 """
 import unittest
 from pathlib import Path
