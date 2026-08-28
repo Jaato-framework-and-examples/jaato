@@ -1132,12 +1132,26 @@ class TurnCompletedEvent(Event):
     # lowercase ``FinishReason`` enum value: ``"stop"`` (normal completion),
     # ``"max_tokens"`` (output-token limit — response truncated), ``"safety"``
     # (safety filter), ``"error"`` (provider error), plus ``"tool_use"`` /
-    # ``"cancelled"`` / ``"unknown"`` for completeness.  Defaults to ``"stop"``
-    # so a client can deterministically branch on ``finish_reason != "stop"``
-    # to flag an abnormal/truncated turn WITHOUT inferring it from empty
-    # output.  The framework also emits a human-readable ``source="system"``
-    # ``AgentOutputEvent`` banner alongside abnormal finishes for direct
-    # display; this field is the machine-readable companion.
+    # ``"cancelled"`` / ``"unknown"`` for completeness.  Defaults to ``"stop"``.
+    #
+    # DO NOT BRANCH ON ``finish_reason != "stop"`` TO DETECT TRUNCATION.
+    # This comment used to recommend exactly that, and it is wrong for every
+    # schema-driven profile.  A profile with a ``completion_payload_schema``
+    # ends by calling ``signal_completion``, which terminates the session
+    # INSIDE a tool-use turn — so a COMPLETE run's terminal turn reports
+    # ``"tool_use"`` and no later turn ever says ``"stop"``.  A consumer
+    # following the old advice blocked every schema-driven arm as truncated,
+    # with the finished artefact sitting on disk beside the verdict.
+    #
+    # The correct rule needs the SESSION's outcome as well as the turn's, so
+    # it does not fit in this field and is not this field's to state:
+    # ``jaato_sdk.helpers.truncation_reason()`` — ``termination_reason``
+    # outranks a payload, a payload outranks ``finish_reason``, and anything
+    # else is named rather than guessed.
+    #
+    # This field remains the machine-readable companion to the human-readable
+    # ``source="system"`` ``AgentOutputEvent`` banner emitted alongside
+    # abnormal finishes; it is one input to the rule, not the rule.
     finish_reason: str = "stop"
 
 

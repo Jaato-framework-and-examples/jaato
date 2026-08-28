@@ -50,3 +50,72 @@ def compute_cache_hit_percent(event: CacheReportingEvent) -> Optional[float]:
     if total == 0:
         return 0.0
     return event.usage.cache_read_tokens / total * 100.0
+
+
+def truncation_reason(
+    *,
+    finish_reason: Optional[str] = None,
+    payload: Optional[dict] = None,
+    termination_reason: Optional[str] = None,
+    termination_detail: Optional[str] = None,
+) -> Optional[str]:
+    """Did this session end where it meant to?  ``None`` if yes.
+
+    Returns ``None`` when the session reached a terminus it DECLARED, and
+    otherwise a string NAMING the mechanism — because the caller's next act
+    is usually to record a blocked/incomplete verdict, and a verdict that
+    does not say what was absent is a silent skip wearing a verdict's
+    clothes.
+
+    WHY THIS IS NOT ``finish_reason != "stop"``.
+
+    That is the obvious rule, it is what ``finish_reason``'s own field
+    comment used to recommend, and it is WRONG for every schema-driven
+    profile.  A profile with a ``completion_payload_schema`` ends by calling
+    ``signal_completion``, which terminates the session INSIDE a tool-use
+    turn — so a COMPLETE run's terminal turn reports ``"tool_use"`` and no
+    later turn ever says ``"stop"``.  A consumer following the old advice
+    blocked every schema-driven arm as truncated with the artefact sitting
+    on disk beside the verdict.
+
+    THE ORDER IS LOAD-BEARING:
+
+    1. ``termination_reason`` outranks everything, INCLUDING a payload.  A
+       budget refusal short-circuits before any turn runs, so
+       ``finish_reason`` still holds whatever the previous turn left, and a
+       payload cannot mean "complete" if the session then refused.
+    2. A payload settles it regardless of ``finish_reason``.  That is the
+       whole schema-profile case.
+    3. Then ``"stop"`` — the plain-prose terminus.
+    4. Otherwise name the mechanism.  Callers quote the string.
+
+    Args:
+        finish_reason: ``TurnCompletedEvent.finish_reason`` of the last turn.
+        payload: The validated ``signal_completion`` payload, or ``None``.
+        termination_reason: ``SessionTerminatedEvent.reason``, or ``None``.
+        termination_detail: The event's detail/error text, when it has one.
+
+    Returns:
+        ``None`` if the session reached a declared terminus; otherwise a
+        human-readable string naming what stopped it.
+
+    Note:
+        Since the terminal event is emitted AFTER the turn's own events, a
+        consumer reading the stream in order has ``termination_reason``
+        settled by the time it evaluates this.  Before that fix the first
+        branch raced the turn event.
+    """
+    if termination_reason == "budget_exhausted":
+        return (f"stopped at its budget ceiling: {termination_detail}"
+                if termination_detail else "stopped at its budget ceiling")
+    if termination_reason == "error":
+        return (f"ended in a session error: {termination_detail}"
+                if termination_detail else "ended in a session error")
+    if payload is not None:
+        return None
+    if finish_reason == "stop":
+        return None
+    if finish_reason == "tool_use":
+        return ("ended mid-tool-loop (finish_reason='tool_use') having "
+                "signalled no completion payload")
+    return f"finish_reason={finish_reason!r}"
