@@ -332,10 +332,51 @@ from jaato_sdk import SessionCreateFailed, truncation_reason
 # This is NOT the `cascade` archetype.  That one is a linear CHAIN: stage 1
 # then stage 2, output feeding forward, one session at a time.  Here nothing
 # feeds forward, and a failed arm must not stop its siblings.
+# (name, profile, agent, prompt) -- and PROFILE AND AGENT ARE ORTHOGONAL.
+#
+#   profile  = CAPABILITIES: model, provider, plugins, GC strategy, ceilings
+#   agent    = the AGENT ITSELF -- who it is, kept in
+#              ``.jaato/agents/<name>.md``
+#
+# An agent is NOT "the system instructions", though it is often described
+# that way.  The system instructions are an ASSEMBLY -- the agent, plus the
+# ``.jaato/instructions/`` base layer, plus plugin instructions, framework
+# constants and the untrusted-content boundary -- and
+# ``suppress_base_instructions`` can drop every one of those layers EXCEPT
+# the agent and its plugins.  The instructions are how an agent reaches a
+# turn; the agent is what persists across turns, sessions and profiles.
+# Naming it after its transport is how it ends up looking swappable with a
+# prompt string
+#
+# They compose freely, so a sweep has TWO natural axes and this is the whole
+# reason the tuple carries both.  Vary the agent to ask "does this persona
+# work better?"; vary the profile to ask "does it hold up on a cheaper model
+# / fewer tools?"; vary both for a real matrix.
+#
+# ``model`` and ``provider`` are NOT axes here -- they are things a profile
+# expresses.  Putting them in this list as an inline spec would repeat,
+# identically, on every row and imply they were the dimension.
+#
+# The example below varies the PERSONA with capabilities held fixed, which
+# is the cleanest demonstration of the orthogonality.  ``None`` in the agent
+# slot means "no persona" -- the profile's own instructions stand.
 ARMS = [
-    ("arm-a", {"model": MODEL, "provider": PROVIDER}, "Do the thing, variant A."),
-    ("arm-b", {"model": MODEL, "provider": PROVIDER}, "Do the thing, variant B."),
+    ("baseline", "your-profile", "your-baseline-agent", "Do the thing."),
+    ("variant",  "your-profile", "your-variant-agent",  "Do the thing."),
 ]
+
+# ``profile`` also accepts an inline spec dict, for when you genuinely want
+# to vary the model and have no profile for it.  ``model`` is required in
+# that form and the daemon rejects a spec without one:
+#
+#     ("cheap", {"model": MODEL, "provider": PROVIDER}, None, "Do the thing."),
+#
+# Prefer named profiles: an inline spec cannot carry plugins, GC strategy,
+# instructions or a completion schema, so a sweep built from specs can only
+# vary the thinnest part of what an agent is.
+#
+# An agent with ``{{param}}`` placeholders takes ``agent_params={...}`` on
+# create_session; add a fifth column if you need to sweep those too.
 
 # Aggregate ceiling for the whole sweep, or None for no pool.
 #
@@ -352,7 +393,7 @@ POOL_LIMITS = {"tokens": 200_000}
 # POOL_LIMITS = None.
 
 
-async def _run_arm(owner_cid, name, profile, prompt) -> dict:
+async def _run_arm(owner_cid, name, profile, agent, prompt) -> dict:
     """Run ONE arm to its terminus and return a result row.
 
     Never raises: a sweep whose arms can kill each other is not a sweep.
@@ -390,7 +431,8 @@ async def _run_arm(owner_cid, name, profile, prompt) -> dict:
     try:
         try:
             await client.create_session(
-                profile=profile, cascade_driver_id=owner_cid, timeout=60.0)
+                profile=profile, agent=agent,
+                cascade_driver_id=owner_cid, timeout=60.0)
         except SessionCreateFailed as exc:
             # A REFUSAL IS A TYPED OUTCOME, NOT A TIMEOUT.  An exhausted pool
             # means the ceiling did its job and nothing ran — a different
@@ -449,8 +491,8 @@ async def main() -> int:
         print(f"# sdk={jaato_sdk.__file__}")
 
         rows = await asyncio.gather(
-            *(_run_arm(cid, name, profile, prompt)
-              for name, profile, prompt in ARMS)
+            *(_run_arm(cid, name, profile, agent, prompt)
+              for name, profile, agent, prompt in ARMS)
         )
     finally:
         await owner.disconnect()

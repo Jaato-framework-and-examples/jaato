@@ -5811,7 +5811,8 @@ class SessionManager:
                 by client config.
             created_by: Authenticated user who created the session.
             agent_name: Optional agent name. If provided, the agent's rendered
-                markdown becomes the session's system instructions. Resolved
+                markdown is ONE LAYER of the assembled system instructions -- not
+                the whole of them; see IPCClient.create_session. Resolved
                 from ``.jaato/agents/`` and ``.jaato/prompts/``.
             agent_params: Parameter values for the agent's ``{{param}}``
                 placeholders.
@@ -5998,7 +5999,7 @@ class SessionManager:
             )
 
         # Resolve agent if requested — the agent's rendered markdown
-        # becomes the session's system instructions.
+        # is one LAYER of the assembled system instructions.
         agent_instructions = None
         if agent_name:
             agent_result = self._resolve_agent(

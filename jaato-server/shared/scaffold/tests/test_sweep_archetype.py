@@ -182,3 +182,140 @@ def test_it_does_not_emit_a_cascade_register_call(rendered):
     more than a redundant call.
     """
     assert "cascade_register" not in rendered
+
+
+def test_the_sweep_varies_the_profile_not_the_model(rendered):
+    """``model`` and ``provider`` are PROFILE properties.
+
+    The first version of this template gave every arm an identical inline
+    ``{"model": MODEL, "provider": PROVIDER}`` — so the "matrix" varied
+    nothing but the prompt, while the dict implied model/provider were the
+    sweep dimension.  ``create_session(profile=...)`` takes a profile name,
+    and a profile is what carries plugins, GC strategy, instructions and a
+    completion schema; an inline spec can only vary the thinnest part of what
+    an agent is.
+    """
+    tree = ast.parse(rendered)
+    arms = next(
+        n.value for n in ast.walk(tree)
+        if isinstance(n, ast.Assign)
+        and any(getattr(t, "id", None) == "ARMS" for t in n.targets)
+    )
+
+    profiles = [row.elts[1] for row in arms.elts]        # (name, profile, agent, prompt)
+    assert all(isinstance(p, ast.Constant) and isinstance(p.value, str)
+               for p in profiles), (
+        "an arm's profile is not a name; the default sweep should vary "
+        "PROFILES, since model/provider are profile-expressible"
+    )
+    # NOT asserting the profiles differ: the shipped example varies the
+    # PERSONA with capabilities held fixed, which is the cleaner
+    # demonstration of orthogonality.  What must hold is that SOMETHING
+    # varies -- see test_the_example_actually_sweeps_something.
+    assert all(isinstance(p.value, str) for p in profiles)
+
+
+def test_no_unsubstituted_placeholder_survives(rendered):
+    """A ``__PLACEHOLDER__`` the builder does not fill reaches the reader.
+
+    Nearly shipped: this template referenced ``__PROFILE__``, which is not
+    one of the builder's placeholders, so it would have appeared verbatim in
+    generated code.  Checked against the builder's real list rather than a
+    copy of it.
+    """
+    import re
+
+    import pathlib
+
+    build_src = pathlib.Path(
+        "jaato-server/shared/scaffold/build.py").read_text(encoding="utf-8")
+    known = set(re.findall(r"__[A-Z_]+__", build_src))
+
+    left = set(re.findall(r"__[A-Z_]+__", rendered))
+    assert not left, (
+        f"unsubstituted placeholder(s) {sorted(left)} in the generated "
+        f"script; the builder only fills {sorted(known)}"
+    )
+
+
+def test_the_tuple_carries_the_persona(rendered):
+    """``agent`` is ORTHOGONAL to ``profile`` and is its own sweep axis.
+
+    profile = CAPABILITIES (model, provider, plugins, GC, ceilings).
+    agent   = PERSONA (the markdown that becomes system instructions).
+
+    The SDK says they "compose freely", and the sibling ``cascade``
+    archetype already carries an agent slot — a sweep without one cannot ask
+    the most common eval question, "does this persona work better?", and is
+    inconsistent with its own family.
+    """
+    tree = ast.parse(rendered)
+    arms = next(
+        n.value for n in ast.walk(tree)
+        if isinstance(n, ast.Assign)
+        and any(getattr(t, "id", None) == "ARMS" for t in n.targets)
+    )
+
+    widths = {len(row.elts) for row in arms.elts}
+    assert widths == {4}, (
+        f"ARMS rows are {widths}-wide; expected 4 — "
+        "(name, profile, agent, prompt)"
+    )
+    assert "agent=agent" in rendered, (
+        "the agent column is collected and never passed to create_session, "
+        "so the persona axis is decorative"
+    )
+
+
+def test_the_example_actually_sweeps_something(rendered):
+    """A sweep whose rows are identical teaches the wrong thing.
+
+    The first version varied nothing but the prompt while implying
+    model/provider were the dimension.  Whatever the shipped example varies,
+    it must vary SOMETHING other than the label.
+    """
+    tree = ast.parse(rendered)
+    arms = next(
+        n.value for n in ast.walk(tree)
+        if isinstance(n, ast.Assign)
+        and any(getattr(t, "id", None) == "ARMS" for t in n.targets)
+    )
+
+    rows = [
+        tuple(getattr(e, "value", ast.dump(e)) for e in row.elts[1:])
+        for row in arms.elts
+    ]
+    assert len(set(rows)) == len(rows), (
+        f"every arm is identical apart from its name ({rows[0]}); the "
+        "example demonstrates no axis at all"
+    )
+
+
+def test_the_sdk_does_not_call_the_agent_its_system_instructions():
+    """An agent is not "the system instructions", and the SDK said it was.
+
+    The instructions are an ASSEMBLY — the agent, plus the
+    ``.jaato/instructions/`` base layer, plugin instructions, framework
+    constants and the untrusted-content boundary.  ``suppress_base_
+    instructions`` can drop every one of those EXCEPT the agent and its
+    plugins, which is the framework itself saying the agent is not the
+    stack.
+
+    Naming an identity after its transport is how it comes to look
+    swappable with a prompt string.  Pinned here rather than left to
+    prose, because a wrong sentence in a docstring readers DO consult
+    already cost this project two bad graders once today.
+    """
+    import pathlib
+
+    # ALL of them, not just the SDK pair: a guard that checks two files
+    # while the same sentence survives in a third is a guard aimed at the
+    # wrong place, and this repo keeps writing those.
+    for path in ("jaato-sdk/jaato_sdk/client/ipc.py",
+                 "jaato-sdk/jaato_sdk/client/recovery.py",
+                 "jaato-server/server/session_manager.py"):
+        src = pathlib.Path(path).read_text(encoding="utf-8")
+        assert "becomes the session's system instructions" not in src, (
+            f"{path} describes the agent as BECOMING the system "
+            "instructions; it is one layer of them"
+        )
