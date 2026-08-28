@@ -51,6 +51,7 @@ about one function.
 from __future__ import annotations
 
 from functools import lru_cache
+import subprocess
 from pathlib import Path
 from typing import Dict, Iterable, Iterator, List, Tuple
 
@@ -547,6 +548,51 @@ def _iter_functions(blocks: Iterable[object], prefix: str = "") -> Iterator[Tupl
         yield from _iter_functions(getattr(block, "closures", []), name + ".")
 
 
+def _source_files(root: Path, package: str) -> List[Path]:
+    """The ``.py`` files git TRACKS under *package*, sorted.
+
+    Not ``rglob`` -- that walked build artifacts.  ``jaato-server/build/lib/``
+    and ``jaato-sdk/build/lib/`` hold hundreds of stale copies of the source
+    at whatever complexity they had when the wheel was built, and ``build/``
+    is gitignored.  So the guard PASSED on CI (fresh checkout, no artifacts)
+    and FAILED for every developer who had ever run a build -- reporting
+    complexity for code that does not ship, against a baseline it could never
+    match.
+
+    Worse than a plainly red gate, because CI said it was fine.  This module
+    exists on the premise that "a gate that is red on its first run gets
+    switched off within a week"; one that is red only where nobody is
+    watching gets switched off faster and with better reason.
+
+    Asking git is not a filter over the walk, it is the definition: what
+    ships is what is tracked, so a future artifact directory (.tox, .nox,
+    dist, site-packages) excludes itself the day it appears, with no list to
+    maintain and no way for it to drift back in.
+
+    Fails LOUD outside a git checkout rather than silently scanning nothing --
+    the caller already asserts a full checkout for the same reason.
+    """
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(root), "ls-files", "-z", "--", f"{package}/*.py"],
+            capture_output=True, check=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise AssertionError(
+            f"could not ask git which files under {package}/ are tracked "
+            f"({exc}).\n\n"
+            f"The audit scans tracked files because build artifacts are "
+            f"gitignored and must not be measured. It needs a git checkout; "
+            f"it does NOT fall back to walking the directory, because that "
+            f"walk is the bug this replaced."
+        ) from exc
+    return sorted(
+        root / rel
+        for rel in out.stdout.decode("utf-8").split("\0")
+        if rel
+    )
+
+
 @lru_cache(maxsize=1)
 def _scan() -> Dict[str, int]:
     """Scan every package .py file, returning ``{"path::Qual.name": cc}``.
@@ -564,7 +610,7 @@ def _scan() -> Dict[str, int]:
     root = _repo_root()
     scores: Dict[str, int] = {}
     for package in PACKAGES:
-        for path in sorted((root / package).rglob("*.py")):
+        for path in _source_files(root, package):
             try:
                 blocks = cc_visit(path.read_text(encoding="utf-8"))
             except (SyntaxError, UnicodeDecodeError):
@@ -726,3 +772,39 @@ if __name__ == "__main__":
         if _cc > CEILING:
             print(f'    "{_key}": {_cc},')
     print("}")
+
+
+def test_the_scan_measures_only_what_ships(scores: Dict[str, int]) -> None:
+    """No scanned file may be one git does not track.
+
+    THE REGRESSION.  The first version of ``_scan`` used ``rglob("*.py")``,
+    which walked ``jaato-server/build/lib/`` and ``jaato-sdk/build/lib/`` --
+    528 stale copies of the source at whatever complexity they had when the
+    wheel was built.  ``build/`` is gitignored, so the guard PASSED on CI
+    (fresh checkout, no artifacts) and FAILED for every developer who had
+    ever run a build.
+
+    That is the worst shape a guard can take: green where it is enforced,
+    red where it is read, and the red is unfixable because those files can
+    never match a baseline.
+
+    Checked as a PROPERTY of the scan's output rather than of its
+    implementation, so any future rewrite that reintroduces a directory walk
+    fails here regardless of how it spells it.
+    """
+    root = _repo_root()
+    tracked = set()
+    for package in PACKAGES:
+        tracked.update(p.relative_to(root).as_posix()
+                       for p in _source_files(root, package))
+
+    scanned = {key.split("::", 1)[0] for key in scores}
+    untracked = sorted(scanned - tracked)
+    assert not untracked, (
+        f"{len(untracked)} scanned file(s) are not tracked by git — the scan "
+        f"is measuring code that does not ship:\n  "
+        + "\n  ".join(untracked[:10])
+        + ("\n  ..." if len(untracked) > 10 else "")
+        + "\n\nBuild artifacts are gitignored, so this passes on a fresh CI "
+          "checkout and fails on any developer machine that has run a build."
+    )
