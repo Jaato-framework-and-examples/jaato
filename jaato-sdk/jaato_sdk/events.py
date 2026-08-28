@@ -673,6 +673,12 @@ class ToolCallEndEvent(Event):
     call_id: Optional[str] = None
     success: bool = True
     is_error_result: bool = False  # computed deeper error check — success=True but error body; distinct from `success`
+    # The tool result's own `status` string, copied verbatim when it declares
+    # one (`send_to_sibling` → accepted/queued/refused/sibling_cold/…).  None
+    # when the tool says nothing — which is NOT an outcome, just silence.
+    # `success`/`is_error_result` answer "did it fail"; this answers "how",
+    # without the consumer having to match on `error_message` prose.
+    result_status: Optional[str] = None
     duration_seconds: float = 0.0
     error_message: Optional[str] = None
     backgrounded: bool = False  # True when tool was auto-backgrounded (still producing output)

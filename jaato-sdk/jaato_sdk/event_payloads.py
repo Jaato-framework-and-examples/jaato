@@ -223,6 +223,7 @@ class ToolCallCompletedPayload(TypedDict):
     call_id: NotRequired[Optional[str]]
     success: bool
     is_error_result: NotRequired[bool]  # computed deeper error check — success=True but error body; distinct from `success`
+    result_status: NotRequired[Optional[str]]  # the tool's own `status` string, verbatim (accepted/refused/sibling_cold/…); None = the tool declares none
     duration_seconds: float
     error_message: NotRequired[Optional[str]]
     backgrounded: NotRequired[bool]
