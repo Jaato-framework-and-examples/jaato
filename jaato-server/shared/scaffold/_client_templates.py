@@ -47,6 +47,7 @@ Preflight first:
 """
 import asyncio
 __CLIENT_IMPORT__
+from jaato_sdk import SessionCreateFailed
 
 ENV_FILE = "__ENV_FILE__"
 WORKSPACE = "__WORKSPACE__"
@@ -97,11 +98,18 @@ async def main() -> int:
     client.subscribe_once(EventType.SESSION_TERMINATED, on_done)
     client.subscribe_once(EventType.TURN_COMPLETED, on_done)
 
-    # Inline spec — swap for profile="<name>", agent="<name>" to use a set.
-    sid = await client.create_session(
-        profile={"model": MODEL, "provider": PROVIDER}, timeout=60.0)
-    if not sid:
-        print("session.new failed — check provider auth / the daemon log")
+    # Inline spec so this runs before you have a profile.  Swap for
+    # profile="<name>", agent="<name>" to use a profile set: profile is
+    # WHAT IT CAN DO (model, plugins, ceilings), agent is WHO IT IS.
+    try:
+        sid = await client.create_session(
+            profile={"model": MODEL, "provider": PROVIDER}, timeout=60.0)
+    except SessionCreateFailed as exc:
+        # create_session RAISES; it does not return None.  The exception
+        # states the cause — do not guess one.  ``may_exist`` is True when
+        # the request was sent and the answer lost, in which case a blind
+        # retry creates a SECOND session.
+        print(f"session.new failed: {exc}")
         await client.disconnect()
         return 1
 
@@ -129,9 +137,14 @@ async def main() -> int:
     if not await client.connect(timeout=120.0):
         print("could not connect/autostart the daemon — run the doctor")
         return 1
-    sid = await client.create_session(
-        profile={"model": MODEL, "provider": PROVIDER}, timeout=60.0)
-    if not sid:
+    # Inline spec so this runs before you have a profile.  Swap for
+    # profile="<name>", agent="<name>" to use a profile set: profile is
+    # WHAT IT CAN DO (model, plugins, ceilings), agent is WHO IT IS.
+    try:
+        sid = await client.create_session(
+            profile={"model": MODEL, "provider": PROVIDER}, timeout=60.0)
+    except SessionCreateFailed as exc:
+        print(f"session.new failed: {exc}")
         await client.disconnect()
         return 1
     await client.send_message("Kick off the long-running task.")
@@ -178,12 +191,15 @@ async def _run_stage(client, cascade_id, profile, agent, prompt) -> str:
         done.set()
 
     client.subscribe_once(EventType.SESSION_TERMINATED, on_done)
-    sid = await client.create_session(
-        profile=profile, agent=agent,
-        cascade_driver_id=cascade_id,   # shared slot → warm imports across stages
-        timeout=60.0)
-    if not sid:
-        return "spawn_failed"
+    try:
+        sid = await client.create_session(
+            profile=profile, agent=agent,
+            cascade_driver_id=cascade_id,   # shared slot → warm imports
+            timeout=60.0)
+    except SessionCreateFailed as exc:
+        # A refused stage is a TYPED outcome, not a timeout: an exhausted
+        # cascade ceiling means the budget did its job and nothing ran.
+        return f"spawn_refused: {exc}"
     await client.send_message(prompt)
     await done.wait()
     return outcome.get("reason") or "unknown"
@@ -301,10 +317,14 @@ async def main() -> int:
     client.subscribe_once(EventType.SESSION_TERMINATED, on_done)
     client.subscribe_once(EventType.TURN_COMPLETED, on_done)
 
-    sid = await client.create_session(
-        profile={"model": MODEL, "provider": PROVIDER}, timeout=60.0)
-    if not sid:
-        print("session.new failed — check provider auth / the daemon log")
+    # Inline spec so this runs before you have a profile.  Swap for
+    # profile="<name>", agent="<name>" to use a profile set: profile is
+    # WHAT IT CAN DO (model, plugins, ceilings), agent is WHO IT IS.
+    try:
+        sid = await client.create_session(
+            profile={"model": MODEL, "provider": PROVIDER}, timeout=60.0)
+    except SessionCreateFailed as exc:
+        print(f"session.new failed: {exc}")
         await client.disconnect()
         return 1
 
