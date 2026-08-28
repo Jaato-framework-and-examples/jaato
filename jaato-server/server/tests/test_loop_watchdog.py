@@ -276,3 +276,161 @@ def test_a_thread_sitting_still_is_reported_as_unchanged():
         f"dumps, so a held lock and a busy thread still read identically.  "
         f"Got:\n{dumps[-1]}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Separating the holder from the waiters
+#
+# The dump above names every thread and how long each has sat still.  Run
+# against a real daemon that answered the wrong question: 47 threads, ~40
+# reading "unchanged for 20.0s", because A PARKED THREAD IS UNCHANGED BY
+# DEFINITION.  Idle readers, reapers and a dozen blocked watchers all looked
+# exactly like a holder.
+#
+# What discriminates is stack CONTENT: a waiter's innermost frame IS the
+# `with ...lock:` statement (acquiring a lock blocks in C, creating no Python
+# frame), while the holder got past it and is stopped somewhere else.
+#
+# These build a REAL convoy: one holder, several blocked waiters, on one lock.
+# ---------------------------------------------------------------------------
+
+def _the_function_that_WAITS_for_the_lock(lock) -> None:
+    """Named so the waiter group has something unmistakable to contain."""
+    with lock:
+        pass
+
+
+def _run_a_convoy(dog, lock, n_waiters, hold_for=1.6):
+    """Hold *lock*, park *n_waiters* threads on it, capture the dumps."""
+    handler, records = _capture()
+    holder = threading.Thread(
+        target=_the_function_that_HOLDS_the_lock, args=(lock, hold_for),
+        name="the-holder-thread", daemon=True,
+    )
+    waiters = [
+        threading.Thread(target=_the_function_that_WAITS_for_the_lock,
+                         args=(lock,), name=f"waiter-{i}", daemon=True)
+        for i in range(n_waiters)
+    ]
+    try:
+        async def scenario():
+            dog.start()
+            await asyncio.sleep(0.2)
+            holder.start()
+            time.sleep(0.2)              # let the holder take it
+            for w in waiters:
+                w.start()
+            time.sleep(0.2)              # let them pile up on it
+            with lock:                   # the LOOP joins the convoy
+                pass
+            await asyncio.sleep(0.3)
+
+        asyncio.run(scenario())
+    finally:
+        dog.stop()
+        holder.join(timeout=4)
+        for w in waiters:
+            w.join(timeout=4)
+        _release(handler)
+
+    return [r.getMessage() for r in records
+            if "every thread's stack follows" in r.getMessage()]
+
+
+def test_the_holder_is_not_buried_among_the_waiters():
+    """The holder lands in the candidate set; the waiters do not."""
+    dog = LoopWatchdog(interval=0.1, threshold=0.3, resample_every=0.3,
+                       all_threads_after=0.4)
+    dumps = _run_a_convoy(dog, threading.Lock(), n_waiters=4)
+    assert dumps, "no all-thread dump was produced"
+    dump = dumps[0]
+
+    head, _, tail = dump.partition("=== BLOCKED ACQUIRING A LOCK")
+    assert tail, f"the dump is not partitioned at all:\n{dump}"
+
+    assert "_the_function_that_HOLDS_the_lock" in head, (
+        "the HOLDER is not in the candidate section. It is the one thread the "
+        "reader needs; putting it among forty parked threads is the problem "
+        f"this partition exists to fix.\n\n{dump}"
+    )
+    assert "_the_function_that_WAITS_for_the_lock" not in head, (
+        "a thread blocked ACQUIRING the lock was listed as a holder "
+        f"candidate. It holds nothing — it never got the lock.\n\n{dump}"
+    )
+    assert "waiter-0" in tail, (
+        f"the blocked waiters are not in the waiter section.\n\n{dump}"
+    )
+
+
+def test_a_convoy_is_one_entry_not_one_stack_each():
+    """Threads blocked on the SAME line collapse to a single entry.
+
+    The live report had twelve workspace-monitor threads on one line. Twelve
+    near-identical stacks is what makes a dump unreadable at daemon scale.
+    """
+    dog = LoopWatchdog(interval=0.1, threshold=0.3, resample_every=0.3,
+                       all_threads_after=0.4)
+    dumps = _run_a_convoy(dog, threading.Lock(), n_waiters=6)
+    assert dumps, "no all-thread dump was produced"
+    dump = dumps[0]
+
+    _, _, tail = dump.partition("=== BLOCKED ACQUIRING A LOCK")
+    for i in range(6):
+        assert f"waiter-{i}" in tail, f"waiter-{i} missing from the dump"
+
+    # Assert the PROPERTY: all six waiters sit under ONE group entry.
+    #
+    # Two earlier versions of this were wrong in opposite directions. The
+    # first counted the waiter FUNCTION's name, which the waiter section
+    # never prints -- 0 either way, so it passed with the grouping torn out.
+    # The second counted the source text "with lock:", which the LOOP's own
+    # blocking line also starts with, so a correct dump counted 2.
+    #
+    # A group entry is a line at two-space indent; its members are the
+    # deeper-indented lines under it. Counting members per group is the thing
+    # grouping actually does.
+    groups: dict = {}
+    current = None
+    for raw in tail.splitlines():
+        if raw.startswith("    ") and current is not None:
+            groups[current].append(raw.strip())
+        elif raw.startswith("  ") and raw.strip():
+            current = raw.strip()
+            groups[current] = []
+
+    holding = [g for g, members in groups.items()
+               if any("waiter-" in m for m in members)]
+    assert len(holding) == 1, (
+        f"the six waiters are spread over {len(holding)} group entries; "
+        f"threads stopped on ONE line must collapse to ONE entry. Twelve "
+        f"near-identical stacks is what made the live dump unreadable.\n\n"
+        f"{tail}"
+    )
+    members = groups[holding[0]]
+    assert len(members) == 6, (
+        f"the waiters' group lists {len(members)} threads, expected 6 — "
+        f"grouping is dropping or duplicating members.\n\n{tail}"
+    )
+
+
+def test_the_loop_is_reported_as_a_waiter_when_it_is_one():
+    """The loop blocked on a lock is BLOCKED, and must not read as a holder.
+
+    It is the thread the reader arrives caring about, so mislabelling it is
+    the most expensive mistake the dump can make.
+    """
+    dog = LoopWatchdog(interval=0.1, threshold=0.3, resample_every=0.3,
+                       all_threads_after=0.4)
+    dumps = _run_a_convoy(dog, threading.Lock(), n_waiters=2)
+    assert dumps, "no all-thread dump was produced"
+    dump = dumps[0]
+
+    head, _, tail = dump.partition("=== BLOCKED ACQUIRING A LOCK")
+    assert "<-- THE LOOP" in tail, (
+        "the loop was blocked acquiring the lock, so it belongs in the waiter "
+        f"section. Reporting it as a candidate points the reader at the one "
+        f"thread that certainly is not the holder.\n\n{dump}"
+    )
+    assert "<-- THE LOOP" not in head, (
+        f"the loop appears in the candidate section while blocked.\n\n{dump}"
+    )
