@@ -1,0 +1,59 @@
+# Tier-1 base for the JUDGE — provider-agnostic.
+#
+# The rubric lives in the completion schema, not in this adapter: the
+# score comes back TYPED, enforced at sampling time and validated by the
+# framework before the payload is emitted.  Changing what "good" means is
+# a schema edit here, never a code change in jaato_eval.
+name: _base_rubric
+description: scores an agent run against a typed rubric.
+
+# filesystem_query so the judge can READ what the agent wrote rather than
+# scoring the listing it was handed.  A judge that can only see filenames
+# grades the claim, not the artefact.
+plugins:
+  - environment
+  - filesystem_query(preload)
+  - permission
+
+plugin_configs:
+  permission:
+    policy:
+      defaultPolicy: allow
+
+completion_payload_schema:
+  type: object
+  additionalProperties: false
+  required: [score, reasoning]
+  properties:
+    score:
+      type: number
+      minimum: 0
+      maximum: 1
+      description: >
+        READ answer.txt with your tools before scoring — do not infer its
+        contents from the completion payload you were shown, which is the
+        agent's CLAIM and is the thing under test.  1.0 if answer.txt
+        exists and contains exactly READY; 0.0 if it is absent; between
+        the two if present but wrong.
+    reasoning:
+      type: string
+      description: >
+        One sentence QUOTING the bytes you read from answer.txt.  If you
+        did not open it, say so instead of guessing — a rubric that
+        scores the claim rather than the artefact measures nothing.
+    warnings:
+      type: array
+      items: {type: string}
+    errors:
+      type: array
+      items: {type: string}
+      description: >
+        PUT "I did not read the artefact" HERE, not only in reasoning.
+        Any reason you could not carry out the assessment belongs in this
+        field — you did not call the tool, the tool failed, the file was
+        unreadable.  The harness treats a non-empty errors[] as BLOCKED
+        rather than FAIL, because a judge that did not judge is not
+        evidence about the agent.  Measured: three of four failures said
+        "I did not open answer.txt" in `reasoning` with errors[] EMPTY,
+        so they were scored as the agent failing when the agent's file
+        was correct and on disk.
