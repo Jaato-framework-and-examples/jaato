@@ -19,6 +19,10 @@ falls into one of four buckets, and only two of them cost framework work:
 
 The mistake this document exists to prevent is reading a competitor's
 feature as a bucket-1 gap in jaato.  Most are bucket 0 — already done.
+The first draft made that mistake twice, in the section that assigns
+framework work; both corrections are kept in §5 rather than edited away,
+because the sorting rule is only worth anything if its misapplications are
+visible.
 
 ## Status & verification disclaimer
 
@@ -29,7 +33,9 @@ hold.  `jaato-premium` claims are at `3d4b8ab`.  Competitor claims are
 from vendor documentation and repositories on the same date; each is
 sourced inline.  Two items were **fixed during the writing of this
 document** and are recorded as such rather than silently dropped — see
-§5.  Re-verify file:line citations before relying on them: this document
+§5.  The two re-filings in §5 are operator decisions, relayed through an
+advisor review and verified here against the tree before being written
+down.  Re-verify file:line citations before relying on them: this document
 was twice overtaken by the tree it describes while being written, which is
 itself the §5 argument.
 
@@ -111,6 +117,27 @@ expressible today, and several are already written:
 The framework's job for this bucket is **discoverability**, not code.  See
 §7.
 
+### A time-based reactor trigger — asked for, and rejected
+
+**A reactor is event-triggered by construction.**  `engine.py:216`
+registers `callback=partial(self._dispatch, session_id=…, server=…)` on a
+bus subscription; `_dispatch` runs only when an event is delivered.  The
+ACTION is a resolved Python script and can do anything — the TRIGGER is
+not generic.  With no matching event a rule never runs at all.  (The mtime
+poll in `watcher.py` reloads the rule file; it does not fire rules.)
+
+So a clock is not an extension of the primitive, it is a **second trigger
+kind**, and it drags in scheduler semantics the framework would then own
+permanently: missed ticks while the daemon was down, catch-up versus skip,
+drift, persistence across restart, timezones, and what "fire" even means
+for a session that is not loaded.  Every one of those is an opinion — in a
+system where §4 refuses to ship Zep's opinion for exactly this reason.
+
+The cost the item claimed — "every deployment writes the same driver" — is
+real and is already answered by §8 item 4: publish the driver.  If the
+complaint is that everyone rewrites it, the fix is an index, not a
+primitive.
+
 ## 4. Bucket 2 — seams.  Where a pattern cannot reach.
 
 A pattern needs a place to stand.  Two hot paths in the memory plugin have
@@ -132,6 +159,43 @@ and let temporal validity, decay and markdown storage be patterns someone
 writes in a repo like the others.  Shipping Zep's model would put one
 opinion in the framework where the framework's whole thesis is that
 opinions belong in the harness.
+
+### Stuck-volley detection: a seam that is open halfway
+
+Two cascade halves circling one thought is the failure a long-running
+pattern most needs to notice, and the framework must **not** detect it.  A
+stuck volley does not repeat its payload — the halves rephrase, elaborate
+and decorate.  Any content-similarity heuristic would be the framework
+owning an opinion about what "the same thought twice" means, which is the
+move §4 already refuses for temporal validity.
+
+So detection is a **pattern**, and its home exists: the `observer`
+archetype (`shared/scaffold/build.py:226`) — a third session with a judge
+persona reading both halves and ruling on progress.  `AgentOutputEvent`
+carries `text`, so the words are on the bus.
+
+What the framework owes is **attribution, not a detector**, and that seam
+is half-open.  #603 stamped `session_id` onto activity events for exactly
+this purpose; the comment at `events.py:340-356` records why — a cascade
+observer "could watch sessions appear, sleep and die — but never watch
+them WORK", and two siblings under one cid were indistinguishable because
+`agent_id` is `"main"` for every top-level session.  There are eight
+`_stamp_session_id` call sites today, against 113 event types.  And
+`session_id: str = ""` still means BOTH "nobody stamped this" AND "this
+event belongs to no session", so a judge cannot separate *not attributable*
+from *not a sibling*: it will either drop real volley content or credit one
+half's words to the other, silently, in a detector whose entire job is
+noticing a silent failure.
+
+Completing that stamping — `Optional[str] = None` to make absent distinct
+from empty — is an **existing backlog item**, not a new primitive.  Two
+consequences worth pricing before starting: the same change that makes
+cascade events legible is what makes the judge possible, and it will
+surface as **113 wire-baseline failures**, because #661 refroze all 113
+baselines and added `jaato-sdk/jaato_sdk/tests/` to CI, a directory no
+workflow had ever run (`ci-tests.yml:143-147`).  That is the guard working
+as designed; it is still a cost to state next to the recommendation rather
+than discover during it.
 
 ## 5. Bucket 3 — fidelity.  Written patterns that break.
 
@@ -162,16 +226,25 @@ misreports costs more than a pattern nobody wrote.
   `status`, so a driver can tell `refused` (backpressure — let the peer
   work) from `sibling_cold` (the loop is over) without matching on prose.
 
-**Still open:**
+**Nothing else is open in this bucket.**
 
-- **Stuck-volley detection.**  Nothing distinguishes progress from two
-  halves circling one thought; every event looks healthy while it happens.
-- **No time-based reactor trigger.**  Reactors match on event type plus a
-  JMESPath `where` (`jaato_premium/reactors/matcher.py`); the only clock in
-  the engine is the rule-file mtime poll.  Bucket 1 covers wake-at-time
-  via a driver, so this is a convenience, not a blocker — but it is the
-  difference between every deployment writing the same driver and none of
-  them doing so.
+An earlier draft listed two items here.  Both were **mis-bucketed**, and
+the correction is recorded rather than quietly applied, because getting
+the bucket wrong *in the section that assigns framework work* is the one
+error this document exists to prevent — and it happened in the first
+draft, to the author of the sorting rule:
+
+- **A time-based reactor trigger** was filed as fidelity.  Nothing
+  misreports; a reactor simply never fires without an event.  It is
+  **bucket 1, and rejected** — see §3.
+- **Stuck-volley detection** was filed as fidelity.  Detection is a
+  judgment, so it can never be a primitive; what the framework owes is the
+  attribution a judge needs.  It is **bucket 2** — see §4.
+
+Both entries also argued against themselves in the draft that contained
+them.  That is the failure mode to watch for: a bucket-3 entry that cannot
+name what misreports is not a fidelity defect, it is a pattern or a seam
+wearing the wrong label.
 
 ## 6. What jaato is ahead on
 
@@ -216,13 +289,20 @@ curator sessions reasoning soundly from a false premise.
 ## 8. Recommended order
 
 1. **Hoist `certify/` into a corpus-wide suite run against jaato `main`.**
-   Bucket 3 defects are found by patterns, so run the patterns.
-2. **Close the remaining fidelity gaps** — stuck-volley visibility first.
+   Bucket 3 defects are found by patterns, so run the patterns.  Unchanged
+   by the re-filing in §5, and still the one to take first: three separate
+   merges on 2026-08-28 were the same defect it addresses — a guard that
+   does not run where it would matter.
+2. **Finish `session_id` attribution** (§4) — `Optional[str] = None`,
+   absent distinct from empty.  It is the seam a stuck-volley judge stands
+   on, it is already on the backlog, and it costs 113 baseline refreezes.
 3. **Open the memory seams** (store backend, ranking function).  Then
    temporal validity and decay are patterns, and this document's largest
    competitor differentiator costs the framework an extension point rather
    than an opinion.
 4. **Index the pattern corpus** so a user — or a model — can find the
-   wake-at-time driver without being told it exists.
+   wake-at-time driver without being told it exists.  This is also the
+   whole answer to the rejected time-trigger request (§3), which is why it
+   is not last by importance, only by order.
 
 Not to chase: connector catalogues, vertical UX, model-zoo aggregation.
