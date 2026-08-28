@@ -76,6 +76,8 @@ def _session(
     s._provider_lazy_pending = None
     s._instruction_budget = None
     s._cache_plugin = None
+    # ``__init__`` sets this; the helper bypasses it via ``__new__``.
+    s._cache_plugins_by_provider = {}
     s._trace = lambda *a, **k: None
     return s
 

@@ -1,9 +1,13 @@
 # Model Tiers × Prompt Caching — Assessment & Plan
 
-**Status**: ASSESSMENT, with one fix landed. The wiring gap in §4 is
-CLOSED (`_wire_cache_plugin` now reads the session's merged provider
-config, and the cache knobs are declared in `PROVIDER_KNOBS`).
-Everything in §5 and §6 is analysis and proposal, not yet implemented.
+**Status**: ASSESSMENT, with the plumbing fixed. CLOSED: the config
+gap (§4 — `_wire_cache_plugin` reads the session's merged provider
+config, and the cache knobs are declared in `PROVIDER_KNOBS`), the
+tier-switch re-wire (§5.2), and the model-invalidation half of Google's
+`CachedContent` binding (§5.3). STILL OPEN: the tier line inside the
+cached system block (§5.1), the invisibility of the miss (§5.4), the
+Google mismatch guard, and everything in §6 — which is where the actual
+cost question gets answered, and it is answerable only once §5.4 lands.
 **Origin**: the question "our profiles can declare a model tier per task
 type and `enter_tier` hands the task to the most suitable one — how does
 that impact cache usage?", which had never been assessed.
@@ -27,15 +31,16 @@ On top of that structural cost, three self-inflicted problems and one
 measurement gap:
 
 - the session appends a tier-identity line to the **system block**, which
-  is the root of every cached prefix (§5.1);
-- the cache plugin is wired once and never re-wired or re-informed on a
-  switch, so a cross-provider tier runs with no cache plugin at all
-  (§5.2);
-- Google's `CachedContent` is created bound to the boot model but its
-  invalidation hash omits the model, so with tiers it is both re-billed
-  on every switch and referenced against the wrong model (§5.3);
+  is the root of every cached prefix (§5.1) — **open**;
+- the cache plugin was wired once and never re-wired or re-informed on a
+  switch, so a cross-provider tier ran with no cache plugin at all
+  (§5.2) — **fixed**;
+- Google's `CachedContent` is created bound to one model while its reuse
+  test omits the model (§5.3) — **the invalidation half is fixed**, the
+  defensive guard is not;
 - per-turn cache figures *replace* rather than accumulate, so a turn
-  containing a switch reports only its last leg (§5.4).
+  containing a switch reports only its last leg (§5.4) — **open**, and
+  it is the one that blocks measuring any of this.
 
 The reason none of this has hurt yet is the subject of §4: the framework's
 own caching was **not reachable from a profile at all**. That is now
@@ -226,41 +231,72 @@ reads. If a per-turn reminder is judged necessary, it belongs at the
 *tail* of the message list (after the last cache breakpoint), never in
 the prefix.
 
-### 5.2 The cache plugin is never re-wired on a switch
+### 5.2 The cache plugin is never re-wired on a switch — FIXED
 
-`_wire_cache_plugin` is called from exactly one place —
-`_ensure_provider` (`shared/jaato_session.py:2767`) — once per session.
-`_provider_for_tier` (`:10160`) builds cross-provider tier providers and
-never wires one.
+`_wire_cache_plugin` was called from exactly one place —
+`_ensure_provider` — once per session, and `_provider_for_tier` builds
+cross-provider tier providers without wiring one. So:
 
-- A **cross-provider tier** targeting anthropic or google_genai runs with
-  no cache plugin for the rest of the session: caching silently off, no
-  warning. (An openrouter tier is unaffected — it caches internally.)
-- `AnthropicCachePlugin.set_model_name()` exists
-  (`cache_anthropic/plugin.py:200`) and **has no caller anywhere**, so
-  the minimum-cacheable-size threshold stays pinned to the boot model
-  across every switch.
+- a **cross-provider tier** targeting anthropic or google_genai ran with
+  no cache plugin for the rest of the session — caching silently off, no
+  warning (an openrouter tier was unaffected; it caches internally); and
+- a **same-provider tier** left the plugin's model pinned to the boot
+  model. `AnthropicCachePlugin.set_model_name()` existed with **no caller
+  anywhere**, so the minimum-cacheable-size threshold was chosen for the
+  wrong model after every switch.
 
-**Proposal**: call `_wire_cache_plugin()` from `_connect_tier_entry`,
-with the plugin cached per provider name alongside `_provider_cache` so a
-switch back is O(1); and push the new model name into the plugin on every
-switch.
+**The fix.** `_connect_tier_entry` re-wires after connecting, which
+covers both routes into a tier change: model-driven (`enter_tier` →
+`switch_tier`) and framework-driven (a budget-control degrade rung
+rebinding the active tier in place, via
+`_reconnect_active_tier_if_rebound` — a path where the tier *name* never
+changes, so nothing else could catch it).
 
-### 5.3 Google's CachedContent ignores the model
+Three properties worth stating, because each was a decision:
 
-`GoogleGenAICachePlugin._model_name` is set only in `initialize()`
-(`cache_google_genai/plugin.py:129`) and the `CachedContent` is created
-bound to it (`:399`), while the invalidation hash covers system + tools
-only (`_compute_content_hash`, `:360`) — **no model in the key**.
+- **Plugin instances are cached per provider**
+  (`_cache_plugins_by_provider`), keyed on the **registration** name, the
+  same key `_provider_cache` uses — not `provider.name`, which zhipuai
+  inherits from anthropic and which would collide two tiers onto one
+  plugin built from the wrong `plugin_configs` section. A switch back is
+  then O(1) and keeps the metrics and prefix state that provider
+  accumulated; re-discovery would rescan entry points on every hop.
+- **A provider with no cache plugin clears `_cache_plugin`** rather than
+  leaving the previous one attached. That slot drives budget forwarding,
+  usage extraction and telemetry, so a stale one would book openrouter's
+  cache traffic against anthropic's counters.
+- **Re-wiring is best-effort.** The connect still raises — a session
+  pointed at the wrong model is not something to continue from — but a
+  cache plugin that cannot be attached means running uncached, not
+  failing the switch.
 
-With tiers and `enable_caching: true`, every switch changes the system
-text (§5.1), so the hash changes, so the plugin deletes a cache it has
-already paid to create, creates another, and then hands the new name to a
-request running against a *different* model. This was latent while §4
-made the knob unreachable; the fix makes it live.
+Coverage: `shared/tests/test_cache_plugin_follows_tier_switch.py`
+(with a `REVERSIONS` entry), plus the model-rebinding tests in
+`cache_google_genai/tests/test_plugin.py`.
 
-**Proposal**: include the active model in the content hash, and refuse to
-emit a `cached_content` name whose bound model does not match the request's.
+### 5.3 Google's CachedContent ignores the model — PARTLY FIXED
+
+`GoogleGenAICachePlugin._model_name` was set only in `initialize()` and
+the `CachedContent` is created bound to it
+(`cache_google_genai/plugin.py:399`), while the reuse test covers system +
+tools only (`_compute_content_hash`) — **no model in the key**.
+
+**What §5.2 forced.** Pushing the active model into the plugin (§5.2)
+is unsafe on its own here: a switch that left system and tools untouched
+would find a matching hash and hand the new model a cache name bound to
+the old one. Today the tier line (§5.1) perturbs the system text on every
+switch, so the hash always changes and hides it — but correctness must
+not rest on an unrelated prompt-assembly detail that §5.1 is about to
+remove. So the plugin's new `set_model_name` **discards the cached
+content when the model actually changes**, which is the model-invalidation
+half of this item expressed at the setter rather than in the hash. It
+deletes rather than forgets: the cache is server-side and billed for its
+TTL, so an orphan keeps costing until it expires. A no-op when the model
+is unchanged, because the session pushes the model on every wire.
+
+**Still open**: a defensive guard refusing to emit a `cached_content`
+name whose bound model does not match the request's. The invalidation
+above closes the path we know of; the guard closes the class.
 
 ### 5.4 The miss is invisible
 
@@ -371,8 +407,9 @@ provider's config.
       config, with an executable agreement guard (§4)
 - [x] cache knobs declared in `PROVIDER_KNOBS` for anthropic + google_genai (§4)
 - [ ] drop the tier line from the system block (§5.1)
-- [ ] re-wire the cache plugin on tier switch; push the model name (§5.2)
-- [ ] model in Google's `CachedContent` hash + mismatch guard (§5.3)
+- [x] re-wire the cache plugin on tier switch; push the model name (§5.2)
+- [x] Google's `CachedContent` discarded when the model changes (§5.3)
+- [ ] Google mismatch guard: never emit a name bound to another model (§5.3)
 - [ ] accumulate cache tokens per turn; `jaato.tier` span attribute (§5.4)
 - [ ] measure a real tiered session, then revisit §6
 - [ ] first-class `cache:` profile field (§7)

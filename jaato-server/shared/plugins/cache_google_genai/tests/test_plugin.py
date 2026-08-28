@@ -622,3 +622,59 @@ class TestDeleteCachedContent:
         plugin._cached_content_name = "cachedContents/xyz"
 
         plugin._delete_cached_content()  # Should not raise
+
+
+# ==================== Model rebinding (tier switches) ====================
+
+
+class TestSetModelName:
+    """A ``CachedContent`` belongs to ONE model.
+
+    ``client.caches.create(model=...)`` binds it, and the reuse test in
+    ``prepare_request`` hashes system+tools only — it has no notion of the
+    model.  So rebinding the model has to discard the cache, or a tier
+    switch that left system and tools untouched would hand the new model a
+    cache name bound to the old one.  See
+    ``docs/design/model-tier-prompt-cache.md`` §5.2/§5.3.
+    """
+
+    def _live_plugin(self):
+        plugin = GoogleGenAICachePlugin()
+        plugin.initialize({"enable_caching": True,
+                           "model_name": "gemini-3-flash"})
+        plugin.set_client(MagicMock())
+        plugin._cached_content_name = "cachedContents/abc"
+        plugin._content_hash = "deadbeef"
+        return plugin
+
+    def test_a_new_model_discards_the_cache(self):
+        plugin = self._live_plugin()
+
+        plugin.set_model_name("gemini-3-pro")
+
+        assert plugin._model_name == "gemini-3-pro"
+        assert plugin._cached_content_name is None
+        assert plugin._content_hash is None, (
+            "a surviving hash lets the next prepare_request reuse a cache "
+            "bound to the previous model"
+        )
+
+    def test_the_orphaned_cache_is_deleted_not_just_forgotten(self):
+        """It is server-side and billed for its TTL."""
+        plugin = self._live_plugin()
+
+        plugin.set_model_name("gemini-3-pro")
+
+        plugin._client.caches.delete.assert_called_once_with(
+            name="cachedContents/abc")
+
+    def test_the_same_model_is_a_no_op(self):
+        """The session pushes the model on every wire, including re-wires
+        that changed nothing; that must not throw away a live cache."""
+        plugin = self._live_plugin()
+
+        plugin.set_model_name("gemini-3-flash")
+
+        assert plugin._cached_content_name == "cachedContents/abc"
+        assert plugin._content_hash == "deadbeef"
+        plugin._client.caches.delete.assert_not_called()

@@ -161,6 +161,42 @@ class GoogleGenAICachePlugin:
         """
         self._client = client
 
+    def set_model_name(self, model_name: str) -> None:
+        """Rebind to a different model, discarding any cache bound to the old.
+
+        A ``CachedContent`` is created for ONE model
+        (``client.caches.create(model=...)``) and referencing it from a
+        request against a different model is not something the API will
+        honour.  The session calls this on every tier switch, so a
+        ``model_tiers`` profile that hops between Gemini models keeps the
+        plugin pointed at the model actually being served.
+
+        Dropping the cached content here is what makes that safe.  The
+        reuse test in :meth:`prepare_request` is a hash of system+tools
+        ONLY — it has no notion of the model — so without this a switch
+        that left system and tools untouched would find a matching hash
+        and hand the new model a cache name bound to the old one.  Today
+        the session appends a per-tier line to the system instruction, so
+        the hash happens to change on every switch and hides that; the
+        moment that line moves out of the cached prefix (see
+        ``docs/design/model-tier-prompt-cache.md`` §5.1) it would stop
+        hiding it.  Correctness here must not depend on an unrelated
+        prompt-assembly detail.
+
+        Deleting rather than merely forgetting: the cache is server-side
+        and billed for its TTL, so an orphaned one keeps costing until it
+        expires.
+
+        Args:
+            model_name: The model now being served.
+        """
+        if model_name == self._model_name:
+            return
+        self._delete_cached_content()
+        self._cached_content_name = None
+        self._content_hash = None
+        self._model_name = model_name
+
     # ==================== Budget ====================
 
     def set_budget(self, budget: "InstructionBudget") -> None:

@@ -1269,12 +1269,14 @@ class JaatoRuntime:
         if plugin_configs:
             merged_extra, promoted_api_key = resolve_provider_extra(
                 config.extra, plugin_configs, effective_provider)
-            if merged_extra != config.extra or promoted_api_key:
-                from dataclasses import replace
-                replace_kwargs: Dict[str, Any] = {"extra": merged_extra}
-                if promoted_api_key:
-                    replace_kwargs["api_key"] = promoted_api_key
-                config = replace(config, **replace_kwargs)
+            # Unconditional: ``replace`` with an equal ``extra`` yields an
+            # equal config, so guarding it would only trade a branch for an
+            # allocation on a path that goes on to do network I/O.
+            from dataclasses import replace
+            replace_kwargs: Dict[str, Any] = {"extra": merged_extra}
+            if promoted_api_key:
+                replace_kwargs["api_key"] = promoted_api_key
+            config = replace(config, **replace_kwargs)
 
         # Fail loud at the provider credential boundary: if api_key is still
         # shaped like an unresolved secret URI (e.g. ``pass://...`` that passed

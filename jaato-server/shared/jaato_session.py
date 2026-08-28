@@ -592,6 +592,15 @@ class JaatoSession:
 
         # Cache control plugin (provider-specific caching strategy)
         self._cache_plugin: Optional[Any] = None  # CachePlugin protocol
+        # Per-provider cache-plugin instances, keyed by the name the
+        # provider was REGISTERED under (the same key ``_provider_cache``
+        # uses).  A cross-provider tier switch re-wires from here, so a
+        # switch back is O(1) and the plugin keeps the cache metrics and
+        # prefix state it accumulated for that provider.  NOT keyed on
+        # ``provider.name``: zhipuai subclasses anthropic and reports the
+        # parent's name, so two tiers would collide on one plugin
+        # instance built from the wrong ``plugin_configs`` section.
+        self._cache_plugins_by_provider: Dict[str, Any] = {}
 
         # Thinking mode
         self._thinking_plugin: Optional['ThinkingPlugin'] = None
@@ -2837,7 +2846,7 @@ class JaatoSession:
         return config
 
     def _wire_cache_plugin(self) -> None:
-        """Discover and attach the cache plugin matching the active provider.
+        """Attach the cache plugin matching the CURRENTLY ACTIVE provider.
 
         The cache plugin is selected by matching the provider's ``name``
         property against available cache plugins' ``provider_name``.
@@ -2845,17 +2854,40 @@ class JaatoSession:
         - The plugin is initialized with the config from
           :meth:`_cache_plugin_config` (runtime extras + this session's
           ``plugin_configs[<provider>]`` profile knobs)
+        - The plugin is told the active model, so any model-dependent
+          policy (Anthropic's minimum-cacheable-size threshold, Google's
+          ``CachedContent`` model binding) tracks a tier switch
         - The current InstructionBudget is set on the plugin
         - The plugin is attached to the provider via ``set_cache_plugin()``
 
         This is a Variant A integration (provider delegates to plugin).
 
-        Called ONCE per session, from :meth:`_ensure_provider` after the
-        provider materializes.  Nothing re-runs it on a tier switch, so a
-        cross-provider tier currently runs with no cache plugin attached
-        (caching silently off) and the plugin's model name goes stale.
-        That is a known defect, not a design choice — see
+        **Idempotent and re-runnable.**  Called from
+        :meth:`_ensure_provider` when the provider first materializes,
+        and again from :meth:`_connect_tier_entry` on every tier switch
+        — model-driven (``enter_tier``) or framework-driven (a
+        budget-control degrade rung rebinding the active tier).  Before
+        it was re-runnable, a cross-provider tier ran with NO cache
+        plugin attached (caching silently off for the rest of the
+        session) and a same-provider switch left the plugin's model name
+        pinned to whatever booted the session.  See
         ``docs/design/model-tier-prompt-cache.md`` §5.2.
+
+        Plugin instances are cached per provider in
+        :attr:`_cache_plugins_by_provider`, so switching back to a tier
+        is O(1) and the plugin keeps the metrics and prefix-invalidation
+        state it accumulated for that provider.  Discovery
+        (``load_cache_plugin_for_provider``) scans entry points, which is
+        not something to repeat on every hop.
+
+        A provider with no matching cache plugin — openrouter, which
+        caches internally, or any provider that cannot cache — clears
+        :attr:`_cache_plugin` rather than leaving the previous
+        provider's attached.  That slot is read for budget forwarding,
+        usage extraction and telemetry, so a stale one would attribute
+        the new provider's cache traffic to the old provider's counters.
+        The old plugin stays in the per-provider cache, still attached to
+        its own provider instance, ready for a switch back.
         """
         if not self._provider:
             return
@@ -2870,28 +2902,44 @@ class JaatoSession:
         if not provider_name:
             return
 
-        config = self._cache_plugin_config()
-        # Include model name for threshold selection
         model_name = getattr(self._provider, 'model_name', None)
-        if model_name:
-            config['model_name'] = model_name
+        # Keyed on the REGISTRATION name, not ``provider.name`` — see the
+        # attribute's comment for why those differ and why it matters.
+        cache_key = self._active_provider_name or provider_name
+        cache_plugin = self._cache_plugins_by_provider.get(cache_key)
 
-        cache_plugin = load_cache_plugin_for_provider(provider_name, config)
+        if cache_plugin is None:
+            config = self._cache_plugin_config()
+            # Include model name for threshold selection
+            if model_name:
+                config['model_name'] = model_name
+            cache_plugin = load_cache_plugin_for_provider(provider_name, config)
+            if cache_plugin is None:
+                self._cache_plugin = None
+                return
+            self._cache_plugins_by_provider[cache_key] = cache_plugin
 
-        if cache_plugin:
-            # Set the budget so the plugin can make policy-aware decisions
-            if self._instruction_budget:
-                cache_plugin.set_budget(self._instruction_budget)
+        # The active model is wiring, not configuration: a tier switch
+        # changes it without changing anything else, and a plugin that
+        # missed the change makes model-dependent decisions for the wrong
+        # model.  Pushed on every call, including the first, so the
+        # re-wire path and the initial path cannot diverge.
+        if model_name and hasattr(cache_plugin, 'set_model_name'):
+            cache_plugin.set_model_name(model_name)
 
-            # Attach to provider (Variant A: provider delegates to plugin)
-            if hasattr(self._provider, 'set_cache_plugin'):
-                self._provider.set_cache_plugin(cache_plugin)
+        # Set the budget so the plugin can make policy-aware decisions
+        if self._instruction_budget:
+            cache_plugin.set_budget(self._instruction_budget)
 
-            self._cache_plugin = cache_plugin
-            self._trace(
-                f"CACHE_PLUGIN: Attached {cache_plugin.name} for provider "
-                f"{provider_name}"
-            )
+        # Attach to provider (Variant A: provider delegates to plugin)
+        if hasattr(self._provider, 'set_cache_plugin'):
+            self._provider.set_cache_plugin(cache_plugin)
+
+        self._cache_plugin = cache_plugin
+        self._trace(
+            f"CACHE_PLUGIN: Attached {cache_plugin.name} for provider "
+            f"{provider_name} (model {model_name})"
+        )
 
     def _unwrap_turn_result(self, turn_result: 'TurnResult') -> 'ProviderResponse':
         """Extract the ``ProviderResponse`` from a ``TurnResult``.
@@ -10280,6 +10328,17 @@ NOTES
         the active tier).  Cross-provider entries swap ``self._provider`` to
         the cached instance for that provider — history is provider-neutral
         (Message/Part), so the conversation flows across the swap.
+
+        The cache plugin is re-wired afterwards, because it is bound to a
+        (provider, model) pair and this method changes both.  Without
+        that, a cross-provider tier ran with no cache plugin at all and a
+        same-provider tier ran with one still configured for the model
+        that booted the session.
+
+        Re-wiring is best-effort: a session that cannot attach a cache
+        plugin should run uncached, not fail the tier switch.  The connect
+        itself still raises, because a session pointed at the wrong model
+        is not something to continue from.
         """
         if self._provider is None:
             return
@@ -10297,6 +10356,13 @@ NOTES
                 entry.model, exc,
             )
             raise
+        try:
+            self._wire_cache_plugin()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "tier cache re-wire for %s/%s failed; continuing uncached: %s",
+                self._active_provider_name, entry.model, exc,
+            )
 
     def switch_tier(self, requested_tier: str) -> Dict[str, Any]:
         """Switch the session's active model tier.
