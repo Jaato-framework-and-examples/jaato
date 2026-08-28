@@ -43,4 +43,16 @@ graders:
   - kind: script
     run: "test -f answer.txt && grep -qx READY answer.txt"
 
-repeats: 1
+  # The judge opens a SECOND session per arm, so it is gated behind the
+  # cheap check: `gate_on` skips it (BLOCKED, with the reason recorded)
+  # when the artefact test already failed, rather than spending a model
+  # call to score an arm known bad.  The rubric lives in the profile's
+  # completion_payload_schema, so the score arrives typed.
+  - kind: judge
+    profile: rubric
+    threshold: 0.9
+    gate_on: ["script:test -f answer.txt && grep -qx READY answer.txt"]
+
+# Two repeats so `det` has something to compare: it reports the share of
+# arms sharing the modal payload hash, which is meaningless at N=1.
+repeats: 2

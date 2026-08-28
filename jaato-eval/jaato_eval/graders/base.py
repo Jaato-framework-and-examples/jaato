@@ -44,6 +44,11 @@ class GraderContext:
             short-circuits before any turn runs.
         termination_detail: The refusal prose / error summary that came
             with it, so a BLOCKED verdict can quote the mechanism.
+        socket_path: The daemon the ARM ran on.  A grader that opens its
+            own session (the judge) must use the same one — the socket is
+            a property of the RUN, not of the task, so it cannot live in
+            the manifest.  Without this the judge silently reached the
+            client default while the arm ran elsewhere.
         turns: How many turns the arm consumed.
         error: Terminal error text, when the arm ended in an error.
         prior_verdicts: ``grader_id`` -> state, for graders already run
@@ -64,6 +69,7 @@ class GraderContext:
     termination_reason: str = ""
     termination_detail: str = ""
     turns: int = 0
+    socket_path: Optional[str] = None
     error: Optional[str] = None
     prior_verdicts: Dict[str, str] = field(default_factory=dict)
 

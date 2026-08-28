@@ -1,0 +1,13 @@
+# worker — openrouter set: google/gemini-2.5-flash-lite.
+name: rubric
+inherits: [_base_rubric]
+plugins: []  # empty keeps the inherited _base surface
+model: google/gemini-2.5-flash-lite
+provider: openrouter
+plugin_configs:
+  openrouter:
+    # Secret URI, resolved daemon-side.  Never substitute the literal key
+    # here — the task definition is committed.
+    api_key: "pass://jaato/openrouter/api-key"
+    api_params:
+      temperature: 0.0  # determinism knob

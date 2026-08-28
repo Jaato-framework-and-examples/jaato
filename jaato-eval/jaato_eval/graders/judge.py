@@ -95,9 +95,13 @@ class JudgeGrader:
             return blocked(self.spec, claim, f"judge session failed: {exc!r}")
 
         if payload is None:
-            return blocked(self.spec, claim,
-                           f"judge profile {profile!r} returned no typed payload; "
-                           "it must declare a completion_payload_schema")
+            return blocked(
+                self.spec, claim,
+                f"judge profile {profile!r} returned no typed payload — either "
+                "it declares no completion_payload_schema, or it answered in "
+                "prose without calling signal_completion. Check the profile's "
+                "schema first, then whether its persona suppresses the "
+                "instruction this adapter sends.")
 
         field = str(self.spec.config.get("score_field", "score"))
         if field not in payload:
@@ -145,7 +149,11 @@ class JudgeGrader:
             "workspace_path": str(context.workspace_path),
             "config_root": str(context.config_root),
         }
-        socket_path = self.spec.config.get("socket_path")
+        # The RUN's socket wins over a manifest override: the judge must
+        # score on the same daemon the arm ran on, and only the sweep
+        # knows which that was.  A manifest `socket_path` remains as an
+        # escape hatch for a judge deliberately hosted elsewhere.
+        socket_path = context.socket_path or self.spec.config.get("socket_path")
         if socket_path:
             kwargs["socket_path"] = socket_path
 
@@ -175,6 +183,19 @@ def _render_prompt(context: GraderContext) -> str:
         f"- turns: {context.turns}\n"
         f"- finish_reason: {context.finish_reason}\n"
         f"- tool calls: {len(context.ledger.entries)}\n"
+        # WITHOUT THIS THE JUDGE ANSWERS IN PROSE AND NEVER SIGNALS.
+        # Measured: every arm came back BLOCKED with "returned no typed
+        # payload" while the rubric's completion_payload_schema was
+        # present and correct.  A profile with a schema is OFFERED
+        # signal_completion; it is not compelled to call it, and a prompt
+        # that only says "score this" reads as a request for an answer.
+        # The instruction belongs here rather than in each rubric profile:
+        # every judge needs it, and leaving it to the profile means each
+        # author rediscovers this failure — with an error message that
+        # points at the schema, which is the one thing that was fine.
+        "\n## Required\nWhen you have finished scoring, call "
+        "`signal_completion` with your rubric's fields. Do not reply in "
+        "prose — the score is only read from that payload.\n"
     )
 
 

@@ -176,6 +176,7 @@ async def run_arm(spec: ArmSpec, *, workspace_root: Path,
         termination_reason=accumulator.termination_reason,
         termination_detail=accumulator.termination_detail,
         turns=accumulator.turns,
+        socket_path=socket_path,
     )
 
     result.verdicts = await _grade(task, context)
