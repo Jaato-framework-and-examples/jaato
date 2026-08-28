@@ -2783,59 +2783,57 @@ class JaatoSession:
         built with, so a cache knob authored in a profile reaches the
         cache plugin by the same route every other provider knob takes.
 
-        Two layers, child-wins, mirroring ``JaatoRuntime.create_provider``:
+        The merge is NOT re-implemented here.  It is
+        ``jaato_runtime.resolve_provider_extra`` — the same function
+        ``create_provider`` uses to build the ``ProviderConfig`` the
+        provider itself was initialized with — so the cache plugin and
+        the provider it caches for cannot be configured differently.
 
-        1. ``runtime._provider_config.extra`` — the runtime-level base.
-        2. ``plugin_configs[<provider>]`` — this session's profile knobs
-           (``plugin_configs.anthropic.enable_caching`` and friends).
+        Why this is a second CALL and not a second read of a stored
+        result: ``plugin_configs`` is a per-session argument, while
+        ``runtime._provider_configs`` is runtime-level and shared by
+        every session on that provider.  Storing the merged config back
+        there would leak one session's profile knobs into all the others.
+        The recomputation is forced by that scoping, and the defence
+        against drift is that there is exactly one implementation of it.
 
-        Layer 2 is the one that was missing, and it was the only layer
-        that ever carried anything.  ``runtime._provider_config`` is
-        assigned exactly once — ``ProviderConfig(project=..., location=...)``
-        in ``JaatoRuntime.connect`` — with an empty ``extra`` that nothing
-        subsequently writes to.  ``create_provider`` merges the profile's
-        ``plugin_configs`` into a LOCAL copy via ``dataclasses.replace``
-        and never stores it back, so reading layer 1 alone handed every
-        cache plugin ``{}``.  Effect: ``enable_caching`` was silently
-        ignored wherever it was written, leaving Anthropic caching
+        What was missing before: ``runtime._provider_config`` is assigned
+        exactly once — ``ProviderConfig(project=..., location=...)`` in
+        ``JaatoRuntime.connect`` — with an empty ``extra`` that nothing
+        subsequently writes to, and ``create_provider``'s merge goes into
+        a local copy that is never stored back.  Reading that base alone
+        handed every cache plugin ``{}``, so ``enable_caching`` was
+        silently ignored wherever it was written: Anthropic caching was
         reachable only through the ``JAATO_ANTHROPIC_ENABLE_CACHING`` env
         default inside ``initialize()``, and Google's explicit
         ``CachedContent`` path (a hard ``False`` default, no env
-        fallback) unreachable altogether.
-
-        ``api_key`` is dropped for the same reason ``create_provider``
-        drops it: that key is promoted to the top-level
-        ``ProviderConfig.api_key`` field and never lands in ``extra``, so
-        carrying it here would hand a credential to a plugin that has no
-        use for it AND misrepresent the provider's own config view.
-        Every other key (``oauth_token`` included) is passed through
-        exactly as the provider sees it.
+        fallback) was unreachable altogether.
 
         The profile lookup is keyed on ``_active_provider_name`` — the
-        name the provider was CREATED under, which is the same key the
+        name the provider was CREATED under, which is the key the
         profile's ``plugin_configs`` uses.  ``provider.name`` is not
         interchangeable with it (zhipuai subclasses anthropic and reports
-        the parent's name), and only the creation name selects the right
-        ``plugin_configs`` section.
+        the parent's name).
 
         Returns:
-            A fresh dict; callers may mutate it freely.
+            A fresh dict; callers may mutate it freely.  ``api_key`` is
+            absent, because ``resolve_provider_extra`` promotes it to the
+            ``ProviderConfig.api_key`` field and it never reaches
+            ``extra`` on the provider's side either.
         """
-        config: Dict[str, Any] = {}
-        if self._runtime and getattr(self._runtime, '_provider_config', None):
-            config = dict(self._runtime._provider_config.extra)
+        from .jaato_runtime import resolve_provider_extra
 
-        base = (getattr(self, '_tier_provider_base', None)
-                or getattr(self, '_provider_lazy_pending', None)
-                or {})
-        plugin_configs = base.get('plugin_configs') or {}
+        base_extra: Dict[str, Any] = {}
+        if self._runtime and getattr(self._runtime, '_provider_config', None):
+            base_extra = self._runtime._provider_config.extra
+
+        pending = (getattr(self, '_tier_provider_base', None)
+                   or getattr(self, '_provider_lazy_pending', None)
+                   or {})
         profile_key = self._active_provider_name or getattr(
             self._provider, 'name', None)
-        if profile_key:
-            overrides = plugin_configs.get(profile_key)
-            if isinstance(overrides, dict):
-                config.update(overrides)
-        config.pop('api_key', None)
+        config, _promoted_api_key = resolve_provider_extra(
+            base_extra, pending.get('plugin_configs'), profile_key)
         return config
 
     def _wire_cache_plugin(self) -> None:

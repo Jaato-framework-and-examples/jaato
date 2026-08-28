@@ -11,7 +11,7 @@ import os
 import sys
 import time
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
+from typing import Any, Callable, Dict, List, Optional, Tuple, TYPE_CHECKING
 
 from .token_accounting import TokenLedger
 from .instruction_token_cache import InstructionTokenCache
@@ -177,6 +177,61 @@ def _get_sandbox_guidance() -> Optional[str]:
         f"- Use relative paths or absolute paths within the workspace\n"
         f"- The .jaato/ directory may reference external configuration"
     )
+
+
+def resolve_provider_extra(
+    base_extra: Dict[str, Any],
+    plugin_configs: Optional[Dict[str, Dict[str, Any]]],
+    provider_name: Optional[str],
+) -> Tuple[Dict[str, Any], Optional[str]]:
+    """The ONE definition of a provider's effective config extras.
+
+    Providers are plugins, so their profile knobs live under
+    ``plugin_configs[<provider>]``.  This folds that section onto the
+    runtime-level base, child-wins, and promotes ``api_key`` out of the
+    result — the universal auth-field contract reads
+    ``ProviderConfig.api_key``, not ``config.extra["api_key"]``.
+
+    Two callers, and they MUST agree:
+
+    * :meth:`JaatoRuntime.create_provider`, which builds the
+      ``ProviderConfig`` the provider itself is initialized with; and
+    * ``JaatoSession._cache_plugin_config``, which builds the config for
+      the cache plugin attached to that same provider.
+
+    They cannot share the RESULT, only this function.  ``plugin_configs``
+    is a per-CALL argument — each session creates its own provider
+    instance from its own profile — while ``_provider_configs`` is
+    runtime-level and shared by every session on that provider.  Writing
+    the merged config back there would leak one session's profile knobs
+    (credentials included) into every other session using the same
+    provider.  So the merge is necessarily recomputed per caller, and the
+    only defence against the two callers drifting apart is that there is
+    exactly one of them, here.
+
+    Args:
+        base_extra: The runtime-level ``ProviderConfig.extra`` to fold onto.
+        plugin_configs: The session profile's per-plugin config dict, or
+            ``None``.
+        provider_name: Which section of ``plugin_configs`` to read — the
+            name the provider is REGISTERED under.  Not interchangeable
+            with ``provider.name``: zhipuai subclasses the Anthropic
+            provider and reports the parent's name, and only the
+            registration name selects the right section.
+
+    Returns:
+        ``(extra, promoted_api_key)``.  ``promoted_api_key`` is ``None``
+        when the profile supplies none, in which case the caller leaves
+        ``ProviderConfig.api_key`` alone.
+    """
+    extra = dict(base_extra)
+    overrides = (plugin_configs or {}).get(provider_name or "")
+    if not overrides:
+        return extra, None
+    overrides = dict(overrides)
+    promoted_api_key = overrides.pop("api_key", None)
+    extra.update(overrides)
+    return extra, promoted_api_key
 
 
 def _is_parallel_tools_enabled() -> bool:
@@ -1204,17 +1259,18 @@ class JaatoRuntime:
         # bug for zhipuai (its working path was the stored-credential
         # fallback ``~/.jaato/zhipuai_auth.json``, not the documented
         # plugin_configs surface).
+        # The merge itself lives in ``resolve_provider_extra`` because the
+        # cache plugin attached to this provider has to reproduce it, and a
+        # second inline copy of it here is what would let the two drift.
+        # It cannot be shared by storing the result: ``plugin_configs`` is
+        # per-session while ``_provider_configs`` is runtime-wide, so writing
+        # back would leak this session's knobs into every other session on
+        # this provider.  See the function's docstring.
         if plugin_configs:
-            provider_overrides = plugin_configs.get(effective_provider)
-            if provider_overrides:
+            merged_extra, promoted_api_key = resolve_provider_extra(
+                config.extra, plugin_configs, effective_provider)
+            if merged_extra != config.extra or promoted_api_key:
                 from dataclasses import replace
-                overrides = dict(provider_overrides)
-                # api_key is a top-level ProviderConfig field — promote
-                # so providers reading ``config.api_key`` (the universal
-                # auth-field contract across openrouter / zhipuai /
-                # anthropic / nim / etc.) see the profile-supplied value.
-                promoted_api_key = overrides.pop("api_key", None)
-                merged_extra = {**config.extra, **overrides}
                 replace_kwargs: Dict[str, Any] = {"extra": merged_extra}
                 if promoted_api_key:
                     replace_kwargs["api_key"] = promoted_api_key

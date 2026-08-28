@@ -146,25 +146,50 @@ Belt and braces: neither `anthropic/__init__.py` nor
 ignored it too. The validator and the runtime agreed the knob did not
 exist; only the docstrings claimed otherwise.
 
-**The fix.** `JaatoSession._cache_plugin_config` now reproduces the
-`ProviderConfig.extra` the *active* provider was built with: the runtime
-base layer, then `plugin_configs[<provider>]` on top, child-wins, in the
-same order `create_provider` uses. Two details are deliberate:
+That shape is worth naming, because it generalises past this bug: **two
+independent sources agreed, the documentation was the outlier, and nobody
+checked which was right.** The prose was the least authoritative artifact
+in the repository and it was the only one anyone read. Where a knob is
+concerned, `PROVIDER_KNOBS` and the read site are the evidence; a
+docstring is a claim about them.
 
-- The profile lookup is keyed on `_active_provider_name` (the name the
-  provider was *created* under), not `provider.name`. They are not
-  interchangeable — zhipuai subclasses the Anthropic provider and reports
-  the parent's name — and only the creation name selects the right
-  `plugin_configs` section.
-- `api_key` is dropped, because `create_provider` promotes it to the
-  top-level `ProviderConfig.api_key` field and it never lands in `extra`.
-  The rule is "match the provider's own config view", not "guess at
-  secrets", so `oauth_token` (which *is* left in `extra` there) passes
-  through.
+**The fix.** The merge is now one function,
+`jaato_runtime.resolve_provider_extra`, called by **both**
+`create_provider` (building the `ProviderConfig` the provider is
+initialized with) and `JaatoSession._cache_plugin_config` (building the
+config for the cache plugin attached to that same provider). It folds
+`plugin_configs[<provider>]` onto the runtime base, child-wins, and
+promotes `api_key` out to the `ProviderConfig.api_key` field.
+
+The two callers share the **function**, not the **result** — and that is
+forced, not lazy. `plugin_configs` is a per-session argument, while
+`runtime._provider_configs` is runtime-level and shared by every session
+on that provider. Writing the merged config back there would leak one
+session's profile knobs, credentials included, into every other session
+using the same provider. So the merge is necessarily recomputed per
+caller, and the only defence against the callers drifting apart is that
+there is exactly one implementation of it.
+
+That defence is checked rather than asserted.
+`TestTheTwoMergesAgree` drives the *real* `create_provider` and
+`_cache_plugin_config` over the same inputs and compares the resulting
+extras. Its input is derived from the provider's declared
+`PROVIDER_KNOBS` top-level layer rather than hand-enumerated, because a
+hand-written case only notices a newly promoted field if it happens to
+mention that field — verified by sabotage: making `create_provider` pop a
+second key passed a hand-enumerated suite and fails the derived one.
+
+The profile lookup is keyed on `_active_provider_name` (the name the
+provider was *registered* under), not `provider.name`; they are not
+interchangeable, since zhipuai subclasses the Anthropic provider and
+reports the parent's name.
 
 The cache knobs are now declared in both providers' `PROVIDER_KNOBS`, at
 `top_level` — the position the read sites actually use. Regression
-coverage: `shared/tests/test_cache_plugin_profile_knobs.py`.
+coverage: `shared/tests/test_cache_plugin_profile_knobs.py`, which
+declares a `REVERSIONS` entry so the meta-guard
+(`test_every_guard_detects_its_own_reversion`, #665) proves the guard
+still notices the defect being put back.
 
 > **Implication for anyone reading old measurements**: prior to this fix,
 > any jaato session not on openrouter and without
@@ -342,6 +367,8 @@ provider's config.
 ## 8. Follow-ups
 
 - [x] `_wire_cache_plugin` reads the session's merged provider config (§4)
+- [x] one merge function shared by `create_provider` and the cache-plugin
+      config, with an executable agreement guard (§4)
 - [x] cache knobs declared in `PROVIDER_KNOBS` for anthropic + google_genai (§4)
 - [ ] drop the tier line from the system block (§5.1)
 - [ ] re-wire the cache plugin on tier switch; push the model name (§5.2)
