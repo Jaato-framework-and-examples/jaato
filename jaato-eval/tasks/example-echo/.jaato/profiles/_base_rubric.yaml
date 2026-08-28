@@ -47,3 +47,13 @@ completion_payload_schema:
     errors:
       type: array
       items: {type: string}
+      description: >
+        PUT "I did not read the artefact" HERE, not only in reasoning.
+        Any reason you could not carry out the assessment belongs in this
+        field — you did not call the tool, the tool failed, the file was
+        unreadable.  The harness treats a non-empty errors[] as BLOCKED
+        rather than FAIL, because a judge that did not judge is not
+        evidence about the agent.  Measured: three of four failures said
+        "I did not open answer.txt" in `reasoning` with errors[] EMPTY,
+        so they were scored as the agent failing when the agent's file
+        was correct and on disk.

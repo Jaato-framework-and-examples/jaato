@@ -48,6 +48,13 @@ _SUMMED_USAGE = ("prompt_tokens", "output_tokens", "spend_total_tokens",
                  "reasoning_tokens", "thinking_tokens")
 
 
+#: Test seam: the graded context, for suites that must assert on what the
+#: graders were HANDED rather than on a verdict downstream of it.  A no-op
+#: in production; a stub suite rebinds it.
+def _CONTEXT_SPY(context):  # noqa: N802 - a seam, not a class
+    return None
+
+
 class _TurnAccumulator:
     """Collects per-turn facts as ``TurnCompletedEvent``s arrive.
 
@@ -64,6 +71,7 @@ class _TurnAccumulator:
         self.cost_usd: Optional[float] = None
         self.termination_reason = ""
         self.termination_detail = ""
+        self.completion_gap: Optional[str] = None
 
     def on_terminated(self, event: Any) -> None:
         """Record why the session wound down.
@@ -91,6 +99,16 @@ class _TurnAccumulator:
         reason = getattr(event, "finish_reason", None)
         if reason:
             self.finish_reason = reason
+        # LATCHED PER TURN, not read off the last one.  completion_gap
+        # rides EXACTLY ONE event and is read-and-cleared, so a session
+        # that gave up and then received more work stops reporting it —
+        # sampling only the final turn would miss the very turn that
+        # carried the fact.  It means "asked twice and refused", not
+        # "did not signal on this turn", so a legitimately multi-turn
+        # session never sets it.
+        gap = getattr(event, "completion_gap", None)
+        if gap:
+            self.completion_gap = str(gap)
         usage = getattr(event, "usage", None)
         if usage is None:
             return
@@ -202,10 +220,12 @@ async def run_arm(spec: ArmSpec, *, workspace_root: Path,
         finish_reason=accumulator.finish_reason,
         termination_reason=accumulator.termination_reason,
         termination_detail=accumulator.termination_detail,
+        completion_gap=accumulator.completion_gap,
         turns=accumulator.turns,
         socket_path=socket_path,
     )
 
+    _CONTEXT_SPY(context)
     result.verdicts = await _grade(task, context)
 
     if not keep_workspace:

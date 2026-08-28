@@ -49,9 +49,12 @@ class _Usage:
 
 
 class _TurnEvent:
-    def __init__(self, finish_reason="stop", cost=0.01):
+    def __init__(self, finish_reason="stop", cost=0.01, completion_gap=None):
         self.finish_reason = finish_reason
         self.usage = _Usage(cost)
+        # jaato #654.  Rides EXACTLY ONE event and is read-and-cleared, so
+        # the stub mirrors that: only the turn that carries it has it.
+        self.completion_gap = completion_gap
 
 
 class _HistoryEvent:
@@ -180,8 +183,12 @@ class _FakeSession:
             await asyncio.sleep(b["hang"])
         if b.get("writes") is not None:
             (self.client.workspace / "answer.txt").write_text(b["writes"])
-        self.client._emit("TURN_COMPLETED",
-                          _TurnEvent(finish_reason=b.get("finish_reason", "stop")))
+        for i in range(int(b.get("turns", 1))):
+            self.client._emit("TURN_COMPLETED", _TurnEvent(
+                finish_reason=b.get("finish_reason", "stop"),
+                # carried by ONE turn only, and deliberately not the last,
+                # so a driver sampling the final event would miss it
+                completion_gap=(b.get("completion_gap") if i == 0 else None)))
         # A real session always winds down with one of these; omitting it
         # would let the engine's SESSION_TERMINATED handling go untested
         # while every stubbed test still passed.
@@ -264,6 +271,10 @@ class RunnerCase(unittest.TestCase):
         from jaato_eval.runner import run_arm
         self.behaviour = behaviour
         _install_stub_sdk(behaviour)
+        import jaato_eval.runner as _r
+        _orig = _r._CONTEXT_SPY
+        _r._CONTEXT_SPY = lambda c: behaviour.__setitem__("graded_context", c)
+        self.addCleanup(lambda: setattr(_r, "_CONTEXT_SPY", _orig))
         spec = ArmSpec(task=self.task, profile_set="cheap", repeat=0)
         return asyncio.run(run_arm(spec, workspace_root=self.root / "ws", **kw))
 
@@ -364,6 +375,25 @@ class RunnerCase(unittest.TestCase):
     def test_zero_disables_the_ceiling(self):
         result = self._run({"writes": "READY\n"}, arm_timeout_seconds=0)
         self.assertEqual(result.state, PASS)
+
+    def test_completion_gap_is_latched_not_sampled_from_the_last_turn(self):
+        """It rides EXACTLY ONE event and is read-and-cleared.
+
+        The stub puts it on the FIRST of three turns, so a driver that
+        reads the field off the final TurnCompletedEvent sees None and
+        reports the arm as an unexplained empty payload — which is the
+        state jaato #654 exists to end.
+        """
+        result = self._run({"writes": "READY\n", "turns": 3,
+                            "completion_gap": "not_signalled_after_nudges"})
+        self.assertEqual(result.turns, 3)
+        ctx = self.behaviour["graded_context"]
+        self.assertEqual(ctx.completion_gap, "not_signalled_after_nudges")
+
+    def test_no_gap_on_a_healthy_arm(self):
+        """A legitimately multi-turn session must never set it."""
+        self._run({"writes": "READY\n", "turns": 3})
+        self.assertIsNone(self.behaviour["graded_context"].completion_gap)
 
     def test_profile_set_reaches_the_env_file(self):
         """The sweep's model axis travels via .env in the workspace."""

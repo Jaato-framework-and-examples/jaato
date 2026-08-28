@@ -287,3 +287,46 @@ class AJudgeThatCouldNotJudgeCase(unittest.TestCase):
     def test_a_genuine_low_score_still_fails(self):
         v = self._grade({"score": 0.1, "errors": []})
         self.assertEqual(v.state, FAIL)
+
+
+class TheFrameworkSaysWhyCase(unittest.TestCase):
+    """`completion_gap` beats this adapter's guess about a missing payload.
+
+    Before jaato #654 the "asked twice and refused" path emitted NO
+    terminal event — no AgentCompletedEvent, and no SessionTerminatedEvent
+    because quiescence is gated on signal_completion having been called.
+    There was nothing to misread, so this adapter invented a cause and
+    named the rubric's schema, which was correct.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.ws = Path(self.tmp.name)
+        self._displaced = {n: sys.modules[n] for n in _STUBBED if n in sys.modules}
+        self.addCleanup(self.tmp.cleanup)
+        self.addCleanup(self._uninstall)
+
+    def _uninstall(self):
+        for n in _STUBBED:
+            sys.modules.pop(n, None)
+        sys.modules.update(self._displaced)
+
+    def _grade(self, **ctx_kw):
+        _install(payload=None)
+        ctx = GraderContext(workspace_path=self.ws, config_root=self.ws,
+                            payload={"ok": True}, **ctx_kw)
+        return JudgeGrader(GraderSpec(kind="judge",
+                                      config={"profile": "rubric"})).grade(ctx)
+
+    def test_the_gap_is_quoted_and_the_schema_is_exonerated(self):
+        v = self._grade(completion_gap="not_signalled_after_nudges")
+        self.assertEqual(v.state, BLOCKED)
+        self.assertIn("not_signalled_after_nudges", v.blocked_reason)
+        self.assertIn("not implicated", v.blocked_reason)
+
+    def test_without_a_gap_the_adapter_still_names_both_causes(self):
+        """No gap means the framework did not report one — so guess, but
+        guess openly, and do not assert the schema is at fault."""
+        v = self._grade()
+        self.assertEqual(v.state, BLOCKED)
+        self.assertIn("either", v.blocked_reason)

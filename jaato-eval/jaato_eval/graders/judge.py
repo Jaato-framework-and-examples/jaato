@@ -95,6 +95,17 @@ class JudgeGrader:
             return blocked(self.spec, claim, f"judge session failed: {exc!r}")
 
         if payload is None:
+            # Prefer the framework's own account over this adapter's guess.
+            # jaato #654 added completion_gap for exactly this: before it,
+            # the "asked and refused" path emitted no terminal event at all,
+            # so the guess below was the best anyone could do and it named
+            # the schema — the one thing that was fine.
+            if context.completion_gap:
+                return blocked(
+                    self.spec, claim,
+                    f"the judge was asked to signal completion and never did "
+                    f"({context.completion_gap}); its rubric schema is not "
+                    "implicated")
             return blocked(
                 self.spec, claim,
                 f"judge profile {profile!r} returned no typed payload — either "
@@ -201,8 +212,23 @@ def _render_prompt(context: GraderContext) -> str:
         if context.payload is not None else "(none — profile declared no completion schema)"
     return (
         "Score the agent run described below against your rubric.\n\n"
-        f"## Workspace\n`{context.workspace_path}`\n\n"
-        f"## Files present ({len(listing)} shown)\n"
+        # NO ABSOLUTE PATH.  The filesystem tools resolve a relative path
+        # against the workspace root themselves (_resolve_path), so an
+        # absolute one buys nothing — and handing a model a 150-character
+        # path to reproduce inside a tool argument invites transcription
+        # error.  Observed: a judge reported
+        #   Path does not exist: .../jaato-eval-tests-e1050a88-.../example_echo-a-fileopenrouter_gpt5mini_0
+        # against a real
+        #   .../jaato-eval-tests/e1050a88-.../example_echo-a-file@openrouter_gpt5mini_0
+        # — a '/' become '-' AND an '@' dropped, two corruptions no single
+        # sanitiser produces, in a path the model had been asked to copy.
+        # Arm workspace names come from arm_id (task@set#repeat), so they
+        # are long and punctuated by construction: this engine supplies the
+        # hazard, so this engine removes it.
+        "## Files\nPaths below are RELATIVE TO THE WORKSPACE ROOT. Pass them "
+        "to your tools exactly as written — do not prefix them with a "
+        "directory, and do not construct an absolute path.\n"
+        f"({len(listing)} shown)\n"
         + "\n".join(f"- {p}" for p in listing)
         + "\n\n## The agent's completion payload\n```json\n"
         + payload_json

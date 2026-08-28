@@ -44,6 +44,15 @@ class GraderContext:
             short-circuits before any turn runs.
         termination_detail: The refusal prose / error summary that came
             with it, so a BLOCKED verdict can quote the mechanism.
+        completion_gap: ``TurnCompletedEvent.completion_gap`` (jaato #654) —
+            set when the framework asked the agent twice to signal
+            completion and it never did.  Before this existed, that path
+            emitted NO terminal event at all: no AgentCompletedEvent, and
+            no SessionTerminatedEvent because quiescence is gated on
+            signal_completion having been called.  There was nothing to
+            misread, so a consumer had to invent a cause for an absence —
+            which this engine did, blaming a rubric's schema that was
+            correct.
         socket_path: The daemon the ARM ran on.  A grader that opens its
             own session (the judge) must use the same one — the socket is
             a property of the RUN, not of the task, so it cannot live in
@@ -68,6 +77,7 @@ class GraderContext:
     finish_reason: str = "stop"
     termination_reason: str = ""
     termination_detail: str = ""
+    completion_gap: Optional[str] = None
     turns: int = 0
     socket_path: Optional[str] = None
     error: Optional[str] = None
