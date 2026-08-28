@@ -521,30 +521,21 @@ _STALE_PATTERNS = (
 _DRIVER_SCAN_LIMIT = 400
 
 
-def check_driver(workspace: str) -> List[Check]:
-    """Is there a scaffolded driver here, and was it generated recently?
+def _find_scaffolded_drivers(
+    ws: Path,
+) -> Tuple[List[Path], List[str], bool]:
+    """Walk *ws* for generated drivers and the stale patterns they carry.
 
-    WHY THE DOCTOR AND NOT A DOCSTRING.  The generator already encodes the
-    known-good recipe — the connect timeout, terminal detection that handles
-    BOTH termini, env_file, client_type, and the fact that a refused create
-    raises rather than returning None.  A consumer who hand-wrote a client
-    instead reported afterwards that every mistake they made was in the half
-    they wrote by hand, and that a pointer sitting in a field's docstring
-    would not have helped: you only look for a second source when the first
-    admits uncertainty, and a wrong sentence never does.
+    Split out of :func:`check_driver` so the WALK and the REPORT are separate
+    concerns -- the complexity ratchet flagged the combined function at 16,
+    and "a function doing validation + work" is the shape it names.  Pure
+    extraction: same traversal, same skips, same truncation rule.
 
-    A check EXECUTES.  It cannot silently go stale the way a cross-reference
-    can, it fires at preflight when the advice is still actionable, and it is
-    in the one tool people already run when something is off.
-
-    WARN, never FAIL: hand-writing a client is legitimate, and a workspace
-    may hold no driver because it holds none yet.  The doctor's exit code
-    gates CI, and a suggestion has no business failing a build.
+    Returns:
+        ``(found, stale, truncated)`` -- the driver files, one message per
+        stale pattern hit, and whether the scan stopped at
+        ``_DRIVER_SCAN_LIMIT`` before exhausting the tree.
     """
-    ws = Path(workspace)
-    if not ws.is_dir():
-        return [Check("driver", WARN, f"{ws} is not a directory")]
-
     found: List[Path] = []
     stale: List[str] = []
     scanned = 0
@@ -569,6 +560,34 @@ def check_driver(workspace: str) -> List[Check]:
         for pattern, why in _STALE_PATTERNS:
             if pattern in code:
                 stale.append(f"{path.name}: {why}")
+    return found, stale, truncated
+
+
+def check_driver(workspace: str) -> List[Check]:
+    """Is there a scaffolded driver here, and was it generated recently?
+
+    WHY THE DOCTOR AND NOT A DOCSTRING.  The generator already encodes the
+    known-good recipe — the connect timeout, terminal detection that handles
+    BOTH termini, env_file, client_type, and the fact that a refused create
+    raises rather than returning None.  A consumer who hand-wrote a client
+    instead reported afterwards that every mistake they made was in the half
+    they wrote by hand, and that a pointer sitting in a field's docstring
+    would not have helped: you only look for a second source when the first
+    admits uncertainty, and a wrong sentence never does.
+
+    A check EXECUTES.  It cannot silently go stale the way a cross-reference
+    can, it fires at preflight when the advice is still actionable, and it is
+    in the one tool people already run when something is off.
+
+    WARN, never FAIL: hand-writing a client is legitimate, and a workspace
+    may hold no driver because it holds none yet.  The doctor's exit code
+    gates CI, and a suggestion has no business failing a build.
+    """
+    ws = Path(workspace)
+    if not ws.is_dir():
+        return [Check("driver", WARN, f"{ws} is not a directory")]
+
+    found, stale, truncated = _find_scaffolded_drivers(ws)
 
     if not found:
         detail = (

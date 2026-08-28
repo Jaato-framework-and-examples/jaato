@@ -105,7 +105,12 @@ BASELINE: Dict[str, int] = {
     "jaato-server/server/core.py::JaatoServer._check_auth_completion": 17,
     "jaato-server/server/core.py::JaatoServer._emit_conversation_replay": 19,
     "jaato-server/server/core.py::JaatoServer._setup_permission_hooks.on_permission_requested": 35,
-    "jaato-server/server/core.py::JaatoServer._start_model_thread.model_thread": 36,
+    # Raised 36 -> 41 by #654, which added the completion-gap give-up
+    # predicate to the model loop.  Called out rather than re-frozen: the
+    # loop is a single long function by construction and splitting it is a
+    # real refactor, not a tidy-up to bundle into a CI change.  It is the
+    # one entry in this file that moved the ratchet the wrong way.
+    "jaato-server/server/core.py::JaatoServer._start_model_thread.model_thread": 41,
     "jaato-server/server/core.py::JaatoServer.execute_command": 28,
     "jaato-server/server/core.py::JaatoServer.initialize": 44,
     "jaato-server/server/core.py::JaatoServer.initialize._run_load_plugins": 17,
@@ -576,15 +581,39 @@ def _scan() -> Dict[str, int]:
 
 @pytest.fixture(scope="module")
 def scores() -> Dict[str, int]:
-    """Current complexity of every function in the scanned packages."""
+    """Current complexity of every function in the scanned packages.
+
+    FAILS, rather than skips, when it cannot find the tree.  ``_repo_root``
+    is positional — ``parents[3]`` from this file — so moving this file one
+    directory deeper resolves the root to ``jaato-server/`` and finds none of
+    the packages.  Skipping there means green CI with the guard doing
+    nothing, and the only tell is that a 7s test took 0.08s.
+
+    That is precisely the failure this module hard-errors on a missing
+    ``radon`` to avoid, and it must be consistent about it: a guard that
+    cannot find what it audits is STALE, and stale is a failure, not an
+    absence.
+    """
     root = _repo_root()
     missing = [p for p in PACKAGES if not (root / p).is_dir()]
-    if missing:
-        pytest.skip(
-            f"package directories not present at {root}: {', '.join(missing)} "
-            "— the audit only runs against a full checkout"
-        )
-    return _scan()
+    assert not missing, (
+        f"the audit cannot find {', '.join(missing)} under {root}, so it is "
+        f"inspecting nothing.\n\n"
+        f"``_repo_root()`` returns parents[3] of this file, which assumes it "
+        f"lives at <root>/jaato-server/shared/tests/.  If this file moved, "
+        f"re-aim ``_repo_root`` — do NOT relax this assertion.\n\n"
+        f"This fails rather than skips on purpose: a complexity guard that "
+        f"silently passes because it found no code is worse than no guard, "
+        f"because it reports success."
+    )
+
+    found = _scan()
+    assert found, (
+        f"the walk over {', '.join(PACKAGES)} under {root} produced no "
+        f"functions at all.  Every assertion in this file passes trivially "
+        f"against an empty scan, so this is a stale guard reporting success."
+    )
+    return found
 
 
 def test_no_new_functions_over_ceiling(scores: Dict[str, int]) -> None:
