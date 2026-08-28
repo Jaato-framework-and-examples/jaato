@@ -560,7 +560,11 @@ class MemoryPlugin(RunnerForwardingMixin):
                 name='list_memory_tags',
                 description=(
                     'List all available memory tags to discover what has been stored. '
-                    'Useful for exploring the knowledge base or finding related topics.'
+                    'Useful for exploring the knowledge base or finding related topics. '
+                    'Tags and memory_count describe the CURATED store; '
+                    'pending_curation reports how many raw memories are still '
+                    'awaiting review, which no tag search can reach — use '
+                    "retrieve_memories with maturity='raw' for those."
                 ),
                 parameters={
                     "type": "object",
@@ -1316,7 +1320,17 @@ class MemoryPlugin(RunnerForwardingMixin):
             args: Tool arguments (none)
 
         Returns:
-            Result dict with all tags
+            Result dict describing BOTH stores, because they answer
+            different questions and only one of them is tag-searchable:
+
+            * ``tags`` / ``count`` / ``memory_count`` — the CURATED store,
+              which is what the indexer builds from and what tag search
+              reads.
+            * ``pending_curation`` — how many memories sit in the RAW
+              queue awaiting curator review.  Unreachable by tag search
+              (``retrieve_memories`` with ``maturity='raw'`` is the way
+              in), so it is reported here or a curator cannot learn its
+              queue is non-empty.
         """
         self._trace("list_memory_tags")
         if not self._indexer:
@@ -1328,17 +1342,50 @@ class MemoryPlugin(RunnerForwardingMixin):
         tags = self._indexer.get_all_tags()
         memory_count = self._indexer.get_memory_count()
 
-        # Maturity breakdown for telemetry
+        # Maturity breakdown.  Counts the RAW QUEUE as well as the curated
+        # store — unlike ``memory_count``, which comes from the indexer and
+        # so describes the curated store only (the same store ``tags``
+        # describes; the two must keep agreeing).
         maturity_counts = {}
         if self._storage:
             maturity_counts = self._storage.count_by_maturity()
+        pending_curation = maturity_counts.get(MATURITY_RAW, 0)
+
+        # THE RAW QUEUE MUST BE VISIBLE TO THE MODEL, NOT ONLY TO TELEMETRY.
+        #
+        # This handler used to answer "Found 0 memories" while holding
+        # "raw: 12" in the same dict, because the raw count went to
+        # ``_telemetry`` (which the model never sees) and nothing else said
+        # the queue existed.  A curator agent asked what was in the store,
+        # was told nothing was, and correctly concluded there was nothing to
+        # curate — with twelve raw memories on disk.  Two curator sessions
+        # reasoned soundly from that false premise; one hedged that "the
+        # memory write hasn't landed yet".
+        #
+        # ``memory_count`` keeps its meaning (curated only) rather than
+        # being widened to the true total: it is the count of the store
+        # ``tags`` indexes, and a number that silently changed denominator
+        # would break the callers that pair them.  The queue gets its own
+        # name instead, and the message names the retrieval that reaches it,
+        # since tag search cannot (``search_by_tags`` reads the curated
+        # store only — see ``_execute_retrieve``).
+        message = (
+            f"Found {memory_count} curated memories "
+            f"with {len(tags)} unique tags"
+        )
+        if pending_curation:
+            message += (
+                f"; {pending_curation} raw awaiting curation "
+                f"(retrieve_memories with maturity='raw')"
+            )
 
         return {
             "status": "success",
             "tags": sorted(tags),
             "count": len(tags),
             "memory_count": memory_count,
-            "message": f"Found {memory_count} memories with {len(tags)} unique tags",
+            "pending_curation": pending_curation,
+            "message": message,
             "_telemetry": {
                 "jaato.memory.operation": "list_tags",
                 "jaato.memory.total_count": memory_count,

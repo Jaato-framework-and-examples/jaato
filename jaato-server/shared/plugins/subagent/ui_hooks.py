@@ -359,6 +359,7 @@ class AgentUIHooks(Protocol):
         show_output: Optional[bool] = None,
         show_popup: Optional[bool] = None,
         is_error_result: bool = False,
+        result_status: Optional[str] = None,
     ) -> None:
         """Called when a tool finishes executing.
 
@@ -373,6 +374,13 @@ class AgentUIHooks(Protocol):
                 status_code >= 400) even though ``success`` is True. Distinct
                 from ``success`` (which only catches raised exceptions /
                 permission / missing-executor).
+            result_status: The tool result's own ``status`` string, copied
+                verbatim when it declares one (``send_to_sibling`` →
+                ``accepted`` / ``queued`` / ``refused`` / ``sibling_cold`` /
+                ``no_such_sibling``).  Lets a consumer branch on WHICH
+                outcome occurred without matching on ``error_message``
+                prose.  ``None`` when the tool declares no status — that is
+                silence, not an outcome.
             call_id: Unique identifier for this tool call (for correlation).
             backgrounded: True if tool was auto-backgrounded (still producing output).
             continuation_id: Session ID for tools that expect follow-up calls

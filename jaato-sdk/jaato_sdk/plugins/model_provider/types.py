@@ -472,6 +472,35 @@ def tool_result_is_error(result: Any) -> bool:
     return "error" in result or result.get("status_code", 200) >= 400
 
 
+def tool_result_status(result: Any) -> Optional[str]:
+    """The tool result's own ``status`` string, when it declares one.
+
+    Many tools answer with a small vocabulary of outcomes rather than a
+    bare success/failure: ``send_to_sibling`` returns ``accepted`` /
+    ``queued`` / ``refused`` / ``sibling_cold`` / ``no_such_sibling``, and
+    the distinction is load-bearing for a cascade driver -- ``refused`` is
+    backpressure and means "let the peer work", while ``sibling_cold``
+    means the peer will never wake and the loop is over.  Both arrive as
+    ``success=False`` with the reason only in the human-readable
+    ``error_message``, so a driver that must tell them apart has no choice
+    but to match on a sentence.
+
+    This lifts that vocabulary onto the event stream verbatim.  It is
+    deliberately NOT interpreted here: the framework does not own the set
+    of statuses a tool may define, so it copies the string and lets the
+    consumer branch on it.  Returns ``None`` when the result is not a dict
+    or carries no string ``status`` -- most tools -- and consumers must
+    treat ``None`` as "this tool says nothing", never as an outcome.
+
+    Companion to :func:`tool_result_is_error`, which answers the different
+    (boolean) question of whether the body represents a failure at all.
+    """
+    if not isinstance(result, dict):
+        return None
+    status = result.get("status")
+    return status if isinstance(status, str) else None
+
+
 @dataclass
 class Part:
     """A part of a message content.

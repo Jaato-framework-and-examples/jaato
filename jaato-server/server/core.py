@@ -3562,13 +3562,14 @@ class JaatoServer:
             def on_tool_call_end(self, agent_id, tool_name, success, duration_seconds,
                                  error_message=None, call_id=None, backgrounded=False,
                                  continuation_id=None, show_output=None, show_popup=None,
-                                 is_error_result=False):
+                                 is_error_result=False, result_status=None):
                 server.emit(ToolCallEndEvent(
                     agent_id=agent_id,
                     tool_name=tool_name,
                     call_id=call_id,
                     success=success,
                     is_error_result=is_error_result,
+                    result_status=result_status,
                     duration_seconds=duration_seconds,
                     error_message=error_message,
                     backgrounded=backgrounded,
@@ -4797,6 +4798,7 @@ class JaatoServer:
                             show_output=payload.get("show_output"),
                             show_popup=payload.get("show_popup"),
                             is_error_result=bool(payload.get("is_error_result", False)),
+                            result_status=payload.get("result_status"),
                         )
                     return
 
