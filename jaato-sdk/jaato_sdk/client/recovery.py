@@ -576,8 +576,11 @@ class IPCRecoveryClient:
                 (``model``, ``plugins``, ``system_instructions``, ...).
                 See ``IPCClient.create_session`` for the full list.
                 Mutually exclusive forms — pass one or the other.
-            agent: Optional agent name. The agent's rendered markdown
-                becomes the session's system instructions.
+            agent: Optional agent name — WHO the session is, as opposed
+                to ``profile``, which is what it can do.  Its rendered
+                markdown is one LAYER of the assembled system instructions,
+                not the whole of them; see
+                :meth:`IPCClient.create_session` for the full contract.
             agent_params: Parameter values for the agent's ``{{param}}``
                 placeholders.
             sibling_name: Cascade-scoped address; see
