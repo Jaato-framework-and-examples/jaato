@@ -80,12 +80,13 @@ class CascadePoolCase(unittest.TestCase):
         (d / "task.yaml").write_text(text)
         return load_manifest(d / "task.yaml")
 
-    def _sweep(self, tasks, behaviour):
+    def _sweep(self, tasks, behaviour, **kw):
         _install_stub_sdk(behaviour)
         arms = build_matrix(tasks, [])
         store = ResultStore(self.root / "out.jsonl")
         return asyncio.run(run_sweep(
-            arms, store=store, workspace_root=self.root / "ws", concurrency=1))
+            arms, store=store, workspace_root=self.root / "ws",
+            concurrency=1, **kw))
 
     def test_one_pool_per_budgeted_task_with_its_ladder(self):
         b = {"writes": "READY\n"}
@@ -148,3 +149,36 @@ class CascadePoolCase(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ResumeSkipsRecordedArmsCase(CascadePoolCase):
+    """End-to-end: --resume must not re-spend on an arm already recorded.
+
+    The pieces were covered (completed_arm_ids, the parser flag); the
+    WIRING was not, and a resume that silently re-ran everything would
+    look identical to one that worked — the sweep completes either way.
+    The witness is how many sessions the stub was asked to open.
+    """
+
+    def test_a_recorded_arm_is_not_rerun(self):
+        task = self._task("a", BUDGETED)          # repeats: 2 -> two arms
+        b = {"writes": "READY\n"}
+        first = self._sweep([task], b)
+        self.assertEqual(len(first), 2)
+        opened_first = len(b["clients"])
+
+        b2 = {"writes": "READY\n"}
+        again = self._sweep([task], b2, resume=True)
+        self.assertEqual(again, [], "both arms were already recorded")
+        self.assertEqual([c for c in b2.get("clients", []) if not c.is_owner], [],
+                         "resume opened a session for an arm it should have skipped")
+        self.assertGreater(opened_first, 0)
+
+    def test_without_resume_the_same_arms_run_again(self):
+        """The contrast that makes the test above mean something."""
+        task = self._task("a", BUDGETED)
+        b = {"writes": "READY\n"}
+        self._sweep([task], b)
+        b2 = {"writes": "READY\n"}
+        again = self._sweep([task], b2)
+        self.assertEqual(len(again), 2)

@@ -186,7 +186,7 @@ give you, and it costs nothing extra to collect.
 python3 -m unittest discover -s tests -t .      # no daemon, no SDK needed
 ```
 
-113 tests. The runner is covered end-to-end against a stubbed SDK
+144 tests. The runner is covered end-to-end against a stubbed SDK
 (`tests/test_runner_integration.py`) — PASS, FAIL and BLOCKED arms, usage
 accumulation, the `config_root`/workspace split, and `.env` profile-set
 propagation.
@@ -214,6 +214,31 @@ working judge scored **0.0 while `answer.txt` held `READY`**, because it
 reasoned from the agent's completion payload instead of opening the file. The
 schema now requires reading the artefact and quoting the bytes. A rubric that
 scores the claim measures the claim.
+
+### The judge is not yet a trustworthy instrument
+
+Roughly one run in four, the judge **skips its verification step** — it does
+not call the tool, and says so, because the rubric requires it to. Three of
+four failures captured read "I did not open answer.txt"; only one was an
+actual tool error. That is a property of LLM judges, not a framework defect,
+and nothing in this package fixes it.
+
+What this package does is stop it being attributed to the thing under test.
+A judge reports any reason it could not carry out the assessment in
+`errors[]`, and a non-empty `errors[]` is **BLOCKED, never FAIL** — a judge
+that did not judge is not evidence about the agent. Before that, the
+admission sat in `reasoning` while `errors[]` was empty, and arms were
+recorded as failures with correct artefacts on disk.
+
+So: `script` and `processor` graders are usable for measurement today. Do not
+publish judge-based numbers from this engine until the skip rate is
+understood; the per-arm records will show you BLOCKED rows rather than a
+pass rate that quietly averages them.
+
+**Report per arm, never averaged.** On a two-arm sample this engine appeared
+to show one model outscoring another; at four arms both models were scoring
+1.0 on one repeat and 0.0 on the other. An average over two repeats would
+have read as a real difference in model quality.
 
 ### Validated against a live daemon
 
