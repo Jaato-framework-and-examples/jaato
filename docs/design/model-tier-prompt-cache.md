@@ -1,11 +1,11 @@
 # Model Tiers × Prompt Caching — Assessment & Plan
 
-**Status**: ASSESSMENT, with the plumbing and the instrumentation
-fixed. CLOSED: the config gap (§4), the tier-switch re-wire (§5.2), the
-model-invalidation half of Google's `CachedContent` binding (§5.3), the
-invisibility of the miss (§5.4), and the reliability attribution (§5.5).
-STILL OPEN: the tier line inside the cached system block (§5.1), the
-Google mismatch guard, and everything in §6.
+**Status**: ASSESSMENT, with every identified defect fixed. CLOSED: the
+config gap (§4), the mutable tier line in the cached system block (§5.1),
+the tier-switch re-wire (§5.2), the model-invalidation half of Google's
+`CachedContent` binding (§5.3), the invisibility of the miss (§5.4), and
+the reliability attribution (§5.5). STILL OPEN: the Google mismatch
+guard, the common `cache:` profile field (§7), and everything in §6.
 
 §6 is where the original cost question actually gets answered, and it is
 now answerable: with §5.4 landed, a real tiered session reports what its
@@ -34,8 +34,8 @@ uncached at the new model.
 On top of that structural cost, three self-inflicted problems and one
 measurement gap:
 
-- the session appends a tier-identity line to the **system block**, which
-  is the root of every cached prefix (§5.1) — **open**;
+- the session appended a tier-identity line to the **system block**, the
+  root of every cached prefix (§5.1) — **fixed**;
 - the cache plugin was wired once and never re-wired or re-informed on a
   switch, so a cross-provider tier ran with no cache plugin at all
   (§5.2) — **fixed**;
@@ -211,11 +211,11 @@ still notices the defect being put back.
 
 ## 5. Open defects
 
-### 5.1 The tier line mutates the system block
+### 5.1 The tier line mutates the system block — FIXED
 
-`_get_effective_system_instruction` (`shared/jaato_session.py:10141`)
-appends `"You are currently operating in the \`<tier>\` tier."` to the
-system prompt on every turn. The Anthropic provider folds
+`_get_effective_system_instruction` appended
+`"You are currently operating in the \`<tier>\` tier."` to the system
+prompt on every turn. The Anthropic provider folds
 `system_instruction` into a **single** text block
 (`anthropic/provider.py:777`), and the cache plugin places BP1 on that
 block (`cache_anthropic/plugin.py:289`). So the tier line sits inside the
@@ -231,11 +231,44 @@ session already used, two tiers sharing one model, and every
 implicit-prefix-caching upstream (OpenAI, DeepSeek, Grok, Gemini) reached
 through openrouter's default `cache_prompt: "auto"`.
 
-**Proposal**: remove the line from the system block. It is redundant —
-`switch_tier` already returns `active_tier` in the tool result the model
-reads. If a per-turn reminder is judged necessary, it belongs at the
-*tail* of the message list (after the last cache breakpoint), never in
-the prefix.
+**The fix.** The system block now carries tier **protocol** instead of
+tier **state** — a line that is byte-identical for the life of the
+session:
+
+> This session runs in multi-tier mode and started in the `dispatcher`
+> tier. Your active tier changes only when you call `enter_tier`, which
+> reports the tier you land in.
+
+`initial_tier` is a config value that never changes (a budget rung
+rebinds a tier's *model*, not which tier is initial), so BP1 survives
+every switch, and with it BP2 and BP3.
+
+The current tier stays derivable — start point plus the `enter_tier`
+results already in history — without restating mutable state in the one
+place that must not carry any. The model does not need it in order to
+*decide*: `enter_tier` is chosen by the work about to be done rather than
+by where it currently is, and entering the active tier is a documented
+no-op. What it loses is a per-turn restatement; the earlier fallback idea
+of moving that to the message *tail* stays available if the loss ever
+shows up in practice, and would touch message assembly rather than the
+prefix.
+
+The invariant is now asserted directly — the system instruction must be
+byte-identical across two switches
+(`test_the_system_instruction_does_not_change_across_a_switch`, with a
+`REVERSIONS` entry) — rather than left as a property of the text.
+
+**This is what made §5.3 load-bearing.** While the tier line moved, a
+Google `CachedContent`'s system+tools hash changed on every switch and
+forced a rebuild, which accidentally covered the fact that the hash has
+no notion of the model. With the block stable the hash no longer changes,
+so the only thing between a tier switch and a cache bound to the wrong
+model is §5.3's `set_model_name` discard. The two fixes were made in
+separate commits and each reads as safe alone, so the combination is
+asserted rather than reasoned about:
+`TestTheGoogleCacheFollowsTheModel` drives the real plugin through a
+session tier switch with an unchanged hash and requires the cache to be
+dropped.
 
 ### 5.2 The cache plugin is never re-wired on a switch — FIXED
 
@@ -539,7 +572,7 @@ provider's config.
 - [x] one merge function shared by `create_provider` and the cache-plugin
       config, with an executable agreement guard (§4)
 - [x] cache knobs declared in `PROVIDER_KNOBS` for anthropic + google_genai (§4)
-- [ ] drop the tier line from the system block (§5.1)
+- [x] drop the tier line from the system block (§5.1)
 - [x] re-wire the cache plugin on tier switch; push the model name (§5.2)
 - [x] Google's `CachedContent` discarded when the model changes (§5.3)
 - [ ] Google mismatch guard: never emit a name bound to another model (§5.3)

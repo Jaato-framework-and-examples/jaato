@@ -12,11 +12,39 @@ Covers:
     mode active) and execution paths (valid switch, invalid arg,
     invalid tier name, programmer-error guard).
   * ``_get_effective_system_instruction`` composition: with/without
-    tier mode, with/without base instructions.
+    tier mode, with/without base instructions, and its cache invariant --
+    the string must be BYTE-IDENTICAL across a tier switch, because the
+    provider folds it into one content block that the cache breakpoint
+    sits on.
 """
 
 import pytest
 from unittest.mock import MagicMock
+
+from shared.tests.test_every_guard_detects_its_own_reversion import Reversion
+
+#: The defect, put back: the system block names the CURRENT tier, so it is
+#: rewritten on every switch and takes the whole cached prefix with it.
+REVERSIONS = [
+    Reversion(
+        target="jaato-server/shared/jaato_session.py",
+        find=(
+            '            f"This session runs in multi-tier mode and started'
+            ' in the "\n'
+            '            f"`{self._tier_config.initial_tier}` tier.  Your'
+            ' active tier "\n'
+            '            f"changes only when you call `enter_tier`, which'
+            ' reports the "\n'
+            '            f"tier you land in."'
+        ),
+        replace=(
+            '            f"You are currently operating in the "\n'
+            '            f"`{self._active_tier}` tier."'
+        ),
+        test="test_the_system_instruction_does_not_change_across_a_switch",
+        because="mutable state at the head of every cached prefix",
+    ),
+]
 
 from ..model_tiers import (
     DEFAULT_INITIAL_TIER,
@@ -354,18 +382,47 @@ class TestJaatoSessionTierMode:
         with pytest.raises(RuntimeError, match="single-model mode"):
             s.switch_tier("planner")
 
-    def test_get_effective_system_instruction_appends_tier_line(self):
+    def test_get_effective_system_instruction_appends_tier_protocol(self):
+        """Tier mode adds one line, and it names where the session STARTED.
+
+        It used to name the tier currently active, rewritten on every
+        switch — mutable state at the head of the cached prefix.  See
+        ``docs/design/model-tier-prompt-cache.md`` §5.1.
+        """
         s = self._session()
         s.configure(tier_config=self._three_tier_cfg())
         eff = s._get_effective_system_instruction()
         assert "Base." in eff
-        assert "currently operating in the `dispatcher` tier" in eff
+        assert "started in the `dispatcher` tier" in eff
+        assert "enter_tier" in eff
 
     def test_get_effective_system_instruction_no_tier_no_line(self):
         s = self._session()
         s.configure()  # single-model mode
         eff = s._get_effective_system_instruction()
-        assert "currently operating" not in (eff or "")
+        assert "multi-tier mode" not in (eff or "")
+
+    def test_the_system_instruction_does_not_change_across_a_switch(self):
+        """THE cache invariant this line exists under.
+
+        The provider folds system instruction into ONE content block and
+        the cache breakpoint sits on it, so a single differing character
+        invalidates the prefix — and tools and history behind it.
+        """
+        s = self._session()
+        s.configure(tier_config=self._three_tier_cfg())
+        before = s._get_effective_system_instruction()
+
+        s.switch_tier("executor")
+        after_switch = s._get_effective_system_instruction()
+        s.switch_tier("planner")
+        after_second = s._get_effective_system_instruction()
+
+        assert before == after_switch == after_second, (
+            "the system instruction changed across a tier switch; that is a "
+            "full prefix invalidation on every switch, tools and history "
+            "included"
+        )
 
 
 # ---------------------------------------------------------------------------

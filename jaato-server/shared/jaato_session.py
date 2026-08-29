@@ -10362,17 +10362,46 @@ NOTES
     def _get_effective_system_instruction(self) -> Optional[str]:
         """System instruction to send to the provider on this turn.
 
-        Equal to the assembled :attr:`_system_instruction` plus a single
-        line naming the current tier when tier mode is active.
-        Recomputed dynamically (not stored on ``_system_instruction``)
-        so tier switches take effect immediately without re-assembling
-        the whole prompt — and so the assembled instruction stays a
-        stable cache anchor for providers that key prompt cache on it.
+        The assembled :attr:`_system_instruction` plus, in tier mode, one
+        line of tier PROTOCOL.  **Byte-identical for the life of the
+        session**, which is the whole point: this string is the head of
+        every cached prefix, so anything mutable in it invalidates the
+        cache on every change and takes tools and history down with it.
+
+        It used to name the CURRENT tier ("You are currently operating in
+        the ``executor`` tier"), rewritten on every switch.  The old
+        docstring claimed the assembled instruction stayed "a stable cache
+        anchor"; that was true of :attr:`_system_instruction` in memory
+        and false of what went on the wire, because the provider folds the
+        two into ONE content block and the cache breakpoint sits on it.
+        The result was a full prefix invalidation per tier switch —
+        including the cases that should have hit, such as returning to a
+        tier the session had already used, two tiers sharing one model,
+        and every implicit-prefix-caching upstream.  See
+        ``docs/design/model-tier-prompt-cache.md`` §5.1.
+
+        What the model gets instead is stable and sufficient:
+
+        * where the session STARTED (``initial_tier``, a config value that
+          never changes — budget rungs rebind a tier's *model*, not which
+          tier is initial); and
+        * the rule that the tier changes only via ``enter_tier``, whose
+          result reports the tier landed in.
+
+        So the current tier is derivable — start point plus the switches
+        recorded in history — without restating mutable state in the one
+        place that must not carry any.  The model does not need it to
+        DECIDE anyway: ``enter_tier`` is chosen by the work about to be
+        done, not by where it currently is, and entering the active tier
+        is a documented no-op.
         """
         if self._active_tier is None:
             return self._system_instruction
         tier_line = (
-            f"You are currently operating in the `{self._active_tier}` tier."
+            f"This session runs in multi-tier mode and started in the "
+            f"`{self._tier_config.initial_tier}` tier.  Your active tier "
+            f"changes only when you call `enter_tier`, which reports the "
+            f"tier you land in."
         )
         if self._system_instruction:
             return self._system_instruction + "\n\n" + tier_line

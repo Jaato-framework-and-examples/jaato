@@ -250,6 +250,71 @@ class TestSameProviderTier:
         assert plugin.model_names[-1] == 'claude-haiku-4-5'
 
 
+class TestTheGoogleCacheFollowsTheModel:
+    """The scenario §5.1 turns from masked into live.
+
+    A Google ``CachedContent`` is bound to ONE model at creation, while
+    the plugin's reuse test hashes system+tools and has no notion of the
+    model.  That was survivable only because the system block used to name
+    the current tier, so its text — and therefore the hash — changed on
+    every switch and forced a rebuild.
+
+    §5.1 makes the system block byte-identical across a switch.  So the
+    hash no longer changes, and the ONLY thing standing between a tier
+    switch and a cache bound to the wrong model is
+    ``set_model_name`` discarding it.  Asserted here rather than reasoned
+    about, because the two fixes were made in separate commits and each
+    reads as safe alone.
+    """
+
+    def test_switching_model_drops_a_cache_the_hash_would_have_reused(
+            self, monkeypatch):
+        from shared.plugins.cache_google_genai.plugin import (
+            GoogleGenAICachePlugin,
+        )
+        import shared.plugins.cache as cache_mod
+
+        plugin = GoogleGenAICachePlugin()
+
+        s = _session(monkeypatch, tiers={
+            'dispatcher': TierEntry(model='gemini-3-flash'),
+            'planner': TierEntry(model='gemini-3-pro'),
+        }, initial='dispatcher', cache_providers=('google_genai',))
+
+        # Swap in the REAL plugin, after ``_session`` has installed its own
+        # stub loader — it patches the same name, so this has to come second.
+        def _loader(provider_name, config):
+            plugin.initialize({'enable_caching': True,
+                               'model_name': config.get('model_name')})
+            plugin.set_client(MagicMock())
+            return plugin
+
+        monkeypatch.setattr(
+            cache_mod, 'load_cache_plugin_for_provider', _loader)
+        s._provider.name = 'google_genai'
+        s._active_provider_name = 'google_genai'
+        s._cache_plugins_by_provider.clear()
+        s._wire_cache_plugin()
+        assert s._cache_plugin is plugin
+
+        # A live cache, and a hash that a switch would now leave untouched
+        # because system+tools do not change with the tier any more.
+        plugin._cached_content_name = 'cachedContents/flash-bound'
+        plugin._content_hash = 'unchanged-across-the-switch'
+
+        s.switch_tier('planner')
+
+        assert plugin._model_name == 'gemini-3-pro'
+        assert plugin._cached_content_name is None, (
+            'the plugin still holds a CachedContent created for '
+            'gemini-3-flash while the session now runs gemini-3-pro'
+        )
+        assert plugin._content_hash is None, (
+            'a surviving hash lets the next request reuse the cache bound '
+            'to the previous model'
+        )
+
+
 class TestFailureIsNotFatal:
 
     def test_a_re_wire_failure_leaves_the_switch_done(self, monkeypatch):
