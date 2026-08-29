@@ -17,6 +17,41 @@ from .model_provider.types import ToolSchema
 # trait membership.
 # ---------------------------------------------------------------------------
 
+TRAIT_SESSION_PERSISTENT = "session_persistent"
+"""Plugin-level trait identifying plugins with state that must OUTLIVE an
+unload/reload of the same session.
+
+Plugins declaring this trait MUST implement ``get_persistence_state()``
+and ``restore_persistence_state()`` (see :class:`ToolPlugin`).
+``SessionManager`` snapshots them at save time into
+``metadata['plugin_states'][<name>]`` and hands the value back on load.
+
+The generic save/restore loops discover implementers by ``hasattr``, so
+the trait is not what makes persistence work — it makes participation
+DECLARED.  The mechanism existed and worked for four plugins while the
+protocol only described it in a comment, and the one plugin that most
+needed it never implemented it (#706).  An undeclared capability is one
+an author cannot find.
+
+The trait exists so the framework can enumerate participating plugins
+without calling a method on every registered plugin.
+
+**This is a different question from** ``reset_for_next_session()``.  That
+hook asks "should this survive the NEXT session of the same cascade?";
+this trait asks "should this survive THIS session being unloaded and
+reloaded?".  The two axes are orthogonal and a plugin can want either,
+both, or neither:
+
+===============================  ==================  ==================
+state                            survives cascade    survives reload
+                                 reset?              (this trait)?
+===============================  ==================  ==================
+LSP server connections           yes                 no — unserialisable
+permission session whitelist     no                  yes
+cached config files              yes                 n/a — re-read
+===============================  ==================  ==================
+"""
+
 TRAIT_AUTH_PROVIDER = "auth_provider"
 """Plugin-level trait identifying authentication plugins.
 
@@ -392,6 +427,64 @@ class EnrichmentPlugin(Protocol):
 
 # Type alias for any plugin accepted by the registry
 AnyPlugin = Any  # Union[ToolPlugin, EnrichmentPlugin] — using Any for duck-typing compat
+
+
+@runtime_checkable
+class SessionPersistentPlugin(Protocol):
+    """Optional protocol for plugins whose state must survive a reload.
+
+    **Why this is separate from** :class:`ToolPlugin`.  ``ToolPlugin`` is
+    ``@runtime_checkable`` and the registry hard-gates discovery on
+    ``isinstance(plugin, ToolPlugin)`` (``registry.py:618``), so every
+    method added there silently DROPS every plugin that does not implement
+    it — discovery returns a shorter list and the plugin is simply gone.
+    That is why this contract lived for years as a commented-out block in
+    this file: it could not be declared where it belonged.  A separate
+    protocol makes it declarable and checkable without touching the
+    conformance gate, so plugins opt in and nothing else notices.
+
+    ``SessionManager`` already drives both halves generically, discovering
+    implementers by ``hasattr``: the save loop snapshots each exposed
+    plugin into ``metadata['plugin_states'][<name>]``, and the load path
+    hands each value back.  Implementing this protocol is therefore
+    sufficient; declaring :data:`TRAIT_SESSION_PERSISTENT` alongside makes
+    the participation visible to readers and to guards.
+
+    **Distinct from** ``ToolPlugin.reset_for_next_session()``.  That asks
+    "should this survive the NEXT session of the same cascade?"; this asks
+    "should this survive THIS session being reloaded?".  Orthogonal — see
+    :data:`TRAIT_SESSION_PERSISTENT`.
+    """
+
+    def get_persistence_state(self) -> Optional[Dict[str, Any]]:
+        """Return state that must survive a save/reload, or ``None``.
+
+        Must be JSON-serialisable, and the plugin owns the encoding: emit
+        a ``set`` as a sorted list so an unchanged policy produces an
+        unchanged journal entry.  Return ``None`` / ``{}`` when there is
+        nothing to persist — the save loop skips falsy values, so the
+        session writes no key at all.
+        """
+        ...
+
+    def restore_persistence_state(self, state: Dict[str, Any]) -> None:
+        """Re-apply a snapshot from :meth:`get_persistence_state`.
+
+        **Ordering guarantee**: runs after ``initialize()`` has read
+        on-disk config.  Load-bearing — the state being restored is the
+        operator's RUNTIME decisions, which must win over the file.
+        Restoring earlier lets disk config clobber them, which is the
+        failure this exists to prevent (jaato #706: session permission
+        grants and denials were rebuilt from ``permissions.json`` and lost
+        on every reattach).
+
+        Read defensively.  A snapshot from an older plugin version, or a
+        hand-edited session file, must not make the session unloadable:
+        ignore keys you no longer understand and skip malformed values
+        rather than raising.  A dropped rule is visible to the operator; a
+        session that will not load is not.
+        """
+        ...
 
 
 @runtime_checkable
@@ -930,53 +1023,10 @@ class ToolPlugin(Protocol):
     #     """
     #     ...
     #
-    # Session Persistence:
-    #
-    # Plugins that maintain state across turns (e.g., plans, task tracking)
-    # can implement these methods to persist and restore their state when
-    # sessions are saved/loaded. The session_manager calls these via hasattr()
-    # checks, so they are optional.
-    #
-    # def get_persistence_state(self) -> Dict[str, Any]:
-    #     """Return plugin state for session persistence.
-    #
-    #     Called by session_manager when saving a session. Return a dict
-    #     containing all state that should survive session restart.
-    #
-    #     The returned dict must be JSON-serializable. Avoid including:
-    #     - Callbacks or function references
-    #     - File handles or connections
-    #     - Thread-local data
-    #
-    #     Returns:
-    #         Dict with JSON-serializable state.
-    #
-    #     Example:
-    #         def get_persistence_state(self) -> Dict[str, Any]:
-    #             return {
-    #                 "agent_plan_ids": self._current_plan_ids,
-    #                 "version": 1,  # For future migrations
-    #             }
-    #     """
-    #     ...
-    #
-    # def restore_persistence_state(self, state: Dict[str, Any]) -> None:
-    #     """Restore plugin state from session persistence.
-    #
-    #     Called by session_manager when loading a session. The state dict
-    #     is exactly what was returned by get_persistence_state().
-    #
-    #     Plugins should:
-    #     - Restore internal data structures
-    #     - Re-register any dynamic hooks/callbacks that were lost
-    #     - Handle version migrations if state format has changed
-    #
-    #     Args:
-    #         state: State dict from get_persistence_state().
-    #
-    #     Example:
-    #         def restore_persistence_state(self, state: Dict[str, Any]) -> None:
-    #             self._current_plan_ids = state.get("agent_plan_ids", {})
+    # Session Persistence: see the SessionPersistentPlugin protocol above.
+    # It cannot live on ToolPlugin -- this protocol is @runtime_checkable
+    # and the registry gates discovery on isinstance(), so adding a method
+    # here drops every plugin that lacks it.  See jaato #706/#707.
     #             # Re-register callbacks that can't be serialized
     #             self._setup_hooks()
     #     """

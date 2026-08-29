@@ -9,6 +9,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from jaato_sdk.plugins.base import TRAIT_SESSION_PERSISTENT
+
 from jaato_sdk.plugins.base import (
     CommandCompletion,
     CommandParameter,
@@ -67,6 +69,11 @@ class ReliabilityPlugin(RunnerForwardingMixin):
     profiles for each tool+parameters combination. When failures exceed
     configured thresholds, tools are escalated to require explicit approval.
     """
+
+    # Participates in the generic session-persistence loop
+    # (SessionManager save/restore).  Declared so the capability is
+    # discoverable rather than implied by hasattr -- see #707.
+    plugin_traits = frozenset({TRAIT_SESSION_PERSISTENT})
 
     def __init__(self, config: Optional[ReliabilityConfig] = None):
         self._config = config or ReliabilityConfig()

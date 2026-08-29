@@ -14,6 +14,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 
+from jaato_sdk.plugins.base import TRAIT_SESSION_PERSISTENT
+
 logger = logging.getLogger(__name__)
 
 from jaato_sdk.plugins.base import CommandCompletion, CommandParameter, HelpLines, UserCommand
@@ -62,6 +64,11 @@ class ServiceConnectorPlugin(RunnerForwardingMixin):
     - import_bruno_collection: Import from Bruno
     - configure_service_auth: Set up authentication
     """
+
+    # Participates in the generic session-persistence loop
+    # (SessionManager save/restore).  Declared so the capability is
+    # discoverable rather than implied by hasattr -- see #707.
+    plugin_traits = frozenset({TRAIT_SESSION_PERSISTENT})
 
     def __init__(self):
         """Initialize the service connector plugin."""
