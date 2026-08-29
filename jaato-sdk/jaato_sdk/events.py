@@ -1002,6 +1002,15 @@ class UsageBreakdown(BaseModel):
     # ``total_tokens`` across turns undercounts spend (measured: 59% of
     # actual).  ``None`` on per-response usage, where spend == total.
     spend_total_tokens: Optional[int] = None
+    # Cache traffic BILLED across the turn — summed over the turn's
+    # responses, the same shape as ``spend_total_tokens``.  Distinct from
+    # ``cache_read_tokens`` / ``cache_creation_tokens``, which are the LAST
+    # response's figures.  The distinction is load-bearing for a session
+    # using ``model_tiers``: a mid-turn tier switch re-reads the whole
+    # prefix cold at the new model, and the last-response figures hide
+    # exactly that miss.  ``None`` when the provider reports no cache usage.
+    spend_cache_read_tokens: Optional[int] = None
+    spend_cache_creation_tokens: Optional[int] = None
 
 
 class GCConfigEvent(Event):

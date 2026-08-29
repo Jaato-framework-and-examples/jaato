@@ -3818,6 +3818,9 @@ class SubagentPlugin(DaemonForwardingMixin):
                         cache_read_tokens=turn.get('cache_read'),
                         cache_creation_tokens=turn.get('cache_creation'),
                         spend_total_tokens=turn.get('spend_total'),
+                        spend_cache_read_tokens=turn.get('spend_cache_read'),
+                        spend_cache_creation_tokens=turn.get(
+                            'spend_cache_creation'),
                         cost_usd=turn.get('cost_usd'),
                         finish_reason=turn.get('finish_reason', 'stop'),
                     )

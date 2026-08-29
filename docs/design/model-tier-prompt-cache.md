@@ -1,13 +1,17 @@
 # Model Tiers × Prompt Caching — Assessment & Plan
 
-**Status**: ASSESSMENT, with the plumbing fixed. CLOSED: the config
-gap (§4 — `_wire_cache_plugin` reads the session's merged provider
-config, and the cache knobs are declared in `PROVIDER_KNOBS`), the
-tier-switch re-wire (§5.2), and the model-invalidation half of Google's
-`CachedContent` binding (§5.3). STILL OPEN: the tier line inside the
-cached system block (§5.1), the invisibility of the miss (§5.4), the
-Google mismatch guard, and everything in §6 — which is where the actual
-cost question gets answered, and it is answerable only once §5.4 lands.
+**Status**: ASSESSMENT, with the plumbing and the instrumentation
+fixed. CLOSED: the config gap (§4), the tier-switch re-wire (§5.2), the
+model-invalidation half of Google's `CachedContent` binding (§5.3), the
+invisibility of the miss (§5.4), and the reliability attribution (§5.5).
+STILL OPEN: the tier line inside the cached system block (§5.1), the
+Google mismatch guard, and everything in §6.
+
+§6 is where the original cost question actually gets answered, and it is
+now answerable: with §5.4 landed, a real tiered session reports what its
+switches cost instead of hiding it. Everything in §6 remains a hypothesis
+until that measurement exists — including the break-even in §3, which is
+arithmetic, not data.
 **Origin**: the question "our profiles can declare a model tier per task
 type and `enter_tier` hands the task to the most suitable one — how does
 that impact cache usage?", which had never been assessed.
@@ -38,11 +42,11 @@ measurement gap:
 - Google's `CachedContent` is created bound to one model while its reuse
   test omits the model (§5.3) — **the invalidation half is fixed**, the
   defensive guard is not;
-- per-turn cache figures *replace* rather than accumulate, so a turn
-  containing a switch reports only its last leg (§5.4) — **open**, and
-  it is the one that blocks measuring any of this;
-- a second subsystem attributes its records to the boot model after a
-  switch (§5.5) — **open**, same shape as §5.4.
+- per-turn cache figures *replaced* rather than accumulated, so a turn
+  containing a switch reported only its last leg (§5.4) — **fixed**, and
+  it was the one blocking measurement of any of this;
+- a second subsystem attributed its records to the boot model after a
+  switch (§5.5) — **fixed**, same shape as §5.4.
 
 The reason none of this has hurt yet is the subject of §4: the framework's
 own caching was **not reachable from a profile at all**. That is now
@@ -300,7 +304,7 @@ is unchanged, because the session pushes the model on every wire.
 name whose bound model does not match the request's. The invalidation
 above closes the path we know of; the guard closes the class.
 
-### 5.4 The miss is invisible
+### 5.4 The miss is invisible — FIXED
 
 `_accumulate_turn_tokens` (`shared/jaato_session.py:8107-8111`) **sums**
 prompt and output tokens but **replaces** `cache_read` and
@@ -315,8 +319,41 @@ no tier attribute, so tier must be inferred from the model name, which
 breaks when two tiers share a model or a budget rung rebinds one
 (`budget_control` degradation does exactly that).
 
-**Proposal**: accumulate cache tokens like every other dimension; add
-`jaato.tier` and a tier-switch counter to the LLM span.
+**The fix.** Both halves.
+
+*Accumulation.* `_accumulate_turn_tokens` now also keeps
+`spend_cache_read` / `spend_cache_creation`, summed per response, exactly
+as `spend_total` and `cost_usd` already were and for the same reason —
+every response in a turn is separately billed. The level readings
+(`cache_read` / `cache_creation`) are kept as well, because they are what
+the streaming usage-callback writes and that callback fires per usage
+*chunk*, so it must not sum. Two shapes, two questions: "how big is the
+context now" and "what did this turn cost".
+
+The spend pair rides the same five links `cost_usd` does — session →
+`on_agent_turn_completed` → runner RPC payload → daemon unpack →
+`_build_usage` → `UsageBreakdown` — and the guard checks each link at its
+own exit shape (a keyword in a *named* call, a key in the wire dict, a
+`payload.get` on the far side). Checking "the name appears as a call
+keyword somewhere in the file" was not enough twice over: `rpc.py` and
+`core.py` each have two exits, and deleting one left the other matching.
+Both were caught by running the sabotage, not by reading the guard.
+
+*Attribution.* The LLM span carries `jaato.tier` and
+`jaato.tier.switches` whenever tier mode is active, and nothing when it
+is not. The tier is what makes a span's cache figures readable — a miss
+after a switch is expected, a miss without one is not.
+`jaato.tier.switches` counts real binding changes only (an `enter_tier`
+to the active tier short-circuits before it), so it is the multiplier on
+what tier mode costs. Both routes increment it, including the
+budget-control rebind where the tier *name* never changes.
+
+Deriving the tier from `llm.model_name` instead does not work: two tiers
+may share a model, and a degrade rung rebinds a tier's model underneath
+it.
+
+Coverage: `shared/tests/test_cache_spend_survives_a_tier_switch.py`
+(with a `REVERSIONS` entry).
 
 ### 5.5 The other uncalled model setters
 
@@ -327,16 +364,21 @@ they are **not** the same finding. Recording the audit so the next reader
 who greps for them does not have to redo it.
 
 **`PatternDetector.set_model_name`** (`reliability/patterns.py:111`) —
-**same class, lower stakes, still open.** Its `_model_name` is stamped
+**same class, lower stakes, FIXED.** Its `_model_name` is stamped
 into every emitted `BehavioralPattern` (six construction sites), and it
 is captured once when the detector is built, from
 `ReliabilityPlugin._current_model` — the boot model.
 `set_session_context` is called without a model name, so nothing updates
 it afterwards. After a tier switch, patterns detected while running the
-executor tier are attributed to the model that started the session, and
-you cannot tell from the record which tier misbehaved. That is the same
-attribution failure as §5.4, in a different subsystem, and the fix is the
-same shape: push the model where the model changes.
+executor tier were attributed to the model that started the session, and
+the record could not say which tier misbehaved.  Attribution silently
+wrong is worse than absent: absent prompts a question, wrong ends one.
+
+Fixed by making `ReliabilityPlugin.set_model_context` forward to its own
+detector, and having the session call it from the same post-connect point
+as the cache re-wire — so both routes into a tier change are covered.
+Coverage: `shared/tests/test_reliability_model_follows_the_tier.py` (with
+a `REVERSIONS` entry).
 
 **`PluginRegistry.set_model_name`** (`registry.py:825`) — **not a gap.**
 Its `_model_name` gates plugin *exposure*: a plugin declaring
@@ -444,7 +486,7 @@ provider's config.
 - [x] re-wire the cache plugin on tier switch; push the model name (§5.2)
 - [x] Google's `CachedContent` discarded when the model changes (§5.3)
 - [ ] Google mismatch guard: never emit a name bound to another model (§5.3)
-- [ ] `PatternDetector` model attribution follows the tier (§5.5)
-- [ ] accumulate cache tokens per turn; `jaato.tier` span attribute (§5.4)
+- [x] `PatternDetector` model attribution follows the tier (§5.5)
+- [x] accumulate cache tokens per turn; `jaato.tier` span attribute (§5.4)
 - [ ] measure a real tiered session, then revisit §6
 - [ ] first-class `cache:` profile field (§7)

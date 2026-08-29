@@ -601,6 +601,14 @@ class JaatoSession:
         # parent's name, so two tiers would collide on one plugin
         # instance built from the wrong ``plugin_configs`` section.
         self._cache_plugins_by_provider: Dict[str, Any] = {}
+        # How many times this session has actually CHANGED tier binding.
+        # Every switch re-reads the whole prefix cold at the new model, so
+        # this is the multiplier on the cost of tier mode — the number that
+        # says whether the tier feature paid for itself.  Counts real
+        # changes only: an ``enter_tier`` to the tier already active is a
+        # no-op and must not inflate it.  Reported on the LLM span as
+        # ``jaato.tier.switches`` and monotonic for the session's life.
+        self._tier_switch_count: int = 0
 
         # Thinking mode
         self._thinking_plugin: Optional['ThinkingPlugin'] = None
@@ -4676,13 +4684,28 @@ NOTES
     def _build_llm_span_attributes(self) -> Dict[str, Any]:
         """Build the attribute dict to attach to an LLM telemetry span.
 
-        Combines per-turn context (turn index) with cache plugin state
-        (anchor, BP3 strategy, totals) so external observers can
-        correlate LLM calls with the GC ↔ cache coordination dance.
+        Combines per-turn context (turn index, active model tier) with
+        cache plugin state (anchor, BP3 strategy, totals) so external
+        observers can correlate LLM calls with the GC ↔ cache
+        coordination dance.
+
+        ``jaato.tier`` / ``jaato.tier.switches`` are emitted only in tier
+        mode, so single-model sessions carry no dead keys.  The tier is
+        what makes the cache figures on this span readable: reads and
+        writes are per (model, prefix), so a span whose tier differs from
+        its predecessor's is expected to show a full miss, and one whose
+        tier is unchanged is not.  Deriving that from ``llm.model_name``
+        instead does not work — two tiers may share a model, and a
+        budget-control degrade rung rebinds a tier's model underneath it.
         """
         attrs: Dict[str, Any] = {
             "jaato.turn_index": int(self._turn_index),
         }
+        active_tier = getattr(self, "_active_tier", None)
+        if active_tier is not None:
+            attrs["jaato.tier"] = active_tier
+            attrs["jaato.tier.switches"] = int(
+                getattr(self, "_tier_switch_count", 0))
         cache = getattr(self, "_cache_plugin", None)
         if cache and hasattr(cache, "get_telemetry_attributes"):
             try:
@@ -8192,9 +8215,24 @@ NOTES
         However, we only replace if values are non-zero, to preserve good values
         when streaming is cancelled mid-turn (which may return zero tokens).
 
-        Cache token fields (cache_read, cache_creation) are replaced alongside
-        prompt/output/total so the final API call's values propagate to
-        turn_accounting and ultimately to TurnCompletedEvent.
+        Cache token fields come in BOTH shapes, for the same reason the
+        token counts do:
+
+        * ``cache_read`` / ``cache_creation`` are REPLACED, matching
+          prompt/output/total, and are also written by the streaming
+          usage-callback (which fires per usage CHUNK, so it must not sum).
+        * ``spend_cache_read`` / ``spend_cache_creation`` ACCUMULATE, and
+          are written ONLY here — the once-per-response hook — exactly as
+          ``spend_*`` and ``cost_usd`` are, and for the same reason: every
+          response in a turn is separately billed for what it read from and
+          wrote to the cache.
+
+        The spend pair is the one that answers "what did this turn cost in
+        cache traffic".  Replacing was actively misleading for a turn that
+        switches model tier mid-flight: the switch re-reads the whole prefix
+        cold at the new model, and reporting only the final leg hid exactly
+        the miss the switch caused.  See
+        ``docs/design/model-tier-prompt-cache.md`` §5.4.
         """
         if response.usage.total_tokens > 0:
             turn_tokens['prompt'] = response.usage.prompt_tokens
@@ -8221,11 +8259,18 @@ NOTES
                     (turn_tokens.get('cost_usd') or 0.0)
                     + response.usage.cost_usd)
 
-        # Cache tokens: replace when present (same semantics as prompt/output)
+        # Cache tokens: the level reading (last response) and the spend
+        # reading (every response) — see the docstring for why both exist.
         if response.usage.cache_read_tokens is not None:
             turn_tokens['cache_read'] = response.usage.cache_read_tokens
+            turn_tokens['spend_cache_read'] = (
+                turn_tokens.get('spend_cache_read', 0)
+                + response.usage.cache_read_tokens)
         if response.usage.cache_creation_tokens is not None:
             turn_tokens['cache_creation'] = response.usage.cache_creation_tokens
+            turn_tokens['spend_cache_creation'] = (
+                turn_tokens.get('spend_cache_creation', 0)
+                + response.usage.cache_creation_tokens)
 
         # Accumulate thinking tokens (these are summed, not replaced)
         if response.usage.thinking_tokens:
@@ -10356,6 +10401,18 @@ NOTES
                 entry.model, exc,
             )
             raise
+        # Everything from here down is bookkeeping ABOUT the switch, not
+        # part of it: the connect has already happened and the caller is
+        # about to update ``_model_name``.  None of it may raise, or a
+        # switch lands half-applied — the provider re-pointed at the new
+        # model while the session still believes it is on the old one.
+        #
+        # Counted here rather than in ``switch_tier`` so BOTH routes into a
+        # binding change are seen: the model-driven one and the
+        # budget-control rebind, which never changes the tier NAME.  A
+        # ``switch_tier`` no-op returns before reaching this method, so an
+        # ``enter_tier`` to the tier already active does not inflate it.
+        self._tier_switch_count = getattr(self, '_tier_switch_count', 0) + 1
         try:
             self._wire_cache_plugin()
         except Exception as exc:  # noqa: BLE001
@@ -10363,6 +10420,42 @@ NOTES
                 "tier cache re-wire for %s/%s failed; continuing uncached: %s",
                 self._active_provider_name, entry.model, exc,
             )
+        try:
+            self._retarget_reliability_model(entry.model)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "tier reliability retarget for %s failed; records will name "
+                "the previous model: %s", entry.model, exc,
+            )
+
+    def _retarget_reliability_model(self, model: str) -> None:
+        """Tell the reliability plugin which model is now running.
+
+        Reliability records — behavioural patterns, tool-failure history —
+        are stamped with the active model.  That model is captured when the
+        session is configured, so in a ``model_tiers`` session every record
+        produced after a tier switch was filed under the model that STARTED
+        the session, and the record could not say which tier misbehaved.
+
+        Same shape as the cache-plugin re-wire alongside it, and the same
+        two routes reach it: ``enter_tier`` and a budget-control rung
+        rebinding the active tier in place.
+
+        ``available_models`` is deliberately not re-supplied — it is the
+        switchable-model catalogue, which a tier change does not alter, and
+        ``set_model_context`` leaves it untouched when passed ``None``.
+
+        Best-effort: attribution must never fail a tier switch.
+        """
+        plugin = getattr(self._runtime, 'reliability_plugin', None) \
+            if self._runtime else None
+        if plugin is None:
+            return
+        try:
+            plugin.set_model_context(model)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "tier reliability retarget to %s failed: %s", model, exc)
 
     def switch_tier(self, requested_tier: str) -> Dict[str, Any]:
         """Switch the session's active model tier.

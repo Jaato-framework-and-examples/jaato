@@ -1381,6 +1381,8 @@ class JaatoServer:
         thinking_tokens: Optional[int] = None,
         cost_usd_override: Optional[float] = None,
         spend_total_tokens: Optional[int] = None,
+        spend_cache_read_tokens: Optional[int] = None,
+        spend_cache_creation_tokens: Optional[int] = None,
     ) -> "UsageBreakdown":
         """Construct a ``UsageBreakdown`` and populate ``cost_usd``.
 
@@ -1422,6 +1424,8 @@ class JaatoServer:
             thinking_tokens=thinking_tokens,
             cost_usd=cost,
             spend_total_tokens=spend_total_tokens,
+            spend_cache_read_tokens=spend_cache_read_tokens,
+            spend_cache_creation_tokens=spend_cache_creation_tokens,
         )
 
     def _schedule_context_limit_fill(self) -> None:
@@ -3318,6 +3322,8 @@ class JaatoServer:
                                         function_calls, cache_read_tokens=None,
                                         cache_creation_tokens=None,
                                         spend_total_tokens=None,
+                                        spend_cache_read_tokens=None,
+                                        spend_cache_creation_tokens=None,
                                         cost_usd=None,
                                         finish_reason="stop"):
                 # Flush any remaining buffered content from the agent's formatter pipeline
@@ -3383,6 +3389,9 @@ class JaatoServer:
                         cache_read_tokens=cache_read_tokens,
                         cache_creation_tokens=cache_creation_tokens,
                         spend_total_tokens=spend_total_tokens,
+                        spend_cache_read_tokens=spend_cache_read_tokens,
+                        spend_cache_creation_tokens=(
+                            spend_cache_creation_tokens),
                     ),
                     duration_seconds=duration_seconds,
                     function_calls=function_calls,
@@ -4924,6 +4933,10 @@ class JaatoServer:
                             cache_read_tokens=payload.get("cache_read_tokens"),
                             cache_creation_tokens=payload.get("cache_creation_tokens"),
                             spend_total_tokens=payload.get("spend_total_tokens"),
+                            spend_cache_read_tokens=payload.get(
+                                "spend_cache_read_tokens"),
+                            spend_cache_creation_tokens=payload.get(
+                                "spend_cache_creation_tokens"),
                             # ``.get`` without a default: absent and null both
                             # mean the provider reported no cost, and a 0.0
                             # default would claim it reported free.

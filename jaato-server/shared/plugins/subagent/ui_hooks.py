@@ -207,6 +207,8 @@ class AgentUIHooks(Protocol):
         cache_read_tokens: Optional[int] = None,
         cache_creation_tokens: Optional[int] = None,
         spend_total_tokens: Optional[int] = None,
+        spend_cache_read_tokens: Optional[int] = None,
+        spend_cache_creation_tokens: Optional[int] = None,
         cost_usd: Optional[float] = None,
         finish_reason: str = "stop",
     ) -> None:
@@ -227,6 +229,12 @@ class AgentUIHooks(Protocol):
                 None when the provider does not support caching.
             cache_creation_tokens: Tokens written to prompt cache.
                 None when the provider does not support caching.
+            spend_cache_read_tokens: Cache reads SUMMED over the turn's
+                responses, where the two above are the last response's.
+                A turn that switches model tier mid-flight re-reads the
+                whole prefix cold at the new model; only the summed
+                figures show that.
+            spend_cache_creation_tokens: Cache writes, summed likewise.
             finish_reason: The provider's finish reason for the turn's
                 terminal response, as the lowercase ``FinishReason`` enum
                 value (``"stop"``, ``"max_tokens"``, ``"safety"``,

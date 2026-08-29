@@ -639,6 +639,19 @@ class ReliabilityPlugin(RunnerForwardingMixin):
     ) -> None:
         """Set model context for model-specific reliability tracking.
 
+        Re-callable: a ``model_tiers`` session changes model mid-run (via
+        ``enter_tier``, or a budget-control rung rebinding a tier), and the
+        session calls this again on every such change.
+
+        The active model is forwarded to the pattern detector, which stamps
+        it into every :class:`BehavioralPattern` it emits.  The detector
+        receives the model once at construction, so without this a pattern
+        detected on the executor tier was filed under the model that
+        STARTED the session — leaving the record unable to say which tier
+        actually misbehaved.  ``PatternDetector.set_model_name`` had no
+        caller anywhere until this forwarded to it.  See
+        ``docs/design/model-tier-prompt-cache.md`` §5.5.
+
         Args:
             current_model: Name of the currently active model
             available_models: List of models that can be switched to
@@ -646,6 +659,8 @@ class ReliabilityPlugin(RunnerForwardingMixin):
         self._current_model = current_model
         if available_models is not None:
             self._available_models = available_models
+        if self._pattern_detector:
+            self._pattern_detector.set_model_name(current_model)
 
     def set_model_switch_config(self, config: ModelSwitchConfig) -> None:
         """Set model switch configuration."""
