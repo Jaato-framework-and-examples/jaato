@@ -29,8 +29,17 @@ from shared.tests.test_every_guard_detects_its_own_reversion import Reversion
 REVERSIONS = [
     Reversion(
         target="jaato-server/shared/plugins/subagent/config.py",
-        find="    gc_config = parse_gc_block(data)\n",
-        replace=("    gc_config = None\n"
+        # TWO lines, not one.  A single 4-space-indented line is a
+        # SUBSTRING of the 8-space-indented sites, so the anchor matched
+        # three times and the meta-guard refused it as ambiguous -- which
+        # is the guard working: an over-broad anchor reverts something
+        # other than the thing under test, or nothing at all.  Two lines
+        # pin the indentation, because the second line's leading spaces
+        # cannot be absorbed the way the first line's can.
+        find=("    cache_config = parse_cache_block(data)\n"
+              "    gc_config = parse_gc_block(data)\n"),
+        replace=("    cache_config = parse_cache_block(data)\n"
+                 "    gc_config = None\n"
                  "    if data.get('gc'):\n"
                  "        gc_config = GCProfileConfig.from_dict(data['gc'])\n"),
         test="test_only_the_shared_parser_constructs_a_gc_config",

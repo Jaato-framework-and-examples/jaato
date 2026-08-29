@@ -775,7 +775,7 @@ Ordered by confidence, not by effort.
 
 ---
 
-## 7. A common cache knob
+## 7. A common cache knob — IMPLEMENTED
 
 Separate from the tier question, and surfaced by §4: caching is the one
 cross-cutting concern with no first-class home in a profile.
@@ -824,6 +824,40 @@ resolves — more specific wins, the same child-wins rule
 common field needs no new precedence concept, only a lower layer beneath
 an existing one.
 
+**Shipped.** `CacheProfileConfig` in `plugins/subagent/config.py`,
+parsed by `parse_cache_block` at all four profile ingresses (the reason
+`parse_gc_block` was extracted first — four copies is four places to
+forget), inherited like `gc:`, and delivered by
+`cache_field_to_provider_extra` through `resolve_provider_extra`, the one
+merge both the provider and its cache plugin already go through.
+
+The per-provider translation is a table, `CACHE_FIELD_DELIVERY`, and its
+**coverage is derived rather than trusted**: a provider declaring
+`prompt_caching=True` with no entry fails
+`test_cache_profile_field.py::test_every_caching_provider_has_a_mapping`,
+and a stale entry for a provider that cannot cache fails its converse. A
+new caching provider therefore cannot land with the common field silently
+inert for it — which is this document's own §4 failure, in the shape it
+would next take.
+
+| | anthropic | google_genai | openrouter |
+|---|---|---|---|
+| `enabled: true` | `enable_caching: true` | `enable_caching: true` | `api_params.cache_prompt: true` |
+| `ttl: 1h` | `cache_ttl: "1h"` | `cache_ttl: "3600s"` | `api_params.cache_ttl: "1h"` |
+| `history: false` | `cache_history: false` | *(no history breakpoint)* | *(not exposed)* |
+| `enabled: auto` | *(emits nothing)* | *(emits nothing)* | `cache_prompt: "auto"` |
+
+`auto` emits nothing for the enable key because it means "leave the
+provider's default alone" — writing a value would invert it. OpenRouter
+is the exception only because `"auto"` is a real value in its API rather
+than an absence.
+
+One implementation note worth keeping: the layering merges one level into
+sub-dicts rather than replacing them. OpenRouter's cache knobs live
+inside `api_params`, so a flat `update` would make a profile that also
+sets `api_params.temperature` lose one or the other depending on which
+layer landed last — silently, either way.
+
 Caching is also a *consumer* of the GC policies it reads
 (`plugins/cache/base.py:5-8`), which is a second argument for placing it
 at the same altitude as `gc:` rather than one level down inside a
@@ -845,4 +879,4 @@ provider's config.
 - [x] accumulate cache tokens per turn; `jaato.tier` span attribute (§5.4)
 - [x] measure a real tiered session — instrumentation validated live (§6.0)
 - [x] measure §3's break-even on a caching provider: 5.61 vs 5.75 predicted (§6.0.1)
-- [ ] first-class `cache:` profile field (§7)
+- [x] first-class `cache:` profile field (§7)

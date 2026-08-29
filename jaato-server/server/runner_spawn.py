@@ -333,6 +333,65 @@ def spawn_session_runner(
     )
 
 
+def _apply_cache_field(
+    profile: Any,
+    provider_name: Optional[str],
+    plugin_configs_dict: Dict[str, Any],
+) -> None:
+    # ``provider_name`` falls back to the profile's own inside the helper,
+    # not at the call site: ``build_session_envelope`` sits at the
+    # complexity ceiling and one ``or`` there costs a decision point.
+    """Fold a profile's common ``cache:`` field into ``plugin_configs``.
+
+    Resolved HERE, into the provider's own knobs, rather than threaded
+    down as a new envelope field: caching is delivered three different
+    ways with three spellings and two layers, and ``plugin_configs`` is
+    already the channel that carries all three to the runner.  A parallel
+    channel would mean a schema bump and a fourth copy of the same
+    routing.
+
+    Laid down BENEATH the profile's explicit knobs -- ``setdefault`` for
+    scalars, and for a sub-dict the cache values first with the explicit
+    ones over the top -- so ``plugin_configs.<provider>`` still wins.  The
+    escape hatch has to be able to escape; see the precedence note in §7.
+
+    Mutates ``plugin_configs_dict`` in place and returns nothing, matching
+    the quirks injection directly below its call site.
+    """
+    provider_name = provider_name or getattr(profile, "provider", None)
+    profile_cache = getattr(profile, "cache", None)
+    if profile_cache is None or not provider_name:
+        return
+
+    from shared.jaato_runtime import cache_field_to_provider_extra
+    import importlib
+    try:
+        mod = importlib.import_module(
+            f"shared.plugins.model_provider.{provider_name}")
+        supports = bool(getattr(
+            getattr(mod, "PROVIDER_CAPABILITIES", None),
+            "prompt_caching", False))
+    except Exception:  # noqa: BLE001
+        # An unknown or unimportable provider cannot be shown to support
+        # caching, and a capability lookup is not worth failing a spawn.
+        supports = False
+
+    cache_extra = cache_field_to_provider_extra(
+        profile_cache, provider_name, supports_caching=supports)
+    if not cache_extra:
+        return
+
+    existing = dict(plugin_configs_dict.get(provider_name) or {})
+    for key, value in cache_extra.items():
+        if isinstance(value, dict) and isinstance(existing.get(key), dict):
+            merged = dict(value)           # cache field first,
+            merged.update(existing[key])   # explicit knob over the top
+            existing[key] = merged
+        else:
+            existing.setdefault(key, value)
+    plugin_configs_dict[provider_name] = existing
+
+
 def build_session_envelope(
     *,
     server: Any,  # JaatoServer (forward-typed; importing the real type
@@ -481,6 +540,12 @@ def build_session_envelope(
         # daemon-spawned subagent path.  See
         # ``SubagentProfile.quirks`` docstring +
         # ``feedback_llama31_vllm_auto_mode_stringifies_args``.
+        # Common ``cache:`` field (§7) -- resolved into the provider's own
+        # knobs and laid BENEATH the profile's explicit ones.  Body lives
+        # in a helper because this function is already 42 on the
+        # complexity ratchet: growing it is what the guard exists to stop.
+        _apply_cache_field(profile, provider_name, plugin_configs_dict)
+
         profile_quirks = getattr(profile, "quirks", None) or {}
         effective_provider_for_quirks = (
             provider_name or getattr(profile, "provider", None)
