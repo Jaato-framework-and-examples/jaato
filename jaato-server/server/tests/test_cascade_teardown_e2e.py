@@ -149,7 +149,10 @@ def _stub_spawned(pool_slot: Optional[PoolSlot] = None) -> Any:
 
 def _make_pool() -> PoolManager:
     """Build a real PoolManager with a mocked template (no fork)."""
-    return PoolManager(template_manager=MagicMock(), target_size=0)
+    # target_size=8: the constructor starts no threads, so 0 was never
+    # what kept them off — and 0 means "pool disabled", which now also
+    # means "every returned slot is over capacity".
+    return PoolManager(template_manager=MagicMock(), target_size=8)
 
 
 # ======================================================================

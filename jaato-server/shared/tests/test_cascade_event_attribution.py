@@ -48,6 +48,21 @@ def _event_classes():
     ]
 
 
+from shared.tests.test_every_guard_detects_its_own_reversion import Reversion
+
+#: The defect, put back: the 64-call-site path stops attributing, and every
+#: event a consumer sees through it goes back to arriving anonymous.
+REVERSIONS = [
+    Reversion(
+        target="jaato-server/server/session_manager.py",
+        find="        _stamp_session_id(event, self._client_to_session.get(client_id))\n",
+        replace="",
+        test="test_an_event_to_a_bound_client_is_attributed_to_its_session",
+        because="the majority emit path not attributing its events",
+    ),
+]
+
+
 def _make_sm() -> SessionManager:
     """SessionManager skeleton — same shape the cascade phase-1 tests use."""
     sm = SessionManager.__new__(SessionManager)
@@ -237,3 +252,80 @@ def test_two_siblings_are_distinguishable_on_one_stream():
 
     assert {e.agent_id for e in received} == {"main"}, "agent_id cannot do it"
     assert [e.session_id for e in received] == ["sibling-a", "sibling-b"]
+
+
+# ---------------------------------------------------------------------------
+# The MAJORITY path
+#
+# ``_emit_to_session`` stamps and has 10 call sites.  ``_emit_to_client`` has
+# 64 and did not, so most of what a consumer sees arrived unattributed --
+# including every PermissionRequestedEvent, which the earlier audit recorded
+# as "NOT verified: whether it arrives unstamped end-to-end".  It did.
+#
+# The audit concluded _emit_to_client "has nothing to stamp WITH" because it
+# takes a client_id.  ``_client_to_session`` was one attribute away, and is
+# read exactly that way elsewhere in the class.  A structural audit answered
+# "does this emitter call the stamper", not "could it".
+# ---------------------------------------------------------------------------
+
+def _emitting_sm(bound: dict):
+    """A manager whose ``_emit_to_client`` records what it delivered."""
+    sm = _make_sm()
+    sm._client_to_session = dict(bound)
+    delivered = []
+    sm._event_callback = lambda cid, ev: delivered.append((cid, ev))
+    return sm, delivered
+
+
+def test_an_event_to_a_bound_client_is_attributed_to_its_session():
+    from jaato_sdk.events import PermissionRequestedEvent
+
+    sm, delivered = _emitting_sm({"client-1": "sess-A"})
+    sm._emit_to_client("client-1", PermissionRequestedEvent())
+
+    assert delivered, "nothing was delivered"
+    _cid, ev = delivered[0]
+    assert ev.session_id == "sess-A", (
+        "an event routed to a client bound to a session arrived without "
+        "naming it. This is the 64-call-site path; an observer watching a "
+        "cascade sees most of its traffic through here and cannot tell two "
+        "siblings apart without it."
+    )
+
+
+def test_an_event_that_names_its_own_subject_is_not_relabelled():
+    """SlotSettled means 'the session that ended', not 'who received this'.
+
+    Overwriting would replace a true fact with a plausible one, which is
+    worse than leaving it blank: a wrong attribution is indistinguishable
+    from a right one.
+    """
+    from jaato_sdk.events import PermissionRequestedEvent
+
+    sm, delivered = _emitting_sm({"client-1": "the-recipient"})
+    ev = PermissionRequestedEvent()
+    ev.session_id = "the-subject"
+    sm._emit_to_client("client-1", ev)
+
+    assert delivered[0][1].session_id == "the-subject", (
+        "the recipient's session overwrote an explicitly-set subject"
+    )
+
+
+def test_an_unbound_client_leaves_the_event_unstamped():
+    """The honest residue.
+
+    ``_client_to_session`` is not populated pre-init, so events emitted
+    while a session is being created have no session to name.  Those are
+    genuinely unattributable rather than missed -- and this is the
+    population worth counting before deciding whether the base field should
+    become ``Optional[str] = None`` to say so out loud.
+    """
+    from jaato_sdk.events import PermissionRequestedEvent
+
+    sm, delivered = _emitting_sm({})          # nothing bound yet
+    sm._emit_to_client("client-unknown", PermissionRequestedEvent())
+
+    assert delivered[0][1].session_id == "", (
+        "an event for a client with no session was given one anyway"
+    )

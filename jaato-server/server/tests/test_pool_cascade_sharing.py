@@ -41,16 +41,37 @@ def _slot(pid: int, cascade_id=None, last_end_ts=None) -> PoolSlot:
     )
 
 
+import sys as _sys, pathlib as _pathlib
+_sys.path.insert(0, str(_pathlib.Path(__file__).resolve().parents[2]))
+from shared.tests.test_every_guard_detects_its_own_reversion import Reversion
+
+#: The defect, put back: the return path appends unconditionally again.
+REVERSIONS = [
+    Reversion(
+        target="jaato-server/server/runner_pool.py",
+        find="            if len(self._idle_slots) >= self.target_size:",
+        replace="            if False:",
+        test="TestPoolCapacity::test_returning_to_a_full_pool_does_not_grow_it",
+        because="the idle pool growing without a ceiling",
+    ),
+]
+
+
 def _pool(*slots, idle_timeout=DEFAULT_CASCADE_IDLE_TIMEOUT_SECONDS) -> PoolManager:
     """Build a PoolManager pre-seeded with the supplied idle slots.
 
-    target_size=0 so spawn_initial_slots / replenish loop stay off
-    — these tests pin behaviour at the API level, not the
-    background-thread level.
+    Threads stay off because the constructor starts none: both
+    ``spawn_initial_slots`` and ``start_replenishment`` are explicit
+    calls these tests never make.  The fixture used to pass
+    ``target_size=0`` for that reason, which was never the mechanism —
+    and 0 is not an inert value: it is "pool disabled", and it now also
+    means "every returned slot is over capacity".  A fixture that picks
+    a sentinel for a side effect it does not have will eventually
+    disagree with production about what the sentinel means.
     """
     pool = PoolManager(
         template_manager=MagicMock(),
-        target_size=0,
+        target_size=8,
         cascade_idle_timeout_seconds=idle_timeout,
     )
     pool._idle_slots = list(slots)
@@ -280,3 +301,101 @@ class TestConfigurableTimeout:
             cascade_idle_timeout_seconds=42.0,
         )
         assert pool._cascade_idle_timeout == 42.0
+
+
+# ======================================================================
+# The pool had a floor and no ceiling
+#
+# ``target_size`` decided how many slots to fork at startup and when
+# replenishment should STOP.  Nothing said how many at most, and
+# ``return_slot_after_session`` appended unconditionally -- so the pool
+# grew by one runner per cleanly-ended pool session and never shrank
+# while the daemon lived.  Measured live at 32 slots / 4237 MB.
+#
+# It surfaced as ``pass show`` failing because gpg could not fork: a
+# resource leak wearing a credentials error, found only because three
+# unlike failures shared "late in the run".
+#
+# The log line made it look guarded -- it printed ``idle_count=%d/%d``,
+# length against target_size, so it read ``idle_count=32/2``: a
+# comparison the code did not make.
+# ======================================================================
+
+class TestPoolCapacity:
+
+    def test_returning_to_a_full_pool_does_not_grow_it(self) -> None:
+        pool = _pool(_slot(1), _slot(2), idle_timeout=300.0)
+        pool.target_size = 2
+
+        pool.return_slot_after_session(_slot(3, cascade_id="c"))
+
+        assert pool.idle_count() == 2, (
+            "the pool grew past target_size. This is the unbounded path: "
+            "one extra runner per cleanly-ended session, ~132 MB each, "
+            "never reclaimed while the daemon lives."
+        )
+
+    def test_a_pure_idle_slot_is_evicted_before_a_cascade_affine_one(self) -> None:
+        """Affine slots carry warm state the next stage would reuse.
+
+        Dropping the affine one to keep an unaffiliated one throws away
+        the thing the pool exists for.
+        """
+        pool = _pool(_slot(1, cascade_id="keep-me"), _slot(2), idle_timeout=300.0)
+        pool.target_size = 2
+
+        pool.return_slot_after_session(_slot(3, cascade_id="also-warm"))
+
+        resident = {s.pid for s in pool._idle_slots}
+        assert 1 in resident, "the cascade-affine slot was evicted"
+        assert 2 not in resident, "the pure-idle slot was kept over an affine one"
+        assert 3 in resident, "the returning affine slot was not admitted"
+
+    def test_with_every_slot_affine_the_returning_one_goes(self) -> None:
+        """No pure-idle victim exists, so nothing warm is displaced."""
+        pool = _pool(_slot(1, cascade_id="a"), _slot(2, cascade_id="b"),
+                     idle_timeout=300.0)
+        pool.target_size = 2
+
+        pool.return_slot_after_session(_slot(3, cascade_id="c"))
+
+        assert {s.pid for s in pool._idle_slots} == {1, 2}
+        assert [s.pid for s in pool._pending_teardown] == [3]
+
+    def test_the_evicted_slot_is_QUEUED_not_torn_down_inline(self) -> None:
+        """Teardown blocks on the daemon loop; this path must not.
+
+        ``_teardown_slot`` closes the rpc via ``run_coroutine_threadsafe``
+        and BLOCKS on the future.  ``return_slot_after_session`` runs
+        wherever ``JaatoServer.shutdown`` runs, so doing it here would
+        make a cap inherit a thread-context assumption -- the same shape
+        as the circular wait fixed in #657, where a worker held a lock
+        and waited for the loop while the loop waited for the lock.
+        """
+        pool = _pool(_slot(1), _slot(2), idle_timeout=300.0)
+        pool.target_size = 2
+        torn: list = []
+        pool._teardown_slot = lambda slot, reason: torn.append(slot.pid)
+
+        pool.return_slot_after_session(_slot(3))
+
+        assert not torn, (
+            "the return path tore a slot down inline, blocking on the "
+            "daemon loop from a thread that has no guarantee of being off it"
+        )
+        assert [s.pid for s in pool._pending_teardown] == [3]
+
+    def test_the_drain_tears_down_what_the_cap_queued(self) -> None:
+        pool = _pool(_slot(1), _slot(2), idle_timeout=300.0)
+        pool.target_size = 2
+        torn: list = []
+        pool._teardown_slot = lambda slot, reason: torn.append((slot.pid, reason))
+
+        pool.return_slot_after_session(_slot(3))
+        pool._drain_pending_teardown()
+
+        assert torn == [(3, "over-capacity")], (
+            "the queued slot was never reclaimed; the count is bounded but "
+            "the PROCESS is not, which is the memory this fixes"
+        )
+        assert pool._pending_teardown == []

@@ -3479,7 +3479,36 @@ class SessionManager:
         callback(event)
 
     def _emit_to_client(self, client_id: str, event: Event) -> None:
-        """Emit an event to a specific client."""
+        """Emit an event to a specific client, attributed to its session.
+
+        WHY THE STAMP IS HERE.  ``_emit_to_session`` stamps, and it has 10
+        call sites; this has 64.  So the MAJORITY path was unattributed,
+        and ``session_id`` arrived empty on most of what a consumer sees --
+        including every ``PermissionRequestedEvent``, and
+        ``InjectPromptResultEvent`` from #619, which shipped through here
+        the same day the unstamped path was identified.
+
+        The earlier audit concluded this method "has nothing to stamp
+        WITH" because it takes a client_id rather than a session_id.  That
+        was wrong: ``_client_to_session`` is right here, and is already
+        read that way elsewhere in this class.  A structural audit of
+        which emitters stamp answered "does this one call the stamper",
+        not "could it".
+
+        WHAT STILL ARRIVES UNSTAMPED, and why that is correct: the map is
+        not populated pre-init, so events emitted while a session is being
+        created have no session to name yet.  Those are genuinely
+        unattributable rather than missed -- which is the residue worth
+        measuring before deciding whether the base field should become
+        ``Optional[str] = None`` to say so out loud.
+
+        The stamper NEVER overwrites, so an event that names its own
+        subject -- ``SlotSettledEvent`` means "the session that just
+        ended", ``GateReleasedEvent`` means "the originating session" --
+        keeps it.  Relabelling those with the recipient's session would
+        replace a true fact with a plausible one.
+        """
+        _stamp_session_id(event, self._client_to_session.get(client_id))
         logger.debug(f"_emit_to_client: {client_id} <- {type(event).__name__}")
         if self._event_callback:
             logger.debug(f"  calling event_callback")
