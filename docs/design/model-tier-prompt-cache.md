@@ -337,11 +337,24 @@ own exit shape (a keyword in a *named* call, a key in the wire dict, a
 `payload.get` on the far side). Checking "the name appears as a call
 keyword somewhere in the file" was not enough twice over: `rpc.py` and
 `core.py` each have two exits, and deleting one left the other matching.
-Both were caught by running the sabotage, not by reading the guard.
 
-*Attribution.* The LLM span carries `jaato.tier` and
-`jaato.tier.switches` whenever tier mode is active, and nothing when it
-is not. The tier is what makes a span's cache figures readable — a miss
+A third blind spot in the same commit, found by a reviewer aiming at it:
+the guard on the streaming callback collected `ast.Assign` targets, so
+`turn_data['spend_cache_creation'] += 1` — an `ast.AugAssign`, and the
+form a double-count would most naturally be written in — passed it, along
+with the whole suite. It now asserts that no `spend_`-prefixed string
+literal appears anywhere in the callback, which covers `=`, `+=`,
+`.update` and `.setdefault` alike, with a parametrised test over all four
+so the guard's own coverage is asserted rather than assumed.
+
+Every one of the three was caught by running a sabotage, never by reading
+the guard. A guard aimed at one *spelling* of an operation is a guard
+that reports on the spelling.
+
+*Attribution.* The LLM span carries `jaato.tier`,
+`jaato.tier.switches`, `jaato.tier.cache_rewire_failures` and
+`jaato.tier.reliability_retarget_failures` whenever tier mode is active,
+and nothing when it is not. The tier is what makes a span's cache figures readable — a miss
 after a switch is expected, a miss without one is not.
 `jaato.tier.switches` counts real binding changes only (an `enter_tier`
 to the active tier short-circuits before it), so it is the multiplier on
@@ -351,6 +364,25 @@ budget-control rebind where the tier *name* never changes.
 Deriving the tier from `llm.model_name` instead does not work: two tiers
 may share a model, and a degrade rung rebinds a tier's model underneath
 it.
+
+The two `*_failures` counters exist because §5.2's post-connect
+bookkeeping cannot be allowed to raise — the provider is already
+re-pointed by then, so an exception leaves the switch half-applied. That
+made two real regressions invisible: a cache plugin that fails to
+re-attach leaves the session running **uncached** (a cost regression),
+and a failed reliability retarget judges patterns against the **wrong
+model** (a correctness one). Three best-effort blocks is not the problem;
+three *unobservable* ones is. Both counters are emitted even when zero,
+so `> 0` is a queryable condition and a healthy span is distinguishable
+from an older build's.
+
+Landing them exposed a second layer of hiding:
+`_retarget_reliability_model` had its own `try/except` *inside* the
+caller's, so it ate the exception before the counter could see it — the
+span would have reported a healthy session while every pattern was filed
+against the wrong model. The helper now raises and the caller's block is
+the single place that decides. Two layers of swallowing is one layer of
+hiding.
 
 Coverage: `shared/tests/test_cache_spend_survives_a_tier_switch.py`
 (with a `REVERSIONS` entry).

@@ -32,14 +32,17 @@ from shared.tests.test_every_guard_detects_its_own_reversion import Reversion
 REVERSIONS = [
     Reversion(
         target="jaato-server/shared/jaato_session.py",
+        # The SMALLEST unique thing whose removal is the defect.  Two
+        # earlier anchors were wrong in opposite directions, and the
+        # meta-guard caught both as BLOCKED rather than letting them read
+        # as passes: quoting the whole try/except went stale the moment a
+        # failure counter was added inside the handler, while the bare call
+        # matches twice (``_ensure_provider`` makes the same call at the
+        # same indent).  The ``try:`` is what distinguishes the tier path.
         find="""        try:
-            self._wire_cache_plugin()
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "tier cache re-wire for %s/%s failed; continuing uncached: %s",
-                self._active_provider_name, entry.model, exc,
-            )""",
-        replace="""        return""",
+            self._wire_cache_plugin()""",
+        replace="""        if False:
+            self._wire_cache_plugin()""",
         test="test_a_cross_provider_tier_gets_a_cache_plugin",
         because="a cross-provider tier running with no cache plugin at all",
     ),

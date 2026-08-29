@@ -131,36 +131,75 @@ class TestCacheSpendAccumulates:
         assert 'spend_cache_read' not in turn
         assert 'spend_cache_creation' not in turn
 
-    def test_the_streaming_callback_does_not_touch_the_spend_keys(self):
-        """It fires per usage CHUNK, so summing there would double-count.
-
-        This is the same reason ``spend_total`` is written only in
-        ``_accumulate_turn_tokens``; the surrounding code says so. Checked
-        as an AST rather than a grep, because the string appears elsewhere
-        in the same file for the legitimate site.
-        """
+    @staticmethod
+    def _streaming_callbacks():
+        """The streaming usage-callback's AST node(s)."""
         tree = ast.parse(SESSION_SRC)
-        callbacks = [
+        found = [
             n for n in ast.walk(tree)
             if isinstance(n, ast.FunctionDef)
             and n.name == 'usage_callback_with_turn_tracking'
         ]
-        assert callbacks, (
+        assert found, (
             'the streaming usage-callback was renamed; this guard no longer '
             'checks anything and must be re-aimed'
         )
-        written = {
-            t.slice.value
-            for cb in callbacks
-            for n in ast.walk(cb) if isinstance(n, ast.Assign)
-            for t in n.targets
-            if isinstance(t, ast.Subscript)
-            and isinstance(t.slice, ast.Constant)
+        return found
+
+    def test_the_streaming_callback_never_mentions_a_spend_key(self):
+        """It fires per usage CHUNK, so any write there double-counts.
+
+        Deliberately BLUNT: no ``spend_``-prefixed string literal may
+        appear anywhere inside the callback.  Every way of writing the key
+        — ``=``, ``+=``, ``.update({...})``, ``.setdefault(...)`` — names
+        it as a string, so one assertion covers the operation rather than
+        one spelling of it.
+
+        The narrow version of this check is what shipped first, and it did
+        not discriminate: it collected ``ast.Assign`` targets only, so
+        ``turn_data['spend_cache_creation'] += 1`` — an ``ast.AugAssign``,
+        and the form a person would most naturally write a double-count in
+        — passed it, along with the entire rest of the suite.  Found by a
+        reviewer aiming a sabotage at it, not by reading it.
+        """
+        mentioned = {
+            n.value
+            for cb in self._streaming_callbacks()
+            for n in ast.walk(cb)
+            if isinstance(n, ast.Constant) and isinstance(n.value, str)
+            and n.value.startswith('spend_')
         }
-        assert not {k for k in written if k.startswith('spend_')}, (
-            f'the streaming callback writes spend keys {written}; it fires '
-            f'per usage chunk, so those would double-count'
+        assert not mentioned, (
+            f'the streaming callback references spend keys {sorted(mentioned)}; '
+            f'it fires per usage chunk, so anything it writes there is '
+            f'counted once per chunk instead of once per response'
         )
+
+    @pytest.mark.parametrize("form", ["=", "+=", ".update", ".setdefault"])
+    def test_the_check_covers_every_write_form(self, form):
+        """The guard above must reject all four, not just assignment.
+
+        Parametrised so the guard's OWN coverage is asserted rather than
+        assumed — each form is compiled into a stand-in callback and run
+        through the same predicate the real check uses.
+        """
+        bodies = {
+            "=": "turn_data['spend_cache_read'] = 1",
+            "+=": "turn_data['spend_cache_read'] += 1",
+            ".update": "turn_data.update({'spend_cache_read': 1})",
+            ".setdefault": "turn_data.setdefault('spend_cache_read', 1)",
+        }
+        src = (
+            "def usage_callback_with_turn_tracking(usage):\n"
+            f"    {bodies[form]}\n"
+        )
+        cb = ast.parse(src).body[0]
+        mentioned = {
+            n.value for n in ast.walk(cb)
+            if isinstance(n, ast.Constant) and isinstance(n.value, str)
+            and n.value.startswith('spend_')
+        }
+        assert mentioned, f'the predicate does not detect the {form} form'
 
 
 class TestTheChainCarriesIt:
@@ -307,6 +346,8 @@ class TestTierAttribution:
             tiers=tiers, initial_tier=initial, tier_fallback=initial)
         s._active_tier = initial
         s._tier_switch_count = 0
+        s._tier_cache_rewire_failures = 0
+        s._tier_reliability_retarget_failures = 0
         s._model_name = tiers[initial].model
         s._active_provider_name = 'anthropic'
         s._provider = MagicMock()
@@ -362,6 +403,50 @@ class TestTierAttribution:
 
         assert s._build_llm_span_attributes()['jaato.tier.switches'] == 1
 
+    def test_degraded_bookkeeping_is_visible_on_the_span(self):
+        """The post-connect blocks cannot raise, so they must be counted.
+
+        A cache plugin that fails to re-attach leaves the session running
+        UNCACHED — a cost regression; a failed reliability retarget judges
+        patterns against the wrong model — a correctness one.  Both are
+        swallowed by design (the provider is already re-pointed; raising
+        would leave the switch half-applied), which is exactly why they
+        need a channel that is not a log line.
+        """
+        s = self._tier_session({
+            'dispatcher': TierEntry(model='claude-sonnet-4-5'),
+            'executor': TierEntry(model='claude-haiku-4-5'),
+        }, 'dispatcher')
+
+        def _boom():
+            raise RuntimeError('entry points unreadable')
+
+        s._wire_cache_plugin = _boom
+        s._runtime.reliability_plugin = MagicMock()
+        s._runtime.reliability_plugin.set_model_context.side_effect = (
+            RuntimeError('detector gone'))
+
+        result = s.switch_tier('executor')
+
+        assert result['status'] == 'switched'      # still non-fatal
+        attrs = s._build_llm_span_attributes()
+        assert attrs['jaato.tier.cache_rewire_failures'] == 1
+        assert attrs['jaato.tier.reliability_retarget_failures'] == 1
+
+    def test_a_healthy_session_reports_zero_not_absence(self):
+        """Present-and-zero, so ``> 0`` is a queryable condition and a
+        consumer can tell a healthy span from an older build's."""
+        s = self._tier_session({
+            'dispatcher': TierEntry(model='claude-sonnet-4-5'),
+            'executor': TierEntry(model='claude-haiku-4-5'),
+        }, 'dispatcher')
+
+        s.switch_tier('executor')
+        attrs = s._build_llm_span_attributes()
+
+        assert attrs['jaato.tier.cache_rewire_failures'] == 0
+        assert attrs['jaato.tier.reliability_retarget_failures'] == 0
+
     def test_a_single_model_session_carries_no_tier_keys(self):
         """No dead attributes on the overwhelmingly common path."""
         s = JaatoSession.__new__(JaatoSession)
@@ -372,5 +457,4 @@ class TestTierAttribution:
 
         attrs = s._build_llm_span_attributes()
 
-        assert 'jaato.tier' not in attrs
-        assert 'jaato.tier.switches' not in attrs
+        assert not [k for k in attrs if k.startswith('jaato.tier')]

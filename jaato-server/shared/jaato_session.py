@@ -609,6 +609,20 @@ class JaatoSession:
         # no-op and must not inflate it.  Reported on the LLM span as
         # ``jaato.tier.switches`` and monotonic for the session's life.
         self._tier_switch_count: int = 0
+        # Post-connect bookkeeping that FAILED, per subsystem.  Both blocks
+        # below are deliberately non-fatal (the provider is already
+        # re-pointed by then; raising would leave the switch half-applied),
+        # and the cost of that is a real regression recorded only in a log
+        # line nobody reads at runtime:
+        #
+        #   cache re-wire fails      -> the session runs UNCACHED from here
+        #   reliability retarget     -> patterns judged against the wrong model
+        #
+        # Three best-effort blocks is not the smell; three UNOBSERVABLE ones
+        # is.  Both counters ride the LLM span alongside ``jaato.tier``, so a
+        # consumer can see a degraded session instead of inferring it.
+        self._tier_cache_rewire_failures: int = 0
+        self._tier_reliability_retarget_failures: int = 0
 
         # Thinking mode
         self._thinking_plugin: Optional['ThinkingPlugin'] = None
@@ -4689,8 +4703,14 @@ NOTES
         observers can correlate LLM calls with the GC ↔ cache
         coordination dance.
 
-        ``jaato.tier`` / ``jaato.tier.switches`` are emitted only in tier
-        mode, so single-model sessions carry no dead keys.  The tier is
+        ``jaato.tier*`` keys are emitted only in tier mode, so single-model
+        sessions carry no dead keys.  The two ``*_failures`` counters are
+        how the non-fatal post-connect bookkeeping in
+        :meth:`_connect_tier_entry` becomes observable: a session whose
+        cache plugin failed to re-attach is running uncached, and one whose
+        reliability retarget failed is judging patterns against the wrong
+        model.  Neither can be allowed to raise, so neither would be
+        visible anywhere but a log without these.  The tier is
         what makes the cache figures on this span readable: reads and
         writes are per (model, prefix), so a span whose tier differs from
         its predecessor's is expected to show a full miss, and one whose
@@ -4706,6 +4726,14 @@ NOTES
             attrs["jaato.tier"] = active_tier
             attrs["jaato.tier.switches"] = int(
                 getattr(self, "_tier_switch_count", 0))
+            # Always emitted, not only when non-zero: a consumer must be
+            # able to distinguish "zero failures" from "this build does not
+            # report them", and querying for > 0 needs the field present on
+            # the healthy spans too.
+            attrs["jaato.tier.cache_rewire_failures"] = int(
+                getattr(self, "_tier_cache_rewire_failures", 0))
+            attrs["jaato.tier.reliability_retarget_failures"] = int(
+                getattr(self, "_tier_reliability_retarget_failures", 0))
         cache = getattr(self, "_cache_plugin", None)
         if cache and hasattr(cache, "get_telemetry_attributes"):
             try:
@@ -10416,6 +10444,8 @@ NOTES
         try:
             self._wire_cache_plugin()
         except Exception as exc:  # noqa: BLE001
+            self._tier_cache_rewire_failures = getattr(
+                self, '_tier_cache_rewire_failures', 0) + 1
             logger.warning(
                 "tier cache re-wire for %s/%s failed; continuing uncached: %s",
                 self._active_provider_name, entry.model, exc,
@@ -10423,6 +10453,8 @@ NOTES
         try:
             self._retarget_reliability_model(entry.model)
         except Exception as exc:  # noqa: BLE001
+            self._tier_reliability_retarget_failures = getattr(
+                self, '_tier_reliability_retarget_failures', 0) + 1
             logger.warning(
                 "tier reliability retarget for %s failed; records will name "
                 "the previous model: %s", entry.model, exc,
@@ -10445,17 +10477,20 @@ NOTES
         switchable-model catalogue, which a tier change does not alter, and
         ``set_model_context`` leaves it untouched when passed ``None``.
 
-        Best-effort: attribution must never fail a tier switch.
+        Raises rather than swallowing.  Attribution must never fail a tier
+        switch, but the ONE place that decides so is the caller's
+        post-connect block, which also counts the failure onto
+        ``jaato.tier.reliability_retarget_failures``.  A second try/except
+        here looked like belt-and-braces and was the opposite: it ate the
+        exception before the counter could see it, so the span reported a
+        healthy session while every pattern was being judged against the
+        wrong model.  Two layers of swallowing is one layer of hiding.
         """
         plugin = getattr(self._runtime, 'reliability_plugin', None) \
             if self._runtime else None
         if plugin is None:
             return
-        try:
-            plugin.set_model_context(model)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "tier reliability retarget to %s failed: %s", model, exc)
+        plugin.set_model_context(model)
 
     def switch_tier(self, requested_tier: str) -> Dict[str, Any]:
         """Switch the session's active model tier.
