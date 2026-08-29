@@ -49,6 +49,22 @@ REVERSIONS = [
         test="test_cache_reads_accumulate_across_a_turns_responses",
         because="a turn reporting only its final response's cache traffic",
     ),
+    # The other half of the same measurement.  Accumulating a number the
+    # provider never parses measures nothing, so the parse belongs under
+    # the same guard as the accumulation.  Lives HERE rather than beside
+    # the provider because #665's meta-guard scans `shared/tests` and
+    # `server/tests` only -- a reversion declared in
+    # `openrouter/tests/` would never be applied, and an unapplied
+    # reversion reads as a passing one.  The detailed shape tests stay
+    # with the provider; this pins the one fact cache accounting needs.
+    Reversion(
+        target=("jaato-server/shared/plugins/model_provider/openrouter"
+                "/converters.py"),
+        find='    creation = _read_details(details, "cache_write_tokens")',
+        replace='    creation = None',
+        test="test_the_provider_reports_the_write_count_at_all",
+        because="cache writes billed but never reported (#699)",
+    ),
 ]
 
 #: Anchored to THIS FILE, not the process CWD.  Sibling guards use
@@ -294,6 +310,43 @@ class TestCacheSpendAccumulates:
             and n.value.startswith('spend_')
         }
         assert mentioned, f'the predicate does not detect the {form} form'
+
+
+class TestTheParseFeedsTheChain:
+    """Accumulating a figure nobody parses measures nothing.
+
+    §5.4 sums the cache counts a provider reports.  If the provider does
+    not report them, the sum is a well-tested zero -- which is exactly
+    what OpenRouter did until #699: writes were billed at 1.25x and
+    `cache_creation_tokens` was permanently `None`, invisible unless you
+    cross-checked cost against published rates.
+
+    One assertion, on the wire shape captured from a live call.  The
+    provider's own tests cover dict/attr handling and the fallback; this
+    pins the fact the accounting depends on.
+    """
+
+    def test_the_provider_reports_the_write_count_at_all(self):
+        from shared.plugins.model_provider.openrouter.converters import (
+            apply_cache_usage,
+        )
+        from jaato_sdk.plugins.model_provider.types import TokenUsage
+        from types import SimpleNamespace
+
+        usage = TokenUsage()
+        # Captured 2026-08-29, anthropic/claude-sonnet-4.6, cold call.
+        apply_cache_usage(
+            SimpleNamespace(
+                prompt_tokens=4412,
+                prompt_tokens_details=SimpleNamespace(
+                    cached_tokens=0, cache_write_tokens=4403),
+            ),
+            usage,
+        )
+        assert usage.cache_creation_tokens == 4403, (
+            "the provider is not reporting cache writes, so every "
+            "spend_cache_creation this module guards sums to nothing"
+        )
 
 
 class TestTheChainCarriesIt:
