@@ -12,11 +12,13 @@ guard, the common `cache:` profile field (§7), and everything in §6.
 §6 answers the original cost question with numbers rather than
 arithmetic. Live runs: the instrumentation validated end to end and the
 §5.4 under-report quantified at 2.0× (§6.0); a real Sonnet→Haiku switch
-priced, break-even landing at **5.61 consecutive calls against §3's
-predicted 5.75** (§6.0.1); and a **correction** — coming back is a cache
-*hit*, not a second cold arrival, so a round trip costs 7.35 turns rather
-than the ~12.5 an earlier version of this document claimed (§6.0.2).
-Leaving is expensive; returning is nearly free.
+priced from measured per-leg costs, break-even landing at **4.80-5.57
+consecutive calls against §3's predicted 5.75** (§6.0.1); and a
+**correction** — coming back is a cache *hit*, and measured at the same
+conversation position it costs **0.996×** a turn with no switch in it, so
+a round trip breaks even at essentially the one-way point rather than the
+~12.5 an earlier version of this document claimed (§6.0.2). **Arriving is
+the whole cost; returning is free.**
 **Origin**: the question "our profiles can declare a model tier per task
 type and `enter_tier` hands the task to the most suitable one — how does
 that impact cache usage?", which had never been assessed.
@@ -592,22 +594,39 @@ Three consequences worth stating plainly:
   the leg the switch caused. The measurement above is only possible
   because that was fixed first.
 
-**One caveat — a bug these runs found, since fixed.** `cache_write` is
-`None` on every row above even though writes were billed: turn 1's
-$0.104148 over 27,819 tokens is $3.74/Mtok, the cache-*write* rate, not
-the $3.00 input rate. OpenRouter reports the count as
-`prompt_tokens_details.cache_write_tokens` — nested, beside the read
-count — while the provider read only the top-level Anthropic-native
-`cache_creation_input_tokens`. Filed as **#699** and fixed in
-`openrouter/converters.py`; the parser now reads the nested name and
-keeps the top-level one as a fallback for upstreams that use it.
+**A bug these runs found, since fixed — and then re-measured.** The
+first pass showed `cache_write: None` on every row even though writes
+were billed (turn 1's $0.104148 over 27,819 tokens is $3.74/Mtok, the
+cache-*write* rate, not the $3.00 input rate). OpenRouter reports the
+count as `prompt_tokens_details.cache_write_tokens` — nested, beside the
+read count — while the provider read only the top-level Anthropic-native
+`cache_creation_input_tokens`. Filed as **#699**, fixed in
+`openrouter/converters.py`, and the run repeated.
 
-The numbers in the tables above were measured **before** that fix, so
-their write costs are derived from the `cost` field rather than from a
-reported token count. That does not affect the break-even: it turns on
-the read side, which was always parsed correctly. A re-run on the fixed
-parser would report the write count directly and is the cheap way to
-confirm the derivation — worth doing, not yet done.
+With the write counts reported, the cold arrival is measured rather than
+derived. Per-response, from the LLM spans:
+
+| tier | prompt | read | write | cost |
+|---|---|---|---|---|
+| dispatcher | 27,863 | 27,488 | — | $0.010271 |
+| **executor (arrival)** | 28,278 | — | **27,503** | **$0.035179** |
+| executor (warm) | 28,294 | 27,503 | — | $0.003566 |
+| executor (warm) | 28,322 | 27,503 | — | $0.003869 |
+| **dispatcher (return)** | 28,707 | **27,488** | — | **$0.011978** |
+| dispatcher | 28,723 | 27,488 | — | $0.012026 |
+
+The cold arrival cost **$0.035179**; the earlier derivation from the
+`cost` field gave $0.036088 — **2.5% high**, because subtracting a
+whole warm turn over-charges for the leg that turn also contained. Close
+enough that the break-even barely moves, but measured beats derived and
+the difference is now visible rather than assumed.
+
+Break-even recomputed from measured per-leg costs: **4.80** calls against
+a same-moment baseline, **5.57** against the earlier-turn baseline — the
+spread is real, because the uncached delta grows as the conversation
+does, so *where* you measure the "stay" cost moves the answer. §3
+predicted 5.75. Both readings sit under it, which means §3's arithmetic
+is a mild **upper bound** on the cost of switching.
 
 ### 6.0.2 Coming back is a cache HIT, not a second cold arrival
 
@@ -643,16 +662,26 @@ $0.0158477 − $0.0035663 = **$0.012281**:
 | | cost | |
 |---|---|---|
 | cold sonnet arrival (turn 1) | $0.104148 | — |
-| **the return leg** | **$0.012281** | **8.5× cheaper than cold** |
-| warm sonnet turn (turn 2) | $0.009362 | return is only **1.31×** a warm turn |
+| **the return leg** | **$0.011978** | **8.7× cheaper than cold** |
+| the very next plain sonnet turn | $0.012026 | return is **0.996×** a normal turn |
+
+**The return is not merely cheap — it is free.** Measured against the
+*next* turn, which involves no switch at all, the return leg costs
+0.996×: indistinguishable. An earlier version of this section reported
+1.31×, comparing instead against a warm turn from *earlier* in the
+conversation. That gap was conversation growth — the uncached delta
+grows with every turn — not a cost of switching. Comparing at the same
+conversation position removes it. Baseline choice was doing the work,
+which is the same error in miniature as the claim this section corrects.
 
 So the corrected economics:
 
 ```
-excess to GO          $0.036088
-excess to COME BACK   $0.006485      (18% of the outbound, not 100%)
-one-way break-even        6.23 turns at the cheap tier
-ROUND-TRIP break-even     7.35 turns   (the wrong claim implied ~12.5)
+excess to GO          $0.024908      (arrival $0.035179 - staying $0.010271)
+excess to COME BACK   ~$0             (the return costs what staying costs)
+break-even            4.80-5.57 calls at the cheap tier
+round trip            ~the same, because coming back is free
+                      (the original wrong claim implied ~12.5)
 ```
 
 **The asymmetry is the useful part: leaving is expensive, returning is
