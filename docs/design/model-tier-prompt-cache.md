@@ -40,7 +40,9 @@ measurement gap:
   defensive guard is not;
 - per-turn cache figures *replace* rather than accumulate, so a turn
   containing a switch reports only its last leg (§5.4) — **open**, and
-  it is the one that blocks measuring any of this.
+  it is the one that blocks measuring any of this;
+- a second subsystem attributes its records to the boot model after a
+  switch (§5.5) — **open**, same shape as §5.4.
 
 The reason none of this has hurt yet is the subject of §4: the framework's
 own caching was **not reachable from a profile at all**. That is now
@@ -316,6 +318,38 @@ breaks when two tiers share a model or a budget rung rebinds one
 **Proposal**: accumulate cache tokens like every other dimension; add
 `jaato.tier` and a tier-switch counter to the LLM span.
 
+### 5.5 The other uncalled model setters
+
+`AnthropicCachePlugin.set_model_name` having no caller was the tell that
+found §5.2 — a setter nobody calls means a whole path was never wired.
+The tree has two more `set_model_name` methods with zero callers, and
+they are **not** the same finding. Recording the audit so the next reader
+who greps for them does not have to redo it.
+
+**`PatternDetector.set_model_name`** (`reliability/patterns.py:111`) —
+**same class, lower stakes, still open.** Its `_model_name` is stamped
+into every emitted `BehavioralPattern` (six construction sites), and it
+is captured once when the detector is built, from
+`ReliabilityPlugin._current_model` — the boot model.
+`set_session_context` is called without a model name, so nothing updates
+it afterwards. After a tier switch, patterns detected while running the
+executor tier are attributed to the model that started the session, and
+you cannot tell from the record which tier misbehaved. That is the same
+attribution failure as §5.4, in a different subsystem, and the fix is the
+same shape: push the model where the model changes.
+
+**`PluginRegistry.set_model_name`** (`registry.py:825`) — **not a gap.**
+Its `_model_name` gates plugin *exposure*: a plugin declaring
+`get_model_requirements` is skipped when the active model does not match
+(`registry.py:1080-1085`; today only `multimodal` declares any). That
+gate runs at `expose_tool` time, while the session's tool surface is
+being built — before any tier switch can happen, and the surface is then
+fixed and already described to the model. Re-running it mid-session would
+change tool schemas underneath a model mid-conversation. Construction
+time is the correct lifetime here, and per-tier tool surfaces would be a
+new feature rather than a repair. The setter is reachable API that
+nothing currently needs.
+
 ---
 
 ## 6. Where to go after that
@@ -410,6 +444,7 @@ provider's config.
 - [x] re-wire the cache plugin on tier switch; push the model name (§5.2)
 - [x] Google's `CachedContent` discarded when the model changes (§5.3)
 - [ ] Google mismatch guard: never emit a name bound to another model (§5.3)
+- [ ] `PatternDetector` model attribution follows the tier (§5.5)
 - [ ] accumulate cache tokens per turn; `jaato.tier` span attribute (§5.4)
 - [ ] measure a real tiered session, then revisit §6
 - [ ] first-class `cache:` profile field (§7)
