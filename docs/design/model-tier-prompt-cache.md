@@ -9,13 +9,14 @@ the tier-switch re-wire (§5.2), the model-invalidation half of Google's
 the reliability attribution (§5.5). STILL OPEN: the Google mismatch
 guard, the common `cache:` profile field (§7), and everything in §6.
 
-§6 answers the original cost question, and it is now answered with
-numbers rather than arithmetic. Two live runs: one validated the
-instrumentation end to end and quantified the §5.4 under-report at 2.0×
-(§6.0); the second priced a real tier switch on Sonnet→Haiku via
-OpenRouter and put the break-even at **5.61 consecutive calls against
-§3's predicted 5.75** (§6.0.1). The switch turn cost **4.85×** a warm
-turn on the model it was leaving.
+§6 answers the original cost question with numbers rather than
+arithmetic. Live runs: the instrumentation validated end to end and the
+§5.4 under-report quantified at 2.0× (§6.0); a real Sonnet→Haiku switch
+priced, break-even landing at **5.61 consecutive calls against §3's
+predicted 5.75** (§6.0.1); and a **correction** — coming back is a cache
+*hit*, not a second cold arrival, so a round trip costs 7.35 turns rather
+than the ~12.5 an earlier version of this document claimed (§6.0.2).
+Leaving is expensive; returning is nearly free.
 **Origin**: the question "our profiles can declare a model tier per task
 type and `enter_tier` hands the task to the most suitable one — how does
 that impact cache usage?", which had never been assessed.
@@ -113,12 +114,12 @@ not cover one cold read of the prefix.
 
 Consequences worth stating plainly:
 
-- **A one-shot hop is always a loss.** Switching to `executor` for a
-  single mechanical tool call and back is strictly worse than not
-  switching.
-- **The `vision` tier is the worst case by construction.** Its documented
-  usage — switch in, view an image, switch back — is two full prefix
-  misses for one or two calls.
+- **A one-shot hop is a loss.** Switching to `executor` for a single
+  mechanical tool call and back is worse than not switching.
+- **The `vision` tier's documented usage — switch in, view an image,
+  switch back — is the shape that loses most.** Not because the return
+  is expensive (it is not; see §6.0.2) but because the *stay* is short:
+  you pay a full cold arrival to do one or two calls.
 - **The advertised cost is wrong.** `enter_tier`'s description tells the
   model *"Switching is cheap (no network round-trip; just re-points the
   active provider)"* (`lifecycle_tools.py:557`). True for latency,
@@ -582,9 +583,9 @@ Three consequences worth stating plainly:
   expensive, not cheaper.
 - **A one-shot hop is a loss, confirmed.** The executor tier saves
   $0.0058/turn and the hop costs $0.0361. Anything under ~6 consecutive
-  calls at the new tier loses money, and the `vision` tier's documented
-  usage — switch in, read an image, switch back — is two hops for one or
-  two calls.
+  calls at the new tier loses money. **What that costs on a round trip
+  is corrected in §6.0.2** — an earlier version of this document claimed
+  a return leg was a second cold arrival, and it is not.
 - **§5.4's under-report is what hid this.** Turn 3's `total_tokens` is
   28,283; its `spend_total_tokens` is 56,206. Before this branch the turn
   reported the smaller number — a 2.0× under-report that dropped exactly
@@ -600,13 +601,103 @@ the write costs above are therefore derived from the `cost` field rather
 than a token count. The read side is unaffected and is what the
 break-even turns on.
 
+### 6.0.2 Coming back is a cache HIT, not a second cold arrival
+
+This section exists because an earlier version of this document was
+wrong, and the error survived several reviews by being plausible.
+
+**The claim that was wrong:** "Round trips pay entry twice. Switching
+back is another cold arrival, so a there-and-back excursion needs ~2n
+calls of benefit, not n."
+
+**Why it was wrong.** It used half of a rule. Caches are *model-scoped* —
+which means arriving at tier B is cold, and equally that leaving tier A
+**does not destroy A's entry**. A sits there under its own TTL. Come back
+inside that window and the prefix hits. The reasoning took the half that
+hurt and never drew the half that helps.
+
+**The measurement.** Same session, extended to six turns — out to the
+cheap tier and back:
+
+| turn | `spend_cache_read` | cost |
+|---|---|---|
+| 2 warm, dispatcher | 27,488 | $0.0093624 |
+| 3 switch → executor | 27,488 | $0.0454502 |
+| 4 warm, executor | 27,503 | $0.0035663 |
+| **5 switch BACK → dispatcher** | **54,991** | **$0.0158477** |
+| 6 after return | 27,488 | $0.0120264 |
+
+Turn 5's `spend_cache_read` of 54,991 is the whole answer: **both** legs
+hit — 27,503 at haiku and **27,488 at sonnet**, byte-for-byte the prefix
+sonnet had cached before the excursion. Isolating the return leg gives
+$0.0158477 − $0.0035663 = **$0.012281**:
+
+| | cost | |
+|---|---|---|
+| cold sonnet arrival (turn 1) | $0.104148 | — |
+| **the return leg** | **$0.012281** | **8.5× cheaper than cold** |
+| warm sonnet turn (turn 2) | $0.009362 | return is only **1.31×** a warm turn |
+
+So the corrected economics:
+
+```
+excess to GO          $0.036088
+excess to COME BACK   $0.006485      (18% of the outbound, not 100%)
+one-way break-even        6.23 turns at the cheap tier
+ROUND-TRIP break-even     7.35 turns   (the wrong claim implied ~12.5)
+```
+
+**The asymmetry is the useful part: leaving is expensive, returning is
+nearly free.** A single sustained excursion is fine; what is punished is
+*repeated* hopping, and only on the outbound legs.
+
+**And the same rule rescues a vision-intensive workload.** Every tier
+holds its own entry, so a *second* arrival at the vision tier is itself a
+return. A loop that visits vision repeatedly pays cold **once**, on first
+entrance; every later visit hits — provided the gaps stay inside that
+tier's TTL. (Measured for the return direction above; the re-visit case
+follows from the same model-scoping rule and the same measurement with
+the roles swapped, and has not been separately measured.)
+
+Two things keep that conditional rather than free, both visible in the
+data:
+
+- **The delta grows between visits.** A return hits only what was cached
+  at the *last* visit; everything appended since is full-price input plus
+  a fresh write. One short excursion added ~1,235 tokens here, and that
+  alone made turn 6 cost 1.31× a warm turn rather than 1.0×. A re-visit
+  costs in proportion to how much work happened *while away*, not to
+  total context size.
+- **TTL is a race against generation time.** The window runs from the
+  *start* of the request that writes or reads, so generation counts
+  against it — a 4-minute turn leaves about a minute for the next request
+  to begin. A read refreshes the timer for free, so continuous traffic
+  keeps an entry alive indefinitely; a gap longer than the window is a
+  genuine cold arrival, which is the case the original wrong claim
+  accidentally described.
+
+So: **vision costs one cold entry plus the accumulated delta per
+re-entry, as long as visits stay inside the TTL.** Vision-intensive work
+is cheap after the first entrance. Occasional image-peeking scattered
+through a long session is the expensive shape, and `cache_ttl: "1h"` buys
+margin there at 2× write cost.
+
+**What this branch got wrong twice, both the same way.** The system-block
+tier line (§5.1) and this claim were both reasoned from one half of a
+rule. The corpus lesson from §5.4 — that a *shape* check reads one body
+while an *effect* check runs the real thing — has an analogue here:
+reasoning about a cache reads one rule; measuring it runs the real cache.
+Both corrections came from a run, not a re-read.
+
+---
+
 ### 6.1 The ordered list
 
 Ordered by confidence, not by effort.
 
-1. **Measure first.** §5.4 plus the §4 fix is the minimum needed to
-   answer "what do tiers actually cost us" with data rather than
-   arithmetic. Everything below is a guess until that lands.
+1. ~~**Measure first.**~~ **Done** — §6.0, §6.0.1 and §6.0.2. The
+   remaining items below are now informed by measurement rather than
+   arithmetic, and two of them changed because of it.
 
 2. **Tell the model the truth.** Replace `enter_tier`'s "switching is
    cheap" with the break-even rule, and report the realised miss in the
@@ -614,9 +705,15 @@ Ordered by confidence, not by effort.
    the entity making the switch decision; it is currently making it on
    bad information.
 
-3. **Minimum dwell / hysteresis.** Refuse or discourage a switch that
-   immediately reverses. Cheap to implement, directly targets the
-   one-shot hop that §3 shows is always a loss.
+3. **Minimum dwell, not anti-reversal.** The first version of this item
+   said "refuse a switch that immediately reverses", on the theory that
+   the reversal was the expensive half. §6.0.2 showed the reversal costs
+   18% of the outbound — the expensive half is the *arrival*, and a short
+   *stay* is what fails to amortise it. So the rule to enforce is a
+   minimum dwell at the new tier (≈ the §3 break-even for that pair),
+   not a penalty on coming back. Gating the return would make things
+   worse: it strands the session on the cheap tier, where its cache is
+   the one still growing.
 
 4. **Prefer handoff over in-place switching.** A cheap model is cheap
    because it receives a *small* task brief, not because of its rate;
@@ -628,10 +725,16 @@ Ordered by confidence, not by effort.
    changes the ergonomics of tiers from "switch" to "delegate", so it is
    a design decision, not a fix.
 
-5. **Longer TTL when hopping is frequent.** Anthropic's `1h` TTL costs a
-   2× write premium instead of 1.25× but keeps a tier's prefix alive
-   across excursions to another tier. Worth evaluating once §5.4 shows
-   the real switch frequency; not worth guessing at now.
+5. **Longer TTL when excursions are long, not merely frequent.**
+   Anthropic's `1h` TTL costs a 2× write premium instead of 1.25×. §6.0.2
+   sharpens when that buys anything: frequent hopping with short gaps
+   already keeps every tier's entry warm on the 5-minute default (a read
+   refreshes the timer for free), so the premium buys nothing there. It
+   pays when the *gap* between visits to a tier exceeds the window —
+   long stretches of work at one tier between visits to another, or turns
+   whose own generation time eats the window. Decide from measured
+   inter-visit gaps, which `jaato.tier.switches` plus span timestamps now
+   make readable.
 
 ---
 
