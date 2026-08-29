@@ -5588,15 +5588,7 @@ NOTES
         # This ensures we capture token values even if streaming is cancelled
         # Always enabled for internal turn tracking, regardless of external callback
         def usage_callback_with_turn_tracking(usage: TokenUsage) -> None:
-            if usage.total_tokens > 0:
-                turn_data['prompt'] = usage.prompt_tokens
-                turn_data['output'] = usage.output_tokens
-                turn_data['total'] = usage.total_tokens
-            # Cache tokens: capture when present (streaming path)
-            if usage.cache_read_tokens is not None:
-                turn_data['cache_read'] = usage.cache_read_tokens
-            if usage.cache_creation_tokens is not None:
-                turn_data['cache_creation'] = usage.cache_creation_tokens
+            self._track_streaming_usage(turn_data, usage)
             if on_usage_update:
                 on_usage_update(usage)
 
@@ -8228,6 +8220,44 @@ NOTES
             '',
             self._system_instruction,
         )
+
+    def _track_streaming_usage(
+        self,
+        turn_data: Dict[str, Any],
+        usage: TokenUsage,
+    ) -> None:
+        """Record a streaming usage CHUNK onto the turn.
+
+        The streaming path fires this once per usage chunk, and a provider
+        may emit several per response.  So everything here REPLACES: these
+        are level readings (end-of-turn context size), and the last chunk
+        wins.
+
+        **Nothing here may write a ``spend_`` key.**  Spend accumulates,
+        and accumulating per chunk would count one response many times.
+        The spend keys are written in exactly one place —
+        :meth:`_accumulate_turn_tokens`, which runs once per response on
+        every path.  See ``docs/design/model-tier-prompt-cache.md`` §5.4.
+
+        Extracted from the closure it used to live in so that rule is
+        testable by EFFECT rather than only by shape: a shape check reads
+        one function body, so moving a write into a helper the callback
+        calls makes it silent, while driving this with two chunks and
+        looking at ``turn_data`` catches the write wherever it hides.
+
+        Args:
+            turn_data: The turn-accounting dict, mutated in place.
+            usage: The usage chunk just received.
+        """
+        if usage.total_tokens > 0:
+            turn_data['prompt'] = usage.prompt_tokens
+            turn_data['output'] = usage.output_tokens
+            turn_data['total'] = usage.total_tokens
+        # Cache tokens: capture when present (streaming path)
+        if usage.cache_read_tokens is not None:
+            turn_data['cache_read'] = usage.cache_read_tokens
+        if usage.cache_creation_tokens is not None:
+            turn_data['cache_creation'] = usage.cache_creation_tokens
 
     def _accumulate_turn_tokens(
         self,

@@ -131,18 +131,25 @@ class TestCacheSpendAccumulates:
         assert 'spend_cache_read' not in turn
         assert 'spend_cache_creation' not in turn
 
-    @staticmethod
-    def _streaming_callbacks():
-        """The streaming usage-callback's AST node(s)."""
+    #: Both halves of the streaming path: the closure the provider is
+    #: handed, and the method it delegates to.  A shape check that knew
+    #: only about the closure went quiet the moment the body moved.
+    STREAMING_FUNCS = (
+        'usage_callback_with_turn_tracking', '_track_streaming_usage')
+
+    @classmethod
+    def _streaming_callbacks(cls):
+        """The AST nodes of every function on the streaming path."""
         tree = ast.parse(SESSION_SRC)
         found = [
             n for n in ast.walk(tree)
-            if isinstance(n, ast.FunctionDef)
-            and n.name == 'usage_callback_with_turn_tracking'
+            if isinstance(n, ast.FunctionDef) and n.name in cls.STREAMING_FUNCS
         ]
-        assert found, (
-            'the streaming usage-callback was renamed; this guard no longer '
-            'checks anything and must be re-aimed'
+        names = {n.name for n in found}
+        assert names == set(cls.STREAMING_FUNCS), (
+            f'expected {sorted(cls.STREAMING_FUNCS)} on the streaming path, '
+            f'found {sorted(names)}; something was renamed and this guard '
+            f'no longer checks what it claims to'
         )
         return found
 
@@ -173,6 +180,93 @@ class TestCacheSpendAccumulates:
             f'the streaming callback references spend keys {sorted(mentioned)}; '
             f'it fires per usage chunk, so anything it writes there is '
             f'counted once per chunk instead of once per response'
+        )
+
+    def test_driving_the_streaming_path_writes_no_spend_key(self):
+        """The assertion no indirection can dodge.
+
+        The shape check above reads function bodies, so moving the write
+        into a helper the callback calls silences it — verified: an
+        ordinary extract-a-helper refactor carrying a genuine per-chunk
+        double-count passed the whole file.  This drives the real code
+        with two chunks and looks at the result, so a write anywhere below
+        it — helper, method, anything transitive — still lands in
+        ``turn_data`` and is caught.
+        """
+        s = _bare_session()
+        turn = {}
+
+        s._track_streaming_usage(turn, _usage(
+            prompt=100, output=10, total=110,
+            cache_read=58_000, cache_creation=1_024))
+        s._track_streaming_usage(turn, _usage(
+            prompt=120, output=20, total=140,
+            cache_read=58_000, cache_creation=1_024))
+
+        spend = {k: v for k, v in turn.items() if k.startswith('spend_')}
+        assert not spend, (
+            f'the streaming path wrote {spend}; it fires once per usage '
+            f'CHUNK and a provider may emit several per response, so spend '
+            f'accumulated here counts one response many times'
+        )
+
+    def test_the_streaming_path_replaces_the_level_readings(self):
+        """The other half of the same contract: it MUST replace, because
+        each chunk's prompt_tokens already covers the whole context."""
+        s = _bare_session()
+        turn = {}
+
+        s._track_streaming_usage(turn, _usage(
+            prompt=100, output=10, total=110, cache_read=58_000))
+        s._track_streaming_usage(turn, _usage(
+            prompt=120, output=20, total=140, cache_read=0))
+
+        assert turn['total'] == 140        # last chunk, not 250
+        assert turn['cache_read'] == 0     # last chunk, not 58_000
+
+    def test_the_closure_is_exactly_a_pass_through(self):
+        """The closure is pinned by WHITELIST, not by forbidding writes.
+
+        It is the one body neither other check reaches: the effect test
+        drives ``_track_streaming_usage``, and a blacklist ("no assignment
+        here") is dodged by a plain call —
+
+            def _record_spend(tt, u): tt['spend_cache_read'] = ...
+            def usage_callback_with_turn_tracking(usage):
+                self._track_streaming_usage(turn_data, usage)
+                _record_spend(turn_data, usage)          # <- a Call
+
+        which is the reviewer's evasion applied one level up, and it
+        passed a blacklist version of this test.  So the closure is
+        allowed EXACTLY two statements and anything else fails, whatever
+        its node type.  If the closure ever legitimately needs to grow,
+        that should be a deliberate edit here, not a silent one there.
+        """
+        closure = next(
+            n for n in self._streaming_callbacks()
+            if n.name == 'usage_callback_with_turn_tracking')
+        body = [n for n in closure.body
+                if not (isinstance(n, ast.Expr)
+                        and isinstance(n.value, ast.Constant))]  # docstring
+
+        assert len(body) == 2, (
+            f'the closure has {len(body)} statements; it must be exactly a '
+            f'delegation to _track_streaming_usage plus the on_usage_update '
+            f'pass-through, because anything else it does is invisible to '
+            f'every other check in this file'
+        )
+
+        delegation, passthrough = body
+        assert (isinstance(delegation, ast.Expr)
+                and isinstance(delegation.value, ast.Call)
+                and getattr(delegation.value.func, 'attr', None)
+                == '_track_streaming_usage'), (
+            'the closure no longer delegates to the method the effect test '
+            'drives, so that test measures something the provider never calls'
+        )
+        assert isinstance(passthrough, ast.If), (
+            'the second statement should be the guarded on_usage_update '
+            'pass-through'
         )
 
     @pytest.mark.parametrize("form", ["=", "+=", ".update", ".setdefault"])

@@ -347,9 +347,22 @@ literal appears anywhere in the callback, which covers `=`, `+=`,
 `.update` and `.setdefault` alike, with a parametrised test over all four
 so the guard's own coverage is asserted rather than assumed.
 
-Every one of the three was caught by running a sabotage, never by reading
-the guard. A guard aimed at one *spelling* of an operation is a guard
-that reports on the spelling.
+A fourth, from the next review round: the shape check reads one function
+body, so an ordinary extract-a-helper refactor moves the write out of
+view and the guard goes quiet — confirmed with a genuine per-chunk
+double-count passing the whole file. No cleverer AST walk fixes that;
+only an **effect** assertion does. The streaming tracking is now a named
+method (`_track_streaming_usage`) rather than an anonymous closure, so
+the test can drive the real code with two chunks and assert the `spend_`
+keys did not move — which catches a write anywhere below it, however
+many helpers deep. The closure that remains is pinned by *whitelist* to
+exactly two statements, because it is the one body the effect test does
+not reach and a blacklist there is dodged by a plain call.
+
+Every one of the four was caught by running a sabotage, never by reading
+the guard. A guard aimed at one *spelling* of an operation reports on the
+spelling; a guard that reads one *body* reports on that body. Only
+driving the thing and looking at what came out is indifferent to both.
 
 *Attribution.* The LLM span carries `jaato.tier`,
 `jaato.tier.switches`, `jaato.tier.cache_rewire_failures` and
