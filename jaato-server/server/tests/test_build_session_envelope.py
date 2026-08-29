@@ -93,7 +93,16 @@ def test_no_profile_no_env_leaves_provider_empty() -> None:
     )
     assert env.provider_name == ""
     assert env.model_name == ""  # validate stage will reject this loudly
-    assert env.plugins == []
+    # NOT ``[]``: with no profile, nothing declared a plugin set, and the
+    # envelope must say so.  ``[]`` is a profile explicitly asking for the
+    # minimal set; ``None`` is "nobody asked", which
+    # ``JaatoRuntime.create_session`` expands to every exposed plugin so the
+    # eager wire keeps the core tools (introspection included) and the model
+    # can discover the rest.  While this asserted ``[]`` a profile-less
+    # session reached the runtime as "minimal", and the empty-wire gate in
+    # ``_should_drop_introspection`` then removed list_tools/get_tool_schemas
+    # too — leaving no tools at all.
+    assert env.plugins is None
     assert env.system_instructions is None
     assert env.gc is None
 

@@ -126,7 +126,6 @@ BASELINE: Dict[str, int] = {
     "jaato-server/server/runner/rpc.py::RunnerRPC._install_session_notification_callbacks": 20,
     "jaato-server/server/runner/rpc.py::RunnerRPC._restore_session_notification_callbacks": 29,
     "jaato-server/server/runner/rpc.py::RunnerRPC.serve": 18,
-    "jaato-server/server/runner/session.py::_build_session": 17,
     "jaato-server/server/runner/session.py::_configure_runtime_plugins": 19,
     "jaato-server/server/runner/tests/test_session_dispatch_lifecycle_e2e.py::test_full_session_lifecycle_through_dispatch_surface": 21,
     "jaato-server/server/runner/tests/test_session_send_message_rpc.py::test_send_message_fires_post_turn_notifications_in_order": 26,

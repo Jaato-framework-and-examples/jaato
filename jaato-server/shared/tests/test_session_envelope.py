@@ -299,9 +299,12 @@ def test_envelope_handles_none_optional_fields() -> None:
 
 
 def test_envelope_default_lists_and_dicts_are_independent() -> None:
-    """Default ``plugins=[]`` etc. must NOT be the shared
-    class-level mutable; modifying one envelope's defaults must not
-    affect another."""
+    """Mutable defaults must NOT be a shared class-level object;
+    modifying one envelope's defaults must not affect another.
+
+    ``plugins`` is deliberately NOT among them — it defaults to ``None``
+    (see :func:`test_envelope_plugins_defaults_to_none_not_empty_list`),
+    so ``plugin_configs`` carries the independence check here."""
     e1 = SessionInitEnvelope(
         session_id="a", workspace_path=None, profile_name=None,
         provider_name="p", model_name="m",
@@ -310,8 +313,40 @@ def test_envelope_default_lists_and_dicts_are_independent() -> None:
         session_id="b", workspace_path=None, profile_name=None,
         provider_name="p", model_name="m",
     )
-    e1.plugins.append({"name": "cli", "preload": False})
-    assert e2.plugins == []  # not corrupted
+    e1.plugin_configs["cli"] = {"x": 1}
+    assert e2.plugin_configs == {}  # not corrupted
+
+
+def test_envelope_plugins_defaults_to_none_not_empty_list() -> None:
+    """``plugins`` must default to ``None``, never ``[]``.
+
+    The two are different answers and both are reachable: ``[]`` is a
+    profile explicitly asking for the minimal tool set, ``None`` is "no
+    profile said anything", which ``JaatoRuntime.create_session`` expands
+    to every exposed plugin.  A ``default_factory=list`` here made a
+    profile-less session indistinguishable from ``plugins: []``: it got
+    the minimal set, and ``_should_drop_introspection`` then removed
+    list_tools/get_tool_schemas as well, leaving the model no tools at
+    all while the system prompt still told it to discover them.
+
+    Round-tripping must preserve the distinction too — ``from_dict``
+    previously did ``d.get("plugins") or []``, collapsing None a second
+    time."""
+    e = SessionInitEnvelope(
+        session_id="s", workspace_path=None, profile_name=None,
+        provider_name="p", model_name="m",
+    )
+    assert e.plugins is None
+
+    from shared.session_envelope import SessionInitEnvelope as _E
+    assert _E.from_dict(e.to_dict()).plugins is None
+
+    explicit_empty = SessionInitEnvelope(
+        session_id="s", workspace_path=None, profile_name=None,
+        provider_name="p", model_name="m", plugins=[],
+    )
+    assert explicit_empty.plugins == []
+    assert _E.from_dict(explicit_empty.to_dict()).plugins == []
 
 
 def test_envelope_schema_version_default() -> None:
