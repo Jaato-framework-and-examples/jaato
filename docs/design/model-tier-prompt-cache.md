@@ -360,9 +360,21 @@ exactly two statements, because it is the one body the effect test does
 not reach and a blacklist there is dodged by a plain call.
 
 Every one of the four was caught by running a sabotage, never by reading
-the guard. A guard aimed at one *spelling* of an operation reports on the
-spelling; a guard that reads one *body* reports on that body. Only
-driving the thing and looking at what came out is indifferent to both.
+the guard. The rule worth keeping, since the four found it from both
+directions:
+
+> A **shape** check reads one body, so any indirection defeats it. An
+> **effect** check runs the real thing, so indirection is irrelevant —
+> but the body has to be **reachable**. Extracting
+> `_track_streaming_usage` from its closure was not a tidy-up; it was the
+> minimal change that made the effect check possible at all.
+
+Shape plus effect covers what neither does alone, and the shape check
+still earns its place for the message it gives when it fires. One caveat
+stated rather than defended: the effect test drives two chunks, so a
+write conditional on a third would evade it. That is not a mistake a
+refactor produces, and a guard aimed at an adversary rather than at a
+mistake buys nothing.
 
 *Attribution.* The LLM span carries `jaato.tier`,
 `jaato.tier.switches`, `jaato.tier.cache_rewire_failures` and
