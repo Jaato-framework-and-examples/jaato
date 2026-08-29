@@ -6,8 +6,9 @@ argued (§6.0.1: 5.61 vs 5.75 predicted). CLOSED: the
 config gap (§4), the mutable tier line in the cached system block (§5.1),
 the tier-switch re-wire (§5.2), the model-invalidation half of Google's
 `CachedContent` binding (§5.3), the invisibility of the miss (§5.4), and
-the reliability attribution (§5.5). STILL OPEN: the Google mismatch
-guard, the common `cache:` profile field (§7), and everything in §6.
+the reliability attribution (§5.5). Every item the assessment raised
+is now closed; §6.1's remaining entries are follow-on ideas rather than
+defects.
 
 §6 answers the original cost question with numbers rather than
 arithmetic. Live runs: the instrumentation validated end to end and the
@@ -340,9 +341,30 @@ deletes rather than forgets: the cache is server-side and billed for its
 TTL, so an orphan keeps costing until it expires. A no-op when the model
 is unchanged, because the session pushes the model on every wire.
 
-**Still open**: a defensive guard refusing to emit a `cached_content`
-name whose bound model does not match the request's. The invalidation
-above closes the path we know of; the guard closes the class.
+**And the guard, which closes the class.** `prepare_request` now refuses
+to emit a `cached_content` name whose bound model differs from the model
+being served, recording the binding at creation
+(`_cached_content_model`) so there is something to compare against.
+
+On the paths we know about it cannot fire — `set_model_name` drops the
+cache first. It exists because that fix closes a *path* and this closes
+the *class*: the reuse test hashes system+tools and has no notion of the
+model, so anything that ever sets the active model without going through
+the setter would be invisible to everything else here. Withholding
+degrades to an uncached request, which is correct and merely slower;
+emitting the name would send a reference the API will not honour.
+
+The withholding is **counted**, not only logged
+(`cache.mismatched_withheld` on the telemetry attributes) — a non-zero
+value means something changed the model outside the setter, which is
+worth seeing rather than discovering in a log. Same reasoning as §5.2's
+degraded-bookkeeping counters: three best-effort behaviours is not the
+smell, three unobservable ones is.
+
+Landing it caught a test double that had drifted from production: a
+stubbed `_create_cached_content` set the cache name without the binding,
+a shape production never has, and the guard correctly withheld against
+it.
 
 ### 5.4 The miss is invisible — FIXED
 
@@ -874,7 +896,7 @@ provider's config.
 - [x] drop the tier line from the system block (§5.1)
 - [x] re-wire the cache plugin on tier switch; push the model name (§5.2)
 - [x] Google's `CachedContent` discarded when the model changes (§5.3)
-- [ ] Google mismatch guard: never emit a name bound to another model (§5.3)
+- [x] Google mismatch guard: never emit a name bound to another model (§5.3)
 - [x] `PatternDetector` model attribution follows the tier (§5.5)
 - [x] accumulate cache tokens per turn; `jaato.tier` span attribute (§5.4)
 - [x] measure a real tiered session — instrumentation validated live (§6.0)

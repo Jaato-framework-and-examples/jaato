@@ -1,6 +1,7 @@
 """Tests for GoogleGenAICachePlugin."""
 
 import pytest
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 from shared.plugins.cache_google_genai.plugin import (
@@ -232,6 +233,13 @@ class TestPrepareRequestActive:
 
         def fake_create(system, tools):
             plugin._cached_content_name = "cachedContents/test-cache-id"
+            # The real ``_create_cached_content`` records WHICH model the
+            # cache was bound to, and the mismatch guard in
+            # ``prepare_request`` compares against it.  A double that sets
+            # only the name is a shape production never has, and it reads
+            # as a cache bound to nothing -- which the guard correctly
+            # withholds.
+            plugin._cached_content_model = plugin._model_name
             client.caches.create()  # Track that create was called
 
         plugin._create_cached_content = fake_create
@@ -678,3 +686,87 @@ class TestSetModelName:
         assert plugin._cached_content_name == "cachedContents/abc"
         assert plugin._content_hash == "deadbeef"
         plugin._client.caches.delete.assert_not_called()
+
+
+# ============ The mismatch guard (§5.3, second half) ============
+
+
+class TestMismatchGuard:
+    """A ``CachedContent`` name is never emitted to a different model.
+
+    ``set_model_name`` already discards the cache when the model changes,
+    so on the paths we know about this cannot fire.  It exists because
+    that fix closes a PATH and this closes the CLASS: the reuse test in
+    ``prepare_request`` hashes system+tools and has no notion of the
+    model, so if anything ever sets ``_model_name`` without going through
+    the setter, nothing else here would notice.
+
+    Degrading to an uncached request is correct and merely slower;
+    emitting the name would send a reference the API will not honour.
+    """
+
+    def _plugin_with_live_cache(self, bound_to="gemini-3-flash"):
+        plugin = GoogleGenAICachePlugin()
+        plugin.initialize({"enable_caching": True, "model_name": bound_to})
+        plugin.set_client(MagicMock())
+        plugin._cached_content_name = "cachedContents/abc"
+        plugin._cached_content_model = bound_to
+        plugin._content_hash = "matches-so-no-rebuild"
+        return plugin
+
+    def _prepare(self, plugin):
+        # A system block big enough to clear the ~32k threshold, and a
+        # hash that matches, so the reuse path is the one under test.
+        system = "x" * (_MIN_CACHE_TOKENS * _CHARS_PER_TOKEN + 10)
+        plugin._content_hash = plugin._compute_content_hash(system, [])
+        return plugin.prepare_request(system, [], [])
+
+    def test_a_matching_model_still_gets_the_cache(self):
+        """The guard must not break the normal path."""
+        plugin = self._plugin_with_live_cache()
+        assert self._prepare(plugin).get("cached_content") == "cachedContents/abc"
+
+    def test_a_mismatched_model_withholds_the_name(self):
+        """The crux: the model moved without the cache being dropped."""
+        plugin = self._plugin_with_live_cache(bound_to="gemini-3-flash")
+        plugin._model_name = "gemini-3-pro"          # bypasses set_model_name
+
+        result = self._prepare(plugin)
+
+        assert "cached_content" not in result, (
+            "handed a request on gemini-3-pro a CachedContent created for "
+            "gemini-3-flash"
+        )
+
+    def test_the_withholding_is_counted_not_only_logged(self):
+        """A log line nobody reads is not an observation."""
+        plugin = self._plugin_with_live_cache(bound_to="gemini-3-flash")
+        plugin._model_name = "gemini-3-pro"
+
+        self._prepare(plugin)
+
+        assert plugin._mismatched_content_withheld == 1
+        assert plugin.get_telemetry_attributes()["cache.mismatched_withheld"] == 1
+
+    def test_creation_records_the_model_it_bound_to(self):
+        """The guard needs the binding recorded, or it compares nothing."""
+        plugin = GoogleGenAICachePlugin()
+        plugin.initialize({"enable_caching": True, "model_name": "gemini-3-pro"})
+        client = MagicMock()
+        client.caches.create.return_value = SimpleNamespace(
+            name="cachedContents/new")
+        plugin.set_client(client)
+
+        plugin._create_cached_content("sys", [])
+
+        assert plugin._cached_content_name == "cachedContents/new"
+        assert plugin._cached_content_model == "gemini-3-pro"
+
+    def test_rebinding_clears_the_recorded_model_too(self):
+        """Otherwise a stale binding outlives the cache it described."""
+        plugin = self._plugin_with_live_cache(bound_to="gemini-3-flash")
+
+        plugin.set_model_name("gemini-3-pro")
+
+        assert plugin._cached_content_name is None
+        assert plugin._cached_content_model is None

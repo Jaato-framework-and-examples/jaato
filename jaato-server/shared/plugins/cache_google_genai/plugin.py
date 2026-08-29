@@ -81,12 +81,23 @@ class GoogleGenAICachePlugin:
         self._enabled: bool = False
         self._cache_ttl: str = "3600s"
         self._cached_content_name: Optional[str] = None
+        #: The model the live ``CachedContent`` was CREATED for.  Tracked
+        #: separately from ``_model_name`` (which is the model currently
+        #: being served) precisely so the two can be compared: a
+        #: ``CachedContent`` is bound to one model at creation, and
+        #: referencing it from a request against a different one is not
+        #: something the API honours.  ``None`` when no cache is live.
+        self._cached_content_model: Optional[str] = None
         self._content_hash: Optional[str] = None
 
         # Metrics
         self._total_cache_read_tokens: int = 0
         self._total_cache_creation_tokens: int = 0
         self._gc_invalidation_count: int = 0
+        #: How many times the guard below withheld a mismatched cache.
+        #: Non-zero means something changed the model without going
+        #: through ``set_model_name`` -- worth seeing, not just logging.
+        self._mismatched_content_withheld: int = 0
         self._budget: Optional["InstructionBudget"] = None
 
     # ==================== Protocol Properties ====================
@@ -194,6 +205,7 @@ class GoogleGenAICachePlugin:
             return
         self._delete_cached_content()
         self._cached_content_name = None
+        self._cached_content_model = None
         self._content_hash = None
         self._model_name = model_name
 
@@ -262,7 +274,32 @@ class GoogleGenAICachePlugin:
             self._content_hash = new_hash
 
         if self._cached_content_name:
-            base["cached_content"] = self._cached_content_name
+            # THE GUARD.  Never hand a request a cache bound to a
+            # different model.
+            #
+            # `set_model_name` already drops the cache when the model
+            # changes, so on the paths we know about this cannot fire.
+            # It exists because that fix closes a PATH and this closes the
+            # CLASS: the invariant is "the name we emit belongs to the
+            # model we are serving", and asserting it where the name is
+            # emitted does not depend on every future caller remembering
+            # to announce a model change.
+            #
+            # The reuse test above hashes system+tools and has no notion
+            # of the model, so nothing else here would notice. Dropping
+            # the name degrades to an uncached request -- correct and
+            # merely slower -- where emitting it would send a reference
+            # the API will not honour.
+            if self._cached_content_model != self._model_name:
+                logger.warning(
+                    "Google GenAI cache: withholding CachedContent %s "
+                    "(bound to %s) from a request on %s; running uncached",
+                    self._cached_content_name,
+                    self._cached_content_model, self._model_name,
+                )
+                self._mismatched_content_withheld += 1
+            else:
+                base["cached_content"] = self._cached_content_name
 
         return base
 
@@ -283,6 +320,8 @@ class GoogleGenAICachePlugin:
             "cache.enabled": self._enabled,
             "cache.strategy": "explicit_system_tools",
             "cache.cached_content_name": self._cached_content_name or "",
+            "cache.cached_content_model": self._cached_content_model or "",
+            "cache.mismatched_withheld": self._mismatched_content_withheld,
             "cache.gc_invalidation_count": self._gc_invalidation_count,
             "cache.total_read_tokens": self._total_cache_read_tokens,
             "cache.total_creation_tokens": self._total_cache_creation_tokens,
@@ -437,6 +476,7 @@ class GoogleGenAICachePlugin:
                 config=config,
             )
             self._cached_content_name = cached.name
+            self._cached_content_model = self._model_name
             logger.debug(
                 "Google GenAI cache: created CachedContent %s (model=%s, ttl=%s)",
                 cached.name,
