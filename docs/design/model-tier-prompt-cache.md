@@ -7,11 +7,12 @@ the tier-switch re-wire (§5.2), the model-invalidation half of Google's
 the reliability attribution (§5.5). STILL OPEN: the Google mismatch
 guard, the common `cache:` profile field (§7), and everything in §6.
 
-§6 is where the original cost question actually gets answered, and it is
-now answerable: with §5.4 landed, a real tiered session reports what its
-switches cost instead of hiding it. Everything in §6 remains a hypothesis
-until that measurement exists — including the break-even in §3, which is
-arithmetic, not data.
+§6 is where the original cost question gets answered. A live run (§6.0)
+has now validated the instrumentation end to end and quantified the §5.4
+under-report at 2.0× on a real turn — but it ran on a provider that does
+not cache, so §3's break-even is still arithmetic on the rate side. What
+it now rests on is a measured prefix: a mid-turn switch re-read 14,262
+tokens at the new model.
 **Origin**: the question "our profiles can declare a model tier per task
 type and `enter_tier` hands the task to the most suitable one — how does
 that impact cache usage?", which had never been assessed.
@@ -486,6 +487,67 @@ nothing currently needs.
 
 ## 6. Where to go after that
 
+### 6.0 What a live run actually showed
+
+Run on a real daemon against NVIDIA NIM, 2026-08-29, branch at `ce109b3`.
+Profile: two NIM models behind tier names
+(`dispatcher: nemotron-3-super-120b-a12b`,
+`executor: nemotron-3-nano-30b-a3b`), prompt instructing one
+`enter_tier` call — which is itself a tool call, so the turn has two
+billed responses with a model change between them.
+
+One turn, session `20260829_122231`, from the LLM spans:
+
+| time | tier | `jaato.tier.switches` | prompt | output | model |
+|---|---|---|---|---|---|
+| 10:22:35 | `dispatcher` | 0 | 14,026 | 64 | `nemotron-3-super-120b-a12b` |
+| 10:22:37 | `executor` | **1** | **14,262** | 70 | `nemotron-3-nano-30b-a3b` |
+
+and from `TurnCompletedEvent.usage` for the same turn:
+
+```
+total_tokens        = 14,332      <- the LAST leg
+spend_total_tokens  = 28,422      <- both legs
+cache_read_tokens   = None        <- NIM does not cache
+spend_cache_read_tokens = None
+```
+
+Four things this establishes, none of which a unit test could:
+
+1. **The instrumentation works end to end.** `jaato.tier`,
+   `jaato.tier.switches` and both `*_failures` counters (0 and 0 — a
+   healthy session) reach a real collector, and the spend fields reach a
+   real client through all five links. The two paths *reconcile to the
+   unit*: 14,026 + 14,262 prompt + 64 + 70 output = 28,422 =
+   `spend_total_tokens`.
+2. **The §5.4 defect, quantified.** The turn cost 28,422 tokens; the
+   pre-fix report would have said 14,332. A **2.0× under-report**, and
+   the half it dropped is exactly the leg the switch caused.
+3. **The prefix-dominates assumption in §3 holds, hard.** Prompt beats
+   output by roughly **200:1** (14,262 vs 70) on a turn doing real work.
+   §3's break-even arithmetic simplifies away the output term; on this
+   evidence that simplification is safe rather than convenient.
+4. **`None` survives the chain.** NIM declares `prompt_caching=False`
+   and every cache field arrives as `None`, not `0` — "this provider
+   does not cache" stayed distinguishable from "it cached nothing" across
+   five hops.
+
+**What it does NOT establish, and cannot.** No credential on that host
+belongs to a caching-capable provider — `anthropic`, `google_genai` and
+`openrouter` are the three that declare `prompt_caching=True`, and the
+box had zhipuai (quota exhausted) and NIM (`prompt_caching=False`). So
+the cache-read and cache-write rates in §3 remain **arithmetic**. What is
+now measured is the multiplicand: a mid-turn tier switch on a ~14k-token
+context re-reads **14,262 prompt tokens at the new model**. Multiply by
+whatever that provider charges for a cold read versus a cache hit, and
+§3's break-even follows — but the multiplication has not been run against
+a bill.
+
+The remaining measurement needs one Anthropic, Google or OpenRouter key
+and a re-run of the same three-job sweep.
+
+### 6.1 The ordered list
+
 Ordered by confidence, not by effort.
 
 1. **Measure first.** §5.4 plus the §4 fix is the minimum needed to
@@ -578,5 +640,6 @@ provider's config.
 - [ ] Google mismatch guard: never emit a name bound to another model (§5.3)
 - [x] `PatternDetector` model attribution follows the tier (§5.5)
 - [x] accumulate cache tokens per turn; `jaato.tier` span attribute (§5.4)
-- [ ] measure a real tiered session, then revisit §6
+- [x] measure a real tiered session — instrumentation validated live (§6.0)
+- [ ] re-run §6.0's sweep on a caching provider; only then is §3 evidence
 - [ ] first-class `cache:` profile field (§7)
