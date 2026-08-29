@@ -1,18 +1,21 @@
 # Model Tiers × Prompt Caching — Assessment & Plan
 
-**Status**: ASSESSMENT, with every identified defect fixed. CLOSED: the
+**Status**: COMPLETE for the question asked — every identified defect
+fixed, and §3's cost claim measured on live infrastructure rather than
+argued (§6.0.1: 5.61 vs 5.75 predicted). CLOSED: the
 config gap (§4), the mutable tier line in the cached system block (§5.1),
 the tier-switch re-wire (§5.2), the model-invalidation half of Google's
 `CachedContent` binding (§5.3), the invisibility of the miss (§5.4), and
 the reliability attribution (§5.5). STILL OPEN: the Google mismatch
 guard, the common `cache:` profile field (§7), and everything in §6.
 
-§6 is where the original cost question gets answered. A live run (§6.0)
-has now validated the instrumentation end to end and quantified the §5.4
-under-report at 2.0× on a real turn — but it ran on a provider that does
-not cache, so §3's break-even is still arithmetic on the rate side. What
-it now rests on is a measured prefix: a mid-turn switch re-read 14,262
-tokens at the new model.
+§6 answers the original cost question, and it is now answered with
+numbers rather than arithmetic. Two live runs: one validated the
+instrumentation end to end and quantified the §5.4 under-report at 2.0×
+(§6.0); the second priced a real tier switch on Sonnet→Haiku via
+OpenRouter and put the break-even at **5.61 consecutive calls against
+§3's predicted 5.75** (§6.0.1). The switch turn cost **4.85×** a warm
+turn on the model it was leaving.
 **Origin**: the question "our profiles can declare a model tier per task
 type and `enter_tier` hands the task to the most suitable one — how does
 that impact cache usage?", which had never been assessed.
@@ -532,19 +535,70 @@ Four things this establishes, none of which a unit test could:
    does not cache" stayed distinguishable from "it cached nothing" across
    five hops.
 
-**What it does NOT establish, and cannot.** No credential on that host
-belongs to a caching-capable provider — `anthropic`, `google_genai` and
-`openrouter` are the three that declare `prompt_caching=True`, and the
-box had zhipuai (quota exhausted) and NIM (`prompt_caching=False`). So
-the cache-read and cache-write rates in §3 remain **arithmetic**. What is
-now measured is the multiplicand: a mid-turn tier switch on a ~14k-token
-context re-reads **14,262 prompt tokens at the new model**. Multiply by
-whatever that provider charges for a cold read versus a cache hit, and
-§3's break-even follows — but the multiplication has not been run against
-a bill.
+That run used NIM, which does not cache, so it validated the plumbing
+without pricing anything. The cost run follows.
 
-The remaining measurement needs one Anthropic, Google or OpenRouter key
-and a re-run of the same three-job sweep.
+### 6.0.1 §3's break-even, measured
+
+Same daemon, OpenRouter, `cache_prompt: true`, tiers
+`dispatcher: anthropic/claude-sonnet-4.6` / `executor:
+anthropic/claude-haiku-4.5` — the canonical expensive/cheap pair, and
+haiku is *exactly* ⅓ of sonnet's input price, which is the ratio §3
+assumed.
+
+A sweep cannot express this: its jobs are independent, so every one is
+cold and a cache read never happens. This is **one session, four turns**.
+
+| turn | prompt | `cache_read` | `spend_total` | cost |
+|---|---|---|---|---|
+| 1 cold, dispatcher | 27,819 | — | 27,824 | $0.104148 |
+| 2 warm, dispatcher | 27,835 | 27,488 | 27,840 | **$0.0093624** |
+| 3 **switch → executor** | 28,278 | 27,488 | **56,206** | **$0.0454502** |
+| 4 warm, executor | 28,294 | 27,503 | 28,299 | **$0.0035663** |
+
+Turn 1 → 2 is prompt caching working: the same prefix, **11.1× cheaper**
+once warm.
+
+Turn 3 is the switch. It carries a warm sonnet leg *and* a cold haiku
+leg, so isolating the cold leg gives $0.0454502 − $0.0093624 =
+**$0.036088** — the price of arriving at a tier whose cache is empty.
+
+Feed those into §3's comparison — n calls staying warm, versus a cold
+first call plus n−1 warm ones at the new tier:
+
+```
+stay:    0.009362·n
+switch:  0.036088 + 0.003566·(n-1)
+                                  →  n = 5.61
+```
+
+**§3 predicted 5.75. Measured 5.61 — 2.4% off.** The arithmetic is now
+evidence.
+
+Three consequences worth stating plainly:
+
+- **The switch turn cost 4.85× a warm turn on the model it was leaving.**
+  Dropping to the cheap tier made that turn nearly five times more
+  expensive, not cheaper.
+- **A one-shot hop is a loss, confirmed.** The executor tier saves
+  $0.0058/turn and the hop costs $0.0361. Anything under ~6 consecutive
+  calls at the new tier loses money, and the `vision` tier's documented
+  usage — switch in, read an image, switch back — is two hops for one or
+  two calls.
+- **§5.4's under-report is what hid this.** Turn 3's `total_tokens` is
+  28,283; its `spend_total_tokens` is 56,206. Before this branch the turn
+  reported the smaller number — a 2.0× under-report that dropped exactly
+  the leg the switch caused. The measurement above is only possible
+  because that was fixed first.
+
+**One caveat, and it is a live bug.** `cache_write` is `None` on every
+row even though writes were billed — turn 1's $0.104148 over 27,819
+tokens is $3.74/Mtok, the cache-*write* rate, not the $3.00 input rate.
+OpenRouter reports the count as `prompt_tokens_details.cache_write_tokens`
+while the provider reads `cache_creation_input_tokens`. Filed as **#699**;
+the write costs above are therefore derived from the `cost` field rather
+than a token count. The read side is unaffected and is what the
+break-even turns on.
 
 ### 6.1 The ordered list
 
@@ -641,5 +695,5 @@ provider's config.
 - [x] `PatternDetector` model attribution follows the tier (§5.5)
 - [x] accumulate cache tokens per turn; `jaato.tier` span attribute (§5.4)
 - [x] measure a real tiered session — instrumentation validated live (§6.0)
-- [ ] re-run §6.0's sweep on a caching provider; only then is §3 evidence
+- [x] measure §3's break-even on a caching provider: 5.61 vs 5.75 predicted (§6.0.1)
 - [ ] first-class `cache:` profile field (§7)
