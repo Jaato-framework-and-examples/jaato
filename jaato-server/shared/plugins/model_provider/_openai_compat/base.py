@@ -695,6 +695,40 @@ class OpenAICompatProvider(ModalityCapabilityMixin):
 
     # ==================== Error Handling ====================
 
+    def _rebuild_client_after_connection_error(self) -> None:
+        """Discard the HTTP client so the next attempt gets a fresh one.
+
+        An ``APIConnectionError`` can leave the underlying ``httpx``
+        transport permanently unusable.  ``with_retry`` retries the CALL,
+        not the client, so without this every backoff re-runs against the
+        same dead object: the ladder is guaranteed to exhaust, and the
+        session stays broken for the rest of its life even after the
+        network recovers.  Measured (jaato #705): a session died at 19:57
+        and still failed at 20:01 while ``curl`` answered in 30ms, a direct
+        provider call in another process succeeded, and a NEW session in
+        the SAME daemon completed normally — the only difference being a
+        freshly built client.
+
+        Best-effort by design.  A failure to close or rebuild must not
+        replace the caller's original error with a second one: the
+        connection error is what the caller needs to see and classify, and
+        a failed rebuild simply leaves the ladder no worse off than before
+        this method existed.
+        """
+        try:
+            if self._client is not None:
+                self._client.close()
+        except Exception:  # noqa: BLE001 - closing a dead transport may throw
+            pass
+        try:
+            self._client = self._create_client()
+            self._trace("[RECOVERY] client rebuilt after APIConnectionError")
+        except Exception as exc:  # noqa: BLE001
+            self._trace(
+                f"[RECOVERY] client rebuild FAILED after APIConnectionError: "
+                f"{type(exc).__name__}: {exc}"
+            )
+
     def _handle_api_error(self, error: Exception) -> None:
         """Map OpenAI SDK exceptions to the provider's error taxonomy.
 
@@ -731,6 +765,10 @@ class OpenAICompatProvider(ModalityCapabilityMixin):
             ) from error
 
         if isinstance(error, openai.APIConnectionError):
+            # Rebuild BEFORE raising: with_retry retries the call, not
+            # the client, so a poisoned transport would make every
+            # remaining backoff a guaranteed failure (#705).
+            self._rebuild_client_after_connection_error()
             raise self._ERR_INFRASTRUCTURE(
                 status_code=0,
                 original_error=str(error),
