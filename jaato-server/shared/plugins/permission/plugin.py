@@ -12,6 +12,8 @@ import threading
 from collections import OrderedDict
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+
+from jaato_sdk.plugins.base import TRAIT_SESSION_PERSISTENT
 from jaato_sdk.plugins.model_provider.types import ToolSchema
 
 from .policy import PermissionPolicy, PermissionDecision, PolicyMatch
@@ -242,9 +244,76 @@ class PermissionPlugin(RunnerForwardingMixin):
         self._on_permission_requested = on_requested
         self._on_permission_resolved = on_resolved
 
+    # The operator's runtime permission decisions are session-scoped and
+    # must outlive an unload/reload of that same session.  See
+    # TRAIT_SESSION_PERSISTENT and jaato #706/#707.
+    plugin_traits = frozenset({TRAIT_SESSION_PERSISTENT})
+
     @property
     def name(self) -> str:
         return "permission"
+
+    # ------------------------------------------------------------------
+    # Session persistence (TRAIT_SESSION_PERSISTENT)
+    # ------------------------------------------------------------------
+
+    def get_persistence_state(self) -> Optional[Dict[str, Any]]:
+        """Snapshot the operator's runtime permission decisions.
+
+        Only the SESSION-scoped rules are persisted.  The base policy is
+        re-read from ``permissions.json`` by ``initialize()``, so
+        persisting it would freeze a copy of a file the operator can edit
+        between runs.
+
+        Sets are emitted as sorted lists: JSON has no set, and sorting
+        makes the snapshot stable so an unchanged policy produces an
+        unchanged journal entry.
+
+        Returns ``None`` when nothing has been decided at runtime, so a
+        session that never touched permissions writes no key at all.
+        """
+        if not self._policy:
+            return None
+        allow = sorted(self._policy.session_whitelist)
+        deny = sorted(self._policy.session_blacklist)
+        default = self._policy.session_default_policy
+        if not allow and not deny and default is None:
+            return None
+        return {
+            "session_whitelist": allow,
+            "session_blacklist": deny,
+            "session_default_policy": default,
+        }
+
+    def restore_persistence_state(self, state: Dict[str, Any]) -> None:
+        """Re-apply persisted runtime permission decisions.
+
+        Runs after ``initialize()`` has loaded ``permissions.json``, so
+        these runtime decisions are layered ON TOP of the file rather than
+        being overwritten by it — restoring earlier would reproduce #706.
+
+        Reads defensively: a snapshot from an older plugin version, or a
+        hand-edited session file, must not make the session unloadable.
+        Unknown keys are ignored and malformed values are skipped, which
+        degrades to "this rule was not restored" rather than to a failed
+        load.  A dropped rule is visible in ``permissions show``; a failed
+        load is not recoverable by the operator.
+        """
+        if not self._policy:
+            return
+        allow = state.get("session_whitelist")
+        if isinstance(allow, list):
+            for pattern in allow:
+                if isinstance(pattern, str) and pattern:
+                    self._policy.add_session_whitelist(pattern)
+        deny = state.get("session_blacklist")
+        if isinstance(deny, list):
+            for pattern in deny:
+                if isinstance(pattern, str) and pattern:
+                    self._policy.add_session_blacklist(pattern)
+        default = state.get("session_default_policy")
+        if isinstance(default, str) and default:
+            self._policy.session_default_policy = default
 
     def _trace(self, msg: str) -> None:
         """Write trace message to log file for debugging."""
