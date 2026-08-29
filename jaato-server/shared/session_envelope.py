@@ -103,7 +103,17 @@ class SessionInitEnvelope:
         model_name: Model identifier (e.g.
             ``"claude-sonnet-4-6"``).
         plugins: Ordered list of plugin specifications the runner
-            should instantiate.  Each entry is a dict carrying
+            should instantiate, or ``None`` when the session was
+            created WITHOUT a profile.  The distinction is
+            load-bearing and must survive the wire: ``None`` means
+            "no profile said anything" and ``JaatoRuntime.create_session``
+            expands it to every exposed plugin (so the eager wire keeps
+            the core tools, introspection among them, and the model can
+            discover the rest); ``[]`` means a profile explicitly asked
+            for the minimal set.  Collapsing the two — as a
+            ``default_factory=list`` field or a ``d.get("plugins") or []``
+            read would — hands a profile-less session an empty tool wire.
+            Each entry is a dict carrying
             ``name`` (str) + ``preload`` (bool — Phase 2 carries
             this via ``"name(preload)"`` syntax; Phase 3 normalizes
             to typed dict).  Per-plugin configs live in
@@ -191,7 +201,7 @@ class SessionInitEnvelope:
     profile_name: Optional[str]
     provider_name: str
     model_name: str
-    plugins: List[Dict[str, Any]] = field(default_factory=list)
+    plugins: Optional[List[Dict[str, Any]]] = None
     # Phase 4 §C: top-level plugin configs map (replaces per-entry
     # ``plugins[i].config`` which only carried configs for plugins
     # named in ``plugins``).  Carries the full ``profile.plugin_configs``
@@ -324,7 +334,8 @@ class SessionInitEnvelope:
             "profile_name": self.profile_name,
             "provider_name": self.provider_name,
             "model_name": self.model_name,
-            "plugins": [dict(p) for p in self.plugins],
+            "plugins": (None if self.plugins is None
+                        else [dict(p) for p in self.plugins]),
             "plugin_configs": {k: dict(v) for k, v in self.plugin_configs.items()},
             "system_instructions": self.system_instructions,
             "agent_id": self.agent_id,
@@ -386,7 +397,8 @@ class SessionInitEnvelope:
             profile_name=d.get("profile_name"),
             provider_name=str(d.get("provider_name", "")),
             model_name=str(d.get("model_name", "")),
-            plugins=[dict(p) for p in (d.get("plugins") or [])],
+            plugins=(None if d.get("plugins") is None
+                     else [dict(p) for p in d["plugins"]]),
             plugin_configs={
                 k: dict(v)
                 for k, v in (d.get("plugin_configs") or {}).items()
