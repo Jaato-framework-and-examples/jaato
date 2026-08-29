@@ -811,9 +811,18 @@ cache:
 
 `auto` is well-defined because `prompt_caching` already gates it, so a
 provider that cannot cache degrades to a no-op rather than an error.
-Per-provider `plugin_configs` knobs stay as the escape hatch for
+
+**Precedence: `plugin_configs.<provider>` wins.** An earlier draft of
+this section said the opposite — that the profile field beat the
+per-provider knobs — while calling those knobs "the escape hatch" two
+lines earlier. An escape hatch that loses is not one. `cache:` sets the
+cross-provider default; `plugin_configs.<provider>` overrides it for
 mechanism-specific tuning (breakpoint counts, `CachedContent` TTL
-format), with the profile field winning where they overlap.
+format). That is also how every other layered knob in this codebase
+resolves — more specific wins, the same child-wins rule
+`resolve_provider_extra` already implements for provider extras — so the
+common field needs no new precedence concept, only a lower layer beneath
+an existing one.
 
 Caching is also a *consumer* of the GC policies it reads
 (`plugins/cache/base.py:5-8`), which is a second argument for placing it

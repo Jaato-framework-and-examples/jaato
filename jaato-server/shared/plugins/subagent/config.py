@@ -1480,6 +1480,33 @@ def _parse_completion_processors(value: Any) -> List[CompletionProcessor]:
     return out
 
 
+def parse_gc_block(data: Dict[str, Any]) -> Optional['GCProfileConfig']:
+    """Parse a profile dict's optional ``gc:`` block.
+
+    ONE definition, because there are FOUR ingresses that build a
+    ``SubagentProfile`` from a dict — ``build_inline_profile``,
+    ``_scan_profiles_dir``, ``_discover_premium_profiles`` and
+    ``SubagentConfig.from_dict`` — and each carried its own copy of the
+    same three lines, in two spellings of the identical guard
+    (``data.get('gc')`` and ``'gc' in data and data['gc']``).
+
+    Four copies is four places to forget when a sibling block field is
+    added, and a field wired into three ingresses and missed in the
+    fourth is silently inert in exactly one code path — which is the
+    failure this branch opened by fixing (§4: a cache knob that reached
+    no ingress at all). Collapsing them now means the next block field
+    is added once.
+
+    Returns ``None`` when the block is absent or empty; an empty ``gc:``
+    is deliberately not a default-constructed config, matching what all
+    four sites already did.
+    """
+    block = data.get('gc')
+    if not block:
+        return None
+    return GCProfileConfig.from_dict(block)
+
+
 def build_inline_profile(
     data: Dict[str, Any],
     name: str = "<inline>",
@@ -1513,9 +1540,7 @@ def build_inline_profile(
             fails to parse. Surfaced so the caller can emit a clear
             ``ErrorEvent`` rather than swallowing the failure.
     """
-    gc_config = None
-    if data.get('gc'):
-        gc_config = GCProfileConfig.from_dict(data['gc'])
+    gc_config = parse_gc_block(data)
 
     runtime_limits = None
     if data.get('runtime_limits'):
@@ -2170,9 +2195,7 @@ def _scan_profiles_dir(
         if name in profiles:
             continue  # higher-precedence source already registered this name
 
-        gc_config = None
-        if 'gc' in data and data['gc']:
-            gc_config = GCProfileConfig.from_dict(data['gc'])
+        gc_config = parse_gc_block(data)
 
         runtime_limits = None
         if 'runtime_limits' in data and data['runtime_limits']:
@@ -2605,9 +2628,7 @@ def _discover_premium_profiles() -> Dict[str, 'SubagentProfile']:
         if name is None or data is None:
             continue
 
-        gc_config = None
-        if 'gc' in data and data['gc']:
-            gc_config = GCProfileConfig.from_dict(data['gc'])
+        gc_config = parse_gc_block(data)
 
         runtime_limits = None
         if 'runtime_limits' in data and data['runtime_limits']:
@@ -2915,9 +2936,7 @@ class SubagentConfig:
         profiles = {}
         for name, profile_data in data.get('profiles', {}).items():
             # Parse GC configuration if present
-            gc_config = None
-            if 'gc' in profile_data and profile_data['gc']:
-                gc_config = GCProfileConfig.from_dict(profile_data['gc'])
+            gc_config = parse_gc_block(profile_data)
 
             # Parse runtime_limits (cgroup-enforced + app-enforced caps).
             # Validation runs in __post_init__ — bad values raise here so
