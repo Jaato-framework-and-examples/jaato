@@ -592,14 +592,22 @@ Three consequences worth stating plainly:
   the leg the switch caused. The measurement above is only possible
   because that was fixed first.
 
-**One caveat, and it is a live bug.** `cache_write` is `None` on every
-row even though writes were billed — turn 1's $0.104148 over 27,819
-tokens is $3.74/Mtok, the cache-*write* rate, not the $3.00 input rate.
-OpenRouter reports the count as `prompt_tokens_details.cache_write_tokens`
-while the provider reads `cache_creation_input_tokens`. Filed as **#699**;
-the write costs above are therefore derived from the `cost` field rather
-than a token count. The read side is unaffected and is what the
-break-even turns on.
+**One caveat — a bug these runs found, since fixed.** `cache_write` is
+`None` on every row above even though writes were billed: turn 1's
+$0.104148 over 27,819 tokens is $3.74/Mtok, the cache-*write* rate, not
+the $3.00 input rate. OpenRouter reports the count as
+`prompt_tokens_details.cache_write_tokens` — nested, beside the read
+count — while the provider read only the top-level Anthropic-native
+`cache_creation_input_tokens`. Filed as **#699** and fixed in
+`openrouter/converters.py`; the parser now reads the nested name and
+keeps the top-level one as a fallback for upstreams that use it.
+
+The numbers in the tables above were measured **before** that fix, so
+their write costs are derived from the `cost` field rather than from a
+reported token count. That does not affect the break-even: it turns on
+the read side, which was always parsed correctly. A re-run on the fixed
+parser would report the write count directly and is the cheap way to
+confirm the derivation — worth doing, not yet done.
 
 ### 6.0.2 Coming back is a cache HIT, not a second cold arrival
 

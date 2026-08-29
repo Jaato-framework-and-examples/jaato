@@ -208,6 +208,86 @@ class TestApplyCacheUsage:
         apply_cache_usage(raw, usage)
         assert usage.cache_creation_tokens == 500
 
+    def test_cache_write_tokens_from_prompt_tokens_details(self):
+        """The shape OpenRouter actually sends (issue #699).
+
+        Captured from the wire on 2026-08-29, anthropic/claude-sonnet-4.6
+        with a cache_control breakpoint, two identical calls 4s apart:
+
+            cold: {"cached_tokens": 0,    "cache_write_tokens": 4403}
+            warm: {"cached_tokens": 4403, "cache_write_tokens": 0}
+
+        The write count is NESTED beside the read count and spelled
+        differently from Anthropic's native field.  Reading only the
+        top-level name left `cache_creation_tokens` permanently None
+        while the write was billed.
+        """
+        from jaato_sdk.plugins.model_provider.types import TokenUsage
+        usage = TokenUsage()
+        raw = _usage_obj(
+            prompt_tokens=4412,
+            completion_tokens=4,
+            total_tokens=4416,
+            prompt_tokens_details=_usage_obj(
+                cached_tokens=0, cache_write_tokens=4403),
+        )
+        apply_cache_usage(raw, usage)
+        assert usage.cache_creation_tokens == 4403
+        assert usage.cache_read_tokens is None   # zero is not a hit
+
+    def test_the_warm_half_of_the_same_exchange(self):
+        """The second call: the read lands, the write goes quiet."""
+        from jaato_sdk.plugins.model_provider.types import TokenUsage
+        usage = TokenUsage()
+        raw = _usage_obj(
+            prompt_tokens=4412,
+            prompt_tokens_details=_usage_obj(
+                cached_tokens=4403, cache_write_tokens=0),
+        )
+        apply_cache_usage(raw, usage)
+        assert usage.cache_read_tokens == 4403
+        assert usage.cache_creation_tokens is None
+
+    def test_cache_write_tokens_as_a_plain_dict(self):
+        """``prompt_tokens_details`` arrives as a dict on some paths."""
+        from jaato_sdk.plugins.model_provider.types import TokenUsage
+        usage = TokenUsage()
+        raw = _usage_obj(
+            prompt_tokens=4412,
+            prompt_tokens_details={"cached_tokens": 900,
+                                   "cache_write_tokens": 4403},
+        )
+        apply_cache_usage(raw, usage)
+        assert usage.cache_read_tokens == 900
+        assert usage.cache_creation_tokens == 4403
+
+    def test_the_anthropic_native_name_still_works_as_a_fallback(self):
+        """Kept deliberately: this helper serves several upstream shapes,
+        and an upstream that passes Anthropic's field through must not
+        regress because OpenRouter's spelling was added."""
+        from jaato_sdk.plugins.model_provider.types import TokenUsage
+        usage = TokenUsage()
+        raw = _usage_obj(
+            prompt_tokens=1000,
+            cache_creation_input_tokens=500,
+            prompt_tokens_details=_usage_obj(cached_tokens=0),
+        )
+        apply_cache_usage(raw, usage)
+        assert usage.cache_creation_tokens == 500
+
+    def test_the_nested_name_wins_over_the_top_level_one(self):
+        """If both arrive, the one OpenRouter actually sends is the
+        authority — the fallback exists for shapes that lack it."""
+        from jaato_sdk.plugins.model_provider.types import TokenUsage
+        usage = TokenUsage()
+        raw = _usage_obj(
+            prompt_tokens=1000,
+            cache_creation_input_tokens=111,
+            prompt_tokens_details=_usage_obj(cache_write_tokens=4403),
+        )
+        apply_cache_usage(raw, usage)
+        assert usage.cache_creation_tokens == 4403
+
     def test_cost_field_populates_cost_usd(self):
         from jaato_sdk.plugins.model_provider.types import TokenUsage
         usage = TokenUsage()

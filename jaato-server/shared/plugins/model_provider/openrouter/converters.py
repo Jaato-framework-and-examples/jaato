@@ -564,10 +564,11 @@ def extract_usage(response: "ChatCompletion") -> TokenUsage:
     - ``prompt_tokens_details.cached_tokens`` — tokens served from cache
       (90% Anthropic discount, varying for other upstreams).  Surfaced
       via :attr:`TokenUsage.cache_read_tokens`.
-    - ``cache_creation_input_tokens`` — Anthropic-via-OpenRouter
-      passthrough indicating bytes written to cache on this turn (1.25x
-      premium for 5-minute TTL, 2x for 1-hour).  Surfaced via
-      :attr:`TokenUsage.cache_creation_tokens`.
+    - ``prompt_tokens_details.cache_write_tokens`` — tokens written to
+      cache on this turn (1.25x premium for 5-minute TTL, 2x for
+      1-hour), with the Anthropic-native top-level
+      ``cache_creation_input_tokens`` accepted as a fallback.  Surfaced
+      via :attr:`TokenUsage.cache_creation_tokens`.
 
     The OpenAI SDK doesn't have typed fields for OpenRouter's extras,
     so we use ``getattr`` with the dict-/Pydantic-aware
@@ -610,6 +611,27 @@ def _read_usage_extra(raw_usage: Any, key: str) -> Optional[Any]:
     return None
 
 
+def _read_details(details: Any, key: str) -> Optional[int]:
+    """Read one integer key out of ``prompt_tokens_details``.
+
+    That block arrives as a Pydantic model on the real SDK and as a plain
+    dict on some paths (and as a ``SimpleNamespace`` in tests), so both
+    accesses are tried.  Returns ``None`` for absent or non-integer
+    values, which callers treat as "not reported" -- distinct from a
+    reported zero.
+
+    Exists because the read and write counts live side by side in this
+    block and were being read two different ways; the write side looked
+    only at the top level and therefore never saw its value.
+    """
+    if details is None:
+        return None
+    value = getattr(details, key, None)
+    if value is None and isinstance(details, dict):
+        value = details.get(key)
+    return value if isinstance(value, int) else None
+
+
 def apply_cache_usage(raw_usage: Any, usage: TokenUsage) -> None:
     """Populate the cache-related fields on ``usage`` from a raw usage object.
 
@@ -624,17 +646,27 @@ def apply_cache_usage(raw_usage: Any, usage: TokenUsage) -> None:
         return
 
     details = getattr(raw_usage, "prompt_tokens_details", None)
-    cached_tokens: Optional[int] = None
-    if details is not None:
-        candidate = getattr(details, "cached_tokens", None)
-        if candidate is None and isinstance(details, dict):
-            candidate = details.get("cached_tokens")
-        if isinstance(candidate, int) and candidate > 0:
-            cached_tokens = candidate
-    if cached_tokens is not None:
+
+    cached_tokens = _read_details(details, "cached_tokens")
+    if cached_tokens is not None and cached_tokens > 0:
         usage.cache_read_tokens = cached_tokens
 
-    creation = _read_usage_extra(raw_usage, "cache_creation_input_tokens")
+    # Writes sit BESIDE the reads, in the same nested block, under
+    # OpenRouter's own spelling.  Reading only the top-level Anthropic
+    # name meant `cache_creation_tokens` was always None on OpenRouter
+    # while the write was billed: a 27,438-token Sonnet turn cost
+    # $0.10271, which is $3.74/Mtok -- the cache-WRITE rate ($3.75), not
+    # the $3.00 input rate.  Verified against the wire (issue #699):
+    #
+    #   "prompt_tokens_details": {"cached_tokens": 0, "cache_write_tokens": 4403}
+    #
+    # The top-level name is kept as a fallback because the surrounding
+    # parsing is deliberately shape-tolerant -- this one helper serves
+    # several upstreams, and an upstream that does pass the Anthropic
+    # field through should keep working.
+    creation = _read_details(details, "cache_write_tokens")
+    if creation is None:
+        creation = _read_usage_extra(raw_usage, "cache_creation_input_tokens")
     if isinstance(creation, int) and creation > 0:
         usage.cache_creation_tokens = creation
 
