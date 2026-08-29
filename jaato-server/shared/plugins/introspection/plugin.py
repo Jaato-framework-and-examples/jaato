@@ -155,10 +155,13 @@ class IntrospectionPlugin(RunnerForwardingMixin):
             ),
             ToolSchema(
                 name="get_tool_schemas",
-                description="Get detailed schemas for specific tools. "
-                           "Use this after list_tools to learn how to call tools you need. "
-                           "Returns full parameter specifications, types, "
-                           "required/optional flags, and descriptions.",
+                description="ENABLE tools so you can call them, and get their "
+                           "schemas.  This is the activation step: a discoverable "
+                           "tool is NOT callable until you pass its id here -- "
+                           "list_tools only shows you what exists.  Returns full "
+                           "parameter specifications, types, required/optional "
+                           "flags and descriptions, plus an 'activated' list "
+                           "naming the tools now available to call.",
                 parameters={
                     "type": "object",
                     "properties": {
@@ -322,13 +325,20 @@ class IntrospectionPlugin(RunnerForwardingMixin):
             "name (e.g. do not turn a human name you saw in prose into "
             "`t_<name>`) — the opaque ids come only from your tool list and "
             "from `get_tool_schemas`.  If you need a capability you don't "
-            "currently see, DISCOVER it via `list_tools(category_id=...)` to "
-            "load the real tool and its id, rather than guessing.\n\n"
+            "currently see, find it with `list_tools(category_id=...)`, then "
+            "ENABLE it with `get_tool_schemas(tool_ids=[...])`, rather than "
+            "guessing.\n\n"
             "TOOL DISCOVERY WORKFLOW (when required):\n"
             "1. `list_tools()` - See all categories with IDs and tool counts\n"
-            "2. `list_tools(category_id='...')` - See tools in a specific category\n"
-            "3. `get_tool_schemas(tool_ids=[...])` - Get full schemas for tools you need\n"
-            "4. Call the tools using the schema information\n\n"
+            "2. `list_tools(category_id='...')` - See tools in a specific category.\n"
+            "   Listing a tool does NOT make it callable; entries you cannot yet\n"
+            "   call are marked `available: false`.\n"
+            "3. `get_tool_schemas(tool_ids=[...])` - ENABLE those tools.  This is\n"
+            "   the step that makes a discovered tool callable: it returns an\n"
+            "   `activated` list alongside the schemas.  Skipping it and trying to\n"
+            "   reach the capability another way (a shell, a notebook `tools`\n"
+            "   bridge) is never necessary and never correct.\n"
+            "4. Call the tools directly, by the real names in `activated`\n\n"
             "CATEGORY QUICK REFERENCE:\n"
             "- coordination: Task tracking, TODO, DELEGATE work, SUBAGENTS, parallel execution\n"
             "- filesystem: Read, write, search files\n"
@@ -619,9 +629,18 @@ class IntrospectionPlugin(RunnerForwardingMixin):
                 "streaming": supports_streaming,
             }
 
-            # Mark tools the session can't call
+            # Mark tools the session can't call -- and say how to fix that.
+            # ``get_tool_schemas`` is the ENABLING call, not a reference
+            # lookup: it is the only place ``activate_discovered_tools`` runs.
+            # Carrying that here, on the entry that reports the tool as
+            # unavailable, puts the affordance in the data the model is
+            # reading at the moment it needs it, instead of relying on the
+            # system prompt having been attended to.
             if schema.name not in session_tool_names:
                 tool_entry["available"] = False
+                tool_entry["activate_with"] = (
+                    f"get_tool_schemas(tool_ids=['{tool_entry['id']}'])"
+                )
 
             if verbose:
                 tool_entry["description"] = schema.description
@@ -648,7 +667,12 @@ class IntrospectionPlugin(RunnerForwardingMixin):
         }
 
         if tools:
-            result["hint"] = "Call get_tool_schemas(tool_ids=['<id>']) to get full parameter details."
+            result["hint"] = (
+                "Call get_tool_schemas(tool_ids=['<id>']) to ENABLE tools "
+                "and get their full parameter details.  Tools marked "
+                "available=false are not callable until you do -- listing "
+                "them here does NOT make them callable."
+            )
 
             # Add streaming hint if any tools support streaming
             streaming_tools = [t["id"] for t in tools if t.get("streaming")]
