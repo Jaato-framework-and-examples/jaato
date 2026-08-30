@@ -13,7 +13,9 @@
     "reasoning_tokens": null,
     "thinking_tokens": null,
     "cost_usd": null,
-    "spend_total_tokens": null
+    "spend_total_tokens": null,
+    "spend_cache_read_tokens": null,
+    "spend_cache_creation_tokens": null
   },
   "completion_gap": null,
   "duration_seconds": 0.0,
