@@ -181,8 +181,12 @@ async def run_arm(spec: ArmSpec, *, workspace_root: Path,
     try:
         limit = (DEFAULT_ARM_TIMEOUT_SECONDS if arm_timeout_seconds is None
                  else float(arm_timeout_seconds))
+        # Held by us, not by the coroutine: `asyncio.wait_for` cancels the
+        # task on timeout and we would never receive its return value.
+        accumulator = _TurnAccumulator()
         run = _run_session(spec, workspace, socket_path=socket_path,
-                           cascade_driver_id=cascade_driver_id)
+                           cascade_driver_id=cascade_driver_id,
+                           accumulator=accumulator)
         payload, accumulator, history = (
             await asyncio.wait_for(run, timeout=limit) if limit > 0 else await run)
     except asyncio.TimeoutError:
@@ -191,12 +195,14 @@ async def run_arm(spec: ArmSpec, *, workspace_root: Path,
             "short — BLOCKED, not FAIL: a run that did not finish says "
             "nothing about the configuration under test")
         result.duration_seconds = time.monotonic() - started
+        _record_partial_usage(result, accumulator)
         if not keep_workspace:
             discard(workspace)
         return result
     except Exception as exc:  # noqa: BLE001 — any session failure is BLOCKED
         result.blocked_reason = _describe_session_failure(exc)
         result.duration_seconds = time.monotonic() - started
+        _record_partial_usage(result, accumulator)
         if not keep_workspace:
             discard(workspace)
         return result
@@ -379,9 +385,38 @@ class _ArmSession:
         return False
 
 
+def _record_partial_usage(result: "ArmResult",
+                          accumulator: "_TurnAccumulator") -> None:
+    """Carry whatever the arm spent onto a BLOCKED result.
+
+    BLOCKED means "we learned nothing about the configuration", NOT "this
+    was free".  An arm cut mid-turn has usually spent real money: one
+    observed arm ran its full 900s ceiling across 467 billed
+    `chat/completions` calls and reported `cost=$0.0000`, because usage was
+    only ever copied onto the result along the success path (#723).
+
+    That is not merely a wrong number.  The task pool's `usd` ceiling is
+    evaluated against reported spend, so an arm that never completes a turn
+    — an agent looping on tool calls, exactly the shape this harness runs —
+    could burn without bound while the pool read zero.  Reporting what we
+    have makes the ceiling enforceable in the case it exists for.
+
+    Still a FLOOR, not the truth: usage rides on turn-completion events, so
+    an arm cut inside its first turn reports what completed, which may be
+    nothing.  The invariant is that reported cost never UNDERSTATES what
+    the accumulator saw; closing the in-flight gap needs per-response usage
+    (#723).
+    """
+    result.turns = accumulator.turns
+    if accumulator.finish_reason and not result.finish_reason:
+        result.finish_reason = accumulator.finish_reason
+    result.usage = accumulator.snapshot()
+
+
 async def _run_session(spec: ArmSpec, workspace: Workspace, *,
                        socket_path: Optional[str],
-                       cascade_driver_id: Optional[str] = None):
+                       cascade_driver_id: Optional[str] = None,
+                       accumulator: Optional["_TurnAccumulator"] = None):
     """Open the session, send the prompt, return payload + facts + history.
 
     The ``.env`` written into the workspace carries ``JAATO_PROFILE_SET``;
@@ -405,7 +440,12 @@ async def _run_session(spec: ArmSpec, workspace: Workspace, *,
     if cascade_driver_id:
         kwargs["cascade_driver_id"] = cascade_driver_id
 
-    accumulator = _TurnAccumulator()
+    # Owned by the CALLER when supplied: a timeout cancels this coroutine,
+    # so anything created HERE is unreachable afterwards and its usage is
+    # lost with it.  The arm that most needs its spend reported is the one
+    # that was cut short (#723).
+    if accumulator is None:
+        accumulator = _TurnAccumulator()
     # None until a HistoryEvent actually lands.  Seeding this with [] would
     # make "no history arrived" indistinguishable from "the agent made no
     # tool calls" — see build_ledger_result on why that difference decides
