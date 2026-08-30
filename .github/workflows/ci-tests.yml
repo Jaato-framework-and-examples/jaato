@@ -8,6 +8,15 @@ on:
   push:
     branches: [main]
 
+# One in-flight run per PR branch. Pushing three times to a PR used to start
+# three full runs that then competed for the same runner pool, so every run's
+# queue wait grew with the branch's own churn. Superseded PR runs are now
+# cancelled; pushes to `main` are NOT (every main commit must stay tested, and
+# a cancelled main run would leave a commit with no verdict).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   # ---------------------------------------------------------------
   # REQUIRED check (promote in branch protection once confirmed green
@@ -36,6 +45,10 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            jaato-sdk/pyproject.toml
+            jaato-server/pyproject.toml
       - name: Install (editable + interactive backend)
         run: |
           pip install -e jaato-sdk/
@@ -56,12 +69,31 @@ jobs:
             jaato-server/shared/tests/test_every_guard_detects_its_own_reversion.py
 
   # ---------------------------------------------------------------
-  # REQUIRED CHECK (repo ruleset "contract-guards" on refs/heads/main, since
-  # 2026-08-09). Runs the three non-contract suites -- shared/tests,
-  # server/tests and shared/plugins/**/tests. It was non-blocking while the
-  # pre-existing-failure backlog was burned down; all three are green now, and
-  # leaving it advisory is what let server/tests and shared/plugins rot
-  # unnoticed for months in the first place.
+  # The suites, fanned out one job per leg.
+  #
+  # These used to be seven sequential steps of a single `full-suite` job, so
+  # its wall clock was the SUM of every suite plus one install (~11 min).
+  # They are independent, so they now run as parallel jobs and the wall clock
+  # is the SLOWEST leg plus one install. The required-check name `full-suite`
+  # is preserved by the gate job below — branch protection keeps pointing at
+  # the same check.
+  #
+  # Each suite still gets its OWN pytest process ON PURPOSE, and now its own
+  # RUNNER too. Run together in one invocation they pollute each other through
+  # process-global state (workspace-root ContextVar, apparmor, bootstrap
+  # helpers): measured 43 failures combined versus 0 + 0 when run separately.
+  # Separate jobs strengthen that isolation rather than weaken it — the three
+  # legs that carry more than one suite keep them in separate `pytest` calls.
+  #
+  # `fail-fast: false` replaces the old per-step `if: always()`: one red leg
+  # must not hide the other legs' failure lists.
+  #
+  # Legs are grouped for balance, and so that no leg is dominated by job
+  # startup. Measured locally after the memo fix below: shared/tests ~117s,
+  # server/tests ~104s, shared/plugins ~107s, and the fourth leg's four suites
+  # ~104s combined (SDK surface ~1s, SDK package-internal ~67s, scaffold ~9s,
+  # conformance ~27s). A dedicated runner for the 1s suite would cost a
+  # minute of setup to save nothing.
   #
   # `--continue-on-collection-errors` so a single bad import (e.g. a stale
   # symbol) doesn't mask the rest of the suite.
@@ -72,123 +104,142 @@ jobs:
   # headers — install them first; graphviz covers the diagrams plugin's
   # render path.
   # ---------------------------------------------------------------
-  full-suite:
+  suite:
+    name: suite (${{ matrix.leg.name }})
     runs-on: ubuntu-latest
-    # Three suites in separate processes: ~8 min locally (4 + 1.5 + 2 plus
-    # install), so 20 left little headroom on a slower runner.
-    timeout-minutes: 35
+    # Longest leg is ~2 min of tests plus install; 20 leaves headroom on a
+    # slow runner without letting a hung leg hold the run for half an hour.
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        leg:
+          # The single largest step, at ~6 min. `introspect.env_vars()` is
+          # memoized as of this change, which took it to ~2 min: the scaffold
+          # tests here called that un-memoized whole-tree AST scan ~37 times.
+          - name: shared/tests
+            run: |
+              pytest -q --continue-on-collection-errors \
+                jaato-server/shared/tests/
+
+          # Until recently NO workflow ran server/tests or shared/plugins, so their
+          # tests rotted silently against deliberate production changes --
+          # three files had not been touched since May while the code moved on
+          # through August, and 4 of the 7 budget_control test files had never
+          # executed in CI at all.
+          - name: server/tests (daemon tier)
+            run: |
+              pytest -q --continue-on-collection-errors \
+                jaato-server/server/tests/
+
+          - name: shared/plugins (plugin tier)
+            run: |
+              pytest -q --continue-on-collection-errors \
+                jaato-server/shared/plugins/
+
+          # Three directories that no workflow ran, plus live conformance.
+          #
+          # jaato-sdk/tests matters because test_recovery_client_parity.py
+          # lives there: that guard exists to catch IPCRecoveryClient falling
+          # behind IPCClient, and a guard CI never runs is exactly the failure
+          # mode it was written for.
+          #
+          # jaato-sdk/jaato_sdk/tests is a SECOND directory, one path segment
+          # away from the first, that no workflow ran either. The event
+          # wire-format baselines live there, and 102 of them had drifted
+          # unnoticed: 96 missing session_id since #603, four more with one
+          # extra field each, and GCEvent with no baseline at all -- an event
+          # type that reached the wire and was never captured.
+          #
+          # jaato-server/shared/scaffold/tests is a THIRD such directory, and
+          # the one that guards the developer-facing toolkit: `jaato-scaffold
+          # explain` / `validate` / `new`, the tools the README and the SDK
+          # skill tell an agent to trust INSTEAD of reading the source. Over a
+          # hundred tests, none of which any workflow ran. It is also where
+          # the drift in #716 lived -- `new` grew from four archetypes to six
+          # while `explain` went on advertising four.
+          #
+          # The shape that hid all three is the same: a green `full-suite`
+          # reads as covering `shared/` and the SDK surface, and the covered
+          # directories are the ones with almost the same names.
+          #
+          # LIVE CONFORMANCE is the only suite here that starts a real daemon
+          # and drives it the way a consumer does. Every other suite supplies
+          # its own fixture, and a fixture cannot be wrong in the way
+          # production is wrong, because the person writing it is the person
+          # who believes the contract. Around 3600 tests passed here while a
+          # consumer building against a live daemon found five real defects in
+          # an hour: an exhausted cascade handing back a usable-looking
+          # handle, a history request answered with silence, a terminal event
+          # emitted before the turn it was reporting, a provider-reported cost
+          # dropped at five consecutive links, and a rejected budget
+          # declaration nobody could see. All five are asserted there.
+          #
+          # It costs NO tokens: the ``echo`` provider is deterministic,
+          # creds-free and network-free, and reports a CONFIGURED spend
+          # (``plugin_configs.echo.usage``) so ceilings and cost propagation
+          # are assertable without a provider that bills.
+          #
+          # ``-m conformance`` is required: these are deselected by default
+          # (pyproject ``addopts``) because they start a subprocess and are
+          # slower than a unit test.
+          - name: SDK + scaffold + conformance
+            run: |
+              rc=0
+              pytest -q --continue-on-collection-errors jaato-sdk/tests/ || rc=1
+              pytest -q --continue-on-collection-errors jaato-sdk/jaato_sdk/tests/ || rc=1
+              pytest -q --continue-on-collection-errors jaato-server/shared/scaffold/tests/ || rc=1
+              pytest -q -m conformance jaato-sdk/jaato_sdk/conformance/ || rc=1
+              exit $rc
+
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
+          # `.[all]` pulls gssapi, which publishes NO wheels — every run
+          # Cython-compiled it from sdist against libkrb5, and that was the
+          # bulk of a 3-minute install. pip caches wheels it builds itself,
+          # so caching pip's dir reuses that build until the pyprojects
+          # change.
+          cache: pip
+          cache-dependency-path: |
+            jaato-sdk/pyproject.toml
+            jaato-server/pyproject.toml
       - name: System build deps (gssapi / diagrams)
         run: sudo apt-get update && sudo apt-get install -y libkrb5-dev graphviz
       - name: Install (editable, all extras)
         run: |
           pip install -e jaato-sdk/
           pip install -e "jaato-server/.[all]"
-      - name: Full shared/tests suite
-        run: |
-          pytest -q --continue-on-collection-errors \
-            jaato-server/shared/tests/
+      - name: ${{ matrix.leg.name }}
+        run: ${{ matrix.leg.run }}
 
-      # Until now NO workflow ran either of these paths, so their tests rotted
-      # silently against deliberate production changes -- three files had not
-      # been touched since May while the code moved on through August, and
-      # 4 of the 7 budget_control test files had never executed in CI at all.
-      #
-      # Each suite gets its OWN pytest process ON PURPOSE. Run together in one
-      # invocation they pollute each other through process-global state
-      # (workspace-root ContextVar, apparmor, bootstrap helpers): measured 43
-      # failures combined versus 0 + 0 when run separately. Separate steps also
-      # mean one suite's failure list stays readable.
-      #
-      # `if: always()` so a failure in the step above still lets these report;
-      # otherwise the first red step hides the other two.
-      - name: server/tests suite (daemon tier)
-        if: always()
+  # ---------------------------------------------------------------
+  # REQUIRED CHECK (repo ruleset "contract-guards" on refs/heads/main, since
+  # 2026-08-09). Aggregates every `suite` leg into the one check name branch
+  # protection already points at, so the fan-out above needed no ruleset edit.
+  #
+  # It was non-blocking while the pre-existing-failure backlog was burned
+  # down; all suites are green now, and leaving it advisory is what let
+  # server/tests and shared/plugins rot unnoticed for months in the first
+  # place.
+  #
+  # `if: always()` + an explicit result check, NOT a bare `needs:` — a
+  # skipped or cancelled leg reports neither `success` nor `failure`, and
+  # without the explicit compare such a leg would let the gate go green.
+  # ---------------------------------------------------------------
+  full-suite:
+    needs: suite
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Gate on every suite leg
         run: |
-          pytest -q --continue-on-collection-errors \
-            jaato-server/server/tests/
-
-      - name: shared/plugins/**/tests suite (plugin tier)
-        if: always()
-        run: |
-          pytest -q --continue-on-collection-errors \
-            jaato-server/shared/plugins/
-
-      # jaato-sdk/tests was believed to be the LAST suite no workflow ran --
-      # the same gap server/tests and shared/plugins had. It matters because
-      # test_recovery_client_parity.py lives here: that guard exists to catch
-      # IPCRecoveryClient falling behind IPCClient, and a guard CI never runs
-      # is exactly the failure mode it was written for.
-      #
-      # It was NOT the last one. See the step below.
-      - name: jaato-sdk/tests suite (SDK surface)
-        if: always()
-        run: |
-          pytest -q --continue-on-collection-errors \
-            jaato-sdk/tests/
-
-      # jaato-sdk/jaato_sdk/tests is a SECOND directory, one path segment away
-      # from the one above, that no workflow ran either.  The event
-      # wire-format baselines live here, and 102 of them had drifted
-      # unnoticed: 96 missing session_id since #603, four more with one extra
-      # field each, and GCEvent with no baseline at all -- an event type that
-      # reached the wire and was never captured.
-      #
-      # Nothing was tolerating those failures. Nobody was seeing them, because
-      # a green `full-suite` reads as covering the SDK surface and the
-      # covered directory is the one with almost the same name.
-      - name: jaato-sdk/jaato_sdk/tests suite (SDK package-internal)
-        if: always()
-        run: |
-          pytest -q --continue-on-collection-errors \
-            jaato-sdk/jaato_sdk/tests/
-
-      # jaato-server/shared/scaffold/tests is a THIRD such directory, and the
-      # one that guards the developer-facing toolkit: `jaato-scaffold explain`
-      # / `validate` / `new`, the tools the README and the SDK skill tell an
-      # agent to trust INSTEAD of reading the source.  Over a hundred tests,
-      # none of which any workflow ran.
-      #
-      # The shape is the same one that hid the two above: a green `full-suite`
-      # reads as covering `shared/`, and the covered directory
-      # (`shared/tests/`) is the one with almost the same name.  It is also
-      # where the drift in #716 lived — `new` grew from four archetypes to six
-      # while `explain` went on advertising four — so this is the suite whose
-      # absence had already cost something measurable.
-      - name: shared/scaffold/tests suite (developer toolkit)
-        if: always()
-        run: |
-          pytest -q --continue-on-collection-errors \
-            jaato-server/shared/scaffold/tests/
-
-      # LIVE CONFORMANCE — the only suite here that starts a real daemon and
-      # drives it the way a consumer does.
-      #
-      # Every other suite supplies its own fixture, and a fixture cannot be
-      # wrong in the way production is wrong, because the person writing it
-      # is the person who believes the contract.  Around 3600 tests passed
-      # here while a consumer building against a live daemon found five real
-      # defects in an hour: an exhausted cascade handing back a usable-looking
-      # handle, a history request answered with silence, a terminal event
-      # emitted before the turn it was reporting, a provider-reported cost
-      # dropped at five consecutive links, and a rejected budget declaration
-      # nobody could see.  All five are asserted below.
-      #
-      # It costs NO tokens: the ``echo`` provider is deterministic,
-      # creds-free and network-free, and reports a CONFIGURED spend
-      # (``plugin_configs.echo.usage``) so ceilings and cost propagation are
-      # assertable without a provider that bills.
-      #
-      # ``-m conformance`` is required: these are deselected by default
-      # (pyproject ``addopts``) because they start a subprocess and are
-      # slower than a unit test.
-      - name: live conformance suite (real daemon, echo provider)
-        if: always()
-        timeout-minutes: 10
-        run: |
-          pytest -q -m conformance \
-            jaato-sdk/jaato_sdk/conformance/
+          result='${{ needs.suite.result }}'
+          echo "suite legs: $result"
+          if [ "$result" != "success" ]; then
+            echo "::error::one or more suite legs did not succeed ($result)"
+            exit 1
+          fi
