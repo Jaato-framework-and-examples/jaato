@@ -8,9 +8,13 @@ is undocumented cannot be trusted sight-unseen — an agent briefed to prefer
 ``jaato-scaffold new profile-set`` over hand-writing spent ~20 minutes and 250+
 tool calls reverse-engineering it and never ran it.
 
-The gap AROSE by drift: archetypes were added, the ``explain`` banner counter
-incremented, and no drill-down was ever written.  So the guard is not "does a
-doc scope exist" but "does the doc still match the generator":
+The gap AROSE by drift, and the banner is where it shows: ``5aa82e1`` (#624)
+shipped FIVE client templates under a literal reading "4 client archetypes"
+(``host-tools`` was uncounted from the first commit), and ``ad016d8`` (#649)
+added ``sweep`` without touching that literal.  The counter was never
+incremented — it was simply never right, and with no drill-down behind it
+nothing made that visible.  So the guard is not "does a doc scope exist" but
+"does the doc still match the generator":
 
 1. every archetype ``new`` dispatches on has an entry in ``ARCHETYPES``;
 2. a real ``new`` run writes nothing the entry does not declare, and writes
@@ -38,8 +42,8 @@ from shared.tests.test_every_guard_detects_its_own_reversion import Reversion
 
 #: Put the defect back: spell the archetype count instead of counting it.
 #: That single literal is the whole of how #716 shipped — the banner said
-#: "4 client archetypes" while `new` accepted six — so it is the reversion
-#: this guard must notice.
+#: "4 client archetypes" while `new` accepted six client templates plus
+#: profile-set — so it is the reversion this guard must notice.
 REVERSIONS = [
     Reversion(
         target="jaato-server/shared/scaffold/explain.py",
@@ -47,7 +51,8 @@ REVERSIONS = [
         replace='f"{len(GC)} gc strategies   4 client archetypes\\n\\n"',
         test="test_the_banner_counter_is_counted_not_spelled",
         because="the overview banner advertising a hardcoded archetype count "
-                "that two new archetypes had already outgrown",
+                "— wrong from the commit that wrote it (host-tools was never "
+                "in the four), and never revisited when sweep landed",
     ),
 ]
 

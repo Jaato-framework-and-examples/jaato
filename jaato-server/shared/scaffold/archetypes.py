@@ -19,8 +19,12 @@ Having the contract as data means three readers share it:
 * the guard in ``tests/test_scaffold_archetype_docs.py`` — every archetype
   ``new`` accepts must be documented, and every documented file must actually
   be written by a real run.  That guard is the point: the gap this module
-  closes arose because archetypes were added, the ``explain`` banner counter
-  incremented, and no drill-down was ever written.
+  closes arose because the archetype count was SPELLED rather than counted.
+  ``5aa82e1`` (#624) shipped five client templates under a banner reading
+  "4 client archetypes" — ``host-tools`` was uncounted on day one — and
+  ``ad016d8`` (#649) added ``sweep`` without touching the literal.  Nobody
+  ever incremented it; there was nothing behind it to drill into, so nothing
+  drew attention to it being wrong.
 
 The one-line summaries are NOT repeated here — client archetypes read theirs
 from :data:`_client_templates.TEMPLATES`, the same string ``new`` prints, so
