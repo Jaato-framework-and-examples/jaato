@@ -25,6 +25,7 @@ declared source of truth as the CI guard, no import side-effects.
 from __future__ import annotations
 
 import ast
+import copy
 import dataclasses
 import io
 import re
@@ -573,12 +574,15 @@ def _tier_for(category: str) -> str:
     return "daemon"
 
 
-def env_vars() -> Dict[str, EnvVar]:
-    """All env vars the installed daemon + plugins read (offline source scan).
+# Memo for :func:`_scan_env_vars`.  ``None`` until the first scan; afterwards
+# the authoritative result, handed out only as deep copies by ``env_vars()``.
+_ENV_VARS_CACHE: Optional[Dict[str, EnvVar]] = None
 
-    Keyed by var name; merges read sites (union of sources; first literal
-    default wins).  Each var carries the ``tier`` (daemon/runner/...) of the
-    code that reads it.  Reflects the INSTALLED code — no prose, no declaration.
+
+def _scan_env_vars() -> Dict[str, EnvVar]:
+    """AST-scan the installed tree for env reads.  The expensive half of
+    :func:`env_vars` — parses every non-test ``.py`` under ``_SCAN_DIRS``
+    (500+ files, ~3s).  Call ``env_vars()`` instead; it memoizes this.
     """
     out: Dict[str, EnvVar] = {}
     for d in _SCAN_DIRS:
@@ -613,6 +617,28 @@ def env_vars() -> Dict[str, EnvVar]:
                         ev.description = desc
     return out
 
+
+def env_vars() -> Dict[str, EnvVar]:
+    """All env vars the installed daemon + plugins read (offline source scan).
+
+    Keyed by var name; merges read sites (union of sources; first literal
+    default wins).  Each var carries the ``tier`` (daemon/runner/...) of the
+    code that reads it.  Reflects the INSTALLED code — no prose, no declaration.
+
+    **Memoized for the life of the process.**  The underlying scan
+    (:func:`_scan_env_vars`) AST-parses the whole installed tree and costs
+    ~3s; the tree cannot change under a running process, so repeat calls —
+    ``build``/``explain``/``validate`` each make one, and the scaffold test
+    suite made ~37 — are served from the memo.
+
+    Callers get a **deep copy**, so the mutable ``EnvVar`` fields (``sources``,
+    ``description``, ``default``) stay caller-owned and no caller can poison
+    the shared memo.  The copy is ~1000x cheaper than the scan.
+    """
+    global _ENV_VARS_CACHE
+    if _ENV_VARS_CACHE is None:
+        _ENV_VARS_CACHE = _scan_env_vars()
+    return copy.deepcopy(_ENV_VARS_CACHE)
 
 
 # ----------------------------------------------------------------- events
