@@ -487,6 +487,32 @@ class TestCLIPluginPathSandboxing:
         assert "-la" not in tokens
         assert "--color=auto" not in tokens
 
+    def test_extract_path_tokens_covers_every_segment(self):
+        """Paths in later segments and substitutions are extracted too."""
+        plugin = CLIToolPlugin()
+
+        tokens = plugin._extract_path_tokens("cat ./a && rm /etc/b")
+        assert tokens == ["./a", "/etc/b"]
+
+        assert plugin._extract_path_tokens("echo $(cat /etc/passwd)") == [
+            "/etc/passwd"
+        ]
+
+    def test_extract_path_tokens_includes_redirect_targets(self):
+        """Redirect targets are paths; fd duplication targets are not."""
+        plugin = CLIToolPlugin()
+
+        assert plugin._extract_path_tokens("echo hi 2>/etc/x") == ["/etc/x"]
+        assert plugin._extract_path_tokens("echo hi >&2") == []
+
+    def test_extract_path_tokens_fails_closed(self):
+        """There is no naive-split fallback for an unparseable command."""
+        from shared.command_analysis import UnanalyzableCommand
+
+        plugin = CLIToolPlugin()
+        with pytest.raises(UnanalyzableCommand):
+            plugin._extract_path_tokens('cat "/etc/passwd')
+
     def test_extract_path_tokens_excludes_npm_packages(self):
         """Test that npm package names are not extracted as paths."""
         plugin = CLIToolPlugin()
@@ -840,3 +866,188 @@ class TestCLIPluginRuntimeLimits:
         plugin.set_runtime_limits(None, None)
         assert plugin._cgroup_attach is None
         assert plugin._runtime_limits is None
+
+
+class TestCLIPluginCompoundCommandAnalysis:
+    """Mode inference must hold for every segment, not just the first.
+
+    Regression suite for the analyzer-bypass class catalogued in issue #668:
+    a command string is judged by what *all* of it does, so a write hidden
+    behind ``&&``, a redirect, or a command substitution is classified as a
+    write rather than inheriting the leading command's read semantics.
+    """
+
+    @pytest.mark.parametrize("command,expected", [
+        # --- compound-command segmentation -----------------------------
+        pytest.param(
+            "cat ./README.md && rm -rf ./notes",
+            [("./README.md", "read"), ("./notes", "write")],
+            id="and-chain",
+        ),
+        pytest.param(
+            "cat ./a || rm ./b",
+            [("./a", "read"), ("./b", "write")],
+            id="or-chain",
+        ),
+        pytest.param(
+            "cat ./a; rm ./b",
+            [("./a", "read"), ("./b", "write")],
+            id="semicolon",
+        ),
+        pytest.param(
+            "cat ./a | tee ./b",
+            [("./a", "read"), ("./b", "write")],
+            id="pipeline",
+        ),
+        pytest.param(
+            "cat ./a & rm ./b",
+            [("./a", "read"), ("./b", "write")],
+            id="background",
+        ),
+        pytest.param(
+            "cat ./a\nrm ./b",
+            [("./a", "read"), ("./b", "write")],
+            id="newline",
+        ),
+        pytest.param(
+            "( rm ./b )",
+            [("./b", "write")],
+            id="subshell",
+        ),
+        pytest.param(
+            "cat ./a; cp ./b ./c",
+            [("./a", "read"), ("./b", "read"), ("./c", "write")],
+            id="write-last-per-segment",
+        ),
+        # --- redirection grammar ---------------------------------------
+        pytest.param("echo hi > ./out", [("./out", "write")], id="redirect-stdout"),
+        pytest.param("echo hi >> ./out", [("./out", "write")], id="redirect-append"),
+        pytest.param("echo hi 2>./out", [("./out", "write")], id="redirect-fd"),
+        pytest.param("echo hi 1>./out", [("./out", "write")], id="redirect-fd-1"),
+        pytest.param("echo hi &>./out", [("./out", "write")], id="redirect-both"),
+        pytest.param("echo hi &>>./out", [("./out", "write")], id="redirect-both-append"),
+        pytest.param("echo hi >&./out", [("./out", "write")], id="redirect-dup-to-file"),
+        pytest.param("echo hi >|./out", [("./out", "write")], id="redirect-clobber"),
+        pytest.param("echo hi <>./out", [("./out", "write")], id="redirect-rw"),
+        pytest.param("cat < ./in", [("./in", "read")], id="redirect-stdin"),
+        pytest.param("cat ./a >&2", [("./a", "read")], id="redirect-fd-dup-not-a-path"),
+        pytest.param(
+            "cp ./a ./b > ./log",
+            [("./a", "read"), ("./b", "write"), ("./log", "write")],
+            id="write-last-plus-redirect",
+        ),
+        # --- command substitution --------------------------------------
+        pytest.param(
+            "echo `rm -rf ./notes`",
+            [("./notes", "write")],
+            id="backtick-substitution",
+        ),
+        pytest.param(
+            'echo "$(tee ./out)"',
+            [("./out", "write")],
+            id="dollar-paren-substitution",
+        ),
+        pytest.param(
+            "diff <(cat ./a) <(rm ./b)",
+            [("./a", "read"), ("./b", "write")],
+            id="process-substitution",
+        ),
+        # --- CC checklist rows -----------------------------------------
+        pytest.param(
+            "FOO=bar rm ./notes",
+            [("./notes", "write")],
+            id="inline-env-assignment",
+        ),
+        pytest.param(
+            "OPTIND=1 RANDOM=2 rm ./notes",
+            [("./notes", "write")],
+            id="multiple-assignments",
+        ),
+        pytest.param(
+            "\\rm -rf ./notes",
+            [("./notes", "write")],
+            id="backslash-escaped-command",
+        ),
+        pytest.param(
+            "cat ./a && \\\nrm ./b",
+            [("./a", "read"), ("./b", "write")],
+            id="line-continuation",
+        ),
+        pytest.param(
+            "sudo rm ./notes",
+            [("./notes", "write")],
+            id="wrapper-command",
+        ),
+        pytest.param(
+            "env FOO=bar rm ./notes",
+            [("./notes", "write")],
+            id="env-wrapper",
+        ),
+        pytest.param(
+            "man -P ./pager ls",
+            [("./pager", "read")],
+            id="pager-option-value-is-a-path",
+        ),
+        pytest.param(
+            "cat <<EOF\n./not-a-real-path\nEOF",
+            [],
+            id="heredoc-body-is-data",
+        ),
+    ])
+    def test_classify_path_modes(self, command, expected):
+        plugin = CLIToolPlugin()
+        assert plugin._classify_path_modes(command) == expected
+
+    def test_write_wins_when_a_path_is_read_and_written(self):
+        """A path used both ways unions to the stricter mode."""
+        plugin = CLIToolPlugin()
+        assert plugin._classify_path_modes("cat ./a && rm ./a") == [("./a", "write")]
+
+    def test_long_command_still_sees_the_hidden_segment(self):
+        """A 10k-character command is analysed, not waved through."""
+        plugin = CLIToolPlugin()
+        filler = " ".join(["x"] * 4000)
+        command = f"echo {filler} && rm -rf ./notes"
+        assert ("./notes", "write") in plugin._classify_path_modes(command)
+
+
+class TestCLIPluginAnalyzerFailsClosed:
+    """Commands the analyzer cannot model are refused, not degraded."""
+
+    @pytest.mark.parametrize("command", [
+        pytest.param('cat "/etc/passwd', id="unbalanced-double-quote"),
+        pytest.param("cat '/etc/passwd", id="unbalanced-single-quote"),
+        pytest.param("echo $(rm -rf /", id="unbalanced-substitution"),
+        pytest.param("echo `rm -rf /", id="unbalanced-backtick"),
+        pytest.param("cat /etc/passwd \\", id="dangling-backslash"),
+        pytest.param("cat >", id="redirect-without-target"),
+        pytest.param("cat /etc/passwd &&", id="dangling-and"),
+        pytest.param("cat /etc/passwd ||", id="dangling-or"),
+    ])
+    def test_refused_with_syntax_error(self, tmp_path, command):
+        plugin = CLIToolPlugin()
+        plugin.initialize({"workspace_root": str(tmp_path)})
+
+        result = plugin._validate_command_paths(command)
+        assert isinstance(result, dict)
+        assert result["returncode"] == 2
+        assert "could not be parsed" in result["stderr"]
+
+    @pytest.mark.parametrize("command", [
+        pytest.param("ls && cat /etc/passwd", id="hidden-behind-and"),
+        pytest.param("ls; cat /etc/passwd", id="hidden-behind-semicolon"),
+        pytest.param("echo hi > /etc/jaato-probe", id="redirect-outside"),
+        pytest.param("echo hi 2> /etc/jaato-probe", id="fd-redirect-outside"),
+        pytest.param("echo hi &> /etc/jaato-probe", id="both-redirect-outside"),
+        pytest.param("echo $(cat /etc/passwd)", id="substitution-outside"),
+        pytest.param("echo `cat /etc/passwd`", id="backtick-outside"),
+        pytest.param("FOO=bar cat /etc/passwd", id="assignment-prefix-outside"),
+    ])
+    def test_out_of_workspace_path_blocked_in_any_position(self, tmp_path, command):
+        plugin = CLIToolPlugin()
+        plugin.initialize({"workspace_root": str(tmp_path)})
+
+        result = plugin._validate_command_paths(command)
+        assert isinstance(result, dict), f"not blocked: {command}"
+        assert result["returncode"] == 1
+        assert "No such file or directory" in result["stderr"]

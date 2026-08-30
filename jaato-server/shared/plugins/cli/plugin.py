@@ -31,6 +31,12 @@ from jaato_sdk.plugins.model_provider.types import CancelledException
 from shared.path_utils import msys2_to_windows_path
 from shared.subprocess_runner import run_command, requires_shell, RunResult
 from shared.trace import trace as _trace_write
+from shared.command_analysis import (
+    Segment,
+    UnanalyzableCommand,
+    WRAPPER_COMMANDS,
+    analyze_command,
+)
 
 
 DEFAULT_MAX_OUTPUT_CHARS = 50000  # ~12k tokens at 4 chars/token
@@ -100,6 +106,92 @@ _WRITE_LAST_CMDS = frozenset({
 _WRITE_OUTPUT_CMDS = frozenset({
     'tee',
 })
+
+# Every command name whose presence in a segment implies a write somewhere.
+_ALL_WRITE_CMDS = _WRITE_ALL_CMDS | _WRITE_LAST_CMDS | _WRITE_OUTPUT_CMDS
+
+
+def _path_like(token: str) -> bool:
+    """True if a command word should be treated as a filesystem path.
+
+    Mirrors the historical heuristic used by
+    :meth:`CLIToolPlugin._extract_path_tokens`: absolute paths, ``..``
+    traversal, explicit ``./`` and ``~`` prefixes count; option flags,
+    URLs and npm-style ``@scope/package`` names do not.
+
+    Args:
+        token: One word from a command, quoting already removed.
+
+    Returns:
+        True when the token should be run through the workspace check.
+    """
+    if not token or token.startswith('-'):
+        return False
+    if re.match(r'^[a-zA-Z][a-zA-Z0-9+.-]*://', token):
+        return False
+    if token.startswith('@') and '/' in token and not token.startswith('@/'):
+        return False
+    return (token.startswith('/') or '..' in token or
+            token.startswith('./') or token.startswith('~'))
+
+
+def _arg_path_like(arg: str) -> bool:
+    """True if an explicit ``args`` entry should be workspace-checked.
+
+    Looser than :func:`_path_like` on purpose: entries in the separate
+    ``args`` list are never shell-parsed, so flag/URL exclusions (which
+    exist to avoid mis-reading shell words) must not weaken the check.
+    """
+    return (arg.startswith('/') or '..' in arg or
+            arg.startswith('./') or arg.startswith('~'))
+
+
+def _effective_command_name(segment: Segment) -> str:
+    """Pick the command name that governs a segment's path semantics.
+
+    A segment can name more than one command: ``sudo rm -rf x`` resolves to
+    ``['sudo', 'rm']``.  Write semantics win, so the first resolved name in
+    :data:`_ALL_WRITE_CMDS` is returned.  When the segment is headed by a
+    wrapper (``sudo``, ``env``, ``xargs``, ...) whose argument layout this
+    module does not model precisely, every word is scanned for a write
+    command -- deliberately over-classifying as write rather than risking a
+    write that reads as ``read``.
+
+    Args:
+        segment: One analyzed shell segment.
+
+    Returns:
+        The governing command basename, or ``''`` when the segment names
+        no command (assignments only).
+    """
+    names = segment.command_names
+    for name in names:
+        if name in _ALL_WRITE_CMDS:
+            return name
+    if any(name in WRAPPER_COMMANDS for name in names):
+        for word in segment.words:
+            base = os.path.basename(word)
+            if base in _ALL_WRITE_CMDS:
+                return base
+    return names[-1] if names else ''
+
+
+def _classify_word_paths(cmd_name: str, paths: List[str]) -> List[tuple]:
+    """Apply the command-name write heuristics to a segment's path words.
+
+    Args:
+        cmd_name: The governing command name for the segment.
+        paths: Path-looking words, in source order.
+
+    Returns:
+        List of ``(path, mode)`` tuples where mode is "read" or "write".
+    """
+    if cmd_name in _WRITE_ALL_CMDS or cmd_name in _WRITE_OUTPUT_CMDS:
+        return [(path, 'write') for path in paths]
+    result = [(path, 'read') for path in paths]
+    if cmd_name in _WRITE_LAST_CMDS and result:
+        result[-1] = (result[-1][0], 'write')
+    return result
 
 
 class CLIToolPlugin(BackgroundCapableMixin, RunnerForwardingMixin):
@@ -1008,6 +1100,11 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
     def _extract_path_tokens(self, command: str) -> List[str]:
         """Extract tokens that look like filesystem paths from a command.
 
+        Covers every segment the command would run, including the bodies of
+        command substitutions, and includes redirection targets.  Mode
+        inference is *not* applied here — see :meth:`_classify_path_modes`
+        for that.
+
         Identifies tokens that are likely filesystem paths:
         - Absolute paths starting with /
         - Relative paths with .. traversal
@@ -1017,50 +1114,29 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
         - URLs (http://, https://, ftp://, etc.)
         - Option flags starting with - or --
         - Package names with @ (npm @scope/package)
+        - Heredoc delimiters and file-descriptor duplication targets, which
+          are not filesystem paths at all
 
         Args:
             command: The shell command string.
 
         Returns:
-            List of tokens that appear to be filesystem paths.
+            List of tokens that appear to be filesystem paths, in source
+            order.
+
+        Raises:
+            UnanalyzableCommand: When the command cannot be modelled the way
+                the shell would parse it.  There is no naive-split fallback:
+                one parser decides, and when it can't, callers must deny.
         """
-        try:
-            # Use shlex to properly handle quoting
-            tokens = shlex.split(command)
-        except ValueError:
-            # If shlex fails (unbalanced quotes), fall back to simple split
-            tokens = command.split()
-
-        path_tokens = []
-        for token in tokens:
-            # Skip empty tokens
-            if not token:
-                continue
-
-            # Skip option flags
-            if token.startswith('-'):
-                continue
-
-            # Skip URLs
-            if re.match(r'^[a-zA-Z][a-zA-Z0-9+.-]*://', token):
-                continue
-
-            # Skip npm-style package names (@scope/package)
-            if token.startswith('@') and '/' in token and not token.startswith('@/'):
-                continue
-
-            # Include if it looks like a path:
-            # - Absolute path (starts with /)
-            # - Relative path with traversal (contains ..)
-            # - Explicit relative path (starts with ./)
-            # - Contains path separator and doesn't look like an option value
-            if (token.startswith('/') or
-                    '..' in token or
-                    token.startswith('./') or
-                    token.startswith('~')):
-                path_tokens.append(token)
-
-        return path_tokens
+        tokens: List[str] = []
+        for segment in analyze_command(command):
+            tokens.extend(word for word in segment.words if _path_like(word))
+            tokens.extend(
+                redirect.target for redirect in segment.redirects
+                if redirect.mode != 'none' and _path_like(redirect.target)
+            )
+        return tokens
 
     def _is_path_within_workspace(self, path: str, mode: str = "write") -> bool:
         """Check if a path is allowed for access.
@@ -1120,6 +1196,33 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
             # If path resolution fails, treat as outside workspace for safety
             return False
 
+    def _classify_segment(self, segment: Segment) -> List[tuple]:
+        """Classify the paths of a single shell segment.
+
+        Each segment is judged on its own command name and its own
+        redirections, which is what makes compound commands safe to reason
+        about: in ``cat README.md && rm -rf notes/`` the ``rm`` segment
+        classifies ``notes/`` as write even though the string starts with
+        ``cat``.
+
+        Args:
+            segment: One segment from :func:`analyze_command`.
+
+        Returns:
+            List of ``(path, mode)`` tuples where mode is "read" or "write".
+        """
+        cmd_name = _effective_command_name(segment)
+        word_paths = [word for word in segment.words if _path_like(word)]
+        result = _classify_word_paths(cmd_name, word_paths)
+
+        # Redirection targets carry the mode the operator grants, regardless
+        # of what the command itself does.
+        for redirect in segment.redirects:
+            if redirect.mode == 'none' or not _path_like(redirect.target):
+                continue
+            result.append((redirect.target, redirect.mode))
+        return result
+
     def _classify_path_modes(
         self,
         command: str,
@@ -1127,11 +1230,20 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
     ) -> List[tuple]:
         """Classify each path token in a command as "read" or "write".
 
-        Heuristics (in order of priority):
-        1. Paths after shell redirections (>, >>) are "write".
-        2. All path args of commands in _WRITE_ALL_CMDS are "write".
-        3. The last path arg of commands in _WRITE_LAST_CMDS is "write".
-        4. All path args of commands in _WRITE_OUTPUT_CMDS are "write".
+        The command is first segmented into the simple commands the shell
+        would actually run (see :func:`shared.command_analysis.analyze_command`),
+        including the bodies of command substitutions.  Each segment is then
+        classified independently and the results are unioned, with "write"
+        winning over "read" for a path that appears in both roles.
+
+        Per-segment heuristics (in order of priority):
+        1. Redirection targets take the mode the operator grants -- the full
+           file-descriptor grammar, not just ``>``/``>>`` (so ``2>f``,
+           ``&>f``, ``>&f``, ``<>f``, ``>|f`` are all writes, and heredoc
+           delimiters are not paths at all).
+        2. All path args of commands in ``_WRITE_ALL_CMDS`` are "write".
+        3. The last path arg of commands in ``_WRITE_LAST_CMDS`` is "write".
+        4. All path args of commands in ``_WRITE_OUTPUT_CMDS`` are "write".
         5. Everything else defaults to "read".
 
         Args:
@@ -1139,56 +1251,61 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
             arg_list: Optional separate argument list.
 
         Returns:
-            List of (path, mode) tuples where mode is "read" or "write".
+            List of ``(path, mode)`` tuples, first-seen order, where mode is
+            "read" or "write".
+
+        Raises:
+            UnanalyzableCommand: When the command cannot be modelled the way
+                the shell would parse it.  Callers must refuse it; see
+                :meth:`_validate_command_paths`.
         """
-        # Detect redirect targets first (before shlex parsing).
-        redirect_targets: set = set()
-        for m in re.finditer(r'>{1,2}\s*(\S+)', command):
-            redirect_targets.add(m.group(1))
+        segments = analyze_command(command)
 
-        # Parse into tokens for command-level analysis.
-        try:
-            tokens = shlex.split(command)
-        except ValueError:
-            tokens = command.split()
+        modes: Dict[str, str] = {}
+        order: List[str] = []
 
-        # Determine the base command name.
-        cmd_name = ''
-        if tokens:
-            cmd_name = os.path.basename(tokens[0])
+        def record(pairs: List[tuple]) -> None:
+            for path, mode in pairs:
+                if path not in modes:
+                    modes[path] = mode
+                    order.append(path)
+                elif mode == 'write':
+                    modes[path] = 'write'
 
-        # Collect all path tokens (same logic as _extract_path_tokens).
-        path_tokens = self._extract_path_tokens(command)
+        for segment in segments:
+            record(self._classify_segment(segment))
 
-        # Also include explicit arg_list paths.
         if arg_list:
-            for arg in arg_list:
-                if (arg.startswith('/') or '..' in arg or
-                        arg.startswith('./') or arg.startswith('~')):
-                    if arg not in path_tokens:
-                        path_tokens.append(arg)
+            record(self._classify_arg_list(segments, arg_list))
 
-        if not path_tokens:
-            return []
+        return [(path, modes[path]) for path in order]
 
-        # Classify each path.
-        result = []
-        for path in path_tokens:
-            if path in redirect_targets:
-                result.append((path, 'write'))
-            elif cmd_name in _WRITE_ALL_CMDS:
-                result.append((path, 'write'))
-            elif cmd_name in _WRITE_OUTPUT_CMDS:
-                result.append((path, 'write'))
-            else:
-                result.append((path, 'read'))
+    def _classify_arg_list(
+        self,
+        segments: List[Segment],
+        arg_list: List[str],
+    ) -> List[tuple]:
+        """Classify paths supplied through the separate ``args`` list.
 
-        # For _WRITE_LAST_CMDS, upgrade the last path to write.
-        if cmd_name in _WRITE_LAST_CMDS and result:
-            last_path, _ = result[-1]
-            result[-1] = (last_path, 'write')
+        The ``args`` form is never shell-parsed, so its entries are checked
+        with the looser :func:`_arg_path_like` filter but classified with the
+        same command-name heuristics as inline words.
 
-        return result
+        Args:
+            segments: Segments parsed from the ``command`` string (used only
+                to resolve the command name).
+            arg_list: The explicit argument list.
+
+        Returns:
+            List of ``(path, mode)`` tuples.
+        """
+        head_words = list(segments[0].words) if segments else []
+        args = [str(arg) for arg in arg_list]
+        synthetic = Segment(words=head_words + args)
+        cmd_name = _effective_command_name(synthetic)
+        return _classify_word_paths(
+            cmd_name, [arg for arg in args if _arg_path_like(arg)]
+        )
 
     def _validate_command_paths(
         self,
@@ -1201,16 +1318,18 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
         positions (redirections, write commands) require "readwrite"
         authorization; all other paths only require "read" access.
 
-        **Fail-closed contract.** The path heuristics below tokenise the
-        command with :func:`shlex.split`, which models POSIX shell word
-        splitting. If ``shlex`` *cannot* parse the command (unbalanced
-        quotes, dangling escapes), the tokens it would produce no longer
-        match how ``/bin/sh`` will interpret the string — so the path
-        extraction can't reason about it safely. Historically the helpers
-        degraded to a naive ``str.split()`` here, which parses differently
-        than the shell and could let an out-of-workspace path slip past the
-        check. Instead we now refuse the command outright. This is a
-        security boundary: when we can't analyse, we deny.
+        **Fail-closed contract.** The command is parsed by
+        :func:`shared.command_analysis.analyze_command`, which models POSIX
+        shell word splitting, command chaining, substitution and the full
+        redirection grammar. If it *cannot* parse the command (unbalanced
+        quotes, dangling escapes, a redirection with no target, an
+        unmodelled redirect operator), the structure it would produce no
+        longer matches how ``/bin/sh`` will interpret the string — so the
+        path extraction can't reason about it safely. Historically the
+        helpers degraded to a naive ``str.split()`` here, which parses
+        differently than the shell and could let an out-of-workspace path
+        slip past the check. Instead we refuse the command outright. This
+        is a security boundary: when we can't analyse, we deny.
 
         Args:
             command: The command string.
@@ -1226,17 +1345,15 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
             # No sandboxing configured
             return None
 
-        # Fail closed before any heuristic runs: a command the validator
-        # cannot tokenise the way the shell will is refused, not degraded.
+        # Fail closed: a command the analyzer cannot model the way the shell
+        # will is refused, not degraded to a looser parse.
         try:
-            shlex.split(command)
-        except ValueError as exc:
+            classified = self._classify_path_modes(command, arg_list)
+        except UnanalyzableCommand as exc:
             self._trace(
                 f"path_sandbox: refusing unparseable command for validation ({exc})"
             )
             return self._make_unparseable_result(command, exc)
-
-        classified = self._classify_path_modes(command, arg_list)
 
         for path, mode in classified:
             if not self._is_path_within_workspace(path, mode=mode):

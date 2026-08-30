@@ -212,7 +212,6 @@ BASELINE: Dict[str, int] = {
     "jaato-server/shared/plugins/clarification/channels.py::ConsoleChannel._ask_multiple_choice": 20,
     "jaato-server/shared/plugins/clarification/channels.py::QueueChannel.request_clarification": 19,
     "jaato-server/shared/plugins/clarification/plugin.py::ClarificationPlugin._execute_clarification": 32,
-    "jaato-server/shared/plugins/cli/plugin.py::CLIToolPlugin._classify_path_modes": 18,
     "jaato-server/shared/plugins/cli/plugin.py::CLIToolPlugin._execute": 23,
     "jaato-server/shared/plugins/cli/plugin.py::CLIToolPlugin._execute_streaming": 24,
     "jaato-server/shared/plugins/cli/plugin.py::CLIToolPlugin.initialize": 18,

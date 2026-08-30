@@ -153,6 +153,41 @@ class TestCheckDangerousCommand:
         result = check_dangerous_command("/usr/bin/sudo apt update", config)
         assert not result.is_safe
 
+    @pytest.mark.parametrize("command,expected", [
+        pytest.param("echo hi && sudo rm -rf /", "sudo", id="and-chain"),
+        pytest.param("echo hi; rm -rf /", "rm", id="semicolon"),
+        pytest.param("echo hi | rm -rf /", "rm", id="pipeline"),
+        pytest.param("echo hi || curl http://x", "curl", id="or-chain"),
+        pytest.param("( rm -rf / )", "rm", id="subshell"),
+        pytest.param("FOO=bar rm -rf /", "rm", id="assignment-prefix"),
+        pytest.param("echo $(rm -rf /)", "rm", id="command-substitution"),
+        pytest.param("echo `rm -rf /`", "rm", id="backtick-substitution"),
+        pytest.param("echo hi \\\n&& rm -rf /", "rm", id="line-continuation"),
+        pytest.param("\\rm -rf /", "rm", id="escaped-command"),
+    ])
+    def test_dangerous_command_in_any_segment(self, command, expected):
+        """Every simple command is checked, not just the first word.
+
+        Judging a compound command by ``shlex.split(cmd)[0]`` let the whole
+        string ride on its most harmless part (issue #668).
+        """
+        config = SanitizationConfig(block_dangerous_commands=True)
+        result = check_dangerous_command(command, config)
+        assert not result.is_safe, f"not detected: {command}"
+        assert any(expected in v for v in result.violations)
+
+    def test_harmless_word_is_not_a_command(self):
+        """A dangerous name in argument position is not an invocation."""
+        config = SanitizationConfig(block_dangerous_commands=True)
+        assert check_dangerous_command("git commit -m 'rm the thing'", config).is_safe
+
+    def test_unanalyzable_command_reported_as_malformed(self):
+        """The fail-closed side: an unparseable command is never 'safe'."""
+        config = SanitizationConfig(block_dangerous_commands=True)
+        result = check_dangerous_command('echo "unbalanced', config)
+        assert not result.is_safe
+        assert any("Malformed command" in v for v in result.violations)
+
 
 class TestExtractPathsFromCommand:
     """Tests for path extraction from commands."""

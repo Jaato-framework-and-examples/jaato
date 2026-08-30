@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+from shared.command_analysis import UnanalyzableCommand, analyze_command
 from shared.path_utils import msys2_to_windows_path, normalize_for_comparison
 
 logger = logging.getLogger(__name__)
@@ -135,8 +136,37 @@ def check_shell_injection(command: str) -> SanitizationResult:
     return SanitizationResult(is_safe=True, reason="No injection detected")
 
 
+def _executables_in(segments) -> List[str]:
+    """Command basenames invoked by ``segments``, de-duplicated in order.
+
+    Args:
+        segments: Segments from :func:`shared.command_analysis.analyze_command`.
+
+    Returns:
+        Every command name the string would invoke, outermost wrapper first
+        (``sudo rm`` yields ``['sudo', 'rm']``).
+    """
+    seen: List[str] = []
+    for segment in segments:
+        for name in segment.command_names:
+            if name not in seen:
+                seen.append(name)
+    return seen
+
+
 def check_dangerous_command(command: str, config: SanitizationConfig) -> SanitizationResult:
     """Check if command uses dangerous executables.
+
+    Every simple command the string would run is checked, not just the first
+    word.  Taking ``shlex.split(command)[0]`` as "the executable" judged a
+    compound command by its most harmless part: ``echo hi && sudo rm -rf /``
+    read as ``echo`` and passed.  Segmentation (see
+    :func:`shared.command_analysis.analyze_command`) also sees through
+    variable-assignment prefixes (``FOO=bar rm ...``) and command
+    substitutions (``echo $(rm -rf /)``).
+
+    A command the analyzer cannot model is reported as malformed rather
+    than parsed loosely — the fail-closed side of the boundary.
 
     Args:
         command: The command string to check
@@ -148,24 +178,20 @@ def check_dangerous_command(command: str, config: SanitizationConfig) -> Sanitiz
     violations = []
 
     try:
-        # Parse command to get executable
-        parts = shlex.split(command)
-        if not parts:
+        segments = analyze_command(command)
+    except UnanalyzableCommand as e:
+        logger.debug(f"Malformed command detected during sanitization: {e}")
+        violations.append(f"Malformed command: {e}")
+    else:
+        if not segments:
             return SanitizationResult(is_safe=True, reason="Empty command")
 
-        executable = os.path.basename(parts[0])
-
-        # Check against dangerous commands
         blocked = DANGEROUS_COMMANDS | config.custom_blocked_commands
         allowed = config.allowed_dangerous_commands
 
-        if executable in blocked and executable not in allowed:
-            violations.append(f"Dangerous command: {executable}")
-
-    except ValueError as e:
-        # shlex.split failed - malformed command
-        logger.debug(f"Malformed command detected during sanitization: {e}")
-        violations.append(f"Malformed command: {e}")
+        for executable in _executables_in(segments):
+            if executable in blocked and executable not in allowed:
+                violations.append(f"Dangerous command: {executable}")
 
     if violations:
         return SanitizationResult(
