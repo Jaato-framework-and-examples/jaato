@@ -22,6 +22,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Dict, List, Optional
 
+from . import archetypes as _archetypes
 from . import introspect
 from . import validate as _validate
 
@@ -112,26 +113,28 @@ def _resolver_registered(scheme: str) -> bool:
         return False
 
 
-def _ensure_env_gitignore(ws: Path, written: List[str]) -> None:
+def _ensure_env_gitignore(ws: Path, plan: "_Plan") -> None:
     """Ensure the workspace ``.gitignore`` ignores ``.env`` (keeps
     ``.env.example`` tracked).  Converting to env-var credentials means the
     user now puts a LIVE key in ``.env``; an absent ignore rule turns that into
-    a leak.  Creates or appends as needed, idempotently."""
+    a leak.  Creates or appends as needed, idempotently.
+
+    Writes go through *plan* rather than the filesystem directly, so
+    ``--dry-run`` reports this file without creating it.
+    """
     gi = ws / ".gitignore"
     block = ("# Local env holds a LIVE provider credential — never commit it.\n"
              ".env\n"
              "!.env.example\n")
     if not gi.exists():
-        gi.write_text(block, encoding="utf-8")
-        written.append(str(gi.relative_to(ws)))
+        plan.write(gi, block)
         return
     text = gi.read_text(encoding="utf-8")
     lines = {ln.strip() for ln in text.splitlines()}
     if ".env" in lines:
         return  # already ignored
     prefix = text if text.endswith("\n") else text + "\n"
-    gi.write_text(prefix + "\n" + block, encoding="utf-8")
-    written.append(str(gi.relative_to(ws)) + " (updated)")
+    plan.write(gi, prefix + "\n" + block, action="update")
 
 
 def _ws_secrets_marker(ws: Path) -> Path:
@@ -151,14 +154,18 @@ def _read_ws_secrets(ws: Path) -> Optional[str]:
         return None
 
 
-def _write_ws_secrets(ws: Path, raw: str, written: List[str]) -> None:
+def _write_ws_secrets(ws: Path, raw: str, plan: "_Plan") -> None:
     """Record the chosen secrets mode so subsequent ``new`` calls default to
-    it — keeps a workspace's credential-reference style consistent."""
+    it — keeps a workspace's credential-reference style consistent.
+
+    Writes go through *plan*, so ``--dry-run`` reports the marker without
+    writing it.
+    """
     import json
     marker = _ws_secrets_marker(ws)
-    marker.parent.mkdir(parents=True, exist_ok=True)
     existing = {}
-    if marker.exists():
+    had = marker.exists()
+    if had:
         try:
             existing = json.loads(marker.read_text(encoding="utf-8"))
         except Exception:
@@ -166,9 +173,8 @@ def _write_ws_secrets(ws: Path, raw: str, written: List[str]) -> None:
     if existing.get("secrets") == raw:
         return
     existing["secrets"] = raw
-    marker.write_text(json.dumps(existing, indent=2) + "\n", encoding="utf-8")
-    rel = str(marker.relative_to(ws))
-    written.append(rel if rel not in written else rel + " (updated)")
+    plan.write(marker, json.dumps(existing, indent=2) + "\n",
+               action="update" if had else "create")
 
 
 def _compose_env(provider: str, active: list) -> str:
@@ -219,63 +225,109 @@ def _compose_env(provider: str, active: list) -> str:
     return "\n".join(lines)
 
 
+# ------------------------------------------------------------------- the plan
+
+
+class _Plan:
+    """The set of files one ``new`` invocation writes — applied, or rehearsed.
+
+    Every write in this module goes through a plan.  With ``dry_run=False``
+    (the normal path) it writes the file and records the label ``new`` prints;
+    with ``dry_run=True`` it records the same entry and writes NOTHING, which
+    is what makes ``new --dry-run`` answer "what exactly lands in MY workspace
+    with THESE flags?" without a throwaway directory.
+
+    Existence checks still read the REAL workspace either way, so a rehearsal
+    distinguishes a created file from an appended-to one exactly as the real
+    run would.
+
+    Each entry is annotated from :mod:`archetypes` — the same registry
+    ``explain archetype`` renders — so the rehearsed tree says what each file
+    is FOR, not just that it appears.
+
+    Attributes:
+        ws: The workspace root; entries are recorded relative to it.
+        doc: The :class:`archetypes.ArchetypeDoc` being built, used to annotate
+            entries.  ``None`` disables annotation.
+        dry_run: True to rehearse (record, never write).
+        entries: ``(relative_path, action)`` in write order, where *action* is
+            ``"create"`` or ``"update"``.
+    """
+
+    def __init__(self, ws: Path, doc=None, *, dry_run: bool = False):
+        self.ws = ws
+        self.doc = doc
+        self.dry_run = dry_run
+        self.entries: List[tuple] = []
+
+    def write(self, path: Path, text: str, action: str = "create") -> None:
+        """Record (and unless rehearsing, perform) one write."""
+        if not self.dry_run:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text, encoding="utf-8")
+        self.entries.append((str(path.relative_to(self.ws)), action))
+
+    @property
+    def labels(self) -> List[str]:
+        """The ``+ <path>`` lines ``new`` prints after a real run."""
+        return [rel + (" (updated)" if act == "update" else "")
+                for rel, act in self.entries]
+
+    def render(self) -> str:
+        """The rehearsed tree, annotated with each file's purpose + status."""
+        if not self.entries:
+            return "  (nothing — every file already exists; pass --force to overwrite)"
+        width = max(len(rel) for rel, _ in self.entries)
+        out = []
+        for rel, act in self.entries:
+            ef = _archetypes.documents(self.doc, rel) if self.doc else None
+            glyph = "+" if act == "create" else "~"
+            status = f"[{ef.status}]" if ef else "[undocumented]"
+            out.append(f"  {glyph} {rel.ljust(width)}  {status:<13} "
+                       f"{ef.what if ef else ''}".rstrip())
+            if act == "update":
+                out.append(f"    {' ' * width}  (appended to — the existing file "
+                           f"is not clobbered)")
+        return "\n".join(out)
+
+
+def _dry_run_footer(doc, skipped: str) -> None:
+    """Close a rehearsal: say nothing was written and where to look next."""
+    print(f"\n(dry run — nothing was written; {skipped} was skipped)")
+    print(f"what is IN each file:  jaato-scaffold explain archetype {doc.name}")
+    print("write it for real:     re-run without --dry-run")
+
+
 def run(args) -> int:
+    """Dispatch to the archetype builder.
+
+    The accepted names come from :mod:`archetypes` rather than a literal list
+    here, so adding a client template makes it an accepted archetype AND makes
+    the documentation guard demand a doc entry for it — the drift that left
+    ``new`` accepting six archetypes while ``explain`` advertised four.
+    """
     archetype = args.archetype
-    if archetype in (None, "profile-set", "set"):
+    if archetype is None or archetype in _archetypes.PROFILE_SET_ALIASES:
         return _new_profile_set(args)
-    if archetype in ("client", "fire", "cascade", "observer", "host-tools",
-                     "sweep"):
+    if archetype in _archetypes.CLIENT_ARCHETYPES:
         return _new_client_archetype(args, archetype)
-    print(f"unknown archetype {archetype!r} — one of: profile-set, client, "
-          "fire, cascade, observer, host-tools")
+    print(f"unknown archetype {archetype!r} — one of: "
+          + ", ".join(_archetypes.accepted()))
     return 2
 
 
 # --------------------------------------------------------- client archetypes
 
-def _new_client_archetype(args, archetype: str) -> int:
-    """Emit a runnable SDK client (+ .env), then py_compile it (emit-then-check).
+def _apply_transport(args, subs: Dict[str, str], socket: str) -> Optional[int]:
+    """Fill the transport-dependent substitutions; return an error code or None.
 
-    The client templates bake in the known-good recipe; we can't fully *run*
-    them here (needs a live daemon + provider auth) so the build-time check is
-    a syntax compile — the client analog of profile-set's emit-then-validate.
-    Next step for the user is the doctor, which checks the runtime env.
+    ``--transport`` decides three placeholders at once — the client import, the
+    connection constants, and the ``_new_client()`` construction — and
+    ``--recoverable`` swaps the class inside two of them.  Extracted from
+    :func:`_new_client_archetype` so the emit path reads as "resolve the
+    transport, then write the files"; a caller propagates a non-None return as
+    its own exit code.
     """
-    import py_compile
-    from ._client_templates import TEMPLATES
-
-    missing = [f for f in ("workspace", "provider", "model")
-               if not getattr(args, f, None)]
-    if missing:
-        print(f"new {archetype}: missing required --{' / --'.join(missing)}")
-        return 2
-    provider = args.provider
-    if introspect.resolve_provider(provider) is None:
-        known = ", ".join(sorted(introspect.providers()))
-        print(f"new {archetype}: unknown provider '{provider}' (have: {known})")
-        return 2
-
-    ws = Path(args.workspace).resolve()
-    ws.mkdir(parents=True, exist_ok=True)
-    env_file = ws / ".env"
-    py_file = ws / f"run_{archetype}.py"
-    socket = "/tmp/jaato.sock"
-    _, template, title = TEMPLATES[archetype]
-
-    subs = {
-        "__SOCKET__": socket,
-        "__ENV_FILE__": str(env_file),
-        "__WORKSPACE__": str(ws),
-        "__MODEL__": args.model,
-        "__PROVIDER__": provider,
-        "__TITLE__": title,
-        "__ARCHETYPE__": archetype,
-        # Correct per-provider key var from the declared AuthSource chain
-        # (ZHIPUAI_API_KEY, ANTHROPIC_API_KEY, …), not a guessed template.
-        "__KEY_ENV__": _primary_key_env_var(
-            introspect.resolve_provider(provider), provider),
-        "__CASCADE_ID__": "REPLACE_WITH_THE_CASCADE_DRIVER_ID",
-    }
     # --transport selects the client. ipc (default) + ws are daemon clients that
     # share the low-level template (WSClient is IPCClient with the transport
     # swapped, same facade-client API); the connection constants + the
@@ -381,6 +433,61 @@ def _new_client_archetype(args, archetype: str) -> int:
             f"        workspace_path=WORKSPACE,{on_status_arg}\n"
             "    )"
         )
+    return None
+
+
+def _new_client_archetype(args, archetype: str) -> int:
+    """Emit a runnable SDK client (+ .env), then py_compile it (emit-then-check).
+
+    The client templates bake in the known-good recipe; we can't fully *run*
+    them here (needs a live daemon + provider auth) so the build-time check is
+    a syntax compile — the client analog of profile-set's emit-then-validate.
+    Next step for the user is the doctor, which checks the runtime env.
+    """
+    import py_compile
+    from ._client_templates import TEMPLATES
+
+    dry_run = bool(getattr(args, "dry_run", False))
+    doc = _archetypes.resolve(archetype)
+    missing = [f for f in ("workspace", "provider", "model")
+               if not getattr(args, f, None)]
+    if missing:
+        print(f"new {archetype}: missing required --{' / --'.join(missing)}")
+        return 2
+    provider = args.provider
+    if introspect.resolve_provider(provider) is None:
+        known = ", ".join(sorted(introspect.providers()))
+        print(f"new {archetype}: unknown provider '{provider}' (have: {known})")
+        return 2
+
+    ws = Path(args.workspace).resolve()
+    if not dry_run:
+        ws.mkdir(parents=True, exist_ok=True)
+    env_file = ws / ".env"
+    py_file = ws / f"run_{archetype}.py"
+    socket = "/tmp/jaato.sock"
+    _, template, title = TEMPLATES[archetype]
+
+    subs = {
+        "__SOCKET__": socket,
+        "__ENV_FILE__": str(env_file),
+        "__WORKSPACE__": str(ws),
+        "__MODEL__": args.model,
+        "__PROVIDER__": provider,
+        "__TITLE__": title,
+        "__ARCHETYPE__": archetype,
+        # Correct per-provider key var from the declared AuthSource chain
+        # (ZHIPUAI_API_KEY, ANTHROPIC_API_KEY, …), not a guessed template.
+        "__KEY_ENV__": _primary_key_env_var(
+            introspect.resolve_provider(provider), provider),
+        "__CASCADE_ID__": "REPLACE_WITH_THE_CASCADE_DRIVER_ID",
+    }
+    # --transport decides the client class, its import, the connection
+    # constants and the _new_client() construction (see _apply_transport).
+    transport = getattr(args, "transport", None) or "ipc"
+    rc = _apply_transport(args, subs, socket)
+    if rc is not None:
+        return rc
 
     # Provenance: the FULL resolved invocation that produced this file, stamped
     # into the docstring so it's copy-paste reproducible (not just the bare
@@ -407,20 +514,24 @@ def _new_client_archetype(args, archetype: str) -> int:
             text = text.replace(k, v)
         return text
 
-    written = []
-    if not env_file.exists() or args.force:
-        env_file.write_text(_compose_env(provider, [
-            f"JAATO_PROVIDER={provider}", f"MODEL_NAME={args.model}"]),
-            encoding="utf-8")
-        written.append(env_file.name)
+    plan = _Plan(ws, doc, dry_run=dry_run)
     if py_file.exists() and not args.force:
         print(f"new {archetype}: {py_file} exists (use --force to overwrite)")
         return 2
-    py_file.write_text(_fill(template), encoding="utf-8")
-    written.append(py_file.name)
+    plan.write(py_file, _fill(template))
+    if not env_file.exists() or args.force:
+        plan.write(env_file, _compose_env(provider, [
+            f"JAATO_PROVIDER={provider}", f"MODEL_NAME={args.model}"]),
+            action="update" if env_file.exists() else "create")
+
+    if dry_run:
+        print(f"`jaato-scaffold new {archetype}` would write into {ws}:\n")
+        print(plan.render())
+        _dry_run_footer(doc, "the compile check")
+        return 0
 
     print(f"scaffolded {archetype} client in {ws}:")
-    for w in written:
+    for w in plan.labels:
         print(f"  + {w}")
 
     # emit-then-check: the generated client must at least compile.
@@ -552,6 +663,39 @@ def _report_revalidation(diags) -> int:
     return 0
 
 
+def _emit_set_env(ws: Path, plan: "_Plan", provider: str, active: List[str],
+                  set_name: str, kind: str, key_env_var: str) -> None:
+    """Write or extend the workspace ``.env`` for a scaffolded profile-set.
+
+    A FRESH workspace gets the full composed file (the set selector plus the
+    commented knob catalogue).  An EXISTING one is only appended to, and only
+    with lines it lacks: a ``JAATO_PROFILE_SET`` already there points at the
+    set the user is running and must not be retargeted behind their back, and
+    a credential already filled in must not be blanked.
+
+    Args:
+        active: The active (uncommented) block for a fresh file — the set
+            selector and, in env/none secrets modes, the credential blank.
+        kind: The resolved secrets mode; only ``env`` / ``none`` put the
+            credential in the environment at all.
+        key_env_var: The provider's declared key variable.
+    """
+    envf = ws / ".env"
+    if not envf.exists():
+        plan.write(envf, _compose_env(provider, active))
+        return
+    existing = envf.read_text(encoding="utf-8")
+    add: List[str] = []
+    if "JAATO_PROFILE_SET" not in existing:
+        add.append(f"JAATO_PROFILE_SET={set_name}")
+    if kind in ("env", "none") and f"{key_env_var}=" not in existing \
+            and f"{key_env_var} =" not in existing:
+        add.append(f"{key_env_var}=")
+    if add:
+        prefix = existing if existing.endswith("\n") else existing + "\n"
+        plan.write(envf, prefix + "\n".join(add) + "\n", action="update")
+
+
 def _new_profile_set(args) -> int:
     # --- fail-loud required inputs --------------------------------------
     missing = [f for f in ("workspace", "set", "provider", "model")
@@ -570,10 +714,13 @@ def _new_profile_set(args) -> int:
         return 2
 
     agents = [a.strip() for a in args.agents.split(",") if a.strip()]
+    dry_run = bool(getattr(args, "dry_run", False))
+    doc = _archetypes.resolve(_archetypes.PROFILE_SET)
     ws = Path(args.workspace).resolve()
     pdir = ws / ".jaato" / "profiles"
     setdir = pdir / args.set
-    setdir.mkdir(parents=True, exist_ok=True)
+    if not dry_run:
+        setdir.mkdir(parents=True, exist_ok=True)
 
     # How profiles REFERENCE the provider credential (env / none / uri:<scheme>).
     # Explicit --secrets wins; else the workspace's recorded choice; else the
@@ -591,19 +738,18 @@ def _new_profile_set(args) -> int:
     key_env_var = _primary_key_env_var(introspect.resolve_provider(provider),
                                        provider)
 
-    written: List[str] = []
+    plan = _Plan(ws, doc, dry_run=dry_run)
     for agent in agents:
         base = pdir / f"_base_{agent}.yaml"
         if not base.exists() or args.force:
-            base.write_text(_base_profile_yaml(agent), encoding="utf-8")
-            written.append(str(base.relative_to(ws)))
+            plan.write(base, _base_profile_yaml(agent),
+                       action="update" if base.exists() else "create")
         setf = setdir / f"{agent}.yaml"
         if not setf.exists() or args.force:
-            setf.write_text(
-                _set_profile_yaml(agent, provider, args.model,
-                                  kind, scheme, secret_path),
-                encoding="utf-8")
-            written.append(str(setf.relative_to(ws)))
+            plan.write(setf,
+                       _set_profile_yaml(agent, provider, args.model,
+                                         kind, scheme, secret_path),
+                       action="update" if setf.exists() else "create")
 
     # emit/merge the workspace .env so the set is SELECTED at runtime
     # (JAATO_PROFILE_SET) — without it the workspace isn't runnable as the
@@ -620,32 +766,24 @@ def _new_profile_set(args) -> int:
                    f"# provider credential — fill in ({provider}); referenced by",
                    f"# the set profiles as ${{{key_env_var}}}.",
                    f"{key_env_var}="]
-    envf = ws / ".env"
-    if not envf.exists():
-        # fresh workspace — full composed .env (set selector + commented knobs)
-        envf.write_text(_compose_env(provider, active), encoding="utf-8")
-        written.append(str(envf.relative_to(ws)))
-    else:
-        existing = envf.read_text(encoding="utf-8")
-        prefix = existing if existing.endswith("\n") else existing + "\n"
-        add: List[str] = []
-        if "JAATO_PROFILE_SET" not in existing:
-            add.append(f"JAATO_PROFILE_SET={args.set}")
-        if kind in ("env", "none") and f"{key_env_var}=" not in existing \
-                and f"{key_env_var} =" not in existing:
-            add.append(f"{key_env_var}=")
-        if add:
-            envf.write_text(prefix + "\n".join(add) + "\n", encoding="utf-8")
-            written.append(str(envf.relative_to(ws)) + " (updated)")
+    _emit_set_env(ws, plan, provider, active, args.set, kind, key_env_var)
 
     if kind in ("env", "none"):
-        _ensure_env_gitignore(ws, written)
+        _ensure_env_gitignore(ws, plan)
     if getattr(args, "secrets", None):
-        _write_ws_secrets(ws, raw_secrets, written)
+        _write_ws_secrets(ws, raw_secrets, plan)
+
+    if dry_run:
+        print(f"`jaato-scaffold new profile-set` would write into {ws} "
+              f"(set '{args.set}', {provider}/{args.model}, "
+              f"secrets={raw_secrets}):\n")
+        print(plan.render())
+        _dry_run_footer(doc, "the re-validation")
+        return 0
 
     print(f"scaffolded profile-set '{args.set}' ({provider}/{args.model}, "
           f"secrets={raw_secrets}):")
-    for w in written:
+    for w in plan.labels:
         print(f"  + {w}")
 
     # --- emit-then-validate: the same validator the `validate` verb runs -
