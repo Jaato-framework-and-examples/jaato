@@ -1165,6 +1165,7 @@ class JaatoRuntime:
         provider_name: Optional[str] = None,
         skip_model_test: bool = False,
         plugin_configs: Optional[Dict[str, Dict[str, Any]]] = None,
+        session_id: Optional[str] = None,
     ) -> 'ModelProviderPlugin':
         """Create a new provider instance for a session.
 
@@ -1238,6 +1239,20 @@ class JaatoRuntime:
             from dataclasses import replace
             extra_with_paths = {**config.extra, 'config_root': self._config_root}
             config = replace(config, extra=extra_with_paths)
+
+        # session_id travels independently of the two branches above: it is
+        # neither registry- nor config_root-derived, and a session that has
+        # neither still has an identity worth putting on the wire.
+        #
+        # It comes from the CALLER and never from the registry.  The registry
+        # is shared across sibling subagents, so reading a session id from it
+        # hands every sibling the last-bootstrapped one — the exact leak that
+        # ``JaatoSession.set_daemon_session_id`` was introduced to close.
+        # Each session owns its id and passes it here.
+        if session_id:
+            from dataclasses import replace as _replace
+            config = _replace(
+                config, extra={**config.extra, 'session_id': session_id})
 
         # Merge profile-level provider config.  Providers are plugins, so
         # their profile knobs sit under ``plugin_configs[provider_name]``.

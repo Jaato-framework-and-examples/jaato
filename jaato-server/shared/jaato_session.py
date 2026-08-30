@@ -2736,6 +2736,11 @@ class JaatoSession:
                 provider_name=cfg['provider_name'],
                 skip_model_test=cfg['skip_model_test'],
                 plugin_configs=cfg['plugin_configs'],
+                # This session's OWN id, not the registry's — see the
+                # note in create_provider.  Stamped by the runner during
+                # bootstrap_session, so it is already set by the time the
+                # provider is lazily created on the first turn.
+                session_id=self._daemon_session_id,
             )
             # V2 cross-provider tiers: record which provider this instance IS and
             # seed the per-provider cache so switch_tier can compare against it
@@ -4045,7 +4050,8 @@ NOTES
             # Create new provider for the new model (preserving provider override)
             self._provider = self._runtime.create_provider(
                 model_name,
-                provider_name=self._provider_name_override
+                provider_name=self._provider_name_override,
+                session_id=self._daemon_session_id,
             )
 
             # Propagate agent context to new provider for trace identification

@@ -114,6 +114,10 @@ class TestJaatoSessionConfigure:
             provider_name=None,
             skip_model_test=False,
             plugin_configs=None,
+            # Each session passes its OWN id so OpenRouter can group the
+            # conversation; None here because this fixture never went
+            # through a daemon bootstrap to be stamped.
+            session_id=None,
         )
 
         # Second call — idempotent, no additional create_provider call.
