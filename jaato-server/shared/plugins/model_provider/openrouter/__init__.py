@@ -66,6 +66,16 @@ PROVIDER_KNOBS = ProviderKnobs(layers=(
         KnobSpec("context_length", "int"),
         KnobSpec("base_url", "str"),
         KnobSpec("modalities", "list"),
+        KnobSpec("connect_timeout", "float", 15.0,
+                 "TCP + TLS handshake deadline, seconds"),
+        KnobSpec("request_timeout", "float", 600.0,
+                 "byte-level deadline (httpx read/write/pool), seconds; "
+                 "0 disables"),
+        KnobSpec("stream_idle_timeout", "float", 300.0,
+                 "payload idle deadline for streaming turns, seconds; "
+                 "0 disables.  Raises StallTimeoutError — httpx cannot "
+                 "see this failure because OpenRouter's keep-alive SSE "
+                 "comments reset the byte clock (#732)"),
     ), description="rare escape hatches"),
 ))
 PROVIDER_QUIRKS = frozenset({
