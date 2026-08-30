@@ -72,6 +72,7 @@ async def run_sweep(arms: Sequence[ArmSpec], *, store: ResultStore,
                     keep_workspaces: bool = False,
                     resume: bool = False,
                     arm_timeout_seconds: Optional[float] = None,
+                    max_attempts: int = 1,
                     on_result: Optional[Callable[[ArmResult], None]] = None,
                     ) -> List[ArmResult]:
     """Run every arm with bounded concurrency, appending as they land.
@@ -114,7 +115,8 @@ async def run_sweep(arms: Sequence[ArmSpec], *, store: ResultStore,
                 spec, workspace_root=workspace_root,
                 socket_path=socket_path, keep_workspace=keep_workspaces,
                 cascade_driver_id=pools.cid_for(spec.task.task_id),
-                arm_timeout_seconds=arm_timeout_seconds)
+                arm_timeout_seconds=arm_timeout_seconds,
+                max_attempts=max_attempts)
         # Serialise the append: JSONL tolerates interleaved *records* but
         # not interleaved *bytes* from concurrent writers.
         async with lock:

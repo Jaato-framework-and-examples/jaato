@@ -137,11 +137,76 @@ class _TurnAccumulator:
 DEFAULT_ARM_TIMEOUT_SECONDS = 900.0
 
 
+def _grading_context(task, workspace, accumulator, *, socket_path,
+                     usage, payload, history, ledger=None) -> GraderContext:
+    """Build the context handed to graders.
+
+    One builder for BOTH the mid-session grade (the retry loop) and the
+    final one.  Two constructions would drift, and a retry graded against a
+    different context than the verdict that is finally reported would make
+    the loop lie about what it was reacting to.
+
+    The mid-session call passes empty usage/history: those are gathered at
+    turn end and are not yet complete.  Graders that read the FILESYSTEM —
+    the acceptance checks this loop exists for — are unaffected, since the
+    worktree is already on disk.  A grader depending on the ledger or the
+    payload sees less mid-loop than it will at the end, so it should be
+    declared such that a provisional verdict is harmless.
+    """
+    return GraderContext(
+        workspace_path=workspace.path,
+        config_root=task.resolved_config_root(),
+        agent_params=dict(task.input.agent_params),
+        payload=payload,
+        ledger=ledger,
+        history=history,
+        usage=usage,
+        finish_reason=accumulator.finish_reason,
+        termination_reason=accumulator.termination_reason,
+        termination_detail=accumulator.termination_detail,
+        completion_gap=accumulator.completion_gap,
+        turns=accumulator.turns,
+        socket_path=socket_path,
+    )
+
+
+def _retry_feedback(verdicts: List[Verdict]) -> Optional[str]:
+    """Turn failing verdicts into an instruction, or ``None`` when all pass.
+
+    Quotes the grader's own claim and detail rather than paraphrasing: the
+    arm should be told exactly what was executed and what it returned, so
+    it can run the same thing itself instead of guessing at the criterion.
+    """
+    failed = [v for v in verdicts if getattr(v, "state", None) == "FAIL"]
+    if not failed:
+        return None
+    lines = [
+        "Your change does not yet satisfy the task's acceptance checks. "
+        "These were EXECUTED against your worktree just now:",
+        "",
+    ]
+    for v in failed:
+        claim = (getattr(v, "claim", "") or "").strip()
+        detail = (getattr(v, "detail", "") or "").strip()
+        lines.append(f"- FAILED: {claim}")
+        if detail:
+            lines.append(f"  result: {detail}")
+    lines += [
+        "",
+        "Run that command yourself inside repo/ to see what it reports, fix "
+        "the cause, and commit again on the same branch. Do not change the "
+        "check — it is the task's definition of done. If you conclude the "
+        "check is wrong, say so plainly rather than committing around it.",
+    ]
+    return "\n".join(lines)
+
+
 async def run_arm(spec: ArmSpec, *, workspace_root: Path,
                   socket_path: Optional[str] = None,
                   keep_workspace: bool = False,
                   cascade_driver_id: Optional[str] = None,
-                  arm_timeout_seconds: Optional[float] = None) -> ArmResult:
+                  arm_timeout_seconds: Optional[float] = None,
+                  max_attempts: int = 1) -> ArmResult:
     """Execute and grade one arm.
 
     Args:
@@ -186,10 +251,30 @@ async def run_arm(spec: ArmSpec, *, workspace_root: Path,
         # Held by us, not by the coroutine: `asyncio.wait_for` cancels the
         # task on timeout and we would never receive its return value.
         accumulator = _TurnAccumulator()
+        # Grade BETWEEN turns, inside the live session, so a failing arm can
+        # be handed its own verdicts and try again.  `attempts` counts the
+        # completions actually issued, and is reported so an arm that needed
+        # three goes is never silently compared with one that needed none.
+        attempts = {"n": 1}
+        graded: Dict[str, Any] = {"verdicts": []}
+
+        async def _retry_hook():
+            if attempts["n"] >= max(1, int(max_attempts)):
+                return None
+            ctx = _grading_context(task, workspace, accumulator,
+                                   socket_path=socket_path, usage={},
+                                   payload=None, history=[])
+            graded["verdicts"] = await _grade(task, ctx)
+            feedback = _retry_feedback(graded["verdicts"])
+            if feedback:
+                attempts["n"] += 1
+            return feedback
+
         run = _run_session(spec, workspace, socket_path=socket_path,
                            cascade_driver_id=cascade_driver_id,
                            accumulator=accumulator,
-                           session_ref=session_ref)
+                           session_ref=session_ref,
+                           retry_hook=_retry_hook if max_attempts > 1 else None)
         payload, accumulator, history = (
             await asyncio.wait_for(run, timeout=limit) if limit > 0 else await run)
     except asyncio.TimeoutError:
@@ -222,24 +307,15 @@ async def run_arm(spec: ArmSpec, *, workspace_root: Path,
         result.payload_hash = canonical_hash(payload)
 
     ledger = build_ledger_result(history)
-    context = GraderContext(
-        workspace_path=workspace.path,
-        config_root=task.resolved_config_root(),
-        agent_params=dict(task.input.agent_params),
-        payload=payload,
-        ledger=ledger,
-        history=history,
-        usage=result.usage,
-        finish_reason=accumulator.finish_reason,
-        termination_reason=accumulator.termination_reason,
-        termination_detail=accumulator.termination_detail,
-        completion_gap=accumulator.completion_gap,
-        turns=accumulator.turns,
-        socket_path=socket_path,
-    )
+    context = _grading_context(task, workspace, accumulator,
+                               socket_path=socket_path, usage=result.usage,
+                               payload=payload, history=history, ledger=ledger)
 
     _CONTEXT_SPY(context)
     result.verdicts = await _grade(task, context)
+    # How many completions this arm needed.  Reported so an arm that took
+    # three goes is never silently compared against one that took none.
+    result.attempts = attempts["n"]
 
     if not keep_workspace:
         discard(workspace)
@@ -493,7 +569,8 @@ async def _run_session(spec: ArmSpec, workspace: Workspace, *,
                        socket_path: Optional[str],
                        cascade_driver_id: Optional[str] = None,
                        accumulator: Optional["_TurnAccumulator"] = None,
-                       session_ref: Optional[Dict[str, Any]] = None):
+                       session_ref: Optional[Dict[str, Any]] = None,
+                       retry_hook: Optional[Any] = None):
     """Open the session, send the prompt, return payload + facts + history.
 
     The ``.env`` written into the workspace carries ``JAATO_PROFILE_SET``;
@@ -550,6 +627,22 @@ async def _run_session(spec: ArmSpec, workspace: Workspace, *,
             session_ref["id"] = getattr(arm, "session_id", None)
         client = session.client
         payload = await session.complete(task.input.prompt)
+        # Deterministic retry, inside the SAME session.
+        #
+        # The acceptance criterion is already deterministic — a grader either
+        # exits 0 or it does not — so whether the arm gets another go must not
+        # depend on the model choosing to check its own work.  Six arm-attempts
+        # across three sweeps committed a feature that was never reachable,
+        # because nothing ran it and nothing made them.
+        #
+        # Same session, not a fresh one: the worker keeps everything it
+        # learned about the codebase, and the feedback lands as the next turn
+        # rather than a cold restart it would have to re-derive.
+        while retry_hook is not None:
+            feedback = await retry_hook()
+            if not feedback:
+                break
+            payload = await session.complete(feedback)
         await client.request_history()
         try:
             await asyncio.wait_for(history_ready.wait(), timeout=30)

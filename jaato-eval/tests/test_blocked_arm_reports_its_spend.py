@@ -144,7 +144,7 @@ def test_a_TIMED_OUT_arm_keeps_its_spend_end_to_end(tmp_path, monkeypatch) -> No
     import jaato_eval.runner as R
 
     async def _hang(spec, workspace, *, socket_path, cascade_driver_id=None,
-                    accumulator=None, session_ref=None):
+                    accumulator=None, session_ref=None, retry_hook=None):
         assert accumulator is not None, (
             "run_arm must supply an accumulator it owns; one created inside "
             "this coroutine is destroyed with it on cancellation"

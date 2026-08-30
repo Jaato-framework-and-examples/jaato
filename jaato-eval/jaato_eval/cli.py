@@ -73,6 +73,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         concurrency=args.concurrency, socket_path=args.socket,
         keep_workspaces=args.keep_workspaces, resume=args.resume,
         arm_timeout_seconds=args.arm_timeout,
+        max_attempts=args.max_attempts,
         on_result=_progress,
     ))
 
@@ -110,6 +111,14 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--workspaces", default=".jaato-eval-workspaces",
                      help="parent directory for per-arm scratch workspaces")
     run.add_argument("--concurrency", type=int, default=DEFAULT_CONCURRENCY)
+    run.add_argument("--max-attempts", type=int, default=1,
+                     help="Completions per arm.  >1 enables the grader-feedback "
+                          "loop: a failing arm is handed its own FAILED verdicts "
+                          "and asked to fix them, in the same session, up to this "
+                          "many completions.  Deterministic by construction — the "
+                          "arm does not choose whether to re-check.  Note this "
+                          "changes WHAT is measured (a model with N grader-guided "
+                          "retries), so compare only arms run at the same value.")
     run.add_argument("--socket", default=None, help="daemon IPC socket path")
     run.add_argument("--keep-workspaces", action="store_true",
                      help="leave scratch workspaces on disk for inspection")

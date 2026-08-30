@@ -50,6 +50,8 @@ class ArmResult:
             — consumers must not read that as free.
         duration_seconds: Wall clock for the agent run, excluding grading.
         turns: Turns consumed.
+        attempts: Completions issued (>1 only under the
+            grader-feedback loop; see ``--max-attempts``).
         finish_reason: Provider finish reason for the terminal turn.
         payload_hash: Canonical-JSON sha256 of the completion payload.
             Repeats sharing a hash produced byte-identical output; the
@@ -66,6 +68,11 @@ class ArmResult:
     usage: Dict[str, Any] = field(default_factory=dict)
     duration_seconds: float = 0.0
     turns: int = 0
+    #: Completions issued for this arm.  1 unless the grader-feedback loop
+    #: sent the arm back (``--max-attempts``).  Reported because an arm that
+    #: needed three goes is not comparable with one that needed none, and a
+    #: pass rate that hides the difference measures the wrong thing.
+    attempts: int = 1
     finish_reason: str = "stop"
     payload_hash: Optional[str] = None
     error: Optional[str] = None
@@ -99,6 +106,7 @@ class ArmResult:
             "usage": self.usage,
             "duration_seconds": self.duration_seconds,
             "turns": self.turns,
+            "attempts": self.attempts,
             "finish_reason": self.finish_reason,
             "payload_hash": self.payload_hash,
             "error": self.error,
