@@ -311,6 +311,12 @@ class OpenRouterProvider(ModalityCapabilityMixin):
         self._client: Optional[OpenAI] = None
         self._model_name: Optional[str] = None
 
+        # Per-session identity stamped by the framework (see initialize).
+        # Declared here so ``_build_extra_body`` is safe on the
+        # ``initialize(config=None)`` path, which never reaches the
+        # ``config.extra`` read.
+        self._session_id: Optional[str] = None
+
         # Configuration
         self._api_key: Optional[str] = None
         self._base_url: str = DEFAULT_BASE_URL
@@ -617,6 +623,14 @@ class OpenRouterProvider(ModalityCapabilityMixin):
         api_params = config.extra.get("api_params") or {}
         routing_dict = config.extra.get("routing")
         framework_overrides = config.extra.get("framework_overrides") or {}
+
+        # Not a profile knob — the framework stamps this per session in
+        # ``JaatoRuntime.create_provider`` so OpenRouter can group a
+        # session's requests together (dashboard grouping and
+        # session-aware upstream routing).  Absent for callers that
+        # construct a provider outside a session, which is why the
+        # emission below is conditional rather than assumed.
+        self._session_id: Optional[str] = config.extra.get("session_id")
 
         def _knob(
             key: str, *, layer: Dict[str, Any], default: Any = None,
@@ -1197,6 +1211,13 @@ class OpenRouterProvider(ModalityCapabilityMixin):
         # cache-creation token count are only emitted when this flag is
         # set; standard ``prompt_tokens_details.cached_tokens`` comes
         # back regardless but the opt-in costs us nothing extra.
+        if self._session_id:
+            # OpenRouter's documented request-body field for grouping the
+            # requests of one conversation
+            # (https://openrouter.ai/docs) — sent as a sibling of
+            # ``model``/``messages`` via ``extra_body``, the same way the
+            # official OpenAI-SDK example does it.
+            body["session_id"] = self._session_id
         body["usage"] = {"include": True}
         return body
 
