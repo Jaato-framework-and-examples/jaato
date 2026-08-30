@@ -45,6 +45,7 @@ from shared.framing import (
     write_frame,
 )
 from shared.session_id import is_safe_session_id
+from shared.plugins.path_safety import ensure_private_dir
 
 
 # Windows named pipe prefix (\\.\pipe\)
@@ -308,11 +309,36 @@ class JaatoIPCServer:
         logger.info("IPC server stopped")
 
     async def _start_unix_socket_server(self) -> None:
-        """Start the Unix domain socket server."""
+        """Start the Unix domain socket server.
+
+        The default socket path sits under a shared, world-writable temp
+        directory, so both the socket's own path and the directory holding it
+        are pre-plantable: another user can create either first and have the
+        daemon bind somewhere they control.  Since the IPC transport is
+        unauthenticated, that is a full takeover of the agent.  So the
+        stale-socket cleanup unlinks only entries that are ours to remove — a
+        symlink at the socket path is refused, never followed — and a parent
+        directory the daemon has to create is adopted through
+        ``ensure_private_dir``, which refuses a pre-planted symlink or another
+        user's directory rather than binding inside it.
+
+        Raises:
+            OSError: if the socket directory cannot be used safely, or the
+                path is occupied by something that must not be unlinked.
+        """
         # Remove stale socket from a previous run
         socket_file = Path(self.socket_path)
         if socket_file.exists() or socket_file.is_symlink():
-            if socket_file.is_socket() or socket_file.is_symlink():
+            if socket_file.is_symlink():
+                # A symlink here is never ours: the daemon only ever creates a
+                # socket.  Unlinking it and binding would place the socket at
+                # the planter's chosen target, so refuse instead.
+                raise OSError(
+                    f"Cannot create socket at '{self.socket_path}': "
+                    f"a symlink exists at that path (pre-planted?). "
+                    f"Inspect it, then remove it with: rm {self.socket_path}"
+                )
+            if socket_file.is_socket():
                 socket_file.unlink()
             elif socket_file.is_dir():
                 raise OSError(
@@ -324,8 +350,22 @@ class JaatoIPCServer:
                 # Regular file or other non-socket — try to unlink
                 socket_file.unlink()
 
-        # Ensure parent directory exists
-        socket_file.parent.mkdir(parents=True, exist_ok=True)
+        # Ensure the parent directory exists.  The strict private-directory
+        # rules apply only to a directory *we* create: finding one already
+        # there where we expected to make it is the pre-planting case, and
+        # ensure_private_dir refuses a symlink or another user's directory
+        # rather than binding inside it.  An operator-supplied parent that
+        # already exists (``--ipc-socket /tmp/jaato.sock`` → ``/tmp``, a
+        # root-owned system root) is theirs to choose, not ours to police —
+        # the socket path itself is still guarded by the symlink refusal above.
+        parent = socket_file.parent
+        if not parent.exists():
+            ensure_private_dir(parent)
+        elif not parent.is_dir():
+            raise OSError(
+                f"Cannot create socket at '{self.socket_path}': "
+                f"'{parent}' exists but is not a directory."
+            )
 
         # Start server
         self._server = await asyncio.start_unix_server(

@@ -3,6 +3,7 @@
 
 import os
 import glob
+import stat
 import time
 from datetime import datetime, timedelta
 from typing import Optional, Any
@@ -19,6 +20,50 @@ from .protocol import (
     VisionCapturePlugin,
 )
 
+try:
+    # Canonical implementation.  jaato-tui declares no dependency on
+    # jaato-server, so this import is best-effort in a standalone TUI install;
+    # _refuse_preplanted_dir below enforces the same refusals when it is
+    # absent.  Keep the two in step.
+    from shared.plugins.path_safety import ensure_private_dir
+except ImportError:  # pragma: no cover - TUI installed without jaato-server
+    ensure_private_dir = None
+
+
+def _refuse_preplanted_dir(path: str) -> None:
+    """Create or adopt ``path``, refusing a directory someone else planted.
+
+    Fallback for :func:`shared.plugins.path_safety.ensure_private_dir` when
+    that module is not importable.  The capture directory defaults to a
+    predictable location under a shared, world-writable ``/tmp``, which is the
+    classic pre-planting target: another user creates it first, as a symlink
+    to somewhere of their choosing or as a directory they can read, and every
+    screenshot afterwards lands where they decided.  ``makedirs(exist_ok=True)``
+    adopts both without complaint.
+
+    Args:
+        path: Directory to create or adopt.
+
+    Raises:
+        OSError: if the path is a symlink, is not a directory, or is owned by
+            another user.
+    """
+    try:
+        os.makedirs(path, mode=0o700, exist_ok=False)
+        return
+    except FileExistsError:
+        pass
+
+    st = os.lstat(path)  # lstat: a symlink must be seen as a symlink
+    if stat.S_ISLNK(st.st_mode):
+        raise OSError(f"Refusing pre-planted symlink as capture directory: {path}")
+    if not stat.S_ISDIR(st.st_mode):
+        raise OSError(f"Refusing non-directory as capture directory: {path}")
+    if hasattr(os, "getuid") and st.st_uid != os.getuid():
+        raise OSError(
+            f"Refusing capture directory owned by another user (uid {st.st_uid}): {path}"
+        )
+
 
 class VisionCapture:
     """Captures TUI state as images using Rich Console recording."""
@@ -33,12 +78,27 @@ class VisionCapture:
         return "vision_capture"
 
     def initialize(self, config: Optional[CaptureConfig] = None) -> None:
-        """Initialize with configuration."""
+        """Initialize with configuration.
+
+        The output directory is created owner-only and refused outright if
+        something is already sitting at that path that we did not put there —
+        see :func:`_refuse_preplanted_dir` for why that matters at the
+        shared-``/tmp`` default.
+
+        Args:
+            config: Capture configuration; the existing config is kept if None.
+
+        Raises:
+            OSError: if the configured output directory cannot be used safely.
+        """
         if config:
             self._config = config
 
-        # Ensure output directory exists
-        os.makedirs(self._config.output_dir, exist_ok=True)
+        # Ensure output directory exists — and is ours.
+        if ensure_private_dir is not None:
+            ensure_private_dir(self._config.output_dir)
+        else:  # pragma: no cover - TUI installed without jaato-server
+            _refuse_preplanted_dir(self._config.output_dir)
 
     def _generate_filename(self) -> str:
         """Generate a unique filename for the capture."""

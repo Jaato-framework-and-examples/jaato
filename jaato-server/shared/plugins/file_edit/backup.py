@@ -17,7 +17,9 @@ import os
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
+
+from ..path_safety import read_bytes_verified
 
 
 # Default waypoint ID (session start)
@@ -513,17 +515,33 @@ class BackupManager:
         ]
         return sorted(backups, key=lambda p: p.stat().st_mtime)
 
-    def create_backup(self, file_path: Path) -> Optional[Path]:
+    def create_backup(
+        self,
+        file_path: Path,
+        validate: Optional[Callable[[str], bool]] = None,
+    ) -> Optional[Path]:
         """Create a backup of the specified file.
 
         Also prunes old backups if the count exceeds max_backups.
         Tracks backup in session for potential cleanup.
 
+        The source is read through :func:`read_bytes_verified` rather than
+        ``Path.read_bytes``.  The caller has already asked the sandbox about
+        the path, but a backup taken by re-reading that path is a second
+        resolution: a symlink swapped in between copies whatever it now points
+        at into the backup store (jaato issue #669).  The same helper also
+        refuses FIFOs and devices, which would otherwise block here forever.
+
         Args:
             file_path: Path to the file to backup
+            validate: Optional sandbox predicate over the canonical path,
+                as accepted by ``shared.plugins.path_safety``.  ``None``
+                keeps the special-file and swap guards without a sandbox
+                check — appropriate only for framework-owned paths.
 
         Returns:
             Path to the created backup, or None if the file doesn't exist
+            or cannot be read safely.
         """
         file_path = Path(file_path)
         if not file_path.exists():
@@ -538,7 +556,16 @@ class BackupManager:
         # timestamps in test_list_backups when the wall clock
         # crossed a sub-second boundary inconveniently).
         backup_path = self._unique_backup_path(file_path)
-        backup_path.write_bytes(file_path.read_bytes())
+        try:
+            source_bytes = read_bytes_verified(file_path, validate=validate)
+        except OSError:
+            logger.warning(
+                "Refusing to back up %s: source is not safely readable",
+                file_path,
+                exc_info=True,
+            )
+            return None
+        backup_path.write_bytes(source_bytes)
 
         # Record metadata with waypoint tagging
         backup_info = BackupInfo(

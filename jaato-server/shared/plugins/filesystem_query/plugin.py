@@ -19,7 +19,7 @@ import stat
 from datetime import datetime
 from fnmatch import fnmatch
 from pathlib import Path
-from typing import Any, AsyncIterator, Callable, Dict, List, Optional
+from typing import Any, AsyncIterator, Callable, Dict, Iterator, List, Optional
 
 from ..background.mixin import BackgroundCapableMixin
 from jaato_sdk.plugins.base import UserCommand
@@ -29,6 +29,7 @@ from jaato_sdk.plugins.model_provider.types import (
     DISCOVERABILITY_DEFERRED,
 )
 from ..sandbox_utils import check_path_with_jaato_containment, detect_jaato_symlink
+from ..path_safety import describe_special
 from shared.path_utils import msys2_to_windows_path, normalize_result_path
 from shared.plugins.runner_forwarding import RunnerForwardingMixin
 from shared.utils.gitignore import GitignoreParser
@@ -314,6 +315,174 @@ class FilesystemQueryPlugin(BackgroundCapableMixin, StreamingCapable, RunnerForw
             logger.debug("FilesystemQueryPlugin: path blocked (outside sandbox): %s", path)
         return allowed
 
+    def _make_result_guard(self) -> Callable[[Path], bool]:
+        """Build a containment filter to apply to every *result* of a search.
+
+        Checking only the search root is not enough.  ``Path.glob`` follows
+        symlinked directories, so a link committed into a repository
+        (``data/logs -> /etc``) turns a workspace-scoped search into a read
+        outside the workspace: the root passes the check, and every file the
+        walk reaches through the link is reported — or, for ``grep_content``,
+        read and quoted back — without ever being checked itself.  The same
+        hole exposes ``.jaato``, which is denied by default but sits inside
+        the workspace and so is reachable from an allowed root.
+
+        The returned predicate closes that by re-applying
+        :meth:`_is_path_allowed` to each hit.  Results are cached per parent
+        directory because a search yields many files per directory and the
+        underlying check costs a :func:`os.path.realpath`; the leaf is only
+        checked individually when it is itself a symlink, which is the only
+        way it can escape a parent that is already contained.
+
+        The predicate also drops special files (FIFOs, sockets, devices):
+        ``grep_content`` would otherwise block indefinitely opening a named
+        pipe reached through an allowed path.
+
+        Returns:
+            A callable taking a candidate :class:`Path` and returning True if
+            the search may report and read it.  Not thread-safe — build one
+            per invocation.
+        """
+        dir_cache: Dict[str, bool] = {}
+
+        def allowed(candidate: Path) -> bool:
+            path_str = str(candidate)
+
+            # Never open a FIFO/socket/device found by a walk.
+            if describe_special(candidate) is not None:
+                logger.debug(
+                    "FilesystemQueryPlugin: skipping special file: %s", path_str
+                )
+                return False
+
+            parent = os.path.dirname(path_str)
+            verdict = dir_cache.get(parent)
+            if verdict is None:
+                verdict = self._is_path_allowed(parent)
+                dir_cache[parent] = verdict
+            if not verdict:
+                logger.debug(
+                    "FilesystemQueryPlugin: result outside sandbox (via directory %s): %s",
+                    parent,
+                    path_str,
+                )
+                return False
+
+            # A contained directory can still hold a symlink pointing out.
+            try:
+                is_link = candidate.is_symlink()
+            except OSError:
+                return False
+            if is_link and not self._is_path_allowed(path_str):
+                logger.debug(
+                    "FilesystemQueryPlugin: result outside sandbox (symlinked file): %s",
+                    path_str,
+                )
+                return False
+
+            return True
+
+        return allowed
+
+    def _iter_glob_files(
+        self,
+        root_path: Path,
+        pattern: str,
+        include_hidden: bool,
+    ) -> Iterator["tuple[Path, str]"]:
+        """Yield the files a ``glob_files`` call should report.
+
+        Shared by the blocking and streaming variants, which had carried
+        identical copies of this filtering; one copy is also what keeps the
+        per-result sandbox check from drifting between them.
+
+        Applies, in order: directory skip, hidden-file skip, the configured
+        exclusion patterns, and the per-result containment guard from
+        :meth:`_make_result_guard`.
+
+        Args:
+            root_path: Resolved directory to glob from.
+            pattern: Relative glob pattern.
+            include_hidden: Whether dot-prefixed path components are allowed.
+
+        Yields:
+            ``(path, path_relative_to_root)`` for each reportable file.
+        """
+        result_allowed = self._make_result_guard()
+
+        for match in root_path.glob(pattern):
+            if match.is_dir():
+                continue
+
+            relative = match.relative_to(root_path)
+            if not include_hidden and any(p.startswith(".") for p in relative.parts):
+                continue
+
+            rel_path = str(relative)
+            if self._config.should_exclude(rel_path):
+                continue
+
+            # Containment must hold per result, not just for the root: the
+            # walk may have reached this file through a symlinked directory
+            # pointing outside the workspace.
+            if not result_allowed(match):
+                continue
+
+            yield match, rel_path
+
+    def _collect_grep_targets(
+        self,
+        search_path: Path,
+        glob_patterns: List[str],
+    ) -> List[Path]:
+        """Collect the files a ``grep_content`` call should read.
+
+        Shared by the blocking and streaming variants.  Applies the
+        configured exclusions, the per-result containment guard (see
+        :meth:`_make_result_guard`), and the maximum-file-size cap, and
+        de-duplicates across overlapping patterns.
+
+        A directly-named file still goes through the guard: the special-file
+        check is what stops ``grep_content`` blocking forever on a FIFO.
+
+        Args:
+            search_path: Resolved file or directory to search.
+            glob_patterns: Relative glob patterns to expand under a directory.
+
+        Returns:
+            The files to read, in discovery order.
+        """
+        result_allowed = self._make_result_guard()
+
+        if search_path.is_file():
+            return [search_path] if result_allowed(search_path) else []
+
+        files: List[Path] = []
+        seen_files: set = set()
+        max_bytes = self._config.max_file_size_kb * 1024
+
+        for glob_pattern in glob_patterns:
+            for match in search_path.glob(glob_pattern):
+                if not match.is_file() or match in seen_files:
+                    continue
+                seen_files.add(match)
+
+                if self._config.should_exclude(str(match.relative_to(search_path))):
+                    continue
+
+                if not result_allowed(match):
+                    continue
+
+                try:
+                    if match.stat().st_size > max_bytes:
+                        continue
+                except (OSError, PermissionError):
+                    continue
+
+                files.append(match)
+
+        return files
+
     def get_tool_schemas(self) -> List[ToolSchema]:
         """Return the tool schemas for glob_files and grep_content."""
         return [
@@ -598,21 +767,9 @@ Tips:
             total_found = 0
             truncated = False
 
-            for match in root_path.glob(pattern):
-                # Skip directories
-                if match.is_dir():
-                    continue
-
-                # Skip hidden files unless requested
-                if not include_hidden:
-                    if any(part.startswith(".") for part in match.relative_to(root_path).parts):
-                        continue
-
-                # Check exclusions
-                rel_path = str(match.relative_to(root_path))
-                if self._config.should_exclude(rel_path):
-                    continue
-
+            for match, rel_path in self._iter_glob_files(
+                root_path, pattern, include_hidden
+            ):
                 total_found += 1
 
                 if len(files) >= max_results:
@@ -739,49 +896,23 @@ Tips:
                 "total_matches": 0,
             }
 
-        # Determine files to search
-        files_to_search: List[Path] = []
-        if search_path.is_file():
-            files_to_search = [search_path]
-        else:
-            # Use provided patterns or default to all files
-            glob_patterns = file_glob if file_glob else ["**/*"]
-
-            # Use a set to avoid duplicate files when patterns overlap
-            seen_files: set = set()
-
-            for glob_pattern in glob_patterns:
-                if not _is_relative_pattern(glob_pattern):
-                    bad = [p for p in glob_patterns if not _is_relative_pattern(p)]
-                    return {
-                        "error": (
-                            f"file_glob patterns must be relative, not absolute paths. "
-                            f"Got absolute pattern(s): {bad}. "
-                            f"Use the 'path' parameter for the search directory and "
-                            f"keep file_glob as relative patterns "
-                            f"(e.g., path='{glob_pattern.split('**')[0].rstrip('/')}', "
-                            f"file_glob=['**/*'])."
-                        ),
-                        "matches": [],
-                        "total_matches": 0,
-                    }
-                for match in search_path.glob(glob_pattern):
-                    if match.is_file() and match not in seen_files:
-                        seen_files.add(match)
-                        rel_path = str(match.relative_to(search_path))
-
-                        # Check exclusions
-                        if self._config.should_exclude(rel_path):
-                            continue
-
-                        # Skip files that are too large
-                        try:
-                            if match.stat().st_size > self._config.max_file_size_kb * 1024:
-                                continue
-                        except (OSError, PermissionError):
-                            continue
-
-                        files_to_search.append(match)
+        # Determine files to search (containment applied per result)
+        glob_patterns = file_glob if file_glob else ["**/*"]
+        bad = [p for p in glob_patterns if not _is_relative_pattern(p)]
+        if bad and not search_path.is_file():
+            return {
+                "error": (
+                    f"file_glob patterns must be relative, not absolute paths. "
+                    f"Got absolute pattern(s): {bad}. "
+                    f"Use the 'path' parameter for the search directory and "
+                    f"keep file_glob as relative patterns "
+                    f"(e.g., path='{bad[0].split('**')[0].rstrip('/')}', "
+                    f"file_glob=['**/*'])."
+                ),
+                "matches": [],
+                "total_matches": 0,
+            }
+        files_to_search = self._collect_grep_targets(search_path, glob_patterns)
 
         # Search files
         matches: List[Dict[str, Any]] = []
@@ -983,7 +1114,17 @@ Tips:
             )
             return
 
-        search_path = Path(path).resolve()
+        # Sandbox check on the search root.  The blocking variant has always
+        # had this; the streaming one did not, which made `grep_content:stream`
+        # an unsandboxed read of any absolute path.
+        if not self._is_path_allowed(path):
+            yield StreamChunk(
+                content=f"Error: Path not allowed: {path}",
+                chunk_type="error"
+            )
+            return
+
+        search_path = self._resolve_path(path).resolve()
         if not search_path.exists():
             yield StreamChunk(
                 content=f"Error: Path does not exist: {path}",
@@ -991,30 +1132,10 @@ Tips:
             )
             return
 
-        # Determine files to search
-        files_to_search: List[Path] = []
-        if search_path.is_file():
-            files_to_search = [search_path]
-        else:
-            glob_patterns = file_glob if file_glob else ["**/*"]
-            seen_files: set = set()
-
-            for glob_pattern in glob_patterns:
-                for match in search_path.glob(glob_pattern):
-                    if match.is_file() and match not in seen_files:
-                        seen_files.add(match)
-                        rel_path = str(match.relative_to(search_path))
-
-                        if self._config.should_exclude(rel_path):
-                            continue
-
-                        try:
-                            if match.stat().st_size > self._config.max_file_size_kb * 1024:
-                                continue
-                        except (OSError, PermissionError):
-                            continue
-
-                        files_to_search.append(match)
+        # Determine files to search (containment applied per result)
+        files_to_search = self._collect_grep_targets(
+            search_path, file_glob if file_glob else ["**/*"]
+        )
 
         # Stream matches as they are found
         match_count = 0
@@ -1155,21 +1276,9 @@ Tips:
         total_found = 0
 
         try:
-            for match in root_path.glob(pattern):
-                # Skip directories
-                if match.is_dir():
-                    continue
-
-                # Skip hidden files unless requested
-                if not include_hidden:
-                    if any(part.startswith(".") for part in match.relative_to(root_path).parts):
-                        continue
-
-                # Check exclusions
-                rel_path = str(match.relative_to(root_path))
-                if self._config.should_exclude(rel_path):
-                    continue
-
+            for match, rel_path in self._iter_glob_files(
+                root_path, pattern, include_hidden
+            ):
                 total_found += 1
 
                 if file_count >= max_results:

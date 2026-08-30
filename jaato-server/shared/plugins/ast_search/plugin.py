@@ -14,7 +14,7 @@ Features:
 import logging
 import os
 from pathlib import Path
-from typing import Any, AsyncIterator, Callable, Dict, List, Optional
+from typing import Any, AsyncIterator, Callable, Dict, Iterator, List, Optional
 
 from ..background.mixin import BackgroundCapableMixin
 from jaato_sdk.plugins.base import UserCommand
@@ -23,6 +23,8 @@ from jaato_sdk.plugins.model_provider.types import (
     DISCOVERABILITY_DEFERRED,
 )
 from shared.plugins.runner_forwarding import RunnerForwardingMixin
+from ..path_safety import describe_special
+from ..sandbox_utils import check_path_with_jaato_containment
 from ..streaming import StreamingCapable, StreamChunk, ChunkCallback
 
 logger = logging.getLogger(__name__)
@@ -118,6 +120,8 @@ class ASTSearchPlugin(BackgroundCapableMixin, StreamingCapable, RunnerForwarding
         self._context_lines = DEFAULT_CONTEXT_LINES
         self._exclude_dirs = list(DEFAULT_EXCLUDE_DIRS)
         self._workspace_path: Optional[str] = None
+        self._allow_tmp: bool = True
+        self._plugin_registry = None
 
     @property
     def name(self) -> str:
@@ -149,6 +153,10 @@ class ASTSearchPlugin(BackgroundCapableMixin, StreamingCapable, RunnerForwarding
             extra_excludes = config.get("exclude_dirs", [])
             if extra_excludes:
                 self._exclude_dirs = list(set(self._exclude_dirs + extra_excludes))
+            workspace_path = config.get("workspace_root")
+            if workspace_path:
+                self._workspace_path = os.path.realpath(os.path.abspath(workspace_path))
+            self._allow_tmp = config.get("allow_tmp", True)
 
         self._initialized = True
         logger.info(
@@ -158,12 +166,111 @@ class ASTSearchPlugin(BackgroundCapableMixin, StreamingCapable, RunnerForwarding
         )
 
     def set_workspace_path(self, path: str) -> None:
-        """Update the workspace path used as the default search root.
+        """Update the workspace path used as the search root and sandbox bound.
 
         Called by PluginRegistry.set_workspace_path() when a session binds
-        to a specific workspace.
+        to a specific workspace.  The path is canonicalised here so that
+        :meth:`_is_path_allowed` compares two symlink-free paths.
+
+        Args:
+            path: The new workspace root, or None to disable sandboxing.
         """
-        self._workspace_path = path
+        self._workspace_path = (
+            os.path.realpath(os.path.abspath(path)) if path else None
+        )
+
+    def set_plugin_registry(self, registry) -> None:
+        """Receive the plugin registry, used for external-path authorization.
+
+        Auto-wired by ``PluginRegistry.expose_tool()``.  The registry is what
+        knows which paths outside the workspace the user has granted via
+        ``sandbox add``, so ``ast_search`` needs it to answer path questions
+        the same way ``filesystem_query`` and ``file_edit`` do.
+
+        Args:
+            registry: The PluginRegistry instance.
+        """
+        self._plugin_registry = registry
+
+    def _is_path_allowed(self, path: str) -> bool:
+        """Check whether ``path`` may be read by this (read-only) plugin.
+
+        Delegates to the shared sandbox utility so ``ast_search`` enforces the
+        same boundary as ``filesystem_query``: inside the workspace, inside
+        the ``.jaato`` containment boundary when explicitly authorized, under
+        a system temp directory, or registered via ``sandbox add``.
+
+        Args:
+            path: Path to check.
+
+        Returns:
+            True if reading the path is allowed.
+        """
+        if not self._workspace_path:
+            # No workspace configured — nothing to sandbox against.
+            return True
+        return check_path_with_jaato_containment(
+            os.path.abspath(path),
+            self._workspace_path,
+            self._plugin_registry,
+            allow_tmp=self._allow_tmp,
+            mode="read",
+        )
+
+    def _make_result_guard(self) -> Callable[[Path], bool]:
+        """Build a containment filter to apply to every *result* of a search.
+
+        ``rglob`` follows symlinked directories, so validating only the search
+        root lets a link committed into the repository (``data/logs -> /etc``)
+        pull files from outside the workspace into the result set — and, since
+        ast_search prints matching source, into the transcript.  This
+        re-applies :meth:`_is_path_allowed` per hit, caching by parent
+        directory because each check costs a :func:`os.path.realpath` and a
+        walk yields many files per directory.  A leaf is checked individually
+        only when it is itself a symlink, the one way it can escape a parent
+        that is already contained.  Special files (FIFOs, devices) are dropped
+        outright — parsing one would block the worker.
+
+        Returns:
+            A predicate over candidate paths.  Not thread-safe — build one per
+            invocation.
+        """
+        dir_cache: Dict[str, bool] = {}
+
+        def allowed(candidate: Path) -> bool:
+            path_str = str(candidate)
+
+            if describe_special(candidate) is not None:
+                logger.debug("ASTSearchPlugin: skipping special file: %s", path_str)
+                return False
+
+            parent = os.path.dirname(path_str)
+            verdict = dir_cache.get(parent)
+            if verdict is None:
+                verdict = self._is_path_allowed(parent)
+                dir_cache[parent] = verdict
+            if not verdict:
+                logger.debug(
+                    "ASTSearchPlugin: result outside sandbox (via directory %s): %s",
+                    parent,
+                    path_str,
+                )
+                return False
+
+            try:
+                is_link = candidate.is_symlink()
+            except OSError:
+                return False
+            if is_link and not self._is_path_allowed(path_str):
+                logger.debug(
+                    "ASTSearchPlugin: result outside sandbox (symlinked file): %s",
+                    path_str,
+                )
+                return False
+
+            return True
+
+        return allowed
 
     def shutdown(self) -> None:
         """Shutdown the plugin and release resources."""
@@ -451,6 +558,106 @@ Guidelines:
 
     # --- Tool implementation ---
 
+    def _select_files(
+        self,
+        search_path: Path,
+        file_pattern: Optional[str],
+        language: Optional[str],
+    ) -> "tuple[List[Path], Optional[str], Optional[str]]":
+        """Pick the files a search should read, applying containment per hit.
+
+        Shared by the blocking and streaming variants, which had carried
+        identical copies of this selection logic; keeping one copy is also
+        what keeps the per-result sandbox check from drifting between them.
+
+        Three selection modes, in the order the tool's arguments imply:
+        an explicit ``file_pattern`` glob, a ``language``'s extensions, or
+        every extension the plugin knows how to parse.  Every candidate must
+        clear :meth:`_make_result_guard` — the walk follows symlinked
+        directories, so a link out of the workspace would otherwise pull
+        outside files into the results.
+
+        Args:
+            search_path: Resolved root of the search (file or directory).
+            file_pattern: Optional glob, relative to ``search_path``.
+            language: Optional language name; auto-detected for a single file.
+
+        Returns:
+            ``(files, language, error)``.  ``language`` is the resolved
+            language (auto-detected when a single file was named).  ``error``
+            is a message for the caller to surface, or None; when set,
+            ``files`` is empty.
+        """
+        if search_path.is_file():
+            return self._select_single_file(search_path, language)
+
+        if not file_pattern and language and not LANGUAGE_EXTENSIONS.get(language):
+            return [], language, f"Unknown language: {language}"
+
+        result_allowed = self._make_result_guard()
+        files = [
+            match
+            for match in self._candidate_paths(search_path, file_pattern, language)
+            if match.is_file()
+            and not self._should_exclude(match, search_path)
+            and result_allowed(match)
+        ]
+        return files, language, None
+
+    def _select_single_file(
+        self,
+        search_path: Path,
+        language: Optional[str],
+    ) -> "tuple[List[Path], Optional[str], Optional[str]]":
+        """Handle the case where the search path names one file.
+
+        Args:
+            search_path: The resolved file.
+            language: Requested language, or None to auto-detect.
+
+        Returns:
+            ``(files, language, error)``, as for :meth:`_select_files`.
+        """
+        result_allowed = self._make_result_guard()
+        files = [search_path] if result_allowed(search_path) else []
+
+        if not language:
+            ext = search_path.suffix.lower()
+            language = EXTENSION_TO_LANGUAGE.get(ext)
+            if not language:
+                return [], None, f"Could not detect language for extension: {ext}"
+
+        return files, language, None
+
+    def _candidate_paths(
+        self,
+        search_path: Path,
+        file_pattern: Optional[str],
+        language: Optional[str],
+    ) -> Iterator[Path]:
+        """Yield the raw walk candidates for a directory search.
+
+        Pure enumeration — exclusions and the containment guard are applied by
+        :meth:`_select_files`, which is the only caller.
+
+        Args:
+            search_path: Resolved directory to walk.
+            file_pattern: Explicit glob, relative to ``search_path``.
+            language: Language whose extensions to walk, when no glob is given.
+
+        Yields:
+            Candidate paths, not yet filtered.
+        """
+        if file_pattern:
+            yield from search_path.glob(file_pattern)
+        elif language:
+            for ext in LANGUAGE_EXTENSIONS.get(language, []):
+                yield from search_path.rglob(f"*{ext}")
+        else:
+            for match in search_path.rglob("*"):
+                if match.suffix.lower() in EXTENSION_TO_LANGUAGE:
+                    yield match
+
     def _execute_ast_search(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Execute the ast_search tool.
 
@@ -486,6 +693,15 @@ Guidelines:
         if not path:
             return {"error": "No path specified and no workspace configured", "matches": [], "total_matches": 0}
 
+        # Sandbox check on the search root.  Without it any absolute path is
+        # readable through this auto-approved tool.
+        if not self._is_path_allowed(path):
+            return {
+                "error": f"Path not allowed: {path}",
+                "matches": [],
+                "total_matches": 0,
+            }
+
         search_path = Path(path).resolve()
         if not search_path.exists():
             return {
@@ -494,49 +710,12 @@ Guidelines:
                 "total_matches": 0,
             }
 
-        # Determine files to search
-        files_to_search: List[Path] = []
-
-        if search_path.is_file():
-            files_to_search = [search_path]
-            # Auto-detect language from extension if not specified
-            if not language:
-                ext = search_path.suffix.lower()
-                language = EXTENSION_TO_LANGUAGE.get(ext)
-                if not language:
-                    return {
-                        "error": f"Could not detect language for extension: {ext}",
-                        "matches": [],
-                        "total_matches": 0,
-                    }
-        else:
-            # Directory search
-            if file_pattern:
-                # Use provided glob pattern
-                for match in search_path.glob(file_pattern):
-                    if match.is_file() and not self._should_exclude(match, search_path):
-                        files_to_search.append(match)
-            elif language:
-                # Use language-specific extensions
-                extensions = LANGUAGE_EXTENSIONS.get(language, [])
-                if not extensions:
-                    return {
-                        "error": f"Unknown language: {language}",
-                        "matches": [],
-                        "total_matches": 0,
-                    }
-                for ext in extensions:
-                    for match in search_path.rglob(f"*{ext}"):
-                        if match.is_file() and not self._should_exclude(match, search_path):
-                            files_to_search.append(match)
-            else:
-                # Search all supported file types
-                for match in search_path.rglob("*"):
-                    if match.is_file():
-                        ext = match.suffix.lower()
-                        if ext in EXTENSION_TO_LANGUAGE:
-                            if not self._should_exclude(match, search_path):
-                                files_to_search.append(match)
+        # Determine files to search (containment applied per result)
+        files_to_search, language, selection_error = self._select_files(
+            search_path, file_pattern, language
+        )
+        if selection_error:
+            return {"error": selection_error, "matches": [], "total_matches": 0}
 
         # Search files
         matches: List[Dict[str, Any]] = []
@@ -767,6 +946,14 @@ Guidelines:
             yield StreamChunk(content="Error: No path specified and no workspace configured", chunk_type="error")
             return
 
+        # Sandbox check on the search root — see the blocking variant.
+        if not self._is_path_allowed(path):
+            yield StreamChunk(
+                content=f"Error: Path not allowed: {path}",
+                chunk_type="error",
+            )
+            return
+
         search_path = Path(path).resolve()
         if not search_path.exists():
             yield StreamChunk(
@@ -785,44 +972,16 @@ Guidelines:
             on_chunk(start_chunk)
         yield start_chunk
 
-        # Determine files to search
-        files_to_search: List[Path] = []
-
-        if search_path.is_file():
-            files_to_search = [search_path]
-            if not language:
-                ext = search_path.suffix.lower()
-                language = EXTENSION_TO_LANGUAGE.get(ext)
-                if not language:
-                    yield StreamChunk(
-                        content=f"Error: Could not detect language for extension: {ext}",
-                        chunk_type="error",
-                    )
-                    return
-        else:
-            if file_pattern:
-                for match in search_path.glob(file_pattern):
-                    if match.is_file() and not self._should_exclude(match, search_path):
-                        files_to_search.append(match)
-            elif language:
-                extensions = LANGUAGE_EXTENSIONS.get(language, [])
-                if not extensions:
-                    yield StreamChunk(
-                        content=f"Error: Unknown language: {language}",
-                        chunk_type="error",
-                    )
-                    return
-                for ext in extensions:
-                    for match in search_path.rglob(f"*{ext}"):
-                        if match.is_file() and not self._should_exclude(match, search_path):
-                            files_to_search.append(match)
-            else:
-                for match in search_path.rglob("*"):
-                    if match.is_file():
-                        ext = match.suffix.lower()
-                        if ext in EXTENSION_TO_LANGUAGE:
-                            if not self._should_exclude(match, search_path):
-                                files_to_search.append(match)
+        # Determine files to search (containment applied per result)
+        files_to_search, language, selection_error = self._select_files(
+            search_path, file_pattern, language
+        )
+        if selection_error:
+            yield StreamChunk(
+                content=f"Error: {selection_error}",
+                chunk_type="error",
+            )
+            return
 
         # Stream matches as they're found
         match_count = 0
