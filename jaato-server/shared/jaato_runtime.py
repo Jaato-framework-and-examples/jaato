@@ -56,10 +56,35 @@ _TASK_COMPLETION_INSTRUCTION = (
 
 # Parallel tool execution guidance — basic efficiency
 _PARALLEL_TOOL_GUIDANCE = (
-    "When you need to perform multiple independent operations (e.g., reading several files, "
-    "searching multiple patterns, fetching multiple URLs), issue all tool calls in a single "
-    "response rather than one at a time. Independent operations will execute in parallel, "
-    "significantly reducing latency."
+    "Batch independent tool calls. Before issuing a call, ask whether the NEXT "
+    "call depends on this one's result. If it does not, issue them together in a "
+    "single response — reading several files, searching several patterns, "
+    "fetching several URLs, or inspecting several directories are all one "
+    "response, not one response each. Only serialise when a call genuinely needs "
+    "an earlier result as input. Independent calls execute in parallel, so a "
+    "batch of eight costs about what one costs; the same eight issued one at a "
+    "time costs eight round trips of latency and eight turns of context."
+)
+
+# Pre-call narration — needed for the OPERATOR, who is otherwise blind.
+#
+# _TURN_SUMMARY_INSTRUCTION below arrives only at the END of a turn, and
+# exists for GC (see its comment).  A capable model can make dozens or
+# hundreds of calls inside one turn, so the person watching the tool tree
+# sees a wall of calls with no stated reason for any of them until the turn
+# closes — and if the turn dies mid-flight (provider error, hung tool) they
+# never learn why any of it happened.  Reported from live use 2026-08-29.
+#
+# Deliberately cheap: one short line before a BATCH, not per call.  A
+# per-call rule would fight _PARALLEL_TOOL_GUIDANCE above, which wants
+# several calls in one response.
+_TOOL_NARRATION_GUIDANCE = (
+    "Before a tool call or a batch of them, state in one short sentence what "
+    "you are about to do and why — what you expect to learn or change. The "
+    "person watching sees your tool calls as they happen and has no other "
+    "window into your reasoning; a turn that dies mid-way should still leave "
+    "them knowing what you were doing. One line per batch, not per call, and "
+    "skip it only when the reason is already obvious from what you just said."
 )
 
 # Turn-end summary guidance — needed for GC to work effectively
@@ -82,6 +107,7 @@ def _apply_premium_prompt_overrides() -> None:
     Called once at module load time.
     """
     global _TASK_COMPLETION_INSTRUCTION, _PARALLEL_TOOL_GUIDANCE, _TURN_SUMMARY_INSTRUCTION
+    global _TOOL_NARRATION_GUIDANCE
 
     eps = importlib.metadata.entry_points()
     if sys.version_info >= (3, 12):
@@ -108,6 +134,8 @@ def _apply_premium_prompt_overrides() -> None:
                 _PARALLEL_TOOL_GUIDANCE = overrides["parallel_tool_guidance"]
             if "turn_summary" in overrides:
                 _TURN_SUMMARY_INSTRUCTION = overrides["turn_summary"]
+            if "tool_narration" in overrides:
+                _TOOL_NARRATION_GUIDANCE = overrides["tool_narration"]
             logger.debug("Premium prompt overrides applied: %s", list(overrides.keys()))
             return  # Only one provider
         except Exception:
@@ -359,6 +387,30 @@ def _is_parallel_tools_enabled() -> bool:
     return os.environ.get(  # env: run multiple tool calls per turn in a thread pool (default true; max 8 concurrent)
         'JAATO_PARALLEL_TOOLS', 'true'
     ).lower() not in ('false', '0', 'no')
+
+
+def _framework_prompt_constants() -> List[str]:
+    """The framework-level prompt constants, in wire order.
+
+    One place that decides which constants are live, so a new constant is
+    added by editing a list rather than by growing
+    ``get_system_instructions`` — that function is over the cyclomatic
+    ceiling and frozen in the complexity baseline, so each new ``if`` there
+    costs a baseline bump.
+
+    Each entry is skipped when empty, which is how a premium prompt
+    provider disables one: override it with ``""``.  ``_PARALLEL_TOOL_GUIDANCE``
+    additionally requires parallel execution to be enabled — advertising
+    batching to a model that will have its calls serialised anyway is a
+    promise the runtime would not keep.
+    """
+    live = [
+        _TASK_COMPLETION_INSTRUCTION,
+        _PARALLEL_TOOL_GUIDANCE if _is_parallel_tools_enabled() else "",
+        _TOOL_NARRATION_GUIDANCE,
+        _TURN_SUMMARY_INSTRUCTION,
+    ]
+    return [c for c in live if c]
 
 
 def _is_deferred_tools_enabled() -> bool:
@@ -1757,12 +1809,7 @@ class JaatoRuntime:
         #    Skipped when include_constants=False — the granular counterpart of
         #    include_base, for ``suppress_base_instructions: {constants: true}``.
         if include_constants:
-            if _TASK_COMPLETION_INSTRUCTION:
-                result_parts.append(_TASK_COMPLETION_INSTRUCTION)
-            if _is_parallel_tools_enabled() and _PARALLEL_TOOL_GUIDANCE:
-                result_parts.append(_PARALLEL_TOOL_GUIDANCE)
-            if _TURN_SUMMARY_INSTRUCTION:
-                result_parts.append(_TURN_SUMMARY_INSTRUCTION)
+            result_parts.extend(_framework_prompt_constants())
 
         # 7. Untrusted-content boundary (security baseline).  Included by
         # default — web_fetch/web_search/MCP tools are deferred-loaded, so

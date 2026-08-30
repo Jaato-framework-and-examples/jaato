@@ -31,7 +31,8 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional, Protocol, TYPE_CHECKING
+from typing import (Any, Callable, Dict, List, Optional, Protocol, Tuple,
+                    TYPE_CHECKING)
 
 from shared.session_envelope import SessionInitEnvelope
 
@@ -1044,11 +1045,30 @@ def bootstrap_session(
 
     logger.info(
         "runner-session bootstrap ready: session_id=%s profile=%s "
-        "model=%s plugins=%d",
+        "model=%s plugins=%s",
         envelope.session_id, envelope.profile_name, envelope.model_name,
-        len(envelope.plugins),
+        _describe_plugin_selection(envelope.plugins),
     )
     return RunnerSessionHost(envelope=envelope, runtime=runtime, session=session)
+
+
+def _describe_plugin_selection(
+    plugins: Optional[List[Dict[str, Any]]],
+) -> str:
+    """Render ``envelope.plugins`` for the bootstrap-ready log line.
+
+    The None/empty distinction is the whole point of the field, so the log
+    must not flatten it: a bare ``len()`` would print ``0`` for both "no
+    profile" (all exposed plugins) and "profile asked for the minimal set",
+    which is exactly the confusion that let a profile-less session ship with
+    an empty tool wire unnoticed.
+
+    Lives at module level rather than inline so ``bootstrap_session`` keeps
+    its cyclomatic score at the ceiling (15) instead of crossing it.
+    """
+    if plugins is None:
+        return "none (no profile — all exposed)"
+    return str(len(plugins))
 
 
 def _validate_envelope(envelope: SessionInitEnvelope) -> None:
@@ -1105,6 +1125,55 @@ def _processors_from_envelope(
     return out
 
 
+def _extract_plugin_specs(
+    specs: Optional[List[Dict[str, Any]]],
+) -> Tuple[Optional[List[str]], set, Dict[str, List[str]]]:
+    """Split ``envelope.plugins`` into the three args ``create_session`` wants.
+
+    Returns ``(tool_names, preloaded, tool_scopes)``:
+
+    - ``tool_names`` feeds ``plugins=`` — the plugin allow-list.  **``None``
+      is preserved, not flattened to ``[]``.**  ``None`` means the session
+      was created WITHOUT a profile, so nothing declared a plugin set and
+      ``JaatoRuntime.create_session`` expands it to every exposed plugin;
+      ``[]`` means a profile explicitly asked for the minimal set.  Both are
+      reachable and they are different answers — collapsing them hands a
+      profile-less session an empty tool wire (the empty-wire gate in
+      ``jaato_session._should_drop_introspection`` then strips list_tools /
+      get_tool_schemas too, so the model gets no tools at all while the
+      system prompt still tells it to discover them).
+    - ``preloaded`` feeds ``preloaded_plugins=`` — names carrying
+      ``(preload)``, which bypass deferred tool loading.
+    - ``tool_scopes`` feeds the per-plugin ``tools:[...]`` allow-list.
+
+    Lives outside ``_build_session`` because that function is over the
+    cyclomatic ceiling and frozen in the complexity baseline at its current
+    size; new branching has to go in a helper.
+
+    Raises:
+        ValueError: an entry is missing a usable ``name``.
+    """
+    if specs is None:
+        return None, set(), {}
+
+    tool_names: List[str] = []
+    preloaded: set = set()
+    tool_scopes: Dict[str, List[str]] = {}
+    for entry in specs:
+        name = entry.get("name")
+        if not isinstance(name, str) or not name:
+            raise ValueError(f"plugin entry missing 'name': {entry!r}")
+        tool_names.append(name)
+        if entry.get("preload"):
+            preloaded.add(name)
+        # Per-plugin tool allow-list (profile ``tools:[...]`` modifier),
+        # carried alongside ``name`` / ``preload`` on the envelope entry.
+        scope = entry.get("tools")
+        if scope:
+            tool_scopes[name] = list(scope)
+    return tool_names, preloaded, tool_scopes
+
+
 def _build_session(
     runtime: "JaatoRuntime", envelope: SessionInitEnvelope,
 ) -> "JaatoSession":
@@ -1123,21 +1192,8 @@ def _build_session(
     ``plugin_configs=...``; the preload set feeds
     ``preloaded_plugins=...``.
     """
-    tool_names: List[str] = []
-    preloaded: set = set()
-    tool_scopes: Dict[str, List[str]] = {}
-    for entry in envelope.plugins:
-        name = entry.get("name")
-        if not isinstance(name, str) or not name:
-            raise ValueError(f"plugin entry missing 'name': {entry!r}")
-        tool_names.append(name)
-        if entry.get("preload"):
-            preloaded.add(name)
-        # Per-plugin tool allow-list (profile ``tools:[...]`` modifier),
-        # carried alongside ``name`` / ``preload`` on the envelope entry.
-        scope = entry.get("tools")
-        if scope:
-            tool_scopes[name] = list(scope)
+    tool_names, preloaded, tool_scopes = _extract_plugin_specs(
+        envelope.plugins)
     # Phase 4 §C: per-plugin configs come from the top-level
     # envelope.plugin_configs map (schema v2); shallow-copy so the
     # callee can't mutate the envelope's dict.
@@ -1199,6 +1255,15 @@ def _build_session(
         # Pass the list verbatim — empty means empty (minimal set:
         # introspection + lifecycle + framework infra like stream /
         # event_bus that are registered as core tools regardless).
+        #
+        # ``None`` is the THIRD case and is equally verbatim: no profile
+        # was supplied, so no one asked for a subset and the runtime
+        # expands it to every exposed plugin.  Before the envelope could
+        # carry None, a profile-less session arrived here as ``[]`` and
+        # got the minimal set; the empty-wire gate in
+        # ``jaato_session._should_drop_introspection`` then dropped
+        # list_tools/get_tool_schemas too, leaving no tools at all while
+        # the system prompt still told the model to discover them.
         plugins=tool_names,
         system_instructions=envelope.system_instructions,
         plugin_configs=plugin_configs or None,

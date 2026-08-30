@@ -245,6 +245,50 @@ def _extract_generation_id(response_or_stream: Any) -> Optional[str]:
     return None
 
 
+def _retry_after_from_body(exc: Exception) -> Optional[float]:
+    """Read a ``Retry-After`` hint out of an OpenRouter error BODY.
+
+    ``retry_utils.get_retry_after`` looks at ``exc.retry_after`` and at
+    ``exc.response.headers``.  OpenRouter also reports the hint inside the
+    JSON payload, at ``error.metadata.headers['Retry-After']`` — so for an
+    error carrying it only there, both readers return ``None`` and the
+    ladder falls back to a generic guess.
+
+    Measured (jaato #719): a 402 ``in_flight_budget_exhausted`` carrying
+    ``Retry-After: 120`` was retried at 1.4s, 1.5s, 3.5s and 6.3s, burning
+    every attempt in about thirteen seconds against a server that had said
+    to wait two minutes.  The delays themselves are the evidence the hint
+    was never found: ``calculate_backoff`` already lets a hint override
+    ``max_delay`` (``retry_utils.py:311``), so a hint that had been read
+    would have produced a 120s wait.
+
+    Returns ``None`` for anything it cannot parse — the caller then falls
+    back to the standard readers, so a malformed body costs nothing.
+    """
+    body = getattr(exc, "body", None)
+    if not isinstance(body, dict):
+        return None
+    err = body.get("error")
+    if not isinstance(err, dict):
+        return None
+    meta = err.get("metadata")
+    if not isinstance(meta, dict):
+        return None
+    headers = meta.get("headers")
+    if not isinstance(headers, dict):
+        return None
+    for key in ("Retry-After", "retry-after"):
+        raw = headers.get(key)
+        if raw is None:
+            continue
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            continue
+        return value if value > 0 else None
+    return None
+
+
 class OpenRouterProvider(ModalityCapabilityMixin):
     """OpenRouter model provider.
 
@@ -1527,6 +1571,40 @@ class OpenRouterProvider(ModalityCapabilityMixin):
 
     # ==================== Error Handling ====================
 
+    def _rebuild_client_after_connection_error(self) -> None:
+        """Discard the HTTP client so the next attempt gets a fresh one.
+
+        An ``APIConnectionError`` can leave the underlying ``httpx``
+        transport permanently unusable.  ``with_retry`` retries the CALL,
+        not the client, so without this every backoff re-runs against the
+        same dead object: the ladder is guaranteed to exhaust, and the
+        session stays broken for the rest of its life even after the
+        network recovers.  Measured (jaato #705): a session died at 19:57
+        and still failed at 20:01 while ``curl`` answered in 30ms, a direct
+        provider call in another process succeeded, and a NEW session in
+        the SAME daemon completed normally — the only difference being a
+        freshly built client.
+
+        Best-effort by design.  A failure to close or rebuild must not
+        replace the caller's original error with a second one: the
+        connection error is what the caller needs to see and classify, and
+        a failed rebuild simply leaves the ladder no worse off than before
+        this method existed.
+        """
+        try:
+            if self._client is not None:
+                self._client.close()
+        except Exception:  # noqa: BLE001 - closing a dead transport may throw
+            pass
+        try:
+            self._client = self._create_client()
+            self._trace("[RECOVERY] client rebuilt after APIConnectionError")
+        except Exception as exc:  # noqa: BLE001
+            self._trace(
+                f"[RECOVERY] client rebuild FAILED after APIConnectionError: "
+                f"{type(exc).__name__}: {exc}"
+            )
+
     def _handle_api_error(self, error: Exception) -> None:
         """Map OpenAI SDK exceptions to provider-specific exceptions."""
         openai = get_openai_module()
@@ -1558,6 +1636,10 @@ class OpenRouterProvider(ModalityCapabilityMixin):
             ) from error
 
         if isinstance(error, openai.APIConnectionError):
+            # Rebuild BEFORE raising: with_retry retries the call, not
+            # the client, so a poisoned transport would make every
+            # remaining backoff a guaranteed failure (#705).
+            self._rebuild_client_after_connection_error()
             raise InfrastructureError(
                 status_code=0,
                 original_error=str(error),
@@ -1693,10 +1775,17 @@ class OpenRouterProvider(ModalityCapabilityMixin):
         return None
 
     def get_retry_after(self, exc: Exception) -> Optional[float]:
-        """Extract a retry-after hint from an exception, if available."""
+        """Extract a retry-after hint from an exception, if available.
+
+        Consulted by ``with_retry`` BEFORE the shared
+        ``retry_utils.get_retry_after``; returning ``None`` here falls
+        through to it, so this only needs to cover what the shared reader
+        cannot see — the hint OpenRouter puts in the response BODY rather
+        than in an HTTP header (see :func:`_retry_after_from_body`).
+        """
         if isinstance(exc, RateLimitError) and exc.retry_after:
             return float(exc.retry_after)
-        return None
+        return _retry_after_from_body(exc)
 
 
 def create_provider() -> OpenRouterProvider:

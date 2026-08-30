@@ -40,7 +40,9 @@ class _CapturingRuntime:
         return object()
 
 
-def _envelope_with_plugins(plugins: List[Dict[str, Any]]) -> SessionInitEnvelope:
+def _envelope_with_plugins(
+    plugins: Optional[List[Dict[str, Any]]],
+) -> SessionInitEnvelope:
     """Build a minimal envelope with the given plugins list.
 
     ``envelope.plugins`` entries are dicts ``{"name": str, "preload":
@@ -71,9 +73,9 @@ def test_empty_plugins_passes_empty_list_not_none() -> None:
 
     assert len(runtime.calls) == 1
     kwargs = runtime.calls[0]
-    assert kwargs["tools"] == [], (
-        f"Empty plugins list must produce tools=[] (NOT None).  "
-        f"Got tools={kwargs['tools']!r}.  When None reaches "
+    assert kwargs["plugins"] == [], (
+        f"Empty plugins list must produce plugins=[] (NOT None).  "
+        f"Got plugins={kwargs['plugins']!r}.  When None reaches "
         f"runtime.create_session it falls back to 'load all exposed "
         f"plugins' — the exact bug the vLLM smoke surfaced "
         f"2026-06-07 (22 tools instead of the expected ~8)."
@@ -91,7 +93,7 @@ def test_non_empty_plugins_passes_through_verbatim() -> None:
     _build_session(runtime, env)  # type: ignore[arg-type]
 
     kwargs = runtime.calls[0]
-    assert kwargs["tools"] == ["cli", "todo"]
+    assert kwargs["plugins"] == ["cli", "todo"]
     assert kwargs["preloaded_plugins"] == {"todo"}
 
 
@@ -101,4 +103,36 @@ def test_single_plugin_passes_through() -> None:
 
     _build_session(runtime, env)  # type: ignore[arg-type]
 
-    assert runtime.calls[0]["tools"] == ["cli"]
+    assert runtime.calls[0]["plugins"] == ["cli"]
+
+
+def test_absent_profile_passes_none_not_empty_list() -> None:
+    """The third case: NO profile at all.
+
+    ``plugins: [x, y]`` means those; ``plugins: []`` means the minimal
+    set; **no profile** means "nobody asked for a subset" and must reach
+    ``runtime.create_session`` as ``None``, which expands to every
+    exposed plugin — so the eager wire keeps the core tools (introspection
+    among them) and the model can discover the rest.
+
+    Regression: ``SessionInitEnvelope.plugins`` used to be a
+    ``default_factory=list`` field, so a profile-less session arrived
+    here as ``[]`` — indistinguishable from an explicit ``plugins: []``.
+    It got the minimal set, and ``_should_drop_introspection`` then
+    removed list_tools/get_tool_schemas as well (nothing left to
+    discover), leaving a session with NO tools while the system prompt
+    still instructed the model to discover them.  The model narrated
+    tool calls in prose and fabricated their results.
+    """
+    runtime = _CapturingRuntime()
+    env = _envelope_with_plugins(None)
+
+    _build_session(runtime, env)  # type: ignore[arg-type]
+
+    kwargs = runtime.calls[0]
+    assert kwargs["plugins"] is None, (
+        f"A profile-less session must reach the runtime as plugins=None "
+        f"(\"all exposed plugins\").  Got plugins={kwargs['plugins']!r}.  "
+        f"An empty list here means 'a profile asked for the minimal set' "
+        f"— a different answer, and the one that empties the tool wire."
+    )

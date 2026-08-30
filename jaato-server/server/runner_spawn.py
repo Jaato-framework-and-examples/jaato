@@ -436,7 +436,15 @@ def build_session_envelope(
     profile = getattr(server, "_profile", None)
     provider_name = ""
     model_name = ""
-    plugin_specs: list = []
+    # ``None`` until a profile says otherwise: a profile-less session must
+    # reach ``create_session(plugins=None)`` ("all exposed plugins", so the
+    # eager wire keeps the core tools and the model can discover the rest).
+    # Seeding this with ``[]`` made that case indistinguishable from a
+    # profile declaring ``plugins: []`` (the minimal set), which since
+    # a3df70a4 is passed to the runtime verbatim — a profile-less TUI
+    # session then got introspection only, and the empty-wire gate in
+    # ``jaato_session._should_drop_introspection`` dropped even that.
+    plugin_specs: Optional[list] = None
     plugin_configs_dict: dict = {}
     preloaded: set = set()
     system_instructions: Optional[str] = None
@@ -455,6 +463,12 @@ def build_session_envelope(
         # dropped connection rather than a config error.
         from shared.model_tiers import bound_model_for_profile
         model_name = bound_model_for_profile(profile) or ""
+        # A profile is present, so its answer is explicit -- even the
+        # empty one.  Materialise here rather than at the first append:
+        # ``plugins: []`` yields an empty ``names`` that never enters the
+        # loop below, and leaving the spec list at ``None`` would report
+        # that profile as "no profile" and expand it to every plugin.
+        plugin_specs = []
         names = list(getattr(profile, "plugins", []) or [])
         preloaded = set(getattr(profile, "preloaded_plugins", set()) or set())
         # v3 (2026-05-14): forward profile.model_tiers to the runner so

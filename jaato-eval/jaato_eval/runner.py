@@ -28,6 +28,7 @@ rate-limited you.
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -178,11 +179,17 @@ async def run_arm(spec: ArmSpec, *, workspace_root: Path,
         return result
 
     started = time.monotonic()
+    session_ref: Dict[str, Any] = {}
     try:
         limit = (DEFAULT_ARM_TIMEOUT_SECONDS if arm_timeout_seconds is None
                  else float(arm_timeout_seconds))
+        # Held by us, not by the coroutine: `asyncio.wait_for` cancels the
+        # task on timeout and we would never receive its return value.
+        accumulator = _TurnAccumulator()
         run = _run_session(spec, workspace, socket_path=socket_path,
-                           cascade_driver_id=cascade_driver_id)
+                           cascade_driver_id=cascade_driver_id,
+                           accumulator=accumulator,
+                           session_ref=session_ref)
         payload, accumulator, history = (
             await asyncio.wait_for(run, timeout=limit) if limit > 0 else await run)
     except asyncio.TimeoutError:
@@ -191,12 +198,18 @@ async def run_arm(spec: ArmSpec, *, workspace_root: Path,
             "short — BLOCKED, not FAIL: a run that did not finish says "
             "nothing about the configuration under test")
         result.duration_seconds = time.monotonic() - started
+        _record_partial_usage(
+            result, accumulator,
+            _tracker_usage(workspace, session_ref.get('id')))
         if not keep_workspace:
             discard(workspace)
         return result
     except Exception as exc:  # noqa: BLE001 — any session failure is BLOCKED
         result.blocked_reason = _describe_session_failure(exc)
         result.duration_seconds = time.monotonic() - started
+        _record_partial_usage(
+            result, accumulator,
+            _tracker_usage(workspace, session_ref.get('id')))
         if not keep_workspace:
             discard(workspace)
         return result
@@ -371,6 +384,10 @@ class _ArmSession:
         if self.refusal:
             await self._client.disconnect()
             raise PoolRefused(self.refusal)
+        # Recorded on the CONTEXT MANAGER, not only returned: a timeout
+        # cancels the body, and the caller still needs the sid to find the
+        # session's persisted tracker snapshot (see _tracker_usage).
+        self.session_id = sid
         return Session(self._client, sid)
 
     async def __aexit__(self, *exc: Any) -> bool:
@@ -379,9 +396,104 @@ class _ArmSession:
         return False
 
 
+#: Dimensions the persisted tracker snapshot reports, mapped onto the
+#: accumulator's vocabulary.  Only unambiguous pairs are carried: the
+#: snapshot's ``tokens`` is a single total with no prompt/output split, so
+#: it cannot fill those two without inventing a division.
+_TRACKER_TO_USAGE = {"usd": "cost_usd", "tokens": "spend_total_tokens"}
+
+
+def _tracker_usage(workspace: Workspace,
+                   session_id: Optional[str]) -> Dict[str, float]:
+    """Read the session's own BudgetTracker snapshot from its workspace.
+
+    ``JaatoSession.get_budget_usage`` is the authoritative figure — the
+    tracker accumulates it PER RESPONSE — and its docstring says why an
+    event stream is not: events are "both duplicable (turn.progress
+    re-emits) and droppable (a cancelled turn's TurnCompletedEvent)".  A
+    cut arm is exactly the droppable case.
+
+    That method is not exposed to SDK clients, but it does not need to be:
+    the daemon persists the snapshot into the session record inside the
+    arm's own workspace, which ``--keep-workspaces`` preserves anyway.
+    Reading the file needs no new wire surface and no live session, so it
+    works after the coroutine has already been cancelled.
+
+    Measured 2026-08-30: an arm reporting ``cost=$0.0000, turns=0`` had
+    ``budget_usage: {"usd": 0.4458212, "tokens": 3057027.0,
+    "tool_calls": 36.0}`` sitting in its workspace (#723).
+
+    Returns ``{}`` when the record is absent or unreadable — the caller
+    then keeps whatever the accumulator saw.  A missing snapshot must
+    never be worse than no snapshot.
+    """
+    if not session_id:
+        return {}
+    record = Path(workspace.path) / ".jaato" / "sessions" / f"{session_id}.json"
+    try:
+        data = json.loads(record.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    usage = data.get("budget_usage")
+    if not isinstance(usage, dict):
+        return {}
+    out: Dict[str, float] = {}
+    for src, dst in _TRACKER_TO_USAGE.items():
+        value = usage.get(src)
+        if isinstance(value, (int, float)):
+            out[dst] = float(value)
+    turns = usage.get("turns")
+    if isinstance(turns, (int, float)):
+        out["turns"] = float(turns)
+    return out
+
+
+def _record_partial_usage(result: "ArmResult",
+                          accumulator: "_TurnAccumulator",
+                          tracker: Optional[Dict[str, float]] = None) -> None:
+    """Carry whatever the arm spent onto a BLOCKED result.
+
+    BLOCKED means "we learned nothing about the configuration", NOT "this
+    was free".  An arm cut mid-turn has usually spent real money: one
+    observed arm ran its full 900s ceiling across 467 billed
+    `chat/completions` calls and reported `cost=$0.0000`, because usage was
+    only ever copied onto the result along the success path (#723).
+
+    That is not merely a wrong number.  The task pool's `usd` ceiling is
+    evaluated against reported spend, so an arm that never completes a turn
+    — an agent looping on tool calls, exactly the shape this harness runs —
+    could burn without bound while the pool read zero.  Reporting what we
+    have makes the ceiling enforceable in the case it exists for.
+
+    Still a FLOOR, not the truth: usage rides on turn-completion events, so
+    an arm cut inside its first turn reports what completed, which may be
+    nothing.  The invariant is that reported cost never UNDERSTATES what
+    the accumulator saw; closing the in-flight gap needs per-response usage
+    (#723).
+    """
+    result.turns = accumulator.turns
+    if accumulator.finish_reason and not result.finish_reason:
+        result.finish_reason = accumulator.finish_reason
+    usage = accumulator.snapshot()
+    for key, value in (tracker or {}).items():
+        if key == "turns":
+            result.turns = max(result.turns, int(value))
+            continue
+        # Never report LESS than either source saw.  The tracker counts per
+        # response and normally wins for a cut arm; the accumulator can still
+        # be ahead on a dimension the snapshot does not carry, or if the
+        # record was written before the final response landed.
+        current = usage.get(key)
+        if not isinstance(current, (int, float)) or value > current:
+            usage[key] = value
+    result.usage = usage
+
+
 async def _run_session(spec: ArmSpec, workspace: Workspace, *,
                        socket_path: Optional[str],
-                       cascade_driver_id: Optional[str] = None):
+                       cascade_driver_id: Optional[str] = None,
+                       accumulator: Optional["_TurnAccumulator"] = None,
+                       session_ref: Optional[Dict[str, Any]] = None):
     """Open the session, send the prompt, return payload + facts + history.
 
     The ``.env`` written into the workspace carries ``JAATO_PROFILE_SET``;
@@ -405,7 +517,12 @@ async def _run_session(spec: ArmSpec, workspace: Workspace, *,
     if cascade_driver_id:
         kwargs["cascade_driver_id"] = cascade_driver_id
 
-    accumulator = _TurnAccumulator()
+    # Owned by the CALLER when supplied: a timeout cancels this coroutine,
+    # so anything created HERE is unreachable afterwards and its usage is
+    # lost with it.  The arm that most needs its spend reported is the one
+    # that was cut short (#723).
+    if accumulator is None:
+        accumulator = _TurnAccumulator()
     # None until a HistoryEvent actually lands.  Seeding this with [] would
     # make "no history arrived" indistinguishable from "the agent made no
     # tool calls" — see build_ledger_result on why that difference decides
@@ -424,7 +541,13 @@ async def _run_session(spec: ArmSpec, workspace: Workspace, *,
         "HISTORY": on_history,
     }
 
-    async with _ArmSession(kwargs, handlers) as session:
+    arm = _ArmSession(kwargs, handlers)
+    async with arm as session:
+        # Published as soon as it exists, for the same reason the
+        # accumulator is caller-owned: a timeout cancels this body, and the
+        # sid is what locates the session's persisted tracker snapshot.
+        if session_ref is not None:
+            session_ref["id"] = getattr(arm, "session_id", None)
         client = session.client
         payload = await session.complete(task.input.prompt)
         await client.request_history()
