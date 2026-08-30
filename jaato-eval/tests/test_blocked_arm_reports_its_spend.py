@@ -144,11 +144,13 @@ def test_a_TIMED_OUT_arm_keeps_its_spend_end_to_end(tmp_path, monkeypatch) -> No
     import jaato_eval.runner as R
 
     async def _hang(spec, workspace, *, socket_path, cascade_driver_id=None,
-                    accumulator=None):
+                    accumulator=None, session_ref=None):
         assert accumulator is not None, (
             "run_arm must supply an accumulator it owns; one created inside "
             "this coroutine is destroyed with it on cancellation"
         )
+        if session_ref is not None:
+            session_ref["id"] = "sid-under-test"
         accumulator.on_turn(_Event(_Usage(prompt=1234, output=56, cost=0.0184)))
         await asyncio.sleep(3600)
 
@@ -173,3 +175,92 @@ def test_a_TIMED_OUT_arm_keeps_its_spend_end_to_end(tmp_path, monkeypatch) -> No
         f"runaway arm can never trip it."
     )
     assert result.turns == 1
+
+
+# ----------------------------------------------------------------------
+# The residual: an arm cut inside its FIRST turn.
+#
+# Usage rides on turn-completion events, so the accumulator sees nothing
+# at all when the cut lands mid-first-turn — the exact case observed on
+# 2026-08-30, where an arm reported cost=$0.0000 / turns=0 while its own
+# workspace held budget_usage {"usd": 0.4458212, "tokens": 3057027.0}.
+#
+# The session's BudgetTracker accumulates PER RESPONSE and the daemon
+# persists it into the arm's workspace, so it survives a cancellation that
+# no event can.
+# ----------------------------------------------------------------------
+
+def _write_session_record(workspace_path, sid, usage) -> None:
+    import json as _json
+    d = workspace_path / ".jaato" / "sessions"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / f"{sid}.json").write_text(_json.dumps({"budget_usage": usage}))
+
+
+def test_tracker_snapshot_recovers_spend_the_events_never_carried(tmp_path):
+    """The residual case: zero turns completed, real money spent."""
+    from jaato_eval.runner import _tracker_usage
+    from jaato_eval.fixture import Workspace
+
+    _write_session_record(tmp_path, "20260830_110006", {
+        "usd": 0.4458212, "tokens": 3057027.0,
+        "seconds": 2088.49328, "tool_calls": 36.0, "turns": 1.0})
+    ws = Workspace(path=tmp_path, env_file=tmp_path / ".env")
+
+    got = _tracker_usage(ws, "20260830_110006")
+    assert got["cost_usd"] == pytest.approx(0.4458212), (
+        "the authoritative tracker figure was not recovered; this is the "
+        "money an arm cut mid-first-turn spends invisibly"
+    )
+    assert got["spend_total_tokens"] == pytest.approx(3057027.0)
+    assert got["turns"] == 1.0
+
+
+def test_a_first_turn_cut_reports_the_tracker_not_zero(tmp_path):
+    """End to end through the recorder: accumulator empty, tracker wins."""
+    from jaato_eval.runner import _record_partial_usage
+
+    result = _arm_result()
+    result.blocked_reason = "arm exceeded the harness ceiling of 900s"
+    _record_partial_usage(result, _TurnAccumulator(),
+                          {"cost_usd": 0.4458212, "turns": 1.0})
+
+    assert result.usage["cost_usd"] == pytest.approx(0.4458212)
+    assert result.turns == 1
+
+
+def test_reported_cost_never_drops_below_either_source(tmp_path):
+    """Whichever source saw more, wins — the invariant is a floor.
+
+    The tracker normally leads for a cut arm, but the record can be written
+    before the final response lands, so the accumulator must not be
+    silently discarded when it is ahead.
+    """
+    from jaato_eval.runner import _record_partial_usage
+
+    acc = _TurnAccumulator()
+    acc.on_turn(_Event(_Usage(prompt=10, output=5, cost=0.9)))
+
+    result = _arm_result()
+    _record_partial_usage(result, acc, {"cost_usd": 0.1})
+    assert result.usage["cost_usd"] == pytest.approx(0.9), (
+        "a stale tracker snapshot overwrote a larger observed spend"
+    )
+
+
+def test_a_missing_or_corrupt_record_is_not_worse_than_none(tmp_path):
+    """No snapshot must never be worse than no snapshot."""
+    from jaato_eval.runner import _tracker_usage
+    from jaato_eval.fixture import Workspace
+    ws = Workspace(path=tmp_path, env_file=tmp_path / ".env")
+
+    assert _tracker_usage(ws, "does-not-exist") == {}
+    assert _tracker_usage(ws, None) == {}
+
+    d = tmp_path / ".jaato" / "sessions"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "bad.json").write_text("{not json")
+    assert _tracker_usage(ws, "bad") == {}
+
+    (d / "nousage.json").write_text('{"budget_usage": "not-a-dict"}')
+    assert _tracker_usage(ws, "nousage") == {}
