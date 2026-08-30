@@ -147,6 +147,24 @@ jobs:
           pytest -q --continue-on-collection-errors \
             jaato-sdk/jaato_sdk/tests/
 
+      # jaato-server/shared/scaffold/tests is a THIRD such directory, and the
+      # one that guards the developer-facing toolkit: `jaato-scaffold explain`
+      # / `validate` / `new`, the tools the README and the SDK skill tell an
+      # agent to trust INSTEAD of reading the source.  Over a hundred tests,
+      # none of which any workflow ran.
+      #
+      # The shape is the same one that hid the two above: a green `full-suite`
+      # reads as covering `shared/`, and the covered directory
+      # (`shared/tests/`) is the one with almost the same name.  It is also
+      # where the drift in #716 lived — `new` grew from four archetypes to six
+      # while `explain` went on advertising four — so this is the suite whose
+      # absence had already cost something measurable.
+      - name: shared/scaffold/tests suite (developer toolkit)
+        if: always()
+        run: |
+          pytest -q --continue-on-collection-errors \
+            jaato-server/shared/scaffold/tests/
+
       # LIVE CONFORMANCE — the only suite here that starts a real daemon and
       # drives it the way a consumer does.
       #

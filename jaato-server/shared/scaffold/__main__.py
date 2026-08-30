@@ -41,6 +41,44 @@ from . import validate as _validate
 
 
 # --------------------------------------------------------------- explain
+#
+# Scopes are TABLES, not an if/elif chain.  The chain is how `explain` came to
+# advertise "4 client archetypes" with no scope behind it (jaato #716): adding
+# a scope meant finding the right rung of a 20-branch ladder AND its entry in
+# two help strings, so the cheap path was to add nothing.
+
+#: Scopes rendered with no argument.
+_SIMPLE_SCOPES = {
+    "plugins": _explain.plugins,
+    "providers": _explain.providers,
+    "gc": _explain.gc,
+    "transports": _explain.transports,
+    "clients": _explain.clients,
+    "runtime": _explain.runtime,
+    "tiers": _explain.tiers,
+    "paths": _explain.paths,
+    "prefetch": _explain.prefetch,
+    "archetypes": _explain.archetypes,
+}
+
+#: Scopes REQUIRING a name, with the usage line printed when it is missing.
+#: A renderer here signals "no such name" by returning a data dict carrying an
+#: ``error`` key; the CLI turns that into a stderr message and exit 2, so a
+#: caller that typo'd a name never mistakes the miss for documentation.
+_NAMED_SCOPES = {
+    "plugin": (_explain.plugin, "explain plugin <name>"),
+    "provider": (_explain.provider, "explain provider <name>"),
+    "event": (_explain.event, "explain event <NAME|wire.value>"),
+    "archetype": (_explain.archetype, "explain archetype <name>"),
+}
+
+#: Scopes taking an OPTIONAL filter as the name argument.
+_FILTER_SCOPES = {"env": _explain.env, "events": _explain.events}
+
+_SCOPES_HELP = ("plugins | plugin | providers | provider | gc | env | events | "
+                "event | transports | clients | runtime | tiers | sets | "
+                "profile [<name>] | paths | prefetch | archetypes | archetype")
+
 
 def _cmd_explain(args) -> int:
     scope = args.scope
@@ -48,36 +86,19 @@ def _cmd_explain(args) -> int:
     ws = args.workspace or "."
     if scope is None:
         data, text = _explain.overview()
-    elif scope == "plugins":
-        data, text = _explain.plugins()
-    elif scope == "plugin":
+    elif scope in _SIMPLE_SCOPES:
+        data, text = _SIMPLE_SCOPES[scope]()
+    elif scope in _FILTER_SCOPES:
+        data, text = _FILTER_SCOPES[scope](name)
+    elif scope in _NAMED_SCOPES:
+        render, usage = _NAMED_SCOPES[scope]
         if not name:
-            print("usage: explain plugin <name>", file=sys.stderr); return 2
-        data, text = _explain.plugin(name)
-    elif scope == "providers":
-        data, text = _explain.providers()
-    elif scope == "provider":
-        if not name:
-            print("usage: explain provider <name>", file=sys.stderr); return 2
-        data, text = _explain.provider(name)
-    elif scope == "gc":
-        data, text = _explain.gc()
-    elif scope == "env":
-        data, text = _explain.env(name)
-    elif scope == "events":
-        data, text = _explain.events(name)
-    elif scope == "event":
-        if not name:
-            print("usage: explain event <NAME|wire.value>", file=sys.stderr); return 2
-        data, text = _explain.event(name)
-    elif scope == "transports":
-        data, text = _explain.transports()
-    elif scope == "clients":
-        data, text = _explain.clients()
-    elif scope == "runtime":
-        data, text = _explain.runtime()
-    elif scope == "tiers":
-        data, text = _explain.tiers()
+            print(f"usage: {usage}", file=sys.stderr)
+            return 2
+        data, text = render(name)
+        if isinstance(data, dict) and "error" in data:
+            print(text, file=sys.stderr)
+            return 2
     elif scope == "sets":
         data, text = _explain.sets(ws)
     elif scope == "profile":
@@ -86,18 +107,10 @@ def _cmd_explain(args) -> int:
         # states what it adds and never what it inherits, so the instruction
         # tax is invisible at authoring time and shows up later as a budget
         # refusal.
-        if name:
-            data, text = _explain.profile_cost(name, ws)
-        else:
-            data, text = _explain.profile()
-    elif scope == "paths":
-        data, text = _explain.paths()
-    elif scope == "prefetch":
-        data, text = _explain.prefetch()
+        data, text = (_explain.profile_cost(name, ws) if name
+                      else _explain.profile())
     else:
-        print(f"unknown explain scope {scope!r} — one of: plugins, plugin, "
-              "providers, provider, gc, env, events, event, transports, "
-              "clients, runtime, tiers, sets, profile [<name>], paths",
+        print(f"unknown explain scope {scope!r} — one of: {_SCOPES_HELP}",
               file=sys.stderr)
         return 2
     print(json.dumps(data, indent=2, default=str) if args.json else text)
@@ -173,6 +186,35 @@ def _cmd_validate(args) -> int:
 
 # ------------------------------------------------------------------- new
 
+def _new_epilog() -> str:
+    """The ``new --help`` epilog: what each archetype WRITES.
+
+    ``new --help`` used to list every flag and not one line describing the
+    output, so the only way to learn what the generator produced was to run it
+    against a throwaway directory and diff, or to read the templates (jaato
+    #716).  Sourced from the same registry ``explain archetypes`` renders.
+    """
+    from . import archetypes as _archetypes
+    docs = [_archetypes.ARCHETYPES[_archetypes.PROFILE_SET]] + [
+        _archetypes.ARCHETYPES[n] for n in _archetypes.CLIENT_ARCHETYPES]
+    width = max(len(d.name) for d in docs)
+    lines = ["what each archetype writes into --workspace:"]
+    for d in docs:
+        paths = ", ".join(e.render_path(archetype=d.name, set="<set>",
+                                        agent="<agent>") for e in d.writes)
+        lines.append(f"  {d.name.ljust(width)}  {paths}")
+    lines += [
+        "",
+        "what is IN those files, and which parts you must edit:",
+        "  jaato-scaffold explain archetypes",
+        "  jaato-scaffold explain archetype <name>",
+        "",
+        "the exact tree for YOUR flags, written nowhere:",
+        "  jaato-scaffold new <name> --workspace DIR ... --dry-run",
+    ]
+    return "\n".join(lines)
+
+
 def _cmd_new(args) -> int:
     from . import build
     return build.run(args)
@@ -225,13 +267,10 @@ def main(argv=None) -> int:
     sub = ap.add_subparsers(dest="cmd")
 
     pe = sub.add_parser("explain", help="interrogate the installed framework")
-    pe.add_argument("scope", nargs="?",
-                    help="plugins | plugin | providers | provider | gc | env "
-                         "| events | event | transports | clients | runtime | "
-                         "tiers | sets | profile")
+    pe.add_argument("scope", nargs="?", help=_SCOPES_HELP)
     pe.add_argument("name", nargs="?",
-                    help="name for plugin/provider/event scope, or a filter "
-                         "for env/events")
+                    help="name for plugin/provider/event/archetype scope, or a "
+                         "filter for env/events")
     pe.add_argument("--workspace", help="workspace dir (for `sets`)")
     pe.add_argument("--json", action="store_true")
     pe.set_defaults(func=_cmd_explain)
@@ -243,9 +282,16 @@ def main(argv=None) -> int:
     pv.add_argument("--json", action="store_true")
     pv.set_defaults(func=_cmd_validate)
 
-    pn = sub.add_parser("new", help="scaffold a profile-set / SDK client")
+    from . import archetypes as _archetypes
+    pn = sub.add_parser(
+        "new", help="scaffold a profile-set / SDK client",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description="Scaffold an asset, then re-check it (a profile-set is run "
+                    "back through the validator; a client is compile-checked).",
+        epilog=_new_epilog())
     pn.add_argument("archetype", nargs="?",
-                    help="client | fire | cascade | observer | host-tools | profile-set")
+                    help="one of: " + " | ".join(_archetypes.accepted())
+                         + "  (default: profile-set)")
     pn.add_argument("--workspace", required=True, help="target workspace dir")
     pn.add_argument("--provider", help="provider name")
     pn.add_argument("--model", help="model name")
@@ -279,6 +325,12 @@ def main(argv=None) -> int:
     pn.add_argument("--token", help="bearer token for --transport ws (optional)")
     pn.add_argument("--ca", help="CA-bundle path for --transport ws wss:// with a "
                                  "self-signed / dev cert (scoped ca=, never os.environ)")
+    pn.add_argument("--dry-run", action="store_true", dest="dry_run",
+                    help="print the file tree this invocation WOULD write "
+                         "— annotated with what each file is for — and write "
+                         "nothing.  Existence checks still read the real "
+                         "workspace, so it distinguishes a created file from "
+                         "an appended-to one exactly as the real run would.")
     pn.add_argument("--json", action="store_true")
     pn.set_defaults(func=_cmd_new)
 

@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from jaato_sdk.plugins.model_provider.types import DISCOVERABILITY_EAGER
+from . import archetypes as _archetypes
 from . import introspect
 
 Rendered = Tuple[Dict[str, Any], str]
@@ -34,12 +35,15 @@ def overview() -> Rendered:
         "providers": sorted(P),
         "plugins": len(PL),
         "gc_strategies": sorted(GC),
-        "archetypes": ["client", "fire", "cascade", "observer", "sweep"],
+        "archetypes": list(_archetypes.accepted()),
     }
+    # Counted, never spelled: a literal here is how the banner came to advertise
+    # "4 client archetypes" while `new` accepted six (jaato #716).
+    n_arch = len(_archetypes.ARCHETYPES)
     text = (
         "jaato-scaffold — interrogate the installed framework, then build.\n\n"
         f"  {len(P)} providers   {len(PL)} plugins   "
-        f"{len(GC)} gc strategies   4 client archetypes\n\n"
+        f"{len(GC)} gc strategies   {n_arch} archetypes\n\n"
         "drill down:\n"
         "  jaato-scaffold explain plugins\n"
         "  jaato-scaffold explain plugin <name>\n"
@@ -54,6 +58,8 @@ def overview() -> Rendered:
         "  jaato-scaffold explain profile\n"
         "  jaato-scaffold explain paths\n"
         "  jaato-scaffold explain prefetch\n"
+        "  jaato-scaffold explain archetypes        # what `new` WRITES\n"
+        "  jaato-scaffold explain archetype <name>\n"
     )
     return data, text
 
@@ -220,6 +226,167 @@ def clients() -> Rendered:
         "  jaato-scaffold new client --transport ws --recoverable .  # WSRecoveryClient\n"
     )
     return data, text
+
+
+# ------------------------------------------------------------ archetypes
+
+def archetypes() -> Rendered:
+    """What ``new`` PRODUCES, one line per archetype.
+
+    ``explain``'s other scopes document the framework's inputs; this one
+    documents the generator's output contract, so a reader can decide whether
+    to run ``new`` without first reverse-engineering the templates.  Sourced
+    from :mod:`archetypes`, whose registry is guarded to cover every archetype
+    ``new`` accepts.
+    """
+    docs = [_archetypes.ARCHETYPES[_archetypes.PROFILE_SET]] + [
+        _archetypes.ARCHETYPES[n] for n in _archetypes.CLIENT_ARCHETYPES]
+    data = {
+        d.name: {
+            "kind": d.kind,
+            "summary": d.summary,
+            "aliases": list(d.aliases),
+            "requires": list(d.requires),
+            "writes": [e.render_path(archetype=d.name, set="<set>",
+                                     agent="<agent>") for e in d.writes],
+        }
+        for d in docs
+    }
+    import textwrap
+    lines = ["`jaato-scaffold new <archetype>` — what each one WRITES into your",
+             "workspace.  Every archetype re-checks its own output: a profile-set",
+             "is run back through the validator, a client is compile-checked.",
+             ""]
+    for d in docs:
+        tags = []
+        if d.name == _archetypes.PROFILE_SET:
+            tags.append("default")
+        tags += [f"also `{a}`" for a in d.aliases]
+        tag = f"   [{', '.join(tags)}]" if tags else ""
+        lines.append(f"  {d.name}{tag}")
+        lines += textwrap.wrap(d.summary, width=76,
+                               initial_indent="      ", subsequent_indent="      ")
+        paths = ", ".join(e.render_path(archetype=d.name, set="<set>",
+                                        agent="<agent>") for e in d.writes)
+        lines += textwrap.wrap("writes: " + paths, width=76,
+                               initial_indent="      ", subsequent_indent="              ")
+        lines.append(f"      needs:  {' '.join(d.requires)}")
+        lines.append("")
+    lines += [
+        "drill down — the file tree, what is in each file, and which parts are",
+        "placeholders you must edit:",
+        "  jaato-scaffold explain archetype <name>",
+        "",
+        "or ask what YOUR flags would write, without writing it:",
+        "  jaato-scaffold new <name> --workspace DIR ... --dry-run",
+    ]
+    return data, "\n".join(lines) + "\n"
+
+
+def archetype(name: str) -> Rendered:
+    """One archetype's full output contract — files, contents, flags, checks.
+
+    Answers the question ``new --help`` does not: what lands in the workspace,
+    what is inside it, which parts are placeholders versus generated-and-correct,
+    and how each flag changes that.
+    """
+    doc = _archetypes.resolve(name)
+    if doc is None:
+        known = ", ".join(_archetypes.accepted())
+        return ({"error": f"unknown archetype {name!r}", "known": list(_archetypes.accepted())},
+                f"unknown archetype {name!r} — one of: {known}")
+
+    subs = dict(archetype=doc.name, **{"set": "<set>", "agent": "<agent>"})
+    data = {
+        "name": doc.name,
+        "kind": doc.kind,
+        "summary": doc.summary,
+        "aliases": list(doc.aliases),
+        "requires": list(doc.requires),
+        "writes": [
+            {
+                "path": e.render_path(**subs),
+                "what": e.what,
+                "status": e.status,
+                "detail": list(e.detail),
+                "when": e.when,
+            }
+            for e in doc.writes
+        ],
+        "flags": [{"flag": f, "effect": eff} for f, eff in doc.flags],
+        "edit_before_running": list(doc.edit_before_running),
+        "generated_correct": list(doc.generated_correct),
+        "check": doc.check,
+        "next_steps": [_fill_subs(n, subs) for n in doc.next_steps],
+    }
+
+    import textwrap
+    alias = (f"  (also `{'`, `'.join(doc.aliases)}`)" if doc.aliases else "")
+    out = [f"jaato-scaffold new {doc.name}{alias}"]
+    out += textwrap.wrap(doc.summary, width=78,
+                         initial_indent="  ", subsequent_indent="  ")
+    out += ["", f"required: {' '.join(doc.requires)}", "",
+            "writes (relative to --workspace):"]
+    out += _render_writes(doc, subs)
+    out.append("")
+    out.append("status: generated = correct as emitted · fill-in = a blank you "
+               "must complete")
+    out.append("        edit = a worked example to replace · merged = an "
+               "existing file is appended to")
+    if doc.edit_before_running:
+        out += ["", "you must edit before it runs:"]
+        for d in doc.edit_before_running:
+            out += _wrap_bullet(d, indent=2)
+    if doc.generated_correct:
+        out += ["", "generated and correct — the recipe this archetype exists to "
+                    "carry:"]
+        for d in doc.generated_correct:
+            out += _wrap_bullet(d, indent=2)
+    if doc.flags:
+        out += ["", "flags that change the output:"]
+        for f, eff in doc.flags:
+            out.append(f"  {f}")
+            out += _wrap_bullet(eff, indent=6, glyph=" ")
+    out += ["", "self-check `new` runs on its own output:"]
+    out += _wrap_bullet(doc.check, indent=2, glyph=" ")
+    out += ["", "next:"]
+    out += [f"  {_fill_subs(n, subs)}" for n in doc.next_steps]
+    out += ["", "to see the exact tree for YOUR flags without writing it:",
+            f"  jaato-scaffold new {doc.name} --workspace DIR ... --dry-run"]
+    return data, "\n".join(out) + "\n"
+
+
+def _render_writes(doc, subs: Dict[str, str]) -> List[str]:
+    """The ``writes:`` block — one stanza per emitted file.
+
+    Each stanza is the path, its ownership status, the condition under which it
+    is written, its one-line purpose, and the bullets describing its contents.
+    """
+    import textwrap
+    out: List[str] = []
+    for e in doc.writes:
+        when = f"   — {e.when}" if e.when else ""
+        out.append(f"  {e.render_path(**subs)}   [{e.status}]{when}")
+        out += textwrap.wrap(e.what, width=78,
+                             initial_indent="      ", subsequent_indent="      ")
+        for d in e.detail:
+            out += _wrap_bullet(d, indent=6)
+    return out
+
+
+def _fill_subs(text: str, subs: Dict[str, str]) -> str:
+    """Fill ``{archetype}`` / ``{set}`` / ``{agent}`` in a rendered line."""
+    for k, v in subs.items():
+        text = text.replace("{" + k + "}", str(v))
+    return text
+
+
+def _wrap_bullet(text: str, indent: int, glyph: str = "-") -> List[str]:
+    """Wrap one bullet to ~78 columns, hanging-indented under its glyph."""
+    import textwrap
+    pad = " " * indent
+    return textwrap.wrap(text, width=78, initial_indent=f"{pad}{glyph} ",
+                         subsequent_indent=f"{pad}  ") or [f"{pad}{glyph}"]
 
 
 # --------------------------------------------------------------- runtime

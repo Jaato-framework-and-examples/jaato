@@ -47,12 +47,23 @@ jaato-scaffold explain                      # plugins · providers · gc · arch
 jaato-scaffold explain plugin <name>        # its tools (core/discoverable), config
 jaato-scaffold explain provider <name>      # capabilities · knobs (by layer, typed) · quirks
 jaato-scaffold explain sets --workspace DIR # profile-sets + the provider/model each pins
+jaato-scaffold explain archetypes           # what `new` WRITES, per archetype
+jaato-scaffold explain archetype <name>     # its file tree, file by file
 jaato-scaffold validate <profile.yaml|workspace> [--set S]   # lint vs the live registry
 jaato-scaffold new profile-set --workspace DIR --set <provider_model> \
     --provider P --model M --agents a,b,c   # emit base+set, then re-validate
-jaato-scaffold new client|fire|cascade|observer --workspace DIR --provider P --model M [--recoverable]
+jaato-scaffold new client|fire|cascade|observer|sweep|host-tools \
+    --workspace DIR --provider P --model M [--recoverable]
+jaato-scaffold new <archetype> ... --dry-run  # the exact tree, written nowhere
 jaato-scaffold explain clients              # IPCClient (simple) vs IPCRecoveryClient
 ```
+
+**Do not reverse-engineer the generator.** `explain archetype <name>` states
+what `new` writes, what is in each file, and which parts are placeholders you
+must edit versus the recipe you must not touch; `new ... --dry-run` shows the
+exact tree your flags would produce (create vs append) without writing it. Both
+answer the question that otherwise sends a reader into `build.py` — reading the
+templates instead of running the generator costs far more than one `--dry-run`.
 
 `validate` catches the silent-ignore failures the runtime drops without a word:
 a mistyped `api_params.temprature`, an unknown plugin, a quirk the provider
