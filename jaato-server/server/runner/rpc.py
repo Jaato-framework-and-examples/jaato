@@ -3476,6 +3476,9 @@ class RunnerRPC:
                 cache_read_tokens=last_turn.get("cache_read"),
                 cache_creation_tokens=last_turn.get("cache_creation"),
                 spend_total_tokens=last_turn.get("spend_total"),
+                spend_cache_read_tokens=last_turn.get("spend_cache_read"),
+                spend_cache_creation_tokens=last_turn.get(
+                    "spend_cache_creation"),
                 cost_usd=last_turn.get("cost_usd"),
                 finish_reason=last_turn.get("finish_reason", "stop"),
             )
@@ -5184,6 +5187,8 @@ class _AgentUIHooksNotificationShim:
         cache_read_tokens: Optional[int] = None,
         cache_creation_tokens: Optional[int] = None,
         spend_total_tokens: Optional[int] = None,
+        spend_cache_read_tokens: Optional[int] = None,
+        spend_cache_creation_tokens: Optional[int] = None,
         cost_usd: Optional[float] = None,
         finish_reason: str = "stop",
     ) -> None:
@@ -5208,6 +5213,16 @@ class _AgentUIHooksNotificationShim:
                     "spend_total_tokens": (
                         int(spend_total_tokens)
                         if spend_total_tokens is not None else None
+                    ),
+                    # None stays None here too — "no cache usage reported"
+                    # is not "zero cache traffic".
+                    "spend_cache_read_tokens": (
+                        int(spend_cache_read_tokens)
+                        if spend_cache_read_tokens is not None else None
+                    ),
+                    "spend_cache_creation_tokens": (
+                        int(spend_cache_creation_tokens)
+                        if spend_cache_creation_tokens is not None else None
                     ),
                     "prompt_tokens": int(prompt_tokens or 0),
                     "output_tokens": int(output_tokens or 0),

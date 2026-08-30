@@ -200,6 +200,13 @@ class AnthropicCachePlugin:
     def set_model_name(self, model_name: str) -> None:
         """Update the model name (affects min-token threshold selection).
 
+        Called by ``JaatoSession._wire_cache_plugin`` on every wire — at
+        session boot and again on every tier switch, so the threshold
+        tracks the model actually being served rather than the one that
+        started the session.  Until that re-wire existed this setter had
+        no caller at all, which is what exposed the wider gap; see
+        ``docs/design/model-tier-prompt-cache.md`` §5.2.
+
         Args:
             model_name: The model ID (e.g., 'claude-sonnet-4-20250514').
         """

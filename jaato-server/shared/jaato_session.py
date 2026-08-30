@@ -592,6 +592,37 @@ class JaatoSession:
 
         # Cache control plugin (provider-specific caching strategy)
         self._cache_plugin: Optional[Any] = None  # CachePlugin protocol
+        # Per-provider cache-plugin instances, keyed by the name the
+        # provider was REGISTERED under (the same key ``_provider_cache``
+        # uses).  A cross-provider tier switch re-wires from here, so a
+        # switch back is O(1) and the plugin keeps the cache metrics and
+        # prefix state it accumulated for that provider.  NOT keyed on
+        # ``provider.name``: zhipuai subclasses anthropic and reports the
+        # parent's name, so two tiers would collide on one plugin
+        # instance built from the wrong ``plugin_configs`` section.
+        self._cache_plugins_by_provider: Dict[str, Any] = {}
+        # How many times this session has actually CHANGED tier binding.
+        # Every switch re-reads the whole prefix cold at the new model, so
+        # this is the multiplier on the cost of tier mode — the number that
+        # says whether the tier feature paid for itself.  Counts real
+        # changes only: an ``enter_tier`` to the tier already active is a
+        # no-op and must not inflate it.  Reported on the LLM span as
+        # ``jaato.tier.switches`` and monotonic for the session's life.
+        self._tier_switch_count: int = 0
+        # Post-connect bookkeeping that FAILED, per subsystem.  Both blocks
+        # below are deliberately non-fatal (the provider is already
+        # re-pointed by then; raising would leave the switch half-applied),
+        # and the cost of that is a real regression recorded only in a log
+        # line nobody reads at runtime:
+        #
+        #   cache re-wire fails      -> the session runs UNCACHED from here
+        #   reliability retarget     -> patterns judged against the wrong model
+        #
+        # Three best-effort blocks is not the smell; three UNOBSERVABLE ones
+        # is.  Both counters ride the LLM span alongside ``jaato.tier``, so a
+        # consumer can see a degraded session instead of inferring it.
+        self._tier_cache_rewire_failures: int = 0
+        self._tier_reliability_retarget_failures: int = 0
 
         # Thinking mode
         self._thinking_plugin: Optional['ThinkingPlugin'] = None
@@ -2781,17 +2812,109 @@ class JaatoSession:
             self._provider_lazy_pending = None
             return self._provider
 
+    def _cache_plugin_config(self) -> Dict[str, Any]:
+        """The config dict handed to this session's cache plugin.
+
+        Reproduces the ``ProviderConfig.extra`` the ACTIVE provider was
+        built with, so a cache knob authored in a profile reaches the
+        cache plugin by the same route every other provider knob takes.
+
+        The merge is NOT re-implemented here.  It is
+        ``jaato_runtime.resolve_provider_extra`` — the same function
+        ``create_provider`` uses to build the ``ProviderConfig`` the
+        provider itself was initialized with — so the cache plugin and
+        the provider it caches for cannot be configured differently.
+
+        Why this is a second CALL and not a second read of a stored
+        result: ``plugin_configs`` is a per-session argument, while
+        ``runtime._provider_configs`` is runtime-level and shared by
+        every session on that provider.  Storing the merged config back
+        there would leak one session's profile knobs into all the others.
+        The recomputation is forced by that scoping, and the defence
+        against drift is that there is exactly one implementation of it.
+
+        What was missing before: ``runtime._provider_config`` is assigned
+        exactly once — ``ProviderConfig(project=..., location=...)`` in
+        ``JaatoRuntime.connect`` — with an empty ``extra`` that nothing
+        subsequently writes to, and ``create_provider``'s merge goes into
+        a local copy that is never stored back.  Reading that base alone
+        handed every cache plugin ``{}``, so ``enable_caching`` was
+        silently ignored wherever it was written: Anthropic caching was
+        reachable only through the ``JAATO_ANTHROPIC_ENABLE_CACHING`` env
+        default inside ``initialize()``, and Google's explicit
+        ``CachedContent`` path (a hard ``False`` default, no env
+        fallback) was unreachable altogether.
+
+        The profile lookup is keyed on ``_active_provider_name`` — the
+        name the provider was CREATED under, which is the key the
+        profile's ``plugin_configs`` uses.  ``provider.name`` is not
+        interchangeable with it (zhipuai subclasses anthropic and reports
+        the parent's name).
+
+        Returns:
+            A fresh dict; callers may mutate it freely.  ``api_key`` is
+            absent, because ``resolve_provider_extra`` promotes it to the
+            ``ProviderConfig.api_key`` field and it never reaches
+            ``extra`` on the provider's side either.
+        """
+        from .jaato_runtime import resolve_provider_extra
+
+        base_extra: Dict[str, Any] = {}
+        if self._runtime and getattr(self._runtime, '_provider_config', None):
+            base_extra = self._runtime._provider_config.extra
+
+        pending = (getattr(self, '_tier_provider_base', None)
+                   or getattr(self, '_provider_lazy_pending', None)
+                   or {})
+        profile_key = self._active_provider_name or getattr(
+            self._provider, 'name', None)
+        config, _promoted_api_key = resolve_provider_extra(
+            base_extra, pending.get('plugin_configs'), profile_key)
+        return config
+
     def _wire_cache_plugin(self) -> None:
-        """Discover and attach the cache plugin matching the active provider.
+        """Attach the cache plugin matching the CURRENTLY ACTIVE provider.
 
         The cache plugin is selected by matching the provider's ``name``
         property against available cache plugins' ``provider_name``.
         When found:
-        - The plugin is initialized with provider config extras
+        - The plugin is initialized with the config from
+          :meth:`_cache_plugin_config` (runtime extras + this session's
+          ``plugin_configs[<provider>]`` profile knobs)
+        - The plugin is told the active model, so any model-dependent
+          policy (Anthropic's minimum-cacheable-size threshold, Google's
+          ``CachedContent`` model binding) tracks a tier switch
         - The current InstructionBudget is set on the plugin
         - The plugin is attached to the provider via ``set_cache_plugin()``
 
         This is a Variant A integration (provider delegates to plugin).
+
+        **Idempotent and re-runnable.**  Called from
+        :meth:`_ensure_provider` when the provider first materializes,
+        and again from :meth:`_connect_tier_entry` on every tier switch
+        — model-driven (``enter_tier``) or framework-driven (a
+        budget-control degrade rung rebinding the active tier).  Before
+        it was re-runnable, a cross-provider tier ran with NO cache
+        plugin attached (caching silently off for the rest of the
+        session) and a same-provider switch left the plugin's model name
+        pinned to whatever booted the session.  See
+        ``docs/design/model-tier-prompt-cache.md`` §5.2.
+
+        Plugin instances are cached per provider in
+        :attr:`_cache_plugins_by_provider`, so switching back to a tier
+        is O(1) and the plugin keeps the metrics and prefix-invalidation
+        state it accumulated for that provider.  Discovery
+        (``load_cache_plugin_for_provider``) scans entry points, which is
+        not something to repeat on every hop.
+
+        A provider with no matching cache plugin — openrouter, which
+        caches internally, or any provider that cannot cache — clears
+        :attr:`_cache_plugin` rather than leaving the previous
+        provider's attached.  That slot is read for budget forwarding,
+        usage extraction and telemetry, so a stale one would attribute
+        the new provider's cache traffic to the old provider's counters.
+        The old plugin stays in the per-provider cache, still attached to
+        its own provider instance, ready for a switch back.
         """
         if not self._provider:
             return
@@ -2806,31 +2929,44 @@ class JaatoSession:
         if not provider_name:
             return
 
-        # Build config from provider config extras
-        config = {}
-        if self._runtime and self._runtime._provider_config:
-            config = dict(self._runtime._provider_config.extra)
-        # Include model name for threshold selection
         model_name = getattr(self._provider, 'model_name', None)
-        if model_name:
-            config['model_name'] = model_name
+        # Keyed on the REGISTRATION name, not ``provider.name`` — see the
+        # attribute's comment for why those differ and why it matters.
+        cache_key = self._active_provider_name or provider_name
+        cache_plugin = self._cache_plugins_by_provider.get(cache_key)
 
-        cache_plugin = load_cache_plugin_for_provider(provider_name, config)
+        if cache_plugin is None:
+            config = self._cache_plugin_config()
+            # Include model name for threshold selection
+            if model_name:
+                config['model_name'] = model_name
+            cache_plugin = load_cache_plugin_for_provider(provider_name, config)
+            if cache_plugin is None:
+                self._cache_plugin = None
+                return
+            self._cache_plugins_by_provider[cache_key] = cache_plugin
 
-        if cache_plugin:
-            # Set the budget so the plugin can make policy-aware decisions
-            if self._instruction_budget:
-                cache_plugin.set_budget(self._instruction_budget)
+        # The active model is wiring, not configuration: a tier switch
+        # changes it without changing anything else, and a plugin that
+        # missed the change makes model-dependent decisions for the wrong
+        # model.  Pushed on every call, including the first, so the
+        # re-wire path and the initial path cannot diverge.
+        if model_name and hasattr(cache_plugin, 'set_model_name'):
+            cache_plugin.set_model_name(model_name)
 
-            # Attach to provider (Variant A: provider delegates to plugin)
-            if hasattr(self._provider, 'set_cache_plugin'):
-                self._provider.set_cache_plugin(cache_plugin)
+        # Set the budget so the plugin can make policy-aware decisions
+        if self._instruction_budget:
+            cache_plugin.set_budget(self._instruction_budget)
 
-            self._cache_plugin = cache_plugin
-            self._trace(
-                f"CACHE_PLUGIN: Attached {cache_plugin.name} for provider "
-                f"{provider_name}"
-            )
+        # Attach to provider (Variant A: provider delegates to plugin)
+        if hasattr(self._provider, 'set_cache_plugin'):
+            self._provider.set_cache_plugin(cache_plugin)
+
+        self._cache_plugin = cache_plugin
+        self._trace(
+            f"CACHE_PLUGIN: Attached {cache_plugin.name} for provider "
+            f"{provider_name} (model {model_name})"
+        )
 
     def _unwrap_turn_result(self, turn_result: 'TurnResult') -> 'ProviderResponse':
         """Extract the ``ProviderResponse`` from a ``TurnResult``.
@@ -4568,13 +4704,42 @@ NOTES
     def _build_llm_span_attributes(self) -> Dict[str, Any]:
         """Build the attribute dict to attach to an LLM telemetry span.
 
-        Combines per-turn context (turn index) with cache plugin state
-        (anchor, BP3 strategy, totals) so external observers can
-        correlate LLM calls with the GC ↔ cache coordination dance.
+        Combines per-turn context (turn index, active model tier) with
+        cache plugin state (anchor, BP3 strategy, totals) so external
+        observers can correlate LLM calls with the GC ↔ cache
+        coordination dance.
+
+        ``jaato.tier*`` keys are emitted only in tier mode, so single-model
+        sessions carry no dead keys.  The two ``*_failures`` counters are
+        how the non-fatal post-connect bookkeeping in
+        :meth:`_connect_tier_entry` becomes observable: a session whose
+        cache plugin failed to re-attach is running uncached, and one whose
+        reliability retarget failed is judging patterns against the wrong
+        model.  Neither can be allowed to raise, so neither would be
+        visible anywhere but a log without these.  The tier is
+        what makes the cache figures on this span readable: reads and
+        writes are per (model, prefix), so a span whose tier differs from
+        its predecessor's is expected to show a full miss, and one whose
+        tier is unchanged is not.  Deriving that from ``llm.model_name``
+        instead does not work — two tiers may share a model, and a
+        budget-control degrade rung rebinds a tier's model underneath it.
         """
         attrs: Dict[str, Any] = {
             "jaato.turn_index": int(self._turn_index),
         }
+        active_tier = getattr(self, "_active_tier", None)
+        if active_tier is not None:
+            attrs["jaato.tier"] = active_tier
+            attrs["jaato.tier.switches"] = int(
+                getattr(self, "_tier_switch_count", 0))
+            # Always emitted, not only when non-zero: a consumer must be
+            # able to distinguish "zero failures" from "this build does not
+            # report them", and querying for > 0 needs the field present on
+            # the healthy spans too.
+            attrs["jaato.tier.cache_rewire_failures"] = int(
+                getattr(self, "_tier_cache_rewire_failures", 0))
+            attrs["jaato.tier.reliability_retarget_failures"] = int(
+                getattr(self, "_tier_reliability_retarget_failures", 0))
         cache = getattr(self, "_cache_plugin", None)
         if cache and hasattr(cache, "get_telemetry_attributes"):
             try:
@@ -5429,15 +5594,7 @@ NOTES
         # This ensures we capture token values even if streaming is cancelled
         # Always enabled for internal turn tracking, regardless of external callback
         def usage_callback_with_turn_tracking(usage: TokenUsage) -> None:
-            if usage.total_tokens > 0:
-                turn_data['prompt'] = usage.prompt_tokens
-                turn_data['output'] = usage.output_tokens
-                turn_data['total'] = usage.total_tokens
-            # Cache tokens: capture when present (streaming path)
-            if usage.cache_read_tokens is not None:
-                turn_data['cache_read'] = usage.cache_read_tokens
-            if usage.cache_creation_tokens is not None:
-                turn_data['cache_creation'] = usage.cache_creation_tokens
+            self._track_streaming_usage(turn_data, usage)
             if on_usage_update:
                 on_usage_update(usage)
 
@@ -8070,6 +8227,44 @@ NOTES
             self._system_instruction,
         )
 
+    def _track_streaming_usage(
+        self,
+        turn_data: Dict[str, Any],
+        usage: TokenUsage,
+    ) -> None:
+        """Record a streaming usage CHUNK onto the turn.
+
+        The streaming path fires this once per usage chunk, and a provider
+        may emit several per response.  So everything here REPLACES: these
+        are level readings (end-of-turn context size), and the last chunk
+        wins.
+
+        **Nothing here may write a ``spend_`` key.**  Spend accumulates,
+        and accumulating per chunk would count one response many times.
+        The spend keys are written in exactly one place —
+        :meth:`_accumulate_turn_tokens`, which runs once per response on
+        every path.  See ``docs/design/model-tier-prompt-cache.md`` §5.4.
+
+        Extracted from the closure it used to live in so that rule is
+        testable by EFFECT rather than only by shape: a shape check reads
+        one function body, so moving a write into a helper the callback
+        calls makes it silent, while driving this with two chunks and
+        looking at ``turn_data`` catches the write wherever it hides.
+
+        Args:
+            turn_data: The turn-accounting dict, mutated in place.
+            usage: The usage chunk just received.
+        """
+        if usage.total_tokens > 0:
+            turn_data['prompt'] = usage.prompt_tokens
+            turn_data['output'] = usage.output_tokens
+            turn_data['total'] = usage.total_tokens
+        # Cache tokens: capture when present (streaming path)
+        if usage.cache_read_tokens is not None:
+            turn_data['cache_read'] = usage.cache_read_tokens
+        if usage.cache_creation_tokens is not None:
+            turn_data['cache_creation'] = usage.cache_creation_tokens
+
     def _accumulate_turn_tokens(
         self,
         response: ProviderResponse,
@@ -8084,9 +8279,24 @@ NOTES
         However, we only replace if values are non-zero, to preserve good values
         when streaming is cancelled mid-turn (which may return zero tokens).
 
-        Cache token fields (cache_read, cache_creation) are replaced alongside
-        prompt/output/total so the final API call's values propagate to
-        turn_accounting and ultimately to TurnCompletedEvent.
+        Cache token fields come in BOTH shapes, for the same reason the
+        token counts do:
+
+        * ``cache_read`` / ``cache_creation`` are REPLACED, matching
+          prompt/output/total, and are also written by the streaming
+          usage-callback (which fires per usage CHUNK, so it must not sum).
+        * ``spend_cache_read`` / ``spend_cache_creation`` ACCUMULATE, and
+          are written ONLY here — the once-per-response hook — exactly as
+          ``spend_*`` and ``cost_usd`` are, and for the same reason: every
+          response in a turn is separately billed for what it read from and
+          wrote to the cache.
+
+        The spend pair is the one that answers "what did this turn cost in
+        cache traffic".  Replacing was actively misleading for a turn that
+        switches model tier mid-flight: the switch re-reads the whole prefix
+        cold at the new model, and reporting only the final leg hid exactly
+        the miss the switch caused.  See
+        ``docs/design/model-tier-prompt-cache.md`` §5.4.
         """
         if response.usage.total_tokens > 0:
             turn_tokens['prompt'] = response.usage.prompt_tokens
@@ -8113,11 +8323,18 @@ NOTES
                     (turn_tokens.get('cost_usd') or 0.0)
                     + response.usage.cost_usd)
 
-        # Cache tokens: replace when present (same semantics as prompt/output)
+        # Cache tokens: the level reading (last response) and the spend
+        # reading (every response) — see the docstring for why both exist.
         if response.usage.cache_read_tokens is not None:
             turn_tokens['cache_read'] = response.usage.cache_read_tokens
+            turn_tokens['spend_cache_read'] = (
+                turn_tokens.get('spend_cache_read', 0)
+                + response.usage.cache_read_tokens)
         if response.usage.cache_creation_tokens is not None:
             turn_tokens['cache_creation'] = response.usage.cache_creation_tokens
+            turn_tokens['spend_cache_creation'] = (
+                turn_tokens.get('spend_cache_creation', 0)
+                + response.usage.cache_creation_tokens)
 
         # Accumulate thinking tokens (these are summed, not replaced)
         if response.usage.thinking_tokens:
@@ -10151,17 +10368,46 @@ NOTES
     def _get_effective_system_instruction(self) -> Optional[str]:
         """System instruction to send to the provider on this turn.
 
-        Equal to the assembled :attr:`_system_instruction` plus a single
-        line naming the current tier when tier mode is active.
-        Recomputed dynamically (not stored on ``_system_instruction``)
-        so tier switches take effect immediately without re-assembling
-        the whole prompt — and so the assembled instruction stays a
-        stable cache anchor for providers that key prompt cache on it.
+        The assembled :attr:`_system_instruction` plus, in tier mode, one
+        line of tier PROTOCOL.  **Byte-identical for the life of the
+        session**, which is the whole point: this string is the head of
+        every cached prefix, so anything mutable in it invalidates the
+        cache on every change and takes tools and history down with it.
+
+        It used to name the CURRENT tier ("You are currently operating in
+        the ``executor`` tier"), rewritten on every switch.  The old
+        docstring claimed the assembled instruction stayed "a stable cache
+        anchor"; that was true of :attr:`_system_instruction` in memory
+        and false of what went on the wire, because the provider folds the
+        two into ONE content block and the cache breakpoint sits on it.
+        The result was a full prefix invalidation per tier switch —
+        including the cases that should have hit, such as returning to a
+        tier the session had already used, two tiers sharing one model,
+        and every implicit-prefix-caching upstream.  See
+        ``docs/design/model-tier-prompt-cache.md`` §5.1.
+
+        What the model gets instead is stable and sufficient:
+
+        * where the session STARTED (``initial_tier``, a config value that
+          never changes — budget rungs rebind a tier's *model*, not which
+          tier is initial); and
+        * the rule that the tier changes only via ``enter_tier``, whose
+          result reports the tier landed in.
+
+        So the current tier is derivable — start point plus the switches
+        recorded in history — without restating mutable state in the one
+        place that must not carry any.  The model does not need it to
+        DECIDE anyway: ``enter_tier`` is chosen by the work about to be
+        done, not by where it currently is, and entering the active tier
+        is a documented no-op.
         """
         if self._active_tier is None:
             return self._system_instruction
         tier_line = (
-            f"You are currently operating in the `{self._active_tier}` tier."
+            f"This session runs in multi-tier mode and started in the "
+            f"`{self._tier_config.initial_tier}` tier.  Your active tier "
+            f"changes only when you call `enter_tier`, which reports the "
+            f"tier you land in."
         )
         if self._system_instruction:
             return self._system_instruction + "\n\n" + tier_line
@@ -10220,6 +10466,17 @@ NOTES
         the active tier).  Cross-provider entries swap ``self._provider`` to
         the cached instance for that provider — history is provider-neutral
         (Message/Part), so the conversation flows across the swap.
+
+        The cache plugin is re-wired afterwards, because it is bound to a
+        (provider, model) pair and this method changes both.  Without
+        that, a cross-provider tier ran with no cache plugin at all and a
+        same-provider tier ran with one still configured for the model
+        that booted the session.
+
+        Re-wiring is best-effort: a session that cannot attach a cache
+        plugin should run uncached, not fail the tier switch.  The connect
+        itself still raises, because a session pointed at the wrong model
+        is not something to continue from.
         """
         if self._provider is None:
             return
@@ -10237,6 +10494,68 @@ NOTES
                 entry.model, exc,
             )
             raise
+        # Everything from here down is bookkeeping ABOUT the switch, not
+        # part of it: the connect has already happened and the caller is
+        # about to update ``_model_name``.  None of it may raise, or a
+        # switch lands half-applied — the provider re-pointed at the new
+        # model while the session still believes it is on the old one.
+        #
+        # Counted here rather than in ``switch_tier`` so BOTH routes into a
+        # binding change are seen: the model-driven one and the
+        # budget-control rebind, which never changes the tier NAME.  A
+        # ``switch_tier`` no-op returns before reaching this method, so an
+        # ``enter_tier`` to the tier already active does not inflate it.
+        self._tier_switch_count = getattr(self, '_tier_switch_count', 0) + 1
+        try:
+            self._wire_cache_plugin()
+        except Exception as exc:  # noqa: BLE001
+            self._tier_cache_rewire_failures = getattr(
+                self, '_tier_cache_rewire_failures', 0) + 1
+            logger.warning(
+                "tier cache re-wire for %s/%s failed; continuing uncached: %s",
+                self._active_provider_name, entry.model, exc,
+            )
+        try:
+            self._retarget_reliability_model(entry.model)
+        except Exception as exc:  # noqa: BLE001
+            self._tier_reliability_retarget_failures = getattr(
+                self, '_tier_reliability_retarget_failures', 0) + 1
+            logger.warning(
+                "tier reliability retarget for %s failed; records will name "
+                "the previous model: %s", entry.model, exc,
+            )
+
+    def _retarget_reliability_model(self, model: str) -> None:
+        """Tell the reliability plugin which model is now running.
+
+        Reliability records — behavioural patterns, tool-failure history —
+        are stamped with the active model.  That model is captured when the
+        session is configured, so in a ``model_tiers`` session every record
+        produced after a tier switch was filed under the model that STARTED
+        the session, and the record could not say which tier misbehaved.
+
+        Same shape as the cache-plugin re-wire alongside it, and the same
+        two routes reach it: ``enter_tier`` and a budget-control rung
+        rebinding the active tier in place.
+
+        ``available_models`` is deliberately not re-supplied — it is the
+        switchable-model catalogue, which a tier change does not alter, and
+        ``set_model_context`` leaves it untouched when passed ``None``.
+
+        Raises rather than swallowing.  Attribution must never fail a tier
+        switch, but the ONE place that decides so is the caller's
+        post-connect block, which also counts the failure onto
+        ``jaato.tier.reliability_retarget_failures``.  A second try/except
+        here looked like belt-and-braces and was the opposite: it ate the
+        exception before the counter could see it, so the span reported a
+        healthy session while every pattern was being judged against the
+        wrong model.  Two layers of swallowing is one layer of hiding.
+        """
+        plugin = getattr(self._runtime, 'reliability_plugin', None) \
+            if self._runtime else None
+        if plugin is None:
+            return
+        plugin.set_model_context(model)
 
     def switch_tier(self, requested_tier: str) -> Dict[str, Any]:
         """Switch the session's active model tier.

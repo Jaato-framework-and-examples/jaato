@@ -849,6 +849,78 @@ def expand_plugin_configs(
 
 
 @dataclass
+class CacheProfileConfig:
+    """Prompt-cache configuration for a profile — the common `cache:` field.
+
+    The cross-provider default. Caching is delivered three different ways
+    (Anthropic breakpoints, Google ``CachedContent``, OpenRouter's gateway
+    annotation) with three different knob spellings, layers and defaults,
+    so before this field a profile author had to know which mechanism
+    their provider used in order to turn caching on at all. See
+    ``docs/design/model-tier-prompt-cache.md`` §7.
+
+    This sets the default; ``plugin_configs.<provider>`` overrides it for
+    mechanism-specific tuning. More specific wins, which is the same
+    child-wins rule ``resolve_provider_extra`` already applies to
+    provider extras — the common field is a layer BENEATH an existing
+    one, not a new precedence concept.
+
+    Attributes:
+        enabled: ``"auto"`` (default), ``True`` or ``False``. ``auto``
+            means "leave the provider's own default alone", and on a
+            provider that cannot cache at all it is a no-op rather than
+            an error — ``ProviderCapabilities.prompt_caching`` is what
+            makes that well-defined.
+        ttl: Cache lifetime in the ``5m`` / ``1h`` vocabulary. Translated
+            per provider (Google wants a duration in seconds).
+        history: Cache the conversation prefix, not only system+tools.
+            Honoured by providers whose mechanism can place a history
+            breakpoint; ignored by the others.
+    """
+    enabled: Any = "auto"
+    ttl: str = "5m"
+    history: bool = True
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'CacheProfileConfig':
+        """Build from a profile's ``cache:`` block.
+
+        Raises:
+            ValueError: on an unusable value, rather than silently
+                falling back to a default. A cache knob that is quietly
+                ignored is the exact failure §4 documents.
+        """
+        enabled = data.get('enabled', "auto")
+        if isinstance(enabled, str):
+            lowered = enabled.strip().lower()
+            if lowered == "auto":
+                enabled = "auto"
+            elif lowered in ("true", "yes", "on"):
+                enabled = True
+            elif lowered in ("false", "no", "off"):
+                enabled = False
+            else:
+                raise ValueError(
+                    f"cache.enabled must be auto/true/false, got {enabled!r}")
+        elif not isinstance(enabled, bool):
+            raise ValueError(
+                f"cache.enabled must be auto/true/false, got {enabled!r}")
+
+        ttl = str(data.get('ttl', "5m")).strip().lower()
+        if ttl not in VALID_CACHE_TTLS:
+            raise ValueError(
+                f"cache.ttl must be one of {sorted(VALID_CACHE_TTLS)}, "
+                f"got {ttl!r}")
+
+        history = data.get('history', True)
+        if not isinstance(history, bool):
+            raise ValueError(
+                f"cache.history must be a boolean, got {history!r}")
+
+        return cls(enabled=enabled, ttl=ttl, history=history)
+
+
+@dataclass
 class GCProfileConfig:
     """Garbage collection configuration for a profile.
 
@@ -1117,6 +1189,12 @@ class SubagentProfile:
         "profile binds exactly one provider + model."})
     max_turns: int = field(default=10, metadata={
         "description": "Max conversation turns before the (sub)agent returns."})
+    cache: Optional['CacheProfileConfig'] = field(default=None, metadata={
+        "description": "Prompt-cache defaults, cross-provider. "
+        "{enabled: auto|true|false, ttl: 5m|1h, history: bool}. "
+        "'auto' leaves the provider's own default alone and is a no-op on "
+        "a provider that cannot cache. plugin_configs.<provider> overrides "
+        "this for mechanism-specific tuning (more specific wins)."})
     gc: Optional[GCProfileConfig] = field(default=None, metadata={
         "description": "Garbage-collection strategy + thresholds for this "
         "session (type + threshold_percent / target / preserve_recent_turns). "
@@ -1480,6 +1558,53 @@ def _parse_completion_processors(value: Any) -> List[CompletionProcessor]:
     return out
 
 
+#: The ``cache.ttl`` vocabulary.  Deliberately the Anthropic/OpenRouter
+#: spelling rather than a duration string: those are the two mechanisms
+#: that expose a TTL choice at all, and Google's seconds format is
+#: derived from these rather than the other way round.
+VALID_CACHE_TTLS = frozenset({"5m", "1h"})
+
+
+def parse_cache_block(data: Dict[str, Any]) -> Optional['CacheProfileConfig']:
+    """Parse a profile dict's optional ``cache:`` block.
+
+    Sibling of :func:`parse_gc_block`, and the reason that one exists:
+    both are called from all four profile ingresses, and a block field
+    wired into three of them is silently inert in the fourth.
+    """
+    block = data.get('cache')
+    if not block:
+        return None
+    return CacheProfileConfig.from_dict(block)
+
+
+def parse_gc_block(data: Dict[str, Any]) -> Optional['GCProfileConfig']:
+    """Parse a profile dict's optional ``gc:`` block.
+
+    ONE definition, because there are FOUR ingresses that build a
+    ``SubagentProfile`` from a dict — ``build_inline_profile``,
+    ``_scan_profiles_dir``, ``_discover_premium_profiles`` and
+    ``SubagentConfig.from_dict`` — and each carried its own copy of the
+    same three lines, in two spellings of the identical guard
+    (``data.get('gc')`` and ``'gc' in data and data['gc']``).
+
+    Four copies is four places to forget when a sibling block field is
+    added, and a field wired into three ingresses and missed in the
+    fourth is silently inert in exactly one code path — which is the
+    failure this branch opened by fixing (§4: a cache knob that reached
+    no ingress at all). Collapsing them now means the next block field
+    is added once.
+
+    Returns ``None`` when the block is absent or empty; an empty ``gc:``
+    is deliberately not a default-constructed config, matching what all
+    four sites already did.
+    """
+    block = data.get('gc')
+    if not block:
+        return None
+    return GCProfileConfig.from_dict(block)
+
+
 def build_inline_profile(
     data: Dict[str, Any],
     name: str = "<inline>",
@@ -1513,9 +1638,8 @@ def build_inline_profile(
             fails to parse. Surfaced so the caller can emit a clear
             ``ErrorEvent`` rather than swallowing the failure.
     """
-    gc_config = None
-    if data.get('gc'):
-        gc_config = GCProfileConfig.from_dict(data['gc'])
+    cache_config = parse_cache_block(data)
+    gc_config = parse_gc_block(data)
 
     runtime_limits = None
     if data.get('runtime_limits'):
@@ -1590,6 +1714,7 @@ def build_inline_profile(
         provider=data.get('provider'),
         max_turns=data.get('max_turns', 10),
         gc=gc_config,
+            cache=cache_config,
         env=env,
         inherits=None,
         completion_payload_schema=data.get('completion_payload_schema'),
@@ -1894,6 +2019,7 @@ def _merge_profiles(
         merged_max_turns = 10
 
     # gc: agreement-or-override (compare as dicts for equality)
+    merged_cache = _resolve_scalar('cache', child.cache)
     merged_gc = _resolve_scalar('gc', child.gc)
 
     # runtime_limits: scalar-override (parents must agree or child
@@ -2039,6 +2165,7 @@ def _merge_profiles(
         provider=merged_provider,
         max_turns=merged_max_turns,
         gc=merged_gc,
+        cache=merged_cache,
         env=merged_env,
         inherits=None,  # Fully resolved
         completion_payload_schema=merged_completion_schema,
@@ -2170,9 +2297,9 @@ def _scan_profiles_dir(
         if name in profiles:
             continue  # higher-precedence source already registered this name
 
-        gc_config = None
-        if 'gc' in data and data['gc']:
-            gc_config = GCProfileConfig.from_dict(data['gc'])
+        cache_config = parse_cache_block(data)
+
+        gc_config = parse_gc_block(data)
 
         runtime_limits = None
         if 'runtime_limits' in data and data['runtime_limits']:
@@ -2265,6 +2392,7 @@ def _scan_profiles_dir(
             provider=data.get('provider'),
             max_turns=data.get('max_turns', 10),
             gc=gc_config,
+            cache=cache_config,
             env=env,
             inherits=_normalize_inherits(data.get('inherits')),
             completion_payload_schema=data.get('completion_payload_schema'),
@@ -2605,9 +2733,9 @@ def _discover_premium_profiles() -> Dict[str, 'SubagentProfile']:
         if name is None or data is None:
             continue
 
-        gc_config = None
-        if 'gc' in data and data['gc']:
-            gc_config = GCProfileConfig.from_dict(data['gc'])
+        cache_config = parse_cache_block(data)
+
+        gc_config = parse_gc_block(data)
 
         runtime_limits = None
         if 'runtime_limits' in data and data['runtime_limits']:
@@ -2678,6 +2806,7 @@ def _discover_premium_profiles() -> Dict[str, 'SubagentProfile']:
             provider=data.get('provider'),
             max_turns=data.get('max_turns', 10),
             gc=gc_config,
+            cache=cache_config,
             env=env,
             inherits=_normalize_inherits(data.get('inherits')),
             completion_payload_schema=data.get('completion_payload_schema'),
@@ -2915,9 +3044,8 @@ class SubagentConfig:
         profiles = {}
         for name, profile_data in data.get('profiles', {}).items():
             # Parse GC configuration if present
-            gc_config = None
-            if 'gc' in profile_data and profile_data['gc']:
-                gc_config = GCProfileConfig.from_dict(profile_data['gc'])
+            cache_config = parse_cache_block(profile_data)
+            gc_config = parse_gc_block(profile_data)
 
             # Parse runtime_limits (cgroup-enforced + app-enforced caps).
             # Validation runs in __post_init__ — bad values raise here so
@@ -2964,6 +3092,7 @@ class SubagentConfig:
                 provider=profile_data.get('provider'),
                 max_turns=profile_data.get('max_turns', 10),
                 gc=gc_config,
+            cache=cache_config,
                 env=env,
                 inherits=_normalize_inherits(profile_data.get('inherits')),
                 completion_payload_schema=profile_data.get('completion_payload_schema'),

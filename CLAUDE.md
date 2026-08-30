@@ -538,6 +538,14 @@ plugin_configs:
     api_key: "sk-ant-..."          # overrides env / OAuth
     oauth_token: "sk-ant-oat01-..." # OAuth token for subscription
 
+    # Top-level — prompt-cache control (delivered by the cache_anthropic
+    # plugin, NOT Messages-API body fields, so not under api_params)
+    enable_caching: true           # unset resolves JAATO_ANTHROPIC_ENABLE_CACHING
+    cache_ttl: "1h"                # 5m (default) | 1h (2x write premium)
+    cache_history: true            # place BP3 on history, not just system+tools
+    cache_exclude_recent_turns: 2  # BP3 fallback when no InstructionBudget
+    cache_min_tokens: true         # enforce the minimum cacheable size
+
     # api_params — Anthropic Messages API request body fields
     api_params:
       temperature: 0.0             # 0.0-1.0 (server default 1.0)
@@ -554,11 +562,19 @@ plugin_configs:
 | Layer | Keys | Purpose |
 |-------|------|---------|
 | top-level | `api_key`, `oauth_token` | auth / identity |
+| top-level (cache) | `enable_caching`, `cache_ttl`, `cache_history`, `cache_exclude_recent_turns`, `cache_min_tokens` | Prompt-cache control, consumed by the `cache_anthropic` plugin (explicit `cache_control` breakpoints on system / tools / history). These are not Messages-API body fields, so they sit at top level rather than under `api_params`. `enable_caching` unset falls back to `JAATO_ANTHROPIC_ENABLE_CACHING` (default off). **Server 0.7.1+**: before the `_wire_cache_plugin` fix these keys were silently ignored — the plugin was built from an always-empty config. See [Model Tiers × Prompt Caching](docs/design/model-tier-prompt-cache.md) §4. |
 | `api_params` | `temperature`, `top_p`, `top_k`, `max_tokens`, `enable_thinking`, `thinking_budget` | Anthropic Messages API body fields. Sampling params are omitted from the request when unset, letting Anthropic apply its server-side defaults. Setting `temperature: 0.0` is the framework's determinism knob. |
 | `framework_overrides` | (reserved) | Future escape hatches |
 
-(Prompt caching is managed by the `cache_anthropic` plugin, not via
-`api_params`.)
+(Prompt caching is delivered by the `cache_anthropic` plugin rather than
+by the provider, which is why its knobs sit at top level and not under
+`api_params`.  Google's equivalents — `enable_caching` (default off) and
+`cache_ttl` (Google duration format, e.g. `"3600s"`) — sit at top level
+under `plugin_configs.google_genai`.  OpenRouter caches internally
+instead, via `api_params.cache_prompt` / `api_params.cache_ttl`.  The
+divergence between those three surfaces, and a proposed common `cache:`
+profile field, are assessed in
+[Model Tiers × Prompt Caching](docs/design/model-tier-prompt-cache.md) §7.)
 
 **Backward compatibility:** the same keys are also accepted at the
 legacy flat position (`temperature:` directly under `anthropic:`) with
@@ -1318,5 +1334,6 @@ This is not optional cleanup — treat missing or inaccurate docstrings as a def
 - [Payload-Schema Conventions](docs/design/payload-schema-conventions.md) - Symmetric authoring guide for `spawn_payload_schema` (input boundary) and `completion_payload_schema` (output boundary). Mirror prefetch required-keys; always carry `warnings[]` / `errors[]` escape hatches; persona ↔ schema consistency check; canonical-hash strip rules; `agent_params` interaction with agent-continuity (§6).
 - [Competitor Memory Systems](docs/design/competitor-memory-systems.md) - Survey of nine agent-memory products, sorted by what a *framework* owes: pattern (nothing) / seam (an extension point) / fidelity (a fix) / not ours. Records which items were already expressible as cascade patterns, which memory hot paths are not pluggable, and why the pattern corpus needs `certify/`-style contract tests run against `main`.
 - [Agent Continuity Pattern](docs/design/agent-continuity.md) - `{{continuity_scope}}` + memory plugin enrichment + raw/curated lifecycle: persona-level continuity across sessions composed from existing primitives, no new framework code. Reference impl in `jaato-knowledge-manager/.jaato.example/`.
+- [Model Tiers × Prompt Caching](docs/design/model-tier-prompt-cache.md) - What `enter_tier` costs when prompt caching is on: cache is keyed per model, so an in-place tier switch re-reads the whole prefix cold (break-even ~6 consecutive calls at the new tier). Covers the `_wire_cache_plugin` gap that made profile cache knobs inert, the system-block tier line that invalidates BP1, and the per-provider knob divergence + proposed common `cache:` field.
 - [AppArmor Setup](docs/apparmor-setup.md) - Kernel-enforced workspace isolation. WS deployments confine automatically when AppArmor is available; IPC clients opt in via `IPCClient(..., apparmor=True)` (defaults to `False`).
 - [GCP Setup Guide](docs/gcp-setup.md) - Setting up GCP project for Vertex AI

@@ -685,6 +685,9 @@ class JaatoClient:
                 cache_read_tokens=last_turn.get('cache_read'),
                 cache_creation_tokens=last_turn.get('cache_creation'),
                 spend_total_tokens=last_turn.get('spend_total'),
+                spend_cache_read_tokens=last_turn.get('spend_cache_read'),
+                spend_cache_creation_tokens=last_turn.get(
+                    'spend_cache_creation'),
                 cost_usd=last_turn.get('cost_usd'),
                 finish_reason=last_turn.get('finish_reason', 'stop'),
             )

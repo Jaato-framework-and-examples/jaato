@@ -11,7 +11,7 @@ import os
 import sys
 import time
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
+from typing import Any, Callable, Dict, List, Optional, Tuple, TYPE_CHECKING
 
 from .token_accounting import TokenLedger
 from .instruction_token_cache import InstructionTokenCache
@@ -205,6 +205,181 @@ def _get_sandbox_guidance() -> Optional[str]:
         f"- Use relative paths or absolute paths within the workspace\n"
         f"- The .jaato/ directory may reference external configuration"
     )
+
+
+#: How the common ``cache:`` profile field reaches each provider's own
+#: knobs.  Three mechanisms, three spellings, two layers -- which is the
+#: whole reason the common field exists (see
+#: ``docs/design/model-tier-prompt-cache.md`` §7).
+#:
+#: ``layer`` is the sub-dict the provider reads the knob from, or ``None``
+#: for a flat extra.  ``enabled`` / ``ttl`` / ``history`` name the
+#: provider's key, or are absent when that provider's mechanism has no
+#: such control (Google places no history breakpoint, so ``history`` is
+#: meaningless there rather than false).
+#:
+#: Coverage is asserted rather than trusted: a provider declaring
+#: ``prompt_caching=True`` with no entry here fails
+#: ``test_cache_profile_field.py``, so a new caching provider cannot land
+#: with the common field silently inert for it.
+CACHE_FIELD_DELIVERY: Dict[str, Dict[str, Any]] = {
+    "anthropic": {
+        "layer": None,
+        "enabled": "enable_caching", "ttl": "cache_ttl",
+        "history": "cache_history",
+    },
+    "google_genai": {
+        # CachedContent holds system+tools; there is no history breakpoint
+        # to switch on, and its TTL is a Google duration string.
+        "layer": None,
+        "enabled": "enable_caching", "ttl": "cache_ttl",
+        "ttl_format": "seconds",
+    },
+    "openrouter": {
+        # Caches internally rather than via a cache plugin, and reads its
+        # knobs from the api_params sub-dict.
+        "layer": "api_params",
+        "enabled": "cache_prompt", "ttl": "cache_ttl",
+    },
+}
+
+#: ``cache.ttl`` in the profile vocabulary -> seconds, for providers whose
+#: API takes a duration.
+_TTL_SECONDS = {"5m": 300, "1h": 3600}
+
+
+def cache_field_to_provider_extra(
+    cache: Any,
+    provider_name: Optional[str],
+    *,
+    supports_caching: bool = True,
+) -> Dict[str, Any]:
+    """Translate the common ``cache:`` field into one provider's knobs.
+
+    Returns the extras the profile field implies, ready to be laid down
+    BENEATH ``plugin_configs.<provider>`` so the specific knob wins.
+
+    Three things produce an empty dict, all deliberately silent rather
+    than an error:
+
+    * no ``cache:`` block -- the field is optional;
+    * a provider that cannot cache (``prompt_caching=False``) -- §7's
+      "degrades to a no-op rather than an error", which is what makes
+      ``auto`` well-defined;
+    * a provider with no delivery entry -- it cannot cache either.
+
+    ``enabled: "auto"`` emits nothing for the enable key: it means "leave
+    the provider's own default alone", so writing a value would be the
+    opposite of what it says.  OpenRouter is the exception, because
+    ``cache_prompt: "auto"`` is a real value in its API rather than an
+    absence.
+    """
+    if cache is None or not supports_caching:
+        return {}
+    spec = CACHE_FIELD_DELIVERY.get(provider_name or "")
+    if not spec:
+        return {}
+
+    flat: Dict[str, Any] = {}
+    enabled = getattr(cache, "enabled", "auto")
+    if enabled != "auto":
+        flat[spec["enabled"]] = bool(enabled)
+    elif provider_name == "openrouter":
+        flat[spec["enabled"]] = "auto"
+
+    ttl = getattr(cache, "ttl", None)
+    if ttl:
+        flat[spec["ttl"]] = (
+            f"{_TTL_SECONDS[ttl]}s" if spec.get("ttl_format") == "seconds"
+            else ttl)
+
+    if "history" in spec:
+        flat[spec["history"]] = bool(getattr(cache, "history", True))
+
+    layer = spec["layer"]
+    return flat if layer is None else {layer: flat}
+
+
+def resolve_provider_extra(
+    base_extra: Dict[str, Any],
+    plugin_configs: Optional[Dict[str, Dict[str, Any]]],
+    provider_name: Optional[str],
+    cache_extra: Optional[Dict[str, Any]] = None,
+) -> Tuple[Dict[str, Any], Optional[str]]:
+    """The ONE definition of a provider's effective config extras.
+
+    Providers are plugins, so their profile knobs live under
+    ``plugin_configs[<provider>]``.  This folds that section onto the
+    runtime-level base, child-wins, and promotes ``api_key`` out of the
+    result — the universal auth-field contract reads
+    ``ProviderConfig.api_key``, not ``config.extra["api_key"]``.
+
+    Two callers, and they MUST agree:
+
+    * :meth:`JaatoRuntime.create_provider`, which builds the
+      ``ProviderConfig`` the provider itself is initialized with; and
+    * ``JaatoSession._cache_plugin_config``, which builds the config for
+      the cache plugin attached to that same provider.
+
+    They cannot share the RESULT, only this function.  ``plugin_configs``
+    is a per-CALL argument — each session creates its own provider
+    instance from its own profile — while ``_provider_configs`` is
+    runtime-level and shared by every session on that provider.  Writing
+    the merged config back there would leak one session's profile knobs
+    (credentials included) into every other session using the same
+    provider.  So the merge is necessarily recomputed per caller, and the
+    only defence against the two callers drifting apart is that there is
+    exactly one of them, here.
+
+    Args:
+        base_extra: The runtime-level ``ProviderConfig.extra`` to fold onto.
+        plugin_configs: The session profile's per-plugin config dict, or
+            ``None``.
+        provider_name: Which section of ``plugin_configs`` to read — the
+            name the provider is REGISTERED under.  Not interchangeable
+            with ``provider.name``: zhipuai subclasses the Anthropic
+            provider and reports the parent's name, and only the
+            registration name selects the right section.
+
+    Returns:
+        ``(extra, promoted_api_key)``.  ``promoted_api_key`` is ``None``
+        when the profile supplies none, in which case the caller leaves
+        ``ProviderConfig.api_key`` alone.
+    """
+    extra = _layer_onto(dict(base_extra), cache_extra or {})
+    overrides = (plugin_configs or {}).get(provider_name or "")
+    if not overrides:
+        return extra, None
+    overrides = dict(overrides)
+    promoted_api_key = overrides.pop("api_key", None)
+    extra = _layer_onto(extra, overrides)
+    return extra, promoted_api_key
+
+
+def _layer_onto(base: Dict[str, Any], top: Dict[str, Any]) -> Dict[str, Any]:
+    """Merge ``top`` onto ``base``, descending ONE level into sub-dicts.
+
+    A flat ``update`` is wrong here.  The common ``cache:`` field delivers
+    OpenRouter's knobs inside ``api_params``, and a profile that also sets
+    ``api_params.temperature`` would have that whole sub-dict replaced by
+    whichever layer landed last -- losing the temperature or losing the
+    cache setting depending on order, silently either way.
+
+    One level is enough and is where it stops deliberately: every provider
+    layer (``api_params``, ``routing``, ``load``, ``framework_overrides``)
+    is a flat sub-dict of scalars, so a deeper merge would have no
+    behaviour to justify it and would start guessing at intent.
+    """
+    out = dict(base)
+    for key, value in top.items():
+        if (isinstance(value, dict)
+                and isinstance(out.get(key), dict)):
+            merged = dict(out[key])
+            merged.update(value)
+            out[key] = merged
+        else:
+            out[key] = value
+    return out
 
 
 def _is_parallel_tools_enabled() -> bool:
@@ -1287,21 +1462,24 @@ class JaatoRuntime:
         # bug for zhipuai (its working path was the stored-credential
         # fallback ``~/.jaato/zhipuai_auth.json``, not the documented
         # plugin_configs surface).
+        # The merge itself lives in ``resolve_provider_extra`` because the
+        # cache plugin attached to this provider has to reproduce it, and a
+        # second inline copy of it here is what would let the two drift.
+        # It cannot be shared by storing the result: ``plugin_configs`` is
+        # per-session while ``_provider_configs`` is runtime-wide, so writing
+        # back would leak this session's knobs into every other session on
+        # this provider.  See the function's docstring.
         if plugin_configs:
-            provider_overrides = plugin_configs.get(effective_provider)
-            if provider_overrides:
-                from dataclasses import replace
-                overrides = dict(provider_overrides)
-                # api_key is a top-level ProviderConfig field — promote
-                # so providers reading ``config.api_key`` (the universal
-                # auth-field contract across openrouter / zhipuai /
-                # anthropic / nim / etc.) see the profile-supplied value.
-                promoted_api_key = overrides.pop("api_key", None)
-                merged_extra = {**config.extra, **overrides}
-                replace_kwargs: Dict[str, Any] = {"extra": merged_extra}
-                if promoted_api_key:
-                    replace_kwargs["api_key"] = promoted_api_key
-                config = replace(config, **replace_kwargs)
+            merged_extra, promoted_api_key = resolve_provider_extra(
+                config.extra, plugin_configs, effective_provider)
+            # Unconditional: ``replace`` with an equal ``extra`` yields an
+            # equal config, so guarding it would only trade a branch for an
+            # allocation on a path that goes on to do network I/O.
+            from dataclasses import replace
+            replace_kwargs: Dict[str, Any] = {"extra": merged_extra}
+            if promoted_api_key:
+                replace_kwargs["api_key"] = promoted_api_key
+            config = replace(config, **replace_kwargs)
 
         # Fail loud at the provider credential boundary: if api_key is still
         # shaped like an unresolved secret URI (e.g. ``pass://...`` that passed

@@ -123,6 +123,15 @@ def _session(active="planner", model="opus", budget=None):
             connect=lambda m, skip_model_test=True: connects.append(m)),
         _active_provider_name="openrouter",
         _provider_cache={},
+        # ``__init__`` always sets these; a double that omits them is a
+        # shape production never has, and the post-connect bookkeeping in
+        # ``_connect_tier_entry`` reads them.
+        _tier_switch_count=0,
+        _cache_plugin=None,
+        _cache_plugins_by_provider={},
+        _instruction_budget=None,
+        _runtime=None,
+        _trace=lambda *a, **k: None,
         _budget_tracker=BudgetTracker(budget) if budget else None,
         _budget_terminal_action=None,
         _budget_exhausted_reason=None,
@@ -135,6 +144,10 @@ def _session(active="planner", model="opus", budget=None):
     for name in ("_is_connected_to", "_connect_tier_entry",
                  "_reconnect_active_tier_if_rebound", "_apply_budget_rungs",
                  "_surface_budget_event", "_refuse_if_budget_exhausted",
+                 # Post-connect bookkeeping, bound so the double exercises
+                 # the real ones rather than silently skipping them.
+                 "_wire_cache_plugin", "_retarget_reliability_model",
+                 "_cache_plugin_config",
                  "switch_tier"):
         setattr(s, name, (lambda n: (lambda *a, **k:
                 getattr(JaatoSession, n)(s, *a, **k)))(name))

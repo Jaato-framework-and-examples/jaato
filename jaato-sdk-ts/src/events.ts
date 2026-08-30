@@ -4407,6 +4407,8 @@ export type ReasoningTokens = number | null;
 export type ThinkingTokens = number | null;
 export type CostUsd = number | null;
 export type SpendTotalTokens = number | null;
+export type SpendCacheReadTokens = number | null;
+export type SpendCacheCreationTokens = number | null;
 export type ContextLimit = number;
 export type PercentUsed = number;
 export type TokensRemaining = number;
@@ -14907,6 +14909,8 @@ export interface UsageBreakdown {
   thinking_tokens?: ThinkingTokens;
   cost_usd?: CostUsd;
   spend_total_tokens?: SpendTotalTokens;
+  spend_cache_read_tokens?: SpendCacheReadTokens;
+  spend_cache_creation_tokens?: SpendCacheCreationTokens;
 }
 /**
  * GC configuration snapshot for the active session.

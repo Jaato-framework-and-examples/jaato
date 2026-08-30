@@ -87,7 +87,24 @@ PROVIDER_KNOBS = ProviderKnobs(layers=(
         KnobSpec("api_key", "str", None, "Anthropic API key (sk-ant-api...)"),
         KnobSpec("oauth_token", "str", None,
                  "OAuth token for Pro/Max subscription"),
-    ), description="auth / identity"),
+        # Prompt caching is delivered by the ``cache_anthropic`` plugin, not
+        # by this provider, so these are NOT Messages-API body fields and do
+        # not belong in ``api_params``.  They are read flat off
+        # ``ProviderConfig.extra`` in ``AnthropicCachePlugin.initialize`` —
+        # declared here because that is the read site's actual position.
+        KnobSpec("enable_caching", "bool", None,
+                 "cache_control breakpoints on system/tools/history; "
+                 "unset resolves JAATO_ANTHROPIC_ENABLE_CACHING (default off)"),
+        KnobSpec("cache_ttl", "str", "5m",
+                 "5m | 1h (1h costs a 2x write premium)"),
+        KnobSpec("cache_history", "bool", True,
+                 "place the history breakpoint (BP3), not just system+tools"),
+        KnobSpec("cache_exclude_recent_turns", "int", 2,
+                 "BP3 fallback turn count when no InstructionBudget is set"),
+        KnobSpec("cache_min_tokens", "bool", True,
+                 "enforce Anthropic's minimum cacheable size before "
+                 "spending a breakpoint"),
+    ), description="auth / identity + prompt-cache control"),
     KnobLayer("api_params", (
         KnobSpec("temperature", "float"),
         KnobSpec("top_p", "float"),
