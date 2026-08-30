@@ -1159,6 +1159,62 @@ class JaatoRuntime:
 
         return session
 
+    def _inject_session_extras(
+        self,
+        config: 'ProviderConfig',
+        session_id: Optional[str] = None,
+    ) -> 'ProviderConfig':
+        """Stamp per-session context onto ``config.extra`` for the provider.
+
+        Three keys, three different provenances:
+
+        * ``workspace_path`` / ``config_root`` — from the registry (or the
+          runtime's stored ``_config_root`` when there is no registry).
+          Providers need them for auth-credential lookup and OAuth token
+          resolution.  The env-var approach (``JAATO_CONFIG_ROOT`` exported
+          by ``JaatoServer._in_workspace``) is not reliable for headless
+          reactor-spawned sessions, whose ``send_message`` runs in a fresh
+          thread with no tie to the parent's context-manager scope; carrying
+          the values on the config makes them available at every call site
+          without thread-local fragility.
+        * ``session_id`` — from the CALLER, and never from the registry.
+          The registry is shared across sibling subagents, so reading a
+          session id from it hands every sibling whichever session
+          bootstrapped last — the exact leak
+          ``JaatoSession.set_daemon_session_id`` exists to close.  It is
+          therefore stamped independently of the two branches above: a
+          session with neither registry nor config_root still has an
+          identity worth putting on the wire.
+
+        Extracted from ``create_provider`` so that method stays under its
+        complexity baseline; the behaviour is unchanged.
+
+        Args:
+            config: The provider config to stamp.
+            session_id: The calling session's own id, if it has one.
+
+        Returns:
+            The config, replaced with an augmented ``extra`` when there is
+            anything to add, else the original object unchanged.
+        """
+        from dataclasses import replace
+
+        extra = dict(config.extra)
+        if self._registry:
+            workspace_path = self._registry.get_workspace_path()
+            config_root = self._registry.get_config_root() or self._config_root
+            if workspace_path:
+                extra['workspace_path'] = workspace_path
+            if config_root:
+                extra['config_root'] = config_root
+        elif self._config_root:
+            extra['config_root'] = self._config_root
+
+        if session_id:
+            extra['session_id'] = session_id
+
+        return replace(config, extra=extra) if extra != config.extra else config
+
     def create_provider(
         self,
         model: str,
@@ -1212,47 +1268,7 @@ class JaatoRuntime:
             )
             self._provider_configs[effective_provider] = config
 
-        # Inject workspace_path AND config_root into config.extra for
-        # providers that need them (auth-credential lookup paths, OAuth
-        # token resolution, etc.).  The env-var approach
-        # (``JAATO_CONFIG_ROOT`` exported by ``JaatoServer._in_workspace``)
-        # is not reliable for headless reactor-spawned sessions whose
-        # ``send_message`` runs in a fresh thread whose timing isn't
-        # tied to the parent's context-manager scope.  Carrying these
-        # on the provider config makes the value available to every
-        # call site without thread-local fragility.
-        if self._registry:
-            from dataclasses import replace
-            workspace_path = self._registry.get_workspace_path()
-            config_root = self._registry.get_config_root() or self._config_root
-            extra_with_paths = dict(config.extra)
-            if workspace_path:
-                extra_with_paths['workspace_path'] = workspace_path
-            if config_root:
-                extra_with_paths['config_root'] = config_root
-            if extra_with_paths != config.extra:
-                config = replace(config, extra=extra_with_paths)
-        elif self._config_root:
-            # Even without a registry, prefer the runtime's stored
-            # config_root over an env-var fallback so the value travels
-            # with the call.
-            from dataclasses import replace
-            extra_with_paths = {**config.extra, 'config_root': self._config_root}
-            config = replace(config, extra=extra_with_paths)
-
-        # session_id travels independently of the two branches above: it is
-        # neither registry- nor config_root-derived, and a session that has
-        # neither still has an identity worth putting on the wire.
-        #
-        # It comes from the CALLER and never from the registry.  The registry
-        # is shared across sibling subagents, so reading a session id from it
-        # hands every sibling the last-bootstrapped one — the exact leak that
-        # ``JaatoSession.set_daemon_session_id`` was introduced to close.
-        # Each session owns its id and passes it here.
-        if session_id:
-            from dataclasses import replace as _replace
-            config = _replace(
-                config, extra={**config.extra, 'session_id': session_id})
+        config = self._inject_session_extras(config, session_id)
 
         # Merge profile-level provider config.  Providers are plugins, so
         # their profile knobs sit under ``plugin_configs[provider_name]``.

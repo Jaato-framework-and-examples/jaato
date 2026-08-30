@@ -68,14 +68,49 @@ def test_siblings_do_not_share_an_id():
 
 
 def test_runtime_threads_the_id_into_provider_config():
-    """``create_provider`` must accept the caller's id and inject it into
-    ``extra`` — the seam the provider reads."""
+    """``create_provider`` accepts the caller's id, and the runtime stamps
+    it into ``config.extra`` — the seam the provider reads.
+
+    Asserted on BEHAVIOUR rather than on the source text: an earlier version
+    of this test grepped ``create_provider`` for the literal and broke the
+    moment the injection moved into a helper, while the wire behaviour was
+    unchanged.
+    """
     import inspect
     from shared.jaato_runtime import JaatoRuntime
 
     assert "session_id" in inspect.signature(JaatoRuntime.create_provider).parameters
-    src = inspect.getsource(JaatoRuntime.create_provider)
-    assert "'session_id'" in src or '"session_id"' in src
+
+    rt = JaatoRuntime.__new__(JaatoRuntime)
+    rt._registry = None
+    rt._config_root = None
+
+    stamped = rt._inject_session_extras(ProviderConfig(), session_id="sid-1")
+    assert stamped.extra["session_id"] == "sid-1"
+
+    # No id -> no key, and the config comes back untouched.
+    plain = ProviderConfig()
+    assert rt._inject_session_extras(plain, session_id=None) is plain
+
+
+def test_runtime_never_sources_the_id_from_the_shared_registry():
+    """A registry present must not contribute a session id.
+
+    The registry is shared across sibling subagents; sourcing an id there
+    is the leak ``set_daemon_session_id`` exists to close.
+    """
+    from unittest.mock import MagicMock
+    from shared.jaato_runtime import JaatoRuntime
+
+    rt = JaatoRuntime.__new__(JaatoRuntime)
+    rt._config_root = None
+    rt._registry = MagicMock()
+    rt._registry.get_workspace_path.return_value = "/ws"
+    rt._registry.get_config_root.return_value = "/cfg"
+
+    stamped = rt._inject_session_extras(ProviderConfig(), session_id=None)
+    assert "session_id" not in stamped.extra
+    assert stamped.extra["workspace_path"] == "/ws"
 
 
 def test_sessions_pass_their_own_id_not_a_shared_one():
