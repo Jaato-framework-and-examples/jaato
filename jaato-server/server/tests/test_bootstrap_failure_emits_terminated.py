@@ -57,6 +57,12 @@ class TestBootstrapFailureEmitsTerminated:
         # and the validator rejects a Mock by type.  frozenset() is the
         # production default for a server that suppresses nothing.
         server._suppress_base_instructions = frozenset()
+        # Third hazard of the same shape: a MagicMock answers
+        # ``config_root`` with an auto-created child whose ``__fspath__``
+        # is a fake RELATIVE path, and the envelope refuses a relative
+        # path across the daemon → runner boundary (#742).  A real server
+        # carries a str or None.
+        server.config_root = None
         server._main_agent_id = "build_judge"
         return server
 
@@ -134,6 +140,12 @@ class TestBootstrapFailureEmitsTerminated:
         # and the validator rejects a Mock by type.  frozenset() is the
         # production default for a server that suppresses nothing.
         server._suppress_base_instructions = frozenset()
+        # Third hazard of the same shape: a MagicMock answers
+        # ``config_root`` with an auto-created child whose ``__fspath__``
+        # is a fake RELATIVE path, and the envelope refuses a relative
+        # path across the daemon → runner boundary (#742).  A real server
+        # carries a str or None.
+        server.config_root = None
         server._main_agent_id = "main"
         server._emit_error_termination_from_exc = MagicMock(
             side_effect=RuntimeError("emit boom"),
@@ -171,6 +183,12 @@ class TestBootstrapFailureEmitsTerminated:
         # and the validator rejects a Mock by type.  frozenset() is the
         # production default for a server that suppresses nothing.
         server._suppress_base_instructions = frozenset()
+        # Third hazard of the same shape: a MagicMock answers
+        # ``config_root`` with an auto-created child whose ``__fspath__``
+        # is a fake RELATIVE path, and the envelope refuses a relative
+        # path across the daemon → runner boundary (#742).  A real server
+        # carries a str or None.
+        server.config_root = None
         del server._main_agent_id  # simulate early-fail
         server.runner_rpc = None
 

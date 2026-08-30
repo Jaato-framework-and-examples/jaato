@@ -2893,7 +2893,13 @@ To connect to a specific server: jaato --connect /path/to/socket
     if args.headless:
         import asyncio
         from headless_mode import run_headless_mode
-        workspace = pathlib.Path(args.workspace) if args.workspace else pathlib.Path.cwd()
+        # Resolved HERE, in the process whose cwd ``--workspace ./foo``
+        # is relative to.  The daemon refuses a relative workspace path
+        # (issue #742) precisely because it cannot do this itself.
+        workspace = (
+            pathlib.Path(args.workspace).expanduser().resolve()
+            if args.workspace else pathlib.Path.cwd()
+        )
         asyncio.run(run_headless_mode(
             socket_path=socket_path,
             prompt=args.prompt or args.initial_prompt,

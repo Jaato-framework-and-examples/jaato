@@ -102,6 +102,12 @@ async def run_headless_mode(
     # Determine workspace
     if workspace is None:
         workspace = pathlib.Path.cwd()
+    else:
+        # A caller may hand us a relative path; resolve it HERE, where the
+        # cwd it is relative to actually lives.  The daemon refuses a
+        # relative workspace rather than resolving it against its own cwd
+        # (issue #742), so an unresolved value would fail the connect.
+        workspace = pathlib.Path(workspace).expanduser().resolve()
 
     # Create renderer
     renderer = HeadlessFileRenderer(workspace=workspace, flush_immediately=True)

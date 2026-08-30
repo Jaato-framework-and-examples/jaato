@@ -39,6 +39,23 @@ def _progress(result: ArmResult) -> None:
     print(f"{glyph} {result.spec.arm_id}{tail}", file=sys.stderr, flush=True)
 
 
+def _absolute(path: str) -> Path:
+    """Resolve a CLI path against THIS process's cwd.
+
+    A workspace path is sent to the daemon, which has its own cwd and a
+    lifetime longer than any sweep.  Left relative, ``--workspaces
+    .jaato-eval-workspaces`` meant one directory to the harness (which
+    writes each arm's fixture) and another to the daemon (which runs the
+    agent in it) whenever the two processes were started from different
+    places — so the agent got a workspace with its worktree but no
+    fixture, and the grader read a workspace with the fixture but no
+    repository, with no error on either side (issue #742).  The daemon now
+    refuses a relative path; resolving it here, where the cwd it is
+    relative to actually lives, is the caller's half of that contract.
+    """
+    return Path(path).expanduser().resolve()
+
+
 def _exit_code(results: Sequence[ArmResult]) -> int:
     if any(r.state == FAIL for r in results):
         return 1
@@ -69,7 +86,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     print(pool_size_advice(args.concurrency), file=sys.stderr)
 
     results = asyncio.run(run_sweep(
-        arms, store=store, workspace_root=Path(args.workspaces),
+        arms, store=store, workspace_root=_absolute(args.workspaces),
         concurrency=args.concurrency, socket_path=args.socket,
         keep_workspaces=args.keep_workspaces, resume=args.resume,
         arm_timeout_seconds=args.arm_timeout,
@@ -108,7 +125,9 @@ def build_parser() -> argparse.ArgumentParser:
                           "(default: whatever each task declares)")
     run.add_argument("--out", default="results.jsonl", help="results JSONL path")
     run.add_argument("--workspaces", default=".jaato-eval-workspaces",
-                     help="parent directory for per-arm scratch workspaces")
+                     help="parent directory for per-arm scratch workspaces "
+                          "(resolved against this process's cwd before it "
+                          "is sent to the daemon)")
     run.add_argument("--concurrency", type=int, default=DEFAULT_CONCURRENCY)
     run.add_argument("--socket", default=None, help="daemon IPC socket path")
     run.add_argument("--keep-workspaces", action="store_true",

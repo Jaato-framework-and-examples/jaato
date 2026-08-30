@@ -4551,6 +4551,76 @@ class SessionManager:
                 total=monitor.active_file_count,
             ))
 
+    #: Path-bearing ``ClientConfigRequest`` fields, in the order they are
+    #: reported.  Every one of them is interpreted by the DAEMON's
+    #: filesystem, so a relative value silently means a different directory
+    #: on each side of the socket (issue #742).
+    _CLIENT_CONFIG_PATH_FIELDS = (
+        "working_dir",
+        "config_root",
+        "env_file",
+        "trace_log_path",
+        "provider_trace_log",
+    )
+
+    def _reject_relative_client_paths(
+        self, client_id: str, event: 'ClientConfigRequest',
+    ) -> bool:
+        """Refuse a client handshake carrying a relative path.
+
+        A relative path is not a portable value across a process boundary:
+        its meaning depends on the receiver's cwd, which the sender does
+        not share and cannot see.  Absolutising it here — the daemon's
+        historical behaviour — supplies the sender's missing half from the
+        WRONG process, splitting a session's workspace across two
+        directories with no error on either side (issue #742).
+
+        Every path-bearing field is checked, not just ``working_dir``:
+        ``config_root``, ``env_file`` and the two trace-log paths cross the
+        same boundary by the same mechanism.  All violations are reported
+        in one error so a client fixing its handshake sees the whole list
+        rather than one field per round trip.
+
+        Nothing is applied when this returns True — a half-applied
+        handshake (say, a good ``working_dir`` beside a dropped
+        ``config_root``) is its own silent-wrong-directory bug.
+
+        Args:
+            client_id: The requesting client, which receives the error.
+            event: The client config event to validate.
+
+        Returns:
+            True when the config was REJECTED (caller must not apply it),
+            False when every path is absolute or absent.
+        """
+        from shared.path_utils import describe_relative_path
+
+        violations = [
+            message
+            for message in (
+                describe_relative_path(
+                    field, getattr(event, field, None) or "",
+                    origin="the daemon boundary",
+                )
+                for field in self._CLIENT_CONFIG_PATH_FIELDS
+            )
+            if message
+        ]
+        if not violations:
+            return False
+
+        error = (
+            "client config rejected — a relative path cannot cross the "
+            "daemon boundary:\n" + "\n".join(f"  - {m}" for m in violations)
+        )
+        logger.error("Client %s: %s", client_id, error)
+        self._emit_to_client(client_id, ErrorEvent(
+            error=error,
+            error_type="RelativePathAcrossBoundary",
+            recoverable=True,
+        ))
+        return True
+
     def _apply_client_config(self, client_id: str, event: 'ClientConfigRequest') -> None:
         """Apply client configuration settings.
 
@@ -4558,11 +4628,17 @@ class SessionManager:
         This allows clients to use their own .env settings (like JAATO_TRACE_LOG)
         even when connecting to a shared server.
 
+        A handshake carrying a RELATIVE path is refused outright and
+        nothing is applied — see :meth:`_reject_relative_client_paths`.
+
         Args:
             client_id: The requesting client.
             event: The client config event with settings.
         """
         import os
+
+        if self._reject_relative_client_paths(client_id, event):
+            return
 
         # Apply trace log paths if provided
         if event.trace_log_path:
@@ -4618,22 +4694,51 @@ class SessionManager:
             logger.info(f"Client {client_id} set apparmor=True")
 
         # Apply to current session if client is attached to one
+        self._apply_client_config_to_live_session(client_id, event)
+
+    def _apply_client_config_to_live_session(
+        self, client_id: str, event: 'ClientConfigRequest',
+    ) -> None:
+        """Push a re-sent client config onto the client's ATTACHED session.
+
+        A client may send ``ClientConfigRequest`` again after it already
+        holds a session (a resized terminal, a re-handshake after
+        reconnect).  The stored config alone would then only reach the
+        NEXT session, so the live one is updated in place here.  A client
+        with no attached session — the usual connect-time case — is a
+        no-op.
+
+        Only the fields whose effect is per-session are pushed:
+        presentation context, workspace / config_root (mirrored onto both
+        the ``Session`` record and its ``JaatoServer``, which read them
+        from different places), and the permission timeout.
+
+        Callers must validate paths first — see
+        :meth:`_reject_relative_client_paths`; this method assumes the
+        event has already been accepted.
+
+        Args:
+            client_id: The client whose attached session to update.
+            event: The already-validated client config event.
+        """
         session_id = self._client_to_session.get(client_id)
-        if session_id:
-            session = self._sessions.get(session_id)
-            if session and session.server:
-                self._apply_presentation_to_server(event, session.server)
-                if event.working_dir:
-                    session.server.workspace_path = event.working_dir
-                    session.workspace_path = event.working_dir
-                if event.config_root:
-                    # Mirrors workspace_path propagation: stash on the
-                    # JaatoServer so JaatoRuntime / JaatoSession can read
-                    # it when threading through discovery sites.
-                    session.server.config_root = event.config_root
-                    session.config_root = event.config_root
-                if event.permission_timeout is not None:
-                    self._apply_permission_timeout(session.server, event.permission_timeout)
+        if not session_id:
+            return
+        session = self._sessions.get(session_id)
+        if not (session and session.server):
+            return
+        self._apply_presentation_to_server(event, session.server)
+        if event.working_dir:
+            session.server.workspace_path = event.working_dir
+            session.workspace_path = event.working_dir
+        if event.config_root:
+            # Mirrors workspace_path propagation: stash on the
+            # JaatoServer so JaatoRuntime / JaatoSession can read
+            # it when threading through discovery sites.
+            session.server.config_root = event.config_root
+            session.config_root = event.config_root
+        if event.permission_timeout is not None:
+            self._apply_permission_timeout(session.server, event.permission_timeout)
 
     def _apply_client_config_to_server(self, client_id: str, server: 'JaatoServer') -> None:
         """Apply stored client configuration to a server.

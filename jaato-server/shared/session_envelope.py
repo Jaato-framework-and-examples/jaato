@@ -43,6 +43,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, FrozenSet, List, Optional
 
 from .instruction_suppression import normalize_suppression, suppression_to_wire
+from .path_utils import require_absolute_path
 
 
 # Bumped per schema change.  Runners refuse a higher-version
@@ -310,16 +311,34 @@ class SessionInitEnvelope:
     schema_version: int = SESSION_ENVELOPE_VERSION
 
     def __post_init__(self) -> None:
-        """Normalize ``suppress_base_instructions`` to the canonical frozenset.
+        """Normalize ``suppress_base_instructions`` and reject relative paths.
 
-        The field is a frozenset invariant, but callers (and legacy
-        ``getattr(server, ..., False)`` defaults / test stubs) may hand it a
-        bool.  Normalizing here — the type boundary — keeps ``to_dict``'s
-        ``suppression_to_wire`` total and mirrors ``SubagentProfile``.
+        Two invariants, both enforced at the type boundary:
+
+        1. ``suppress_base_instructions`` is a frozenset, but callers (and
+           legacy ``getattr(server, ..., False)`` defaults / test stubs) may
+           hand it a bool.  Normalizing here keeps ``to_dict``'s
+           ``suppression_to_wire`` total and mirrors ``SubagentProfile``.
+        2. ``workspace_path`` / ``config_root`` must be ABSOLUTE.  This
+           envelope crosses a process boundary (daemon → runner), and the
+           runner would resolve a relative path against ITS cwd — which is
+           the daemon's, not the client's.  Issue #742: a session whose
+           workspace resolved twice ran its agent in one directory while
+           the harness graded another, with no error on either side.  A
+           session bootstrapped with a relative path must FAIL, not
+           resolve.
+
+        Raises:
+            RelativePathAcrossBoundaryError: when a path field is relative.
         """
         self.suppress_base_instructions = normalize_suppression(
             self.suppress_base_instructions
         )
+        _origin = "the daemon → runner session envelope"
+        require_absolute_path(
+            self.workspace_path, field="workspace_path", origin=_origin)
+        require_absolute_path(
+            self.config_root, field="config_root", origin=_origin)
 
     def to_dict(self) -> Dict[str, Any]:
         """Serialize to a JSON-friendly dict for the wire.
@@ -563,3 +582,36 @@ class BootstrapEnvelope:
 
     # -- Bootstrap-time event sink ---------------------------------------
     on_event_during_init: Optional[Callable[[Any], None]] = None
+
+    def __post_init__(self) -> None:
+        """Reject relative paths on the bootstrap envelope.
+
+        ``workspace_path``, ``config_root`` and ``env_file`` all decide
+        where a session's work LANDS.  Each arrives from a client across a
+        process boundary (or is derived from one), and a relative value
+        would be resolved against the DAEMON's cwd — ambient state the
+        sending client neither shares nor can see.
+
+        Issue #742: a harness launched from one directory sent a relative
+        workspace path to a daemon started from another.  Both processes
+        "succeeded"; the agent got a workspace holding its git worktree but
+        not its fixture, the grader got one holding the fixture but no
+        repository, and the disagreement was visible only by comparing two
+        filesystems.  The failure was timing-dependent — the identical
+        command had worked before the daemon was restarted elsewhere — so
+        it cannot be left to convention.
+
+        This is the last guard before the session is built, hence the one
+        that must fail rather than resolve: resolving is precisely what
+        supplies the wrong missing half.
+
+        Raises:
+            RelativePathAcrossBoundaryError: when a path field is relative.
+        """
+        _origin = "the session bootstrap envelope"
+        require_absolute_path(
+            self.workspace_path, field="workspace_path", origin=_origin)
+        require_absolute_path(
+            self.config_root, field="config_root", origin=_origin)
+        require_absolute_path(
+            self.env_file, field="env_file", origin=_origin)

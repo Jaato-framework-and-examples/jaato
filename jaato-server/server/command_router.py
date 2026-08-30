@@ -18,6 +18,7 @@ from jaato_sdk.events import Event
 from server.event_sink import EventSink
 from server.session_manager import SessionManager
 from server.session_logging import set_logging_context, clear_logging_context
+from shared.path_utils import describe_relative_path
 from shared.session_id import is_safe_session_id
 
 logger = logging.getLogger(__name__)
@@ -135,6 +136,46 @@ class CommandRouter:
         finally:
             clear_logging_context()
 
+    def _handle_set_workspace(
+        self,
+        client_id: str,
+        args: List[str],
+    ) -> None:
+        """Register the client's workspace, or refuse a relative one.
+
+        ``set_workspace`` is the first command a client sends after
+        connecting, and the workspace it registers is inherited by every
+        session that client later creates.  A RELATIVE path is refused
+        rather than absolutised: the daemon would resolve it against its
+        OWN cwd, which is not the client's and which a daemon restart can
+        change, so the session would run in a different directory from the
+        one the client writes to and reads back — with no error on either
+        side (issue #742).
+
+        Args:
+            client_id: The requesting client.
+            args: The command's arguments; ``args[0]`` is the workspace.
+        """
+        workspace_path = args[0] if args else None
+        if not workspace_path:
+            return
+        bad = describe_relative_path(
+            "workspace", workspace_path,
+            origin="the daemon boundary (set_workspace)",
+        )
+        if bad:
+            logger.error("Client %s: set_workspace refused: %s",
+                         client_id, bad)
+            from jaato_sdk.events import ErrorEvent
+            self._event_sink.send_event(client_id, ErrorEvent(
+                error=f"set_workspace: {bad}",
+                error_type="RelativePathAcrossBoundary",
+                recoverable=True,
+            ))
+            return
+        self._event_sink.set_client_workspace(client_id, workspace_path)
+        logger.debug(f"Client {client_id} workspace set to: {workspace_path}")
+
     def _dispatch(
         self,
         client_id: str,
@@ -158,10 +199,7 @@ class CommandRouter:
 
             # Handle set_workspace command (sent by client on connect)
             if cmd == "set_workspace":
-                workspace_path = event.args[0] if event.args else None
-                if workspace_path:
-                    self._event_sink.set_client_workspace(client_id, workspace_path)
-                    logger.debug(f"Client {client_id} workspace set to: {workspace_path}")
+                self._handle_set_workspace(client_id, event.args)
                 return
 
             # Get client's workspace path for session operations

@@ -16,7 +16,11 @@
 // (#400/#402/#403/#404 — the org-wide client-simplification effort).
 
 import { JaatoClient, type JaatoClientOptions } from "./client.js";
-import { AgentError, PermissionUnhandled } from "./errors.js";
+import {
+  AgentError,
+  PermissionUnhandled,
+  RelativePathAcrossBoundaryError,
+} from "./errors.js";
 import { EventTypeValue } from "./events.js";
 import type { ConnectionStatus, RecoveryConfig } from "./state.js";
 
@@ -83,11 +87,17 @@ export interface SessionOpenOptions {
    * ``terminal``/``web``/``chat`` roots). Set into ``presentation.client_type``.
    */
   clientType?: string;
-  /** Workspace dir for file ops / sandbox scoping (→ ``working_dir``). */
+  /**
+   * Workspace dir for file ops / sandbox scoping (→ ``working_dir``).
+   * Must be ABSOLUTE — the daemon has its own cwd and refuses to resolve
+   * a relative path against it (#742); a relative value throws
+   * {@link RelativePathAcrossBoundaryError} here.
+   */
   workspacePath?: string;
   /** ``.env`` path for the daemon to load (→ ``env_file``). */
   envFile?: string;
-  /** Read-only framework-config root override (→ ``config_root``). */
+  /** Read-only framework-config root override (→ ``config_root``).
+   *  Must be ABSOLUTE, for the same reason as ``workspacePath``. */
   configRoot?: string;
   /** Opt-in per-session AppArmor confinement (→ ``apparmor``). */
   apparmor?: boolean;
@@ -434,6 +444,33 @@ export function waitForSessionId(
 }
 
 /**
+ * Whether a path string is absolute, without importing ``node:path``
+ * (this module also runs in browsers). Accepts POSIX roots, Windows
+ * drive roots (``C:\`` / ``C:/``) and UNC roots (``\\server``).
+ */
+function isAbsolutePath(value: string): boolean {
+  return (
+    value.startsWith("/") ||
+    value.startsWith("\\\\") ||
+    /^[A-Za-z]:[\\/]/.test(value)
+  );
+}
+
+/**
+ * Throw if a path bound for the daemon is relative.
+ *
+ * The daemon refuses one too, but failing here puts the error in the
+ * process whose cwd the path was written against — next to the code that
+ * chose it. See {@link RelativePathAcrossBoundaryError} for why the value
+ * is rejected rather than resolved.
+ */
+function requireAbsolutePath(field: string, value: string | undefined): void {
+  if (value !== undefined && value !== "" && !isAbsolutePath(value)) {
+    throw new RelativePathAcrossBoundaryError(field, value);
+  }
+}
+
+/**
  * Build a {@link JaatoClient}, connect, register host tools, create the
  * session, and return a ready {@link Session}. Backs {@link JaatoClient.session}.
  */
@@ -442,6 +479,11 @@ export async function openSession(opts: SessionOpenOptions): Promise<Session> {
     ...(opts.presentation ?? {}),
     client_type: opts.clientType ?? "api",
   };
+  // Refused before the handshake is built, not absolutised: a relative
+  // path means one directory here and another in the daemon (#742).
+  requireAbsolutePath("workspacePath", opts.workspacePath);
+  requireAbsolutePath("configRoot", opts.configRoot);
+
   const clientConfig: Record<string, unknown> = { presentation };
   if (opts.workspacePath !== undefined) clientConfig.working_dir = opts.workspacePath;
   if (opts.envFile !== undefined) clientConfig.env_file = opts.envFile;
