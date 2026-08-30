@@ -72,6 +72,11 @@ def _make_session(
 
     # Create session
     session = JaatoSession.__new__(JaatoSession)
+    # __init__ sets this (jaato_session.py) and `_ensure_provider` reads it
+    # to tell the provider which session it serves.  The helper bypasses
+    # __init__, so it must stand in for it — production code should not
+    # carry a getattr default for an attribute the constructor always sets.
+    session._daemon_session_id = None
     session._runtime = runtime
     session._model_name = "test-model"
     session._provider_name_override = None
