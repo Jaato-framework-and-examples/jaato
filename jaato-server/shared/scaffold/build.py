@@ -600,7 +600,9 @@ def _set_profile_yaml(agent: str, provider: str, model: str,
     The bar is that high on purpose: a generated profile where every knob has
     a commented example is noise nobody reads.  The ``env:`` facts come from
     :data:`explain.PROFILE_ENV_FACTS` rather than being restated here, so this
-    half and ``explain env`` cannot drift apart.
+    half and ``explain env`` cannot drift apart; the worked example's value
+    comes from :data:`explain.ENV_EXAMPLE_VALUE` for the same reason, and is
+    relative rather than absolute on purpose (see that constant).
     """
     info = introspect.resolve_provider(provider)
     lines = [
@@ -622,10 +624,13 @@ def _set_profile_yaml(agent: str, provider: str, model: str,
     ]
     lines += [f"#   - {fact}" for fact in _explain.PROFILE_ENV_FACTS]
     lines += [
-        "#     (so pass an ABSOLUTE path when each session must write its own",
-        "#     file).  See `jaato-scaffold explain env`.",
+        "#     — the trace vars resolve theirs against the session workspace,",
+        "#     so the RELATIVE form below writes one file per session, in its",
+        "#     own workspace, where an absolute path would be fixed at this",
+        "#     profile and shared by every session using it.",
+        "#     See `jaato-scaffold explain env`.",
         "# env:",
-        f"#   {_explain.ENV_EXAMPLE_VAR}: /abs/path/{agent}-provider_trace.log",
+        f"#   {_explain.ENV_EXAMPLE_VAR}: {_explain.ENV_EXAMPLE_VALUE}",
     ]
     knobs = info.knobs if info else None
     if knobs is not None:

@@ -721,11 +721,39 @@ def gc() -> Rendered:
 # available to a caller that does not own the .env.  The author who needed it
 # found it by reading `server/core.py`, which is the failure this whole verb
 # exists to prevent.
+#
+# The note deliberately spends its longest paragraph on PATH RESOLUTION, which
+# is not where you would expect the difficulty to be.  Three plausible answers
+# are all wrong, and each was believed by someone working on this: the runner
+# is NOT chdir'd into the workspace at spawn (measured -- it is forked into
+# the daemon's cwd, and `core.py:336` still promises otherwise);
+# `${workspaceRoot}` does NOT help (it expands daemon-side, at a point where
+# the session's workspace is not the one in scope); and a relative value is
+# NOT rewritten on the way in.  What actually makes a relative trace path land
+# per-session is the READER -- `jaato_sdk.trace._resolve_trace_file` joins it
+# onto JAATO_WORKSPACE_ROOT, which the runner seeds per session.
+#
+# So the note names the reader instead of stating a rule about paths.  That is
+# also the only form that survives the process cwd moving underneath it, which
+# it does: `subagent/plugin.py` chdirs the whole runner into the workspace when
+# it spawns a subagent.  A cwd that changes mid-session is not something to
+# write a path against.
 
 #: Worked example wherever the profile ``env:`` block is documented -- HERE and
 #: in the commented block ``new`` emits (``build._set_profile_yaml``).  It is a
-#: path knob on purpose: the verbatim-path fact below is the half that bites.
+#: path knob on purpose: the resolution fact below is the half that bites, and
+#: this is the variable people reach for when a session misbehaves.
 ENV_EXAMPLE_VAR = "JAATO_PROVIDER_TRACE"
+
+#: The example's VALUE, shared for the same reason as its name.  Deliberately
+#: RELATIVE: ``jaato_sdk.trace._resolve_trace_file`` joins a relative trace
+#: path onto ``JAATO_WORKSPACE_ROOT``, which the runner seeds per session, so
+#: this form gives every session its own trace in its own workspace.  The
+#: absolute form is fixed at the PROFILE and every session sharing that
+#: profile appends to one interleaved file -- the failure mode this example
+#: exists to steer people away from, and the one an earlier draft of this note
+#: recommended (jaato #752 review).
+ENV_EXAMPLE_VALUE = "provider_trace.log"
 
 #: The three load-bearing, non-obvious properties of the profile ``env:``
 #: block, rendered by BOTH halves of its documentation from this ONE
@@ -740,7 +768,7 @@ ENV_EXAMPLE_VAR = "JAATO_PROVIDER_TRACE"
 PROFILE_ENV_FACTS = (
     "outranks the workspace .env, per key",
     "takes ${VAR} expansion + secret URIs (pass://, vault://, ...)",
-    "is applied verbatim: a RELATIVE path lands in the DAEMON's cwd",
+    "is applied verbatim — a relative path is resolved by its READER",
 )
 
 
@@ -766,13 +794,30 @@ def _profile_env_note() -> List[str]:
     ]
     lines += [f"    - {fact}" for fact in PROFILE_ENV_FACTS]
     lines += [
-        "      — NOT against the session workspace, and every session on that "
-        "daemon",
-        "      shares that cwd (`${workspaceRoot}` / `${cwd}` expand "
-        "daemon-side too).",
-        "      Give an ABSOLUTE path, distinct per profile, when each session "
-        "must",
-        "      write its own file.",
+        "      Nothing rewrites the value on the way in, so WHERE a relative "
+        "path",
+        "      lands is the reader's business, and readers differ:",
+        "        · the trace vars (JAATO_PROVIDER_TRACE / JAATO_TRACE_LOG) "
+        "join theirs",
+        "          onto JAATO_WORKSPACE_ROOT, which the runner seeds per "
+        "session — so a",
+        "          RELATIVE value gives each session its own file in its own "
+        "workspace,",
+        "          and an ABSOLUTE one is fixed at the profile and shared by "
+        "every",
+        "          session using it (jaato_sdk/trace.py _resolve_trace_file).",
+        "        · a reader that just open()s the value gets the runner "
+        "process's cwd,",
+        "          which is NOT the workspace: the runner is forked into the "
+        "daemon's",
+        "          cwd (core.py:1029 — the chdir promised at core.py:336 does "
+        "not",
+        "          happen), and the subagent path can chdir it later, so it is "
+        "not a",
+        "          thing to write a path against.  `${workspaceRoot}` / "
+        "`${cwd}` are no",
+        "          help either: they expand daemon-side, before the session "
+        "exists.",
         "    - merges per KEY across `inherits:` (a child wins only the keys "
         "it sets)",
         "    - is the ONLY route when the .env is not yours to write — "
@@ -782,7 +827,8 @@ def _profile_env_note() -> List[str]:
         "      author cannot put anything there.",
         "",
         "        env:",
-        f"          {ENV_EXAMPLE_VAR}: /abs/path/arm-a/provider_trace.log",
+        f"          {ENV_EXAMPLE_VAR}: {ENV_EXAMPLE_VALUE}"
+        "    # one file per session",
     ]
     return lines
 
