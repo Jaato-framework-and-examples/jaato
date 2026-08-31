@@ -642,6 +642,74 @@ class FinishReason(str, Enum):
     UNKNOWN = "unknown"        # Unknown reason
 
 
+#: Finish reasons that describe *how the turn failed*, not what the
+#: model asked for next.  A turn that ended for one of these reasons is
+#: terminal: whatever parts it carries are the fragments that made it
+#: out before the generation was cut off, not a well-formed request.
+#:
+#: Used by :func:`resolve_tool_use_finish` to keep a provider from
+#: relabelling a severed turn as a tool-use turn.
+TERMINAL_FINISH_REASONS = frozenset({
+    FinishReason.MAX_TOKENS,
+    FinishReason.SAFETY,
+    FinishReason.ERROR,
+    FinishReason.CANCELLED,
+})
+
+
+def resolve_tool_use_finish(
+    observed: FinishReason,
+    has_function_calls: bool,
+) -> FinishReason:
+    """Decide a streamed turn's finish reason once its parts are known.
+
+    Every streaming provider faces the same ambiguity at the end of a
+    turn: some upstreams report ``"stop"`` (or report nothing at all)
+    on a turn that in fact emitted tool calls, so the accumulated calls
+    are the only reliable evidence that the turn wants a tool executed.
+    The historical fix was an unconditional override::
+
+        if function_calls:
+            finish_reason = FinishReason.TOOL_USE
+
+    which is right for the ambiguous case and wrong for every other
+    one.  When the upstream reported ``length`` — the output cap was
+    hit — the accumulated calls are not a request, they are the
+    fragments of a call that was severed mid-serialization, quite
+    possibly mid-``arguments``.  Overriding there throws away the one
+    signal that says so, and the truncated turn presents downstream as
+    a turn that wants a tool run.  That is a silent wrong answer in the
+    control plane: :mod:`shared.rewind` keys its truncated-tool-call
+    recovery on ``MAX_TOKENS`` *together with* function calls, so the
+    override made that recovery structurally unreachable, and
+    ``_classify_finish_reason``'s abnormal-finish banner never fired
+    either.  See issue #745.
+
+    So ``TOOL_USE`` is a **fallback, not an override**: it fills in an
+    unreported or merely-``stop`` finish, and it never displaces a
+    reason in :data:`TERMINAL_FINISH_REASONS`.
+
+    Args:
+        observed: The finish reason the provider actually derived from
+            the wire, before any tool-call-based adjustment.  Pass
+            :attr:`FinishReason.UNKNOWN` when the upstream reported
+            none.
+        has_function_calls: Whether the turn accumulated at least one
+            function call.  Callers that drop partial calls on
+            cancellation should pass the post-drop answer.
+
+    Returns:
+        ``observed`` unchanged when it is terminal or when no function
+        calls were accumulated; :attr:`FinishReason.TOOL_USE`
+        otherwise.
+    """
+    if not has_function_calls:
+        return observed
+    if observed in TERMINAL_FINISH_REASONS:
+        return observed
+    return FinishReason.TOOL_USE
+
+
 @dataclass
 class ProviderResponse:
     """Unified response from any AI provider.

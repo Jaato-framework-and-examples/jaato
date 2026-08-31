@@ -34,6 +34,7 @@ from jaato_sdk.plugins.model_provider.types import (
     ToolResult,
     ToolSchema,
     TurnResult,
+    resolve_tool_use_finish,
 )
 from .env import (
     resolve_cli_mode,
@@ -837,8 +838,14 @@ class ClaudeCLIProvider(ModalityCapabilityMixin):
                     finish_reason = FinishReason.ERROR
 
         # Determine finish reason
-        if function_calls:
-            finish_reason = FinishReason.TOOL_USE
+        # TOOL_USE fills in an unreported or merely-``stop`` finish; it
+        # must not displace a terminal one.  A turn that hit the output
+        # cap mid-``arguments`` carries fragments, not a request — see
+        # ``resolve_tool_use_finish`` and issue #745.
+        finish_reason = resolve_tool_use_finish(
+            finish_reason,
+            has_function_calls=bool(function_calls),
+        )
 
         # Build parts list
         parts: List[Part] = []
@@ -999,8 +1006,14 @@ class ClaudeCLIProvider(ModalityCapabilityMixin):
         # Determine finish reason
         if cancelled:
             finish_reason = FinishReason.CANCELLED
-        elif function_calls:
-            finish_reason = FinishReason.TOOL_USE
+        # TOOL_USE fills in an unreported or merely-``stop`` finish; it
+        # must not displace a terminal one.  A turn that hit the output
+        # cap mid-``arguments`` carries fragments, not a request — see
+        # ``resolve_tool_use_finish`` and issue #745.
+        finish_reason = resolve_tool_use_finish(
+            finish_reason,
+            has_function_calls=bool(function_calls),
+        )
 
         # Build parts list
         parts: List[Part] = []

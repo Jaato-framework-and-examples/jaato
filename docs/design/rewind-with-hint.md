@@ -108,6 +108,35 @@ From `jaato-sdk/jaato_sdk/plugins/model_provider/types.py`:
 - `FunctionCall.args: Dict[str, Any]` — inspect for `{}` or missing required
   keys relative to the tool's declared schema.
 
+#### The precondition providers must not destroy (#745)
+
+Detection needs `MAX_TOKENS` **and** function calls on the *same*
+`ProviderResponse`. That combination was unreachable on every streamed turn
+until 2026-08-31, because each streaming provider ended its turn with an
+unconditional override:
+
+```python
+if function_calls and not was_cancelled:
+    finish_reason = FinishReason.TOOL_USE
+```
+
+The line has a legitimate job — several upstreams report `stop`, or report
+nothing, on a turn that did emit tool calls — but running it unconditionally
+also rewrote the reason on a turn the provider had correctly read as
+truncated. So the detector's precondition could never be satisfied, and this
+whole design was dead code for streaming: the truncated turn presented
+downstream as a turn that wanted a tool executed, and the session executed or
+failed on the fragment and went round again.
+
+The contract now lives in one place —
+`jaato_sdk.plugins.model_provider.types.resolve_tool_use_finish`. `TOOL_USE`
+is a **fallback, not an override**: it fills in an unreported or merely-`stop`
+finish and never displaces a reason in `TERMINAL_FINISH_REASONS`
+(`MAX_TOKENS`, `SAFETY`, `ERROR`, `CANCELLED`). Every streaming provider calls
+it instead of assigning, and
+`shared/tests/test_truncation_is_not_reported_as_tool_use.py` fails if one
+goes back to assigning.
+
 ## Hint message template
 
 The injected user-role message should:
