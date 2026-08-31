@@ -26,6 +26,7 @@ deadline outlasts the deadline".
 
 import threading
 import time
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -466,3 +467,172 @@ class TestStreamingStallBecomesATypedError:
         )
 
         assert result is not None
+
+
+# ==================== The client survives the stall ====================
+
+
+def _healthy_stream():
+    """A stream that yields two content chunks and ends."""
+    class _Healthy:
+        def __init__(self):
+            self.closed = False
+
+        def __iter__(self):
+            for text in ("Hel", "lo"):
+                chunk = MagicMock()
+                chunk.choices = [MagicMock()]
+                chunk.choices[0].delta.content = text
+                chunk.choices[0].delta.tool_calls = None
+                chunk.choices[0].delta.reasoning = None
+                chunk.choices[0].finish_reason = None
+                chunk.usage = None
+                chunk.error = None
+                chunk.model_extra = {}
+                yield chunk
+
+        def close(self):
+            self.closed = True
+
+    return _Healthy()
+
+
+def _quietly_ending_stream():
+    """A stream that outlasts the deadline and then just ends."""
+    class _EndsQuietly:
+        def __init__(self):
+            self.closed = False
+
+        def __iter__(self):
+            time.sleep(0.3)
+            return iter(())
+
+        def close(self):
+            self.closed = True
+
+    return _EndsQuietly()
+
+
+class _PoolAwareClient:
+    """A fake client whose pool death is observable, like the real one.
+
+    ``MagicMock`` happily answers a request after ``close()``, which is
+    what let the missing client rebuild go unnoticed.  Measured against
+    the installed SDK: once ``client.close()`` has run, the next
+    ``chat.completions.create`` raises
+    ``openai.APIConnectionError: Connection error.``  This stand-in
+    reproduces that, so a test can tell a live client from a dead one.
+    """
+
+    def __init__(self, stream_factory):
+        self.closed = False
+        self.requests = 0
+        self._stream_factory = stream_factory
+        self.chat = SimpleNamespace(
+            completions=SimpleNamespace(create=self._create))
+
+    def _create(self, **kwargs):
+        if self.closed:
+            import httpx
+            import openai
+            raise openai.APIConnectionError(request=httpx.Request(
+                "POST", "https://openrouter.ai/api/v1/chat/completions"))
+        self.requests += 1
+        return self._stream_factory()
+
+    def close(self):
+        self.closed = True
+
+
+class TestTheClientSurvivesAStall:
+    """A stall must leave the provider able to make the next request.
+
+    This is the precondition for the whole retry story, not cleanup.
+    ``StallTimeoutError`` subclasses ``InfrastructureError`` so
+    ``with_retry`` retries the turn — but the watchdog got the parked
+    read unstuck by closing the client's httpx pool, and a closed client
+    raises ``APIConnectionError: Connection error.`` on its next request
+    (measured).  Without the rebuild, every retry of a stalled turn dies
+    on a dead pool and reports a connection failure that never happened,
+    burning the retry budget on a misleading error.  Wrong is worse than
+    stuck.
+
+    Both stall exits need this, so both are covered: the one where the
+    torn-down read raises, and the one where the iterator just ends.
+    The assertion is the *outcome* — a second turn reaches the transport
+    — so it keeps its meaning if the rebuild is done some other way.
+    """
+
+    def _stalling_then_healthy(self, first_stream):
+        """Serve ``first_stream`` to turn one, a healthy stream after."""
+        streams = [lambda: first_stream, _healthy_stream]
+
+        def next_stream():
+            return streams.pop(0)() if len(streams) > 1 else streams[0]()
+
+        return next_stream
+
+    def _run_two_turns(self, first_stream):
+        """Stall a turn, then take another.  Returns (result, clients)."""
+        clients = []
+        next_stream = self._stalling_then_healthy(first_stream)
+
+        def fake_client_class(**kwargs):
+            client = _PoolAwareClient(next_stream)
+            clients.append(client)
+            return client
+
+        # The patch spans BOTH turns: the rebuild goes through
+        # get_openai_client_class() too, and outside the patch it would
+        # build a real client pointed at the real endpoint.
+        with patch(
+            "shared.plugins.model_provider.openrouter.provider."
+            "get_openai_client_class",
+            return_value=fake_client_class,
+        ):
+            provider = OpenRouterProvider()
+            provider.initialize(ProviderConfig(
+                api_key="sk-or-test",
+                extra={"framework_overrides": {
+                    "stream_idle_timeout": 0.05,
+                    "context_length": 200000,
+                }},
+            ))
+            provider.connect("openai/gpt-5-mini", skip_model_test=True)
+
+            with pytest.raises(StallTimeoutError):
+                provider.complete(
+                    [Message.from_text(Role.USER, "hi")],
+                    on_chunk=lambda text: None,
+                )
+
+            # The turn with_retry would take next.  It must reach the
+            # transport rather than dying on the pool the guard closed.
+            result = provider.complete(
+                [Message.from_text(Role.USER, "again")],
+                on_chunk=lambda text: None,
+            )
+
+        return result, clients
+
+    def test_after_a_stall_that_raises(self):
+        stop = threading.Event()
+        result, clients = self._run_two_turns(_stalling_stream(stop))
+
+        assert result is not None
+        assert clients[0].closed is True, "precondition: the guard closed it"
+        assert len(clients) == 2, (
+            "the stalled turn left the provider on a closed client — the "
+            "next retry would raise APIConnectionError instead of retrying"
+        )
+        assert clients[1].requests == 1
+
+    def test_after_a_stall_that_ends_quietly(self):
+        result, clients = self._run_two_turns(_quietly_ending_stream())
+
+        assert result is not None
+        assert clients[0].closed is True, "precondition: the guard closed it"
+        assert len(clients) == 2, (
+            "the quiet-end stall path left the provider on a closed client"
+        )
+        assert clients[1].requests == 1
