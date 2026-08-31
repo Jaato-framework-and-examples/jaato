@@ -338,6 +338,17 @@ class FilesystemQueryPlugin(BackgroundCapableMixin, StreamingCapable, RunnerForw
         ``grep_content`` would otherwise block indefinitely opening a named
         pipe reached through an allowed path.
 
+        Note that results keep reporting the path that was *asked about*, not
+        its realpath, and that is deliberate rather than an oversight left
+        over from this guard.  Once containment holds, every reported result
+        is contained, and the requested path is the handle the caller will
+        use next.  Substituting the resolved target would instead emit an
+        out-of-workspace path into the result — and into the model's context
+        — for a file the sandbox deliberately permitted, trading a cosmetic
+        mismatch for an information disclosure.  If a consumer ever needs to
+        know that resolution occurred, add a field (``via_symlink``, or a
+        ``resolved_path`` beside the requested one); do not replace this one.
+
         Returns:
             A callable taking a candidate :class:`Path` and returning True if
             the search may report and read it.  Not thread-safe — build one
