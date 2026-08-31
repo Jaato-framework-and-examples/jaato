@@ -91,3 +91,11 @@ knowledge/skills/code/soi/skill-020-microservice-java-spring/examples/example-01
 # contents can apply — git does not descend into an excluded directory.
 !jaato-eval/tasks/*/.jaato/
 !jaato-eval/tasks/*/.jaato/**
+
+# Eval scratch workspaces.  ``jaato_eval run --workspaces`` materialises one
+# fixture copy (and one git worktree) per arm here; a sweep leaves hundreds
+# of megabytes behind when run with --keep-workspaces.  Ignored under any
+# parent so a misresolved workspace root — the #742 failure, which dropped
+# 341 MB of worktrees into the framework repo — is never one ``git add -A``
+# from being committed.
+.jaato-eval-workspaces/

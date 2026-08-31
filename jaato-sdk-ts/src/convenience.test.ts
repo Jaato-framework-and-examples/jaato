@@ -9,8 +9,17 @@ import { strict as assert } from "node:assert";
 import { test } from "node:test";
 
 import { JaatoClient } from "./client.js";
-import { Session, waitForSessionId, type ClientToolHandler } from "./convenience.js";
-import { AgentError, PermissionUnhandled } from "./errors.js";
+import {
+  Session,
+  openSession,
+  waitForSessionId,
+  type ClientToolHandler,
+} from "./convenience.js";
+import {
+  AgentError,
+  PermissionUnhandled,
+  RelativePathAcrossBoundaryError,
+} from "./errors.js";
 import { EventTypeValue } from "./events.js";
 
 type Handler = (ev: unknown) => void;
@@ -297,4 +306,43 @@ test("waitForSessionId: resolves null on timeout when no SESSION_INFO arrives", 
   c.sessionId = null;
   const sid = await waitForSessionId(c as unknown as JaatoClient, 20);
   assert.equal(sid, null);
+});
+
+// ── the daemon path boundary (#742) ──────────────────────────────────
+// A relative path means one directory here and another in the daemon,
+// whose cwd this process neither shares nor can see. Sent as-is, the
+// session runs somewhere other than where the caller reads results back,
+// with no error raised anywhere — so openSession refuses BEFORE it
+// connects. Asserted as a refusal: a test that checked the path resolved
+// "correctly" passes whenever the two processes happen to share a cwd,
+// which is how the defect survived several green runs.
+
+test("openSession: a relative workspacePath is refused before connecting", async () => {
+  await assert.rejects(
+    () => openSession({
+      url: "ws://127.0.0.1:1/never-dialled",
+      workspacePath: ".jaato-eval-workspaces/arm0",
+    }),
+    (err: unknown) => {
+      assert.ok(err instanceof RelativePathAcrossBoundaryError);
+      assert.equal(err.field, "workspacePath");
+      assert.match(err.message, /\.jaato-eval-workspaces\/arm0/);
+      return true;
+    },
+  );
+});
+
+test("openSession: a relative configRoot is refused before connecting", async () => {
+  await assert.rejects(
+    () => openSession({
+      url: "ws://127.0.0.1:1/never-dialled",
+      workspacePath: "/abs/ws",
+      configRoot: "task/.jaato",
+    }),
+    (err: unknown) => {
+      assert.ok(err instanceof RelativePathAcrossBoundaryError);
+      assert.equal(err.field, "configRoot");
+      return true;
+    },
+  );
 });

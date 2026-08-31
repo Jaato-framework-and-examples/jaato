@@ -150,3 +150,34 @@ export class PermissionUnhandled extends Error {
     this.toolName = toolName;
   }
 }
+
+/**
+ * A relative path was about to cross the daemon boundary.
+ *
+ * A relative path is not a portable value between processes: its referent
+ * is the reading process's cwd, which the daemon does not share with this
+ * client and which a daemon restart can change. Sent as-is, the daemon
+ * resolves it against ITS cwd and the session silently runs in a
+ * different directory from the one this process reads back — no error on
+ * either side (issue #742). Thrown HERE rather than resolved, because
+ * ``../proj`` and ``~/proj`` both look relative and mean different
+ * things: resolve it yourself (Node: ``path.resolve(p)``).
+ *
+ * Mirror of ``jaato_sdk.path_boundary.RelativePathAcrossBoundaryError``.
+ */
+export class RelativePathAcrossBoundaryError extends Error {
+  readonly field: string;
+  readonly value: string;
+  constructor(field: string, value: string) {
+    super(
+      `${field}=${JSON.stringify(value)} is a relative path and cannot ` +
+        `cross the daemon boundary: its meaning depends on the cwd of ` +
+        `whichever process reads it, and the two sides do not share one. ` +
+        `Resolve it to an absolute path in the process whose cwd it is ` +
+        `relative to.`,
+    );
+    this.name = "RelativePathAcrossBoundaryError";
+    this.field = field;
+    this.value = value;
+  }
+}

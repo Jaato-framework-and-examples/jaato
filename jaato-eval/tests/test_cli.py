@@ -12,8 +12,27 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from jaato_eval.cli import build_parser, cmd_report, main
+from unittest.mock import patch
+
+from jaato_eval.cli import build_parser, cmd_report, cmd_run, main
 from jaato_eval.results import ResultStore
+
+
+#: The smallest manifest ``discover_tasks`` accepts; the sweep itself is
+#: stubbed out, so nothing here is ever executed.
+_TASK = """
+id: t/echo
+environment:
+  fixture: fixture
+  config_root: cfg
+input:
+  prompt: say READY
+harness:
+  profile: worker
+graders:
+  - kind: script
+    run: "true"
+"""
 
 
 def _record(arm_id, state, task="t/a", profile_set="cheap"):
@@ -111,6 +130,56 @@ class ResumeCase(unittest.TestCase):
         args = build_parser().parse_args(["run", "tasks", "--arm-timeout", "12"])
         self.assertEqual(args.arm_timeout, 12.0)
         self.assertIsNone(build_parser().parse_args(["run", "tasks"]).arm_timeout)
+
+
+class WorkspaceRootIsAbsoluteCase(unittest.TestCase):
+    """``--workspaces`` is resolved HERE, before it reaches the daemon.
+
+    A workspace path is sent across a socket to a daemon with its own cwd
+    and a lifetime longer than any sweep.  Left relative, the harness
+    materialised each arm's fixture in one directory while the daemon ran
+    the agent in another whenever the two had been started from different
+    places — the agent got its worktree without its fixture, the grader
+    got the fixture without a repository, and neither side raised
+    anything (issue #742).
+
+    The assertion is on ABSOLUTENESS, not on the resolved value matching
+    some expected directory: a check of the latter kind passes whenever
+    the two processes happen to share a cwd, which is exactly how this
+    went unnoticed for several green runs.
+    """
+
+    def _captured_workspace_root(self, argv):
+        seen = {}
+
+        async def fake_sweep(arms, **kwargs):
+            seen["workspace_root"] = kwargs["workspace_root"]
+            return []
+
+        with tempfile.TemporaryDirectory() as tmp:
+            task_dir = Path(tmp) / "t"
+            (task_dir / "fixture").mkdir(parents=True)
+            (task_dir / "cfg").mkdir()
+            (task_dir / "task.yaml").write_text(_TASK)
+            args = build_parser().parse_args(
+                ["run", str(task_dir), "--out", str(Path(tmp) / "r.jsonl")]
+                + argv)
+            with patch("jaato_eval.cli.run_sweep", fake_sweep):
+                cmd_run(args)
+        return seen["workspace_root"]
+
+    def test_the_default_relative_workspaces_dir_is_resolved(self):
+        root = self._captured_workspace_root([])
+        self.assertTrue(root.is_absolute(), f"{root} is relative")
+        self.assertEqual(root, Path(".jaato-eval-workspaces").resolve())
+
+    def test_an_explicitly_relative_workspaces_dir_is_resolved(self):
+        root = self._captured_workspace_root(["--workspaces", "scratch/ws"])
+        self.assertTrue(root.is_absolute(), f"{root} is relative")
+
+    def test_an_absolute_workspaces_dir_is_passed_through(self):
+        root = self._captured_workspace_root(["--workspaces", "/abs/ws"])
+        self.assertEqual(root, Path("/abs/ws"))
 
 
 class MainDispatchCase(unittest.TestCase):

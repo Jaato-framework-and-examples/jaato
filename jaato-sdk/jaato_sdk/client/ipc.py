@@ -52,6 +52,7 @@ from jaato_sdk.client._handler_registry import (
     Unsubscribe,
     _HandlerRegistry,
 )
+from jaato_sdk.path_boundary import require_absolute_path
 
 logger = logging.getLogger(__name__)
 
@@ -252,7 +253,15 @@ class IPCClient:
             env_file: Path to .env file for auto-started server.
             workspace_path: Working directory sent to the server for file
                 operations and sandbox scoping.  Falls back to
-                ``os.getcwd()`` when not provided.
+                ``os.getcwd()`` when not provided.  **Must be absolute** —
+                the daemon has its own cwd and would resolve a relative
+                path against that one, silently running the session in a
+                different directory from the one this process reads back
+                (issue #742).  A relative value raises
+                ``RelativePathAcrossBoundaryError`` here rather than being
+                absolutised, because ``../proj`` and ``~/proj`` both look
+                relative and mean different things; resolve it yourself
+                (e.g. ``Path(p).expanduser().resolve()``).
             config_root: Optional override for where the daemon reads
                 read-only framework config (profiles, agents, prompts,
                 references, completion_schemas, instructions, scripts,
@@ -264,6 +273,8 @@ class IPCClient:
                 a ``.jaato/`` symlink to give the agent's filesystem
                 tools no visibility into the framework config.  See
                 ``shared/config_resolver.py`` for the resolver contract.
+                **Must be absolute**, for the same reason as
+                ``workspace_path``.
             apparmor: Opt-in AppArmor confinement for sessions on this
                 connection.  Defaults to ``False`` to preserve the
                 long-standing IPC behavior (sessions run unconfined).
@@ -316,6 +327,11 @@ class IPCClient:
                 with ``supports_tables=False`` / ``supports_images=True`` /
                 ``supports_expandable_content=True`` and a fixed narrow
                 ``content_width`` — so the model adapts its output format.
+
+        Raises:
+            ValueError: if ``env_file`` is None.
+            RelativePathAcrossBoundaryError: if ``workspace_path`` or
+                ``config_root`` is relative (a ``ValueError`` subclass).
         """
         if env_file is None:
             raise ValueError(
@@ -325,6 +341,22 @@ class IPCClient:
                 "path (a minimal one is fine if the daemon gets provider "
                 "config another way)."
             )
+        # A relative ``workspace_path`` / ``config_root`` is refused HERE,
+        # in the sending process, because here is the only place its
+        # meaning is knowable: the daemon resolves what it receives
+        # against its OWN cwd, which nothing keeps equal to this one and
+        # which a daemon restart can change (issue #742).  Refused rather
+        # than absolutised — "resolve it yourself" is a decision the
+        # caller must make explicitly, since ``~/proj`` and ``../proj``
+        # both look relative and mean very different things.
+        require_absolute_path(
+            workspace_path, field="workspace_path",
+            origin="the daemon boundary",
+        )
+        require_absolute_path(
+            config_root, field="config_root",
+            origin="the daemon boundary",
+        )
         self.socket_path = socket_path
         self.auto_start = auto_start
         self.env_file = env_file
@@ -974,9 +1006,28 @@ class IPCClient:
         def get_env(key: str) -> str | None:
             return client_env.get(key) or os.environ.get(key)
 
-        # Trace paths (for backward compatibility, still sent explicitly)
-        trace_log = get_env("JAATO_TRACE_LOG")
-        provider_trace = get_env("PROVIDER_TRACE_LOG")
+        # Trace paths (for backward compatibility, still sent explicitly).
+        # The DAEMON opens these files, so a relative value would land in
+        # the daemon's cwd rather than beside the workspace the author of
+        # the .env meant (issue #742, same mechanism as workspace_path).
+        # Unlike ``workspace_path`` these are resolved rather than
+        # refused: they come from a file INSIDE the workspace, so "beside
+        # the workspace" is what a relative entry there unambiguously
+        # means — and a log path is not worth failing a connect over.
+        workspace_base = Path(self.workspace_path) if self.workspace_path \
+            else Path.cwd()
+
+        def abs_env_path(key: str) -> str | None:
+            raw = get_env(key)
+            if not raw:
+                return raw
+            candidate = Path(raw).expanduser()
+            if candidate.is_absolute():
+                return str(candidate)
+            return str((workspace_base / candidate).resolve())
+
+        trace_log = abs_env_path("JAATO_TRACE_LOG")
+        provider_trace = abs_env_path("PROVIDER_TRACE_LOG")
 
         # Send the effective content width (terminal minus client chrome)
         # so server-side formatters render to the actual available area.

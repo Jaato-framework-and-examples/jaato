@@ -1332,7 +1332,7 @@ This is not optional cleanup — treat missing or inaccurate docstrings as a def
 - [Architecture Overview](docs/architecture.md) - Server-first architecture, event protocol, component diagrams
 - [Sequence Diagrams](docs/sequence-diagram-architecture.md) - Client-server interaction, tool execution flows
 - [Design Philosophy](docs/design-philosophy.md) - Opinionated design decisions and rationale
-- [Path Boundary Pattern](docs/path-boundary-pattern.md) - MSYS2/Windows path handling for new components
+- [Path Boundary Pattern](docs/path-boundary-pattern.md) - MSYS2/Windows path handling for new components, and the cross-process rule: a **relative path never crosses the daemon boundary** — client-supplied `workspace_path` / `config_root` / `env_file` / trace-log paths are REJECTED, not resolved against the daemon's cwd (#742)
 - [OpenTelemetry Design](docs/opentelemetry-design.md) - Comprehensive OTel tracing integration
 - [Reliability Policies Config](docs/reliability-policies-config.md) - JSON schema, per-tool thresholds, prerequisite policies, usage examples
 - [Daemon Extensions](docs/design/daemon-extensions.md) - Extension points for external packages (session hooks, WS interceptors, custom aspects, remote handlers)

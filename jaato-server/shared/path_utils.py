@@ -278,3 +278,20 @@ def get_display_separator() -> str:
     if is_msys2_environment():
         return '/'
     return os.sep
+
+
+# ----------------------------------------------------------------------
+# Cross-process path boundary (issue #742)
+# ----------------------------------------------------------------------
+#
+# Re-exported from the SDK so server-side callers keep importing path
+# helpers from one module.  The contract lives in ``jaato_sdk`` because
+# it belongs to the PROTOCOL — both ends of the daemon boundary enforce
+# it, and the SDK is the half both ends already share.  See
+# ``jaato_sdk/path_boundary.py`` for the rationale and the worked
+# failure.
+from jaato_sdk.path_boundary import (  # noqa: E402,F401
+    RelativePathAcrossBoundaryError,
+    describe_relative_path,
+    require_absolute_path,
+)

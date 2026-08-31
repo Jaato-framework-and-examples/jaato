@@ -246,3 +246,71 @@ All functions live in `shared/path_utils.py`. See that module for the full API:
 | `normalized_equals(path1, path2)` | Comparison | Equality wrapper |
 | `normalize_result_path(path)` | Output | For tool result dicts |
 | `get_display_separator()` | Output | `/` under MSYS2, `os.sep` otherwise |
+| `describe_relative_path(field, value)` | Process boundary | Message iff `value` is relative, else `None` |
+| `require_absolute_path(value, field=...)` | Process boundary | Returns `value`, or raises on a relative one |
+
+The last two are re-exported from `jaato_sdk/path_boundary.py`, where the
+contract lives so both ends of the daemon socket enforce the same rule.
+
+---
+
+## The Other Boundary: Relative Paths Between Processes
+
+The MSYS2 problem above is about *spelling* — the same directory written
+two ways. This one is about *meaning*: the same spelling denoting two
+different directories.
+
+**A relative path is not a portable value across a process boundary.** Its
+referent is the reading process's cwd — ambient state the sender does not
+share, cannot see, and cannot transmit by sending the value. When a client
+sends `workspace_path=".jaato-eval-workspaces/arm0"` to a daemon started
+from a different directory, both processes behave correctly by their own
+lights and the session's workspace silently splits in half.
+
+That is issue #742, observed. The harness wrote each arm's fixture into
+its own directory; the daemon's runner created the git worktree in the
+daemon's. The agent got a workspace holding its repository but not its
+fixture, the grader graded a workspace holding the fixture but no
+repository, and the arm burned 25 provider calls producing nothing. No
+error was raised anywhere. The failure was timing-dependent: earlier runs
+of the identical command worked, because the daemon then happened to share
+the harness's cwd, and restarting the daemon from elsewhere changed the
+result.
+
+### The rule
+
+**Reject, do not resolve.** Absolutising a received relative path against
+the receiver's cwd is the defect — it supplies the sender's missing half
+from the wrong process, and does so silently. A caller that means
+"relative to me" resolves it *before* sending, where the cwd it is
+relative to actually lives.
+
+### Where the guards are
+
+| Boundary | Enforcement |
+|----------|-------------|
+| `IPCClient.__init__` (sender) | Raises `RelativePathAcrossBoundaryError` for `workspace_path` / `config_root` |
+| `CommandRouter._handle_set_workspace` | Refuses, replies `ErrorEvent(error_type="RelativePathAcrossBoundary")` |
+| `SessionManager._apply_client_config` | Refuses the whole handshake — `working_dir`, `config_root`, `env_file`, both trace-log paths — and applies none of it |
+| `BootstrapEnvelope` / `SessionInitEnvelope` | Raise in `__post_init__`: a session bootstrapped with a relative path fails rather than resolving |
+
+Guarded by
+`jaato-server/shared/tests/test_relative_paths_do_not_cross_the_daemon_boundary.py`,
+which asserts on the *rejection*. Asserting that a relative path resolved
+correctly would pass whenever the two processes happen to share a cwd —
+which is precisely how this survived several green runs.
+
+### When relative IS correct
+
+Relativity is fine when the anchor travels with the value or is owned by
+the receiver. `StagedFileSpec.name` is workspace-relative *by contract*
+and is rejected if absolute: the server resolves it against a workspace
+root it owns, not against its cwd. The defect is relativity to **ambient**
+state, not relativity as such.
+
+### Writing a new cross-process path field
+
+1. Send absolute, resolving in the process whose cwd is the referent.
+2. Guard the receiving side with `require_absolute_path(...)`, naming the
+   field as the sender knows it.
+3. Test the refusal, not the resolution.

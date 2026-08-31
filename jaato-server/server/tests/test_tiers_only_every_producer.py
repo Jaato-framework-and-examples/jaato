@@ -63,6 +63,10 @@ def test_producer_daemon_envelope_carries_it(profile):
     server._session_env = {}          # no MODEL_NAME: the profile must suffice
     server._cascade_budget_pool = None
     server._suppress_base_instructions = frozenset()
+    # A bare MagicMock answers ``config_root`` with an auto-created child
+    # whose ``__fspath__`` is a fake RELATIVE path, which the envelope now
+    # refuses (#742).  Real servers carry a str or None.
+    server.config_root = None
     envelope = build_session_envelope(
         server=server, session_id="s1", workspace_path="/tmp/ws",
         profile_name="goal-actor")
