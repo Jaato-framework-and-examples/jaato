@@ -68,6 +68,120 @@ class ScriptGraderCase(unittest.TestCase):
         self.assertTrue(any("boom" in line for line in v.evidence))
 
 
+class ScriptGraderParamsCase(unittest.TestCase):
+    """The task's own inputs reach the shell (jaato #762).
+
+    A script grader cannot read ``GraderContext``, so an input-dependent
+    check used to have no choice but to hardcode the input — after which
+    re-pointing the task at a different input graded every arm against
+    the old one's criteria, silently.  These exercise the export that
+    lets the grader follow the input instead.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.ws = Path(self.tmp.name)
+        self.addCleanup(self.tmp.cleanup)
+
+    def grade(self, run, params, **ctx):
+        spec = GraderSpec(kind="script", config={"run": run})
+        return ScriptGrader(spec).grade(
+            _context(self.ws, agent_params=params, **ctx))
+
+    def emit(self, run, params):
+        """Run ``run``, returning what it wrote to stdout."""
+        v = self.grade(f"{run} > out.txt", params)
+        self.assertEqual(v.state, PASS, v.blocked_reason or v.detail)
+        return (self.ws / "out.txt").read_text().strip()
+
+    def test_scalar_param_is_visible(self):
+        self.assertEqual(
+            self.emit('printf %s "$JAATO_EVAL_PARAM_ISSUE_ID"',
+                      {"issue_id": "716"}),
+            "716")
+
+    def test_the_grader_follows_the_input(self):
+        """The defect itself: the same manifest, a changed input, and a
+        verdict that moves with it rather than staying behind."""
+        run = '[ "$JAATO_EVAL_PARAM_ISSUE_ID" = "716" ]'
+        self.assertEqual(self.grade(run, {"issue_id": "716"}).state, PASS)
+        self.assertEqual(self.grade(run, {"issue_id": "715"}).state, FAIL)
+
+    def test_key_is_upper_cased_and_shell_safe(self):
+        """``issue-id`` has no environment name of its own; it gets one."""
+        self.assertEqual(
+            self.emit('printf %s "$JAATO_EVAL_PARAM_ISSUE_ID"',
+                      {"issue-id": "716"}),
+            "716")
+
+    def test_non_scalar_params_are_json(self):
+        """A dict has no obvious flat representation, so it gets the one
+        a grader can parse back."""
+        self.assertEqual(
+            self.emit('printf %s "$JAATO_EVAL_PARAM_SPEC"',
+                      {"spec": {"b": 2, "a": [1, "x"]}}),
+            '{"a": [1, "x"], "b": 2}')
+
+    def test_bool_is_the_json_spelling_not_pythons(self):
+        """The author wrote ``true`` in YAML; ``True`` would be a value
+        their shell comparison never matches."""
+        self.assertEqual(
+            self.emit('printf %s "$JAATO_EVAL_PARAM_STRICT"',
+                      {"strict": True}),
+            "true")
+
+    def test_none_is_null_not_empty(self):
+        """An explicit null must stay distinguishable from an absent key —
+        empty string is what both would otherwise look like."""
+        self.assertEqual(
+            self.emit('printf %s "$JAATO_EVAL_PARAM_TARGET"',
+                      {"target": None}),
+            "null")
+
+    def test_whole_mapping_is_exported_as_json(self):
+        """The only way a shell can tell 'no such parameter' from 'the
+        parameter is empty'."""
+        self.assertEqual(
+            self.emit('printf %s "$JAATO_EVAL_PARAMS"',
+                      {"issue_id": "716", "repo": "org/thing"}),
+            '{"issue_id": "716", "repo": "org/thing"}')
+
+    def test_absent_param_leaves_the_variable_unset(self):
+        """Not exported-and-empty: ``set -u`` is then a working guard for
+        a grader that wants absence to be loud."""
+        v = self.grade('[ -z "${JAATO_EVAL_PARAM_NOPE+set}" ]',
+                       {"issue_id": "716"})
+        self.assertEqual(v.state, PASS)
+
+    def test_set_u_makes_a_missing_param_fail_loudly(self):
+        """The documented convention, executed: a grader that opts in
+        does not pass vacuously on an input the task never declared."""
+        v = self.grade('set -u; printf %s "$JAATO_EVAL_PARAM_NOPE"', {})
+        self.assertEqual(v.state, FAIL)
+
+    def test_colliding_keys_are_blocked_not_arbitrated(self):
+        """Two keys wanting one variable is a task defect.  Picking a
+        winner would grade against an input the arm may not have run
+        with — exactly the disagreement this export removes."""
+        v = self.grade("true", {"issue-id": "715", "issue_id": "716"})
+        self.assertEqual(v.state, BLOCKED)
+        self.assertIn("JAATO_EVAL_PARAM_ISSUE_ID", v.blocked_reason)
+        self.assertIn("rename", v.blocked_reason)
+
+    def test_params_do_not_displace_the_run_marker(self):
+        v = self.grade('[ "$JAATO_EVAL" = "1" ]', {"issue_id": "716"})
+        self.assertEqual(v.state, PASS)
+
+    def test_unserializable_value_does_not_escape_the_grader(self):
+        """A value JSON has no encoding for still reaches the shell as
+        JSON — a quoted string — rather than raising into the sweep
+        driver, which would take down an arm's other graders too."""
+        self.assertEqual(
+            self.emit('printf %s "$JAATO_EVAL_PARAM_WHERE"',
+                      {"where": Path("/tmp/x")}),
+            '"/tmp/x"')
+
+
 PROC_PAYLOAD_ONLY = '''
 def validate(payload, context):
     return [] if payload.get("ok") else ["not ok"]
