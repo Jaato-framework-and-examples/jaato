@@ -714,6 +714,124 @@ def gc() -> Rendered:
 
 
 # --------------------------------------------------------------------- env
+#
+# A session's env vars have TWO routes, and only the lower-precedence one was
+# ever named here (jaato #752): `explain env` said "set these in the workspace
+# .env" while the profile `env:` block outranks it -- and is the ONLY route
+# available to a caller that does not own the .env.  The author who needed it
+# found it by reading `server/core.py`, which is the failure this whole verb
+# exists to prevent.
+#
+# The note deliberately spends its longest paragraph on PATH RESOLUTION, which
+# is not where you would expect the difficulty to be.  Three plausible answers
+# are all wrong, and each was believed by someone working on this: the runner
+# is NOT chdir'd into the workspace at spawn (measured -- it is forked into
+# the daemon's cwd, and `core.py:336` still promises otherwise);
+# `${workspaceRoot}` does NOT help (it expands daemon-side, at a point where
+# the session's workspace is not the one in scope); and a relative value is
+# NOT rewritten on the way in.  What actually makes a relative trace path land
+# per-session is the READER -- `jaato_sdk.trace._resolve_trace_file` joins it
+# onto JAATO_WORKSPACE_ROOT, which the runner seeds per session.
+#
+# So the note names the reader instead of stating a rule about paths.  That is
+# also the only form that survives the process cwd moving underneath it, which
+# it does: `subagent/plugin.py` chdirs the whole runner into the workspace when
+# it spawns a subagent.  A cwd that changes mid-session is not something to
+# write a path against.
+
+#: Worked example wherever the profile ``env:`` block is documented -- HERE and
+#: in the commented block ``new`` emits (``build._set_profile_yaml``).  It is a
+#: path knob on purpose: the resolution fact below is the half that bites, and
+#: this is the variable people reach for when a session misbehaves.
+ENV_EXAMPLE_VAR = "JAATO_PROVIDER_TRACE"
+
+#: The example's VALUE, shared for the same reason as its name.  Deliberately
+#: RELATIVE: ``jaato_sdk.trace._resolve_trace_file`` joins a relative trace
+#: path onto ``JAATO_WORKSPACE_ROOT``, which the runner seeds per session, so
+#: this form gives every session its own trace in its own workspace.  The
+#: absolute form is fixed at the PROFILE and every session sharing that
+#: profile appends to one interleaved file -- the failure mode this example
+#: exists to steer people away from, and the one an earlier draft of this note
+#: recommended (jaato #752 review).
+ENV_EXAMPLE_VALUE = "provider_trace.log"
+
+#: The three load-bearing, non-obvious properties of the profile ``env:``
+#: block, rendered by BOTH halves of its documentation from this ONE
+#: definition.
+#:
+#: Sharing the strings is the anti-drift mechanism.  #716's
+#: ``test_a_real_run_writes_only_documented_files`` asserts which FILES ``new``
+#: writes, never their content, so a fact stated in the generated comment and
+#: not in ``explain env`` (or reworded in one of them) would drift with nothing
+#: failing -- "documentation about a generator rots", one level down.  Kept
+#: short enough to render as a comment line inside a generated YAML file.
+PROFILE_ENV_FACTS = (
+    "outranks the workspace .env, per key",
+    "takes ${VAR} expansion + secret URIs (pass://, vault://, ...)",
+    "is applied verbatim — a relative path is resolved by its READER",
+)
+
+
+def _profile_env_note() -> List[str]:
+    """The two-routes note that heads ``explain env``.
+
+    Its own function because it renders :data:`PROFILE_ENV_FACTS` in a
+    comprehension, and folding that back into :func:`env` puts that function
+    over the repository's cyclomatic-complexity ceiling.
+
+    Returns:
+        Rendered lines, blank-line separated from the variable catalogue that
+        follows them.
+    """
+    lines = [
+        "",
+        "  TWO ROUTES SET THESE — the profile block wins:",
+        "    <workspace>/.env                     VAR=value"
+        "           per-WORKSPACE  (lower)",
+        "    .jaato/profiles/<set>/<agent>.yaml   env: {VAR: value}"
+        "   per-SESSION    (higher)",
+        "  The profile `env:` block:",
+    ]
+    lines += [f"    - {fact}" for fact in PROFILE_ENV_FACTS]
+    lines += [
+        "      Nothing rewrites the value on the way in, so WHERE a relative "
+        "path",
+        "      lands is the reader's business, and readers differ:",
+        "        · the trace vars (JAATO_PROVIDER_TRACE / JAATO_TRACE_LOG) "
+        "join theirs",
+        "          onto JAATO_WORKSPACE_ROOT, which the runner seeds per "
+        "session — so a",
+        "          RELATIVE value gives each session its own file in its own "
+        "workspace,",
+        "          and an ABSOLUTE one is fixed at the profile and shared by "
+        "every",
+        "          session using it (jaato_sdk/trace.py _resolve_trace_file).",
+        "        · a reader that just open()s the value gets the runner "
+        "process's cwd,",
+        "          which is NOT the workspace: the runner is forked into the "
+        "daemon's",
+        "          cwd (core.py:1029 — the chdir promised at core.py:336 does "
+        "not",
+        "          happen), and the subagent path can chdir it later, so it is "
+        "not a",
+        "          thing to write a path against.  `${workspaceRoot}` / "
+        "`${cwd}` are no",
+        "          help either: they expand daemon-side, before the session "
+        "exists.",
+        "    - merges per KEY across `inherits:` (a child wins only the keys "
+        "it sets)",
+        "    - is the ONLY route when the .env is not yours to write — "
+        "jaato-eval writes",
+        "      each arm's .env itself (JAATO_PROFILE_SET and nothing else), so "
+        "a task",
+        "      author cannot put anything there.",
+        "",
+        "        env:",
+        f"          {ENV_EXAMPLE_VAR}: {ENV_EXAMPLE_VALUE}"
+        "    # one file per session",
+    ]
+    return lines
+
 
 def env(filter_: str = None) -> Rendered:
     """Env vars the installed daemon + plugins read (optionally filtered).
@@ -742,8 +860,9 @@ def env(filter_: str = None) -> Rendered:
     if filter_:
         head += f" — filter '{filter_}'"
     lines = [head,
-             "  (set these in the workspace .env; commented = optional; "
-             "descriptions come from `# env: ...` comments at the read site)"]
+             "  (commented = optional; descriptions come from `# env: ...` "
+             "comments at the read site)"]
+    lines += _profile_env_note()
     for cat in sorted(groups):
         lines.append(f"\n  [{cat}]")
         w = max((len(v.name) for v in groups[cat]), default=0)

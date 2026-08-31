@@ -24,6 +24,21 @@ def _args(**kw):
     return ns
 
 
+def _live(text: str) -> str:
+    """*text* with its comment lines removed.
+
+    An assertion about what the generator EMITS must not be answerable by
+    prose.  The tier-2 template carries commented hints — ``model_tiers:``,
+    and since jaato #752 an ``env:`` block whose text names the secret-URI
+    schemes those values accept — so a bare ``"pass://" not in prof`` reads a
+    documented scheme name as a hardcoded credential and convicts a change
+    that never touched the credential.  What this module guards is the
+    ACTIVE ``api_key`` line.
+    """
+    return "\n".join(ln for ln in text.splitlines()
+                     if not ln.lstrip().startswith("#"))
+
+
 # ------------------------------------------------------------- mode parsing
 
 def test_resolve_secrets_mode_variants():
@@ -66,7 +81,7 @@ def test_default_mode_emits_env_var_interpolation_not_pass(tmp_path):
     assert rc == 0  # valid by construction
     prof = (tmp_path / ".jaato" / "profiles" / "or_x" / "a.yaml").read_text()
     assert 'api_key: "${JAATO_OPENROUTER_API_KEY}"' in prof
-    assert "pass://" not in prof
+    assert "pass://" not in _live(prof)
 
 
 def test_default_mode_surfaces_key_var_in_env_and_gitignores_it(tmp_path):

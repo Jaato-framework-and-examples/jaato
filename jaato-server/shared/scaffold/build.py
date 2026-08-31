@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from . import archetypes as _archetypes
+from . import explain as _explain
 from . import introspect
 from . import validate as _validate
 
@@ -590,6 +591,18 @@ def _set_profile_yaml(agent: str, provider: str, model: str,
     secrets-mode section above): ``env`` interpolates ``${<PROVIDER_KEY_ENV>}``
     (default, public-checkout friendly), ``none`` omits it, ``uri`` emits a
     ``<scheme>://<path>`` secret URI.
+
+    Two knobs are emitted COMMENTED OUT, in the same shape: a worked example
+    plus an ``explain`` pointer.  Both earn the space by being undiscoverable
+    from the authoring surface -- ``model_tiers`` because nothing in a profile
+    hints that a stage can span models, ``env`` because the tool whose job is
+    env discoverability named only the lower-precedence route (jaato #752).
+    The bar is that high on purpose: a generated profile where every knob has
+    a commented example is noise nobody reads.  The ``env:`` facts come from
+    :data:`explain.PROFILE_ENV_FACTS` rather than being restated here, so this
+    half and ``explain env`` cannot drift apart; the worked example's value
+    comes from :data:`explain.ENV_EXAMPLE_VALUE` for the same reason, and is
+    relative rather than absolute on purpose (see that constant).
     """
     info = introspect.resolve_provider(provider)
     lines = [
@@ -607,6 +620,17 @@ def _set_profile_yaml(agent: str, provider: str, model: str,
         "#   vision:   {model: google/gemini-2.5-flash-lite, provider: openrouter}",
         "#   initial: executor",
         "#   fallback: executor",
+        "# Optional per-SESSION env vars.  This block:",
+    ]
+    lines += [f"#   - {fact}" for fact in _explain.PROFILE_ENV_FACTS]
+    lines += [
+        "#     — the trace vars resolve theirs against the session workspace,",
+        "#     so the RELATIVE form below writes one file per session, in its",
+        "#     own workspace, where an absolute path would be fixed at this",
+        "#     profile and shared by every session using it.",
+        "#     See `jaato-scaffold explain env`.",
+        "# env:",
+        f"#   {_explain.ENV_EXAMPLE_VAR}: {_explain.ENV_EXAMPLE_VALUE}",
     ]
     knobs = info.knobs if info else None
     if knobs is not None:
