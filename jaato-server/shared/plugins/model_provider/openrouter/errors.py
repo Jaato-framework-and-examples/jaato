@@ -182,3 +182,65 @@ class InfrastructureError(OpenRouterError):
             "The request will be automatically retried.",
         ])
         return "\n".join(lines)
+
+
+class StallTimeoutError(InfrastructureError):
+    """A request made no progress inside the provider's idle deadline.
+
+    Raised when a streaming turn produces no *payload* for
+    ``stream_idle_timeout`` seconds — the connection is alive (OpenRouter
+    keeps sending ``: OPENROUTER PROCESSING`` SSE comments, so neither the
+    socket nor ``httpx``'s read timeout ever notices) but nothing is
+    coming back.  Before this existed the provider waited forever and the
+    session sat until something *outside* it — a harness arm-timeout, a
+    budget ceiling — tore it down (#732).
+
+    Subclasses :class:`InfrastructureError` deliberately: a stall is a
+    transient upstream condition, so
+    :meth:`OpenRouterProvider.classify_error` already routes it to
+    ``with_retry``'s exponential backoff without a second entry.  There
+    is no ``Retry-After`` to read on this path — the upstream never
+    answered — so the standard backoff applies (#720 handles the case
+    where a hint *does* exist).
+    """
+
+    def __init__(
+        self,
+        idle_timeout: float,
+        *,
+        chunks_received: int = 0,
+        generation_id: Optional[str] = None,
+        model: Optional[str] = None,
+    ):
+        self.idle_timeout = idle_timeout
+        self.chunks_received = chunks_received
+        self.generation_id = generation_id
+        self.model = model
+        super().__init__(status_code=0, original_error=None)
+
+    def _format_message(self) -> str:
+        phase = (
+            "before the first content chunk arrived"
+            if self.chunks_received == 0
+            else f"after {self.chunks_received} content chunk(s)"
+        )
+        lines = [
+            f"OpenRouter stalled: no response payload for "
+            f"{self.idle_timeout:g}s ({phase}).",
+        ]
+        if self.model:
+            lines.append(f"Model: {self.model}")
+        if self.generation_id:
+            lines.append(f"Generation ID: {self.generation_id}")
+        lines.extend([
+            "",
+            "The connection stayed open but the upstream stopped producing.",
+            "This is a transient error.",
+            "The request will be automatically retried.",
+            "",
+            "If the model legitimately needs longer to think, raise the",
+            "deadline (0 disables it entirely):",
+            "  plugin_configs.openrouter.framework_overrides.stream_idle_timeout",
+            "  or JAATO_OPENROUTER_STREAM_IDLE_TIMEOUT=<seconds>",
+        ])
+        return "\n".join(lines)

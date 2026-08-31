@@ -21,6 +21,8 @@ ENV_OPENROUTER_CONTEXT_LENGTH = "JAATO_OPENROUTER_CONTEXT_LENGTH"
 ENV_OPENROUTER_HTTP_REFERER = "JAATO_OPENROUTER_HTTP_REFERER"
 ENV_OPENROUTER_APP_TITLE = "JAATO_OPENROUTER_APP_TITLE"
 ENV_OPENROUTER_APP_CATEGORIES = "JAATO_OPENROUTER_APP_CATEGORIES"
+ENV_OPENROUTER_REQUEST_TIMEOUT = "JAATO_OPENROUTER_REQUEST_TIMEOUT"
+ENV_OPENROUTER_STREAM_IDLE_TIMEOUT = "JAATO_OPENROUTER_STREAM_IDLE_TIMEOUT"
 
 # OpenRouter uses these header names for app attribution / rankings.
 # See https://openrouter.ai/docs/app-attribution.
@@ -47,6 +49,37 @@ DEFAULT_APP_CATEGORIES = ("cli-agent",)
 # OpenRouter's documented limits on the X-OpenRouter-Categories header.
 MAX_CATEGORIES_PER_REQUEST = 5
 MAX_CATEGORY_LENGTH = 30
+
+# ============================================================
+# Request deadlines (#732)
+# ============================================================
+#
+# Nothing inside the provider used to bound a single request: whether the
+# upstream stalled or the connection silently died, the provider waited
+# forever and delegated the timeout to whoever happened to be above it
+# (a harness arm-timeout, a budget ceiling).  These three defaults are
+# what a request is now bounded by.  Each is overridable per-profile
+# (``plugin_configs.openrouter.framework_overrides``) or by env var,
+# because a legitimate long generation and a dead socket look identical
+# from here.
+
+# Connect deadline — TCP + TLS to openrouter.ai.  Deliberately short:
+# a connect that hasn't completed in 15s is not going to.
+DEFAULT_CONNECT_TIMEOUT = 15.0
+
+# BYTE-level deadline, handed to httpx as read / write / pool.  Bounds a
+# socket that has gone silent entirely (the SDK's own default is 600s, so
+# this only makes the value explicit and configurable).
+DEFAULT_REQUEST_TIMEOUT = 600.0
+
+# PAYLOAD-level deadline for streaming turns, enforced by
+# :class:`~.stall.StreamStallGuard`.  The read timeout above cannot see
+# this failure: OpenRouter keeps a stalled stream fed with
+# ``: OPENROUTER PROCESSING`` SSE comments, which reset the byte clock
+# while the caller's chunk loop never ticks.  300s is set above any
+# realistic time-to-first-token (reasoning models can think for minutes)
+# and far below the 20+ minute hangs #732 measured.
+DEFAULT_STREAM_IDLE_TIMEOUT = 300.0
 
 
 def resolve_api_key() -> Optional[str]:
@@ -86,6 +119,38 @@ def resolve_context_length() -> Optional[int]:
         except ValueError:
             pass
     return None
+
+
+def _resolve_timeout(env_var: str, default: float) -> float:
+    """Read a non-negative float deadline from ``env_var``.
+
+    ``0`` is meaningful — it disables the deadline — so it is accepted and
+    returned as-is.  A negative or unparseable value falls back to
+    ``default`` rather than failing: an env-var typo should not make the
+    provider unusable, and the deadline it lands on is still bounded.
+    """
+    raw = os.environ.get(env_var)
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        return default
+    return value if value >= 0 else default
+
+
+def resolve_request_timeout() -> float:
+    """Resolve the byte-level request deadline (httpx read/write/pool)."""
+    return _resolve_timeout(  # env: per-request byte deadline in seconds (0 disables)
+        ENV_OPENROUTER_REQUEST_TIMEOUT, DEFAULT_REQUEST_TIMEOUT,
+    )
+
+
+def resolve_stream_idle_timeout() -> float:
+    """Resolve the payload-level idle deadline for streaming turns."""
+    return _resolve_timeout(  # env: streaming payload idle deadline in seconds (0 disables)
+        ENV_OPENROUTER_STREAM_IDLE_TIMEOUT, DEFAULT_STREAM_IDLE_TIMEOUT,
+    )
 
 
 def resolve_http_referer() -> str:
