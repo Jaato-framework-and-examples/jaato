@@ -177,13 +177,21 @@ BASELINE: Dict[str, int] = {
     "jaato-server/shared/jaato_runtime.py::JaatoRuntime.get_system_instructions": 28,
     "jaato-server/shared/jaato_runtime.py::JaatoRuntime.get_tool_schemas": 16,
     "jaato-server/shared/jaato_session.py::JaatoSession._execute_function_calls_parallel": 20,
-    "jaato-server/shared/jaato_session.py::JaatoSession._execute_single_tool": 33,
-    "jaato-server/shared/jaato_session.py::JaatoSession._execute_single_tool_for_parallel": 30,
+    # The next two, and _run_chat_loop_with_parts below, each rose by 1 in
+    # #750: the three tool-dispatch sites gained the guard that refuses a
+    # call whose arguments the provider could not read, rather than
+    # executing a zero-argument call the model never made.  The branch has
+    # to sit at the dispatch itself -- that is the last point before the
+    # executor runs -- so there is no helper to hide it in.  The same
+    # change took four provider functions DOWN (see the anthropic and
+    # github_models entries), so the tree's total moved the right way.
+    "jaato-server/shared/jaato_session.py::JaatoSession._execute_single_tool": 34,
+    "jaato-server/shared/jaato_session.py::JaatoSession._execute_single_tool_for_parallel": 31,
     "jaato-server/shared/jaato_session.py::JaatoSession._execute_tools_and_continue": 22,
     "jaato-server/shared/jaato_session.py::JaatoSession._get_framework_enrichments": 16,
     "jaato-server/shared/jaato_session.py::JaatoSession._handle_cancellation": 18,
     "jaato-server/shared/jaato_session.py::JaatoSession._run_chat_loop": 89,
-    "jaato-server/shared/jaato_session.py::JaatoSession._run_chat_loop_with_parts": 35,
+    "jaato-server/shared/jaato_session.py::JaatoSession._run_chat_loop_with_parts": 36,
     "jaato-server/shared/jaato_session.py::JaatoSession._send_tool_results_and_continue": 27,
     "jaato-server/shared/jaato_session.py::JaatoSession._track_activated_tools_in_budget": 20,
     "jaato-server/shared/jaato_session.py::JaatoSession._update_conversation_budget": 37,
@@ -267,7 +275,7 @@ BASELINE: Dict[str, int] = {
     "jaato-server/shared/plugins/model_provider/_openai_compat/converters.py::message_to_openai": 26,
     "jaato-server/shared/plugins/model_provider/anthropic/converters.py::validate_tool_use_pairing": 19,
     "jaato-server/shared/plugins/model_provider/anthropic/provider.py::AnthropicProvider._handle_api_error": 22,
-    "jaato-server/shared/plugins/model_provider/anthropic/provider.py::AnthropicProvider._stream_response": 55,
+    "jaato-server/shared/plugins/model_provider/anthropic/provider.py::AnthropicProvider._stream_response": 51,
     "jaato-server/shared/plugins/model_provider/anthropic/provider.py::AnthropicProvider.complete": 37,
     "jaato-server/shared/plugins/model_provider/anthropic/provider.py::AnthropicProvider.initialize": 25,
     "jaato-server/shared/plugins/model_provider/anthropic/provider.py::AnthropicProvider.verify_auth": 16,
@@ -281,17 +289,16 @@ BASELINE: Dict[str, int] = {
     "jaato-server/shared/plugins/model_provider/claude_cli/provider.py::ClaudeCLIProvider._stream_cli_messages": 27,
     "jaato-server/shared/plugins/model_provider/doubleword/auth.py::validate_api_key": 16,
     "jaato-server/shared/plugins/model_provider/doubleword/provider.py::DoublewordProvider.verify_auth": 17,
-    "jaato-server/shared/plugins/model_provider/github_models/converters.py::message_from_sdk": 17,
     "jaato-server/shared/plugins/model_provider/github_models/copilot_client.py::CopilotClient._make_request": 24,
     "jaato-server/shared/plugins/model_provider/github_models/copilot_client.py::CopilotClient.complete_responses_stream": 22,
     "jaato-server/shared/plugins/model_provider/github_models/copilot_client.py::CopilotClient.list_models_with_info": 17,
     "jaato-server/shared/plugins/model_provider/github_models/provider.py::GitHubModelsProvider._build_copilot_messages_from": 19,
     "jaato-server/shared/plugins/model_provider/github_models/provider.py::GitHubModelsProvider._complete_azure_streaming": 41,
-    "jaato-server/shared/plugins/model_provider/github_models/provider.py::GitHubModelsProvider._copilot_responses_streaming": 21,
+    "jaato-server/shared/plugins/model_provider/github_models/provider.py::GitHubModelsProvider._copilot_responses_streaming": 20,
     "jaato-server/shared/plugins/model_provider/github_models/provider.py::GitHubModelsProvider._copilot_streaming_response": 20,
     "jaato-server/shared/plugins/model_provider/github_models/provider.py::GitHubModelsProvider._fetch_models_from_api.parse_model": 16,
     "jaato-server/shared/plugins/model_provider/github_models/provider.py::GitHubModelsProvider._handle_api_error": 27,
-    "jaato-server/shared/plugins/model_provider/github_models/provider.py::GitHubModelsProvider._responses_api_response_to_provider": 21,
+    "jaato-server/shared/plugins/model_provider/github_models/provider.py::GitHubModelsProvider._responses_api_response_to_provider": 19,
     "jaato-server/shared/plugins/model_provider/github_models/provider.py::GitHubModelsProvider.initialize": 18,
     "jaato-server/shared/plugins/model_provider/google_genai/converters.py::part_from_sdk": 23,
     "jaato-server/shared/plugins/model_provider/google_genai/provider.py::GoogleGenAIProvider._complete_streaming": 43,

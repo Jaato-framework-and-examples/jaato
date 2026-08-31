@@ -86,6 +86,7 @@ from jaato_sdk.plugins.model_provider.types import (
     TokenUsage,
     ThinkingConfig,
     TurnResult,
+    parse_tool_call_arguments,
     resolve_tool_use_finish,
 )
 from .cache import (
@@ -1530,18 +1531,25 @@ class OpenRouterProvider(ModalityCapabilityMixin):
                 tc = tool_call_accumulators[idx]
                 func_name = tc.get("function", {}).get("name")
                 if func_name:
-                    try:
-                        args = json.loads(tc.get("function", {}).get("arguments", "{}"))
-                    except json.JSONDecodeError:
-                        args = {}
+                    # Unreadable arguments stay unreadable (#750): a parse
+                    # failure must not present as a zero-argument call.
+                    args, unreadable_args = parse_tool_call_arguments(
+                        tc.get("function", {}).get("arguments")
+                    )
                     tool_id = tc.get("id")
                     original_name = get_original_tool_name(func_name)
                     if not tool_id:
                         self._trace(f"ERROR: Missing tool call ID for {func_name}")
+                    if unreadable_args is not None:
+                        self._trace(
+                            f"UNREADABLE_TOOL_ARGS name={original_name} "
+                            f"chars={len(unreadable_args)}"
+                        )
                     fc = FunctionCall(
                         id=tool_id,
                         name=original_name,
                         args=args,
+                        unreadable_args=unreadable_args,
                     )
                     parts.append(Part.from_function_call(fc))
                     function_calls.append(fc)

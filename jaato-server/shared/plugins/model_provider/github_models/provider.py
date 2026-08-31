@@ -63,6 +63,7 @@ from jaato_sdk.plugins.model_provider.types import (
     ToolSchema,
     TokenUsage,
     TurnResult,
+    parse_tool_call_arguments,
     resolve_tool_use_finish,
 )
 from .converters import (
@@ -866,11 +867,12 @@ class GitHubModelsProvider(ModalityCapabilityMixin):
                         thinking = "\n".join(t for t in reasoning_texts if t)
 
             elif item.type == "function_call":
-                # Convert function call
-                try:
-                    args = json.loads(item.arguments or "{}")
-                except json.JSONDecodeError:
-                    args = {}
+                # Convert function call.  Unreadable arguments stay
+                # unreadable (#750) -- an empty dict here would present a
+                # failed decode as a zero-argument call.
+                args, unreadable_args = parse_tool_call_arguments(
+                    item.arguments
+                )
                 # Restore original tool name from sanitized version
                 sanitized_name = item.name or ""
                 original_name = get_original_tool_name(sanitized_name)
@@ -878,6 +880,7 @@ class GitHubModelsProvider(ModalityCapabilityMixin):
                     id=item.call_id,
                     name=original_name,
                     args=args,
+                    unreadable_args=unreadable_args,
                 )
                 parts.append(Part.from_function_call(fc))
                 finish_reason = FinishReason.TOOL_USE
@@ -919,10 +922,9 @@ class GitHubModelsProvider(ModalityCapabilityMixin):
             # Extract tool calls
             if choice.message.tool_calls:
                 for tc in choice.message.tool_calls:
-                    try:
-                        args = json.loads(tc.get("function", {}).get("arguments", "{}"))
-                    except json.JSONDecodeError:
-                        args = {}
+                    args, unreadable_args = parse_tool_call_arguments(
+                        tc.get("function", {}).get("arguments")
+                    )
                     # Restore original tool name from sanitized version
                     sanitized_name = tc.get("function", {}).get("name", "")
                     original_name = get_original_tool_name(sanitized_name)
@@ -930,6 +932,7 @@ class GitHubModelsProvider(ModalityCapabilityMixin):
                         id=tc.get("id"),
                         name=original_name,
                         args=args,
+                        unreadable_args=unreadable_args,
                     )
                     parts.append(Part.from_function_call(fc))
                 finish_reason = FinishReason.TOOL_USE
@@ -1796,10 +1799,11 @@ class GitHubModelsProvider(ModalityCapabilityMixin):
             for idx in sorted(tool_call_accumulators.keys()):
                 tc = tool_call_accumulators[idx]
                 if tc.get("function", {}).get("name"):
-                    try:
-                        args = json.loads(tc.get("function", {}).get("arguments", "{}"))
-                    except json.JSONDecodeError:
-                        args = {}
+                    # Unreadable arguments stay unreadable (#750): the
+                    # accumulated delta text may be a severed object.
+                    args, unreadable_args = parse_tool_call_arguments(
+                        tc.get("function", {}).get("arguments")
+                    )
                     # OpenAI/Copilot API should always return an ID for tool calls.
                     # If missing, log for investigation - this indicates a parsing issue.
                     tool_id = tc.get("id")
@@ -1812,6 +1816,7 @@ class GitHubModelsProvider(ModalityCapabilityMixin):
                         id=tool_id,  # May be None - will cause API error, which is correct
                         name=original_name,
                         args=args,
+                        unreadable_args=unreadable_args,
                     )
                     parts.append(Part.from_function_call(fc))
                     function_calls.append(fc)
@@ -1999,10 +2004,9 @@ class GitHubModelsProvider(ModalityCapabilityMixin):
                 elif event_type == "function_call":
                     # Function call complete
                     flush_text_block()
-                    try:
-                        args = json.loads(event.get("arguments", "{}"))
-                    except json.JSONDecodeError:
-                        args = {}
+                    args, unreadable_args = parse_tool_call_arguments(
+                        event.get("arguments")
+                    )
                     # Restore original tool name from sanitized version
                     sanitized_name = event.get("name", "")
                     original_name = get_original_tool_name(sanitized_name)
@@ -2010,6 +2014,7 @@ class GitHubModelsProvider(ModalityCapabilityMixin):
                         id=event.get("call_id"),
                         name=original_name,
                         args=args,
+                        unreadable_args=unreadable_args,
                     )
                     parts.append(Part.from_function_call(fc))
                     function_calls.append(fc)

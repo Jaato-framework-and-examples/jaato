@@ -65,6 +65,7 @@ from jaato_sdk.plugins.model_provider.types import (
     ToolSchema,
     TokenUsage,
     TurnResult,
+    parse_tool_call_arguments,
     resolve_tool_use_finish,
 )
 from .._openai_compat.converters import (
@@ -831,19 +832,27 @@ class VLLMProvider(OpenAICompatLocalHostProvider):
                 tc = tool_call_accumulators[idx]
                 func_name = tc.get("function", {}).get("name")
                 if func_name:
-                    try:
-                        args = json.loads(tc.get("function", {}).get("arguments", "{}"))
-                    except json.JSONDecodeError:
-                        args = {}
+                    # Unreadable arguments stay unreadable (#750): a parse
+                    # failure must not present as a zero-argument call.
+                    args, unreadable_args = parse_tool_call_arguments(
+                        tc.get("function", {}).get("arguments")
+                    )
                     tool_id = tc.get("id")
                     original_name = get_original_tool_name(func_name)
                     # Quirk: coerce stringified args BEFORE building the
                     # FunctionCall so downstream (schema validator,
-                    # ledger, history) sees the typed shape.
-                    args = self._coerce_args_to_schema(
-                        args, schemas_by_name.get(original_name),
+                    # ledger, history) sees the typed shape.  Nothing to
+                    # coerce when the arguments never decoded.
+                    if unreadable_args is None:
+                        args = self._coerce_args_to_schema(
+                            args, schemas_by_name.get(original_name),
+                        )
+                    fc = FunctionCall(
+                        id=tool_id,
+                        name=original_name,
+                        args=args,
+                        unreadable_args=unreadable_args,
                     )
-                    fc = FunctionCall(id=tool_id, name=original_name, args=args)
                     parts.append(Part.from_function_call(fc))
                     function_calls.append(fc)
             tool_call_accumulators.clear()

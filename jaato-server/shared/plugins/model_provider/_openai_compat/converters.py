@@ -24,6 +24,7 @@ from jaato_sdk.plugins.model_provider.types import (
     Role,
     TokenUsage,
     ToolResult,
+    parse_tool_call_arguments,
     render_result_for_model,
     ToolSchema,
 )
@@ -254,16 +255,17 @@ def message_from_openai(msg: Dict[str, Any]) -> Message:
             parts.append(Part(text=content))
         for tc in msg.get("tool_calls", []):
             func = tc.get("function", {})
-            args = {}
-            if func.get("arguments"):
-                try:
-                    args = json.loads(func["arguments"])
-                except json.JSONDecodeError:
-                    args = {"raw": func["arguments"]}
+            # A ``{"raw": ...}`` stand-in was still a fabricated argument
+            # mapping -- one the model never wrote and the tool has no
+            # parameter for.  The raw text rides on its own field (#750).
+            args, unreadable_args = parse_tool_call_arguments(
+                func.get("arguments")
+            )
             parts.append(Part(function_call=FunctionCall(
                 id=tc.get("id", ""),
                 name=get_original_tool_name(func.get("name", "")),
                 args=args,
+                unreadable_args=unreadable_args,
             )))
         return Message(role=Role.MODEL, parts=parts)
 
@@ -325,16 +327,14 @@ def extract_parts_from_response(response: "ChatCompletion") -> List[Part]:
         # Tool calls follow text
         if choice.message.tool_calls:
             for tc in choice.message.tool_calls:
-                args = {}
-                if tc.function.arguments:
-                    try:
-                        args = json.loads(tc.function.arguments)
-                    except json.JSONDecodeError:
-                        args = {"raw": tc.function.arguments}
+                args, unreadable_args = parse_tool_call_arguments(
+                    tc.function.arguments
+                )
                 fc = FunctionCall(
                     id=tc.id,
                     name=get_original_tool_name(tc.function.name),
                     args=args,
+                    unreadable_args=unreadable_args,
                 )
                 parts.append(Part.from_function_call(fc))
 

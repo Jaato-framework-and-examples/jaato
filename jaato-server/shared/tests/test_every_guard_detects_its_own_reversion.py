@@ -199,7 +199,11 @@ def test_at_least_one_guard_declares_a_reversion():
 )
 def test_the_guard_fails_when_its_defect_is_put_back(module_name, rev):
     path = ROOT / rev.target
-    original = path.read_text(encoding="utf-8") if path.is_file() else None
+    # BYTES, not text: several files in this tree are CRLF, and a
+    # read_text/write_text round trip silently rewrites every line
+    # ending in them -- leaving the whole file "modified" in a working
+    # tree the suite is supposed to leave exactly as it found it.
+    original = path.read_bytes() if path.is_file() else None
     state, detail = _apply(rev)
     if state == BLOCKED:
         pytest.fail(
@@ -210,7 +214,7 @@ def test_the_guard_fails_when_its_defect_is_put_back(module_name, rev):
         code = _run_guard(module_name, rev.test)
     finally:
         if original is not None:
-            path.write_text(original, encoding="utf-8")
+            path.write_bytes(original)
         _clear_pycache(ROOT / "jaato-server")
 
     assert code != 0, (

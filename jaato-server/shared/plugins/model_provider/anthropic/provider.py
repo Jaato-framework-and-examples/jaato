@@ -46,6 +46,7 @@ from jaato_sdk.plugins.model_provider.types import (
     ToolSchema,
     TokenUsage,
     TurnResult,
+    parse_tool_call_arguments,
     resolve_tool_use_finish,
 )
 from .converters import (
@@ -1507,10 +1508,13 @@ class AnthropicProvider(ModalityCapabilityMixin):
                             # Finalize this tool call
                             tc = current_tool_calls[idx]
                             json_str = ''.join(tc["json_chunks"])
-                            try:
-                                args = json.loads(json_str) if json_str else {}
-                            except json.JSONDecodeError:
-                                args = {}
+                            # Unreadable arguments stay unreadable (#750):
+                            # the accumulated ``input_json_delta`` chunks
+                            # may be a severed object, and an empty dict
+                            # would present that as a zero-argument call.
+                            args, unreadable_args = parse_tool_call_arguments(
+                                json_str
+                            )
 
                             # Flush text before adding function call
                             flush_text_block()
@@ -1520,6 +1524,7 @@ class AnthropicProvider(ModalityCapabilityMixin):
                                 id=tc["id"],
                                 name=id_to_name(tc["name"]),
                                 args=args,
+                                unreadable_args=unreadable_args,
                             )
                             self._trace(f"STREAM_FUNC_CALL name={fc.name}")
                             # Notify caller about function call detection (for UI positioning)
@@ -1593,12 +1598,17 @@ class AnthropicProvider(ModalityCapabilityMixin):
         if not was_cancelled:
             for idx, tc in current_tool_calls.items():
                 json_str = ''.join(tc["json_chunks"])
-                try:
-                    args = json.loads(json_str) if json_str else {}
-                except json.JSONDecodeError:
-                    args = {}
+                # These are the calls whose ``content_block_stop`` never
+                # arrived, so a severed ``input`` is the expected case
+                # here rather than the exotic one (#750).
+                args, unreadable_args = parse_tool_call_arguments(json_str)
                 from shared.tool_id_map import id_to_name
-                fc = FunctionCall(id=tc["id"], name=id_to_name(tc["name"]), args=args)
+                fc = FunctionCall(
+                    id=tc["id"],
+                    name=id_to_name(tc["name"]),
+                    args=args,
+                    unreadable_args=unreadable_args,
+                )
                 # Notify caller about function call detection
                 if on_function_call:
                     on_function_call(fc)
