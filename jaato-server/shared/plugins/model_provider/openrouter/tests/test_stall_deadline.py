@@ -606,6 +606,18 @@ class TestTheClientSurvivesAStall:
                     on_chunk=lambda text: None,
                 )
 
+            # Disarm the deadline before turn two.  Turn one has made its
+            # point, and 50ms is not a budget a HEALTHY turn can be held
+            # to: the guard is stopped in the ``finally`` AFTER the chunk
+            # loop, so a consumer thread descheduled between the last
+            # chunk and ``guard.stop()`` fires the watchdog on a stream
+            # that already finished, and the second turn dies as
+            # "stalled ... after 2 content chunk(s)" — the two chunks
+            # _healthy_stream yields.  Observed on CI, not locally.
+            # What this test asserts is the REBUILD (turn two reaches the
+            # transport at all), which the deadline plays no part in.
+            provider._stream_idle_timeout = 0.0
+
             # The turn with_retry would take next.  It must reach the
             # transport rather than dying on the pool the guard closed.
             result = provider.complete(
