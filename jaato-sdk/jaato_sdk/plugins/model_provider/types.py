@@ -839,6 +839,80 @@ def unreadable_arguments_error(call: "FunctionCall") -> Dict[str, Any]:
     }
 
 
+def unexecuted_call_error(
+    call: "FunctionCall",
+    finish_reason: "Optional[FinishReason]" = None,
+) -> Dict[str, Any]:
+    """The tool-result payload for a call the turn ended before running.
+
+    A turn can be severed *after* a well-formed tool call has arrived:
+    the arguments parsed, the call is complete, and then the output cap
+    (or a safety filter, or a provider error) ends the generation before
+    the session ever dispatches it.  The assistant message carrying that
+    ``tool_use`` is already in history; abandoning it there leaves a
+    function call with no output, which every OpenAI/Azure-shaped
+    upstream rejects on the *next* request::
+
+        No tool output found for function call call_mAyQ...
+
+    So the session's next request 400s and the session is dead -- not
+    degraded, stopped (#751).
+
+    This is the answer that keeps history valid.  It is deliberately the
+    same shape as :func:`unreadable_arguments_error`: a call that will
+    not run still yields a tool *result*, so the pairing holds and the
+    model can see what became of the call it made.  The two differ only
+    in what went wrong -- there the arguments were unreadable, here they
+    were fine and the turn simply ended first.
+
+    Args:
+        call: The abandoned call.  Its ``name`` is quoted back so the
+            model knows which of several calls in the turn was dropped.
+        finish_reason: Why the turn ended, when known.  Names the cause
+            in the message so the model can act on it (shorten the
+            output for a cap, take a different route for a filter)
+            rather than blindly re-emitting the same call.
+
+    Returns:
+        An error dict in the shape ``ToolExecutor`` results use
+        (``{"error": ...}``), plus the finish reason under its own key
+        for clients that want to render it.
+    """
+    cause = {
+        FinishReason.MAX_TOKENS: (
+            "the turn hit its output-token limit before the call could "
+            "be dispatched"
+        ),
+        FinishReason.SAFETY: (
+            "the provider's safety filter ended the turn before the "
+            "call could be dispatched"
+        ),
+        FinishReason.ERROR: (
+            "the provider reported an error that ended the turn before "
+            "the call could be dispatched"
+        ),
+    }.get(
+        finish_reason,
+        "the turn ended before the call could be dispatched",
+    )
+    remedy = (
+        "Re-send it, but plan for less output this time: split large "
+        "work across several smaller calls and keep narration short."
+        if finish_reason is FinishReason.MAX_TOKENS else
+        "Re-send it if you still need it, or take a different approach."
+    )
+    return {
+        "error": (
+            f"The call to {call.name!r} was NOT executed: {cause}. "
+            f"Nothing ran and nothing changed. {remedy}"
+        ),
+        "unexecuted": True,
+        "finish_reason": (
+            finish_reason.value if finish_reason is not None else None
+        ),
+    }
+
+
 @dataclass
 class ProviderResponse:
     """Unified response from any AI provider.

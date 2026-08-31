@@ -108,6 +108,7 @@ from jaato_sdk.plugins.model_provider.types import (
     TurnResult,
     tool_result_is_error,
     tool_result_status,
+    unexecuted_call_error,
     unreadable_arguments_error,
 )
 
@@ -5058,6 +5059,12 @@ NOTES
           human-readable ``source="system"`` banner is emitted so the
           abnormal stop is visible, not merely logged — the sibling of the
           cancellation notification.
+
+        Deliberately does NOT touch history, so it can be driven on its
+        own.  An abnormal finish also has a history consequence — the
+        severed turn may carry a tool call that will never be dispatched
+        (#751) — and that lives in :meth:`_finish_abnormally`, the
+        wrapper every chat-loop exit calls instead of this method.
         """
         finish_reason = response.finish_reason
         if turn_data is not None and finish_reason is not None:
@@ -5077,6 +5084,32 @@ NOTES
         return TurnResult.from_finish_reason(
             finish_reason, response.get_text()
         )
+
+    def _finish_abnormally(
+        self,
+        response: ProviderResponse,
+        turn_data: Optional[Dict[str, Any]] = None,
+        on_output: Optional[OutputCallback] = None,
+    ) -> Optional[TurnResult]:
+        """Classify a finish reason AND leave history usable afterwards.
+
+        :meth:`_classify_finish_reason` decides whether the turn ended
+        abnormally; it deliberately stays a pure classifier so it can be
+        driven on its own.  But an abnormal finish is not only a verdict
+        -- it is the moment history can be left structurally invalid,
+        because the severed turn may carry a tool call that will now
+        never be dispatched (#751).  Pairing the two here means every
+        abnormal exit from ``_run_chat_loop`` reconciles, rather than
+        each of its return sites remembering to.
+
+        Returns whatever the classifier returned: a ``TurnResult`` for
+        an abnormal stop (the caller should end the turn with it), or
+        ``None`` to keep processing.
+        """
+        abnormal = self._classify_finish_reason(response, turn_data, on_output)
+        if abnormal is not None:
+            self._reconcile_unanswered_calls(response.finish_reason)
+        return abnormal
 
     def _handle_cancellation(
         self,
@@ -5452,7 +5485,7 @@ NOTES
             return cr.new_response, None, True
 
         # 5. Classify finish reason for abnormal stops
-        abnormal = self._classify_finish_reason(response, turn_data, on_output)
+        abnormal = self._finish_abnormally(response, turn_data, on_output)
         if abnormal is not None:
             return None, abnormal, False
 
@@ -5770,7 +5803,7 @@ NOTES
                 on_output("thinking", response.thinking, "write")
 
             # Check finish_reason for abnormal termination
-            abnormal = self._classify_finish_reason(response, turn_data, on_output)
+            abnormal = self._finish_abnormally(response, turn_data, on_output)
             if abnormal is not None:
                 return abnormal.text
 
@@ -7942,6 +7975,93 @@ NOTES
             untrusted_source=_untrusted_source,
         )
 
+    def _reconcile_unanswered_calls(
+        self,
+        finish_reason: Optional[FinishReason] = None,
+    ) -> int:
+        """Answer tool calls the turn abandoned, so history stays valid.
+
+        THE INVARIANT.  Every ``tool_use`` block in history must have a
+        matching ``tool_result``.  OpenAI/Azure-shaped upstreams enforce
+        it on the *next* request and reject the whole conversation when
+        it does not hold::
+
+            No tool output found for function call call_mAyQ...
+
+        THE HOLE THIS FILLS (#751).  A turn severed by the output cap
+        can carry a **complete, well-formed** tool call: the arguments
+        parsed cleanly, so #750's unreadable-arguments refusal never
+        sees it, and the abnormal-finish path ends the turn before the
+        call is ever dispatched.  The assistant message is in history,
+        the call has no output, and the session is dead from the next
+        request onward -- not degraded, stopped.
+
+        Two neighbouring mechanisms deliberately do NOT cover it:
+
+        * :meth:`_maybe_rewind` fires only when
+          ``detect_truncated_tool_call`` recognises a *damaged* call
+          (empty or incomplete arguments), and drops it from history
+          when it does.  A complete call is not damaged, so no rewind.
+        * ``unreadable_arguments_error`` keys on
+          ``FunctionCall.unreadable_args``, which a complete call does
+          not carry.
+
+        WHAT IT WRITES.  A tool result per abandoned call, in the same
+        shape a failed execution produces, saying the call was not run
+        and why (see :func:`unexecuted_call_error`).  That is both the
+        thing the contract needs and the place the model already looks
+        for the outcome of the call it just made -- which is why the
+        truncation nudge belongs here rather than in a free-floating
+        user-role message.
+
+        Reads HISTORY rather than the response, because history is what
+        the next request is built from: a call the rewind path already
+        dropped must not be answered, and a call that was executed
+        normally already has its answer.  Only a trailing ``MODEL``
+        message can hold unanswered calls, so the method is a no-op --
+        and therefore idempotent -- once the results are appended.
+
+        Args:
+            finish_reason: Why the turn ended, passed through to the
+                synthesised result so the model is told the cause.
+
+        Returns:
+            How many calls were answered (0 when there was nothing to
+            reconcile).
+        """
+        messages = self._history.messages
+        if not messages:
+            return 0
+        last = messages[-1]
+        if last.role != Role.MODEL:
+            return 0
+        fcs = [p.function_call for p in last.parts if p.function_call]
+        if not fcs:
+            return 0
+
+        tool_results = [
+            ToolResult(
+                call_id=fc.id,
+                name=fc.name,
+                result=unexecuted_call_error(fc, finish_reason),
+                is_error=True,
+            )
+            for fc in fcs
+        ]
+        tool_results = self._gate_tool_results_for_active_modalities(
+            tool_results
+        )
+        self._history.append(Message(
+            role=Role.TOOL,
+            parts=[Part(function_response=r) for r in tool_results],
+        ))
+        self._trace(
+            f"RECONCILE_UNANSWERED: {len(fcs)} call(s) abandoned by "
+            f"finish={getattr(finish_reason, 'value', finish_reason)}: "
+            f"{[fc.name for fc in fcs]}"
+        )
+        return len(fcs)
+
     def _inject_synthetic_cancelled_results(self, fcs: List[FunctionCall]) -> None:
         """Append synthetic cancelled tool results to history for unexecuted tool calls.
 
@@ -9736,6 +9856,11 @@ NOTES
             from jaato_sdk.plugins.model_provider.types import FinishReason
             if response.finish_reason not in (FinishReason.STOP, FinishReason.UNKNOWN, FinishReason.TOOL_USE):
                 logger.warning(f"Model stopped with finish_reason={response.finish_reason}")
+                # A severed turn can carry a complete-but-undispatched
+                # tool call; leaving it unanswered invalidates history
+                # for every later request (#751).  Same reconciliation
+                # the non-parts loop gets via ``_finish_abnormally``.
+                self._reconcile_unanswered_calls(response.finish_reason)
                 response_text = response.get_text()
                 if response_text:
                     return f"{response_text}\n\n[Model stopped: {response.finish_reason}]"
