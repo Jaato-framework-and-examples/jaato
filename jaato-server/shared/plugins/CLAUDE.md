@@ -465,6 +465,21 @@ a workspace-scoped search into a read outside it. See
 `FilesystemQueryPlugin._make_result_guard` for the pattern (cache the verdict
 per parent directory; check the leaf individually only when it is a symlink).
 
+**Allow rules must resolve too, not only deny rules.** The `/tmp` allowance in
+`check_path_with_jaato_containment` short-circuits the workspace check beneath
+it, so deciding it on the path *as written* admitted a symlink for where the
+link lives rather than where it points — `/tmp/x -> ~/.ssh/id_rsa` read as
+"under /tmp". Any new allowlist branch must compare **resolved against
+resolved** (resolve the configured roots as well, or macOS's
+`/tmp -> /private/tmp` rejects every real temp path).
+
+**Testing note:** on Linux `tmp_path` is itself under `/tmp`, so a fixture that
+puts its "outside" target there is inside the temp allowance and the escape
+test passes for the wrong reason — in both directions, since it also makes
+non-escapes look like leaks. Substitute `SYSTEM_TEMP_PATHS` with a directory
+under `tmp_path` instead of disabling `allow_tmp`, which masks this whole class
+of bug.
+
 ## Checklist for New Plugins
 
 1. `__init__.py` has `PLUGIN_KIND = "tool"` or `"enrichment"` (or other appropriate kind)

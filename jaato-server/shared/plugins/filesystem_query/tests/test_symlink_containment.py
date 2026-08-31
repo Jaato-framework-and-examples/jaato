@@ -211,3 +211,73 @@ class TestStreamingContainment:
         )
         files = [c for c in chunks if c.chunk_type == "file"]
         assert files == []
+
+
+class TestTempAllowanceDoesNotLeak:
+    """The same boundary, with the /tmp allowance left at its default.
+
+    Every fixture above sets ``allow_tmp: False`` so that the symlink
+    behaviour is isolated from the (deliberate, unrelated) temp allowance.
+    That isolation also hid a real leak: with ``allow_tmp`` at its **default
+    of True** and the workspace under a temp root, a leaf symlink pointing
+    outside was admitted, because the allowance was decided on where the link
+    lived rather than where it pointed.  The content returned was outside both
+    the workspace and /tmp — and ``absolute_path`` in the result reported the
+    symlink's own contained-looking path, so a caller re-checking the result
+    would not have caught it either.
+
+    Reported by the jaato-ac review session against jaato issue #669.
+    """
+
+    @pytest.fixture
+    def tmp_rooted_workspace(self, tmp_path, monkeypatch):
+        """A workspace *inside* a substituted temp root, leaking outward.
+
+        The real temp root cannot be used: ``tmp_path`` is itself under
+        ``/tmp`` on Linux, so the "outside" secret would resolve into the
+        allowance and the test would pass for the wrong reason.
+
+        Returns:
+            The workspace path.
+        """
+        temp_root = tmp_path / "faketmp"
+        temp_root.mkdir()
+        monkeypatch.setattr(
+            "shared.plugins.sandbox_utils.SYSTEM_TEMP_PATHS", [str(temp_root)]
+        )
+
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "secret.txt").write_text("SECRET\n")
+
+        workspace = temp_root / "ws"
+        workspace.mkdir()
+        (workspace / "ordinary.txt").write_text("ordinary\n")
+        (workspace / "home_leaf.txt").symlink_to(outside / "secret.txt")
+        return workspace
+
+    @pytest.fixture
+    def tmp_plugin(self, tmp_rooted_workspace):
+        """A plugin with ``allow_tmp`` left at its default of True."""
+        p = FilesystemQueryPlugin()
+        p.initialize({})
+        p.set_workspace_path(str(tmp_rooted_workspace))
+        yield p
+        p.shutdown()
+
+    def test_grep_with_no_path_does_not_leak(self, tmp_plugin):
+        """The reported repro, verbatim: no ``path`` argument at all."""
+        result = tmp_plugin._execute_grep_content({"pattern": "SECRET"})
+        assert result["total_matches"] == 0, result["matches"]
+
+    def test_grep_still_finds_workspace_content(self, tmp_plugin):
+        result = tmp_plugin._execute_grep_content({"pattern": "ordinary"})
+        assert result["total_matches"] == 1, result
+
+    def test_glob_does_not_report_the_leaking_link(self, tmp_plugin, tmp_rooted_workspace):
+        result = tmp_plugin._execute_glob_files(
+            {"pattern": "*.txt", "root": str(tmp_rooted_workspace)}
+        )
+        found = _paths(result)
+        assert any(p.endswith("ordinary.txt") for p in found), found
+        assert not any(p.endswith("home_leaf.txt") for p in found), found

@@ -949,3 +949,158 @@ class TestAccessMode:
         )
 
         assert received_modes == ["read", "write"]
+
+
+class TestTempAllowanceResolvesTheTarget:
+    """The /tmp allowance must judge where a symlink POINTS, not where it lives.
+
+    ``check_path_with_jaato_containment`` allows anything under a system temp
+    directory, and that branch short-circuits the workspace check beneath it.
+    Deciding it on the path as written admitted a symlink for its own
+    location: a link at ``/tmp/x`` aimed at ``~/.ssh/id_rsa`` read as "under
+    /tmp", so the content of a file outside both /tmp and the workspace came
+    back allowed.  An allow rule has to resolve for the same reason a deny
+    rule does (jaato issue #669).
+
+    Found by attacking the branch rather than reading it — credit to the
+    jaato-ac review session, whose controlled repro is the second test here.
+
+    Every test substitutes its own temp root under ``tmp_path``.  The real
+    one cannot be used: ``tmp_path`` is itself under ``/tmp`` on Linux, so a
+    secret placed "outside" would still resolve into the allowance and the
+    test would pass for the wrong reason.  That artifact is exactly what
+    makes this bug easy to mis-attribute in either direction.
+    """
+
+    @pytest.fixture
+    def temp_root(self, tmp_path, monkeypatch):
+        """Substitute a controlled directory for the system temp roots.
+
+        Returns:
+            The directory that ``is_under_temp_path`` will treat as /tmp.
+        """
+        root = tmp_path / "faketmp"
+        root.mkdir()
+        monkeypatch.setattr(
+            "shared.plugins.sandbox_utils.SYSTEM_TEMP_PATHS", [str(root)]
+        )
+        return root
+
+    @pytest.fixture
+    def secret(self, tmp_path):
+        """A file outside both the temp root and any workspace.
+
+        Returns:
+            Path to the off-limits file.
+        """
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        target = outside / "secret.txt"
+        target.write_text("PRIVATEKEY\n")
+        return target
+
+    def test_symlink_in_temp_pointing_outside_is_denied(
+        self, tmp_path, temp_root, secret
+    ):
+        """The wider variant: the workspace need not be under /tmp at all."""
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        link = temp_root / "leak_link.txt"
+        link.symlink_to(secret)
+
+        assert check_path_with_jaato_containment(
+            str(link), str(workspace), None, allow_tmp=True, mode="read"
+        ) is False
+
+    def test_workspace_under_temp_does_not_leak_through_a_leaf_symlink(
+        self, temp_root, secret
+    ):
+        """The reported repro, with the workspace itself under a temp root."""
+        workspace = temp_root / "ws"
+        workspace.mkdir()
+        (workspace / "home_leaf.txt").symlink_to(secret)
+
+        assert check_path_with_jaato_containment(
+            str(workspace / "home_leaf.txt"),
+            str(workspace),
+            None,
+            allow_tmp=True,
+            mode="read",
+        ) is False
+
+    def test_symlinked_directory_in_temp_pointing_outside_is_denied(
+        self, tmp_path, temp_root, secret
+    ):
+        """The parent, not the leaf, being the link out."""
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        (temp_root / "vendor").symlink_to(secret.parent, target_is_directory=True)
+
+        assert check_path_with_jaato_containment(
+            str(temp_root / "vendor" / "secret.txt"),
+            str(workspace),
+            None,
+            allow_tmp=True,
+            mode="read",
+        ) is False
+
+    def test_ordinary_temp_file_is_still_allowed(self, tmp_path, temp_root):
+        """The allowance itself must survive: no false positives."""
+        target = temp_root / "ordinary.txt"
+        target.write_text("fine\n")
+
+        assert check_path_with_jaato_containment(
+            str(target), str(tmp_path / "workspace"), None, allow_tmp=True, mode="read"
+        ) is True
+
+    def test_not_yet_created_temp_path_is_still_allowed(self, tmp_path, temp_root):
+        """Writing a new file under /tmp must not require it to exist first."""
+        target = temp_root / "does_not_exist_yet.txt"
+        assert not target.exists()
+
+        assert check_path_with_jaato_containment(
+            str(target), str(tmp_path / "workspace"), None, allow_tmp=True, mode="write"
+        ) is True
+
+    def test_symlink_staying_inside_temp_is_allowed(self, tmp_path, temp_root):
+        """Resolving must not break links that stay within the allowance."""
+        real = temp_root / "real.txt"
+        real.write_text("fine\n")
+        link = temp_root / "alias.txt"
+        link.symlink_to(real)
+
+        assert check_path_with_jaato_containment(
+            str(link), str(tmp_path / "workspace"), None, allow_tmp=True, mode="read"
+        ) is True
+
+    def test_a_symlinked_temp_root_still_matches(self, tmp_path, monkeypatch):
+        """macOS ships ``/tmp`` as a symlink to ``/private/tmp``.
+
+        Resolving the candidate but not the configured roots would reject
+        every real temp path on such a platform, so the roots are resolved
+        too.  This models that shape with a symlinked root of our own.
+        """
+        real_root = tmp_path / "private_tmp"
+        real_root.mkdir()
+        linked_root = tmp_path / "tmp_link"
+        linked_root.symlink_to(real_root, target_is_directory=True)
+        (real_root / "file.txt").write_text("fine\n")
+
+        monkeypatch.setattr(
+            "shared.plugins.sandbox_utils.SYSTEM_TEMP_PATHS", [str(linked_root)]
+        )
+        assert check_path_with_jaato_containment(
+            str(linked_root / "file.txt"),
+            str(tmp_path / "workspace"),
+            None,
+            allow_tmp=True,
+            mode="read",
+        ) is True
+
+    def test_allow_tmp_false_is_unaffected(self, tmp_path, temp_root):
+        target = temp_root / "off.txt"
+        target.write_text("x")
+
+        assert check_path_with_jaato_containment(
+            str(target), str(tmp_path / "workspace"), None, allow_tmp=False, mode="read"
+        ) is False
