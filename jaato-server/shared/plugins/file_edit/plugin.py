@@ -20,6 +20,13 @@ from shared.ui_utils import ellipsize_path, ellipsize_path_pair
 from jaato_sdk.plugins.base import UserCommand, PermissionDisplayInfo
 from jaato_sdk.plugins.model_provider.types import EditableContent, ToolSchema, TRAIT_FILE_WRITER, TRAIT_REPLAY_SAFE, DISCOVERABILITY_EAGER, DISCOVERABILITY_DEFERRED
 from ..sandbox_utils import check_path_with_jaato_containment, detect_jaato_symlink
+from ..path_safety import (
+    move_verified,
+    read_bytes_verified,
+    read_text_verified,
+    unlink_verified,
+    write_text_verified,
+)
 from .backup import BackupManager
 from .diff_utils import (
     generate_unified_diff,
@@ -694,6 +701,27 @@ class FileEditPlugin(RunnerForwardingMixin):
             self._trace(f"_is_path_allowed: {path} blocked (outside sandbox, mode={mode})")
         return allowed
 
+    def _sandbox_validator(self, mode: str) -> Callable[[str], bool]:
+        """Bind :meth:`_is_path_allowed` for the ``path_safety`` primitives.
+
+        The helpers in ``shared.plugins.path_safety`` resolve a path once,
+        hand the canonical form to this callback, and then prove the object
+        they opened is the one the callback approved.  That ordering is what
+        closes the check-then-open window: calling ``_is_path_allowed(path)``
+        and then opening ``path`` separately validates one object and acts on
+        another whenever a symlink is swapped in between (jaato issue #669,
+        shape A).
+
+        Args:
+            mode: ``"read"`` or ``"write"`` — the access being requested,
+                so ``readonly`` authorized paths still block writes.
+
+        Returns:
+            A predicate over canonical paths, suitable as the ``validate``
+            argument of the ``*_verified`` helpers.
+        """
+        return lambda resolved: self._is_path_allowed(resolved, mode=mode)
+
     def _resolve_path(self, path: str) -> Path:
         """Resolve a path, making relative paths relative to workspace_root.
 
@@ -760,7 +788,11 @@ class FileEditPlugin(RunnerForwardingMixin):
             return
 
         try:
-            content = gitignore.read_text(encoding="utf-8")
+            # No sandbox validator here — this is the framework reading its own
+            # workspace's .gitignore, not a model-supplied path.  The verified
+            # reader is still used for its special-file guard: a hostile repo
+            # shipping .gitignore as a FIFO would otherwise hang session start.
+            content = read_text_verified(gitignore)
             lines = content.splitlines()
 
             # Any existing .jaato-anchored rule → the user is managing it; leave
@@ -1352,7 +1384,9 @@ Backups are automatically created for file modifications."""
             return None
 
         try:
-            old_content = file_path.read_text(encoding="utf-8")
+            old_content = read_text_verified(
+                file_path, validate=self._sandbox_validator("read")
+            )
         except OSError as e:
             logger.warning(f"Failed to read file for update permission display: {path}", exc_info=True)
             display_path = ellipsize_path(path, DEFAULT_MAX_PATH_WIDTH)
@@ -1455,7 +1489,9 @@ Backups are automatically created for file modifications."""
             return None
 
         try:
-            content = file_path.read_text(encoding="utf-8")
+            content = read_text_verified(
+                file_path, validate=self._sandbox_validator("read")
+            )
         except OSError as e:
             logger.warning(f"Failed to read file for delete permission display: {path}", exc_info=True)
             display_path = ellipsize_path(path, DEFAULT_MAX_PATH_WIDTH)
@@ -1499,7 +1535,9 @@ Backups are automatically created for file modifications."""
             return None
 
         try:
-            content = source.read_text(encoding="utf-8")
+            content = read_text_verified(
+                source, validate=self._sandbox_validator("read")
+            )
         except OSError as e:
             display_source = ellipsize_path(source_path, DEFAULT_MAX_PATH_WIDTH)
             return PermissionDisplayInfo(
@@ -1582,7 +1620,9 @@ Backups are automatically created for file modifications."""
         if ext in IMAGE_EXTENSIONS:
             self._trace(f"readFile: detected image file, returning as multimodal")
             try:
-                data = file_path.read_bytes()
+                data = read_bytes_verified(
+                    file_path, validate=self._sandbox_validator("read")
+                )
                 mime_type = IMAGE_MIME_TYPES.get(ext, 'image/png')
                 return {
                     "_multimodal": True,
@@ -1600,7 +1640,9 @@ Backups are automatically created for file modifications."""
         if ext == '.pdf':
             self._trace("readFile: detected PDF, returning as multimodal file")
             try:
-                data = file_path.read_bytes()
+                data = read_bytes_verified(
+                    file_path, validate=self._sandbox_validator("read")
+                )
                 return {
                     "_multimodal": True,
                     "_multimodal_type": "file",
@@ -1624,7 +1666,9 @@ Backups are automatically created for file modifications."""
                 return {"error": "limit must be a positive integer"}
 
         try:
-            content = file_path.read_text(encoding="utf-8")
+            content = read_text_verified(
+                file_path, validate=self._sandbox_validator("read")
+            )
             all_lines = content.splitlines(keepends=True)
             total_lines = len(all_lines)
 
@@ -1716,7 +1760,9 @@ Backups are automatically created for file modifications."""
                 return {"error": span_error}
 
             try:
-                current_content = file_path.read_text(encoding="utf-8")
+                current_content = read_text_verified(
+                    file_path, validate=self._sandbox_validator("read")
+                )
             except OSError as e:
                 return {"error": f"Failed to read file: {e}"}
 
@@ -1744,10 +1790,16 @@ Backups are automatically created for file modifications."""
         # Create backup before modification
         backup_path = None
         if self._backup_manager:
-            backup_path = self._backup_manager.create_backup(file_path)
+            backup_path = self._backup_manager.create_backup(
+                file_path, validate=self._sandbox_validator("read")
+            )
 
         try:
-            file_path.write_text(new_content, encoding="utf-8")
+            write_text_verified(
+                file_path,
+                new_content,
+                validate=self._sandbox_validator("write"),
+            )
             result = {
                 "success": True,
                 "path": normalize_result_path(path),
@@ -1789,7 +1841,15 @@ Backups are automatically created for file modifications."""
         try:
             # Create parent directories if needed
             file_path.parent.mkdir(parents=True, exist_ok=True)
-            file_path.write_text(content, encoding="utf-8")
+            # exclusive=True: O_EXCL|O_NOFOLLOW relative to the resolved
+            # parent, so neither a symlink planted at the target nor a swap
+            # of the parent directory can redirect the new file.
+            write_text_verified(
+                file_path,
+                content,
+                validate=self._sandbox_validator("write"),
+                exclusive=True,
+            )
             return {
                 "success": True,
                 "path": normalize_result_path(path),
@@ -1829,10 +1889,12 @@ Backups are automatically created for file modifications."""
         # Create backup before deletion
         backup_path = None
         if self._backup_manager:
-            backup_path = self._backup_manager.create_backup(file_path)
+            backup_path = self._backup_manager.create_backup(
+                file_path, validate=self._sandbox_validator("read")
+            )
 
         try:
-            file_path.unlink()
+            unlink_verified(file_path, validate=self._sandbox_validator("write"))
             result = {
                 "success": True,
                 "path": normalize_result_path(path),
@@ -1887,19 +1949,29 @@ Backups are automatically created for file modifications."""
         # Create backup of source file before moving
         backup_path = None
         if self._backup_manager:
-            backup_path = self._backup_manager.create_backup(source)
+            backup_path = self._backup_manager.create_backup(
+                source, validate=self._sandbox_validator("read")
+            )
 
         # If overwriting, also backup the destination
         dest_backup_path = None
         if destination.exists() and overwrite and self._backup_manager:
-            dest_backup_path = self._backup_manager.create_backup(destination)
+            dest_backup_path = self._backup_manager.create_backup(
+                destination, validate=self._sandbox_validator("read")
+            )
 
         try:
             # Create destination parent directories if needed
             destination.parent.mkdir(parents=True, exist_ok=True)
 
-            # Move the file (this handles overwrite if destination exists)
-            shutil.move(str(source), str(destination))
+            # Move the file (this handles overwrite if destination exists).
+            # Both ends are pinned to their resolved parents so neither can be
+            # redirected between the sandbox check and the rename.
+            move_verified(
+                source,
+                destination,
+                validate=self._sandbox_validator("write"),
+            )
 
             result = {
                 "success": True,
@@ -2012,7 +2084,9 @@ Backups are automatically created for file modifications."""
         # Create backup function that uses our backup manager
         def backup_fn(file_path: Path) -> Optional[Path]:
             if self._backup_manager:
-                return self._backup_manager.create_backup(file_path)
+                return self._backup_manager.create_backup(
+                    file_path, validate=self._sandbox_validator("read")
+                )
             return None
 
         # Create executor

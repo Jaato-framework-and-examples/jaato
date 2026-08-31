@@ -36,6 +36,7 @@ temporary file operations. This can be disabled via the allow_tmp parameter.
 
 import os
 import tempfile
+from functools import lru_cache
 from typing import Optional, Tuple
 
 from shared.path_utils import msys2_to_windows_path, normalize_for_comparison
@@ -229,19 +230,51 @@ def is_path_within_jaato_boundary(
     return True
 
 
-def is_under_temp_path(path: str) -> bool:
-    """Check if a path is under a system temp directory.
+@lru_cache(maxsize=8)
+def _resolved_temp_roots(roots: Tuple[str, ...]) -> Tuple[str, ...]:
+    """Canonicalise the temp roots once per distinct ``SYSTEM_TEMP_PATHS``.
+
+    Taking the tuple as an argument rather than reading the module global
+    keeps the cache correct when tests substitute the roots, and keeps two
+    extra ``realpath`` calls off every path check.
 
     Args:
-        path: Path to check (should be absolute or normalized).
+        roots: The temp-directory roots to canonicalise.
 
     Returns:
-        True if path is under /tmp or system temp directory.
+        The roots, resolved and normalised for comparison.
     """
-    normalized = normalize_for_comparison(os.path.normpath(path))
-    for temp_path in SYSTEM_TEMP_PATHS:
-        temp_normalized = normalize_for_comparison(os.path.normpath(temp_path))
-        if normalized == temp_normalized or normalized.startswith(temp_normalized + '/'):
+    return tuple(
+        normalize_for_comparison(os.path.realpath(root)) for root in roots
+    )
+
+
+def is_under_temp_path(path: str) -> bool:
+    """Check whether a path *resolves* to somewhere under a system temp dir.
+
+    Both sides are canonicalised before comparison, and that is load-bearing
+    rather than tidy.  Comparing the path as written admits a symlink for
+    where the link **lives** instead of where it **points**: a link at
+    ``/tmp/x`` aimed at ``~/.ssh/id_rsa`` reads as "under /tmp", and the temp
+    allowance short-circuits the workspace check below it, so the content of
+    a file outside both /tmp and the workspace comes back allowed (jaato
+    issue #669).  An allow rule has to resolve for the same reason a deny
+    rule does.
+
+    Resolving the roots too is what keeps this correct on macOS, where
+    ``/tmp`` is itself a symlink to ``/private/tmp``: a resolved path
+    compared against an unresolved root would reject every real temp path
+    there.
+
+    Args:
+        path: Path to check (absolute; a relative path resolves against CWD).
+
+    Returns:
+        True if the path's resolved target is at or under a temp directory.
+    """
+    real = normalize_for_comparison(os.path.realpath(path))
+    for temp_root in _resolved_temp_roots(tuple(SYSTEM_TEMP_PATHS)):
+        if real == temp_root or real.startswith(temp_root + '/'):
             return True
     return False
 
@@ -369,7 +402,9 @@ def check_path_with_jaato_containment(
         # Not authorized - denied by default
         return False
 
-    # Check if path is under /tmp (allowed by default)
+    # Check whether the path RESOLVES to somewhere under /tmp (allowed by
+    # default).  This branch short-circuits the workspace check below it, so
+    # it must be decided on the resolved target — see is_under_temp_path.
     if allow_tmp and is_under_temp_path(abs_path):
         return True
 

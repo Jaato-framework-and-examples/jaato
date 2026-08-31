@@ -426,6 +426,60 @@ def get_config_schema(self) -> List[PluginSetting]:
 **Registry access:** `registry.get_plugin_config_schema("cli")` returns the list
 of `PluginSetting` for a plugin, or `[]` if unimplemented.
 
+## Critical: Model-Supplied Paths Go Through `path_safety`
+
+A plugin that reads or writes a path the **model** chose must not use the
+`check(path)` → `open(path)` pattern. `sandbox_utils.check_path_with_jaato_containment`
+answers the question by canonicalising with `os.path.realpath`; re-opening by
+path afterwards makes the kernel resolve the symlinks a *second* time, so a
+link swapped in between validates one object and acts on another. Use
+`shared/plugins/path_safety.py`, which resolves once and proves the descriptor
+it hands back is the object that was validated.
+
+```python
+from ..path_safety import read_text_verified, write_text_verified
+
+def _validator(self, mode: str):
+    return lambda resolved: self._is_path_allowed(resolved, mode=mode)
+
+content = read_text_verified(path, validate=self._validator("read"))
+write_text_verified(path, new, validate=self._validator("write"), exclusive=True)
+```
+
+| Helper | Use for |
+|--------|---------|
+| `open_verified(path, flags, validate=...)` | Anything the higher-level helpers don't cover. |
+| `read_text_verified` / `read_bytes_verified` | Reads. |
+| `write_text_verified(..., exclusive=True)` | New files — `O_EXCL`/`O_NOFOLLOW` relative to the resolved parent, so a symlink planted at the target is not followed. |
+| `unlink_verified` / `move_verified` | Deletes and moves, pinned to the resolved parent. |
+| `describe_special(path)` | Skip FIFOs/sockets/devices during a **directory walk** — opening a named pipe blocks the worker until a writer appears. |
+| `ensure_private_dir(path)` | Any directory the plugin composes under a shared, world-writable `/tmp`; refuses a pre-planted symlink or another user's directory. |
+
+Everything raises `UnsafePathError`, an `OSError` subclass, so existing
+`except OSError` handlers degrade to an ordinary tool error.
+
+**Search tools have a second obligation**: containment must be re-applied to
+every *result*, not just the search root. `Path.glob` follows symlinked
+directories, so a link committed into a repository (`data/logs -> /etc`) turns
+a workspace-scoped search into a read outside it. See
+`FilesystemQueryPlugin._make_result_guard` for the pattern (cache the verdict
+per parent directory; check the leaf individually only when it is a symlink).
+
+**Allow rules must resolve too, not only deny rules.** The `/tmp` allowance in
+`check_path_with_jaato_containment` short-circuits the workspace check beneath
+it, so deciding it on the path *as written* admitted a symlink for where the
+link lives rather than where it points — `/tmp/x -> ~/.ssh/id_rsa` read as
+"under /tmp". Any new allowlist branch must compare **resolved against
+resolved** (resolve the configured roots as well, or macOS's
+`/tmp -> /private/tmp` rejects every real temp path).
+
+**Testing note:** on Linux `tmp_path` is itself under `/tmp`, so a fixture that
+puts its "outside" target there is inside the temp allowance and the escape
+test passes for the wrong reason — in both directions, since it also makes
+non-escapes look like leaks. Substitute `SYSTEM_TEMP_PATHS` with a directory
+under `tmp_path` instead of disabling `allow_tmp`, which masks this whole class
+of bug.
+
 ## Checklist for New Plugins
 
 1. `__init__.py` has `PLUGIN_KIND = "tool"` or `"enrichment"` (or other appropriate kind)
@@ -439,6 +493,7 @@ of `PluginSetting` for a plugin, or `[]` if unimplemented.
 9. **Auth plugins:** `__init__.py` has `SESSION_INDEPENDENT = True`
 10. **Model providers:** `verify_auth()` works before `initialize()` (no `self._client` access)
 11. **File-writing tools:** Declare `traits=frozenset({TRAIT_FILE_WRITER})` and include `path`/`files_modified` in result
+12. **Model-supplied paths:** Read/write via `path_safety` helpers, never `check()` then `open()`; search tools re-check every result, not just the root
 
 ## Critical: `verify_auth()` in Model Provider Plugins
 
