@@ -43,6 +43,8 @@ Environment variables
     JAATO_OPENROUTER_HTTP_REFERER   Attribution: site URL
     JAATO_OPENROUTER_APP_TITLE      Attribution: app title
     JAATO_OPENROUTER_APP_CATEGORIES Attribution: comma-separated categories
+    JAATO_OPENROUTER_REQUEST_TIMEOUT     Byte-level request deadline (seconds)
+    JAATO_OPENROUTER_STREAM_IDLE_TIMEOUT Streaming payload idle deadline (seconds)
 """
 
 from __future__ import annotations
@@ -51,6 +53,7 @@ import copy
 import json
 import logging
 import re
+from functools import partial
 from typing import Any, Dict, List, Optional, Set, TYPE_CHECKING
 
 logger = logging.getLogger(__name__)
@@ -109,6 +112,9 @@ from .._prose_tools import (
 )
 from .env import (
     DEFAULT_BASE_URL,
+    DEFAULT_CONNECT_TIMEOUT,
+    DEFAULT_REQUEST_TIMEOUT,
+    DEFAULT_STREAM_IDLE_TIMEOUT,
     HEADER_APP_CATEGORIES,
     HEADER_APP_TITLE,
     HEADER_HTTP_REFERER,
@@ -122,6 +128,8 @@ from .env import (
     resolve_context_length,
     resolve_http_referer,
     resolve_model,
+    resolve_request_timeout,
+    resolve_stream_idle_timeout,
 )
 from .errors import (
     APIKeyNotFoundError,
@@ -129,8 +137,11 @@ from .errors import (
     ContextLimitError,
     InfrastructureError,
     ModelNotFoundError,
+    OpenRouterError,
     RateLimitError,
+    StallTimeoutError,
 )
+from .stall import StreamStallGuard
 
 
 # Substrings that signal the upstream model exposes reasoning content
@@ -243,6 +254,63 @@ def _extract_generation_id(response_or_stream: Any) -> Optional[str]:
                 if isinstance(value, str) and value:
                     return value
     return None
+
+
+def _resolve_deadline(value: Any, fallback: float, key: str) -> float:
+    """Validate one ``framework_overrides`` deadline knob (#732).
+
+    Args:
+        value: The raw profile value, or ``None`` when the profile is
+            silent — in which case ``fallback`` (already resolved from
+            env / the module default) is returned untouched.
+        fallback: Seconds to use when the profile doesn't set the knob.
+        key: Knob name, for the error message.
+
+    Returns:
+        The deadline in seconds.  ``0`` is legal and means "no deadline"
+        — the documented opt-out for a model that legitimately thinks
+        for longer than any bound the operator is willing to set.
+
+    Raises:
+        ValueError: The value isn't a non-negative number.  Fails loud
+            rather than silently reverting to the default, because a
+            typo'd deadline is exactly the config whose failure mode is
+            an unbounded hang.
+    """
+    if value is None:
+        return fallback
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"OpenRouter framework_overrides.{key} must be a number of "
+            f"seconds (0 disables the deadline), got {value!r}"
+        ) from None
+    if seconds < 0:
+        raise ValueError(
+            f"OpenRouter framework_overrides.{key} must be >= 0 "
+            f"(0 disables the deadline), got {value!r}"
+        )
+    return seconds
+
+
+def _retry_after_from_headers(exc: Exception) -> Optional[float]:
+    """Read a ``Retry-After`` hint from an SDK error's response HEADERS.
+
+    The header counterpart of :func:`_retry_after_from_body`.  Returns
+    ``None`` for anything it cannot parse, so a missing or malformed
+    header just falls through to the standard backoff.
+    """
+    response = getattr(exc, "response", None)
+    if not response:
+        return None
+    raw = getattr(response.headers, "get", lambda *a: None)("retry-after")
+    if not raw:
+        return None
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
 
 
 def _retry_after_from_body(exc: Exception) -> Optional[float]:
@@ -450,6 +518,27 @@ class OpenRouterProvider(ModalityCapabilityMixin):
         # are parsed back into FunctionCall parts.  See
         # shared/plugins/model_provider/_prose_tools.py.
         self._prose_tool_calls: bool = False
+
+        # Request deadlines (#732).  Nothing inside the provider used to
+        # bound a single request: a stalled upstream or a silently dead
+        # connection left the provider waiting forever, and the timeout
+        # was delegated to whoever happened to sit above it (a harness
+        # arm-timeout, a budget ceiling).  Two layers now bound it:
+        #
+        #   _connect_timeout / _request_timeout  BYTE level, enforced by
+        #       httpx (connect, and read/write/pool respectively).
+        #   _stream_idle_timeout                 PAYLOAD level, enforced
+        #       by StreamStallGuard around the streaming chunk loop —
+        #       the layer httpx cannot provide, because OpenRouter's
+        #       ``: OPENROUTER PROCESSING`` keep-alive comments reset the
+        #       byte clock while no chunk is ever yielded.
+        #
+        # All three are settable per-profile under
+        # ``framework_overrides`` (or by env var); ``0`` disables a
+        # deadline, restoring the pre-#732 unbounded wait.
+        self._connect_timeout: float = DEFAULT_CONNECT_TIMEOUT
+        self._request_timeout: float = DEFAULT_REQUEST_TIMEOUT
+        self._stream_idle_timeout: float = DEFAULT_STREAM_IDLE_TIMEOUT
 
         # Cached catalog so connect() can look up per-model context lengths
         # without re-fetching for every model switch.
@@ -863,6 +952,22 @@ class OpenRouterProvider(ModalityCapabilityMixin):
                 )
             self._cache_ttl = ttl_str
 
+        # Request deadlines (#732) — framework escape hatches, not wire
+        # fields, so they live under ``framework_overrides`` next to
+        # ``context_length`` / ``base_url``.  Profile > env > default.
+        self._connect_timeout = _resolve_deadline(
+            _knob("connect_timeout", layer=framework_overrides),
+            DEFAULT_CONNECT_TIMEOUT, "connect_timeout",
+        )
+        self._request_timeout = _resolve_deadline(
+            _knob("request_timeout", layer=framework_overrides),
+            resolve_request_timeout(), "request_timeout",
+        )
+        self._stream_idle_timeout = _resolve_deadline(
+            _knob("stream_idle_timeout", layer=framework_overrides),
+            resolve_stream_idle_timeout(), "stream_idle_timeout",
+        )
+
         if not self._api_key:
             raise APIKeyNotFoundError(
                 checked_locations=get_checked_credential_locations(config=config),
@@ -873,7 +978,10 @@ class OpenRouterProvider(ModalityCapabilityMixin):
             f"[INIT] client created, base_url={self._base_url}, "
             f"referer={self._http_referer!r}, title={self._app_title!r}, "
             f"categories={self._app_categories!r}, "
-            f"provider_routing={'configured' if self._provider_routing else 'none'}"
+            f"provider_routing={'configured' if self._provider_routing else 'none'}, "
+            f"connect_timeout={self._connect_timeout:g}s, "
+            f"request_timeout={self._request_timeout:g}s, "
+            f"stream_idle_timeout={self._stream_idle_timeout:g}s"
         )
 
     def _create_client(self) -> "OpenAI":
@@ -885,7 +993,30 @@ class OpenRouterProvider(ModalityCapabilityMixin):
         after the framework defaults — profile values win on key
         collisions, so a profile can override the attribution headers
         if needed, but normally just adds new ones (beta opt-ins).
+
+        Two transport-level decisions are made here (#732):
+
+        ``timeout``
+            Explicit and configurable rather than the SDK's implicit
+            600s default.  ``connect`` is separated out because a TLS
+            handshake that hasn't finished in 15s never will, while a
+            generation legitimately can run for minutes.  Passed as an
+            ``httpx.Timeout`` so read/write/pool track
+            ``request_timeout`` independently of connect.  ``0``
+            disables the byte-level deadline (``httpx`` reads ``None``
+            as "no timeout").
+
+        ``max_retries=0``
+            The SDK's default of 2 silently *multiplies* every deadline
+            by three and is invisible in the daemon log.  The framework
+            already owns retries — ``retry_utils.with_retry``, which
+            classifies via :meth:`classify_error`, applies exponential
+            backoff and honours the ``Retry-After`` hint OpenRouter puts
+            in the response body (#720).  Two nested retry budgets is
+            one too many; the framework's is the one that is observable.
         """
+        import httpx
+
         client_class = get_openai_client_class()
         default_headers: Dict[str, str] = {}
         if self._http_referer:
@@ -901,6 +1032,11 @@ class OpenRouterProvider(ModalityCapabilityMixin):
             base_url=self._base_url,
             api_key=self._api_key,
             default_headers=default_headers or None,
+            timeout=httpx.Timeout(
+                self._request_timeout or None,
+                connect=self._connect_timeout or None,
+            ),
+            max_retries=0,
         )
 
     def verify_auth(
@@ -1411,14 +1547,27 @@ class OpenRouterProvider(ModalityCapabilityMixin):
             tool_call_accumulators.clear()
 
         response_stream = None
+        # #732: the payload-idle watchdog.  Covers the whole exchange —
+        # started before ``create()`` so a POST that never comes back is
+        # bounded too, then pinged by every chunk the SDK yields.  The
+        # holder exists because the stream to tear down doesn't exist yet
+        # when the guard is armed.
+        stream_holder: Dict[str, Any] = {}
+        guard = StreamStallGuard(
+            self._stream_idle_timeout,
+            on_stall=partial(self._abort_stalled_stream, stream_holder, trace_prefix),
+            name=f"openrouter-stall-{self._agent_id}",
+        )
         try:
             self._trace(f"{trace_prefix}_START")
             chunk_count = 0
+            guard.start()
             response_stream = self._client.chat.completions.create(
                 model=self._model_name,
                 messages=messages,
                 **kwargs,
             )
+            stream_holder["stream"] = response_stream
 
             # Capture OpenRouter's generation ID for log correlation
             # (header is set on the response that the stream wraps).
@@ -1428,6 +1577,7 @@ class OpenRouterProvider(ModalityCapabilityMixin):
                 self._trace(f"{trace_prefix}_GENERATION_ID {gen_id}")
 
             for chunk in response_stream:
+                guard.ping()
                 if cancel_token and cancel_token.is_cancelled:
                     self._trace(f"{trace_prefix}_CANCELLED after {chunk_count} chunks")
                     was_cancelled = True
@@ -1543,36 +1693,38 @@ class OpenRouterProvider(ModalityCapabilityMixin):
             if cancel_token and cancel_token.is_cancelled:
                 was_cancelled = True
                 finish_reason = FinishReason.CANCELLED
+            elif guard.fired:
+                # The watchdog tore the connection down; whatever the
+                # parked read raised on the way out is a symptom, not the
+                # cause.  Report the stall, and hand back a fresh client —
+                # the old one's pool was closed from under it.
+                self._rebuild_client_after_connection_error()
+                raise self._stall_error(chunk_count) from e
             else:
                 raise
         finally:
-            # Close the underlying HTTP connection.  Per the OpenRouter
-            # streaming spec ("Stream Cancellation"), aborting the
-            # connection immediately stops upstream model processing
-            # and billing on supported providers (OpenAI, Anthropic,
-            # DeepSeek, Together, ...).  Without this close, a cancelled
-            # turn keeps the upstream generating until the SDK ``Stream``
-            # object is garbage-collected — which on cancellation can
-            # mean billing for the entire response the user no longer
-            # wants.
-            if response_stream is not None:
-                try:
-                    response_stream.close()
-                except Exception as close_exc:  # pragma: no cover - best effort
-                    self._trace(
-                        f"{trace_prefix}_CLOSE_ERROR "
-                        f"{type(close_exc).__name__}: {close_exc}"
-                    )
-
+            guard.stop()
+            self._close_stream_quietly(response_stream, trace_prefix)
             # SHAPE B (cancel-leak fix, 2026-06-09): close the openai
             # client's httpx pool when cancelled.  See vllm/provider.py
             # for the empirical evidence — ``response_stream.close()``
             # alone does NOT propagate TCP-FIN to the upstream.
-            if was_cancelled and self._client is not None:
-                try:
-                    self._client.close()
-                except Exception:  # pragma: no cover - best effort
-                    pass
+            if was_cancelled:
+                self._close_client_quietly()
+
+        if guard.fired and not was_cancelled:
+            # The iterator ended quietly once the watchdog closed the
+            # connection under it.  That is a truncated turn, not a
+            # finished one — returning here would hand the session a
+            # response with no finish_reason and no error, which is the
+            # silent half of #732.
+            #
+            # ``not was_cancelled`` because a cancel that lands in the
+            # same instant as the deadline is still a cancel: the caller
+            # asked for the turn to end, and reporting a stall instead
+            # would turn a clean stop into a retryable error.
+            self._rebuild_client_after_connection_error()
+            raise self._stall_error(chunk_count)
 
         flush_text_block()
         flush_tool_calls()
@@ -1588,6 +1740,82 @@ class OpenRouterProvider(ModalityCapabilityMixin):
             finish_reason=finish_reason,
             raw=None,
             thinking=thinking,
+        )
+
+    # ==================== Stream Teardown / Stall Handling ====================
+
+    def _close_stream_quietly(self, response_stream: Any, trace_prefix: str) -> None:
+        """Close a streaming response, swallowing teardown failures.
+
+        Per the OpenRouter streaming spec ("Stream Cancellation"),
+        aborting the connection immediately stops upstream model
+        processing and billing on supported providers (OpenAI,
+        Anthropic, DeepSeek, Together, ...).  Without this close, an
+        abandoned turn keeps the upstream generating until the SDK
+        ``Stream`` object is garbage-collected — which on cancellation
+        can mean billing for the entire response the caller no longer
+        wants.
+
+        Called from two threads: the consumer thread (normal end,
+        cancellation, error) and the watchdog thread (a stall, via
+        :meth:`_abort_stalled_stream`).  ``None`` is accepted because
+        the watchdog can fire before the stream object exists.
+        """
+        if response_stream is None:
+            return
+        try:
+            response_stream.close()
+        except Exception as close_exc:  # pragma: no cover - best effort
+            self._trace(
+                f"{trace_prefix}_CLOSE_ERROR "
+                f"{type(close_exc).__name__}: {close_exc}"
+            )
+
+    def _close_client_quietly(self) -> None:
+        """Close the OpenAI client's httpx pool, ignoring failures.
+
+        Closing the *stream* is not enough to propagate TCP-FIN to the
+        upstream (measured on vllm, 2026-06-09); closing the pool is.
+        Used on cancellation and on a stall — in the latter case from the
+        watchdog thread, which is what unparks the blocked read.
+        """
+        if self._client is None:
+            return
+        try:
+            self._client.close()
+        except Exception:  # pragma: no cover - best effort
+            pass
+
+    def _abort_stalled_stream(
+        self, stream_holder: Dict[str, Any], trace_prefix: str,
+    ) -> None:
+        """Tear down a stalled exchange.  Runs on the watchdog thread.
+
+        Bound to :class:`~.stall.StreamStallGuard` via ``partial`` in
+        :meth:`_stream_response`.  Only touches the transport — the
+        half-built response belongs to the consumer thread, which
+        discovers ``guard.fired`` when its read comes back and raises
+        :class:`StallTimeoutError` from there.
+
+        ``stream_holder`` is a one-key dict rather than the stream
+        itself because the guard is armed *before* the request is sent,
+        so that a POST which never returns is bounded too; the stream
+        appears in the holder only once ``create()`` has answered.
+        """
+        self._trace(
+            f"{trace_prefix}_STALL idle_timeout={self._stream_idle_timeout:g}s "
+            f"generation_id={self._last_generation_id!r} — closing transport"
+        )
+        self._close_stream_quietly(stream_holder.get("stream"), trace_prefix)
+        self._close_client_quietly()
+
+    def _stall_error(self, chunk_count: int) -> StallTimeoutError:
+        """Build the typed error for a stall the watchdog detected."""
+        return StallTimeoutError(
+            self._stream_idle_timeout,
+            chunks_received=chunk_count,
+            generation_id=self._last_generation_id,
+            model=self._model_name,
         )
 
     # ==================== Error Handling ====================
@@ -1627,26 +1855,25 @@ class OpenRouterProvider(ModalityCapabilityMixin):
             )
 
     def _handle_api_error(self, error: Exception) -> None:
-        """Map OpenAI SDK exceptions to provider-specific exceptions."""
+        """Map OpenAI SDK exceptions to provider-specific exceptions.
+
+        Returns without doing anything for an exception that is already
+        one of ours — a mid-stream :class:`InfrastructureError`, a
+        :class:`StallTimeoutError` from the idle watchdog — so the caller
+        re-raises it unchanged.  That early exit also keeps the SDK
+        import off a path that has nothing to map.
+        """
+        if isinstance(error, OpenRouterError):
+            return
+
         openai = get_openai_module()
 
         if isinstance(error, openai.AuthenticationError):
             raise AuthenticationError(original_error=str(error)) from error
 
         if isinstance(error, openai.RateLimitError):
-            retry_after = None
-            response = getattr(error, "response", None)
-            if response:
-                retry_header = getattr(
-                    response.headers, "get", lambda *a: None
-                )("retry-after")
-                if retry_header:
-                    try:
-                        retry_after = float(retry_header)
-                    except ValueError:
-                        pass
             raise RateLimitError(
-                retry_after=retry_after,
+                retry_after=_retry_after_from_headers(error),
                 original_error=str(error),
             ) from error
 

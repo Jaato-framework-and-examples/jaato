@@ -260,6 +260,16 @@ openrouter-auth logout</code></pre>
                 <td><code>cli-agent</code></td>
                 <td><code>X-OpenRouter-Categories</code> header (comma-separated marketplace categories)</td>
               </tr>
+              <tr>
+                <td><code>JAATO_OPENROUTER_REQUEST_TIMEOUT</code></td>
+                <td><code>600</code></td>
+                <td>Byte-level per-request deadline in seconds (<code>0</code> disables)</td>
+              </tr>
+              <tr>
+                <td><code>JAATO_OPENROUTER_STREAM_IDLE_TIMEOUT</code></td>
+                <td><code>300</code></td>
+                <td>Streaming payload idle deadline in seconds (<code>0</code> disables)</td>
+              </tr>
             </tbody>
           </table>
         </div>
@@ -364,6 +374,9 @@ openrouter/auto          # OpenRouter picks per-request</code></pre>
             <tbody>
               <tr><td><code>context_length</code></td><td>int</td><td>Override catalog-reported context window</td></tr>
               <tr><td><code>base_url</code></td><td>str</td><td>Endpoint override</td></tr>
+              <tr><td><code>connect_timeout</code></td><td>float</td><td>TCP + TLS handshake deadline, seconds (default 15)</td></tr>
+              <tr><td><code>request_timeout</code></td><td>float</td><td>Byte-level deadline &mdash; httpx read/write/pool, seconds (default 600; <code>0</code> disables)</td></tr>
+              <tr><td><code>stream_idle_timeout</code></td><td>float</td><td>Payload idle deadline for streaming turns, seconds (default 300; <code>0</code> disables). Raises <code>StallTimeoutError</code> &mdash; a retryable <code>InfrastructureError</code> &mdash; when a stream produces no chunks for this long. httpx cannot see this: OpenRouter&rsquo;s <code>: OPENROUTER PROCESSING</code> keep-alive comments reset the byte clock while no chunk is yielded.</td></tr>
             </tbody>
           </table>
         </div>
@@ -404,7 +417,8 @@ plugin_configs:
 
     # Framework overrides (rare)
     framework_overrides:
-      context_length: 200000</code></pre>
+      context_length: 200000
+      stream_idle_timeout: 300   # payload idle deadline (0 disables)</code></pre>
           </div>
 
           <div class="code-label" style="margin-top: 24px;">Extended thinking example</div>

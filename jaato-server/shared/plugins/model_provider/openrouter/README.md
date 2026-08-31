@@ -63,6 +63,8 @@ session profile overrides per session.
 | `JAATO_OPENROUTER_HTTP_REFERER` | `https://github.com/Jaato-framework-and-examples/jaato` | [App attribution](https://openrouter.ai/docs/app-attribution): site URL (required for rankings) |
 | `JAATO_OPENROUTER_APP_TITLE` | `jaato` | App attribution: display name |
 | `JAATO_OPENROUTER_APP_CATEGORIES` | `cli-agent` | App attribution: comma-separated marketplace categories |
+| `JAATO_OPENROUTER_REQUEST_TIMEOUT` | `600` | Byte-level per-request deadline, seconds (`0` disables) |
+| `JAATO_OPENROUTER_STREAM_IDLE_TIMEOUT` | `300` | Streaming payload idle deadline, seconds (`0` disables) |
 
 ### Profile `plugin_configs["openrouter"]`
 
@@ -129,6 +131,9 @@ plugin_configs:
     framework_overrides:
       context_length: 32768
       base_url: "https://..."
+      connect_timeout: 15         # seconds; TCP + TLS
+      request_timeout: 600        # seconds; httpx read/write/pool (0 disables)
+      stream_idle_timeout: 300    # seconds; payload idle deadline (0 disables)
 ```
 
 | Layer | Keys | Purpose |
@@ -136,7 +141,7 @@ plugin_configs:
 | top-level | `api_key`, `http_referer`, `app_title`, `app_categories`, `extra_headers` | auth / identity. `app_categories` (`List[str]`) opts your profile into OpenRouter's [marketplace rankings](https://openrouter.ai/docs/app-attribution) via the `X-OpenRouter-Categories` header (jaato defaults to `["cli-agent"]`; pass `[]` to opt out). Validated strictly: lowercase hyphen-separated, ≤30 chars each, ≤5 entries. `extra_headers` carries OpenRouter's [provider-specific beta headers](https://openrouter.ai/docs/features/provider-routing#provider-specific-headers) (e.g. `x-anthropic-beta`). |
 | `api_params` | `temperature`, `top_p`, `top_k`, `max_tokens`, `models`, `enable_thinking`, `thinking_budget`, `thinking_level`, `cache_prompt`, `cache_ttl` | OpenAI Chat Completions body fields; `models` is OpenRouter's request-level cross-model fallback list |
 | `routing` | any [provider routing](https://openrouter.ai/docs/features/provider-routing) key (`order`, `allow_fallbacks`, `require_parameters`, `data_collection`, `ignore`, `only`, `quantizations`, `sort`, `zdr`, `enforce_distillable_text`, `max_price`, `preferred_min_throughput`, `preferred_max_latency`, ...) | constrains which upstream serves each request; opaque pass-through, so new routing keys work without a framework release |
-| `framework_overrides` | `context_length`, `base_url` | rare escape hatches |
+| `framework_overrides` | `context_length`, `base_url`, `connect_timeout`, `request_timeout`, `stream_idle_timeout` | rare escape hatches. The three deadlines are what bounds a single request — see [Request deadlines](#request-deadlines). |
 
 **Backward compatibility:** every nested key is also accepted at the
 legacy flat position (`temperature:` directly under `openrouter:`,
@@ -269,9 +274,51 @@ Defined in `errors.py`:
 | `ModelNotFoundError` | Model id not in OpenRouter catalog |
 | `ContextLimitError` | Prompt exceeds upstream's context window |
 | `InfrastructureError` | 5xx / connection error — retryable |
+| `StallTimeoutError` | No response payload inside `stream_idle_timeout` — subclasses `InfrastructureError`, so retryable |
 
 `RateLimitError` and `InfrastructureError` are classified as transient
 by the reliability layer.
+
+---
+
+## Request deadlines
+
+Nothing inside the provider used to bound a single request (#732). An
+agentic session could stop mid-tool-loop and never resume — no
+exception, no `finish_reason`, no retry — sitting on an ESTABLISHED
+socket with zero bytes queued until something *outside* the provider
+(a harness arm-timeout, a budget ceiling) tore it down. Two layers now
+bound it:
+
+| Layer | Knob | Default | Enforced by | Bounds |
+|---|---|---|---|---|
+| connect | `connect_timeout` | 15s | httpx | TCP + TLS handshake |
+| byte | `request_timeout` | 600s | httpx (read/write/pool) | a socket that has gone silent entirely |
+| payload | `stream_idle_timeout` | 300s | `stall.StreamStallGuard` | a stream that produces no chunks |
+
+The payload layer exists because the byte layer cannot see this
+failure: OpenRouter keeps a stalled stream fed with
+`: OPENROUTER PROCESSING` SSE comments, and the OpenAI SDK's decoder
+drops comment lines without yielding an event — so those bytes reset
+httpx's read clock while the consumer's chunk loop never ticks. The
+guard measures silence in *payload*: it is pinged by every chunk the
+SDK yields, and on expiry it closes the stream and the client's httpx
+pool (which is what unparks the blocked read, and stops upstream
+generation and billing per OpenRouter's stream-cancellation spec).
+The consumer then raises `StallTimeoutError`.
+
+Each knob accepts `0` to disable that deadline, restoring the
+pre-#732 unbounded wait — a legitimate long generation and a dead
+socket look identical from here, so the bound is configurable rather
+than assumed.
+
+The OpenAI SDK's own `max_retries` is set to **0**: its default of 2
+silently multiplies every deadline by three and is invisible in the
+daemon log. Retries belong to `retry_utils.with_retry`, which
+classifies via `classify_error`, applies exponential backoff, and
+honours the `Retry-After` hint OpenRouter puts in the response body
+(#720). A stall carries no such hint — the upstream never answered —
+so it falls through to the standard backoff.
 
 ---
 
@@ -287,10 +334,12 @@ jaato/jaato-server/shared/plugins/model_provider/openrouter/
 ├── env.py            # JAATO_OPENROUTER_* env-var resolution
 ├── errors.py         # APIKey / Auth / RateLimit / ModelNotFound / Context / Infra
 ├── provider.py       # OpenRouterProvider — the main class
+├── stall.py          # StreamStallGuard — the payload-idle watchdog (#732)
 ├── tests/
 │   ├── test_auth.py
 │   ├── test_openrouter_provider.py
-│   └── test_prompt_caching.py
+│   ├── test_prompt_caching.py
+│   └── test_stall_deadline.py
 └── README.md         # This file
 ```
 
