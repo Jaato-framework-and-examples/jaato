@@ -25,6 +25,7 @@ from jaato_sdk.plugins.model_provider.types import (
     TERMINAL_FINISH_REASONS,
     TokenUsage,
     ToolResult,
+    normalize_inclusive_usage,
     parse_tool_call_arguments,
     render_result_for_model,
     ToolSchema,
@@ -564,7 +565,8 @@ def extract_usage(response: "ChatCompletion") -> TokenUsage:
 
     - ``prompt_tokens_details.cached_tokens`` — tokens served from cache
       (90% Anthropic discount, varying for other upstreams).  Surfaced
-      via :attr:`TokenUsage.cache_read_tokens`.
+      via :attr:`TokenUsage.cache_read_tokens`, and SUBTRACTED from
+      ``prompt_tokens``, which on this wire includes it.
     - ``prompt_tokens_details.cache_write_tokens`` — tokens written to
       cache on this turn (1.25x premium for 5-minute TTL, 2x for
       1-hour), with the Anthropic-native top-level
@@ -642,6 +644,20 @@ def apply_cache_usage(raw_usage: Any, usage: TokenUsage) -> None:
     fields — older OpenRouter responses (and non-cache-capable
     upstreams) simply leave the optional ``cache_*`` attributes as
     ``None``.
+
+    AND CONVERTS THE CONVENTION.  OpenRouter counts both cached
+    quantities INSIDE ``prompt_tokens``; :class:`TokenUsage` counts them
+    beside it.  So this is also the seam that subtracts them back out —
+    it is the one place all three OpenRouter paths pass through, and the
+    only place that has the raw counts and the destination object at the
+    same time.  Callers must therefore pass a FRESHLY built ``usage``
+    still carrying the wire's ``prompt_tokens``; the subtraction is
+    arithmetic, not idempotent.
+
+    Without it the same tokens land on both sides of every downstream
+    sum: a live GLM-5.3 turn reported a 50% cache hit against a bill
+    that says 99.3%, because ``cache_read + prompt`` double-counted the
+    129,825 tokens that were served from cache (issue #758).
     """
     if raw_usage is None:
         return
@@ -678,6 +694,12 @@ def apply_cache_usage(raw_usage: Any, usage: TokenUsage) -> None:
     cost = _read_usage_extra(raw_usage, "cost")
     if isinstance(cost, (int, float)) and cost >= 0:
         usage.cost_usd = float(cost)
+
+    # LAST, once both cached counts are known: take them out of
+    # ``prompt_tokens``.  Order matters — reading the writes above is what
+    # makes the cold-arrival turn (all input written, none read) normalize
+    # correctly rather than reporting a whole cold prefix as new input.
+    normalize_inclusive_usage(usage)
 
 
 def extract_reasoning_from_response(response: "ChatCompletion") -> Optional[str]:

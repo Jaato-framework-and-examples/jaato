@@ -7,7 +7,10 @@ mirror in ``jaato-sdk-ts/src/helpers.ts`` must be updated too.
 
 import pytest
 
-from jaato_sdk import compute_cache_hit_percent
+from jaato_sdk import (
+    cache_hit_percent_from_counts,
+    compute_cache_hit_percent,
+)
 from jaato_sdk.events import TurnCompletedEvent, TurnProgressEvent, UsageBreakdown
 
 
@@ -92,3 +95,35 @@ class TestComputeCacheHitPercent:
             _progress(prompt_tokens=100, cache_read_tokens=900)
         )
         assert result == pytest.approx(90.0)
+
+
+class TestCacheHitPercentFromCounts:
+    """The counts-based core the event helper delegates to.
+
+    It exists for clients holding stored turn accounting rather than a
+    live event (the TUI's history replay).  These assert the two entry
+    points cannot diverge, which is the whole reason the second one is
+    not a local copy of the formula.
+    """
+
+    def test_agrees_with_the_event_helper(self):
+        event = _completed(prompt_tokens=500, cache_read_tokens=4500)
+        assert (cache_hit_percent_from_counts(4500, 500)
+                == compute_cache_hit_percent(event))
+
+    def test_none_when_no_cache_stats_reported(self):
+        # Not 0.0: "the provider says nothing" and "the provider says
+        # zero" are different answers, and a status bar renders them
+        # differently (omit the line vs. show 0%).
+        assert cache_hit_percent_from_counts(None, 1000) is None
+
+    def test_zero_when_reported_zero(self):
+        assert cache_hit_percent_from_counts(0, 1000) == 0.0
+
+    def test_missing_prompt_count_reads_as_zero(self):
+        # A perfect hit leaves no new input, and some accounting rows
+        # carry no ``prompt`` key at all.
+        assert cache_hit_percent_from_counts(5000, None) == 100.0
+
+    def test_empty_turn_does_not_divide_by_zero(self):
+        assert cache_hit_percent_from_counts(0, 0) == 0.0

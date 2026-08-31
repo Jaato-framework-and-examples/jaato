@@ -29,6 +29,7 @@ from jaato_sdk.plugins.model_provider.types import (
     TokenUsage,
     ToolResult,
     ToolSchema,
+    normalize_inclusive_usage,
 )
 
 from shared.tool_id_map import id_to_name, name_to_id
@@ -492,6 +493,15 @@ def extract_usage_from_response(response) -> TokenUsage:
 
     Extracts standard token counts plus cached content token count
     when context caching is used.
+
+    Gemini's ``prompt_token_count`` is the WHOLE prompt and
+    ``cached_content_token_count`` is the cached PART of it — the
+    OpenAI convention, not the Anthropic one :class:`TokenUsage`
+    carries.  So the cached count is subtracted back out here, at the
+    seam, and every consumer downstream reads one convention (issue
+    #758).  Google reports no cache-creation count on a response
+    (explicit ``CachedContent`` is billed at creation time, on its own
+    call), so there is nothing else to remove.
     """
     usage = TokenUsage()
 
@@ -506,8 +516,9 @@ def extract_usage_from_response(response) -> TokenUsage:
 
         # Extract cached content token count (context caching)
         cached_tokens = getattr(metadata, 'cached_content_token_count', None)
-        if cached_tokens is not None and cached_tokens > 0:
+        if isinstance(cached_tokens, int) and cached_tokens > 0:
             usage.cache_read_tokens = cached_tokens
+            normalize_inclusive_usage(usage)
 
     return usage
 

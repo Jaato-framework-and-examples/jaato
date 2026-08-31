@@ -37,9 +37,17 @@ def test_extract_usage_maps_cached_into_cache_read_tokens():
                        total_tokens=660387,
                        prompt_tokens_details=NS(cached_tokens=312000)))
     tu = extract_usage(resp)
-    assert tu.prompt_tokens == 660000
+    # 660,000 on the wire MINUS the 312,000 it already contained.
+    # ``TokenUsage.prompt_tokens`` is the NEW input; the wire's is the
+    # whole input.  Asserting the wire number back was how the
+    # double-count survived — see issue #758 and
+    # ``shared/tests/test_cache_hit_percent_against_invoice.py``.
+    assert tu.prompt_tokens == 348000
     assert tu.output_tokens == 387
     assert tu.cache_read_tokens == 312000
+    # ``total_tokens`` is left exactly as reported: it is the wire size,
+    # which the GC denominator reads.
+    assert tu.total_tokens == 660387
 
 
 def test_extract_usage_no_cache_field_leaves_cache_read_none():

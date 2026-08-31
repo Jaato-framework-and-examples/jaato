@@ -65,6 +65,7 @@ from jaato_sdk.plugins.model_provider.types import (
     ToolSchema,
     TokenUsage,
     TurnResult,
+    normalize_inclusive_usage,
     parse_tool_call_arguments,
     resolve_tool_use_finish,
 )
@@ -103,6 +104,11 @@ def _extract_cache_tokens(usage_obj) -> Optional[int]:
     ``usage.prompt_tokens_details.cached_tokens`` when prefix caching is
     enabled (the default since vLLM 0.5.x).  Returns ``None`` when the
     server omits the field.
+
+    The count is a SUBSET of the same usage object's ``prompt_tokens``,
+    so every caller must pair it with
+    :func:`normalize_inclusive_usage` — ``TokenUsage`` carries the
+    other convention (issue #758).
     """
     if not usage_obj:
         return None
@@ -742,6 +748,8 @@ class VLLMProvider(OpenAICompatLocalHostProvider):
                     cached = _extract_cache_tokens(response.usage)
                     if cached is not None:
                         provider_response.usage.cache_read_tokens = cached
+                        # ...and out of prompt_tokens, which counted it.
+                        normalize_inclusive_usage(provider_response.usage)
                 self._coerce_response_function_calls(provider_response, tools)
 
             self._last_usage = provider_response.usage
@@ -885,12 +893,12 @@ class VLLMProvider(OpenAICompatLocalHostProvider):
 
                 if not chunk.choices:
                     if chunk.usage:
-                        usage = TokenUsage(
+                        usage = normalize_inclusive_usage(TokenUsage(
                             prompt_tokens=chunk.usage.prompt_tokens or 0,
                             output_tokens=chunk.usage.completion_tokens or 0,
                             total_tokens=chunk.usage.total_tokens or 0,
                             cache_read_tokens=_extract_cache_tokens(chunk.usage),
-                        )
+                        ))
                         if on_usage_update and usage.total_tokens > 0:
                             on_usage_update(usage)
                     continue
@@ -929,12 +937,12 @@ class VLLMProvider(OpenAICompatLocalHostProvider):
                         finish_reason = map_finish_reason(choice.finish_reason)
 
                 if chunk.usage:
-                    usage = TokenUsage(
+                    usage = normalize_inclusive_usage(TokenUsage(
                         prompt_tokens=chunk.usage.prompt_tokens or 0,
                         output_tokens=chunk.usage.completion_tokens or 0,
                         total_tokens=chunk.usage.total_tokens or 0,
                         cache_read_tokens=_extract_cache_tokens(chunk.usage),
-                    )
+                    ))
                     if on_usage_update and usage.total_tokens > 0:
                         on_usage_update(usage)
 

@@ -615,14 +615,49 @@ class Message:
 class TokenUsage:
     """Token usage statistics from a model response.
 
+    THE PROMPT-TOKEN CONVENTION (load-bearing).
+
+    ``prompt_tokens`` is the **new, uncached** input for the call: it
+    EXCLUDES ``cache_read_tokens`` and ``cache_creation_tokens``.  Total
+    input is therefore ``prompt_tokens + cache_read_tokens +
+    cache_creation_tokens``, and the cache-hit ratio is
+    ``cache_read_tokens / total_input`` — which caps at 1.0.
+
+    This is Anthropic's ``input_tokens`` convention, and it is the ONLY
+    convention this dataclass carries.  Every consumer depends on it:
+    :func:`jaato_sdk.helpers.compute_cache_hit_percent`,
+    ``shared.session_telemetry.classify_cache_outcome`` and
+    ``shared.pricing.PricingTable.cost_for_usage`` all read the three
+    fields as disjoint buckets.
+
+    OpenAI-compatible wire formats (and Google's ``usage_metadata``) use
+    the OPPOSITE convention: their ``prompt_tokens`` /
+    ``prompt_token_count`` is the WHOLE input and the cached count is a
+    SUBSET of it.  A provider on such a wire MUST convert on the way out
+    — call :func:`normalize_inclusive_usage` at the seam — or the same
+    tokens land on both sides of every sum downstream.  That is not
+    hypothetical: it shipped, and it capped the reported cache-hit rate
+    at a structural 50% (issue #758).
+
     Attributes:
-        prompt_tokens: Tokens used in the prompt/input.
+        prompt_tokens: NEW (uncached) input tokens — see the convention
+            above.  NOT the size of the prompt on the wire when caching
+            is active; that is ``total_tokens`` on a provider whose wire
+            format reports it inclusively.
         output_tokens: Tokens generated in the response.
-        total_tokens: Total tokens used.
+        total_tokens: Total tokens used, as the provider reported them.
+            Deliberately NOT recomputed by :func:`normalize_inclusive_usage`
+            — on an inclusive provider it is the end-of-turn context size
+            (what GC's provider-path denominator wants), and rewriting it
+            would collapse that number on a cache-warm turn.
         cache_read_tokens: Tokens read from cache (reduced cost).
-            Supported by: Anthropic, OpenAI, Google Gemini.
-        cache_creation_tokens: Tokens written to cache (Anthropic-specific).
+            Supported by: Anthropic, OpenAI-compatible upstreams,
+            Google Gemini.  ``None`` means "provider reported nothing",
+            which is distinct from a reported zero.
+        cache_creation_tokens: Tokens written to cache.
             Anthropic charges 1.25x for 5-min cache, 2x for 1-hour cache.
+            Also reported by OpenRouter as
+            ``prompt_tokens_details.cache_write_tokens``.
         reasoning_tokens: Tokens used for reasoning/thinking (OpenAI o-series).
             For Anthropic/Gemini, thinking tokens are included in output_tokens.
         thinking_tokens: Tokens used for extended thinking (Anthropic/Gemini).
@@ -647,6 +682,88 @@ class TokenUsage:
     # boundary.  Provider-reported values always win — they're
     # closer to the source of truth.
     cost_usd: Optional[float] = None
+
+
+def uncached_prompt_tokens(
+    prompt_tokens: int,
+    cache_read_tokens: Optional[int],
+    cache_creation_tokens: Optional[int] = None,
+) -> int:
+    """Convert an INCLUSIVE prompt-token count to the framework convention.
+
+    An OpenAI-compatible upstream reports ``usage.prompt_tokens`` as the
+    WHOLE input and ``usage.prompt_tokens_details.cached_tokens`` as a
+    SUBSET of it.  :class:`TokenUsage` carries the other convention —
+    ``prompt_tokens`` is the new, uncached input only — so the cached
+    counts must come OUT of the total at the provider seam.
+
+    Args:
+        prompt_tokens: The upstream's total-input count.
+        cache_read_tokens: Cached tokens served on this call, or ``None``.
+        cache_creation_tokens: Tokens written to cache on this call, or
+            ``None``.  Pass it whenever the upstream counts writes inside
+            ``prompt_tokens`` too (OpenRouter does — see below); leave it
+            ``None`` for a wire format that reports writes separately.
+
+    Returns:
+        The new-input count, floored at 0.
+
+    Evidence, not assumption.  A cold-arrival response measured in
+    ``docs/design/model-tier-prompt-cache.md`` §6.0.1 reported
+    ``prompt=28,278`` beside ``cache_write=27,503`` and was billed
+    $0.035179.  Read inclusively — 775 new tokens at $1.00/Mtok plus
+    27,503 written at $1.25/Mtok — that reconstructs to $0.035154, 0.07%
+    off.  Read exclusively it reconstructs to $0.031, an order of
+    magnitude out on the write leg.  The warm rows on the same table
+    settle the read side the same way.  So on OpenRouter BOTH cached
+    counts sit inside ``prompt_tokens``.
+
+    The floor at 0 is defensive, not expected: a well-formed inclusive
+    report can never have its subsets exceed the total.  A provider that
+    manages it has a bug of its own, and clamping keeps that bug from
+    turning into a negative token count three layers downstream.
+    """
+    cached = (cache_read_tokens or 0) + (cache_creation_tokens or 0)
+    if cached <= 0:
+        return prompt_tokens
+    return max(0, prompt_tokens - cached)
+
+
+def normalize_inclusive_usage(usage: TokenUsage) -> TokenUsage:
+    """Rewrite an inclusive-convention ``usage`` in place, and return it.
+
+    THE SEAM.  Providers whose wire format counts cached tokens inside
+    ``prompt_tokens`` call this once, immediately after the cache fields
+    are populated and before the usage escapes the provider.  Everything
+    downstream then reads one convention and needs no per-provider
+    branch — which is the whole point: the alternative (carry the
+    convention on the wire and branch in every consumer) leaks the
+    provider's accounting quirk into the helper, the pricing table, the
+    telemetry classifier and the TUI.
+
+    NOT idempotent, deliberately.  It is arithmetic, not a state
+    machine: calling it twice subtracts twice.  Every call site builds a
+    fresh :class:`TokenUsage` from one wire object and normalizes it
+    once; keep it that way rather than adding a "already normalized"
+    flag to a wire-adjacent dataclass.
+
+    ``total_tokens`` is left exactly as the provider reported it — see
+    the class docstring for why.
+
+    Args:
+        usage: The just-built usage, carrying the upstream's inclusive
+            ``prompt_tokens`` and whatever cache counts it reported.
+
+    Returns:
+        The same object, mutated, so the call can be inlined at a
+        construction site.
+    """
+    usage.prompt_tokens = uncached_prompt_tokens(
+        usage.prompt_tokens,
+        usage.cache_read_tokens,
+        usage.cache_creation_tokens,
+    )
+    return usage
 
 
 class FinishReason(str, Enum):

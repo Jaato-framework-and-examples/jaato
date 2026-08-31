@@ -24,6 +24,7 @@ from jaato_sdk.plugins.model_provider.types import (
     Role,
     TokenUsage,
     ToolResult,
+    normalize_inclusive_usage,
     parse_tool_call_arguments,
     render_result_for_model,
     ToolSchema,
@@ -385,17 +386,24 @@ def cached_tokens_from(usage: Any) -> Optional[int]:
     """
     details = getattr(usage, "prompt_tokens_details", None)
     cached = getattr(details, "cached_tokens", None) if details is not None else None
-    return cached if cached else None
+    # Int-checked because the count is subtracted from ``prompt_tokens``
+    # at this seam; anything else reads as "not reported".
+    return cached if isinstance(cached, int) and cached else None
 
 
 def extract_usage(response: "ChatCompletion") -> TokenUsage:
     """Extract token usage from OpenAI response.
 
+    The wire's ``prompt_tokens`` counts the cached tokens; the returned
+    :class:`TokenUsage` does not, so they are subtracted back out here —
+    see :func:`normalize_inclusive_usage` and issue #758.
+
     Args:
         response: OpenAI ChatCompletion response object.
 
     Returns:
-        TokenUsage with counts (incl. ``cache_read_tokens`` on a cache hit).
+        TokenUsage with counts (incl. ``cache_read_tokens`` on a cache hit),
+        with ``prompt_tokens`` reduced to the NEW input.
     """
     usage = TokenUsage()
 
@@ -407,7 +415,7 @@ def extract_usage(response: "ChatCompletion") -> TokenUsage:
     usage.total_tokens = response.usage.total_tokens or 0
     usage.cache_read_tokens = cached_tokens_from(response.usage)
 
-    return usage
+    return normalize_inclusive_usage(usage)
 
 
 def extract_reasoning_from_response(response: "ChatCompletion") -> Optional[str]:
