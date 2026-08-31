@@ -58,6 +58,7 @@ from jaato_sdk.plugins.model_provider.types import (
     TokenUsage,
     ThinkingConfig,
     TurnResult,
+    resolve_tool_use_finish,
 )
 from .converters import (
     get_original_tool_name,
@@ -680,8 +681,14 @@ class OpenAICompatProvider(ModalityCapabilityMixin):
         flush_text_block()
         flush_tool_calls()
 
-        if function_calls and not was_cancelled:
-            finish_reason = FinishReason.TOOL_USE
+        # TOOL_USE fills in an unreported or merely-``stop`` finish; it
+        # must not displace a terminal one.  A turn that hit the output
+        # cap mid-``arguments`` carries fragments, not a request — see
+        # ``resolve_tool_use_finish`` and issue #745.
+        finish_reason = resolve_tool_use_finish(
+            finish_reason,
+            has_function_calls=bool(function_calls) and not was_cancelled,
+        )
 
         thinking = "".join(accumulated_thinking) if accumulated_thinking else None
 

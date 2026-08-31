@@ -22,6 +22,7 @@ from jaato_sdk.plugins.model_provider.types import (
     Part,
     ProviderResponse,
     Role,
+    TERMINAL_FINISH_REASONS,
     TokenUsage,
     ToolResult,
     render_result_for_model,
@@ -535,22 +536,23 @@ def extract_parts_from_response(response: "ChatCompletion") -> List[Part]:
 
 
 def extract_finish_reason(response: "ChatCompletion") -> FinishReason:
-    """Extract the ``FinishReason`` from an OpenAI response."""
+    """Extract the ``FinishReason`` from an OpenAI response.
+
+    Shares :func:`resolve_choice_finish_reason` with the streaming
+    path, so the batch path sees a truncation that OpenRouter
+    normalised away for exactly the same reasons — a non-streamed turn
+    can hit the output cap mid-tool-call just as easily.  Choices whose
+    reason resolves to ``UNKNOWN`` (typically: not reported yet) are
+    skipped, preserving the original scan-for-a-reported-reason
+    behaviour.
+    """
     if not response or not response.choices:
         return FinishReason.UNKNOWN
 
     for choice in response.choices:
-        reason = choice.finish_reason
-        if reason:
-            reason_str = str(reason).lower()
-            if reason_str == "stop":
-                return FinishReason.STOP
-            elif reason_str in ("length", "max_tokens"):
-                return FinishReason.MAX_TOKENS
-            elif reason_str == "tool_calls":
-                return FinishReason.TOOL_USE
-            elif reason_str == "content_filter":
-                return FinishReason.SAFETY
+        resolved = resolve_choice_finish_reason(choice)
+        if resolved is not FinishReason.UNKNOWN:
+            return resolved
 
     return FinishReason.UNKNOWN
 
@@ -716,6 +718,29 @@ def response_from_openai(response: "ChatCompletion") -> ProviderResponse:
 
 # ==================== Streaming Helpers ====================
 
+#: Finish-reason spellings that all mean "the output cap was hit".
+#:
+#: OpenRouter normalises ``finish_reason`` to the OpenAI vocabulary but
+#: passes the upstream's own word through untouched in
+#: ``native_finish_reason``, so the vocabulary this has to recognise is
+#: the union over every provider it fronts, not the OpenAI four:
+#: ``length`` (OpenAI chat completions, Together, Fireworks),
+#: ``max_tokens`` (Anthropic, Bedrock), ``max_output_tokens`` (OpenAI's
+#: Responses API, which is what gpt-5 family models are served over) and
+#: ``model_length`` (Mistral).  Google's ``MAX_TOKENS`` folds in via the
+#: caller's lowercasing.
+#:
+#: Anything not listed here falls through to ``UNKNOWN`` rather than
+#: being guessed at — an unrecognised reason is a reason to look, not a
+#: reason to assume truncation.
+TRUNCATION_FINISH_REASONS = frozenset({
+    "length",
+    "max_tokens",
+    "max_output_tokens",
+    "model_length",
+})
+
+
 def map_finish_reason(reason: Optional[str]) -> FinishReason:
     """Map an OpenAI streaming finish reason to a ``FinishReason``.
 
@@ -725,6 +750,10 @@ def map_finish_reason(reason: Optional[str]) -> FinishReason:
     ("Errors After Tokens Have Been Sent"), where the upstream
     disconnects partway through a response.  The framework's
     ``FinishReason.ERROR`` is its dedicated outcome.
+
+    Truncation spellings beyond OpenAI's ``length`` are accepted
+    because this same function is used to interpret OpenRouter's
+    ``native_finish_reason`` — see :data:`TRUNCATION_FINISH_REASONS`.
     """
     if not reason:
         return FinishReason.UNKNOWN
@@ -732,7 +761,7 @@ def map_finish_reason(reason: Optional[str]) -> FinishReason:
     reason_lower = reason.lower()
     if reason_lower == "stop":
         return FinishReason.STOP
-    elif reason_lower in ("length", "max_tokens"):
+    elif reason_lower in TRUNCATION_FINISH_REASONS:
         return FinishReason.MAX_TOKENS
     elif reason_lower in ("tool_calls", "function_call"):
         return FinishReason.TOOL_USE
@@ -742,6 +771,68 @@ def map_finish_reason(reason: Optional[str]) -> FinishReason:
         return FinishReason.ERROR
 
     return FinishReason.UNKNOWN
+
+
+def read_native_finish_reason(choice: Any) -> Optional[str]:
+    """Return OpenRouter's ``native_finish_reason`` for a choice, if any.
+
+    OpenRouter documents this field as a sibling of ``finish_reason`` on
+    every choice (streaming chunk and batch response alike): the raw
+    word the *upstream* used, before OpenRouter mapped it into the
+    OpenAI vocabulary.  The two disagree in practice — an OpenRouter
+    activity export for issue #745 shows turns that ran to a 65,536
+    token cap reported as ``native_finish_reason: "max_output_tokens"``
+    and ``finish_reason: "tool_calls"``, i.e. the normalised field
+    hides the truncation behind the fact that a call was in flight when
+    the cap landed.
+
+    The OpenAI SDK's ``Choice`` models don't declare the field, so on
+    real responses it lands in Pydantic's ``model_extra``.  Both
+    accesses are tried, mirroring :func:`_read_usage_extra`.
+
+    Returns:
+        The reason string when one is reported as a genuine ``str``,
+        else ``None``.  The ``isinstance`` check is what keeps
+        ``MagicMock``'s auto-vivified attributes from being mistaken
+        for a reported value.
+    """
+    if choice is None:
+        return None
+    direct = getattr(choice, "native_finish_reason", None)
+    if isinstance(direct, str):
+        return direct
+    extra = getattr(choice, "model_extra", None)
+    if isinstance(extra, dict):
+        candidate = extra.get("native_finish_reason")
+        if isinstance(candidate, str):
+            return candidate
+    return None
+
+
+def resolve_choice_finish_reason(choice: Any) -> FinishReason:
+    """Map a choice's finish reason, consulting the native reason too.
+
+    ``finish_reason`` is authoritative whenever it already reports a
+    terminal outcome (truncation, safety, a mid-stream error): those
+    are precise, and a native reason cannot improve on them.  It is
+    *not* authoritative when it reports ``stop`` / ``tool_calls`` /
+    nothing at all, because OpenRouter's normalisation can flatten an
+    upstream truncation into one of those — which is the #745 bug.  In
+    that case a truncating ``native_finish_reason`` wins.
+
+    Args:
+        choice: A streaming ``Choice`` delta or a batch ``Choice``.
+
+    Returns:
+        The resolved :class:`FinishReason`.
+    """
+    normalised = map_finish_reason(getattr(choice, "finish_reason", None))
+    if normalised in TERMINAL_FINISH_REASONS:
+        return normalised
+    native = read_native_finish_reason(choice)
+    if native and native.strip().lower() in TRUNCATION_FINISH_REASONS:
+        return FinishReason.MAX_TOKENS
+    return normalised
 
 
 def read_chunk_error(chunk: Any) -> Optional[Dict[str, Any]]:

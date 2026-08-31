@@ -86,6 +86,7 @@ from jaato_sdk.plugins.model_provider.types import (
     TokenUsage,
     ThinkingConfig,
     TurnResult,
+    resolve_tool_use_finish,
 )
 from .cache import (
     make_cache_control,
@@ -97,8 +98,8 @@ from .converters import (
     deserialize_history as _deserialize_history,
     get_original_tool_name,
     history_to_openai,
-    map_finish_reason,
     read_chunk_error,
+    resolve_choice_finish_reason,
     response_from_openai,
     serialize_history as _serialize_history,
     system_message_with_cache,
@@ -1625,7 +1626,7 @@ class OpenRouterProvider(ModalityCapabilityMixin):
                     delta = choice.delta
                     if not delta:
                         if choice.finish_reason:
-                            finish_reason = map_finish_reason(choice.finish_reason)
+                            finish_reason = resolve_choice_finish_reason(choice)
                         continue
 
                     # Reasoning content — OpenRouter normalizes upstream
@@ -1671,7 +1672,7 @@ class OpenRouterProvider(ModalityCapabilityMixin):
                                     )
 
                     if choice.finish_reason:
-                        finish_reason = map_finish_reason(choice.finish_reason)
+                        finish_reason = resolve_choice_finish_reason(choice)
 
                 if chunk.usage:
                     usage = TokenUsage(
@@ -1729,8 +1730,14 @@ class OpenRouterProvider(ModalityCapabilityMixin):
         flush_text_block()
         flush_tool_calls()
 
-        if function_calls and not was_cancelled:
-            finish_reason = FinishReason.TOOL_USE
+        # TOOL_USE fills in an unreported or merely-``stop`` finish; it
+        # must not displace a terminal one.  A turn that hit the output
+        # cap mid-``arguments`` carries fragments, not a request — see
+        # ``resolve_tool_use_finish`` and issue #745.
+        finish_reason = resolve_tool_use_finish(
+            finish_reason,
+            has_function_calls=bool(function_calls) and not was_cancelled,
+        )
 
         thinking = "".join(accumulated_thinking) if accumulated_thinking else None
 

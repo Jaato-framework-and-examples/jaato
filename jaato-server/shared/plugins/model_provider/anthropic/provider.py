@@ -46,6 +46,7 @@ from jaato_sdk.plugins.model_provider.types import (
     ToolSchema,
     TokenUsage,
     TurnResult,
+    resolve_tool_use_finish,
 )
 from .converters import (
     deserialize_history,
@@ -1616,9 +1617,16 @@ class AnthropicProvider(ModalityCapabilityMixin):
         if was_cancelled:
             parts = [p for p in parts if p.function_call is None]
 
-        # Update finish reason if we have function calls
-        if any(p.function_call for p in parts) and not was_cancelled:
-            finish_reason = FinishReason.TOOL_USE
+        # TOOL_USE fills in an unreported or merely-``stop`` finish; it
+        # must not displace a terminal one.  A turn that hit the output
+        # cap mid-``arguments`` carries fragments, not a request — see
+        # ``resolve_tool_use_finish`` and issue #745.
+        finish_reason = resolve_tool_use_finish(
+            finish_reason,
+            has_function_calls=(
+                any(p.function_call for p in parts) and not was_cancelled
+            ),
+        )
 
         return ProviderResponse(
             parts=parts,
