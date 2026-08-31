@@ -103,8 +103,8 @@ REVERSIONS = [
     Reversion(
         target="jaato-server/shared/jaato_session.py",
         find="""                self._reconcile_unanswered_calls(response.finish_reason)
-                response_text = response.get_text()""",
-        replace="""                response_text = response.get_text()""",
+                # An output-cap truncation is recoverable here too""",
+        replace="""                # An output-cap truncation is recoverable here too""",
         test="test_the_parts_loop_reconciles_too",
         because="the multi-part chat loop abandoning its own severed "
                 "call, which the non-parts loop's fix does not reach",
@@ -368,6 +368,32 @@ def _severed_then_clean_provider(seen):
     return provider
 
 
+def _always_severed_provider(seen):
+    """A provider whose every turn is cut off at the output cap.
+
+    The fixture for what happens once #749's recovery budget is spent:
+    the turn ends severed after all, and everything #751 promises has to
+    still hold on that last response.
+    """
+    def complete(messages, **_kwargs):
+        seen.append(_dangling_call_ids(messages))
+        return TurnResult.from_provider_response(ProviderResponse(
+            parts=[Part(text="I'll write that file now"),
+                   Part(function_call=_complete_call(
+                       f"call_{len(seen)}"))],
+            finish_reason=FinishReason.MAX_TOKENS,
+            usage=TokenUsage(prompt_tokens=10, output_tokens=5,
+                             total_tokens=15),
+        ))
+
+    provider = MagicMock()
+    provider.name = "fake"
+    provider.supports_streaming.return_value = True
+    provider.get_context_limit.return_value = 0
+    provider.complete.side_effect = complete
+    return provider
+
+
 def _live_session(provider):
     runtime = MagicMock()
     runtime.create_provider.return_value = provider
@@ -400,15 +426,20 @@ def test_the_session_can_still_make_a_request_after_a_severed_turn():
     session.send_message("Write me a long file")
     session.send_message("Try again, smaller")
 
-    assert len(seen) == 2, (
-        f"expected one provider request per message, got {len(seen)}"
-    )
+    # NOT one request per message: #749 continues a truncated turn
+    # in-band, so the severed turn issues its own follow-up before the
+    # second message is ever sent.  The count is deliberately not
+    # asserted -- the contract is about what EVERY request carries, and
+    # pinning the count would make this guard fail whenever the recovery
+    # policy changes, which is not what it is watching.
+    assert len(seen) > 1, "the session never got past the severed turn"
     assert seen[0] == [], "the first request cannot be at fault"
-    assert seen[1] == [], (
-        f"the request after the severed turn carried unanswered tool "
-        f"call(s) {seen[1]}. Azure rejects it with 'No tool output found "
-        f"for function call {seen[1][0] if seen[1] else ''}' and the "
-        f"session cannot continue (#751)."
+    dangling = [(i, d) for i, d in enumerate(seen) if d]
+    assert not dangling, (
+        f"request(s) {dangling} after the severed turn carried unanswered "
+        f"tool calls. Azure rejects such a request with 'No tool output "
+        f"found for function call {dangling[0][1][0]}' and the session "
+        f"cannot continue (#751)."
     )
 
 
@@ -418,15 +449,25 @@ def test_the_severed_turn_still_reports_its_own_truncation():
     The whole value of #745 is that a truncated turn says so; a fix that
     made it look like a clean tool turn again would trade one defect for
     the one before it.
+
+    The provider here never stops truncating, so #749's recovery spends
+    its budget and the turn ends severed for real -- which is the case
+    this claim is about.  A turn that truncates once and then RECOVERS
+    genuinely ends on ``stop``, and reporting ``max_tokens`` for it
+    would be the same defect pointing the other way.
     """
     seen = []
-    session = _live_session(_severed_then_clean_provider(seen))
+    session = _live_session(_always_severed_provider(seen))
 
     session.send_message("Write me a long file")
 
     accounting = session.get_turn_accounting()
     assert accounting, "the turn recorded no accounting at all"
     assert accounting[-1]["finish_reason"] == "max_tokens"
+    assert not [d for d in seen if d], (
+        f"a request carried unanswered calls even though every severed "
+        f"response should have been reconciled: {seen}"
+    )
 
 
 def test_the_parts_loop_reconciles_too():
@@ -448,9 +489,12 @@ def test_the_parts_loop_reconciles_too():
         [Part(text="Try again, smaller")], lambda *a, **k: None,
     )
 
-    assert len(seen) == 2
-    assert seen[1] == [], (
-        f"the parts loop left {seen[1]} unanswered after a severed turn"
+    # As above: the severed turn issues its own continuation (#749), so
+    # the request count is not one per message.
+    assert len(seen) > 1, "the parts loop never got past the severed turn"
+    dangling = [(i, d) for i, d in enumerate(seen) if d]
+    assert not dangling, (
+        f"the parts loop left {dangling} unanswered after a severed turn"
     )
 
 

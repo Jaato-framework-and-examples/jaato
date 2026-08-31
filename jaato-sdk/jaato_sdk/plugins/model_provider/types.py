@@ -8,6 +8,7 @@ support for multiple AI providers (Google GenAI, Anthropic, etc.).
 """
 
 import json
+import re
 import threading
 import uuid
 from dataclasses import dataclass, field
@@ -733,6 +734,93 @@ def resolve_tool_use_finish(
 #: blob to re-enter the context it just blew up.
 UNREADABLE_ARGS_EXCERPT_CHARS = 400
 
+#: A run of one repeated character at least this long is replaced by a
+#: count of it rather than quoted.  Twelve is comfortably past anything
+#: a human writes on purpose (``-----`` rules, ``...``, ``====``) and
+#: far short of the runs a stuck model emits by the thousand.
+MIN_COLLAPSIBLE_RUN = 12
+
+#: Head and tail budgets, in characters, for a fragment of the model's
+#: own output replayed back to it.  Two windows rather than one: a
+#: truncation is diagnosed from where the output *stopped*, and a
+#: head-only excerpt of a long fragment shows everything except that.
+REPLAY_EXCERPT_HEAD_CHARS = 200
+REPLAY_EXCERPT_TAIL_CHARS = 200
+
+
+def collapse_runs(text: str, min_run: int = MIN_COLLAPSIBLE_RUN) -> str:
+    """Render a long run of one repeated character as a count of it.
+
+    ``"----------..."`` becomes ``[240 repetitions of '-']``.
+
+    This exists because of what a model does when it walks into a
+    repetition loop: it emits the same character until the output cap
+    stops it, and the resulting fragment is both enormous and almost
+    entirely uninformative.  Quoting it back verbatim is the worst of
+    both -- it spends a large slice of the context window, and it puts
+    the model back inside the very run it was stuck in.
+
+    The count is strictly *more* informative than the run.  A model
+    cannot see the length of what it emitted; being told it produced
+    240 identical characters names the failure mode outright, which is
+    the single most useful thing a truncation message can say.
+
+    Args:
+        text: The fragment about to be replayed.
+        min_run: Shortest run to collapse.  Runs below it are ordinary
+            typography (a ``-----`` rule, an ellipsis) and are left
+            alone.
+
+    Returns:
+        *text* with every run of ``min_run`` or more identical
+        characters replaced by its count.  Newlines and other
+        whitespace collapse too, and are quoted via ``repr`` so the
+        replacement is unambiguous about which character it was.
+    """
+    if not text or min_run < 2:
+        return text
+    pattern = re.compile(r"(.)\1{%d,}" % (min_run - 1), re.DOTALL)
+    return pattern.sub(
+        lambda m: f"[{len(m.group(0))} repetitions of {m.group(1)!r}]",
+        text,
+    )
+
+
+def replay_excerpt(
+    text: str,
+    head_chars: int = REPLAY_EXCERPT_HEAD_CHARS,
+    tail_chars: int = REPLAY_EXCERPT_TAIL_CHARS,
+) -> str:
+    """Bound a fragment of the model's own output for replay back to it.
+
+    Collapses runs first, then keeps a head and a tail with a count of
+    what was dropped between them.  Collapsing before bounding matters:
+    a fragment that is one 50,000-character run reduces to a single
+    line and never needs eliding at all, so the excerpt spends its
+    budget on the text either side of the run rather than on the run.
+
+    Args:
+        text: The fragment.  May be empty.
+        head_chars: Characters kept from the start.
+        tail_chars: Characters kept from the end -- where a truncated
+            turn stopped, and therefore the diagnostic half.
+
+    Returns:
+        A bounded rendering, at most roughly
+        ``head_chars + tail_chars`` plus the elision marker.  Callers
+        are expected to fence it: it is the model's own text coming
+        back, and replayed text must not read as an instruction.
+    """
+    collapsed = collapse_runs(text)
+    if len(collapsed) <= head_chars + tail_chars:
+        return collapsed
+    elided = len(collapsed) - head_chars - tail_chars
+    return (
+        f"{collapsed[:head_chars]}"
+        f"\n[... {elided} characters elided ...]\n"
+        f"{collapsed[-tail_chars:]}"
+    )
+
 
 def parse_tool_call_arguments(
     raw: Any,
@@ -823,8 +911,12 @@ def unreadable_arguments_error(call: "FunctionCall") -> Dict[str, Any]:
         clients that want to render it).
     """
     raw = call.unreadable_args or ""
-    excerpt = raw[:UNREADABLE_ARGS_EXCERPT_CHARS]
-    truncated = len(raw) > len(excerpt)
+    # Collapse before bounding: an argument blob severed inside a
+    # repetition loop is mostly one character repeated, and the count
+    # of it is both shorter and more useful than the run (#749).
+    collapsed = collapse_runs(raw)
+    excerpt = collapsed[:UNREADABLE_ARGS_EXCERPT_CHARS]
+    truncated = len(collapsed) > len(excerpt)
     return {
         "error": (
             f"The arguments for {call.name!r} could not be parsed as JSON, "
