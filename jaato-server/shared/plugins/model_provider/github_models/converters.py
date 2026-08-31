@@ -38,6 +38,7 @@ from jaato_sdk.plugins.model_provider.types import (
     Role,
     TokenUsage,
     ToolResult,
+    parse_tool_call_arguments,
     render_result_for_model,
     ToolSchema,
 )
@@ -227,16 +228,17 @@ def message_from_sdk(msg: "ChatRequestMessage") -> Message:
             parts.append(Part(text=msg.content))
         if msg.tool_calls:
             for tc in msg.tool_calls:
-                args = {}
-                if tc.function.arguments:
-                    try:
-                        args = json.loads(tc.function.arguments)
-                    except json.JSONDecodeError:
-                        args = {"raw": tc.function.arguments}
+                # A ``{"raw": ...}`` stand-in was still an argument
+                # mapping the model never wrote; the raw text rides on
+                # its own field instead (#750).
+                args, unreadable_args = parse_tool_call_arguments(
+                    tc.function.arguments
+                )
                 parts.append(Part(function_call=FunctionCall(
                     id=tc.id,
                     name=tc.function.name,
                     args=args,
+                    unreadable_args=unreadable_args,
                 )))
         return Message(role=Role.MODEL, parts=parts)
 
@@ -323,20 +325,17 @@ def extract_function_calls_from_stream_delta(tool_calls) -> List[FunctionCall]:
         name = getattr(func, 'name', None) or ''
         arguments = getattr(func, 'arguments', None) or ''
 
-        # Parse arguments if present
-        args = {}
-        if arguments:
-            try:
-                args = json.loads(arguments)
-            except json.JSONDecodeError:
-                # Arguments may be partial during streaming
-                args = {"_partial": arguments}
+        # Arguments may be partial during streaming -- which is
+        # exactly why a partial must not decode into a ``{"_partial":
+        # ...}`` mapping that looks like a real call (#750).
+        args, unreadable_args = parse_tool_call_arguments(arguments)
 
         if name:  # Only add if we have a function name
             calls.append(FunctionCall(
                 id=tc_id,
                 name=name,
                 args=args,
+                unreadable_args=unreadable_args,
             ))
 
     return calls
@@ -421,16 +420,14 @@ def extract_function_calls_from_response(response: ChatCompletions) -> List[Func
     for choice in response.choices:
         if choice.message and choice.message.tool_calls:
             for tc in choice.message.tool_calls:
-                args = {}
-                if tc.function.arguments:
-                    try:
-                        args = json.loads(tc.function.arguments)
-                    except json.JSONDecodeError:
-                        args = {"raw": tc.function.arguments}
+                args, unreadable_args = parse_tool_call_arguments(
+                    tc.function.arguments
+                )
                 calls.append(FunctionCall(
                     id=tc.id,
                     name=tc.function.name,
                     args=args,
+                    unreadable_args=unreadable_args,
                 ))
 
     return calls
@@ -458,16 +455,14 @@ def extract_parts_from_response(response: ChatCompletions) -> List[Part]:
         # Tool calls follow text
         if choice.message.tool_calls:
             for tc in choice.message.tool_calls:
-                args = {}
-                if tc.function.arguments:
-                    try:
-                        args = json.loads(tc.function.arguments)
-                    except json.JSONDecodeError:
-                        args = {"raw": tc.function.arguments}
+                args, unreadable_args = parse_tool_call_arguments(
+                    tc.function.arguments
+                )
                 fc = FunctionCall(
                     id=tc.id,
                     name=tc.function.name,
                     args=args,
+                    unreadable_args=unreadable_args,
                 )
                 parts.append(Part.from_function_call(fc))
 

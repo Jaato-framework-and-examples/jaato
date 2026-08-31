@@ -12,7 +12,9 @@ import threading
 import uuid
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Callable, Dict, FrozenSet, List, Optional, Union
+from typing import (
+    Any, Callable, Dict, FrozenSet, List, Optional, Tuple, Union,
+)
 
 
 TRAIT_FILE_WRITER = "file_writer"
@@ -352,11 +354,26 @@ class FunctionCall:
     Attributes:
         id: Unique identifier for this call (used for result correlation).
         name: Name of the function to call.
-        args: Arguments to pass to the function.
+        args: Arguments to pass to the function.  Meaningful **only**
+            when :attr:`unreadable_args` is ``None`` -- see below.
+        unreadable_args: The raw argument text the provider could not
+            decode, when it could not decode it; ``None`` on every call
+            whose arguments were read successfully (the normal case,
+            including a genuine zero-argument call).
+
+            When this is set the call is **not executable**: the model's
+            request never arrived intact, so there is nothing to run.
+            ``args`` is then an empty dict standing for "no arguments
+            were recovered", not for "the model passed none", and
+            :meth:`JaatoSession._execute_single_tool` refuses the call
+            and reports the failure back to the model instead of
+            executing it.  See :func:`parse_tool_call_arguments` and
+            issue #750.
     """
     id: str
     name: str
     args: Dict[str, Any] = field(default_factory=dict)
+    unreadable_args: Optional[str] = None
 
 
 @dataclass
@@ -708,6 +725,118 @@ def resolve_tool_use_finish(
     if observed in TERMINAL_FINISH_REASONS:
         return observed
     return FinishReason.TOOL_USE
+
+
+#: How much of the unreadable argument text is quoted back to the model
+#: when a call is refused.  Enough to recognise which call it was and
+#: where the text stops; not enough for a severed 60k-token argument
+#: blob to re-enter the context it just blew up.
+UNREADABLE_ARGS_EXCERPT_CHARS = 400
+
+
+def parse_tool_call_arguments(
+    raw: Any,
+) -> Tuple[Dict[str, Any], Optional[str]]:
+    """Decode a tool call's wire ``arguments`` without inventing one.
+
+    Every provider had the same three lines::
+
+        try:
+            args = json.loads(tc["function"]["arguments"])
+        except json.JSONDecodeError:
+            args = {}
+
+    and then built a well-formed :class:`FunctionCall` from the result.
+    "I could not read the arguments" became "the model called this tool
+    with no arguments", and the session executed it: absence and
+    emptiness shared one representation, so nothing downstream could
+    tell them apart.  For a read-only tool that is a wasted turn; for a
+    writer or a shell invocation "no arguments" is not obviously safe,
+    and the required-argument check that would have caught it lives
+    downstream of a call that now looks valid.  See issue #750.
+
+    Routes in are not exotic: an output cap hit mid-``arguments`` (the
+    incident in #750, since narrowed by #745), a weaker model emitting
+    malformed JSON, a prose-tool-call parse failure, any provider-side
+    encoding bug.  In all but the first the finish reason is an ordinary
+    ``tool_calls`` and the turn continues.
+
+    So a parse failure produces no value.  It produces the raw text,
+    which the caller carries on
+    :attr:`FunctionCall.unreadable_args`, and the session reports back
+    to the model as a failed call it can re-emit.
+
+    Args:
+        raw: Whatever the wire carried in the arguments slot -- the JSON
+            text (the usual case), a dict some SDKs pre-decode for us,
+            or ``None`` / ``""`` when the upstream sent no arguments at
+            all.
+
+    Returns:
+        ``(args, unreadable)``.  On success ``args`` is the decoded
+        object and ``unreadable`` is ``None``.  On failure ``args`` is
+        an empty dict -- meaning "nothing recovered", never "no
+        arguments were passed" -- and ``unreadable`` is the raw text,
+        which is the caller's signal not to execute.
+
+        A genuinely absent or empty arguments slot is a **success**:
+        ``({}, None)``, the zero-argument call the model really did
+        make.  A payload that decodes to something other than an object
+        (``"null"``, ``"[1, 2]"``, a bare number) is a **failure**:
+        it cannot be a keyword-argument mapping, and coercing it would
+        be the same fabrication one layer along.
+    """
+    if raw is None:
+        return {}, None
+    if isinstance(raw, dict):
+        return dict(raw), None
+    if not isinstance(raw, str):
+        return {}, str(raw)
+    if not raw.strip():
+        return {}, None
+    try:
+        decoded = json.loads(raw)
+    except (json.JSONDecodeError, ValueError):
+        return {}, raw
+    if not isinstance(decoded, dict):
+        return {}, raw
+    return decoded, None
+
+
+def unreadable_arguments_error(call: "FunctionCall") -> Dict[str, Any]:
+    """The tool-result payload for a call whose arguments never arrived.
+
+    Refusing to execute is only half the fix: a call that vanishes
+    silently leaves the model believing it ran.  This is the other half
+    -- the same treatment a failed call gets today, so the agent can see
+    that its request was unreadable and re-emit it.
+
+    Args:
+        call: The refused call.  ``call.unreadable_args`` carries the
+            raw text; an excerpt of it is quoted back so the model can
+            see *where* its serialization stopped, which is the usual
+            tell for an output cap hit mid-arguments.
+
+    Returns:
+        An error dict in the shape ``ToolExecutor`` results use
+        (``{"error": ...}``, plus the excerpt under its own key for
+        clients that want to render it).
+    """
+    raw = call.unreadable_args or ""
+    excerpt = raw[:UNREADABLE_ARGS_EXCERPT_CHARS]
+    truncated = len(raw) > len(excerpt)
+    return {
+        "error": (
+            f"The arguments for {call.name!r} could not be parsed as JSON, "
+            f"so the call was not executed. This usually means the call was "
+            f"cut off mid-serialization (an output cap) or serialized "
+            f"incorrectly. Re-send the call with complete, valid JSON "
+            f"arguments; if the arguments are large, split the work into "
+            f"smaller calls."
+        ),
+        "unreadable_arguments": excerpt + ("..." if truncated else ""),
+        "unreadable_arguments_length": len(raw),
+    }
 
 
 @dataclass

@@ -108,6 +108,7 @@ from jaato_sdk.plugins.model_provider.types import (
     TurnResult,
     tool_result_is_error,
     tool_result_status,
+    unreadable_arguments_error,
 )
 
 if TYPE_CHECKING:
@@ -6554,6 +6555,13 @@ NOTES
         """Execute a single tool call with full UI hooks and telemetry.
 
         Used for sequential execution where we want tool-by-tool UI updates.
+
+        A call carrying ``fc.unreadable_args`` is **refused** rather than
+        executed: the provider could not decode its arguments, so there
+        is no call to run (#750).  It still travels the full path --
+        hooks, span, ``ToolResult`` -- as a failed call, so the model is
+        told its request was unreadable and the tool_use/tool_result
+        pairing in history stays intact.
         """
         import threading
         name = fc.name
@@ -6607,7 +6615,19 @@ NOTES
             tool_span.set_attribute("input.value", json.dumps(args) if args else "{}")
             tool_span.set_attribute("input.mime_type", "application/json")
 
-            if self._is_streaming_tool(name):
+            if fc.unreadable_args is not None:
+                # The provider could not decode this call's arguments, so
+                # there is no call to run: executing it would be acting on
+                # a request the model never made (#750).  Report it back
+                # as a failed call instead -- an error result is still a
+                # tool output, so history stays paired and the model can
+                # re-emit the call.
+                self._trace(
+                    f"TOOL_REFUSED_UNREADABLE_ARGS name={name} "
+                    f"call_id={fc.id} chars={len(fc.unreadable_args)}"
+                )
+                executor_result = (False, unreadable_arguments_error(fc))
+            elif self._is_streaming_tool(name):
                 # Route to streaming execution
                 executor_result = self._execute_streaming_tool(fc, on_output)
             elif self._executor:
@@ -6819,6 +6839,9 @@ NOTES
         - Restores interactive plugin channels captured from spawning thread
         - Attaches captured OTel context so tool spans parent correctly
 
+        Refuses a call carrying ``fc.unreadable_args`` on the same terms
+        as ``_execute_single_tool`` -- see there for why.
+
         Args:
             fc: The function call to execute.
             captured_channels: Channel references captured from the spawning
@@ -6877,7 +6900,11 @@ NOTES
                 tool_span.set_attribute("input.mime_type", "application/json")
 
                 # Check if this is a streaming tool (name ends with -stream)
-                if self._is_streaming_tool(name):
+                if fc.unreadable_args is not None:
+                    # Unreadable arguments are refused, not executed (#750)
+                    # -- see the sequential path for the reasoning.
+                    executor_result = (False, unreadable_arguments_error(fc))
+                elif self._is_streaming_tool(name):
                     # Route to streaming execution
                     executor_result = self._execute_streaming_tool(fc, None)
                 elif self._executor:
@@ -9737,7 +9764,13 @@ NOTES
                         )
 
                     fc_start = datetime.now()
-                    if self._executor:
+                    if fc.unreadable_args is not None:
+                        # Unreadable arguments are refused, not executed
+                        # (#750) -- see _execute_single_tool.
+                        executor_result = (
+                            False, unreadable_arguments_error(fc),
+                        )
+                    elif self._executor:
                         # Set up tool output callback for streaming output during execution
                         if self._ui_hooks and fc.id:
                             def tool_output_callback(chunk: str, _call_id=fc.id) -> None:
