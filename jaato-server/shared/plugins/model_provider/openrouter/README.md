@@ -275,9 +275,35 @@ Defined in `errors.py`:
 | `ContextLimitError` | Prompt exceeds upstream's context window |
 | `InfrastructureError` | 5xx / connection error — retryable |
 | `StallTimeoutError` | No response payload inside `stream_idle_timeout` — subclasses `InfrastructureError`, so retryable |
+| `UpstreamFinishError` | Turn ended with `finish_reason: "error"` and no error payload — names the `native_finish_reason`; subclasses `InfrastructureError`, so retryable |
 
 `RateLimitError` and `InfrastructureError` are classified as transient
 by the reliability layer.
+
+### The two shapes of a mid-stream error
+
+OpenRouter reports an upstream failure mid-turn in two shapes, and
+before #766 only one of them survived:
+
+| Shape | Wire | Raised as |
+|---|---|---|
+| 1 | top-level `error` object **+** `finish_reason: "error"` | `InfrastructureError` carrying the upstream's own message |
+| 2 | `finish_reason: "error"` **alone**, cause in `native_finish_reason` | `UpstreamFinishError` naming that reason |
+
+Shape 2 used to resolve to `FinishReason.ERROR` and travel back as an
+ordinary response, which `JaatoSession` turned into a terminal
+`RuntimeError("Provider returned an error")` — one string for every
+cause, and fatal where the identical upstream condition in shape 1 was
+retried. Eleven sweep arms died with that string. The cause was
+knowable throughout: Gemini's `MALFORMED_FUNCTION_CALL`, a function
+call the model's own serialiser rejected, sitting in a field the
+provider already parsed for #745.
+
+`native_finish_reason` is now traced on **every** streamed turn
+(`*_NATIVE_FINISH_REASON`), not only failing ones — an
+`UNEXPECTED_TOOL_CALL` on the generation before a
+`MALFORMED_FUNCTION_CALL` is the kind of adjacency that shortens the
+next investigation, and `FinishReason` has nowhere to carry it.
 
 ---
 

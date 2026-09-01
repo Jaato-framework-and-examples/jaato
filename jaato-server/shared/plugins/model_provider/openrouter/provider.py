@@ -100,6 +100,8 @@ from .converters import (
     get_original_tool_name,
     history_to_openai,
     read_chunk_error,
+    read_native_finish_reason,
+    read_response_native_finish_reason,
     resolve_choice_finish_reason,
     response_from_openai,
     serialize_history as _serialize_history,
@@ -142,6 +144,7 @@ from .errors import (
     OpenRouterError,
     RateLimitError,
     StallTimeoutError,
+    UpstreamFinishError,
 )
 from .stall import StreamStallGuard
 
@@ -1464,6 +1467,12 @@ class OpenRouterProvider(ModalityCapabilityMixin):
                 if gen_id:
                     self._last_generation_id = gen_id
                     self._trace(f"COMPLETE_GENERATION_ID {gen_id}")
+                # A non-streamed turn carries the shape too — it is
+                # the upstream's verdict, not an artefact of SSE.
+                self._reject_error_finish(
+                    provider_response.finish_reason,
+                    read_response_native_finish_reason(response),
+                )
 
             # Mirror the streaming-path gate: if reasoning isn't
             # enabled for this session, drop any reasoning content
@@ -1511,12 +1520,41 @@ class OpenRouterProvider(ModalityCapabilityMixin):
         accumulated_thinking: List[str] = []
         parts: List[Part] = []
         finish_reason = FinishReason.UNKNOWN
+        # The upstream's own word for why it stopped, before OpenRouter
+        # normalised it.  Kept because ``finish_reason`` alone cannot
+        # carry it, and for ``error`` it is the ONLY diagnosis there is
+        # (#766).  Traced on every outcome, not just failures: a
+        # ``UNEXPECTED_TOOL_CALL`` on the turn before a
+        # ``MALFORMED_FUNCTION_CALL`` is the adjacency that shortens the
+        # next investigation.
+        native_finish_reason: Optional[str] = None
         function_calls: List[FunctionCall] = []
         usage = TokenUsage()
         was_cancelled = False
 
         # Tool calls stream in pieces — accumulate by index.
         tool_call_accumulators: Dict[int, Dict[str, Any]] = {}
+
+        def record_finish(choice: Any) -> None:
+            """Resolve a choice's reported finish reason, keeping the native one.
+
+            Both call sites in the chunk loop go through here so the
+            normalised reason and the upstream's raw word never drift
+            apart.  The native reason is traced as it arrives (it is
+            dropped from the returned :class:`ProviderResponse`, which
+            has nowhere to put it) and retained for the ``error``
+            outcome, where :meth:`_reject_error_finish` turns it into
+            the raised diagnosis.
+            """
+            nonlocal finish_reason, native_finish_reason
+            finish_reason = resolve_choice_finish_reason(choice)
+            native = read_native_finish_reason(choice)
+            if native:
+                native_finish_reason = native
+                self._trace(
+                    f"{trace_prefix}_NATIVE_FINISH_REASON {native!r} "
+                    f"normalised={finish_reason}"
+                )
 
         def flush_text_block() -> None:
             nonlocal accumulated_text
@@ -1634,7 +1672,7 @@ class OpenRouterProvider(ModalityCapabilityMixin):
                     delta = choice.delta
                     if not delta:
                         if choice.finish_reason:
-                            finish_reason = resolve_choice_finish_reason(choice)
+                            record_finish(choice)
                         continue
 
                     # Reasoning content — OpenRouter normalizes upstream
@@ -1680,7 +1718,7 @@ class OpenRouterProvider(ModalityCapabilityMixin):
                                     )
 
                     if choice.finish_reason:
-                        finish_reason = resolve_choice_finish_reason(choice)
+                        record_finish(choice)
 
                 if chunk.usage:
                     usage = TokenUsage(
@@ -1696,6 +1734,14 @@ class OpenRouterProvider(ModalityCapabilityMixin):
                 f"{trace_prefix}_END chunks={chunk_count} "
                 f"finish_reason={finish_reason}"
             )
+
+            # Shape 2 of OpenRouter's mid-stream error (#766): the
+            # sentinel choice arrived WITHOUT a top-level ``error``
+            # object, so ``read_chunk_error`` above correctly saw
+            # nothing and the only diagnosis is the native reason.
+            # Reaching here with ``ERROR`` therefore means shape 2 by
+            # construction — shape 1 has already raised.
+            self._reject_error_finish(finish_reason, native_finish_reason)
 
         except Exception as e:
             self._trace(f"{trace_prefix}_ERROR {type(e).__name__}: {e}")
@@ -1829,6 +1875,56 @@ class OpenRouterProvider(ModalityCapabilityMixin):
         return StallTimeoutError(
             self._stream_idle_timeout,
             chunks_received=chunk_count,
+            generation_id=self._last_generation_id,
+            model=self._model_name,
+        )
+
+    def _reject_error_finish(
+        self,
+        finish_reason: FinishReason,
+        native_reason: Optional[str],
+    ) -> None:
+        """Raise a named, retryable error for a bare ``"error"`` finish.
+
+        OpenRouter reports a mid-stream upstream failure in two shapes
+        and only one of them used to survive (#766): a top-level
+        ``error`` object is read by :func:`~.converters.read_chunk_error`
+        and raised with the upstream's own words, while
+        ``finish_reason: "error"`` *alone* travelled back as an ordinary
+        response whose finish reason was ``ERROR``.  The session then
+        turned that into a terminal ``RuntimeError("Provider returned an
+        error")`` — one string for every cause, and fatal where the
+        identical condition in the other shape was retried.
+
+        This closes both halves.  The cause lives in the sibling
+        ``native_finish_reason`` (Gemini's ``MALFORMED_FUNCTION_CALL``,
+        say), which a :class:`FinishReason` has no room to carry, so it
+        rides the exception instead; and
+        :class:`~.errors.UpstreamFinishError` is an
+        :class:`~.errors.InfrastructureError`, so ``classify_error``
+        hands it to ``with_retry`` like any other transient.
+
+        Called unconditionally by both the streaming and non-streamed
+        paths — the decision lives here so neither call site grows a
+        branch, and so the same condition reads the same way whichever
+        one saw it.
+
+        Args:
+            finish_reason: The resolved finish reason for the turn.
+            native_reason: The upstream's own word for why it stopped,
+                or ``None`` when it reported nothing.
+
+        Raises:
+            UpstreamFinishError: When *finish_reason* is ``ERROR``.
+        """
+        if finish_reason is not FinishReason.ERROR:
+            return
+        self._trace(
+            f"UPSTREAM_FINISH_ERROR native={native_reason!r} "
+            f"generation_id={self._last_generation_id!r}"
+        )
+        raise UpstreamFinishError(
+            native_reason,
             generation_id=self._last_generation_id,
             model=self._model_name,
         )

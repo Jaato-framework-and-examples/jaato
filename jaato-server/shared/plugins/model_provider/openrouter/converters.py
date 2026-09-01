@@ -835,11 +835,20 @@ def resolve_choice_finish_reason(choice: Any) -> FinishReason:
 
     ``finish_reason`` is authoritative whenever it already reports a
     terminal outcome (truncation, safety, a mid-stream error): those
-    are precise, and a native reason cannot improve on them.  It is
-    *not* authoritative when it reports ``stop`` / ``tool_calls`` /
-    nothing at all, because OpenRouter's normalisation can flatten an
+    are precise, and a native reason cannot improve on the *mapping*.
+    It is *not* authoritative when it reports ``stop`` / ``tool_calls``
+    / nothing at all, because OpenRouter's normalisation can flatten an
     upstream truncation into one of those — which is the #745 bug.  In
     that case a truncating ``native_finish_reason`` wins.
+
+    ``error`` is the one terminal outcome that describes nothing, and
+    the native reason is the only thing carrying information about it
+    (#766).  That diagnosis cannot ride *this* return value — a
+    :class:`FinishReason` has no room for ``MALFORMED_FUNCTION_CALL``
+    — so callers read :func:`read_native_finish_reason` alongside this
+    and raise :class:`~.errors.UpstreamFinishError` with it.  The
+    mapping here is unchanged: ``error`` still means
+    :attr:`FinishReason.ERROR`.
 
     Args:
         choice: A streaming ``Choice`` delta or a batch ``Choice``.
@@ -854,6 +863,31 @@ def resolve_choice_finish_reason(choice: Any) -> FinishReason:
     if native and native.strip().lower() in TRUNCATION_FINISH_REASONS:
         return FinishReason.MAX_TOKENS
     return normalised
+
+
+def read_response_native_finish_reason(response: Any) -> Optional[str]:
+    """Return the first ``native_finish_reason`` a batch response reports.
+
+    The streaming loop reads the native reason per choice as the chunks
+    arrive; the non-streamed path has no loop to hang that on, so this
+    scans the response's choices for the first one that reports a
+    reason.  Mirrors :func:`extract_finish_reason`'s first-reported-wins
+    scan so the two agree about *which* choice they are describing.
+
+    Returns:
+        The native reason string, or ``None`` when no choice reports one
+        (which includes every non-OpenRouter-shaped double).
+    """
+    if response is None:
+        return None
+    choices = getattr(response, "choices", None)
+    if not choices:
+        return None
+    for choice in choices:
+        native = read_native_finish_reason(choice)
+        if native:
+            return native
+    return None
 
 
 def read_chunk_error(chunk: Any) -> Optional[Dict[str, Any]]:
