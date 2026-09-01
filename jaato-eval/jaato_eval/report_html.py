@@ -291,19 +291,37 @@ def _sort_key(record: Dict[str, Any]) -> Tuple[str, int]:
 #: per-arm table is wide by construction — it is a provider console's
 #: session list, and those are wide too.
 _STYLE = """
-:root { --rule: #d8d8d8; --ink: #1a1a1a; --muted: #666; --pass: #1b7f3b;
-        --fail: #b3261e; --blocked: #8a6d00; }
+/* EVERY COLOUR IS A TOKEN AND THE BODY PAINTS ITS OWN GROUND.
+   A page that sets ink and leaves the background to the viewer inherits
+   whatever ground the host supplies — which, in a dark-themed browser or
+   panel, is near-black behind #1a1a1a text.  The first shipped version
+   did exactly that and was illegible on open.  So: a complete light
+   palette on bare :root, the same tokens redefined for a dark viewer, and
+   `background` stated explicitly rather than assumed. */
+:root {
+  color-scheme: light dark;
+  --bg: #ffffff; --surface: #f6f7f8; --rule: #d8dade; --ink: #1a1a1a;
+  --muted: #5f6368; --pass: #1b7f3b; --fail: #b3261e; --blocked: #8a6d00;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #16181c; --surface: #1e2126; --rule: #333941; --ink: #e6e8eb;
+    --muted: #9aa0a6; --pass: #5fd08a; --fail: #ff8d84; --blocked: #e3c25f;
+  }
+}
 * { box-sizing: border-box; }
 body { font: 13px/1.45 -apple-system, "Segoe UI", Roboto, sans-serif;
-       color: var(--ink); margin: 2rem; }
+       background: var(--bg); color: var(--ink); margin: 2rem; }
 h1 { font-size: 1.5rem; margin: 0 0 .25rem; }
 h2 { font-size: 1.1rem; margin: 2rem 0 .5rem; }
 .sub { color: var(--muted); margin: 0 0 1.5rem; }
-table { border-collapse: collapse; width: 100%; margin-bottom: .5rem; }
+table { border-collapse: collapse; width: 100%; margin-bottom: .5rem;
+        background: var(--bg); }
 th, td { border-bottom: 1px solid var(--rule); padding: .35rem .5rem;
          text-align: left; vertical-align: top; }
 th { font-weight: 600; font-size: .78rem; text-transform: uppercase;
-     letter-spacing: .03em; color: var(--muted); white-space: nowrap; }
+     letter-spacing: .03em; color: var(--muted); white-space: nowrap;
+     background: var(--surface); }
 td.num { text-align: right; font-variant-numeric: tabular-nums; }
 code, .mono { font-family: ui-monospace, "SF Mono", Menlo, monospace;
               font-size: .82em; }
@@ -314,6 +332,14 @@ code, .mono { font-family: ui-monospace, "SF Mono", Menlo, monospace;
         max-width: 60em; }
 .wrap { overflow-x: auto; }
 @media print {
+  /* Paper is white whatever the viewer's theme is, and this block comes
+     last so it wins over the dark palette above.  Without it, printing
+     from a dark-themed browser either wastes a cartridge on the ground or
+     drops it and prints pale ink on white. */
+  :root {
+    --bg: #ffffff; --surface: #ffffff; --rule: #bfc3c8; --ink: #000000;
+    --muted: #3c4043; --pass: #14602c; --fail: #8c1d17; --blocked: #6a5400;
+  }
   @page { size: A4 landscape; margin: 12mm; }
   body { margin: 0; font-size: 9pt; }
   h2 { break-after: avoid; }

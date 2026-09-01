@@ -145,6 +145,35 @@ class DocumentCase(unittest.TestCase):
         self.assertNotIn("https://", html)
         self.assertIn("<style>", html)
 
+    def test_the_page_paints_its_own_ground(self):
+        """The first shipped version set ink and left the background to
+        the viewer, so a dark-themed browser rendered #1a1a1a text on its
+        own near-black ground — illegible on open.  A document that names
+        a text colour must name the surface under it."""
+        html = render_html([_rec()])
+        self.assertIn("background: var(--bg)", html)
+        self.assertIn("--bg:", html)
+
+    def test_the_palette_answers_a_dark_viewer(self):
+        """Tokens redefined under prefers-color-scheme, not a second
+        stylesheet: a value whose ONLY definition sits inside a media
+        query is undefined for everyone outside it."""
+        html = render_html([_rec()])
+        self.assertIn("prefers-color-scheme: dark", html)
+        base = html.split("@media", 1)[0]
+        for token in ("--bg:", "--ink:", "--rule:", "--muted:"):
+            self.assertIn(token, base, f"{token} must have a light default")
+
+    def test_print_forces_paper_regardless_of_the_viewers_theme(self):
+        """Declared last so it wins over the dark palette — otherwise
+        printing from a dark browser is pale ink on white, or a whole
+        cartridge spent on the ground."""
+        html = render_html([_rec()])
+        self.assertLess(html.index("prefers-color-scheme: dark"),
+                        html.index("@media print"))
+        print_block = html.split("@media print", 1)[1]
+        self.assertIn("--bg: #ffffff", print_block)
+
     def test_it_carries_print_css_so_a_browser_is_the_pdf_renderer(self):
         self.assertIn("@media print", render_html([_rec()]))
         self.assertIn("@page", render_html([_rec()]))
