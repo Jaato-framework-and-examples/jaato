@@ -1075,9 +1075,20 @@ class TestProviderRouting:
     @patch("shared.plugins.model_provider.openrouter.provider.get_openai_client_class")
     def test_streaming_path_also_forwards_provider_routing(self, mock_client_class):
         fake_client = MagicMock()
-        # Streaming returns an iterable of chunks; an empty list is fine
-        # — we only care about what was passed in.
-        fake_client.chat.completions.create.return_value = iter([])
+        # Streaming returns an iterable of chunks.  One terminal chunk is
+        # the minimum a real stream sends: a stream that ends without a
+        # finish reason is now an error in its own right (#687), and this
+        # test is about what was passed IN.
+        terminal = MagicMock()
+        terminal.choices = [MagicMock()]
+        terminal.choices[0].delta.content = None
+        terminal.choices[0].delta.tool_calls = None
+        terminal.choices[0].delta.reasoning = None
+        terminal.choices[0].finish_reason = "stop"
+        terminal.usage = None
+        terminal.error = None
+        terminal.model_extra = {}
+        fake_client.chat.completions.create.return_value = iter([terminal])
         mock_client_class.return_value = lambda **kw: fake_client
 
         provider = OpenRouterProvider()

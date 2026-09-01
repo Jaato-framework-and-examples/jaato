@@ -229,6 +229,26 @@ class TestClientTransportDeadlines:
 # ==================== The streaming path ====================
 
 
+def _terminal_chunk():
+    """A final chunk carrying ``finish_reason``, as a real stream sends.
+
+    Fixtures that end without one now raise ``StreamInterruptedError``
+    before any assertion here is reached (#687): "the stream stopped
+    arriving" is a failure in its own right, so a fixture standing in
+    for a HEALTHY stream has to terminate like one.
+    """
+    chunk = MagicMock()
+    chunk.choices = [MagicMock()]
+    chunk.choices[0].delta.content = None
+    chunk.choices[0].delta.tool_calls = None
+    chunk.choices[0].delta.reasoning = None
+    chunk.choices[0].finish_reason = "stop"
+    chunk.usage = None
+    chunk.error = None
+    chunk.model_extra = {}
+    return chunk
+
+
 def _stalling_stream(stop: threading.Event):
     """A stream that yields nothing and blocks, like a parked read.
 
@@ -372,6 +392,7 @@ class TestStreamingStallBecomesATypedError:
                     chunk.error = None
                     chunk.model_extra = {}
                     yield chunk
+                yield _terminal_chunk()
 
             def close(self):
                 self.closed = True
@@ -451,7 +472,10 @@ class TestStreamingStallBecomesATypedError:
 
             def __iter__(self):
                 time.sleep(0.2)
-                return iter(())
+                # It is slow but FINE, so it terminates properly.  A
+                # stream that ends with no finish reason is #687's
+                # failure, not this test's subject.
+                yield _terminal_chunk()
 
             def close(self):
                 self.closed = True
@@ -490,6 +514,7 @@ def _healthy_stream():
                 chunk.error = None
                 chunk.model_extra = {}
                 yield chunk
+            yield _terminal_chunk()
 
         def close(self):
             self.closed = True

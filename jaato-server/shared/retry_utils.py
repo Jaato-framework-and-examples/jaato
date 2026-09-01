@@ -35,6 +35,14 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Type, TypeVar, TY
 if TYPE_CHECKING:
     from jaato_sdk.plugins.model_provider.types import CancelToken
 
+# A stream that ended without a terminal event, from ANY provider (#687).
+# Imported plainly, not behind the try/except the OPTIONAL provider SDKs
+# below use: jaato-sdk is a required dependency of jaato-server, so a
+# guard here would only ever produce an empty tuple that makes a later
+# isinstance decide nothing -- the exact shape removed from
+# ``classify_error`` in the same change.
+from jaato_sdk.plugins.model_provider.types import StreamInterruptedError
+
 # Type alias for retry callback - client provides this to handle retry notifications
 # Signature: (message: str, attempt: int, max_attempts: int, delay: float) -> None
 RetryCallback = Callable[[str, int, int, float], None]
@@ -167,15 +175,34 @@ def classify_error(exc: Exception) -> Dict[str, bool]:
     rate_like = False
     infra_like = False
 
+    # An interrupted stream is the textbook retryable failure: the
+    # connection died mid-response, so nothing about the request itself
+    # is known to be wrong (#687).  It belongs here rather than in each
+    # provider's ``classify_error`` because it is one condition with one
+    # verdict: every provider's own classifier returns None for types it
+    # does not recognise, so a single entry in the shared fallback covers
+    # all of them and cannot drift apart between them.  Checked FIRST
+    # because the message patterns below would otherwise have to be
+    # trusted not to match it.
+    if isinstance(exc, StreamInterruptedError):
+        return {"transient": True, "rate_limit": False, "infra": True}
+
+    # NOTE on the ``isinstance(exc, SOME_TUPLE)`` calls below: each of
+    # those tuples is ``()`` when its SDK is not installed, and
+    # ``isinstance(x, ())`` is already False -- so the ``TUPLE and``
+    # guard every one of them used to carry decided nothing.  Dropped
+    # (six branches' worth), which is what left room for the check
+    # above under the complexity ratchet.
+
     # Check Google api_core exceptions (older google-generativeai SDK)
-    if GOOGLE_TRANSIENT_CLASSES and isinstance(exc, GOOGLE_TRANSIENT_CLASSES):
-        if GOOGLE_RATE_LIMIT_CLASSES and isinstance(exc, GOOGLE_RATE_LIMIT_CLASSES):
+    if isinstance(exc, GOOGLE_TRANSIENT_CLASSES):
+        if isinstance(exc, GOOGLE_RATE_LIMIT_CLASSES):
             rate_like = True
         else:
             infra_like = True
     # Check Google GenAI ClientError (newer python-genai SDK)
     # ClientError wraps all 4xx errors, so check message for specific codes
-    elif GENAI_RATE_LIMIT_CLASSES and isinstance(exc, GENAI_RATE_LIMIT_CLASSES):
+    elif isinstance(exc, GENAI_RATE_LIMIT_CLASSES):
         lower = str(exc).lower()
         if any(p in lower for p in ["429", "resource exhausted", "resource_exhausted", "rate limit", "quota"]):
             rate_like = True
@@ -183,11 +210,11 @@ def classify_error(exc: Exception) -> Dict[str, bool]:
             infra_like = True
         # For other 4xx ClientErrors, don't retry by default (auth errors, bad requests, etc.)
     # Check GitHub rate limit
-    elif GITHUB_RATE_LIMIT_CLASSES and isinstance(exc, GITHUB_RATE_LIMIT_CLASSES):
+    elif isinstance(exc, GITHUB_RATE_LIMIT_CLASSES):
         rate_like = True
     # Check Anthropic exceptions
-    elif ANTHROPIC_TRANSIENT_CLASSES and isinstance(exc, ANTHROPIC_TRANSIENT_CLASSES):
-        if ANTHROPIC_RATE_LIMIT_CLASSES and isinstance(exc, ANTHROPIC_RATE_LIMIT_CLASSES):
+    elif isinstance(exc, ANTHROPIC_TRANSIENT_CLASSES):
+        if isinstance(exc, ANTHROPIC_RATE_LIMIT_CLASSES):
             rate_like = True
         else:
             infra_like = True

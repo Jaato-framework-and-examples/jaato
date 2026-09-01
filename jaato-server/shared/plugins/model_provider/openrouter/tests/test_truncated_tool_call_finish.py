@@ -43,6 +43,7 @@ import pytest
 
 from jaato_sdk.plugins.model_provider.types import (
     FinishReason,
+    StreamInterruptedError,
     TERMINAL_FINISH_REASONS,
     resolve_tool_use_finish,
 )
@@ -331,15 +332,34 @@ class TestTruncatedStreamDoesNotReportToolUse:
         ])
         assert result.finish_reason == FinishReason.TOOL_USE
 
-    def test_an_unreported_finish_with_calls_is_still_tool_use(self):
-        # The case the override existed to serve: some upstreams report
-        # nothing, and the accumulated calls are the only evidence.
-        result = _stream([
-            _make_chunk(tool_calls=[
-                _tool_call_delta(args='{"path": "a.py"}'),
-            ]),
-        ])
-        assert result.finish_reason == FinishReason.TOOL_USE
+    def test_a_stream_that_never_reported_a_finish_is_an_error_now(self):
+        """#687 narrowed what "unreported" is allowed to mean here.
+
+        This case used to assert ``TOOL_USE``, on the reasoning that
+        some upstreams report nothing and the accumulated calls are the
+        only evidence.  They are also the only evidence when the
+        connection simply died mid-call -- the two are the same bytes on
+        the wire, and reading them as a tool request is how a severed
+        turn becomes an executed one.
+
+        ``resolve_tool_use_finish``'s own contract is unchanged (see
+        ``TestResolveToolUseFinish.test_fills_in_an_unreported_finish``):
+        it still fills in an ``UNKNOWN`` observed reason, which is what a
+        chunk carrying an unmapped finish label produces.  What changed
+        is upstream of it -- a stream that delivered no terminal event at
+        all no longer reaches that resolution.
+        """
+        with pytest.raises(StreamInterruptedError) as exc:
+            _stream([
+                _make_chunk(tool_calls=[
+                    _tool_call_delta(args='{"path": "a.py"}'),
+                ]),
+            ])
+        assert exc.value.dropped_calls == 1
+        assert exc.value.partial.finish_reason == FinishReason.INCOMPLETE
+        assert not [
+            p for p in exc.value.partial.parts if p.function_call
+        ], "a call the stream never finished must not travel downstream"
 
     def test_a_bare_stop_with_calls_is_still_tool_use(self):
         result = _stream([
