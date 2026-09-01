@@ -122,6 +122,13 @@ class PluginInfo:
     config_keys: List[str] = field(default_factory=list)
     config_settings: List["ConfigSetting"] = field(default_factory=list)
     dynamic: bool = False               # tool list needs a live session (mcp, …)
+    # Provenance (issue #684): who supplied this plugin.  ``source`` is
+    # the rendered one-liner (``built-in (shared.plugins.cli)``), and
+    # ``builtin`` says whether it came from the framework's own package —
+    # so an out-of-tree distribution that claimed a built-in name is
+    # visible in ``jaato-scaffold plugins`` without reading daemon logs.
+    source: str = ""
+    builtin: bool = True
 
 
 @dataclass
@@ -334,6 +341,20 @@ def profile_schema() -> List[ProfileField]:
 
 # ----------------------------------------------------------------- plugins
 
+def _stamp_origin(info: "PluginInfo", origin: Any) -> None:
+    """Copy a registry ``PluginOrigin`` onto *info*, if one was recorded.
+
+    Provenance is optional: a registry that predates #684 tracking, or a
+    plugin registered by some path that never stamped one, yields
+    ``None`` and leaves the defaults ("built-in", unnamed source) in
+    place rather than misreporting an unknown origin as foreign.
+    """
+    if origin is None:
+        return
+    info.source = origin.describe()
+    info.builtin = origin.builtin
+
+
 def plugins() -> Dict[str, PluginInfo]:
     """All tool/enrichment plugins, best-effort offline.
 
@@ -353,6 +374,7 @@ def plugins() -> Dict[str, PluginInfo]:
     for name in sorted(reg.list_available()):
         info = PluginInfo(name=name)
         plugin = reg.get_plugin(name)
+        _stamp_origin(info, reg.get_plugin_source(name))
         # kind / tier from the plugin's module (module-level constants)
         mod = type(plugin).__module__
         try:

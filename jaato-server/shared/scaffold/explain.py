@@ -531,14 +531,25 @@ def plugins() -> Rendered:
         data[name] = {
             "kind": pi.kind, "tier": pi.tier,
             "tools": len(pi.tools), "core": core, "dynamic": pi.dynamic,
+            # Provenance (issue #684) — which distribution supplied this
+            # plugin, and whether that is the framework itself.
+            "source": pi.source, "builtin": pi.builtin,
         }
         tools = "dynamic" if pi.dynamic else f"{len(pi.tools)} ({core} core/{disc} disc)"
-        rows.append(f"  {name:22} {pi.kind:10} {str(pi.tier or '-'):8} {tools}")
+        # Built-ins render bare; anything else is named, so a plugin
+        # supplied by an installed distribution stands out in the table.
+        src = "" if pi.builtin else f"   <- {pi.source}"
+        rows.append(
+            f"  {name:22} {pi.kind:10} {str(pi.tier or '-'):8} {tools}{src}"
+        )
     text = (f"{'plugin':24}{'kind':12}{'tier':10}tools\n"
             + "  " + "-" * 56 + "\n" + "\n".join(rows)
             + "\n\n  core = in the model's initial schema; disc = deferred "
               "(discoverable via\n  list_tools/get_tool_schemas, or force eager "
-              "with `<plugin>(preload)` in a profile)")
+              "with `<plugin>(preload)` in a profile)"
+            + "\n  `<- dist (module)` marks a plugin supplied by an "
+              "installed distribution\n  rather than the built-in "
+              "package — see JAATO_PLUGIN_ENTRY_POINT_ALLOWLIST")
     return data, text
 
 
