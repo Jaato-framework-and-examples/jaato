@@ -50,6 +50,21 @@ from typing import Any, AsyncIterator, Collection, Dict, Optional
 from ..events import ClientType, EventType
 
 
+#: Seconds ``Session.complete`` will wait for the ``AGENT_STATUS_CHANGED`` that
+#: confirms or withdraws a turn's proposed terminus, before settling on the
+#: turn anyway.
+#:
+#: The daemon emits that event from the same thread that emitted the turn
+#: event, microseconds later, so this is never reached in a healthy session --
+#: it exists for the one where the daemon stops talking mid-sequence (a lost
+#: connection between a turn and its status event, or a daemon that dies
+#: there).  Without it that session waits forever, and this module has shipped
+#: an infinite hang before (PR #399).  Deliberately generous: tripping it early
+#: costs the accuracy #767 bought back, so it should only ever fire when the
+#: alternative is not returning at all.
+SETTLE_GRACE = 10.0
+
+
 class AgentError(Exception):
     """A turn ended in error (``SESSION_TERMINATED(reason="error")`` /
     ``AgentErrorEvent``).  Carries the daemon's ``error_type`` /
@@ -245,12 +260,24 @@ class Session:
         the parent's call, which they did before -- any agent's
         ``TURN_COMPLETED`` ended the wait.
 
-        NO TIMER, AND NO HANG.  If that opening status event never arrives
-        (an older daemon, or a connection whose cascade registration filters
-        the type), nothing is latched and the first ``TURN_COMPLETED``
-        settles the call exactly as it used to.  The fallback is the
-        pre-existing behaviour, so version skew costs accuracy, never a wait
-        with no end.
+        NO HANG, ON EITHER SIDE OF THE LATCH.  Waiting on a confirmation
+        introduces two ways for one never to arrive, and both fall back to the
+        pre-#767 behaviour -- settle on the turn:
+
+        * *Never latched.*  The opening status event does not arrive (an older
+          daemon, or a connection whose cascade registration filters the
+          type), so nothing is latched and the first ``TURN_COMPLETED``
+          settles the call immediately, exactly as it used to.
+        * *Latched, then unconfirmed.*  A turn proposes a terminus and neither
+          the status event nor a terminal follows -- the daemon stopped
+          talking mid-sequence.  The proposal is settled after
+          ``SETTLE_GRACE``.  The first version of this fix had no such bound
+          and hung here forever, which is the defect class this module already
+          carries a scar from (PR #399, and ``ask``'s own "so a turn can never
+          hang in user code").
+
+        So version skew or a lost daemon costs accuracy, never a wait with no
+        end.
 
         ``ask``/``stream`` keep turn semantics deliberately: their contract is
         one turn's output, and an interactive session must hand back each turn
@@ -258,9 +285,13 @@ class Session:
         """
         box: Dict[str, Any] = {}
         done = asyncio.Event()
-        # The agent whose turns can settle this call, and whether one of its
-        # turns is currently PROPOSING a terminus (awaiting its status event).
-        state: Dict[str, Any] = {"agent": None, "proposed": False}
+        # Anything a handler changes wakes the wait below, which re-reads
+        # ``state`` rather than trusting the event that woke it.
+        wake = asyncio.Event()
+        # The agent whose turns can settle this call, and the turn of its that
+        # is currently PROPOSING a terminus (awaiting that agent's next status
+        # event).  ``None`` = nothing proposed, so the wait is unbounded.
+        state: Dict[str, Any] = {"agent": None, "proposal": None}
 
         def on_completed(ev: Any) -> None:
             box["payload"] = getattr(ev, "payload", None)
@@ -268,6 +299,7 @@ class Session:
         def settle(ev: Any) -> None:
             self._note_terminal(box, ev)
             done.set()
+            wake.set()
 
         def on_turn(ev: Any) -> None:
             agent = getattr(ev, "agent_id", None)
@@ -277,7 +309,8 @@ class Session:
                 settle(ev)
                 return
             if agent == state["agent"]:
-                state["proposed"] = True
+                state["proposal"] = ev
+                wake.set()
 
         def on_status(ev: Any) -> None:
             agent = getattr(ev, "agent_id", None)
@@ -286,10 +319,11 @@ class Session:
                 if status == "active":
                     state["agent"] = agent
                 return
-            if agent != state["agent"] or not state["proposed"]:
+            if agent != state["agent"] or state["proposal"] is None:
                 return
             if status == "active":
-                state["proposed"] = False   # another turn is starting
+                state["proposal"] = None    # another turn is starting
+                wake.set()
             else:
                 settle(ev)                  # the agent settled on that turn
 
@@ -303,7 +337,24 @@ class Session:
         try:
             await self._client.send_message(
                 prompt, parallel_tools=parallel_tools, attachments=attachments)
-            await done.wait()
+            while not done.is_set():
+                # Clear BEFORE reading the state the handlers write.  Sync
+                # handlers run inline on this loop, so they cannot interleave
+                # between the clear and the await -- whatever they had already
+                # recorded is visible here, and anything later re-sets ``wake``.
+                wake.clear()
+                proposal = state["proposal"]
+                if proposal is None:
+                    await wake.wait()       # nothing proposed: wait as before
+                    continue
+                try:
+                    await asyncio.wait_for(wake.wait(), timeout=SETTLE_GRACE)
+                except asyncio.TimeoutError:
+                    # The confirmation never came.  Settle on what the turn
+                    # proposed rather than wait on a daemon that has stopped
+                    # talking.
+                    if state["proposal"] is proposal and not done.is_set():
+                        settle(proposal)
         finally:
             unsub_comp()
             unsub_term()

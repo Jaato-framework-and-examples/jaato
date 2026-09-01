@@ -25,6 +25,7 @@ from jaato_sdk import (
     ask,
 )
 from jaato_sdk.events import EventType
+from jaato_sdk.client import convenience
 from jaato_sdk.client.convenience import _SessionContext, open_session
 
 
@@ -240,6 +241,26 @@ async def test_complete_falls_back_to_the_turn_when_no_agent_is_announced():
     c = ScriptedClient(fire=[_turn()])
     assert await Session(c, "s").complete("go") is None
     assert c.delivered == 1
+
+
+async def test_complete_does_not_hang_when_the_confirmation_never_arrives(monkeypatch):
+    """A latched turn whose status event never comes must still return.
+
+    The first version of #767's fix waited for that confirmation with no
+    bound, so a daemon that stopped talking between a turn and its status
+    event -- a lost connection, or a daemon that died there -- left the caller
+    waiting forever.  Nothing in the SDK synthesises a terminal on disconnect
+    (the event stream takes a ``None`` sentinel and unsubscribes, so
+    ``subscribe_once`` callbacks never fire), so no other layer would have
+    ended it.  That is the hang class this module already carries a scar from
+    (PR #399), reintroduced narrower.
+
+    Found by review, reproduced with exactly this script.
+    """
+    monkeypatch.setattr(convenience, "SETTLE_GRACE", 0.05)
+    c = ScriptedClient(fire=[_status("main", "active"), _turn("main")])
+    assert await asyncio.wait_for(Session(c, "s").complete("go"),
+                                  timeout=5) is None
 
 
 async def test_complete_raises_on_the_error_terminal_of_a_nudged_session():
