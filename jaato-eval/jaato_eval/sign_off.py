@@ -50,6 +50,22 @@ from __future__ import annotations
 
 from typing import Optional
 
+#: How many times the framework re-prompts a session that ended without
+#: calling ``signal_completion`` before giving up and producing the
+#: terminal below.  ``server/core.py``'s ``MAX_COMPLETION_NUDGES``,
+#: restated here because the engine must not import ``server.*`` and
+#: because the number is what makes a reported ``2`` mean "at the
+#: ceiling, one nudge from NudgeExhausted" rather than merely "twice".
+#:
+#: It lives beside :data:`UNSIGNED_TERMINALS` deliberately: this is the
+#: budget whose exhaustion produces that terminal, and the runner (which
+#: counts nudges) and the report (which renders them against the ceiling)
+#: must not each carry their own copy of the number.
+#:
+#: If the framework raises its ceiling, this constant is stale in exactly
+#: one direction — an arm reported at the ceiling that had a nudge left.
+MAX_COMPLETION_NUDGES = 2
+
 #: Daemon ``error_type`` values whose workspace is still worth grading.
 #: Deliberately a one-element set, and deliberately named rather than
 #: pattern-matched: every other terminal keeps the conservative reading,

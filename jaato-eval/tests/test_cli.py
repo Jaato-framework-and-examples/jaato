@@ -182,6 +182,54 @@ class WorkspaceRootIsAbsoluteCase(unittest.TestCase):
         self.assertEqual(root, Path("/abs/ws"))
 
 
+class PerArmDocumentCase(unittest.TestCase):
+    """``--html`` / ``--pdf`` — the per-arm report (jaato #777).
+
+    Both subcommands take them, because the two are the same question at
+    different times: as a sweep finishes, and over an old results file.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+        self.path = self.dir / "results.jsonl"
+        self.path.write_text(json.dumps(_record("t/a@cheap#0", "PASS")) + "\n")
+        self.addCleanup(self.tmp.cleanup)
+
+    def _report(self, *extra):
+        args = build_parser().parse_args(["report", str(self.path), *extra])
+        return cmd_report(args)
+
+    def test_html_is_written_and_the_verdict_still_decides_the_exit(self):
+        out = self.dir / "report.html"
+        self.assertEqual(self._report("--html", str(out)), 0)
+        self.assertIn("Which configuration won", out.read_text(encoding="utf-8"))
+
+    def test_without_the_flag_nothing_is_written(self):
+        self.assertEqual(self._report(), 0)
+        self.assertEqual(list(self.dir.glob("*.html")), [])
+
+    def test_a_pdf_that_cannot_be_rendered_is_not_a_silent_success(self):
+        """A sweep run unattended asked for a PDF.  Exiting on the verdict
+        code alone would report the missing artefact as an ordinary
+        result."""
+        try:
+            import weasyprint  # noqa: F401
+        except ImportError:
+            self.assertEqual(self._report("--pdf", str(self.dir / "r.pdf")), 2)
+        else:
+            self.assertEqual(self._report("--pdf", str(self.dir / "r.pdf")), 0)
+
+    def test_both_flags_reach_both_subcommands(self):
+        for command in (["run", "tasks"], ["report", "r.jsonl"]):
+            args = build_parser().parse_args(command + ["--html", "a.html",
+                                                        "--pdf", "b.pdf"])
+            self.assertEqual(args.html, "a.html")
+            self.assertEqual(args.pdf, "b.pdf")
+            self.assertIsNone(
+                build_parser().parse_args(command).html)
+
+
 class MainDispatchCase(unittest.TestCase):
 
     def test_report_is_reachable_through_main(self):

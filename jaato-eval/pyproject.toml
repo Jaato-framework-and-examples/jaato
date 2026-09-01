@@ -21,6 +21,13 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest"]
+# `report --pdf` only.  The per-arm HTML document is written with no
+# dependency at all and carries print CSS, so a browser is already a
+# working PDF renderer; this extra buys the `--pdf` flag on a machine with
+# no browser — a CI box, or a sweep host running unattended.  Kept optional
+# so a default install stays dependency-free, and asked for loudly rather
+# than falling back silently to HTML (see jaato_eval/report_html.py).
+report = ["weasyprint>=60"]
 
 [project.scripts]
 jaato-eval = "jaato_eval.cli:main"

@@ -50,6 +50,10 @@ python -m jaato_eval run tasks/ --profile-set openrouter_haiku,vllm_qwen3_14b \
 # re-pivot an existing results file
 python -m jaato_eval report results.jsonl
 
+# ... and write the per-arm report beside it (self-contained HTML; add
+# --pdf for the same document rendered, via `pip install 'jaato-eval[report]'`)
+python -m jaato_eval report results.jsonl --html report.html
+
 # resume a sweep that was killed
 python -m jaato_eval run tasks/ --out results.jsonl --resume
 ```
@@ -266,6 +270,90 @@ sweep does not. Set `JAATO_RUNNER_POOL_SIZE >= --concurrency` or arms
 cold-spawn (~30s) instead of claiming a warm slot (~7s). The driver prints
 the number it wants rather than silently under-performing.
 
+## The per-arm report
+
+The pivot answers *which configuration won*. It is the wrong artefact for
+the other question a sweep raises constantly: **what happened to arm 3,
+and can I go look at it upstream?**
+
+```bash
+python -m jaato_eval run tasks/ --out results.jsonl --html report.html
+python -m jaato_eval report results.jsonl --html report.html --pdf report.pdf
+```
+
+`--html` writes a **self-contained** document — no dependency, no script,
+no webfont, no network — carrying the pivot *and* one table per task, one
+row per arm, shaped like a provider console's session list. It ships print
+CSS, so any browser prints it to PDF. `--pdf` renders the same HTML through
+the optional `report` extra (`pip install 'jaato-eval[report]'`) and fails
+loudly with that install line rather than falling back silently to HTML —
+a sweep run unattended asked for a PDF and must not quietly produce
+something else.
+
+### The session id is the point
+
+| column | source |
+|---|---|
+| model, provider | the daemon's `SessionInfoEvent` — what it actually **bound**, not the profile-set name |
+| **session id** | the runner already knew it and used to discard it |
+| upstream provider, native finish reason | provider-reported; `—` until jaato #766 carries them off the wire |
+| budget | which gate applied, and what the pool had left **on arrival** |
+| nudges | `n/2`, counted from the session's own log |
+| verdicts | one column per grader, not a blob |
+
+`profile_set` (`openrouter_gemini25flash`) is a naming convention, not
+data. The **session id** is the join key: OpenRouter's console groups its
+Sessions view by exactly that string, so persisting it turns every row
+into a link to the provider's own record of the arm — request count,
+routed upstream, per-request cost, generation ids. Without it the two
+views cannot be joined at all.
+
+### Why budget is a column
+
+Three arms of one sweep drew on a single `$6.00` pool and spent
+`$3.81 + $0.17 + $2.03 = $6.0140`. The last was killed mid-work with
+`SessionTerminatedEvent(reason=budget_exhausted)` and recorded BLOCKED.
+From the results file that arm looks like a model failure. It was not — it
+was billed for an earlier arm's appetite, and noticing took reading three
+rows and adding them up.
+
+```
+$2.0300 / pool $6.0000 (66% consumed on arrival)
+```
+
+The pool reading is taken **per arm, immediately before it starts**
+(`cascade.budget.get`): one taken up front would print the same number on
+every row and answer nothing.
+
+The two budget gates are shown as themselves. A session declaring its own
+`budget_control` is on its own books and does not draw on the task pool —
+so the column says `own $0.2500` or `pool $6.0000`, because a ceiling
+shown without naming its pot reads as a pool that failed to bind.
+
+### `—` is not zero
+
+Every unestablished value renders as an em dash, and the document says in
+prose what each one does *not* mean. `cost —` is not free (neither the
+provider nor `.jaato/pricing.json` reported one). `nudges —` is not "none
+fired" — it means the count could not be read, which is what a daemon
+logging at INFO leaves behind, and reporting it as `0` would be a fact the
+engine made up. The same discipline as `pass rate —` versus `0%`.
+
+### Where each field comes from
+
+Only one of them is read off a file. The model and provider come from the
+daemon's own announcement, because a resolver that re-derived them would
+be a second implementation of profile binding and would describe an arm
+that never ran the moment it disagreed. The **budget ceiling** has no such
+witness — the daemon enforces `budget_control` without announcing it — so
+`jaato_eval/profile.py` reads that one field from the profile the arm
+bound, following the framework's own two rules: set directory first, and
+limits merge **min-wins** (a child may only ever *tighten* a ceiling).
+
+Nudges come from the session's own log inside the arm's workspace, the
+same move `_tracker_usage` already makes for the budget snapshot — the
+count is announced with `logger.debug` and rides no event.
+
 ## Determinism
 
 Every arm's completion payload is hashed with the same canonicalisation
@@ -280,7 +368,7 @@ give you, and it costs nothing extra to collect.
 python3 -m unittest discover -s tests -t .      # no daemon, no SDK needed
 ```
 
-144 tests. The runner is covered end-to-end against a stubbed SDK
+230 tests. The runner is covered end-to-end against a stubbed SDK
 (`tests/test_runner_integration.py`) — PASS, FAIL and BLOCKED arms, usage
 accumulation, the `config_root`/workspace split, and `.env` profile-set
 propagation.
