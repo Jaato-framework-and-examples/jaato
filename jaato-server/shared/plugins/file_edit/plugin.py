@@ -325,6 +325,34 @@ class FileEditPlugin(RunnerForwardingMixin):
             "the match ambiguous."
         )
 
+    @staticmethod
+    def _full_replacement_content(args: Dict[str, Any]) -> Optional[str]:
+        """``new_content``, then the ``content`` alias, or ``None`` if absent.
+
+        A method rather than two inline checks because ``_execute_update_file``
+        sits at the complexity ceiling and is frozen in the audit baseline —
+        the same reason the caller reads as one branch.  ``None`` means NOT
+        SUPPLIED; an empty string is a deliberate truncation and must survive.
+        """
+        content = args.get("new_content")
+        return args.get("content") if content is None else content
+
+    def _missing_content_error(self) -> str:
+        """Guiding error for a full-replacement call that names no content.
+
+        'new_content' absent entirely is a malformed call, not a request for
+        an empty file: absent and empty must not share a representation, or
+        a call that merely forgot its payload silently truncates the file.
+        An explicit ``new_content: ""`` remains the way to truncate
+        deliberately.  Names both modes so the model can self-correct.
+        """
+        return (
+            "updateFile needs content to apply: provide 'old' (the exact "
+            "current text, minimal) → 'new' for a targeted edit, or "
+            "'new_content' for full-file replacement. To truncate the file "
+            "deliberately, pass 'new_content' as an empty string (\"\")."
+        )
+
     def _check_edit_span(self, old: Optional[str], new: Optional[str]) -> Optional[str]:
         """Enforce the targeted-edit span cap on ``old`` and ``new``.
 
@@ -1436,8 +1464,22 @@ Backups are automatically created for file modifications."""
                     format_hint="text",
                     pre_validation_error=self._full_replace_gate_error(),
                 )
-            # Accept both 'new_content' (canonical) and 'content' (alias)
-            new_content = arguments.get("new_content") or arguments.get("content", "")
+            # Same absent-vs-empty distinction as the executor: a call that
+            # names no content will be rejected there, so surface the guiding
+            # error here as pre-validation rather than previewing a truncation
+            # the executor will refuse.
+            new_content = arguments.get("new_content")
+            if new_content is None:
+                new_content = arguments.get("content")
+            if new_content is None:
+                display_path = ellipsize_path(path, DEFAULT_MAX_PATH_WIDTH)
+                missing_error = self._missing_content_error()
+                return PermissionDisplayInfo(
+                    summary=f"Update file: {display_path} (no content provided)",
+                    details=missing_error,
+                    format_hint="text",
+                    pre_validation_error=missing_error,
+                )
 
         diff_text, truncated, total_lines = generate_unified_diff(
             old_content, new_content, path, max_lines=DEFAULT_MAX_LINES
@@ -1783,8 +1825,15 @@ Backups are automatically created for file modifications."""
             if not self._allow_full_replace:
                 self._trace(f"updateFile(full) REJECTED — allow_full_replace=False: path={path}")
                 return {"error": self._full_replace_gate_error()}
-            # Accept both 'new_content' (canonical) and 'content' (alias)
-            new_content = args.get("new_content") or args.get("content", "")
+            # Accept both 'new_content' (canonical) and 'content' (alias).
+            # Absent is NOT empty: a call that names no content is malformed
+            # and must be rejected before any backup or write, or it silently
+            # truncates the file and reports success.  An explicit empty
+            # string remains the deliberate way to truncate.
+            new_content = self._full_replacement_content(args)
+            if new_content is None:
+                self._trace(f"updateFile(full) REJECTED - no content: path={path}")
+                return {"error": self._missing_content_error()}
             self._trace(f"updateFile(full): path={path}, content_len={len(new_content)}")
 
         # Create backup before modification
