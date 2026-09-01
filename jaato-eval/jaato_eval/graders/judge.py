@@ -74,20 +74,9 @@ class JudgeGrader:
             return blocked(self.spec, "judge grader runs",
                            "manifest grader has no 'profile' key")
 
-        truncated = context.truncation_reason
-        if truncated:
-            return blocked(self.spec, claim,
-                           f"arm {truncated}; judging a truncated run "
-                           "would score the interruption, not the work")
-
-        unmet = self._unmet_gates(context)
-        if unmet:
-            return blocked(self.spec, claim,
-                           "gate_on graders did not pass: "
-                           + ", ".join(f"{g}={context.prior_verdicts.get(g, 'not run')}"
-                                       for g in unmet)
-                           + " — judge skipped to avoid spending a session on an "
-                             "arm already known bad")
+        refusal = self._must_not_run(claim, context)
+        if refusal is not None:
+            return refusal
 
         try:
             payload = asyncio.run(self._ask_judge(profile, context))
@@ -170,6 +159,53 @@ class JudgeGrader:
             if key in payload:
                 verdict.note(f"{key}: {_brief(payload[key])}")
         return verdict
+
+    def _must_not_run(self, claim: str,
+                      context: GraderContext) -> Optional[Verdict]:
+        """The reasons this judge must not spend a session, or ``None``.
+
+        Every one of them is a BLOCKED verdict rather than a FAIL: a judge
+        that did not judge says nothing about the arm.  They live together
+        because the module's COST WARNING is what they all serve — each is
+        a full model call avoided — and because grouping them keeps
+        :meth:`grade` about scoring.
+
+        The order is the order they are cheapest to establish in, and the
+        first two are not interchangeable: an unsigned arm is also a
+        truncated one by :attr:`GraderContext.truncation_reason`, so the
+        specific reading has to be tried first or the reader is told the
+        run was interrupted when it was not.
+        """
+        # A JUDGE IS A PAYLOAD READER.  ``_render_prompt`` puts the arm's
+        # completion payload first and a workspace listing second, so an
+        # arm with no payload would be scored on half its input — and the
+        # rubric would be answering a different question than it does for
+        # every sibling arm, which is worse for a comparison than a gap.
+        # So an unsigned arm BLOCKS here even though its script graders
+        # return verdicts (jaato #773); what changes is that the reason
+        # names the missing sign-off instead of calling the run truncated.
+        if context.missing_sign_off:
+            return blocked(
+                self.spec, claim,
+                f"the agent never called signal_completion "
+                f"({context.termination_error_type}), so the judge would be "
+                "handed a workspace listing with no claim to score it "
+                "against — its workspace was still graded by the graders "
+                "that read the workspace")
+        truncated = context.truncation_reason
+        if truncated:
+            return blocked(self.spec, claim,
+                           f"arm {truncated}; judging a truncated run "
+                           "would score the interruption, not the work")
+        unmet = self._unmet_gates(context)
+        if unmet:
+            return blocked(self.spec, claim,
+                           "gate_on graders did not pass: "
+                           + ", ".join(f"{g}={context.prior_verdicts.get(g, 'not run')}"
+                                       for g in unmet)
+                           + " — judge skipped to avoid spending a session on an "
+                             "arm already known bad")
+        return None
 
     def _unmet_gates(self, context: GraderContext) -> List[str]:
         """Gate ids from ``gate_on`` that did not record a PASS.

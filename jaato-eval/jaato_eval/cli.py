@@ -33,6 +33,14 @@ def _progress(result: ArmResult) -> None:
     tail = ""
     if result.blocked_reason:
         tail = f"  ({result.blocked_reason})"
+    elif result.error:
+        # A VERDICT AND AN ERROR TERMINAL AT ONCE.  An arm graded through a
+        # missing signal_completion (jaato #773) has a real state, so it
+        # gets a ✓ or ✘ like any other — but it also ended badly, and the
+        # live line is where an operator is actually looking.  Without this
+        # such an arm is indistinguishable from a clean one until someone
+        # opens the results file.
+        tail = f"  (graded without a sign-off: {result.error})"
     cost = (result.usage or {}).get("cost_usd")
     if isinstance(cost, (int, float)):
         tail += f"  ${cost:.4f}"

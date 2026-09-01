@@ -24,6 +24,15 @@ tripped, provider cut the turn short.  None of these say anything about
 the configuration under test, and averaging them into a pass rate is how
 a sweep concludes that the cheap model is worse when its provider merely
 rate-limited you.
+
+The sorting is by whether the agent was EXERCISED, not by whether the
+session ended cleanly, and one terminal makes the difference visible: an
+agent that spends the framework's completion-nudge budget
+(``NudgeExhausted``) has run, worked and left a workspace, and is missing
+only its sign-off.  That belongs in the first bucket, and it reaches it —
+see :mod:`jaato_eval.sign_off`, which owns the rule, and ``_run_session``,
+which grades through such a terminal instead of raising past the grading.
+Every other error terminal still lands in the second.
 """
 from __future__ import annotations
 
@@ -38,6 +47,7 @@ from .fixture import FixtureError, Workspace, discard, materialise
 from .graders import REGISTRY, GraderContext
 from .ledger import build_ledger_result
 from .results import canonical_hash
+from .sign_off import is_unsigned_terminal
 from .verdict import Verdict
 
 #: Usage keys summed across turns rather than taken from the last turn.
@@ -72,6 +82,8 @@ class _TurnAccumulator:
         self.cost_usd: Optional[float] = None
         self.termination_reason = ""
         self.termination_detail = ""
+        self.termination_error_type = ""
+        self.agent_error: Optional[str] = None
         self.completion_gap: Optional[str] = None
 
     def on_terminated(self, event: Any) -> None:
@@ -94,6 +106,37 @@ class _TurnAccumulator:
         detail = (getattr(event, "details", None)
                   or getattr(event, "error_summary", None) or "")
         self.termination_detail = str(detail)
+        # The terminal's TYPE, alongside its prose.  ``reason="error"``
+        # says only that something failed; the type is what separates a
+        # daemon that died mid-turn from an agent that finished its work
+        # and never called signal_completion (see :mod:`jaato_eval.sign_off`).
+        self.termination_error_type = str(
+            getattr(event, "error_type", "") or "")
+
+    def note_unsigned(self, exc: Exception) -> None:
+        """Record an error terminal the arm is being graded through anyway.
+
+        Called by :func:`_run_session` when ``complete()`` raises a
+        terminal :mod:`jaato_eval.sign_off` classifies as *unsigned* — the
+        agent worked and left a workspace, it just never called
+        ``signal_completion``.  The facts land here rather than on a local
+        so that the arm's result and every grader see the same account of
+        why no payload arrived, and so a session whose
+        ``SessionTerminatedEvent`` never reached us (the exception carries
+        the same two fields) is described just as fully.
+
+        Never overwrites what the terminal event already said: the event is
+        the daemon's own account, the exception is the SDK's relay of it.
+        """
+        error_type = str(getattr(exc, "error_type", "") or "")
+        if error_type and not self.termination_error_type:
+            self.termination_error_type = error_type
+        summary = str(getattr(exc, "error_summary", "") or "")
+        if summary and not self.termination_detail:
+            self.termination_detail = summary
+        if not self.termination_reason:
+            self.termination_reason = "error"
+        self.agent_error = str(exc)
 
     def on_turn(self, event: Any) -> None:
         self.turns += 1
@@ -218,6 +261,12 @@ async def run_arm(spec: ArmSpec, *, workspace_root: Path,
     result.turns = accumulator.turns
     result.finish_reason = accumulator.finish_reason
     result.usage = accumulator.snapshot()
+    # Set ONLY for an arm graded through an error terminal (today: a
+    # missing signal_completion).  ``blocked_reason`` stays None -- the
+    # state must roll up from the verdicts, which is the difference this
+    # field exists to record: the arm ran and produced evidence, and what
+    # it lacked was the sign-off, not the work.
+    result.error = accumulator.agent_error
     if payload is not None:
         result.payload_hash = canonical_hash(payload)
 
@@ -233,9 +282,11 @@ async def run_arm(spec: ArmSpec, *, workspace_root: Path,
         finish_reason=accumulator.finish_reason,
         termination_reason=accumulator.termination_reason,
         termination_detail=accumulator.termination_detail,
+        termination_error_type=accumulator.termination_error_type,
         completion_gap=accumulator.completion_gap,
         turns=accumulator.turns,
         socket_path=socket_path,
+        error=accumulator.agent_error,
     )
 
     _CONTEXT_SPY(context)
@@ -559,8 +610,35 @@ async def _run_session(spec: ArmSpec, workspace: Workspace, *,
         # worked around here, per this module's own rule about where SDK gaps
         # belong (jaato #767); the guard lives in the SDK's conformance suite,
         # where a live daemon can actually be re-prompted.
-        payload = await session.complete(task.input.prompt)
-        await client.request_history()
+        #
+        # NOT EVERY ERROR TERMINAL IS "NOTHING TO GRADE".  ``complete()``
+        # raises ``AgentError`` on an error terminal, and this used to let
+        # every one of them out to run_arm's blanket handler, which records
+        # BLOCKED.  For ``NudgeExhausted`` that is the wrong state: the
+        # agent ran, committed, and left a workspace, and only its sign-off
+        # is missing -- so the arm was reported as unmeasured while its tree
+        # sat on disk, and (since blocked arms leave the pass-rate
+        # denominator) a genuinely failing arm silently improved the model's
+        # score.  :mod:`jaato_eval.sign_off` owns which terminals qualify;
+        # everything else still propagates, because a daemon that died
+        # mid-turn really does leave a tree nobody can vouch for.
+        try:
+            payload = await session.complete(task.input.prompt)
+        except Exception as exc:  # noqa: BLE001 -- sorted, not swallowed
+            if not is_unsigned_terminal(getattr(exc, "error_type", None)):
+                raise
+            payload = None
+            accumulator.note_unsigned(exc)
+        try:
+            await client.request_history()
+        except Exception:  # noqa: BLE001 -- the same fallback as a timeout
+            # A session that ended in an error may not accept the request at
+            # all.  That is the timeout case one step earlier, and it takes
+            # the same course: ``history`` stays None, the ledger comes back
+            # UNFAITHFUL, ledger-reading graders BLOCK -- and the graders
+            # that read the workspace still get their verdict, which is the
+            # whole point of grading this arm.
+            history_ready.set()
         try:
             await asyncio.wait_for(history_ready.wait(), timeout=30)
         except asyncio.TimeoutError:

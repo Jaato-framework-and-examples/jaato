@@ -70,10 +70,15 @@ class _TerminatedEvent:
     stop the turn stream cannot report.
     """
 
-    def __init__(self, reason="natural", details="", error_summary=None):
+    def __init__(self, reason="natural", details="", error_summary=None,
+                 error_type=None):
         self.reason = reason
         self.details = details
         self.error_summary = error_summary
+        # The terminal's TYPE.  ``reason="error"`` alone cannot tell a
+        # daemon that died mid-turn from an agent that finished and never
+        # signed off, and the engine sorts those into opposite states.
+        self.error_type = error_type
 
 
 class _ErrorEvent:
@@ -88,6 +93,20 @@ class _ErrorEvent:
     def __init__(self, error_type, error=""):
         self.error_type = error_type
         self.error = error
+
+
+class _AgentError(Exception):
+    """Mirrors ``convenience.AgentError``'s consumed surface.
+
+    ``Session.complete`` raises this on an error terminal, AFTER the
+    ``SESSION_TERMINATED`` handlers have run — the ordering matters, since
+    the engine reads the terminal's type off either source.
+    """
+
+    def __init__(self, error_type, error_summary):
+        self.error_type = error_type
+        self.error_summary = error_summary
+        super().__init__(f"{error_type}: {error_summary}")
 
 
 class _FakeClient:
@@ -192,9 +211,18 @@ class _FakeSession:
         # A real session always winds down with one of these; omitting it
         # would let the engine's SESSION_TERMINATED handling go untested
         # while every stubbed test still passed.
+        error_type = b.get("agent_error")
         self.client._emit("SESSION_TERMINATED", _TerminatedEvent(
-            reason=b.get("termination_reason", "natural"),
-            details=b.get("termination_detail", "")))
+            reason=("error" if error_type
+                    else b.get("termination_reason", "natural")),
+            details=b.get("termination_detail", ""),
+            error_type=error_type))
+        # An error terminal reaches the caller as an exception, not as a
+        # return: the terminal event fires first, then ``complete()``
+        # raises.  A stub that only emitted the event would let the engine
+        # walk on into grading and test a path no real session takes.
+        if error_type:
+            raise _AgentError(error_type, b.get("termination_detail", ""))
         return b.get("payload")
 
 
@@ -221,6 +249,7 @@ def _install_stub_sdk(behaviour):
     ipc_mod.IPCClient = _FakeClient
     conv_mod = types.ModuleType("jaato_sdk.client.convenience")
     conv_mod.Session = _FakeSession
+    conv_mod.AgentError = _AgentError
     events_mod = types.ModuleType("jaato_sdk.events")
     events_mod.EventType = types.SimpleNamespace(
         TURN_COMPLETED="TURN_COMPLETED", HISTORY="HISTORY",
@@ -240,13 +269,26 @@ def _install_stub_sdk(behaviour):
         sys.modules[name] = mod
 
 
-class RunnerCase(unittest.TestCase):
+class RunnerHarness(unittest.TestCase):
+    """The stub rig, with no assertions of its own.
+
+    Split from :class:`RunnerCase` so a sibling suite can drive an arm
+    through the same fakes without also inheriting — and re-running, under
+    its own manifest — every test declared here.  Carries no ``test_``
+    methods deliberately: it is a fixture, and anything asserted on it
+    would run twice for each subclass.
+    """
+
+    #: The manifest each arm runs.  Overridden by a subclass that needs a
+    #: different grader set (``setUp`` reads it after writing the file).
+    task_yaml = TASK
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
         (self.root / "fixture").mkdir()
         (self.root / "cfg").mkdir()
-        (self.root / "task.yaml").write_text(TASK)
+        (self.root / "task.yaml").write_text(self.task_yaml)
         self.task = load_manifest(self.root / "task.yaml")
         self._displaced = {name: sys.modules[name] for name in _STUBBED
                            if name in sys.modules}
@@ -278,6 +320,7 @@ class RunnerCase(unittest.TestCase):
         spec = ArmSpec(task=self.task, profile_set="cheap", repeat=0)
         return asyncio.run(run_arm(spec, workspace_root=self.root / "ws", **kw))
 
+class RunnerCase(RunnerHarness):
     def test_agent_does_the_work_arm_passes(self):
         result = self._run({"writes": "READY\n", "payload": {"done": True}})
         self.assertEqual(result.state, PASS)

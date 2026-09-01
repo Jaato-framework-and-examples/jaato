@@ -100,8 +100,17 @@ class ScriptGrader:
             return blocked(self.spec, "script grader runs",
                            "manifest grader has no 'run' key")
 
+        # AN UNSIGNED ARM IS NOT A TRUNCATED ONE.  ``truncation_reason``
+        # answers "did the session end where it meant to", and for an agent
+        # that spent the completion-nudge budget the answer is honestly no —
+        # but the workspace it left is a tree it worked on to a stop of its
+        # own, not one interrupted mid-edit.  Blocking here recorded such an
+        # arm as unmeasured with a passing (or failing) tree on disk, which
+        # is what this gate is for on every OTHER terminal and exactly wrong
+        # on this one (jaato #773).  What the sign-off's absence invalidates
+        # is the graders that read the sign-off; this is not one of them.
         truncated = context.truncation_reason
-        if truncated:
+        if truncated and not context.missing_sign_off:
             return blocked(self.spec, claim,
                            f"arm {truncated}; the workspace reflects a "
                            "truncated run")
@@ -141,6 +150,15 @@ class ScriptGrader:
             state=state,
             detail=f"exit {proc.returncode} (expected {expect_exit})",
         )
+        if context.missing_sign_off:
+            # Carried as evidence, not as a caveat on the state: the
+            # command ran against the real tree and its exit code means
+            # what it always means.  But a reader comparing this arm with
+            # its siblings should know the agent never declared itself
+            # done, because that is a real difference in how it behaved.
+            verdict.note(
+                f"graded without a completion payload — the agent never "
+                f"called signal_completion ({context.termination_error_type})")
         for line in _tail(proc.stdout, proc.stderr):
             verdict.note(line)
         return verdict

@@ -188,6 +188,32 @@ a broken runner, and a report that hid the eight would read as success.
 A cell that exercised nothing prints `—`, not `0%`. Zero would say "it
 always failed"; the truth is "we never found out".
 
+### The one error terminal that is still evidence
+
+Both of those properties cut the other way when `BLOCKED` is applied to an
+arm that *did* produce something, and one terminal does exactly that. When
+the framework's completion-nudge budget runs out (`NudgeExhausted`), the
+agent has run, worked and committed; the only thing missing is its
+`signal_completion` call. Recording it as "nothing to grade" loses a
+passing tree outright, and — because blocked arms leave the denominator —
+lets a genuinely failing one *raise* the model's pass rate. That is a
+measurement bias, not a missing row (jaato #773).
+
+So such an arm is graded, and grading is **per-grader**, not per-arm:
+
+| grader | on an unsigned arm | why |
+|---|---|---|
+| `script` | runs, returns a verdict | it reads the workspace, and the workspace is real |
+| `processor` | BLOCKED | its whole contract is `validate(payload, …)`, and there is no payload |
+| `judge` | BLOCKED | it is handed the payload first and a listing second; scoring one arm on half the input it scores its siblings on is worse than a gap |
+
+The arm carries `error` (the terminal) with `blocked_reason` unset — the
+record that it produced evidence *and* ended badly. Every other error
+terminal keeps the conservative reading: a daemon that died mid-turn
+leaves a tree nobody can vouch for. The rule lives in one place,
+`jaato_eval/sign_off.py`, because the runner and the graders must not each
+carry a copy of it.
+
 ## The tool-call ledger
 
 Completion processors that cross-reference `context.tool_calls` run here
