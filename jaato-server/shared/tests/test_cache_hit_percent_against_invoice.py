@@ -263,6 +263,19 @@ class TestOpenRouterCacheWritesAreInsideThePromptTotal:
 
     So on OpenRouter BOTH cached quantities sit inside
     ``prompt_tokens``, and both come back out at the seam.
+
+    A SECOND CASE SETTLES IT WITHOUT ANY PRICE LIST — which matters,
+    because the rates above were fitted to the row they explain, and a
+    fitted constant is weak evidence on its own.
+    ``test_cache_spend_survives_a_tier_switch`` carries a wire shape
+    captured live from a COLD Sonnet call: ``prompt_tokens=4412`` beside
+    ``cache_write_tokens=4403`` and no reads.  A write is by definition a
+    subset of what was sent — you can only cache content you transmitted
+    — so the exclusive reading makes that turn's input 4412 new tokens
+    PLUS 4403 written, 8,815 tokens of input for a prompt the same
+    object calls 4,412.  It contradicts itself.  The inclusive reading
+    gives 4,403 written and 9 new, which sums to exactly the reported
+    4,412.  No cost, no rate, no fit.
     """
 
     RATES = {
@@ -293,6 +306,23 @@ class TestOpenRouterCacheWritesAreInsideThePromptTotal:
             cache_creation_tokens=usage.cache_creation_tokens,
         )
         assert cost == pytest.approx(0.035179, rel=0.01)
+
+    def test_a_cold_call_only_adds_up_under_the_inclusive_reading(self):
+        # The price-free proof, from the live capture reused by
+        # ``test_cache_spend_survives_a_tier_switch``.  A write is a
+        # subset of what was sent, so the parts must sum to the whole:
+        # 4,403 written + 9 new == the 4,412 reported.  Read the other
+        # way the same object claims 8,815 tokens of input for a
+        # 4,412-token prompt.
+        from shared.plugins.model_provider.openrouter.converters import (
+            extract_usage,
+        )
+
+        usage = extract_usage(SimpleNamespace(usage=_openai_usage(
+            4412, 0, cache_write_tokens=4403)))
+        assert usage.cache_creation_tokens == 4403
+        assert usage.prompt_tokens == 9
+        assert usage.prompt_tokens + usage.cache_creation_tokens == 4412
 
     def test_leaving_writes_in_would_overcharge_the_arrival(self):
         # The control for the write side specifically: a seam that

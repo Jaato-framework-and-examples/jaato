@@ -588,6 +588,15 @@ $1.00/Mtok input rate — and to $0.031 read exclusively, at an input
 rate that fits no catalog and contradicts the warm rows on the same
 table.
 
+A second capture settles it without any price list, which matters
+because that rate was fitted to the row it explains. §5.4's own
+coverage carries a live COLD Sonnet call: `prompt_tokens=4412` beside
+`cache_write_tokens=4403`, no reads. A write is by definition a subset
+of what was sent, so the parts must sum to the whole — 4,403 written
+plus 9 new is exactly the 4,412 reported. The exclusive reading makes
+that same object claim 8,815 tokens of input for a 4,412-token
+prompt.
+
 Coverage: ``shared/tests/test_cache_hit_percent_against_invoice.py``,
 which reconciles against **bills** rather than against itself. A test
 that feeds ``cache_read=X, prompt=Y`` and asserts ``X/(X+Y)`` passes
