@@ -7,9 +7,14 @@ proxy and get the ``HTTPS_PROXY`` env to hand the runner, and the
 session-teardown path calls :func:`egress_teardown`.  No manager ownership has
 to be threaded through ``SessionManager`` / ``JaatoServer``.
 
-Everything here is **opt-in and fail-safe**: with no ``egress_allowlist``
-configured, :func:`egress_env_for_session` returns an empty env and starts no
-proxy, so the session-spawn path is byte-for-byte unchanged.
+Everything here is **opt-in**: with no ``egress_allowlist`` configured,
+:func:`egress_env_for_session` returns an empty env and starts no proxy, so the
+session-spawn path is byte-for-byte unchanged.  It is also fail-*safe* by
+default — a kernel-level gate that cannot be installed degrades to proxy-only
+confinement.  Deployments that need fail-*closed* set
+``JAATO_EGRESS_NFT_ENFORCE=strict``, which turns that degradation into an
+:class:`~server.egress_proxy.errors.EgressEnforcementError` and denies the
+session instead.
 """
 
 from __future__ import annotations
@@ -21,6 +26,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
 from .config import AllowlistConfig, validate_allowlist
+from .errors import EgressEnforcementError
 from .manager import EgressProxyManager
 from .nft import EgressNftManager
 
@@ -30,17 +36,35 @@ _manager: Optional[EgressProxyManager] = None
 _nft_manager: Optional[EgressNftManager] = None
 _manager_lock = threading.Lock()
 
-# Loopback must bypass the proxy (the runner reaches the proxy itself, and any
-# daemon-local service, directly).
+# Loopback must bypass the proxy: the runner reaches the proxy itself directly,
+# and a CONNECT to a loopback address would be meaningless.  This only tells
+# well-behaved clients not to *use* the proxy for loopback — it grants nothing.
+# Reachability is decided by the nft gate, which accepts the proxy's own
+# address:port and rejects the rest of loopback, IPv6 included (#696).
 _NO_PROXY = "localhost,127.0.0.1,::1"
 
 
-def _nft_enforce_enabled() -> bool:
-    """Hard cgroup-nft egress enforcement is opt-in (needs `nft` in the daemon's
-    sudo NOPASSWD scope + a per-session cgroup).  Off by default → proxy-only
-    ("cooperative") confinement, unchanged behavior."""
-    return os.environ.get("JAATO_EGRESS_NFT_ENFORCE", "").strip().lower() in (  # env: opt-in hard cgroup-nft egress enforcement (§5.11d-v2); needs a per-session cgroup + nft
-        "1", "true", "yes", "on")
+# ``JAATO_EGRESS_NFT_ENFORCE`` postures.  ``off`` is the default: proxy-only
+# ("cooperative") confinement.  ``best_effort`` installs the cgroup-nft gate
+# but degrades to proxy-only on any failure.  ``strict`` denies instead —
+# a session that asked for the gate and did not get one does not start.
+_ENFORCE_BEST_EFFORT = frozenset({"1", "true", "yes", "on"})
+_ENFORCE_STRICT = frozenset({"strict", "required", "fail-closed", "fail_closed"})
+
+
+def _nft_enforce_mode() -> str:
+    """Return the configured enforcement posture: off / best_effort / strict.
+
+    Hard cgroup-nft egress enforcement is opt-in (it needs `nft` in the
+    daemon's sudo NOPASSWD scope + a per-session cgroup), so an unset or
+    unrecognized value means ``off`` and leaves behavior unchanged.
+    """
+    raw = os.environ.get("JAATO_EGRESS_NFT_ENFORCE", "").strip().lower()  # env: opt-in hard cgroup-nft egress enforcement (§5.11d-v2); needs a per-session cgroup + nft.  "1"/"true"/"yes"/"on" = best-effort, "strict" = deny the session when the gate cannot be installed
+    if raw in _ENFORCE_STRICT:
+        return "strict"
+    if raw in _ENFORCE_BEST_EFFORT:
+        return "best_effort"
+    return "off"
 
 
 def _session_cgroup_path(session_id: str) -> str:
@@ -57,23 +81,42 @@ def get_nft_manager() -> EgressNftManager:
 
 
 def _maybe_enforce_nft(session_id: str, proxy_url: str) -> None:
-    """Best-effort hard enforcement: gate the session's cgroup to the proxy at
-    netfilter.  Opt-in; guarded so it can never break a session — a missing
-    cgroup, missing `nft`, or an nft error degrades to proxy-only + a log."""
-    if not _nft_enforce_enabled():
+    """Gate the session's cgroup to the proxy at netfilter.  Opt-in.
+
+    Under the default ``best_effort`` posture this is guarded so it can never
+    break a session — a missing cgroup, missing `nft`, or an nft error
+    degrades to proxy-only + a log.  Under ``strict`` the same conditions
+    raise :class:`EgressEnforcementError` so the session is denied rather than
+    started with the gate silently absent.
+    """
+    mode = _nft_enforce_mode()
+    if mode == "off":
         return
+    reason = None
     if not EgressNftManager.nft_available():
-        logger.warning("egress: JAATO_EGRESS_NFT_ENFORCE set but `nft` not "
-                       "found — session %s runs proxy-only", session_id)
+        reason = "`nft` not found"
+    else:
+        try:
+            parsed = urlparse(proxy_url)
+            port, host = parsed.port, parsed.hostname
+            if not port or not host:
+                reason = f"unusable proxy url {proxy_url!r}"
+            elif not get_nft_manager().install(
+                    session_id, _session_cgroup_path(session_id), int(port),
+                    proxy_host=host):
+                reason = "nft ruleset could not be installed"
+        except Exception as exc:  # defensive: never block spawn (best-effort)
+            reason = f"{type(exc).__name__}: {exc}"
+            logger.debug("egress nft enforcement raised for session %s",
+                         session_id, exc_info=True)
+    if reason is None:
         return
-    try:
-        port = urlparse(proxy_url).port
-        if not port:
-            return
-        get_nft_manager().install(session_id, _session_cgroup_path(session_id), int(port))
-    except Exception:  # pragma: no cover - defensive: never block spawn
-        logger.warning("egress nft enforcement failed for session %s "
-                       "(proxy-only)", session_id, exc_info=True)
+    if mode == "strict":
+        raise EgressEnforcementError(
+            f"egress: hard enforcement required (JAATO_EGRESS_NFT_ENFORCE="
+            f"strict) but unavailable for session {session_id}: {reason}")
+    logger.warning("egress: hard enforcement unavailable for session %s (%s) "
+                   "— running proxy-only", session_id, reason)
 
 
 def get_manager() -> EgressProxyManager:
@@ -98,6 +141,11 @@ def egress_env_for_session(
       rather than failing to start).
     - valid → proxy started, ``env`` carries HTTPS_PROXY/HTTP_PROXY/NO_PROXY
       (upper + lower case) to merge into the runner's ``session_env``.
+
+    Raises :class:`EgressEnforcementError` only under
+    ``JAATO_EGRESS_NFT_ENFORCE=strict``, when the kernel-level gate was
+    required but could not be installed; the proxy is torn down first, and the
+    caller is expected to fail the session rather than start it unconfined.
     """
     if not allowlist_data:
         return {}, []
@@ -109,7 +157,13 @@ def egress_env_for_session(
         return {}, errors
     cfg = AllowlistConfig.from_dict(allowlist_data)
     url = get_manager().start_proxy_for_session(session_id, cfg)
-    _maybe_enforce_nft(session_id, url)
+    try:
+        _maybe_enforce_nft(session_id, url)
+    except EgressEnforcementError:
+        # Strict posture: deny.  Drop the proxy we just started so the failed
+        # spawn leaves no listener behind, then let the caller fail the session.
+        egress_teardown(session_id)
+        raise
     env = {
         "HTTPS_PROXY": url, "https_proxy": url,
         "HTTP_PROXY": url, "http_proxy": url,

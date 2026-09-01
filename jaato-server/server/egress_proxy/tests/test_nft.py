@@ -8,6 +8,8 @@ netfilter. The *enforcement* proof lives in scripts/verify_egress_nft.sh
 
 import subprocess
 
+import pytest
+
 from server.egress_proxy import nft
 from server.egress_proxy.nft import (
     EgressNftManager,
@@ -28,7 +30,6 @@ def test_render_contains_cgroup_match_and_proxy_port():
     rs = render_ruleset("sess-1", "/sys/fs/cgroup/jaato/jaato-ws-x", 45871)
     assert 'socket cgroupv2 level 2 "jaato/jaato-ws-x" jump gate' in rs
     assert "ip  daddr 127.0.0.1 tcp dport 45871 accept" in rs
-    assert "ip6 daddr ::1 accept" in rs
     assert "counter reject" in rs
     # table name sanitized (no '-')
     assert "table inet jaato_egress_sess_1 {" in rs
@@ -36,10 +37,70 @@ def test_render_contains_cgroup_match_and_proxy_port():
     assert "policy accept;" in rs
 
 
+# ---- #696: loopback is reachable ONLY at the proxy's address:port ---------
+
+def test_render_never_opens_ipv6_loopback_wholesale():
+    """Regression for #696.
+
+    The gate used to carry an unconditional ``ip6 daddr ::1 accept`` beside the
+    port-scoped IPv4 rule, which opened every service on IPv6 loopback to a
+    confined session.  The proxy binds AF_INET, so no ip6 accept rule belongs
+    in the ruleset at all — IPv6 must fall through to ``counter reject``.
+    """
+    rs = render_ruleset("sess-1", "/sys/fs/cgroup/jaato/jaato-ws-x", 45871)
+    assert "::1" not in rs
+    assert "ip6" not in rs
+    # exactly one accept, and it is port-scoped
+    accepts = [ln.strip() for ln in rs.splitlines() if ln.strip().endswith("accept")]
+    assert accepts == ["ip  daddr 127.0.0.1 tcp dport 45871 accept"]
+
+
+def test_render_accept_rule_follows_the_proxy_bind_family():
+    """The family is derived from the bind address, not assumed.
+
+    Today ``ConnectAllowlistProxy`` is AF_INET-only so this stays IPv4; if it
+    ever binds ``::1`` the gate must narrow to that address AND port rather
+    than opening the interface.
+    """
+    rs = render_ruleset("s", "/sys/fs/cgroup/s", 8443, proxy_host="::1")
+    assert "ip6 daddr ::1 tcp dport 8443 accept" in rs
+    assert "127.0.0.1" not in rs
+
+
+def test_render_rejects_non_literal_proxy_host():
+    """The ruleset is piped to ``nft -f -``; only IP literals may reach it."""
+    for bad in ("localhost", "evil.example", "127.0.0.1 accept\n    ip daddr 0.0.0.0", ""):
+        with pytest.raises(ValueError):
+            render_ruleset("s", "/sys/fs/cgroup/s", 443, proxy_host=bad)
+
+
+def test_render_rejects_out_of_range_port():
+    for bad in (0, -1, 65536):
+        with pytest.raises(ValueError):
+            render_ruleset("s", "/sys/fs/cgroup/s", bad)
+
+
+def test_render_denies_udp_by_omission():
+    """No rule matches UDP, so QUIC / direct DNS hit ``counter reject``."""
+    rs = render_ruleset("s", "/sys/fs/cgroup/s", 443)
+    assert "udp" not in rs
+
+
 def test_render_dns_closed_by_default_open_with_flag():
     assert "127.0.0.53" not in render_ruleset("s", "/sys/fs/cgroup/s", 443)
-    assert "127.0.0.53" in render_ruleset(
-        "s", "/sys/fs/cgroup/s", 443, allow_local_resolver=True)
+    rs = render_ruleset("s", "/sys/fs/cgroup/s", 443, allow_local_resolver=True)
+    assert "127.0.0.53" in rs
+
+
+def test_render_dns_carveout_is_scoped_to_port_53():
+    """#696 follow-up: the stub-resolver carve-out had no port predicate, so it
+    opened every port on 127.0.0.53 rather than DNS."""
+    rs = render_ruleset("s", "/sys/fs/cgroup/s", 443, allow_local_resolver=True)
+    stub = [ln.strip() for ln in rs.splitlines() if "127.0.0.53" in ln]
+    assert stub == [
+        "ip  daddr 127.0.0.53 udp dport 53 accept",
+        "ip  daddr 127.0.0.53 tcp dport 53 accept",
+    ]
 
 
 # ---- manager install/remove (stubbed nft) --------------------------------
@@ -108,3 +169,21 @@ def test_shutdown_removes_all(monkeypatch):
     assert ("delete", "table", "inet", "jaato_egress_s1") in deleted
     assert ("delete", "table", "inet", "jaato_egress_s2") in deleted
     assert m._installed == {}
+
+
+def test_install_renders_the_proxy_bind_address(monkeypatch):
+    """``install`` gates the address the proxy actually bound (#696)."""
+    _patch_isdir(monkeypatch, True)
+    m = _StubManager()
+    assert m.install("s1", "/sys/fs/cgroup/x", 8080, proxy_host="::1") is True
+    load = [c for c in m.calls if c[0] == ["-f", "-"]][0][1]
+    assert "ip6 daddr ::1 tcp dport 8080 accept" in load
+
+
+def test_install_refuses_non_literal_proxy_host(monkeypatch):
+    """A host that cannot be rendered safely means no table, not a broad one."""
+    _patch_isdir(monkeypatch, True)
+    m = _StubManager()
+    assert m.install("s1", "/sys/fs/cgroup/x", 443, proxy_host="localhost") is False
+    assert [c for c in m.calls if c[0] == ["-f", "-"]] == []
+    assert "s1" not in m._installed

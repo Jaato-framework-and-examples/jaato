@@ -15,9 +15,11 @@ Public surface:
 - :class:`AllowlistConfig` / :func:`validate_allowlist` — the policy schema.
 - :class:`ConnectAllowlistProxy` — the per-session proxy thread.
 - :class:`EgressProxyManager` — per-session lifecycle (spawn / teardown).
+- :class:`EgressEnforcementError` — strict-posture enforcement failure.
 """
 
 from .config import AllowlistConfig, validate_allowlist
+from .errors import EgressEnforcementError
 from .proxy import ConnectAllowlistProxy
 from .manager import EgressProxyManager
 
@@ -26,4 +28,5 @@ __all__ = [
     "validate_allowlist",
     "ConnectAllowlistProxy",
     "EgressProxyManager",
+    "EgressEnforcementError",
 ]

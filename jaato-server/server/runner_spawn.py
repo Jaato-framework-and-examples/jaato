@@ -41,6 +41,13 @@ import logging
 import os
 from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 
+# Leaf module (no package-internal deps of its own): the strict-posture egress
+# failure is the one wire-up error the spawn path must NOT swallow, so the type
+# has to be nameable in an ``except`` clause without a lazy import.
+from server.egress_proxy.errors import (
+    EgressEnforcementError as _EgressEnforcementError,
+)
+
 
 if TYPE_CHECKING:  # pragma: no cover — types only
     from shared.session_envelope import SessionInitEnvelope
@@ -392,6 +399,41 @@ def _apply_cache_field(
     plugin_configs_dict[provider_name] = existing
 
 
+def _apply_egress_env(
+    session_id: str,
+    agent_params_dict: dict,
+    resolved_session_env: dict,
+) -> None:
+    """Merge the session's egress-proxy env into ``resolved_session_env``.
+
+    Per-session egress allowlist (Phase 5 §5.11, opt-in).  If the profile's
+    ``agent_params.egress_allowlist`` is set, start a per-session CONNECT proxy
+    and point the runner's proxy env at it so all outbound HTTPS is confined to
+    the allowlisted hosts.  No config (the common case) leaves
+    ``resolved_session_env`` untouched.
+
+    Fail-safe by default: a wire-up error is swallowed so it can never break
+    session spawn.  The one exception is ``EgressEnforcementError``, raised
+    only under ``JAATO_EGRESS_NFT_ENFORCE=strict`` — the operator asked for a
+    kernel-enforced gate, so a session that would run without one is denied
+    rather than started unconfined.
+    """
+    try:
+        from server.egress_proxy import wireup as _egress_wireup
+        _egress_env, _egress_errs = _egress_wireup.egress_env_for_session(
+            session_id, agent_params_dict.get("egress_allowlist"))
+        if _egress_env:
+            resolved_session_env.update(_egress_env)
+    except _EgressEnforcementError:
+        logger.error("egress: denying session %s — hard enforcement was "
+                     "required but could not be installed", session_id)
+        raise
+    except Exception:  # pragma: no cover - defensive: never block spawn
+        logger.warning(
+            "egress proxy wire-up failed for session %s (continuing without "
+            "egress restriction)", session_id, exc_info=True)
+
+
 def build_session_envelope(
     *,
     server: Any,  # JaatoServer (forward-typed; importing the real type
@@ -718,22 +760,7 @@ def build_session_envelope(
     # persisted, or forwarded to clients.
     resolved_session_env = dict(getattr(server, "_session_env", {}) or {})
 
-    # Per-session egress allowlist (Phase 5 §5.11, opt-in).  If the profile's
-    # ``agent_params.egress_allowlist`` is set, start a per-session CONNECT
-    # proxy and point the runner's proxy env at it so all outbound HTTPS is
-    # confined to the allowlisted hosts.  Fully fail-safe: no config (the common
-    # case) leaves ``resolved_session_env`` untouched, and any wire-up error is
-    # swallowed so it can never break session spawn.
-    try:
-        from server.egress_proxy import wireup as _egress_wireup
-        _egress_env, _egress_errs = _egress_wireup.egress_env_for_session(
-            session_id, agent_params_dict.get("egress_allowlist"))
-        if _egress_env:
-            resolved_session_env.update(_egress_env)
-    except Exception:  # pragma: no cover - defensive: never block spawn
-        logger.warning(
-            "egress proxy wire-up failed for session %s (continuing without "
-            "egress restriction)", session_id, exc_info=True)
+    _apply_egress_env(session_id, agent_params_dict, resolved_session_env)
 
     return SessionInitEnvelope(
         session_id=session_id,
