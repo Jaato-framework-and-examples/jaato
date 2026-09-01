@@ -55,10 +55,19 @@ class ArmResult:
             Repeats sharing a hash produced byte-identical output; the
             count of distinct hashes across repeats is the determinism
             measurement.
-        error: Terminal error text, when the arm ended in an error.
+        error: Terminal error text, when the arm ended in an error the
+            engine graded through anyway.  Today that is exactly the
+            unsigned terminal (:mod:`jaato_eval.sign_off`): the agent
+            worked, left a workspace, and never called
+            ``signal_completion``.  Set ALONGSIDE a real ``state`` rather
+            than instead of one — an ``error`` with ``blocked_reason``
+            unset is the record that the arm produced evidence and ended
+            badly, which is the distinction jaato #773 exists to keep.
         blocked_reason: Set when the arm itself never ran (fixture failed,
             daemon unreachable, budget tripped).  Distinct from a grader
-            being blocked — this means there was nothing to grade.
+            being blocked — this means there was nothing to grade.  An
+            error terminal is therefore NOT automatically a blocked_reason:
+            see ``error`` for the one that leaves a workspace behind.
     """
 
     spec: ArmSpec

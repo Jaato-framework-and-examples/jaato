@@ -16,6 +16,7 @@ from jaato_sdk import truncation_reason as _sdk_truncation_reason
 
 from ..ledger import LedgerResult
 from ..manifest import GraderSpec
+from ..sign_off import is_unsigned_terminal
 from ..verdict import Verdict
 
 
@@ -44,6 +45,12 @@ class GraderContext:
             short-circuits before any turn runs.
         termination_detail: The refusal prose / error summary that came
             with it, so a BLOCKED verdict can quote the mechanism.
+        termination_error_type: The terminal's TYPE, when it had one
+            (``"NudgeExhausted"``, ``"RunnerCallError"``, ...).  Read it
+            through :attr:`missing_sign_off` rather than by comparing
+            strings — the set of terminals that leave a gradeable
+            workspace is one rule, and it lives in
+            :mod:`jaato_eval.sign_off`.
         completion_gap: ``TurnCompletedEvent.completion_gap`` (jaato #654) —
             set when the framework asked the agent twice to signal
             completion and it never did.  Before this existed, that path
@@ -59,7 +66,12 @@ class GraderContext:
             the manifest.  Without this the judge silently reached the
             client default while the arm ran elsewhere.
         turns: How many turns the arm consumed.
-        error: Terminal error text, when the arm ended in an error.
+        error: Terminal error text, when the arm ended in an error the
+            engine graded through anyway (see :attr:`missing_sign_off`).
+            An error terminal that leaves nothing to grade never reaches
+            a grader at all — the arm is BLOCKED before this object is
+            built — so a populated ``error`` means "the agent produced
+            evidence AND ended badly", not "grading failed".
         prior_verdicts: ``grader_id`` -> state, for graders already run
             on this arm.  The runner fills this in as it goes, so a
             later grader can gate on an earlier one's outcome (see
@@ -77,11 +89,36 @@ class GraderContext:
     finish_reason: str = "stop"
     termination_reason: str = ""
     termination_detail: str = ""
+    termination_error_type: str = ""
     completion_gap: Optional[str] = None
     turns: int = 0
     socket_path: Optional[str] = None
     error: Optional[str] = None
     prior_verdicts: Dict[str, str] = field(default_factory=dict)
+
+    @property
+    def missing_sign_off(self) -> bool:
+        """The agent finished working but never called ``signal_completion``.
+
+        ``True`` only for the terminals
+        :func:`jaato_eval.sign_off.is_unsigned_terminal` names — today
+        just ``NudgeExhausted``, the framework's completion-nudge budget
+        running out.  Such an arm HAS a workspace, so it is graded rather
+        than discarded (jaato #773), and this is how each adapter decides
+        whether it is one of the graders that survives:
+
+        * reading the workspace → still valid, run and return a verdict;
+        * reading the completion payload → BLOCK, and say the sign-off
+          is what is missing rather than blaming the schema or the daemon.
+
+        Note this is NOT the negation of :attr:`truncation_reason`.  That
+        one answers "did the session end where it meant to", and the
+        honest answer here is still no — which is why it keeps naming the
+        mechanism, and why an adapter that reads the workspace has to
+        consult BOTH: truncated-and-unsigned is gradeable, truncated for
+        any other reason is not.
+        """
+        return is_unsigned_terminal(self.termination_error_type)
 
     @property
     def truncation_reason(self) -> Optional[str]:

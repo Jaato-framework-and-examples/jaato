@@ -28,6 +28,17 @@ whole engine is built to refuse.
 
 Processors that only inspect the payload and the filesystem are
 unaffected and run regardless of daemon version.
+
+THE PAYLOAD GATE
+================
+
+There is no post-hoc substitute for the payload: this adapter's whole
+contract is ``validate(payload, context)``.  So an arm the engine graded
+through an unsigned terminal — the agent worked, left a workspace, and
+never called ``signal_completion`` (jaato #773) — BLOCKS here even though
+its script graders returned verdicts.  That is the per-grader split
+working: the missing sign-off invalidates exactly the graders that read
+the sign-off.
 """
 from __future__ import annotations
 
@@ -70,6 +81,19 @@ class ProcessorGrader:
             return blocked(self.spec, claim, f"processor not found: {path}")
 
         if context.payload is None:
+            # Name the CAUSE when the engine knows it.  An arm graded
+            # through an unsigned terminal (jaato #773) reaches here with a
+            # real workspace and no payload, and the generic wording below
+            # sends its reader to check a schema that is fine — the same
+            # misdirection ``JudgeGrader`` records against its own guess.
+            if context.missing_sign_off:
+                return blocked(
+                    self.spec, claim,
+                    f"the agent never called signal_completion "
+                    f"({context.termination_error_type}), so there is no "
+                    "payload to validate — its workspace was still graded "
+                    "by the graders that read the workspace, and the "
+                    "profile's completion_payload_schema is not implicated")
             return blocked(self.spec, claim,
                            "arm produced no signal_completion payload "
                            "(profile declares no completion_payload_schema, "
