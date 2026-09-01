@@ -69,6 +69,12 @@ from agent_registry import AgentRegistry
 from keybindings import load_keybindings, detect_terminal, list_available_profiles
 from theme import load_theme, list_available_themes
 
+# Clarification input, per-question and batched (#704)
+from clarification_batch import (
+    enter_clarification_input_mode,
+    submit_clarification_answer,
+)
+
 # Backend abstraction for mode-agnostic operation
 from backend import Backend, IPCBackend
 
@@ -853,6 +859,7 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
         PermissionInputModeEvent,
         PermissionResolvedEvent,
         PermissionStatusEvent,
+        ClarificationBatchEvent,
         ClarificationInputModeEvent,
         ClarificationResolvedEvent,
         ReferenceSelectionRequestedEvent,
@@ -1424,21 +1431,13 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                     suspension_scope=event.suspension_scope,
                 )
 
-            elif isinstance(event, ClarificationInputModeEvent):
-                # New unified flow: content already emitted via AgentOutputEvent,
-                # this event just signals input mode
-                ipc_trace(f"  ClarificationInputModeEvent: tool={event.tool_name}, q{event.question_index}/{event.total_questions}")
-                if not pending_clarification_request:
-                    pending_clarification_request = {"request_id": event.request_id, "agent_id": event.agent_id}
-                pending_clarification_request["current_question"] = event.question_index
-                pending_clarification_request["total_questions"] = event.total_questions
-                pending_clarification_request["tool_name"] = event.tool_name
-                # Update tool tree with simple "awaiting input" status
-                buffer = agent_registry.get_buffer(event.agent_id) if event.agent_id else agent_registry.get_selected_buffer()
-                if buffer:
-                    buffer.set_tool_awaiting_clarification(event.tool_name, event.question_index, event.total_questions)
-                display.set_waiting_for_channel_input(True)
-                display.refresh()
+            elif isinstance(event, (ClarificationInputModeEvent, ClarificationBatchEvent)):
+                # Two ways a clarification asks for input; see
+                # ``enter_clarification_input_mode`` for which is which.
+                pending_clarification_request = await enter_clarification_input_mode(
+                    event, pending_clarification_request,
+                    client, agent_registry, display, ipc_trace,
+                )
 
             elif isinstance(event, ClarificationResolvedEvent):
                 ipc_trace(f"  ClarificationResolvedEvent: tool={event.tool_name}, qa_pairs={len(event.qa_pairs)}")
@@ -2384,11 +2383,13 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                         display.set_waiting_for_channel_input(False)
                         continue
 
-                # Handle clarification response
+                # Handle clarification response.  Batched (runner-tier)
+                # requests are answered client-side question by question and
+                # sent as one batch, so the helper owns the pending state.
                 if pending_clarification_request:
-                    await client.respond_to_clarification(
-                        pending_clarification_request["request_id"],
-                        text
+                    pending_clarification_request = await submit_clarification_answer(
+                        client, pending_clarification_request, text,
+                        agent_registry, display,
                     )
                     continue
 

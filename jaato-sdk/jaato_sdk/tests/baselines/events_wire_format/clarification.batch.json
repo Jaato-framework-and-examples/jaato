@@ -6,5 +6,6 @@
   "request_id": "",
   "tool_name": "",
   "context": "",
-  "questions": []
+  "questions": [],
+  "batch_only": false
 }

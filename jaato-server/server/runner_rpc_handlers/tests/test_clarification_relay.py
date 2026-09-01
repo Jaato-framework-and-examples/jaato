@@ -50,6 +50,38 @@ def test_handle_emits_batch_event_and_resolves():
     asyncio.run(run())
 
 
+def test_the_relayed_batch_says_it_is_the_only_delivery():
+    """``batch_only`` is how a client tells this apart from the daemon-local
+    preview event, which is followed by a per-question flow.  Without it a
+    client either prompts twice or — as in #704 — not at all."""
+    events = []
+    h = ClarificationRelayHandler(emit_event=events.append)
+
+    async def run():
+        task = asyncio.ensure_future(h.handle(_args("r-batch-only")))
+        await asyncio.sleep(0)
+        assert events[0].batch_only is True
+        h.resolve_response("r-batch-only", ["1"])
+        await task
+
+    asyncio.run(run())
+
+
+def test_a_cancel_resolves_the_relay_as_cancelled():
+    """The escape hatch from an unanswerable clarification: the tool returns
+    ``cancelled`` to the model and the turn continues, instead of the turn
+    staying parked on a question nobody can answer."""
+    h = ClarificationRelayHandler(emit_event=lambda e: None)
+
+    async def run():
+        task = asyncio.ensure_future(h.handle(_args("r-cancel")))
+        await asyncio.sleep(0)
+        assert h.resolve_response("r-cancel", [], cancelled=True) is True
+        assert await task == {"cancelled": True, "answers": []}
+
+    asyncio.run(run())
+
+
 def test_resolve_unknown_request_returns_false():
     h = ClarificationRelayHandler(emit_event=lambda e: None)
     assert h.resolve_response("nope", ["x"]) is False

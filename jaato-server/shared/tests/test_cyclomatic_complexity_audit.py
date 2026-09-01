@@ -502,7 +502,10 @@ BASELINE: Dict[str, int] = {
     "jaato-tui/rich_client.py::handle_screenshot_command_ipc": 39,
     "jaato-tui/rich_client.py::main": 16,
     "jaato-tui/rich_client.py::run_ipc_mode.command_completion_provider": 24,
-    "jaato-tui/rich_client.py::run_ipc_mode.handle_events": 216,
+    # 216 -> 213 by #704, which lifted the clarification input-mode branch
+    # into jaato-tui/clarification_batch.py so the batch flow could join it
+    # without the loop growing.
+    "jaato-tui/rich_client.py::run_ipc_mode.handle_events": 213,
     "jaato-tui/rich_client.py::run_ipc_mode.handle_input": 71,
     "jaato-tui/tests/test_output_buffer.py::TestStreamingToolTreePositioning.test_multiple_streaming_rounds_with_tools": 20,
     "jaato-tui/tests/test_output_buffer.py::TestToolTreePositioning.test_multiple_tool_batches_maintain_order": 20,

@@ -712,13 +712,17 @@ class IPCRecoveryClient:
         self,
         request_id: str,
         answers: List[str],
+        *,
+        cancelled: bool = False,
     ) -> None:
         """Respond to a batched clarification (all answers at once) — proxied
         to the inner client (see ``IPCClient.respond_to_clarification_batch``)."""
         self._check_can_send()
 
         if self._client:
-            await self._client.respond_to_clarification_batch(request_id, answers)
+            await self._client.respond_to_clarification_batch(
+                request_id, answers, cancelled=cancelled,
+            )
 
     async def register_client_tools(self, tools: List[Dict[str, Any]]) -> None:
         """Register client-provided ("host") tools — proxied to the inner client.

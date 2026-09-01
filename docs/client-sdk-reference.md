@@ -121,7 +121,7 @@ The protocol defines ~100 event types in `EventType` (Python) / `EventTypeValue`
 | Agent lifecycle | Server → Client | `agent.created`, `agent.output`, `agent.completed` |
 | Tool execution | Server → Client | `tool.call_start`, `tool.call_end`, `tool.output` |
 | Permission flow | Bidirectional | `permission.requested`, `permission.resolved`, `permission.response` |
-| Clarification flow | Bidirectional | `clarification.requested`, `clarification.resolved`, `clarification.batch` |
+| Clarification flow | Bidirectional | `clarification.input_mode`, `clarification.resolved`, `clarification.batch` (see §4.1.1) |
 | Reference selection | Bidirectional | `reference_selection.requested`, `reference_selection.resolved` |
 | Plan updates | Server → Client | `plan.updated`, `plan.step_updated`, `plan.cleared` |
 | Context / tokens | Server → Client | `context.updated`, `turn.completed`, `turn.progress` (each carries a typed `usage: UsageBreakdown` with token counts, cache hits, reasoning/thinking tokens, and `cost_usd` when known); `gc.config` carries GC strategy/threshold separately |
@@ -131,6 +131,26 @@ The protocol defines ~100 event types in `EventType` (Python) / `EventTypeValue`
 | Peer channel | Server ↔ Server | `peer.spawn_request`, `peer.agent_output`, `peer.heartbeat` |
 | SDK parity verbs | Client → Server | `inject_prompt.request`, `replay_messages.request`, `resolve_fork_point.request` |
 | Permission policy | Client → Server | `permission.add_whitelist`, `permission.set_default`, `permission.policy_snapshot.request` |
+
+#### 4.1.1 Clarification: two flows, one of them mandatory
+
+`request_clarification` blocks its tool call until a client answers, and
+it reaches the client one of two ways:
+
+| Session | Events | What the client must do |
+|---------|--------|-------------------------|
+| Daemon-local | `clarification.batch` with `batch_only: false`, then per question: `agent.output` (rendered question) + `clarification.input_mode` | Answer each question with `clarification.response`. The batch event is an optional preview — render from it if you can show every question at once, but do not also prompt from the per-question events. |
+| Runner-tier (pre-warm pool / confined runner — the default) | `clarification.batch` with `batch_only: true`, and nothing else | Render the questions from the event itself and reply with ONE `clarification.batch_response`. No question text, no `clarification.input_mode`, no `clarification.resolved` follows, so the client also owns closing out its own UI state. |
+
+Ignoring a `batch_only` batch hangs the session: the tool call never
+returns, a stop does not interrupt a turn parked inside a tool, and
+subsequent input queues behind it (#704). Each question carries `text`,
+`question_type` (`single_choice` / `multiple_choice` / `free_text`),
+`required`, and for choice questions `choices[]` plus `default_choice`.
+Answers are ordered strings, one per question, parsed server-side the
+same way the per-question flow parses them: a choice number, a
+comma-separated list for multiple choice, free text, or empty to take the
+default (or skip an optional question).
 
 ### 4.2 Event Base Model (Python)
 
@@ -221,6 +241,7 @@ Every method below exists in both SDKs with identical semantics. Python uses `sn
 | `request_history(agent_id?)` | `requestHistory(agentId?)` | `history.request` |
 | `respond_to_permission(request_id, response, edited_arguments?)` | `respondToPermission(requestId, response, editedArguments?)` | `permission.response` |
 | `respond_to_clarification(request_id, response)` | `respondToClarification(requestId, response, questionIndex?)` | `clarification.response` |
+| `respond_to_clarification_batch(request_id, answers, cancelled=False)` | `respondToClarificationBatch(requestId, answers, cancelled?)` | `clarification.batch_response` — answers a whole `clarification.batch` at once. **Mandatory** when that event carries `batch_only`: nothing else about the request reaches the client and the tool call stays blocked until this reply arrives (#704). `cancelled` abandons the request instead of answering it, which is the only way out of a question the user cannot answer — a turn blocked inside a tool call does not respond to a stop. |
 | `respond_to_reference_selection(request_id, response)` | `respondToReferenceSelection(requestId, response)` | `reference_selection.response` |
 
 #### Session Management

@@ -20,6 +20,49 @@ from renderers.headless import HeadlessFileRenderer
 logger = logging.getLogger(__name__)
 
 
+async def _auto_skip_clarification(client, renderer, event) -> None:
+    """Answer a clarification nobody is here to answer.
+
+    Headless runs disable the clarification tool and put the main agent on
+    the auto channel, so this is a fallback for the cases that slip past
+    both.  It has to exist because an unanswered clarification is not a
+    missing prompt but a stuck turn: the tool call blocks until it gets a
+    reply (#704).
+
+    Both shapes of request are answered the same way — every question
+    skipped:
+
+    * ``ClarificationInputModeEvent`` — one empty answer for the question
+      currently being asked; the daemon drives the next one.
+    * ``ClarificationBatchEvent`` — one empty answer per question, sent
+      as a single batch.  ``batch_only`` batches (runner-tier sessions)
+      get nothing else, so this reply is the only thing that unblocks
+      them; a preview batch is left to the per-question flow that
+      follows it.
+    """
+    from jaato_sdk.events import ClarificationBatchEvent
+
+    if not isinstance(event, ClarificationBatchEvent):
+        renderer.on_system_message(
+            f"[headless] Clarification requested for {event.tool_name}, auto-skipping",
+            style="system_warning"
+        )
+        await client.respond_to_clarification(event.request_id, "")
+        return
+
+    if not event.batch_only:
+        return
+    questions = event.questions or []
+    renderer.on_system_message(
+        f"[headless] Clarification requested for {event.tool_name} "
+        f"({len(questions)} questions), auto-skipping",
+        style="system_warning"
+    )
+    await client.respond_to_clarification_batch(
+        event.request_id, [""] * len(questions)
+    )
+
+
 async def run_headless_mode(
     socket_path: str,
     prompt: str,
@@ -82,6 +125,7 @@ async def run_headless_mode(
         AgentCompletedEvent,
         PermissionInputModeEvent,
         PermissionResolvedEvent,
+        ClarificationBatchEvent,
         ClarificationInputModeEvent,
         ClarificationResolvedEvent,
         PlanUpdatedEvent,
@@ -327,14 +371,12 @@ async def run_headless_mode(
                 )
 
             # ==================== Clarification Events ====================
-            elif isinstance(event, ClarificationInputModeEvent):
-                # With AutoChannel, this shouldn't happen for main agent
-                # But handle as fallback (e.g., if channel wasn't set correctly)
-                renderer.on_system_message(
-                    f"[headless] Clarification requested for {event.tool_name}, auto-skipping",
-                    style="system_warning"
-                )
-                await client.respond_to_clarification(event.request_id, "")
+            elif isinstance(event, (ClarificationInputModeEvent, ClarificationBatchEvent)):
+                # With AutoChannel, this shouldn't happen for the main agent,
+                # but answer it anyway: an unanswered clarification blocks the
+                # tool call and the turn behind it forever (#704), and there
+                # is nobody here to notice.
+                await _auto_skip_clarification(client, renderer, event)
 
             # ==================== Plan Events ====================
             elif isinstance(event, PlanUpdatedEvent):

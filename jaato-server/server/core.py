@@ -4141,14 +4141,18 @@ class JaatoServer:
             pass
 
         def on_batch_requested(tool_name: str, request, *_args):
-            """Emit ClarificationBatchEvent with all questions for WS clients.
+            """Emit ClarificationBatchEvent with all questions, as a preview.
 
-            Fires before the QueueChannel loop so that WebSocket clients
-            can display every question at once in a tabbed panel and let
-            the user answer in any order.  TUI/IPC clients ignore this
-            event; they still receive individual ClarificationInputModeEvent
-            events one at a time through the existing on_question_displayed
-            hook.
+            Fires before the QueueChannel loop so that a client which can
+            render every question at once (a tabbed panel, say) does not
+            have to wait for them to trickle in.  It is emitted WITHOUT
+            ``batch_only``: the per-question flow follows it here
+            (AgentOutputEvent + ClarificationInputModeEvent, one question
+            at a time, via the on_question_displayed hook), so a client
+            may use either and must not prompt for both.  The runner-tier
+            relay in ``runner_rpc_handlers.clarification_relay`` emits the
+            same event with ``batch_only=True``, where it is the only
+            delivery and answering it is mandatory (#704).
             """
             request_id = server._pending_clarification_request_id or ""
             questions_payload = []
@@ -5648,7 +5652,12 @@ class JaatoServer:
 
         self._channel_input_queue.put(response)
 
-    def respond_to_clarification_batch(self, request_id: str, answers: List[str]) -> None:
+    def respond_to_clarification_batch(
+        self,
+        request_id: str,
+        answers: List[str],
+        cancelled: bool = False,
+    ) -> None:
         """Respond to a batch clarification request with all answers at once.
 
         Runner-tier sessions resolve the ``ClarificationRelayHandler``
@@ -5659,11 +5668,20 @@ class JaatoServer:
         Args:
             request_id: The clarification request ID.
             answers: Ordered list of answer strings, one per question.
+            cancelled: Abandon the clarification instead of answering it.
+                The relay resolves its future as cancelled; the legacy
+                path feeds the QueueChannel the ``cancel`` sentinel it
+                already understands.  Either way ``request_clarification``
+                returns ``{"cancelled": True}`` and the turn continues,
+                which is what keeps an unanswerable question from blocking
+                a turn forever (#704).  ``answers`` is ignored.
         """
         # Runner→daemon relay path (post-seat-flip runner sessions) — mirror
         # of respond_to_permission's prompt_operator_handler.resolve_response.
         relay = getattr(self, "_clarification_relay_handler", None)
-        if relay is not None and relay.resolve_response(request_id, answers):
+        if relay is not None and relay.resolve_response(
+            request_id, answers, cancelled=cancelled
+        ):
             return
 
         # Legacy daemon-local QueueChannel path.
@@ -5672,6 +5690,12 @@ class JaatoServer:
                 error=f"Unknown clarification request: {request_id}",
                 error_type="StateError",
             ))
+            return
+
+        if cancelled:
+            # QueueChannel treats a literal "cancel" as an abort and stops
+            # reading, so one entry ends the whole request.
+            self._channel_input_queue.put("cancel")
             return
 
         for answer in answers:

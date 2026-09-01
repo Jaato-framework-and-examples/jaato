@@ -3,5 +3,6 @@
   "timestamp": "<TIMESTAMP>",
   "session_id": "",
   "request_id": "",
-  "answers": []
+  "answers": [],
+  "cancelled": false
 }
