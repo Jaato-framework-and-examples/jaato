@@ -540,9 +540,10 @@ table inet jaato_egress_<session_id> {
     socket cgroupv2 level <N> "<cg>" jump gate
   }
   chain gate {
-    ip  daddr 127.0.0.1 tcp dport <port> accept   # the egress proxy
-    ip6 daddr ::1        accept
-    # (optional) ip daddr 127.0.0.53 accept        # local stub resolver, if DNS wanted
+    ip  daddr 127.0.0.1 tcp dport <port> accept   # the egress proxy — the ONLY accept
+    # (optional) local stub resolver, scoped to DNS, if runner-side DNS is wanted:
+    #   ip daddr 127.0.0.53 udp dport 53 accept
+    #   ip daddr 127.0.0.53 tcp dport 53 accept
     counter reject
   }
 }
@@ -550,6 +551,23 @@ table inet jaato_egress_<session_id> {
 
 Non-matching host traffic falls through `policy accept`, so only the session's
 cgroup is constrained.  Deleting the table on teardown removes the rule.
+
+The gate accepts **exactly one destination**: the proxy's own address and port,
+TCP.  Two consequences worth stating, because both were once implicit:
+
+- **UDP is denied by omission.**  No rule matches it, so QUIC and direct DNS
+  fall through to `counter reject`.
+- **The address family follows the proxy's bind address.**  `ConnectAllowlistProxy`
+  binds `AF_INET` on `127.0.0.1`, so only the IPv4 rule is emitted and IPv6 is
+  rejected wholesale.  Revisions before #696 carried an unconditional
+  `ip6 daddr ::1 accept` beside the IPv4 rule.  Having no port (nor protocol)
+  predicate, it opened *every* service on IPv6 loopback — local model providers
+  (ollama, LM Studio, vLLM), a `--ws-unsafe-no-auth` WS server, the wake ingress
+  listener, any dual-stack daemon on the host — to a confined session, which
+  defeats the CONNECT allowlist this subsystem exists to enforce.  The proxy has
+  never listened on `::1`, so the rule was unnecessary as well as over-broad; it
+  is gone rather than narrowed, and `render_ruleset` now derives the family from
+  the bind address it is handed instead of assuming one.
 
 **Daemon integration surface (§5.11d-v2 implementation):**
 1. `EgressNftManager` (mirrors `EgressProxyManager`): `install(session_id,
@@ -568,7 +586,16 @@ cgroup is constrained.  Deleting the table on teardown removes the rule.
    the proxy's CONNECT (hostname passed to the proxy, resolved proxy-side).
    This CLOSES direct DNS exfil (a bonus over the AppArmor plan's partial
    mitigation).  A `allow_local_resolver` knob can re-open `127.0.0.53` if a
-   deployment needs runner-side DNS.
+   deployment needs runner-side DNS — scoped to port 53 (udp + tcp) since #696,
+   not the whole address.
+5. **Failure posture** (#696).  `JAATO_EGRESS_NFT_ENFORCE` takes three values:
+   unset/unrecognized = off (proxy-only, unchanged); `1`/`true`/`yes`/`on` =
+   best-effort, where a missing cgroup, missing `nft`, or an nft error degrades
+   to proxy-only plus a warning; `strict` (also `required` / `fail-closed`) =
+   deny — the same conditions raise `EgressEnforcementError`, the proxy that was
+   just started is torn down, and the spawn path re-raises rather than starting
+   a session whose gate is silently absent.  Best-effort remains the default so
+   existing deployments are unaffected.
 
 ### §5.11d-v2 — SHIPPED + live-verified on the daemon (2026-07-04)
 
