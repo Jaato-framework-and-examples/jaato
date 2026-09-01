@@ -2678,6 +2678,17 @@ class SubagentPlugin(DaemonForwardingMixin):
             "max_turns": profile.max_turns,
             "env": dict(profile.env),
         }
+        # Trace block (optional).  Rides the wire because the isolated
+        # runner applies the payload through ``build_inline_profile``,
+        # and a block dropped here would leave an isolated subagent
+        # writing its trace wherever the daemon's env happened to point
+        # — the untyped behaviour the block replaces.
+        if getattr(profile, 'trace', None) is not None:
+            trace_dict = {k: v for k, v in (
+                ("session_log", profile.trace.session_log),
+                ("provider_log", profile.trace.provider_log)) if v}
+            if trace_dict:
+                profile_payload["trace"] = trace_dict
         # GC config (optional).
         if profile.gc is not None:
             gc_obj = profile.gc
@@ -3466,6 +3477,19 @@ class SubagentPlugin(DaemonForwardingMixin):
                 if isinstance(value, str):
                     _saved_profile_env[key] = os.environ.get(key)  # None if absent
                     os.environ[key] = value
+
+        # Typed `trace:` block (issue #775) — applied AFTER `env:` and by
+        # the same save/restore, so the validated value outranks the
+        # stringly-typed one here exactly as it does for a main session
+        # in ``JaatoServer._resolve_session_env``.  Without this the
+        # block would be honoured for main sessions and silently inert
+        # for subagents, which is the "wired into three ingresses, dead
+        # in the fourth" failure ``parse_gc_block`` exists to prevent.
+        if getattr(profile, 'trace', None):
+            for key, value in profile.trace.as_env().items():
+                if key not in _saved_profile_env:
+                    _saved_profile_env[key] = os.environ.get(key)
+                os.environ[key] = value
 
         try:
             # Create session using the existing runtime-based method logic
