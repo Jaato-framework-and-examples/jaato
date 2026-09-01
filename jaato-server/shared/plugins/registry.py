@@ -32,6 +32,13 @@ from jaato_sdk.plugins.model_provider.types import (
     DISCOVERABILITY_DEFERRED,
 )
 from .streaming.protocol import StreamingCapable
+from .entry_point_trust import (
+    BUILTIN_PLUGIN_PACKAGE as _BUILTIN_PLUGIN_PACKAGE,
+    PluginOrigin,
+    entry_point_distribution,
+    entry_point_module,
+    evaluate_entry_point,
+)
 from .enrichment_formatter import (
     EnrichmentNotification,
     format_enrichment_notifications,
@@ -124,6 +131,43 @@ def _trace(msg: str, include_traceback: bool = False, warning: bool = False) -> 
         logger.debug(msg)
 
 
+#: Which Protocol a discovered plugin must satisfy, per plugin kind.
+#: Kinds absent from this map (``gc``, ``cache``) carry no structural
+#: contract the registry can check, so they are admitted unchecked.
+_PLUGIN_KIND_PROTOCOLS: Dict[str, type] = {
+    "tool": ToolPlugin,
+    "enrichment": EnrichmentPlugin,
+}
+
+
+def _protocol_gap(plugin: Any, plugin_kind: str) -> Optional[str]:
+    """Render the protocol methods *plugin* is missing, or ``None``.
+
+    Both discovery paths (entry point and directory) must refuse a
+    plugin that fails its kind's Protocol check, and both must say
+    which methods are missing rather than dropping it silently — the
+    PR #171 / PR-210 lesson.  This helper holds the shared half so the
+    two call sites differ only in the wording that identifies *where*
+    the plugin came from.
+
+    Args:
+        plugin: The instantiated plugin.
+        plugin_kind: The kind being discovered (``"tool"``,
+            ``"enrichment"``, ...).
+
+    Returns:
+        A comma-separated list of missing method names, ``"(unknown)"``
+        when the plugin fails the check but introspection yields
+        nothing actionable, or ``None`` when the plugin satisfies the
+        Protocol (or its kind declares none).
+    """
+    protocol = _PLUGIN_KIND_PROTOCOLS.get(plugin_kind)
+    if protocol is None or isinstance(plugin, protocol):
+        return None
+    missing = _missing_protocol_methods(plugin, protocol)
+    return ", ".join(missing) if missing else "(unknown)"
+
+
 def _missing_protocol_methods(plugin: Any, protocol_cls: type) -> List[str]:
     """Return method/property names the protocol declares but ``plugin`` lacks.
 
@@ -206,6 +250,12 @@ class PluginRegistry:
                        match will be skipped during expose_tool().
         """
         self._plugins: Dict[str, AnyPlugin] = {}
+        # Provenance for every registered plugin: name -> PluginOrigin.
+        # Populated by both discovery paths and by register_plugin(), so
+        # a shadowed built-in is visible without reading logs and so a
+        # later claim on an occupied name can name the incumbent
+        # (issue #684).
+        self._plugin_sources: Dict[str, PluginOrigin] = {}
         self._exposed: Set[str] = set()
         self._enrichment_only: Set[str] = set()  # Plugins for prompt enrichment only
         self._configs: Dict[str, Dict[str, Any]] = {}
@@ -579,8 +629,12 @@ class PluginRegistry:
                 eps = all_eps.get(entry_point_group, [])
 
             for ep in eps:
-                # Skip if already loaded (avoid duplicates with directory scan)
-                if ep.name in self._plugins:
+                # Trust gate (issue #684): reserved-name, allowlist and
+                # occupied-name checks, all decided from the entry
+                # point's METADATA so a refused claim is never
+                # ``ep.load()``-ed and its module never imported.
+                origin = self._gate_entry_point(ep)
+                if origin is None:
                     continue
 
                 try:
@@ -614,35 +668,37 @@ class PluginRegistry:
                     # names the missing methods so the author knows
                     # exactly what to add.  Mirrors the directory-
                     # path warning at ``_discover_via_directory``
-                    # (see ``_missing_protocol_methods``).
-                    if plugin_kind == "tool" and not isinstance(plugin, ToolPlugin):
-                        missing = _missing_protocol_methods(plugin, ToolPlugin)
+                    # (both share ``_protocol_gap``).
+                    gap = _protocol_gap(plugin, plugin_kind)
+                    if gap is not None:
                         logger.warning(
                             "Entry point '%s' (%s): plugin does not "
-                            "implement the ToolPlugin protocol — it "
-                            "will be silently skipped. Missing "
-                            "methods: %s. Add them to the plugin "
-                            "class.",
+                            "implement the %s protocol — it will be "
+                            "silently skipped. Missing methods: %s. "
+                            "Add them to the plugin class.",
                             ep.name,
                             getattr(ep, "value", "<unknown>"),
-                            ", ".join(missing) if missing else "(unknown)",
-                        )
-                        continue
-                    if plugin_kind == "enrichment" and not isinstance(plugin, EnrichmentPlugin):
-                        missing = _missing_protocol_methods(plugin, EnrichmentPlugin)
-                        logger.warning(
-                            "Entry point '%s' (%s): plugin does not "
-                            "implement the EnrichmentPlugin protocol "
-                            "— it will be silently skipped. Missing "
-                            "methods: %s. Add them to the plugin "
-                            "class.",
-                            ep.name,
-                            getattr(ep, "value", "<unknown>"),
-                            ", ".join(missing) if missing else "(unknown)",
+                            _PLUGIN_KIND_PROTOCOLS[plugin_kind].__name__,
+                            gap,
                         )
                         continue
 
+                    # A plugin's ``.name`` property need not match the
+                    # name it was declared under, so re-run the trust
+                    # gate on the name it actually claims — otherwise
+                    # an entry point called ``harmless`` could return a
+                    # plugin named ``permission`` (issue #684).
+                    if not self._admit_claimed_name(plugin.name, origin):
+                        continue
+
                     self._plugins[plugin.name] = plugin
+                    self._plugin_sources[plugin.name] = PluginOrigin(
+                        name=plugin.name,
+                        via="entry_point",
+                        module=origin.module,
+                        distribution=origin.distribution,
+                        entry_point=origin.entry_point,
+                    )
                     discovered.append(plugin.name)
 
                     # Enrichment plugins are always enrichment-only
@@ -657,6 +713,130 @@ class PluginRegistry:
             pass
 
         return discovered
+
+    def _gate_entry_point(self, ep: Any) -> Optional[PluginOrigin]:
+        """Apply the #684 trust policy to one entry point, pre-``load()``.
+
+        Runs entirely off the entry point's metadata (``ep.name``,
+        ``ep.value``, ``ep.dist``), so a refused claim never has its
+        module imported — which matters because ``ep.load()`` executes
+        the target module, and "merely being installed" was previously
+        enough to run third-party code at discovery time.
+
+        Three ways an entry point is turned away, each with a WARNING
+        rather than a bare ``continue``:
+
+        * the name is already registered by a *different* provider
+          (duplicate claim — first writer wins, and the loser is named);
+        * its distribution is outside a configured allowlist;
+        * it claims a reserved built-in name without an operator opt-in
+          (never available at all for the security-critical set).
+
+        Args:
+            ep: The ``importlib.metadata.EntryPoint`` under consideration.
+
+        Returns:
+            A :class:`PluginOrigin` describing the accepted claimant —
+            its ``name`` is the *entry-point* name, refined to the
+            plugin's own name once instantiated — or ``None`` when the
+            entry point must be skipped.
+        """
+        module = entry_point_module(ep)
+        distribution = entry_point_distribution(ep)
+        origin = PluginOrigin(
+            name=ep.name,
+            via="entry_point",
+            module=module,
+            distribution=distribution,
+            entry_point=ep.name,
+        )
+
+        if ep.name in self._plugins:
+            # Pre-#684 this was a bare ``continue``.  Re-discovery of
+            # the same provider is normal and stays quiet; a second
+            # distribution claiming an occupied name is a shadow the
+            # operator needs to see.
+            self._warn_name_taken(ep.name, origin)
+            return None
+
+        decision = evaluate_entry_point(ep.name, module, distribution)
+        if decision.warn:
+            logger.warning("%s", decision.message)
+        return origin if decision.allowed else None
+
+    def _admit_claimed_name(self, claimed: str, origin: PluginOrigin) -> bool:
+        """Re-apply the trust policy to the name a loaded plugin claims.
+
+        ``_gate_entry_point`` can only judge the *declared* name.  A
+        plugin whose ``name`` property returns something else would
+        otherwise land in ``self._plugins`` under a name nobody vetted —
+        including a reserved built-in one.  Called after instantiation
+        and before registration; a plugin whose ``.name`` matches its
+        entry-point name has already been cleared and passes straight
+        through.
+
+        Args:
+            claimed: The value of the instantiated plugin's ``name``.
+            origin: What :meth:`_gate_entry_point` accepted.
+
+        Returns:
+            True when the plugin may be registered under *claimed*.
+        """
+        if claimed == origin.entry_point:
+            return True
+        if claimed in self._plugins:
+            self._warn_name_taken(claimed, origin)
+            return False
+        decision = evaluate_entry_point(
+            claimed, origin.module, origin.distribution,
+        )
+        if decision.warn:
+            logger.warning("%s", decision.message)
+        return decision.allowed
+
+    def _warn_name_taken(self, name: str, challenger: PluginOrigin) -> bool:
+        """Log the loser when two providers claim the same plugin name.
+
+        First writer wins — that ordering is unchanged, and is why
+        entry points beat the directory scan.  What changes is that the
+        skip is no longer silent: both the incumbent and the challenger
+        are named, so an operator can see *which* distribution took over
+        a plugin they thought was the built-in one.
+
+        Two collisions are benign and stay quiet:
+
+        * the same module re-offering a name it already holds
+          (``discover()`` runs more than once per process, and the
+          enrichment pass re-walks the same directory);
+        * one built-in reaching the registry by two routes — the
+          framework declares its plugins as entry points AND ships them
+          in the scanned directory, and registers a few (the session
+          plugin) directly.  A built-in losing to a built-in is not the
+          shadow this warning is for.
+
+        Args:
+            name: The contested plugin name.
+            challenger: The provider that arrived second and lost.
+
+        Returns:
+            True if a warning was emitted, False if the collision was a
+            benign re-registration of a built-in.
+        """
+        incumbent = self._plugin_sources.get(name)
+        if incumbent is not None and incumbent.module == challenger.module:
+            return False
+        if incumbent is not None and incumbent.builtin and challenger.builtin:
+            return False
+        held_by = incumbent.describe() if incumbent else "an earlier registration"
+        logger.warning(
+            "Plugin name '%s' is already provided by %s; ignoring the "
+            "competing declaration from %s. Whichever loads first wins "
+            "— rename one of them to make the outcome deterministic.",
+            name,
+            held_by,
+            challenger.describe(),
+        )
+        return True
 
     @staticmethod
     def _lookup_module_tier(module_name: str) -> Optional[str]:
@@ -722,8 +902,22 @@ class PluginRegistry:
             if name.startswith('_') or name in ('base', 'registry'):
                 continue
 
-            # Skip if already loaded via entry points
+            # Skip if already loaded via entry points.  Pre-#684 this
+            # was silent, which is exactly how a third-party entry
+            # point could take over a built-in without anyone noticing:
+            # the built-in module was simply never imported.  The
+            # framework declaring its OWN plugins through entry points
+            # lands here on every run, so only a foreign incumbent
+            # warns.
             if name in self._plugins:
+                self._warn_name_taken(
+                    name,
+                    PluginOrigin(
+                        name=name,
+                        via="directory",
+                        module=f"{_BUILTIN_PLUGIN_PACKAGE}.{name}",
+                    ),
+                )
                 continue
 
             try:
@@ -764,31 +958,27 @@ class PluginRegistry:
                     # registry — same footgun as missing PLUGIN_KIND.
                     # Promote to a real warning that names the missing
                     # methods so the author knows exactly what to add.
-                    if plugin_kind == "tool" and not isinstance(plugin, ToolPlugin):
-                        missing = _missing_protocol_methods(plugin, ToolPlugin)
+                    gap = _protocol_gap(plugin, plugin_kind)
+                    if gap is not None:
                         logger.warning(
-                            "Plugin '%s' does not implement the ToolPlugin "
-                            "protocol — it will be silently skipped. Missing "
-                            "methods: %s. Add them to %s/plugin.py.",
+                            "Plugin '%s' does not implement the %s "
+                            "protocol — it will be silently skipped. "
+                            "Missing methods: %s. Add them to "
+                            "%s/plugin.py.",
                             name,
-                            ", ".join(missing) if missing else "(unknown)",
-                            name,
-                        )
-                        continue
-                    if plugin_kind == "enrichment" and not isinstance(plugin, EnrichmentPlugin):
-                        missing = _missing_protocol_methods(plugin, EnrichmentPlugin)
-                        logger.warning(
-                            "Plugin '%s' does not implement the "
-                            "EnrichmentPlugin protocol — it will be "
-                            "silently skipped. Missing methods: %s. "
-                            "Add them to %s/plugin.py.",
-                            name,
-                            ", ".join(missing) if missing else "(unknown)",
+                            _PLUGIN_KIND_PROTOCOLS[plugin_kind].__name__,
+                            gap,
                             name,
                         )
                         continue
 
                     self._plugins[plugin.name] = plugin
+                    self._plugin_sources[plugin.name] = PluginOrigin(
+                        name=plugin.name,
+                        via="directory",
+                        module=module.__name__,
+                        entry_point=None,
+                    )
                     discovered.append(plugin.name)
 
                     # Enrichment plugins are always enrichment-only
@@ -839,6 +1029,31 @@ class PluginRegistry:
     def list_available(self) -> List[str]:
         """List all discovered plugin names."""
         return list(self._plugins.keys())
+
+    def get_plugin_source(self, name: str) -> Optional[PluginOrigin]:
+        """Where the plugin registered under *name* came from.
+
+        Provenance is recorded at registration time by both discovery
+        paths and by :meth:`register_plugin`, so callers can tell a
+        built-in apart from an out-of-tree plugin that claimed the same
+        name (issue #684 item 4).
+
+        Args:
+            name: Registered plugin name.
+
+        Returns:
+            The :class:`PluginOrigin`, or ``None`` for a plugin that
+            predates provenance tracking or was never registered.
+        """
+        return self._plugin_sources.get(name)
+
+    def get_plugin_sources(self) -> Dict[str, PluginOrigin]:
+        """Provenance for every registered plugin, by name.
+
+        Returns a copy — callers reporting on the registry must not be
+        able to reshape its record of what it loaded.
+        """
+        return dict(self._plugin_sources)
 
     def list_exposed(self) -> List[str]:
         """List currently exposed plugin names."""
@@ -955,6 +1170,11 @@ class PluginRegistry:
             registry.register_plugin(my_enrichment_plugin)
         """
         self._plugins[plugin.name] = plugin
+        self._plugin_sources[plugin.name] = PluginOrigin(
+            name=plugin.name,
+            via="registered",
+            module=type(plugin).__module__ or "",
+        )
 
         # EnrichmentPlugin instances are always enrichment-only
         if isinstance(plugin, EnrichmentPlugin) and not isinstance(plugin, ToolPlugin):
