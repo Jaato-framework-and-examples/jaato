@@ -188,9 +188,14 @@ _CLIENT_GENERATED_CORRECT = (
     "default of 5s is too short",
     "env_file is always a real path — env_file=None crashes the IPC handshake "
     "with an opaque os.PathLike TypeError",
-    "completion waits on the FIRST of {TURN_COMPLETED, SESSION_TERMINATED} — a "
-    "plain turn never self-terminates, so waiting on SESSION_TERMINATED alone "
-    "hangs forever",
+    "this NON-GATED client waits on the FIRST of {TURN_COMPLETED, "
+    "SESSION_TERMINATED} — its turn IS its terminus, and a plain turn never "
+    "self-terminates, so waiting on SESSION_TERMINATED alone hangs forever",
+    "point it at a COMPLETION-GATED profile and first-of stops being the "
+    "terminus: an agent that ends a turn without signal_completion is "
+    "re-prompted and keeps working, so the turn event fires mid-flight "
+    "(jaato #767). Use Session.complete(), which owns that settle rule, or "
+    "wait on SESSION_TERMINATED only as the cascade archetype does",
     "create_session RAISES SessionCreateFailed; it does not return None",
 )
 

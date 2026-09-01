@@ -24,6 +24,18 @@ hour of trial-and-error:
   NOT ``set_event_callback`` (which does not exist — the phantom method that
   ate the peer's tracing).
 
+  THE RECIPE IS SCOPED TO THE NON-GATED CLIENT, and the scoping is the part
+  that bites when a template gets adapted.  ``client`` / ``host-tools`` ship
+  an inline, schema-less profile spec, so their single turn IS the terminus
+  and first-of is right.  Point either at a profile carrying a
+  ``completion_payload_schema`` and it stops being right: an agent that ends
+  a turn without ``signal_completion`` is RE-PROMPTED by the daemon and keeps
+  working, so ``TURN_COMPLETED`` fires with its work still ahead of it and
+  the client reports an outcome for a session that is still running (jaato
+  #767).  For that shape use ``Session.complete()``, which owns the settle
+  rule, or wait on ``SESSION_TERMINATED`` only — which is exactly what the
+  ``cascade`` template does, and why its stages are required to be gated.
+
 Templates use ``__TOKEN__`` placeholders filled by ``str.replace`` so the
 embedded Python (dict literals, async braces) needs no escaping.
 """
@@ -82,6 +94,14 @@ async def main() -> int:
         # Subscribing to BOTH means a plain turn doesn't hang here; setdefault
         # lets a real SESSION_TERMINATED error reason win even if TURN_COMPLETED
         # raced in first.  (Mirrors run_ephemeral terminal detection, PR #316.)
+        #
+        # THIS IS RIGHT BECAUSE THE PROFILE BELOW IS NOT COMPLETION-GATED.
+        # Give it a completion_payload_schema and the turn stops being the
+        # terminus: an agent that ends a turn without signal_completion gets
+        # RE-PROMPTED and keeps working, so this fires mid-flight and the
+        # outcome describes a session still running (jaato #767).  Switch to
+        # Session.complete() there — it owns that rule — or wait on
+        # SESSION_TERMINATED only, as the cascade archetype does.
         outcome.setdefault("reason", getattr(ev, "reason", None) or "natural")
         if getattr(ev, "error_type", None):
             outcome["error_type"] = ev.error_type
@@ -306,6 +326,9 @@ async def main() -> int:
         # TURN_COMPLETED (then goes IDLE), a completion-gated one emits
         # SESSION_TERMINATED.  Subscribing to both avoids a hang on the plain
         # path.  (Mirrors run_ephemeral terminal detection, jaato PR #316.)
+        # Right because the profile below is NOT completion-gated — under a
+        # completion_payload_schema the turn fires while the agent is still
+        # being re-prompted, so use Session.complete() instead (jaato #767).
         done.set()
 
     def on_output(ev):
