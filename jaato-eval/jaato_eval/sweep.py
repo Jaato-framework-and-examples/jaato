@@ -110,11 +110,18 @@ async def run_sweep(arms: Sequence[ArmSpec], *, store: ResultStore,
 
     async def one(spec: ArmSpec, pools: CascadePools) -> None:
         async with semaphore:
+            # READ INSIDE THE SEMAPHORE, immediately before the arm starts.
+            # Taken up front for every arm it would describe the pool as it
+            # was before the sweep began — the same number on every row, and
+            # useless for the question it exists to answer: how much was
+            # already gone when THIS arm arrived.
+            on_arrival = await pools.snapshot(spec.task.task_id)
             result = await run_arm(
                 spec, workspace_root=workspace_root,
                 socket_path=socket_path, keep_workspace=keep_workspaces,
                 cascade_driver_id=pools.cid_for(spec.task.task_id),
-                arm_timeout_seconds=arm_timeout_seconds)
+                arm_timeout_seconds=arm_timeout_seconds,
+                pool_on_arrival=on_arrival)
         # Serialise the append: JSONL tolerates interleaved *records* but
         # not interleaved *bytes* from concurrent writers.
         async with lock:

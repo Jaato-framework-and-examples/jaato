@@ -68,6 +68,65 @@ class ArmResult:
             being blocked — this means there was nothing to grade.  An
             error terminal is therefore NOT automatically a blocked_reason:
             see ``error`` for the one that leaves a workspace behind.
+
+    THE PROVENANCE BLOCK
+    ====================
+
+    Everything below this line answers "what happened to THIS arm, and can
+    I go look at it upstream?" rather than "which configuration won".  The
+    pivot ignores all of it; the per-arm report (:mod:`jaato_eval.report_html`)
+    is made of it.
+
+    Every one of these fields is ``Optional`` and ``None`` means UNKNOWN,
+    never a default.  A zero ceiling and an unread ceiling are opposite
+    facts, and so are "the model called no nudge" and "we could not count".
+
+    Attributes:
+        session_id: The daemon's id for this arm's session.  The runner has
+            always known it and used to discard it, which left nothing in
+            the results file identifying the session — and OpenRouter's
+            console groups by exactly this id, so persisting it turns every
+            row into a join onto the provider's own record of the arm
+            (request count, upstream, per-request cost, generation ids).
+        model: The model the daemon actually BOUND, from
+            ``SessionInfoEvent.model_name``.  Not ``profile_set``, which is
+            a naming convention rather than data — ``openrouter_gemini25flash``
+            is what someone called the directory.
+        provider: Likewise ``SessionInfoEvent.model_provider`` — the jaato
+            provider plugin (``openrouter``, ``anthropic``, ...).
+        upstream_provider: WHO THE GATEWAY ROUTED TO.  OpenRouter serves one
+            model from several upstreams (observed: ``Google Vertex`` for
+            Gemini 2.5 Flash), and an arm served by a different upstream is
+            not the same measurement.  Only the provider knows this and the
+            framework does not yet carry it off the wire, so this is
+            ``None`` on every arm today; the runner reads it opportunistically
+            so it populates itself the day the turn event reports it (the
+            same plumbing jaato #766 needs for ``native_finish_reason``).
+        native_finish_reason: The upstream's own finish word, behind
+            OpenRouter's normalised one — Gemini's ``MALFORMED_FUNCTION_CALL``
+            is the case that sent two arms to the provider's API for an
+            explanation.  ``None`` until jaato #766 surfaces it; read
+            opportunistically for the same reason as ``upstream_provider``.
+        completion_nudges: How many times the framework asked this session
+            to call ``signal_completion`` before giving up.  An arm sitting
+            at the ceiling is one nudge from BLOCKED, and today that is
+            visible only by grepping ``COMPLETION_NUDGE`` out of session
+            logs — which is how three BLOCKED arms were finally explained.
+        budget_ceiling: The arm's OWN ``budget_control.limits``, resolved
+            from the profile it bound (:mod:`jaato_eval.profile`).  ``None``
+            when the profile declares none: such a session draws on the task
+            pool instead, which is the framework's rule and the reason both
+            fields exist side by side.
+        pool_limits: The task's cascade-pool ceilings, as declared in the
+            manifest — the aggregate this arm's siblings shared.
+        pool_on_arrival: What the pool had left when this arm STARTED
+            (``{declared, limits, remaining, usage_fraction, pressure}``
+            from ``cascade.budget.get``).  The column that makes an arm
+            killed by an earlier arm's appetite readable as such: three arms
+            on one $6.00 pool spent $3.81 + $0.17 + $2.03, and the third was
+            terminated ``budget_exhausted`` and recorded BLOCKED — which
+            reads as a model failure until you can see it arrived with 63%
+            already gone.
     """
 
     spec: ArmSpec
@@ -79,6 +138,15 @@ class ArmResult:
     payload_hash: Optional[str] = None
     error: Optional[str] = None
     blocked_reason: Optional[str] = None
+    session_id: Optional[str] = None
+    model: Optional[str] = None
+    provider: Optional[str] = None
+    upstream_provider: Optional[str] = None
+    native_finish_reason: Optional[str] = None
+    completion_nudges: Optional[int] = None
+    budget_ceiling: Optional[Dict[str, float]] = None
+    pool_limits: Optional[Dict[str, float]] = None
+    pool_on_arrival: Optional[Dict[str, Any]] = None
 
     @property
     def report(self) -> Report:
@@ -111,6 +179,19 @@ class ArmResult:
             "finish_reason": self.finish_reason,
             "payload_hash": self.payload_hash,
             "error": self.error,
+            # The per-arm provenance block.  Written unconditionally, nulls
+            # included: a reader must be able to tell a field this engine
+            # could not establish from a field a newer engine added, and an
+            # omitted key looks like the latter.
+            "session_id": self.session_id,
+            "model": self.model,
+            "provider": self.provider,
+            "upstream_provider": self.upstream_provider,
+            "native_finish_reason": self.native_finish_reason,
+            "completion_nudges": self.completion_nudges,
+            "budget_ceiling": self.budget_ceiling,
+            "pool_limits": self.pool_limits,
+            "pool_on_arrival": self.pool_on_arrival,
             # Which code this arm actually exercised.  The branch does not
             # determine it — see results.provenance.
             "provenance": provenance(),

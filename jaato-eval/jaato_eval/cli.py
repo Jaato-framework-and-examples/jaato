@@ -23,6 +23,7 @@ from typing import List, Optional, Sequence
 from .arm import ArmResult
 from .manifest import ManifestError, discover_tasks
 from .report import render_markdown
+from .report_html import ReportDependencyError, write_html, write_pdf
 from .results import ResultStore
 from .sweep import DEFAULT_CONCURRENCY, build_matrix, pool_size_advice, run_sweep
 from .verdict import BLOCKED, FAIL, PASS
@@ -102,8 +103,35 @@ def cmd_run(args: argparse.Namespace) -> int:
     ))
 
     print("", file=sys.stderr)
-    print(render_markdown(store.read()))
-    return _exit_code(results)
+    records = store.read()
+    print(render_markdown(records))
+    rendered = _render_documents(args, records)
+    return rendered if rendered else _exit_code(results)
+
+
+def _render_documents(args: argparse.Namespace,
+                      records: Sequence[dict]) -> int:
+    """Write the per-arm document(s) asked for.  ``0`` unless PDF failed.
+
+    Returns an exit code ONLY for the one failure a caller must not miss:
+    ``--pdf`` without the optional renderer.  A sweep run unattended asked
+    for a PDF and did not get one, and silently exiting on the verdict
+    codes would report that as an ordinary result.  Every other outcome
+    returns 0 and lets the verdict decide the exit, because the verdict is
+    what the exit codes mean.
+    """
+    if getattr(args, "html", None):
+        path = write_html(records, _absolute(args.html))
+        print(f"per-arm report: {path}", file=sys.stderr)
+    if not getattr(args, "pdf", None):
+        return 0
+    try:
+        path = write_pdf(records, _absolute(args.pdf))
+    except ReportDependencyError as exc:
+        print(f"--pdf: {exc}", file=sys.stderr)
+        return 2
+    print(f"per-arm report: {path}", file=sys.stderr)
+    return 0
 
 
 def cmd_report(args: argparse.Namespace) -> int:
@@ -113,6 +141,9 @@ def cmd_report(args: argparse.Namespace) -> int:
         print(f"no records in {args.results}", file=sys.stderr)
         return 2
     print(render_markdown(records))
+    rendered = _render_documents(args, records)
+    if rendered:
+        return rendered
     states = [r.get("state") for r in records]
     if FAIL in states:
         return 1
@@ -148,12 +179,34 @@ def build_parser() -> argparse.ArgumentParser:
                           "and a session that never ends never consumes it.")
     run.add_argument("--resume", action="store_true",
                      help="skip arms already present in --out")
+    _add_document_arguments(run)
     run.set_defaults(func=cmd_run)
 
     rep = sub.add_parser("report", help="pivot an existing results file")
     rep.add_argument("results", help="results JSONL path")
+    _add_document_arguments(rep)
     rep.set_defaults(func=cmd_report)
     return parser
+
+
+def _add_document_arguments(parser: argparse.ArgumentParser) -> None:
+    """The per-arm document flags, shared by ``run`` and ``report``.
+
+    Both subcommands take them because the two are the same question at
+    different times: a sweep wants the document written as it finishes,
+    and an old ``results.jsonl`` wants it written now — including one
+    produced before this feature existed, whose new columns simply render
+    as unknown.
+    """
+    parser.add_argument("--html", default=None, metavar="PATH",
+                        help="write the per-arm report as a self-contained "
+                             "HTML document (no dependencies; carries print "
+                             "CSS, so any browser prints it to PDF)")
+    parser.add_argument("--pdf", default=None, metavar="PATH",
+                        help="also render that document to PDF. Needs the "
+                             "optional renderer: pip install "
+                             "'jaato-eval[report]'. Missing it is an error, "
+                             "not a silent HTML-only fallback.")
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:

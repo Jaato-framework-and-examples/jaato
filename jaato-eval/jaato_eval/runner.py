@@ -46,8 +46,9 @@ from .arm import ArmResult, ArmSpec
 from .fixture import FixtureError, Workspace, discard, materialise
 from .graders import REGISTRY, GraderContext
 from .ledger import build_ledger_result
+from .profile import resolve_budget_ceiling
 from .results import canonical_hash
-from .sign_off import is_unsigned_terminal
+from .sign_off import MAX_COMPLETION_NUDGES, is_unsigned_terminal
 from .verdict import Verdict
 
 #: Usage keys summed across turns rather than taken from the last turn.
@@ -85,6 +86,16 @@ class _TurnAccumulator:
         self.termination_error_type = ""
         self.agent_error: Optional[str] = None
         self.completion_gap: Optional[str] = None
+        # PROVIDER-SIDE FACTS THE WIRE DOES NOT CARRY YET.  Both stay None
+        # on every arm today: the OpenRouter provider reads
+        # ``native_finish_reason`` off the choice and the routed upstream
+        # off the response, and neither reaches TurnCompletedEvent (jaato
+        # #766).  Read here anyway, by name, so the per-arm report fills
+        # these columns the day the framework reports them — the
+        # alternative is a report that keeps printing "—" for a fact the
+        # daemon has started sending.
+        self.native_finish_reason: Optional[str] = None
+        self.upstream_provider: Optional[str] = None
 
     def on_terminated(self, event: Any) -> None:
         """Record why the session wound down.
@@ -153,6 +164,16 @@ class _TurnAccumulator:
         gap = getattr(event, "completion_gap", None)
         if gap:
             self.completion_gap = str(gap)
+        # LATCHED, not overwritten by a later turn that omits them: a
+        # gateway reports the upstream once per response and a normalised
+        # finish reason has no native twin on most turns, so "the last turn
+        # did not say" must not erase what an earlier one did.
+        native = getattr(event, "native_finish_reason", None)
+        if native:
+            self.native_finish_reason = str(native)
+        upstream = getattr(event, "upstream_provider", None)
+        if upstream:
+            self.upstream_provider = str(upstream)
         usage = getattr(event, "usage", None)
         if usage is None:
             return
@@ -184,7 +205,8 @@ async def run_arm(spec: ArmSpec, *, workspace_root: Path,
                   socket_path: Optional[str] = None,
                   keep_workspace: bool = False,
                   cascade_driver_id: Optional[str] = None,
-                  arm_timeout_seconds: Optional[float] = None) -> ArmResult:
+                  arm_timeout_seconds: Optional[float] = None,
+                  pool_on_arrival: Optional[Dict[str, Any]] = None) -> ArmResult:
     """Execute and grade one arm.
 
     Args:
@@ -202,6 +224,14 @@ async def run_arm(spec: ArmSpec, *, workspace_root: Path,
             An arm whose profile declares its own ``budget_control`` is on
             its own books and does not draw on the pool even when given
             one — that is the framework's rule, not this engine's.
+        pool_on_arrival: What that pool had left when this arm STARTED, as
+            :meth:`jaato_eval.pool.CascadePools.snapshot` read it.  Recorded
+            on the result because spend is only legible against what was
+            still available: an arm that arrives at a 63%-consumed pool and
+            is terminated ``budget_exhausted`` reads as a model failure
+            until the reader can see it was billed for a sibling's
+            appetite.  ``None`` when the task declared no pool, or when the
+            snapshot could not be read — never invented.
 
     Returns:
         An :class:`ArmResult`, always — this coroutine does not raise for
@@ -210,6 +240,11 @@ async def run_arm(spec: ArmSpec, *, workspace_root: Path,
     """
     task = spec.task
     result = ArmResult(spec=spec)
+    # Before anything can fail.  These three are properties of what the arm
+    # was ALLOWED, not of what it did, so a fixture error must not cost them
+    # — an arm blocked at materialisation still belongs in the per-arm table
+    # with its ceilings shown.
+    _record_declared_budget(result, spec, pool_on_arrival)
 
     try:
         workspace = materialise(
@@ -244,6 +279,9 @@ async def run_arm(spec: ArmSpec, *, workspace_root: Path,
         _record_partial_usage(
             result, accumulator,
             _tracker_usage(workspace, session_ref.get('id')))
+        # AFTER the usage read and BEFORE the discard: the session log this
+        # counts nudges from lives in the workspace that is about to go.
+        _record_binding(result, workspace, session_ref, accumulator)
         if not keep_workspace:
             discard(workspace)
         return result
@@ -253,10 +291,12 @@ async def run_arm(spec: ArmSpec, *, workspace_root: Path,
         _record_partial_usage(
             result, accumulator,
             _tracker_usage(workspace, session_ref.get('id')))
+        _record_binding(result, workspace, session_ref, accumulator)
         if not keep_workspace:
             discard(workspace)
         return result
 
+    _record_binding(result, workspace, session_ref, accumulator)
     result.duration_seconds = time.monotonic() - started
     result.turns = accumulator.turns
     result.finish_reason = accumulator.finish_reason
@@ -295,6 +335,54 @@ async def run_arm(spec: ArmSpec, *, workspace_root: Path,
     if not keep_workspace:
         discard(workspace)
     return result
+
+
+def _record_declared_budget(result: "ArmResult", spec: ArmSpec,
+                            pool_on_arrival: Optional[Dict[str, Any]]) -> None:
+    """Record the two ceilings this arm ran under, and the pool's state.
+
+    THE TWO ARE NOT ALTERNATIVES TO EACH OTHER and the report shows both
+    for that reason: a session declaring its own ``budget_control`` is on
+    its own books and does not draw on the pool, so a populated
+    ``budget_ceiling`` beside an untouched pool is the framework working
+    as designed rather than a pool that failed to bind.
+
+    ``budget_ceiling`` stays ``None`` when the profile could not be
+    resolved — see :mod:`jaato_eval.profile` on why that must not read as
+    "unbudgeted".
+    """
+    result.budget_ceiling = resolve_budget_ceiling(
+        spec.task.resolved_config_root(),
+        spec.task.harness.profile,
+        spec.profile_set or spec.task.harness.profile_set,
+    )
+    result.pool_limits = dict(spec.task.budget.limits) or None
+    result.pool_on_arrival = pool_on_arrival
+
+
+def _record_binding(result: "ArmResult", workspace: Workspace,
+                    session_ref: Dict[str, Any],
+                    accumulator: "_TurnAccumulator") -> None:
+    """Record WHICH session this arm was, and what served it.
+
+    Called on every path that opened a session — success, harness timeout
+    and session failure alike — because the arm a reader most needs to
+    look up upstream is the one that did not finish.  The session id in
+    particular is the join key: OpenRouter's console groups by exactly
+    this id, so a row carrying it links to the provider's own record of
+    the arm, and a row without it cannot be joined to anything.
+
+    Every field is left ``None`` when unknown.  A cut arm may never have
+    received its ``SessionInfoEvent``, and naming a model it might have
+    bound would be worse than a blank.
+    """
+    result.session_id = session_ref.get("id")
+    result.model = session_ref.get("model")
+    result.provider = session_ref.get("provider")
+    result.upstream_provider = accumulator.upstream_provider
+    result.native_finish_reason = accumulator.native_finish_reason
+    result.completion_nudges = _completion_nudges(
+        workspace, result.session_id, accumulator.completion_gap)
 
 
 async def _grade(task, context: GraderContext) -> List[Verdict]:
@@ -374,11 +462,17 @@ class _ArmSession:
     """
 
     def __init__(self, kwargs: Dict[str, Any],
-                 handlers: Dict[str, Any]) -> None:
+                 handlers: Dict[str, Any],
+                 session_ref: Optional[Dict[str, Any]] = None) -> None:
         self._kwargs = dict(kwargs)
         self._handlers = dict(handlers)
         self._client: Any = None
         self.refusal: Optional[str] = None
+        # Written to DIRECTLY by the SESSION_INFO handler rather than read
+        # off this object afterwards, for the same reason the sid is
+        # published early: a timeout cancels the session body, and the
+        # binding the report describes must survive that.
+        self._session_ref = session_ref if session_ref is not None else {}
 
     async def __aenter__(self):
         """Connect, subscribe, create — and in that order.
@@ -422,8 +516,29 @@ class _ArmSession:
             if "CascadeExhausted" in error_type:
                 self.refusal = (str(getattr(event, "error", "")) or error_type)
 
+        def on_session_info(event: Any) -> None:
+            """Latch the model and provider the daemon actually BOUND.
+
+            ``profile_set`` is a directory name someone chose; this is the
+            binding.  Subscribed BEFORE create for the same reason the
+            refusal watch is: the first ``SessionInfoEvent`` is emitted
+            while ``create_session`` is still in flight.
+
+            Two of them arrive on a normal create — a snapshot at creation
+            and a second once the provider is fully ready — and the second
+            is the one that can carry a name the first did not have yet.
+            So an empty field never overwrites a populated one, and a
+            populated one always wins.
+            """
+            for key, attribute in (("model", "model_name"),
+                                   ("provider", "model_provider")):
+                value = getattr(event, attribute, None)
+                if value:
+                    self._session_ref[key] = str(value)
+
         for event_type in (EventType.ERROR, EventType.AGENT_ERROR):
             self._client.subscribe(event_type, on_error)
+        self._client.subscribe(EventType.SESSION_INFO, on_session_info)
         for name, handler in self._handlers.items():
             self._client.subscribe(getattr(EventType, name), handler)
 
@@ -497,6 +612,62 @@ def _tracker_usage(workspace: Workspace,
     if isinstance(turns, (int, float)):
         out["turns"] = float(turns)
     return out
+
+
+def _completion_nudges(workspace: Workspace,
+                       session_id: Optional[str],
+                       completion_gap: Optional[str]) -> Optional[int]:
+    """How many completion nudges this arm drew, or ``None`` if unknowable.
+
+    Three of one sweep's BLOCKED arms were explained only by grepping
+    ``COMPLETION_NUDGE`` out of session logs, and an arm sitting at
+    ``2/2`` is one nudge from BLOCKED — so the count belongs in the
+    result rather than in whatever log the operator still has.
+
+    There is no event carrying it: the framework announces each nudge with
+    ``JaatoServer._trace``, which is ``logger.debug``.  So this reads the
+    session's OWN log out of the arm's workspace, the same move
+    :func:`_tracker_usage` makes for the budget snapshot and for the same
+    reason — the daemon writes it there (``JAATO_SESSION_LOG_DIR``,
+    default ``.jaato/logs``, resolved against the workspace), so no new
+    wire surface and no live session is needed.
+
+    ``completion_gap`` is the corroborating witness and the fallback: the
+    framework sets it exactly when it asked ``MAX_COMPLETION_NUDGES``
+    times and gave up, so an arm carrying it is at the ceiling whether or
+    not a log survives.
+
+    Returns:
+        The count, or ``None`` when it cannot be established.  ``None``
+        rather than ``0`` for the case that matters: a daemon logging at
+        INFO writes the session file without ever writing a nudge line,
+        and reporting that as "no nudges" would be a fact this engine
+        made up.  A log with no ``DEBUG`` record at all is therefore read
+        as "not recorded", not as "none fired".
+    """
+    if completion_gap:
+        return MAX_COMPLETION_NUDGES
+    if not session_id:
+        return None
+    log_dir = Path(workspace.path) / ".jaato" / "logs"
+    # The handler names files ``session_{sid}_client_{cid}.log`` and one
+    # session can be written by more than one client, so this is a glob
+    # over the session's files rather than a single path.
+    logs = sorted(log_dir.glob(f"session_{session_id}*.log"))
+    if not logs:
+        return None
+    nudges = 0
+    debug_seen = False
+    for log in logs:
+        try:
+            text = log.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        debug_seen = debug_seen or "[DEBUG]" in text
+        nudges += text.count("COMPLETION_NUDGE:")
+    if nudges:
+        return nudges
+    return 0 if debug_seen else None
 
 
 def _record_partial_usage(result: "ArmResult",
@@ -592,7 +763,7 @@ async def _run_session(spec: ArmSpec, workspace: Workspace, *,
         "HISTORY": on_history,
     }
 
-    arm = _ArmSession(kwargs, handlers)
+    arm = _ArmSession(kwargs, handlers, session_ref=session_ref)
     async with arm as session:
         # Published as soon as it exists, for the same reason the
         # accumulator is caller-owned: a timeout cancels this body, and the

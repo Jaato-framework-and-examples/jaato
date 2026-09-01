@@ -22,6 +22,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from jaato_eval.manifest import load_manifest
 from jaato_eval.sweep import build_matrix, run_sweep
@@ -125,6 +126,40 @@ class CascadePoolCase(unittest.TestCase):
             b["subscribed_before_create"],
             {"TURN_COMPLETED", "SESSION_TERMINATED", "HISTORY", "ERROR"},
             "a subscription installed after create_session receives nothing")
+
+    def test_each_arm_records_the_headroom_it_arrived_with(self):
+        """jaato #777.  Three arms sharing one $6.00 pool spent
+        $3.81 + $0.17 + $2.03 and the last was killed mid-work with
+        ``budget_exhausted`` — which reads as a model failure until the row
+        can show it arrived at a pool already 63% gone.  Read PER ARM,
+        immediately before it starts: one reading taken up front would put
+        the same number on every row."""
+        b = {"writes": "READY\n"}
+        results = self._sweep([self._task("a", BUDGETED)], b)
+        self.assertEqual(len(b["budget_gets"]), len(results),
+                         "one reading per arm, not one per sweep")
+        for result in results:
+            self.assertEqual(result.pool_on_arrival["usage_fraction"], 0.635)
+            self.assertEqual(result.pool_on_arrival["cascade_driver_id"],
+                             b["pools"][0]["cid"])
+
+    def test_a_pool_that_never_answers_leaves_the_reading_absent(self):
+        """Reporting must never fail an arm, and an unread pool must never
+        render as an empty one."""
+        b = {"writes": "READY\n", "pool_reply": None}
+        # The production wait is deliberately generous; a suite that paid
+        # it per arm would spend most of its runtime asleep.
+        with patch("jaato_eval.pool.SNAPSHOT_TIMEOUT_SECONDS", 0.05):
+            results = self._sweep([self._task("a", BUDGETED)], b)
+        self.assertEqual(len(results), 2)
+        for result in results:
+            self.assertIsNone(result.pool_on_arrival)
+
+    def test_an_unpooled_task_asks_for_no_reading(self):
+        b = {"writes": "READY\n"}
+        results = self._sweep([self._task("p", UNBUDGETED)], b)
+        self.assertEqual(b.get("budget_gets", []), [])
+        self.assertIsNone(results[0].pool_on_arrival)
 
     def test_a_task_with_no_budget_gets_no_pool_and_no_owner(self):
         """Opening an owner connection anyway taxes every sweep."""

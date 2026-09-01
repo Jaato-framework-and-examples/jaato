@@ -45,10 +45,17 @@ Reference implementation this follows:
 """
 from __future__ import annotations
 
+import asyncio
+import json
 import uuid
 from typing import Any, Dict, Optional, Sequence
 
 from .manifest import TaskManifest
+
+#: How long :meth:`CascadePools.snapshot` waits for the daemon's reply.
+#: Short deliberately: the snapshot is a REPORTING nicety, and an arm must
+#: never be delayed — let alone fail — because a pool reading was slow.
+SNAPSHOT_TIMEOUT_SECONDS = 5.0
 
 
 def _slug(task_id: str) -> str:
@@ -82,6 +89,12 @@ class CascadePools:
         self._workspace_path = workspace_path
         self._cids: Dict[str, str] = {}
         self._client: Any = None
+        #: cid -> the last ``cascade.budget.get`` reply seen for it.  The
+        #: daemon answers on the EVENT STREAM rather than as a return
+        #: value, so the reply has to be latched by a handler and matched
+        #: back to its cid.
+        self._budget_replies: Dict[str, Dict[str, Any]] = {}
+        self._reply_arrived = asyncio.Event()
 
     def cid_for(self, task_id: str) -> Optional[str]:
         """The cascade id this task's arms draw on, or ``None``."""
@@ -108,6 +121,7 @@ class CascadePools:
             kwargs["workspace_path"] = self._workspace_path
         self._client = IPCClient(**kwargs)
         await self._client.connect(timeout=120)
+        self._subscribe_budget_replies()
 
         for task in self._tasks:
             cid = f"jaato-eval-{_slug(task.task_id)}-{uuid.uuid4().hex[:8]}"
@@ -118,6 +132,88 @@ class CascadePools:
             )
             self._cids[task.task_id] = cid
         return self
+
+    def _subscribe_budget_replies(self) -> None:
+        """Latch ``cascade.budget.get`` answers off the event stream.
+
+        The daemon replies to that command with a ``SystemMessageEvent``
+        whose ``message`` is JSON — so this handler has to distinguish the
+        reply from every other system message the connection sees, and it
+        does so by SHAPE: a JSON object carrying ``cascade_driver_id``.
+        Matching on anything looser would let an unrelated message be
+        recorded as a pool reading, which is the one thing a budget column
+        must not do.
+
+        Best-effort: a daemon that answers in a shape this does not
+        recognise leaves the reading absent, and an absent reading prints
+        as unknown rather than as an empty pool.
+        """
+        from jaato_sdk.events import EventType
+
+        def on_system_message(event: Any) -> None:
+            raw = getattr(event, "message", None)
+            if not isinstance(raw, str) or "cascade_driver_id" not in raw:
+                return
+            try:
+                data = json.loads(raw)
+            except ValueError:
+                return
+            if not isinstance(data, dict):
+                return
+            cid = data.get("cascade_driver_id")
+            if not cid:
+                return
+            self._budget_replies[str(cid)] = data
+            self._reply_arrived.set()
+
+        self._client.subscribe(EventType.SYSTEM_MESSAGE, on_system_message)
+
+    async def snapshot(self, task_id: str) -> Optional[Dict[str, Any]]:
+        """What this task's pool had left, read now.
+
+        Called by the sweep driver just before an arm starts, so the arm's
+        result records the headroom it ARRIVED with.  That is the fact that
+        makes a ``budget_exhausted`` terminal legible: three arms sharing a
+        $6.00 pool spent $3.81 + $0.17 + $2.03, and the last was killed
+        mid-work and recorded BLOCKED — indistinguishable, from the results
+        file alone, from a model that failed.
+
+        Returns:
+            The daemon's reply — ``{cascade_driver_id, declared, limits,
+            remaining, usage_fraction, pressure}`` — or ``None`` when the
+            task has no pool, the owner connection is closed, or no reply
+            arrives within :data:`SNAPSHOT_TIMEOUT_SECONDS`.  ``None`` is
+            "not read", never "empty": a reporting read must not be able to
+            manufacture evidence that a pool was exhausted.
+        """
+        cid = self._cids.get(task_id)
+        if not cid or self._client is None:
+            return None
+        # Drop any earlier reading for this cid before asking, so a STALE
+        # one cannot satisfy this wait.  The owner declares every pool on
+        # one connection and the wake-up event is shared across cids, hence
+        # the loop: another cid's reply sets the event without answering us.
+        self._budget_replies.pop(cid, None)
+        self._reply_arrived.clear()
+        try:
+            await self._client.cascade_budget_get(cid)
+        except Exception:  # noqa: BLE001 — reporting must not fail an arm
+            return None
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + SNAPSHOT_TIMEOUT_SECONDS
+        while True:
+            reply = self._budget_replies.get(cid)
+            if reply is not None:
+                return reply
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                return None
+            try:
+                await asyncio.wait_for(self._reply_arrived.wait(),
+                                       timeout=remaining)
+            except asyncio.TimeoutError:
+                return None
+            self._reply_arrived.clear()
 
     async def __aexit__(self, *exc: Any) -> bool:
         if self._client is not None:

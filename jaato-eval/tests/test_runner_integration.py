@@ -15,6 +15,7 @@ that contract, which is the part this package owns.
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 import tempfile
 import types
@@ -60,6 +61,33 @@ class _TurnEvent:
 class _HistoryEvent:
     def __init__(self, history):
         self.history = history
+
+
+class _SessionInfoEvent:
+    """Mirrors ``SessionInfoEvent``'s consumed surface.
+
+    The daemon emits one WHILE ``create_session`` is still in flight and a
+    second once the provider is ready, so the stub emits it from inside
+    create: a stub that emitted it afterwards would let a handler
+    subscribed too late still pass, which is the exact ordering bug the
+    real subscription order exists to avoid.
+    """
+
+    def __init__(self, model_name="", model_provider=""):
+        self.model_name = model_name
+        self.model_provider = model_provider
+
+
+class _SystemMessageEvent:
+    """Mirrors ``SystemMessageEvent`` — how ``cascade.budget.get`` answers.
+
+    The pool reading is not a return value: the daemon replies on the
+    event stream with JSON in ``message``, which is why the engine has to
+    latch it by shape.
+    """
+
+    def __init__(self, message=""):
+        self.message = message
 
 
 class _TerminatedEvent:
@@ -156,6 +184,24 @@ class _FakeClient:
         self.behaviour.setdefault("pools", []).append(
             {"cid": cid, "limits": limits, "degrade": degrade})
 
+    async def cascade_budget_get(self, cid):
+        """Answer on the EVENT STREAM, as the daemon does.
+
+        ``pool_reply`` lets a test shape the answer; absent, the reply is a
+        plausible half-consumed pool, so every sweep test exercises the
+        snapshot path rather than only the "no reply" fallback.
+        """
+        self.behaviour.setdefault("budget_gets", []).append(cid)
+        reply = self.behaviour.get("pool_reply", {
+            "declared": True, "limits": {"usd": 6.0},
+            "remaining": {"usd": 2.19}, "usage_fraction": 0.635,
+            "pressure": "63% of usd",
+        })
+        if reply is None:
+            return
+        self._emit("SYSTEM_MESSAGE", _SystemMessageEvent(
+            message=json.dumps({"cascade_driver_id": cid, **reply})))
+
     async def create_session(self, **create_kwargs):
         self.behaviour["seen_kwargs"] = {**self.kwargs, **create_kwargs}
         # Snapshot WHICH events were already subscribed.  With a
@@ -164,6 +210,11 @@ class _FakeClient:
         # set captured here is the only way a stub can hold it.
         self.behaviour["subscribed_before_create"] = set(self._handlers)
         self.created = True
+        # The binding, announced the way the daemon announces it: from
+        # inside create, before the sid is returned.
+        self._emit("SESSION_INFO", _SessionInfoEvent(
+            model_name=self.behaviour.get("model_name", "openai/gpt-5-mini"),
+            model_provider=self.behaviour.get("model_provider", "openrouter")))
         refuse = self.behaviour.get("refuse_spawn")
         if refuse:
             # Dispatched to handlers BEFORE the sid is returned — the
@@ -202,6 +253,14 @@ class _FakeSession:
             await asyncio.sleep(b["hang"])
         if b.get("writes") is not None:
             (self.client.workspace / "answer.txt").write_text(b["writes"])
+        if b.get("session_log") is not None:
+            # Where the daemon actually puts it: JAATO_SESSION_LOG_DIR
+            # defaults to `.jaato/logs`, resolved against the WORKSPACE, and
+            # the handler names the file after the session and the client.
+            logs = self.client.workspace / ".jaato" / "logs"
+            logs.mkdir(parents=True, exist_ok=True)
+            (logs / f"session_{self.session_id}_client_c1.log").write_text(
+                b["session_log"])
         for i in range(int(b.get("turns", 1))):
             self.client._emit("TURN_COMPLETED", _TurnEvent(
                 finish_reason=b.get("finish_reason", "stop"),
@@ -254,7 +313,10 @@ def _install_stub_sdk(behaviour):
     events_mod.EventType = types.SimpleNamespace(
         TURN_COMPLETED="TURN_COMPLETED", HISTORY="HISTORY",
         SESSION_TERMINATED="SESSION_TERMINATED", ERROR="ERROR",
-        AGENT_ERROR="AGENT_ERROR")
+        AGENT_ERROR="AGENT_ERROR",
+        # The two the per-arm report needs: the binding (jaato #777's join
+        # key, model and provider) and the pool reading.
+        SESSION_INFO="SESSION_INFO", SYSTEM_MESSAGE="SYSTEM_MESSAGE")
     events_mod.ClientType = types.SimpleNamespace(API="API")
     # The event CLASSES the engine names when registering as a cascade
     # observer.  cascade_register filters on type-name, so the stub only
