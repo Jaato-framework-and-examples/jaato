@@ -241,3 +241,101 @@ def test_a_reported_cost_reaches_the_turn_event(daemon):
             await c.disconnect()
 
     asyncio.run(go())
+
+
+# ---------------------------------------------------- the re-prompted session
+
+def test_a_session_that_never_signals_stops_being_re_prompted(daemon):
+    """The completion nudge must have a ceiling, and reach it.
+
+    ``MAX_COMPLETION_NUDGES = 2`` bounds how many times the daemon re-prompts
+    an agent that ended its loop without ``signal_completion``.  It did not:
+    the re-prompt IS a turn, and a turn start refunded the budget the nudge
+    had just spent, so the ceiling was never reached.  Measured against this
+    daemon before the fix: 735 turns in 40 seconds, ended only by the
+    observer giving up.  In production the ceiling was whatever the operator's
+    wallet or wall-clock supplied (jaato #767).
+
+    Asserted as a TURN COUNT rather than a log line because the count is what
+    a consumer is billed for: one initial turn plus two nudges, then a
+    terminal.
+    """
+    async def go():
+        c = await _client(daemon)
+        turns = {"n": 0}
+        terminal: list = []
+        try:
+            c.subscribe(EventType.TURN_COMPLETED,
+                        lambda ev: turns.__setitem__("n", turns["n"] + 1))
+            c.subscribe(EventType.SESSION_TERMINATED, terminal.append)
+            await c.create_session(profile="conformance-nudged")
+            await c.send_message("go")
+            # Generous: three echo turns take well under a second.  What this
+            # bounds is the FAILING case, which does not stop on its own.
+            for _ in range(120):
+                if terminal:
+                    break
+                await asyncio.sleep(0.25)
+            assert terminal, (
+                f"a completion-gated session that never signals was still "
+                f"being re-prompted after 30s ({turns['n']} turns and "
+                f"counting) -- the nudge budget does not bound it"
+            )
+            assert turns["n"] == 3, (
+                f"expected 1 turn + 2 nudges before the terminal, saw "
+                f"{turns['n']}"
+            )
+        finally:
+            await c.disconnect()
+
+    asyncio.run(go())
+
+
+def test_complete_returns_at_the_session_terminus_not_the_first_turn(daemon):
+    """``complete()`` must not hand back a session that is still working.
+
+    A completion-gated session that ends a turn in prose is re-prompted, so
+    ``TURN_COMPLETED`` fires with the agent's work still ahead of it.  A
+    caller that settled there read the workspace mid-flight.  Two independent
+    runs of the eval harness that found this, on the same arm
+    (``openrouter_gpt5mini#0``), show the cost is not one grader's:
+
+    * graded 19s before the agent's first commit -> FAIL on ``compiles``,
+      against a final tree that compiles;
+    * graded ~2min before the agent wired the dispatcher -> FAIL, against a
+      final tree that passes all three graders.
+
+    So it does not merely mis-report one dimension; it discards a genuine
+    PASS.  And the failure is silent in both directions -- it can invent a
+    FAIL from a defect the next turn fixes, or a PASS from a tree the next
+    turn breaks (jaato #767).
+
+    Asserted on the TURN COUNT AT RETURN, because "returned too early" is not
+    visible in the return value alone: ``None`` is also what a session with no
+    payload legitimately returns.
+    """
+    from jaato_sdk import AgentError, Session
+
+    async def go():
+        c = await _client(daemon)
+        turns = {"n": 0}
+        try:
+            c.subscribe(EventType.TURN_COMPLETED,
+                        lambda ev: turns.__setitem__("n", turns["n"] + 1))
+            sid = await c.create_session(profile="conformance-nudged")
+            with pytest.raises(AgentError) as ei:
+                await asyncio.wait_for(Session(c, sid).complete("go"),
+                                       timeout=90)
+            assert turns["n"] == 3, (
+                f"complete() returned after {turns['n']} of the session's 3 "
+                f"turns -- the caller was handed a session still being "
+                f"re-prompted"
+            )
+            assert ei.value.error_type == "NudgeExhausted", (
+                f"the terminal named {ei.value.error_type!r}, so a caller "
+                f"cannot tell a spent nudge budget from any other error"
+            )
+        finally:
+            await c.disconnect()
+
+    asyncio.run(go())

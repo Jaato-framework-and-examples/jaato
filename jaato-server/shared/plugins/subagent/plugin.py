@@ -3756,6 +3756,13 @@ class SubagentPlugin(DaemonForwardingMixin):
             # the work or signal completion now — and re-enter the
             # loop with that prompt.  Bounded by ``MAX_COMPLETION_NUDGES``
             # so a model that keeps narrating refusal eventually halts.
+            #
+            # THE BOUND IS THE COUNTER GOING UP, which is a claim on
+            # ``JaatoSession`` and not on this loop: ``send_message``
+            # below starts a turn, and while a turn start cleared
+            # ``_completion_nudges_fired`` this ``while`` could not
+            # terminate at all -- each pass refunded the token it had
+            # just spent (#767).
             # The flag ``session._signal_completion_called`` is flipped
             # in ``LifecycleTools._execute_signal_completion`` on
             # successful invocation.

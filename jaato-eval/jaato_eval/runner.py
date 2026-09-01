@@ -549,6 +549,16 @@ async def _run_session(spec: ArmSpec, workspace: Workspace, *,
         if session_ref is not None:
             session_ref["id"] = getattr(arm, "session_id", None)
         client = session.client
+        # RETURNS AT THE SESSION'S TERMINUS, and everything after this line
+        # -- the ledger, and every grader reading the workspace -- depends on
+        # that.  It used to return at the first turn boundary, which for a
+        # completion-gated profile is not the terminus: an agent that ends a
+        # turn in prose is re-prompted by the daemon and keeps working.  This
+        # engine graded an arm 19s before its agent's first commit and
+        # recorded FAIL on a tree that compiles.  Fixed in the SDK rather than
+        # worked around here, per this module's own rule about where SDK gaps
+        # belong (jaato #767); the guard lives in the SDK's conformance suite,
+        # where a live daemon can actually be re-prompted.
         payload = await session.complete(task.input.prompt)
         await client.request_history()
         try:

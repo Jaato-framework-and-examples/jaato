@@ -9,6 +9,7 @@ one-shot module function.
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 
 import pytest
@@ -24,6 +25,7 @@ from jaato_sdk import (
     ask,
 )
 from jaato_sdk.events import EventType
+from jaato_sdk.client import convenience
 from jaato_sdk.client.convenience import _SessionContext, open_session
 
 
@@ -140,6 +142,145 @@ async def test_complete_returns_payload():
 async def test_complete_no_completion_returns_none_no_hang():
     # plain turn, model never called signal_completion -> only TURN_COMPLETED
     assert await Session(FakeClient(fire=[_TURN]), "s").complete("hi") is None
+
+
+# ------------------------------- complete() settles on the SESSION's terminus
+
+class ScriptedClient(FakeClient):
+    """Delivers its script ONE EVENT PER LOOP TICK, from a background task.
+
+    ``FakeClient`` fires everything inside ``send_message``, so by the time the
+    call under test reaches its wait, the whole session has already happened --
+    which makes "did it return too early?" unaskable: an early return still
+    sees the last event.  That is precisely the question #767 turns on, so
+    these tests need a client that lets the session arrive AFTER the wait
+    begins, the way a daemon does.
+    """
+
+    async def send_message(self, prompt, parallel_tools=None, attachments=None):
+        self.calls.append(("send_message", prompt))
+        self.delivered = 0
+        self._pump_task = asyncio.ensure_future(self._pump())
+
+    async def _pump(self):
+        for event_type, ev in self._fire:
+            await asyncio.sleep(0)
+            for h in list(self._handlers.get(event_type, [])):
+                h(ev)
+            self.delivered += 1
+
+
+def _status(agent, status):
+    return (EventType.AGENT_STATUS_CHANGED,
+            SimpleNamespace(agent_id=agent, status=status))
+
+
+def _turn(agent="main"):
+    return (EventType.TURN_COMPLETED, SimpleNamespace(agent_id=agent))
+
+
+#: The daemon's wire shape for a completion-gated session whose model ends its
+#: loop in prose: the turn ends, the daemon RE-PROMPTS it
+#: (``COMPLETION_NUDGE``) and announces the agent active again, twice, before
+#: the agent finally signals.  The payload rides the LAST turn, so a call that
+#: settles on the first one returns None for a session that completed -- and,
+#: in the case that motivated this, hands a grader a half-written tree
+#: (jaato #767, where an eval arm was graded 19s before the agent's first
+#: commit and recorded FAIL on a tree that compiles).
+_NUDGED_SESSION = [
+    _status("main", "active"),           # send_message begins
+    _turn(), _status("main", "active"),  # turn 1 -> nudge 1
+    _turn(), _status("main", "active"),  # turn 2 -> nudge 2
+    (EventType.AGENT_COMPLETED, SimpleNamespace(payload={"ok": True})),
+    _turn(),
+    (EventType.SESSION_TERMINATED, SimpleNamespace(reason="natural")),
+]
+
+
+async def test_complete_waits_out_a_nudged_session():
+    c = ScriptedClient(fire=_NUDGED_SESSION)
+    assert await Session(c, "s").complete("go") == {"ok": True}
+    assert c.delivered == len(_NUDGED_SESSION), (
+        "returned before the session reached its terminus")
+
+
+async def test_complete_settles_when_the_agent_settles_not_when_a_turn_ends():
+    """The status event after the turn is what makes it a terminus.
+
+    Same opening as the nudged session, but the agent settles on its first
+    turn -- so the call must return there and NOT wait for a
+    SESSION_TERMINATED that a turn-per-message session never emits.
+    """
+    c = ScriptedClient(fire=[_status("main", "active"), _turn(),
+                             _status("main", "done")])
+    assert await Session(c, "s").complete("go") is None
+    assert c.delivered == 3
+
+
+async def test_complete_ignores_a_subagent_turn():
+    """A subagent finishing a turn is not the parent's terminus.
+
+    Before #767 any agent's TURN_COMPLETED ended the wait, so a parent that
+    spawned one settled on the CHILD's first turn.
+    """
+    c = ScriptedClient(fire=[
+        _status("main", "active"),
+        _turn("sub-1"), _status("sub-1", "done"),   # not ours
+        (EventType.AGENT_COMPLETED, SimpleNamespace(payload={"ok": True})),
+        _turn("main"), _status("main", "done"),
+    ])
+    assert await Session(c, "s").complete("go") == {"ok": True}
+
+
+async def test_complete_falls_back_to_the_turn_when_no_agent_is_announced():
+    """Version skew costs accuracy, never a wait with no end.
+
+    A daemon that never emits AGENT_STATUS_CHANGED(active) leaves nothing to
+    latch, and the first turn settles the call exactly as it did before #767.
+    """
+    c = ScriptedClient(fire=[_turn()])
+    assert await Session(c, "s").complete("go") is None
+    assert c.delivered == 1
+
+
+async def test_complete_does_not_hang_when_the_confirmation_never_arrives(monkeypatch):
+    """A latched turn whose status event never comes must still return.
+
+    The first version of #767's fix waited for that confirmation with no
+    bound, so a daemon that stopped talking between a turn and its status
+    event -- a lost connection, or a daemon that died there -- left the caller
+    waiting forever.  Nothing in the SDK synthesises a terminal on disconnect
+    (the event stream takes a ``None`` sentinel and unsubscribes, so
+    ``subscribe_once`` callbacks never fire), so no other layer would have
+    ended it.  That is the hang class this module already carries a scar from
+    (PR #399), reintroduced narrower.
+
+    Found by review, reproduced with exactly this script.
+    """
+    monkeypatch.setattr(convenience, "SETTLE_GRACE", 0.05)
+    c = ScriptedClient(fire=[_status("main", "active"), _turn("main")])
+    assert await asyncio.wait_for(Session(c, "s").complete("go"),
+                                  timeout=5) is None
+
+
+async def test_complete_raises_on_the_error_terminal_of_a_nudged_session():
+    """A spent nudge budget is a terminal error, and it must reach the caller.
+
+    This is the shape a completion-gated session takes when the model never
+    signals: NudgeExhausted, after the daemon has asked twice.
+    """
+    c = ScriptedClient(fire=[
+        _status("main", "active"),
+        _turn(), _status("main", "active"),
+        _turn(), _status("main", "active"),
+        _turn(),
+        (EventType.SESSION_TERMINATED,
+         SimpleNamespace(reason="error", error_type="NudgeExhausted",
+                         error_summary="asked twice, never signalled")),
+    ])
+    with pytest.raises(AgentError) as ei:
+        await Session(c, "s").complete("go")
+    assert ei.value.error_type == "NudgeExhausted"
 
 
 # --------------------------------------------------------------- stream() (Phase 2)

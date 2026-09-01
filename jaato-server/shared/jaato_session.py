@@ -441,7 +441,11 @@ class JaatoSession:
         # subagent: end of ``_run_subagent_async``) to decide whether
         # to inject a nudge prompt back into the session asking the
         # agent to call ``signal_completion`` before terminating.
-        # ``_completion_nudges_fired`` bounds the retry budget.
+        # ``_completion_nudges_fired`` bounds the retry budget, and unlike
+        # ``_signal_completion_called`` it is per SESSION: a nudge
+        # re-prompts, so a per-turn budget is refunded by the very turn it
+        # paid for and bounds nothing (#767).  See
+        # ``_begin_turn_completion_state``.
         self._signal_completion_called: bool = False
         self._completion_nudges_fired: int = 0
         # Set in configure() when introspection's tools are dropped because there
@@ -5858,7 +5862,7 @@ NOTES
     def _begin_turn_completion_state(self) -> None:
         """Clear the completion flags that are per-TURN in meaning.
 
-        Three flags looked session-lifetime but every reader asks a per-turn
+        Two flags looked session-lifetime but every reader asks a per-turn
         question:
 
         * ``_signal_completion_called`` -- read by the turn terminator
@@ -5867,9 +5871,30 @@ NOTES
           signal_completion DURING THIS TURN"), the signal_completion
           idempotency guard ("in the same tool batch"), the auto-finalize
           synthesizer, the subagent nudge loop, and the embedded nudge gate.
-        * ``_completion_nudges_fired`` -- the nudge BUDGET, otherwise spent
-          once per session rather than once per turn.
         * ``_session_quiescent_emitted`` -- the once-per-turn quiescence latch.
+
+        ``_completion_nudges_fired`` IS NOT ONE OF THEM, and clearing it here
+        cost the framework its only bound on the nudge loop (#767).  A nudge
+        RE-PROMPTS THE SESSION, so the nudge's own turn ran this reset and
+        handed the budget back the token it had just spent.  Both guards read
+        the counter the same way and both were therefore unbounded: the
+        top-level guard in ``core.py``'s model_thread re-armed itself every
+        turn (observed: "nudge 1/2" logged three times in one session, and a
+        conformance session that never signals turned 735 times in 40
+        seconds), and the subagent guard's ``while ... < MAX_COMPLETION_NUDGES``
+        in ``subagent/plugin.py`` -- written on the assumption that the
+        counter only goes up -- could not terminate at all.  ``max_turns``,
+        ``budget_control`` and the caller's own wall-clock were what actually
+        stopped those sessions, at whatever they had spent by then.
+
+        So the budget is per SESSION, which is what ``MAX_COMPLETION_NUDGES``
+        already claimed to be.  A session that spends it terminates
+        (``NudgeExhausted``), so "the next task on this session gets a fresh
+        budget" describes a session that no longer exists -- and a
+        completion-gated session is one-shot by construction.  The one real
+        cost is an agent that answers each nudge with more work and needs a
+        third: it is now cut off at two.  That is the declared ceiling doing
+        its job, and raising it is a knob, not a bug.
 
         None of them is persisted, so this has no restore implications.
 
@@ -5890,7 +5915,6 @@ NOTES
         would miss.
         """
         self._signal_completion_called = False
-        self._completion_nudges_fired = 0
         self._session_quiescent_emitted = False
         self._truncation_recovery_count = 0
 

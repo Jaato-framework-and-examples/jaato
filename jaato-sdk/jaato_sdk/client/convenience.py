@@ -50,6 +50,21 @@ from typing import Any, AsyncIterator, Collection, Dict, Optional
 from ..events import ClientType, EventType
 
 
+#: Seconds ``Session.complete`` will wait for the ``AGENT_STATUS_CHANGED`` that
+#: confirms or withdraws a turn's proposed terminus, before settling on the
+#: turn anyway.
+#:
+#: The daemon emits that event from the same thread that emitted the turn
+#: event, microseconds later, so this is never reached in a healthy session --
+#: it exists for the one where the daemon stops talking mid-sequence (a lost
+#: connection between a turn and its status event, or a daemon that dies
+#: there).  Without it that session waits forever, and this module has shipped
+#: an infinite hang before (PR #399).  Deliberately generous: tripping it early
+#: costs the accuracy #767 bought back, so it should only ever fire when the
+#: alternative is not returning at all.
+SETTLE_GRACE = 10.0
+
+
 class AgentError(Exception):
     """A turn ended in error (``SESSION_TERMINATED(reason="error")`` /
     ``AgentErrorEvent``).  Carries the daemon's ``error_type`` /
@@ -211,32 +226,140 @@ class Session:
         """Send ``prompt`` and return the typed completion ``payload``.
 
         For completion-gated profiles: captures ``AGENT_COMPLETED.payload``
-        (emitted before the terminal), waits on first-of ``{SESSION_TERMINATED,
-        TURN_COMPLETED}``.  Returns the payload (``None`` if the profile
-        declared no schema or the model didn't complete).  Raises
+        (emitted before the terminal), and returns when the SESSION settles --
+        not when its first turn ends.  Returns the payload (``None`` if the
+        profile declared no schema or the model didn't complete).  Raises
         :class:`AgentError` on an error terminal.
+
+        WHY A TURN BOUNDARY IS NOT THE SESSION'S TERMINUS.
+
+        This waited on first-of ``{SESSION_TERMINATED, TURN_COMPLETED}``, and
+        for a completion-gated profile that is the WRONG event.  Such a
+        session ends at ``signal_completion``; when the model instead ends its
+        loop in prose, the daemon RE-PROMPTS it (``COMPLETION_NUDGE``) and the
+        session keeps working -- so ``TURN_COMPLETED`` fired while the agent
+        had minutes of work left.  A caller that graded on the return value
+        graded a half-finished tree, and did so silently and in both
+        directions: it can read a FAIL from a defect the next turn fixes, or a
+        PASS from a tree the next turn regresses (jaato #767, where an eval
+        arm was graded 19s before the agent's first commit and recorded FAIL
+        on a tree that compiles).
+
+        THE RULE.  A ``TURN_COMPLETED`` is the terminus only if the agent
+        SETTLES on it.  The daemon closes every turn of the main agent with
+        exactly one ``AGENT_STATUS_CHANGED`` for that agent: ``"active"`` when
+        it is starting another turn (a nudge, a stashed continuation, a
+        drained user send), ``"idle"``/``"done"`` when it is not.  So the turn
+        event proposes a terminus and the status event confirms or withdraws
+        it.  ``SESSION_TERMINATED`` remains an unconditional terminus -- it is
+        what arrives when the nudge budget is spent.
+
+        WHICH AGENT.  Only the agent this send started, latched from the
+        ``AGENT_STATUS_CHANGED(status="active")`` the daemon emits as
+        ``send_message`` begins.  Subagent turns therefore no longer settle
+        the parent's call, which they did before -- any agent's
+        ``TURN_COMPLETED`` ended the wait.
+
+        NO HANG, ON EITHER SIDE OF THE LATCH.  Waiting on a confirmation
+        introduces two ways for one never to arrive, and both fall back to the
+        pre-#767 behaviour -- settle on the turn:
+
+        * *Never latched.*  The opening status event does not arrive (an older
+          daemon, or a connection whose cascade registration filters the
+          type), so nothing is latched and the first ``TURN_COMPLETED``
+          settles the call immediately, exactly as it used to.
+        * *Latched, then unconfirmed.*  A turn proposes a terminus and neither
+          the status event nor a terminal follows -- the daemon stopped
+          talking mid-sequence.  The proposal is settled after
+          ``SETTLE_GRACE``.  The first version of this fix had no such bound
+          and hung here forever, which is the defect class this module already
+          carries a scar from (PR #399, and ``ask``'s own "so a turn can never
+          hang in user code").
+
+        So version skew or a lost daemon costs accuracy, never a wait with no
+        end.
+
+        ``ask``/``stream`` keep turn semantics deliberately: their contract is
+        one turn's output, and an interactive session must hand back each turn
+        as it lands.
         """
         box: Dict[str, Any] = {}
         done = asyncio.Event()
+        # Anything a handler changes wakes the wait below, which re-reads
+        # ``state`` rather than trusting the event that woke it.
+        wake = asyncio.Event()
+        # The agent whose turns can settle this call, and the turn of its that
+        # is currently PROPOSING a terminus (awaiting that agent's next status
+        # event).  ``None`` = nothing proposed, so the wait is unbounded.
+        state: Dict[str, Any] = {"agent": None, "proposal": None}
 
         def on_completed(ev: Any) -> None:
             box["payload"] = getattr(ev, "payload", None)
 
-        def on_terminal(ev: Any) -> None:
+        def settle(ev: Any) -> None:
             self._note_terminal(box, ev)
             done.set()
+            wake.set()
+
+        def on_turn(ev: Any) -> None:
+            agent = getattr(ev, "agent_id", None)
+            if state["agent"] is None:
+                # Never announced active -> old-daemon fallback: this turn IS
+                # the terminus, as it was before #767.
+                settle(ev)
+                return
+            if agent == state["agent"]:
+                state["proposal"] = ev
+                wake.set()
+
+        def on_status(ev: Any) -> None:
+            agent = getattr(ev, "agent_id", None)
+            status = getattr(ev, "status", None)
+            if state["agent"] is None:
+                if status == "active":
+                    state["agent"] = agent
+                return
+            if agent != state["agent"] or state["proposal"] is None:
+                return
+            if status == "active":
+                state["proposal"] = None    # another turn is starting
+                wake.set()
+            else:
+                settle(ev)                  # the agent settled on that turn
 
         unsub_comp = self._client.subscribe_once(EventType.AGENT_COMPLETED, on_completed)
-        unsub_term = self._client.subscribe_once(EventType.SESSION_TERMINATED, on_terminal)
-        unsub_turn = self._client.subscribe_once(EventType.TURN_COMPLETED, on_terminal)
+        unsub_term = self._client.subscribe_once(EventType.SESSION_TERMINATED, settle)
+        # NOT ``subscribe_once``: a nudged session runs several turns and the
+        # call must see every one of them to know which is the last.
+        unsub_turn = self._client.subscribe(EventType.TURN_COMPLETED, on_turn)
+        unsub_status = self._client.subscribe(
+            EventType.AGENT_STATUS_CHANGED, on_status)
         try:
             await self._client.send_message(
                 prompt, parallel_tools=parallel_tools, attachments=attachments)
-            await done.wait()
+            while not done.is_set():
+                # Clear BEFORE reading the state the handlers write.  Sync
+                # handlers run inline on this loop, so they cannot interleave
+                # between the clear and the await -- whatever they had already
+                # recorded is visible here, and anything later re-sets ``wake``.
+                wake.clear()
+                proposal = state["proposal"]
+                if proposal is None:
+                    await wake.wait()       # nothing proposed: wait as before
+                    continue
+                try:
+                    await asyncio.wait_for(wake.wait(), timeout=SETTLE_GRACE)
+                except asyncio.TimeoutError:
+                    # The confirmation never came.  Settle on what the turn
+                    # proposed rather than wait on a daemon that has stopped
+                    # talking.
+                    if state["proposal"] is proposal and not done.is_set():
+                        settle(proposal)
         finally:
             unsub_comp()
             unsub_term()
             unsub_turn()
+            unsub_status()
         self._raise_if_needed(box)
         return box.get("payload")
 
