@@ -185,7 +185,7 @@ REVERSIONS = [
     ),
     Reversion(
         target="jaato-server/shared/retry_utils.py",
-        find="""    if isinstance(exc, STREAM_INTERRUPTED_CLASSES):
+        find="""    if isinstance(exc, StreamInterruptedError):
         return {"transient": True, "rate_limit": False, "infra": True}
 """,
         replace="",
