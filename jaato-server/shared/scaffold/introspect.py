@@ -373,6 +373,52 @@ def _stamp_origin(info: "PluginInfo", origin: Any) -> None:
     info.builtin = origin.builtin
 
 
+def _collect_user_commands(plugin: Any) -> List["CommandInfo"]:
+    """The plugin's user-facing commands, or ``[]`` — never raising.
+
+    Split out of :func:`plugins` rather than inlined: that function is over
+    the complexity ceiling and frozen in the audit baseline, so new logic
+    belongs in a helper (see ``test_cyclomatic_complexity_audit``).
+
+    Best-effort on BOTH levels, and deliberately so.  ``get_user_commands``
+    is optional protocol — a plugin that lacks it or raises must not break
+    the whole registry walk — and the per-command completion lookup is
+    independently guarded, so one plugin with a broken completer costs its
+    own subcommands rather than every command after it.
+
+    Subcommands come from the first-argument completions, which is where the
+    actionable surface lives: ``permissions`` alone tells an operator
+    nothing, ``permissions allow|deny|suspend|…`` does.
+    """
+    out: List[CommandInfo] = []
+    try:
+        commands = plugin.get_user_commands() or []
+    except Exception:
+        return out
+    for cmd in commands:
+        out.append(CommandInfo(
+            name=getattr(cmd, "name", "?"),
+            description=getattr(cmd, "description", "") or "",
+            share_with_model=bool(getattr(cmd, "share_with_model", False)),
+            subcommands=_command_subcommands(plugin, getattr(cmd, "name", "")),
+        ))
+    return out
+
+
+def _command_subcommands(plugin: Any, command: str) -> List[str]:
+    """First-argument completions for *command*, de-duplicated, or ``[]``."""
+    subs: List[str] = []
+    try:
+        completions = plugin.get_command_completions(command, []) or []
+    except Exception:
+        return subs
+    for comp in completions:
+        value = getattr(comp, "value", None)
+        if value and value not in subs:
+            subs.append(value)
+    return subs
+
+
 def plugins() -> Dict[str, PluginInfo]:
     """All tool/enrichment plugins, best-effort offline.
 
@@ -417,30 +463,7 @@ def plugins() -> Dict[str, PluginInfo]:
                 ))
         except Exception:
             info.dynamic = True
-        # user commands (best-effort) — the operator's runtime control surface
-        # (TUI verbs like `permissions allow *`), same best-effort contract as
-        # the tool collection above: a plugin that raises must not break the
-        # walk.  Subcommands come from the first-argument completions, since
-        # that is where the actionable surface lives.
-        try:
-            for cmd in plugin.get_user_commands() or []:
-                subs: List[str] = []
-                try:
-                    for comp in (plugin.get_command_completions(
-                            getattr(cmd, "name", ""), []) or []):
-                        v = getattr(comp, "value", None)
-                        if v and v not in subs:
-                            subs.append(v)
-                except Exception:
-                    pass
-                info.commands.append(CommandInfo(
-                    name=getattr(cmd, "name", "?"),
-                    description=getattr(cmd, "description", "") or "",
-                    share_with_model=bool(getattr(cmd, "share_with_model", False)),
-                    subcommands=subs,
-                ))
-        except Exception:
-            pass
+        info.commands.extend(_collect_user_commands(plugin))
         # plugin-level description (class docstring, first line)
         doc = (type(plugin).__doc__ or "").strip()
         info.description = doc.split("\n", 1)[0].strip() if doc else ""
