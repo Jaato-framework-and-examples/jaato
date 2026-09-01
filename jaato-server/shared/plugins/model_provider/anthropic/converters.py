@@ -506,6 +506,15 @@ def extract_usage_from_response(response: Any) -> TokenUsage:
     Extracts standard token counts plus cache token information
     when prompt caching is enabled, and thinking tokens when
     extended thinking is enabled.
+
+    NO CONVENTION CONVERSION HAPPENS HERE, and that is deliberate.
+    Anthropic's ``input_tokens`` already excludes both
+    ``cache_read_input_tokens`` and ``cache_creation_input_tokens``,
+    which is exactly what :class:`TokenUsage` means by
+    ``prompt_tokens`` — the framework convention was taken FROM this
+    wire.  Providers on the OpenAI-shaped wire convert to it at their
+    own seam via ``normalize_inclusive_usage``; see issue #758 for what
+    it cost when they did not.
     """
     usage = TokenUsage()
 

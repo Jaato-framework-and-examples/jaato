@@ -346,7 +346,11 @@ class TestExtractUsageEnd2End:
             cost=0.0125,
         )
         usage = extract_usage(response)
-        assert usage.prompt_tokens == 2000
+        # 2000 on the wire, of which 1800 were read from cache and 200
+        # written to it — OpenRouter counts both INSIDE ``prompt_tokens``
+        # and ``TokenUsage`` counts them beside it, so nothing is left as
+        # new input here.  See issue #758.
+        assert usage.prompt_tokens == 0
         assert usage.output_tokens == 300
         assert usage.total_tokens == 2300
         assert usage.cache_read_tokens == 1800

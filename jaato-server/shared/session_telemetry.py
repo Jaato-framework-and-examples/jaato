@@ -133,12 +133,20 @@ def classify_cache_outcome(
 
     ``prompt_tokens`` is the *new* (uncached) input only — matches
     Anthropic's ``input_tokens`` semantics, which jaato normalizes other
-    providers to (see ``model_provider/anthropic/converters.py``). Total
-    input therefore = ``cache_read_tokens + prompt_tokens``, and the hit
-    ratio is ``cache_read_tokens / total_input`` — which naturally caps at
+    providers to at the provider seam (``normalize_inclusive_usage`` in
+    ``jaato_sdk.plugins.model_provider.types``; the OpenAI-shaped wires
+    and Google report the cached count INSIDE their prompt total and
+    subtract it back out there). Total input therefore =
+    ``cache_read_tokens + prompt_tokens``, and the hit ratio is
+    ``cache_read_tokens / total_input`` — which naturally caps at
     1.0. Dividing by ``prompt_tokens`` alone produces ratios above 1.0 on
     cache-warm turns (e.g. 36.97 from 26580 / 719) and misclassifies them
     as anomalies.
+
+    Until issue #758 this docstring named the normalization but nothing
+    performed it, and on an inclusive provider the double-count pushed
+    every cache-warm turn's ratio to at most 0.5 — so a 99%-cached turn
+    classified as ``"partial"`` rather than ``"hit"``.
 
     Returns:
         ``"hit"``     — most input tokens served from cache (>= 80%)

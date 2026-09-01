@@ -119,6 +119,16 @@ class PricingTable:
 
         Token counts default to 0 — a missing field on the wire
         contributes nothing rather than poisoning the total.
+
+        THE FOUR BUCKETS MUST BE DISJOINT.  Each count is billed at
+        its own rate and the products are summed, so a caller that
+        passes a ``prompt_tokens`` which already contains
+        ``cache_read_tokens`` charges those tokens twice — once at the
+        full input rate and again at the cache-read rate.  That is not
+        a rounding error: at a 99% hit rate it is nearly 3x the true
+        bill.  :class:`TokenUsage` guarantees the split at the
+        provider seam (``normalize_inclusive_usage``); anything else
+        feeding this method owes the same guarantee.  See issue #758.
         """
         entry = self._prices.get(model_name)
         if not entry:

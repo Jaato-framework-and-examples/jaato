@@ -511,6 +511,101 @@ time is the correct lifetime here, and per-tier tool surfaces would be a
 new feature rather than a repair. The setter is reachable API that
 nothing currently needs.
 
+### 5.6 Two token conventions, one formula — FIXED
+
+Everything in §5.4 counts cache traffic. It counts it correctly only
+because ``TokenUsage`` means ONE thing by ``prompt_tokens``, and until
+issue #758 half the fleet meant the other.
+
+**The two conventions.** Anthropic's ``input_tokens`` is the *new,
+uncached* input: cache reads and writes are counted BESIDE it. Every
+OpenAI-compatible wire — and Gemini's ``usage_metadata`` — reports
+``prompt_tokens`` as the *whole* input, with the cached count as a
+SUBSET of it. Same field name, disjoint meanings.
+
+**What the framework assumed.** The Anthropic one, in three places at
+once: ``compute_cache_hit_percent`` divides by
+``cache_read + prompt``; ``classify_cache_outcome`` does the same;
+``PricingTable.cost_for_usage`` bills the four counts at four rates and
+sums. All three read the counts as disjoint buckets.
+``classify_cache_outcome``'s docstring even stated the normalization as
+fact — "which jaato normalizes other providers to" — while no code
+performed it.
+
+**What it cost.** On an inclusive provider the cached tokens landed on
+both sides of the hit-rate sum, which made the metric structurally
+incapable of exceeding 50%:
+
+| true hit | reported |
+|---|---|
+| 50% | 33.3% |
+| 90% | 47.4% |
+| **100%** | **50.0%** |
+
+A live GLM-5.3 turn reported **50%** against a bill that reconstructs to
+**99.3%** — so a perfectly-cached session read as wasting half its
+input, and no value ever looked anomalous enough to question. A metric
+that is merely wrong gets caught; one that is wrong *and bounded* looks
+like a measurement. The cost line beside it was right (OpenRouter
+reports cost), so the two footer numbers disagreed with each other for
+anyone who checked.
+
+The pricing table carried the same defect, dormant: fed an inclusive
+``prompt_tokens`` it charges the cached tokens twice, at the full input
+rate AND the cache-read rate. Dormant on OpenRouter only because it reports a
+cost of its own, which wins over the table. On any inclusive provider
+that reports none — vLLM, nim, a Gemini endpoint — with an operator
+pricing table loaded, it was live.
+
+**The fix, and why at the seam.** ``prompt_tokens`` keeps one meaning
+(new input), and each provider whose wire disagrees converts on the way
+out via ``normalize_inclusive_usage``
+(``jaato_sdk/plugins/model_provider/types.py``). Six seams:
+``_openai_compat/base.py`` (which nim, nebius, ovhcloud, lmstudio,
+tensorrt_llm, triton, doubleword and zhipuai_openai inherit),
+``vllm``, ``openrouter``, ``nebius``'s own converter, and both
+``google_genai`` paths. ``anthropic`` and ``claude_cli`` already
+report the framework convention and are left alone.
+
+The alternative — carry the convention on ``TokenUsage`` and branch in
+the helper — pushes a provider's accounting quirk into the helper, the
+pricing table, the telemetry classifier, the TUI footer and every
+external SDK consumer. One rule at the seam, inherited by everyone,
+matches how #745 and #750 settled.
+
+``total_tokens`` is deliberately NOT rewritten. On an inclusive provider
+it is the end-of-turn context size, which is what the provider-path GC
+denominator reads (§5.4's ``_log_gc_denominator``); collapsing it on a
+cache-warm turn would stop GC firing exactly when the context is
+largest.
+
+**Which convention each provider uses is evidence, not inference.**
+OpenRouter counts BOTH cached quantities inside ``prompt_tokens``, and
+§6.0.1's measured table is what settles it: the cold-arrival row
+(``prompt=28,278``, ``cache_write=27,503``, billed $0.035179)
+reconstructs to $0.035154 read inclusively — 0.07% off, at a round
+$1.00/Mtok input rate — and to $0.031 read exclusively, at an input
+rate that fits no catalog and contradicts the warm rows on the same
+table.
+
+A second capture settles it without any price list, which matters
+because that rate was fitted to the row it explains. §5.4's own
+coverage carries a live COLD Sonnet call: `prompt_tokens=4412` beside
+`cache_write_tokens=4403`, no reads. A write is by definition a subset
+of what was sent, so the parts must sum to the whole — 4,403 written
+plus 9 new is exactly the 4,412 reported. The exclusive reading makes
+that same object claim 8,815 tokens of input for a 4,412-token
+prompt.
+
+Coverage: ``shared/tests/test_cache_hit_percent_against_invoice.py``,
+which reconciles against **bills** rather than against itself. A test
+that feeds ``cache_read=X, prompt=Y`` and asserts ``X/(X+Y)`` passes
+whether or not ``Y`` contains ``X`` — it restates the formula instead of
+checking it, and that is precisely the test this defect would have
+passed. Three ``REVERSIONS`` entries, one for the arithmetic and one
+each for two seams, because the failure mode is a seam that stops
+calling a helper that is itself perfectly correct.
+
 ---
 
 ## 6. Where to go after that
@@ -902,3 +997,4 @@ provider's config.
 - [x] measure a real tiered session — instrumentation validated live (§6.0)
 - [x] measure §3's break-even on a caching provider: 5.61 vs 5.75 predicted (§6.0.1)
 - [x] first-class `cache:` profile field (§7)
+- [x] one prompt-token convention, converted at the provider seam (§5.6)

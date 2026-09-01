@@ -1773,8 +1773,15 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                             from jaato_sdk import compute_cache_hit_percent
                             hit_pct = compute_cache_hit_percent(event)
                             if hit_pct is not None:
+                                # The count, not just the rate: "in" above
+                                # is NEW input only, so on a cache-warm turn
+                                # it is far below the wire size and the three
+                                # numbers look like they disagree.  Naming
+                                # the cached tokens is what closes the gap
+                                # for the reader (issue #758).
                                 buffer.add_system_message(
-                                    f"─── cache hit: {hit_pct:.0f}%",
+                                    f"─── cache hit: {hit_pct:.0f}% "
+                                    f"({event.usage.cache_read_tokens:,} cached)",
                                     "dim",
                                 )
                         if event.usage.cost_usd is not None:
@@ -2151,13 +2158,19 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                                 turn_line = f"  --- Turn {turn_index + 1}: {total:,} tokens (in: {prompt:,}, out: {output:,})"
                                 cache_read = acc.get('cache_read')
                                 if cache_read:
-                                    # See note in the live ─── cache hit ─── path:
-                                    # prompt is uncached input only; total input is
-                                    # cache_read + prompt.  The earlier formula
-                                    # produced absurd percentages on cache-warm turns.
-                                    total_input = cache_read + (prompt or 0)
-                                    if total_input > 0:
-                                        hit_pct = cache_read / total_input * 100
+                                    # Through the SDK helper, not a local copy
+                                    # of the formula: this line and the live
+                                    # ─── cache hit ─── one are the same metric,
+                                    # and the copy here is the one that had
+                                    # already drifted once (dividing by prompt
+                                    # alone, which read in the thousands on a
+                                    # cache-warm turn).
+                                    from jaato_sdk import (
+                                        cache_hit_percent_from_counts,
+                                    )
+                                    hit_pct = cache_hit_percent_from_counts(
+                                        cache_read, prompt)
+                                    if hit_pct is not None:
                                         turn_line += f", cache hit: {hit_pct:.0f}%"
                                 turn_line += " ---"
                                 lines.append((turn_line, "dim"))

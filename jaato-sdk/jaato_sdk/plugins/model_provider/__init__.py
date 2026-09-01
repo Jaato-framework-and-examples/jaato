@@ -23,6 +23,8 @@ from .types import (
     TOOL_DISCOVERABILITY,
     DISCOVERABILITY_EAGER,
     DISCOVERABILITY_DEFERRED,
+    normalize_inclusive_usage,
+    uncached_prompt_tokens,
 )
 
 __all__ = [
@@ -47,4 +49,8 @@ __all__ = [
     "TOOL_DISCOVERABILITY",
     "DISCOVERABILITY_EAGER",
     "DISCOVERABILITY_DEFERRED",
+    # An out-of-tree provider on an OpenAI-shaped wire needs this to
+    # meet TokenUsage's prompt-token convention; see its docstring.
+    "normalize_inclusive_usage",
+    "uncached_prompt_tokens",
 ]

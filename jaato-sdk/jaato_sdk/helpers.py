@@ -21,15 +21,29 @@ def compute_cache_hit_percent(event: CacheReportingEvent) -> Optional[float]:
     """Cache hit % for a turn — share of paid input tokens served from cache.
 
     The denominator is ``cache_read_tokens + prompt_tokens`` (the
-    "non-creation" input).  Anthropic's ``input_tokens`` /
-    pydantic's ``prompt_tokens`` is the *new uncached* input — it
-    excludes both ``cache_read_tokens`` and ``cache_creation_tokens``,
-    so the natural hit-rate denominator is "what was the model paying
-    for this turn that *could* have been a cache hit", which is
-    cache_read (the actual hit) plus prompt (the new input that
-    wasn't a hit).  ``cache_creation_tokens`` is excluded because it
-    represents *new* content being written to cache — it's not a hit
-    on prior content, just future infrastructure.
+    "non-creation" input).  ``prompt_tokens`` is the *new uncached*
+    input — it excludes both ``cache_read_tokens`` and
+    ``cache_creation_tokens`` — so the natural hit-rate denominator is
+    "what was the model paying for this turn that *could* have been a
+    cache hit", which is cache_read (the actual hit) plus prompt (the
+    new input that wasn't a hit).  ``cache_creation_tokens`` is
+    excluded because it represents *new* content being written to
+    cache — it's not a hit on prior content, just future
+    infrastructure.
+
+    THAT PREMISE IS A CONTRACT, NOT AN OBSERVATION.  It holds because
+    every provider whose wire format counts cached tokens INSIDE its
+    prompt total (all the OpenAI-compatible ones, and Google) converts
+    at its own seam, via
+    ``jaato_sdk.plugins.model_provider.types.normalize_inclusive_usage``.
+    When they did not, the same tokens sat on both sides of this sum
+    and the result was structurally capped at 50% — a metric that rose
+    monotonically toward a ceiling it could never cross, so a
+    perfectly-cached session read as wasting half its input and no
+    value ever looked anomalous enough to question.  A live GLM-5.3
+    turn reported 50% against a bill that says 99.3% (issue #758).  If
+    this function ever needs a per-provider branch, the seam upstream
+    has been bypassed; fix it there.
 
     Returns:
         ``None`` when the provider does not report cache stats
@@ -44,12 +58,44 @@ def compute_cache_hit_percent(event: CacheReportingEvent) -> Optional[float]:
 
         Otherwise the percentage in the range ``[0.0, 100.0]``.
     """
-    if event.usage.cache_read_tokens is None:
+    return cache_hit_percent_from_counts(
+        event.usage.cache_read_tokens, event.usage.prompt_tokens)
+
+
+def cache_hit_percent_from_counts(
+    cache_read_tokens: Optional[int],
+    prompt_tokens: Optional[int],
+) -> Optional[float]:
+    """The same metric, for callers holding counts rather than an event.
+
+    Exists because the TUI renders this figure twice — once live from
+    ``TurnCompletedEvent`` and once when replaying ``turn_accounting``
+    from history, where there is no event to pass — and the second site
+    had a hand-rolled copy of the formula.  Two copies of one metric is
+    how they drift; the history line is the one that had already gone
+    wrong once (dividing by ``prompt_tokens`` alone, which produced
+    percentages in the thousands on cache-warm turns).
+
+    Same contract as :func:`compute_cache_hit_percent`, including the
+    prompt-token convention it depends on: ``prompt_tokens`` must be the
+    NEW input, with cached tokens counted beside it rather than inside
+    it.
+
+    Args:
+        cache_read_tokens: Tokens served from cache, or ``None`` when
+            the provider reports no cache stats.
+        prompt_tokens: New (uncached) input tokens.
+
+    Returns:
+        ``None`` when ``cache_read_tokens`` is ``None``; otherwise the
+        percentage in ``[0.0, 100.0]``.
+    """
+    if cache_read_tokens is None:
         return None
-    total = event.usage.cache_read_tokens + event.usage.prompt_tokens
+    total = cache_read_tokens + (prompt_tokens or 0)
     if total == 0:
         return 0.0
-    return event.usage.cache_read_tokens / total * 100.0
+    return cache_read_tokens / total * 100.0
 
 
 def truncation_reason(

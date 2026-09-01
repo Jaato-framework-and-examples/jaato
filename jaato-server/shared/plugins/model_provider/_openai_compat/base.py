@@ -58,6 +58,7 @@ from jaato_sdk.plugins.model_provider.types import (
     TokenUsage,
     ThinkingConfig,
     TurnResult,
+    normalize_inclusive_usage,
     parse_tool_call_arguments,
     resolve_tool_use_finish,
 )
@@ -458,6 +459,9 @@ class OpenAICompatProvider(ModalityCapabilityMixin):
                 cached = self._extract_cache_tokens(getattr(response, "usage", None))
                 if cached is not None and provider_response.usage is not None:
                     provider_response.usage.cache_read_tokens = cached
+                    # ...and then take it back OUT of prompt_tokens, which
+                    # on this wire counted it.  See ``TokenUsage``.
+                    normalize_inclusive_usage(provider_response.usage)
 
             # Prose-mode counterpart of the native tool-call flush: parse
             # fenced tool_call blocks out of the text into FunctionCall
@@ -489,10 +493,19 @@ class OpenAICompatProvider(ModalityCapabilityMixin):
 
         Lets cache hit-rate and $ savings be measured uniformly across the
         fleet — previously a per-provider copy (and missing entirely on nim).
+
+        This count is a SUBSET of the same usage object's
+        ``prompt_tokens``.  Callers must therefore pair it with
+        :func:`normalize_inclusive_usage`, or the tokens get counted on
+        both sides of every downstream sum (issue #758).
         """
         details = getattr(usage, "prompt_tokens_details", None)
         cached = getattr(details, "cached_tokens", None) if details is not None else None
-        return cached if cached else None
+        # ``isinstance`` and not merely truthiness: the count is now
+        # ARITHMETIC (it comes out of ``prompt_tokens``), so a field an
+        # upstream sent as a string — or a test double left as a mock —
+        # must read as "not reported" rather than reach the subtraction.
+        return cached if isinstance(cached, int) and cached else None
 
     def _stream_response(
         self,
@@ -586,12 +599,12 @@ class OpenAICompatProvider(ModalityCapabilityMixin):
                 if not chunk.choices:
                     # Final chunk may have only usage
                     if chunk.usage:
-                        usage = TokenUsage(
+                        usage = normalize_inclusive_usage(TokenUsage(
                             prompt_tokens=chunk.usage.prompt_tokens or 0,
                             output_tokens=chunk.usage.completion_tokens or 0,
                             total_tokens=chunk.usage.total_tokens or 0,
                             cache_read_tokens=self._extract_cache_tokens(chunk.usage),
-                        )
+                        ))
                         self._trace(f"{trace_prefix}_USAGE prompt={usage.prompt_tokens} output={usage.output_tokens}")
                         if on_usage_update and usage.total_tokens > 0:
                             on_usage_update(usage)
@@ -645,12 +658,12 @@ class OpenAICompatProvider(ModalityCapabilityMixin):
 
                 # Extract usage from chunk (some providers include it per-chunk)
                 if chunk.usage:
-                    usage = TokenUsage(
+                    usage = normalize_inclusive_usage(TokenUsage(
                         prompt_tokens=chunk.usage.prompt_tokens or 0,
                         output_tokens=chunk.usage.completion_tokens or 0,
                         total_tokens=chunk.usage.total_tokens or 0,
                         cache_read_tokens=self._extract_cache_tokens(chunk.usage),
-                    )
+                    ))
                     if on_usage_update and usage.total_tokens > 0:
                         on_usage_update(usage)
 
