@@ -47,6 +47,7 @@ def overview() -> Rendered:
         "drill down:\n"
         "  jaato-scaffold explain plugins\n"
         "  jaato-scaffold explain plugin <name>\n"
+        "  jaato-scaffold explain commands\n"
         "  jaato-scaffold explain providers\n"
         "  jaato-scaffold explain provider <name>\n"
         "  jaato-scaffold explain gc\n"
@@ -600,6 +601,14 @@ def plugin(name: str) -> Rendered:
                 f"get_tool_schemas (introspection is always core, so they're never "
                 f"lost), OR add `{name}(preload)` to a profile's plugins to force "
                 f"ALL of this plugin's tools eager.")
+    if pi.commands:
+        lines.append("  commands (typed directly in the TUI, not via the model):")
+        for c in pi.commands:
+            subs = (f"  subcommands: {', '.join(c.subcommands)}"
+                    if c.subcommands else "")
+            lines.append(f"    {c.name}{subs}")
+            if c.description:
+                lines.append(f"           {c.description}")
     if pi.config_settings:
         lines.append(f"  config (plugin_configs.{name}.*):")
         for s in pi.config_settings:
@@ -608,6 +617,9 @@ def plugin(name: str) -> Rendered:
             lines.append(f"    {s.name:22} {s.type:8}{d}{dflt}")
     data = {"description": pi.description,
             "kind": pi.kind, "tier": pi.tier, "dynamic": pi.dynamic,
+            "commands": [{"name": c.name, "description": c.description,
+                          "share_with_model": c.share_with_model,
+                          "subcommands": c.subcommands} for c in pi.commands],
             # ``parameters`` is what makes a tool SIGNATURE machine-checkable
             # from the CLI.  Without it a consumer validating a published spec
             # against the framework can compare names and prose but not the
@@ -619,6 +631,45 @@ def plugin(name: str) -> Rendered:
                        "parameters": t.parameters} for t in pi.tools],
             "config": [{"name": s.name, "type": s.type, "default": s.default,
                         "description": s.description} for s in pi.config_settings]}
+    return data, "\n".join(lines)
+
+
+# --------------------------------------------------------------- commands
+
+def commands() -> Rendered:
+    """Every user-facing TUI command, flat, grouped by owning plugin.
+
+    The lookup ``explain plugin <name>`` cannot answer: "I know I want to
+    change permissions / switch a model / inspect a plan — which command is
+    it?"  The reader does not yet know which plugin owns the verb, so the
+    catalog must be flat and grouped by owner.  These are the commands typed
+    directly into the TUI (``permissions allow *``, ``memory …``), NOT the
+    model's function-calling tools.
+    """
+    PL = introspect.plugins()
+    data: Dict[str, Any] = {}
+    lines = ["user commands — typed directly in the TUI, grouped by owning plugin",
+             "  (`explain plugin <name>` for the full per-plugin page)"]
+    total = 0
+    for name in sorted(PL):
+        pi = PL[name]
+        if not pi.commands:
+            continue
+        data[name] = [{"name": c.name, "description": c.description,
+                       "share_with_model": c.share_with_model,
+                       "subcommands": c.subcommands} for c in pi.commands]
+        total += len(pi.commands)
+        lines.append(f"\n  [{name}]")
+        for c in pi.commands:
+            subs = (f"  ({', '.join(c.subcommands)})" if c.subcommands else "")
+            lines.append(f"    {c.name}{subs}")
+            if c.description:
+                lines.append(f"      {c.description}")
+    if not total:
+        lines.append("\n  (no plugin exposes user commands)")
+    else:
+        lines.insert(2, f"  {total} command(s) across "
+                        f"{len(data)} plugin(s)")
     return data, "\n".join(lines)
 
 

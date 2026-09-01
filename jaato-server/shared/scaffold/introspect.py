@@ -102,6 +102,23 @@ class ToolInfo:
 
 
 @dataclass
+class CommandInfo:
+    """One user-facing command a plugin exposes (from ``get_user_commands``).
+
+    User commands are the operator's runtime control surface — invoked directly
+    in the TUI (``permissions allow *``, ``memory …``, auth switches), NOT via
+    the model's function calling.  ``subcommands`` are the first-argument
+    completions (``CommandCompletion`` entries from ``get_command_completions``)
+    — where the real surface lives: ``permissions`` alone tells an operator
+    nothing actionable.
+    """
+    name: str
+    description: str = ""
+    share_with_model: bool = False
+    subcommands: List[str] = field(default_factory=list)
+
+
+@dataclass
 class ConfigSetting:
     """One configurable plugin setting (from ``get_config_schema``)."""
     name: str
@@ -119,6 +136,7 @@ class PluginInfo:
     tier: Optional[str] = None
     description: str = ""               # plugin class docstring, first line
     tools: List[ToolInfo] = field(default_factory=list)
+    commands: List[CommandInfo] = field(default_factory=list)
     config_keys: List[str] = field(default_factory=list)
     config_settings: List["ConfigSetting"] = field(default_factory=list)
     dynamic: bool = False               # tool list needs a live session (mcp, …)
@@ -399,6 +417,30 @@ def plugins() -> Dict[str, PluginInfo]:
                 ))
         except Exception:
             info.dynamic = True
+        # user commands (best-effort) — the operator's runtime control surface
+        # (TUI verbs like `permissions allow *`), same best-effort contract as
+        # the tool collection above: a plugin that raises must not break the
+        # walk.  Subcommands come from the first-argument completions, since
+        # that is where the actionable surface lives.
+        try:
+            for cmd in plugin.get_user_commands() or []:
+                subs: List[str] = []
+                try:
+                    for comp in (plugin.get_command_completions(
+                            getattr(cmd, "name", ""), []) or []):
+                        v = getattr(comp, "value", None)
+                        if v and v not in subs:
+                            subs.append(v)
+                except Exception:
+                    pass
+                info.commands.append(CommandInfo(
+                    name=getattr(cmd, "name", "?"),
+                    description=getattr(cmd, "description", "") or "",
+                    share_with_model=bool(getattr(cmd, "share_with_model", False)),
+                    subcommands=subs,
+                ))
+        except Exception:
+            pass
         # plugin-level description (class docstring, first line)
         doc = (type(plugin).__doc__ or "").strip()
         info.description = doc.split("\n", 1)[0].strip() if doc else ""
