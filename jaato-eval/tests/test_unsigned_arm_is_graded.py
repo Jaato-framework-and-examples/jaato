@@ -51,6 +51,7 @@ from jaato_eval.arm import ArmResult, ArmSpec
 from jaato_eval.graders.base import GraderContext
 from jaato_eval.graders.judge import JudgeGrader
 from jaato_eval.manifest import GraderSpec
+from jaato_eval.report import build_cells
 from jaato_eval.sign_off import is_unsigned_terminal
 from jaato_eval.verdict import BLOCKED, FAIL, PASS, Verdict
 
@@ -290,6 +291,39 @@ class UnsignedArmIsVisibleWhileTheSweepRuns(unittest.TestCase):
         with contextlib.redirect_stderr(captured):
             _progress(result)
         self.assertNotIn("sign-off", captured.getvalue())
+
+
+class TheBiasIsANumber(unittest.TestCase):
+    """The measurement bias, executed rather than asserted in prose.
+
+    Every other test here holds that the arm gets a verdict.  This one
+    holds WHY that matters, through the code that actually consumes the
+    results file: ``report.build_cells`` keeps blocked arms out of the
+    pass-rate denominator by design, so an arm that genuinely failed does
+    not merely go missing — it *raises* the model's score.
+
+    The module docstrings state that.  A stated fact rots; this executes
+    the comparison, on the same two arms and the same two trees, recorded
+    the two ways.
+    """
+
+    @staticmethod
+    def _cell(records):
+        cell = list(build_cells(records).values())[0]
+        return cell.pass_rate, cell.passed, cell.failed, cell.blocked
+
+    def test_a_blocked_failing_arm_inflates_the_pass_rate(self):
+        clean = {"task_id": "t", "profile_set": "p", "state": PASS}
+        # The second arm both ways: an agent that exhausted its nudges and
+        # left a tree its graders reject.
+        as_blocked = {"task_id": "t", "profile_set": "p", "state": BLOCKED,
+                      "blocked_reason": "session refused by the daemon "
+                                        "(NudgeExhausted)"}
+        as_graded = {"task_id": "t", "profile_set": "p", "state": FAIL,
+                     "error": f"NudgeExhausted: {NUDGE_SUMMARY}"}
+
+        self.assertEqual(self._cell([clean, as_blocked]), (1.0, 1, 0, 1))
+        self.assertEqual(self._cell([clean, as_graded]), (0.5, 1, 1, 0))
 
 
 class SignOffRule(unittest.TestCase):

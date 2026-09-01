@@ -196,8 +196,16 @@ the framework's completion-nudge budget runs out (`NudgeExhausted`), the
 agent has run, worked and committed; the only thing missing is its
 `signal_completion` call. Recording it as "nothing to grade" loses a
 passing tree outright, and — because blocked arms leave the denominator —
-lets a genuinely failing one *raise* the model's pass rate. That is a
-measurement bias, not a missing row (jaato #773).
+lets a genuinely failing one *raise* the model's pass rate. The same two
+arms and the same two trees, through `report.build_cells`:
+
+```
+recorded BLOCKED  ->  pass rate 100%   pass 1  fail 0  blocked 1
+graded            ->  pass rate  50%   pass 1  fail 1  blocked 0
+```
+
+That is a measurement bias, not a missing row (jaato #773), and it is a
+test rather than a claim — `tests/test_unsigned_arm_is_graded.py`.
 
 So such an arm is graded, and grading is **per-grader**, not per-arm:
 
@@ -206,6 +214,14 @@ So such an arm is graded, and grading is **per-grader**, not per-arm:
 | `script` | runs, returns a verdict | it reads the workspace, and the workspace is real |
 | `processor` | BLOCKED | its whole contract is `validate(payload, …)`, and there is no payload |
 | `judge` | BLOCKED | it is handed the payload first and a listing second; scoring one arm on half the input it scores its siblings on is worse than a gap |
+
+A judge- or processor-graded task therefore still rolls up BLOCKED when
+its script graders all pass: the payload-reader cannot establish its
+claim, and inventing a verdict for it would be the same error in the
+other direction. So the "passing tree reported as unmeasured" half is
+fully recovered only for workspace-only manifests; the "failing tree
+leaves the denominator" half is recovered for every manifest, since a
+FAIL outranks a BLOCKED in the roll-up.
 
 The arm carries `error` (the terminal) with `blocked_reason` unset — the
 record that it produced evidence *and* ended badly. Every other error
