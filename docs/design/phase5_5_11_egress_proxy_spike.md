@@ -597,6 +597,20 @@ TCP.  Two consequences worth stating, because both were once implicit:
    a session whose gate is silently absent.  Best-effort remains the default so
    existing deployments are unaffected.
 
+**Host verification.**  `scripts/verify_egress_nft.sh` installs the ruleset
+`render_ruleset` actually emits — loading `nft.py` standalone by path, so the
+script stays dependency-free — rather than a hand-written copy of it, then
+asserts each probe and exits non-zero on any failure.  That coupling is the
+point: a script that mirrors the renderer passes identically on a fixed and an
+unfixed tree, so it would not have caught #696.  With the pre-#696 renderer it
+installs `ip6 daddr ::1 accept`, the `::1` probe connects, and the run fails.
+Three exit codes: `0` all assertions held, `1` an assertion failed, `2` the
+host cannot verify (not root, renderer missing, or — checked via the gate's
+reject counter after the first probe — `socket cgroupv2` never matched, which
+is what happens inside a container whose `/sys/fs/cgroup` is a namespaced
+view).  On a host without IPv6 the `::1` probe reports SKIPPED and the verdict
+says in as many words that the assertion this script exists for did not run.
+
 ### §5.11d-v2 — SHIPPED + live-verified on the daemon (2026-07-04)
 
 Implemented: `server/egress_proxy/nft.py` (`EgressNftManager` + pure
