@@ -117,6 +117,58 @@ The `judge` rubric is a completion schema, so the score comes back typed —
 the provider enforces the shape at sampling time. There is no free-text
 score to parse, and changing what "good" means is a schema edit.
 
+### A script grader can see the task's inputs
+
+`processor` and `judge` graders get a `GraderContext`, which carries
+`agent_params`. A shell command cannot read a Python object, so the
+`script` grader hands the same inputs over as environment variables:
+
+| variable | is |
+|---|---|
+| `JAATO_EVAL` | `1` — this is a graded run |
+| `JAATO_EVAL_PARAM_<KEY>` | one `agent_params` entry, key upper-cased, non-identifier characters replaced by `_` |
+| `JAATO_EVAL_PARAMS` | the whole mapping as JSON, under the author's own key spellings |
+
+So a check that depends on an input says so in the manifest:
+
+```yaml
+input:
+  agent_params: {repo: Jaato-framework-and-examples/jaato, issue_id: "716"}
+graders:
+  - kind: script
+    run: bash acceptance.sh compliant "$JAATO_EVAL_PARAM_ISSUE_ID"
+```
+
+Without this, an input-dependent check has to hardcode the input — and
+then changing `issue_id` grades every arm against the *previous* issue's
+acceptance criteria. No error, no warning: arms that did the work
+correctly are reported `FAIL` against a claim the task never made. The
+export makes the dependency real rather than something two files have to
+remember about each other.
+
+**Values.** Strings pass through verbatim. Everything else is JSON, so a
+dict or list survives the trip (`{"a": 1}`), a bool is the `true` the
+manifest author wrote rather than Python's `True`, and an explicit null
+is `null` rather than the empty string that would make it
+indistinguishable from an absent key.
+
+**Absence.** A parameter the task does not declare leaves its variable
+*unset*, not empty — so `set -u` in the grader is a working guard, and a
+grader that depends on a parameter should use it rather than passing
+vacuously on an empty expansion:
+
+```bash
+set -u   # $JAATO_EVAL_PARAM_ISSUE_ID being absent now fails the grader
+```
+
+For a finer distinction — declared-but-empty versus never declared —
+parse `JAATO_EVAL_PARAMS`; it is the only place the two look different.
+
+**Collisions** are BLOCKED, not arbitrated. `issue-id` and `issue_id`
+both want `$JAATO_EVAL_PARAM_ISSUE_ID`; picking a winner would grade
+against one input while the arm ran with the other, which is the very
+disagreement this export exists to remove. Rename one key.
+
 ## Why three verdict states
 
 `PASS` / `FAIL` / `BLOCKED`, lifted from
