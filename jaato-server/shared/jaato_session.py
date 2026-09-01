@@ -5054,6 +5054,10 @@ NOTES
             FinishReason.ERROR:
                 "Model stopped early: the provider reported an error "
                 "(error).",
+            FinishReason.INCOMPLETE:
+                "Model stopped early: the response stream ended without "
+                "the provider saying why (incomplete); what arrived is a "
+                "fragment, not an answer.",
         }.get(
             finish_reason,
             f"Model stopped early: "
@@ -5069,9 +5073,17 @@ NOTES
         """Classify a provider response's finish reason.
 
         Returns a ``TurnResult`` for abnormal terminations (``SAFETY``,
-        ``MAX_TOKENS``, ``ERROR``) and ``None`` for reasons that the
-        chat loop should continue processing (``STOP``, ``UNKNOWN``,
-        ``TOOL_USE``, ``CANCELLED``).
+        ``MAX_TOKENS``, ``ERROR``, ``INCOMPLETE``) and ``None`` for
+        reasons that the chat loop should continue processing
+        (``STOP``, ``UNKNOWN``, ``TOOL_USE``, ``CANCELLED``).
+
+        ``UNKNOWN`` continues and ``INCOMPLETE`` does not, and the
+        distinction is the whole of #687: ``UNKNOWN`` is "the turn
+        ended, with a label we do not map", ``INCOMPLETE`` is "the turn
+        never ended".  Providers raise ``StreamInterruptedError`` rather
+        than return an ``INCOMPLETE`` response, so this branch is the
+        backstop for any path that does not -- it must never be the
+        list above.
 
         ``CANCELLED`` is handled separately by ``_handle_cancellation``
         because it requires additional logic (mid-turn interrupts,

@@ -64,6 +64,8 @@ from jaato_sdk.plugins.model_provider.types import (
     TokenUsage,
     TurnResult,
     parse_tool_call_arguments,
+    StreamInterruptedError,
+    require_terminated_stream,
     resolve_tool_use_finish,
 )
 from .converters import (
@@ -960,6 +962,14 @@ class GitHubModelsProvider(ModalityCapabilityMixin):
         import httpx
         import requests.exceptions
 
+        # An interrupted stream is already typed and already classified
+        # as retryable (#687).  Nothing below can improve on it, and the
+        # mappers that match on message TEXT could mangle it -- a model
+        # id containing "413" would become PayloadTooLargeError.  Return
+        # so the caller re-raises it unchanged.
+        if isinstance(error, StreamInterruptedError):
+            return
+
         # Check for httpx transport errors (Copilot client uses httpx).
         # TransportError covers both NetworkError (ConnectError, ReadError)
         # and ProtocolError (RemoteProtocolError) — all transient failures.
@@ -1528,6 +1538,11 @@ class GitHubModelsProvider(ModalityCapabilityMixin):
         accumulated_thinking: List[str] = []
         parts: List[Part] = []
         finish_reason = FinishReason.UNKNOWN
+        # Whether the wire ever said the turn ended.  Tracked apart from
+        # ``finish_reason`` because ``_map_finish_reason`` answers UNKNOWN
+        # for a label it does not recognise, which is still a terminated
+        # turn (#687).
+        terminal_seen = False
         function_calls: List = []
         usage = TokenUsage()
         was_cancelled = False
@@ -1539,8 +1554,8 @@ class GitHubModelsProvider(ModalityCapabilityMixin):
                 accumulated_text = []
 
         response_stream = None
+        chunk_count = 0
         try:
-            chunk_count = 0
             response_stream = self._client.complete(
                 model=self._model_name,
                 messages=api_messages,
@@ -1583,6 +1598,7 @@ class GitHubModelsProvider(ModalityCapabilityMixin):
                                 function_calls.extend(new_calls)
 
                         if hasattr(choice, 'finish_reason') and choice.finish_reason:
+                            terminal_seen = True
                             finish_reason = self._map_finish_reason(choice.finish_reason)
 
                 if hasattr(chunk, 'usage') and chunk.usage:
@@ -1634,12 +1650,21 @@ class GitHubModelsProvider(ModalityCapabilityMixin):
 
         thinking = ''.join(accumulated_thinking) if accumulated_thinking else None
 
-        provider_response = ProviderResponse(
-            parts=parts,
-            usage=usage,
-            finish_reason=finish_reason,
-            raw=None,
-            thinking=thinking,
+        # A stream that stopped arriving is not a turn that finished
+        # (#687).  Raises rather than returning the fragment.
+        provider_response = require_terminated_stream(
+            ProviderResponse(
+                parts=parts,
+                usage=usage,
+                finish_reason=finish_reason,
+                raw=None,
+                thinking=thinking,
+            ),
+            terminal_seen=terminal_seen,
+            was_cancelled=was_cancelled,
+            provider=self.name,
+            model=self._model_name,
+            chunks=chunk_count,
         )
 
         self._last_usage = usage
@@ -1779,6 +1804,11 @@ class GitHubModelsProvider(ModalityCapabilityMixin):
         accumulated_thinking: List[str] = []
         parts = []
         finish_reason = FinishReason.UNKNOWN
+        # Whether the wire ever said the turn ended.  Tracked apart from
+        # ``finish_reason`` because ``_map_finish_reason`` answers UNKNOWN
+        # for a label it does not recognise, which is still a terminated
+        # turn (#687).
+        terminal_seen = False
         function_calls = []
         usage = TokenUsage()
         was_cancelled = False
@@ -1822,9 +1852,9 @@ class GitHubModelsProvider(ModalityCapabilityMixin):
                     function_calls.append(fc)
             tool_call_accumulators.clear()
 
+        chunk_count = 0
         try:
             self._trace(f"{trace_prefix}_START")
-            chunk_count = 0
 
             for choice in self._copilot_client.complete_stream(
                 model=self._copilot_model_name(),
@@ -1883,6 +1913,7 @@ class GitHubModelsProvider(ModalityCapabilityMixin):
 
                 # Extract finish reason
                 if choice.finish_reason:
+                    terminal_seen = True
                     finish_reason = self._map_finish_reason(choice.finish_reason)
 
             self._trace(f"{trace_prefix}_END chunks={chunk_count} finish_reason={finish_reason}")
@@ -1911,12 +1942,21 @@ class GitHubModelsProvider(ModalityCapabilityMixin):
 
         thinking = ''.join(accumulated_thinking) if accumulated_thinking else None
 
-        return ProviderResponse(
-            parts=parts,
-            usage=usage,
-            finish_reason=finish_reason,
-            raw=None,
-            thinking=thinking,
+        # A stream that stopped arriving is not a turn that finished
+        # (#687).  Raises rather than returning the fragment.
+        return require_terminated_stream(
+            ProviderResponse(
+                parts=parts,
+                usage=usage,
+                finish_reason=finish_reason,
+                raw=None,
+                thinking=thinking,
+            ),
+            terminal_seen=terminal_seen,
+            was_cancelled=was_cancelled,
+            provider=self.name,
+            model=self._model_name,
+            chunks=chunk_count,
         )
 
     def _copilot_responses_streaming(
@@ -1949,6 +1989,9 @@ class GitHubModelsProvider(ModalityCapabilityMixin):
         accumulated_thinking: List[str] = []
         parts = []
         finish_reason = FinishReason.UNKNOWN
+        # The Responses stream's terminal event is ``done``; without it
+        # the connection simply stopped mid-response (#687).
+        terminal_seen = False
         function_calls = []
         usage = TokenUsage()
         was_cancelled = False
@@ -1960,9 +2003,9 @@ class GitHubModelsProvider(ModalityCapabilityMixin):
                 parts.append(Part.from_text(text))
                 accumulated_text = []
 
+        chunk_count = 0
         try:
             self._trace(f"{trace_prefix}_START")
-            chunk_count = 0
 
             for event in self._copilot_client.complete_responses_stream(
                 model=self._copilot_model_name(),
@@ -2032,6 +2075,7 @@ class GitHubModelsProvider(ModalityCapabilityMixin):
                         self._trace(f"{trace_prefix}_USAGE prompt={usage.prompt_tokens} output={usage.output_tokens}")
                         if on_usage_update and usage.total_tokens > 0:
                             on_usage_update(usage)
+                    terminal_seen = True
                     finish_reason = FinishReason.STOP
 
             self._trace(f"{trace_prefix}_END chunks={chunk_count} finish_reason={finish_reason}")
@@ -2059,12 +2103,21 @@ class GitHubModelsProvider(ModalityCapabilityMixin):
 
         thinking = ''.join(accumulated_thinking) if accumulated_thinking else None
 
-        return ProviderResponse(
-            parts=parts,
-            usage=usage,
-            finish_reason=finish_reason,
-            raw=None,
-            thinking=thinking,
+        # A stream that stopped arriving is not a turn that finished
+        # (#687).  Raises rather than returning the fragment.
+        return require_terminated_stream(
+            ProviderResponse(
+                parts=parts,
+                usage=usage,
+                finish_reason=finish_reason,
+                raw=None,
+                thinking=thinking,
+            ),
+            terminal_seen=terminal_seen,
+            was_cancelled=was_cancelled,
+            provider=self.name,
+            model=self._model_name,
+            chunks=chunk_count,
         )
 
     def _map_finish_reason(self, reason: str) -> FinishReason:

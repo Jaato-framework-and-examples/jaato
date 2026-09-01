@@ -767,14 +767,30 @@ def normalize_inclusive_usage(usage: TokenUsage) -> TokenUsage:
 
 
 class FinishReason(str, Enum):
-    """Reason why the model stopped generating."""
+    """Reason why the model stopped generating.
+
+    ``UNKNOWN`` and ``INCOMPLETE`` look alike and are opposites.
+
+    ``UNKNOWN`` means *the turn ended and the upstream's word for why
+    was not one we recognise* -- a clean end, an unmapped label.  It is
+    also the initial value every streaming accumulator starts from,
+    which is precisely why it cannot double as "the stream stopped
+    arriving": that reading would make the sentinel a success value and
+    a severed stream indistinguishable from a finished one (#687).
+
+    ``INCOMPLETE`` means *the upstream never said the turn ended at
+    all* -- the event stream stopped mid-response.  It is terminal (see
+    :data:`TERMINAL_FINISH_REASONS`), it is never a success, and it is
+    set only by :func:`require_terminated_stream`.
+    """
     STOP = "stop"              # Normal completion
     MAX_TOKENS = "max_tokens"  # Hit token limit
     TOOL_USE = "tool_use"      # Stopped to execute tools
     SAFETY = "safety"          # Safety filter triggered
     ERROR = "error"            # Error occurred
     CANCELLED = "cancelled"    # Cancelled via CancelToken
-    UNKNOWN = "unknown"        # Unknown reason
+    INCOMPLETE = "incomplete"  # Stream ended without a terminal event
+    UNKNOWN = "unknown"        # Reported reason was not recognised
 
 
 #: Finish reasons that describe *how the turn failed*, not what the
@@ -789,6 +805,7 @@ TERMINAL_FINISH_REASONS = frozenset({
     FinishReason.SAFETY,
     FinishReason.ERROR,
     FinishReason.CANCELLED,
+    FinishReason.INCOMPLETE,
 })
 
 
@@ -843,6 +860,163 @@ def resolve_tool_use_finish(
     if observed in TERMINAL_FINISH_REASONS:
         return observed
     return FinishReason.TOOL_USE
+
+
+class StreamInterruptedError(Exception):
+    """A streamed turn ended without the upstream ever saying it ended.
+
+    Every streaming provider accumulates into a ``finish_reason`` that
+    starts at :attr:`FinishReason.UNKNOWN` and is overwritten only when
+    a terminal event arrives on the wire -- Anthropic's ``message_stop``
+    / ``message_delta.stop_reason``, an OpenAI-compatible chunk carrying
+    ``choice.finish_reason``, a Google candidate carrying
+    ``finish_reason``, the Claude CLI's ``ResultMessage``.  When the
+    stream simply stops -- a proxy drops the connection, a gateway times
+    out, an upstream 5xx lands mid-body, TLS resets -- none of those
+    arrive, the iterator ends quietly, and the accumulator still holds
+    ``UNKNOWN`` plus whatever text got through.
+
+    ``UNKNOWN`` was grouped with the success outcomes at every consumer,
+    so that half-finished turn was accepted as a completed one (#687).
+    Three things followed, each worse than the last: the user saw a
+    truncated answer with no sign it was cut; a tool call severed
+    mid-serialisation was handed downstream as a request; and the one
+    failure that most deserves a retry never reached the retry path,
+    because no exception was ever raised for the classifier to see.
+
+    So the stream's end is now a *claim the upstream has to make*.  If
+    it does not, :func:`require_terminated_stream` raises this instead
+    of returning -- and because every provider's ``classify_error``
+    falls through to :func:`shared.retry_utils.classify_error` for types
+    it does not know, one entry there makes an interrupted stream
+    retryable for all of them at once.
+
+    Attributes:
+        provider: Provider name, for the message.
+        model: Model the interrupted turn was addressed to, if known.
+        chunks: Content chunks that did arrive before the stream ended.
+        text_chars: Characters of text accumulated and already streamed
+            out to the caller's ``on_chunk``.
+        dropped_calls: Function calls that had accumulated when the
+            stream died.  They are dropped rather than returned (see
+            :func:`require_terminated_stream`); the count is kept
+            because "the stream died mid-tool-call" is the shape worth
+            recognising in a log.
+        partial: The :class:`ProviderResponse` as it stood, marked
+            :attr:`FinishReason.INCOMPLETE` and stripped of function
+            calls.  Attached for diagnosis; nothing on the happy path
+            consumes it.
+    """
+
+    def __init__(
+        self,
+        provider: str,
+        *,
+        model: Optional[str] = None,
+        chunks: int = 0,
+        text_chars: int = 0,
+        dropped_calls: int = 0,
+        partial: Optional['ProviderResponse'] = None,
+    ):
+        self.provider = provider
+        self.model = model
+        self.chunks = chunks
+        self.text_chars = text_chars
+        self.dropped_calls = dropped_calls
+        self.partial = partial
+        super().__init__(self._format_message())
+
+    def _format_message(self) -> str:
+        where = (
+            "before any content arrived"
+            if self.chunks == 0
+            else f"after {self.chunks} chunk(s), {self.text_chars} char(s) of text"
+        )
+        lines = [
+            f"{self.provider} stream ended without a terminal event "
+            f"({where}).",
+        ]
+        if self.model:
+            lines.append(f"Model: {self.model}")
+        if self.dropped_calls:
+            lines.append(
+                f"Dropped {self.dropped_calls} tool call(s) that were still "
+                f"being streamed; a half-built call is not a request."
+            )
+        lines.extend([
+            "",
+            "The upstream never reported why generation stopped, so the",
+            "response that arrived is a fragment, not an answer.",
+            "This is a transient error.",
+            "The request will be automatically retried.",
+        ])
+        return "\n".join(lines)
+
+
+def require_terminated_stream(
+    response: 'ProviderResponse',
+    *,
+    terminal_seen: bool,
+    was_cancelled: bool,
+    provider: str,
+    model: Optional[str] = None,
+    chunks: int = 0,
+) -> 'ProviderResponse':
+    """Return *response*, unless its stream never said it had ended.
+
+    The last step of every streaming accumulator, and the counterpart to
+    :func:`resolve_tool_use_finish`: that one decides what a finished
+    turn wanted, this one decides whether the turn finished at all.
+
+    Args:
+        response: The assembled response, ready to return.
+        terminal_seen: Whether the wire delivered an event that names
+            why generation stopped.  This is deliberately *not* "the
+            finish reason is no longer ``UNKNOWN``": a provider that
+            maps an unrecognised label to ``UNKNOWN`` still saw the
+            upstream end the turn, and must not be reported as
+            interrupted.
+        was_cancelled: Whether the caller cancelled.  A cancelled turn
+            has no terminal event by construction and is not a failure
+            -- the absence was asked for.
+        provider: Provider name, for the error message.
+        model: Model name, for the error message.
+        chunks: Content chunks received, for the error message.
+
+    Returns:
+        *response* unchanged when the turn's end is accounted for.
+
+    Raises:
+        StreamInterruptedError: when it is not.  Before raising, the
+            response is marked :attr:`FinishReason.INCOMPLETE` and its
+            function-call parts are dropped, then attached to the error
+            as ``partial``.  Both are deliberate:
+
+            * the mark, because a value that escapes by some route this
+              function does not control must not read as a success --
+              ``INCOMPLETE`` is in :data:`TERMINAL_FINISH_REASONS`, maps
+              to ``TurnOutcome.ERROR``, and is in no consumer's
+              continue-set;
+            * the drop, because a call accumulated by a stream that then
+              died may be missing its arguments, or its name, or its
+              closing brace.  Passing it on is how a severed turn
+              becomes an executed one (#687, and the same failure #750
+              closed for arguments that would not parse).
+    """
+    if was_cancelled or terminal_seen:
+        return response
+
+    dropped = [p for p in response.parts if p.function_call is not None]
+    response.parts = [p for p in response.parts if p.function_call is None]
+    response.finish_reason = FinishReason.INCOMPLETE
+    raise StreamInterruptedError(
+        provider,
+        model=model,
+        chunks=chunks,
+        text_chars=len(response.get_text() or ""),
+        dropped_calls=len(dropped),
+        partial=response,
+    )
 
 
 #: How much of the unreadable argument text is quoted back to the model
@@ -1352,7 +1526,18 @@ class TurnResult:
         * ``CANCELLED`` → ``CANCELLED``
         * ``MAX_TOKENS`` → ``MAX_TOKENS``
         * ``SAFETY`` → ``SAFETY``
-        * ``ERROR`` → ``ERROR``
+        * ``ERROR``, ``INCOMPLETE`` → ``ERROR``
+
+        ``UNKNOWN`` maps to ``RESPONSE`` because it means the turn ended
+        and the label was not one we map -- not that it failed.  The
+        reason that means "the turn never ended" is ``INCOMPLETE``, and
+        it is an error (#687).
+
+        Anything unmapped is an error too.  The default used to be
+        ``RESPONSE``, which made "a finish reason this table has not
+        heard of" indistinguishable from a clean stop -- the same shape
+        as the ``UNKNOWN``-is-success defect, waiting for the next enum
+        member.
 
         Args:
             provider_response: The ProviderResponse from the provider.
@@ -1371,8 +1556,9 @@ class TurnResult:
             FinishReason.MAX_TOKENS: TurnOutcome.MAX_TOKENS,
             FinishReason.SAFETY: TurnOutcome.SAFETY,
             FinishReason.ERROR: TurnOutcome.ERROR,
+            FinishReason.INCOMPLETE: TurnOutcome.ERROR,
         }
-        outcome = outcome_map.get(fr, TurnOutcome.RESPONSE)
+        outcome = outcome_map.get(fr, TurnOutcome.ERROR)
 
         return cls(
             outcome=outcome,

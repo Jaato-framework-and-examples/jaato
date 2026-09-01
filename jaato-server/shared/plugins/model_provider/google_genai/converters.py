@@ -381,32 +381,87 @@ def function_call_from_sdk(fc) -> Optional[FunctionCall]:
     )
 
 
-def finish_reason_from_sdk(reason) -> FinishReason:
-    """Convert SDK finish reason to internal FinishReason.
+#: Google's ``FinishReason`` members, mapped by NAME.
+#:
+#: The mapping used to be four substring tests, and two of them were
+#: wrong in opposite directions (#687).
+#:
+#: ``'TOOL' in name or 'FUNCTION' in name -> TOOL_USE`` never matched a
+#: tool-use turn, because Gemini reports ``STOP`` for a turn that emits
+#: function calls -- it has no tool-use finish reason at all.  What it
+#: DID match was every error whose name happens to mention tools:
+#: ``MALFORMED_FUNCTION_CALL`` (the model emitted a call its own
+#: serialiser rejected), ``UNEXPECTED_TOOL_CALL``,
+#: ``TOO_MANY_TOOL_CALLS``.  Each of those became "the model wants a
+#: tool run", so the session executed or nudged on a turn that had
+#: failed.
+#:
+#: And everything unlisted fell through to ``UNKNOWN``, which is a
+#: SUCCESS value downstream -- so ``RECITATION``, ``BLOCKLIST``,
+#: ``PROHIBITED_CONTENT``, ``SPII`` and ``OTHER`` all read as clean
+#: stops.
+#:
+#: Mapping by name rather than by substring is what makes both
+#: unambiguous.  An unrecognised name still resolves to ``UNKNOWN``: a
+#: reason we do not know is not a reason to guess, and Google adds
+#: members (the image-generation set landed in 2025) faster than this
+#: table can.
+_GOOGLE_FINISH_REASONS = {
+    "STOP": FinishReason.STOP,
 
-    Used during streaming to convert finish reasons from chunks.
+    "MAX_TOKENS": FinishReason.MAX_TOKENS,
+
+    # Content filters.  ``RECITATION`` (copyrighted material),
+    # ``BLOCKLIST``, ``PROHIBITED_CONTENT``, ``SPII`` (personal data)
+    # and the image-side equivalents are all "the filter stopped it".
+    "SAFETY": FinishReason.SAFETY,
+    "RECITATION": FinishReason.SAFETY,
+    "BLOCKLIST": FinishReason.SAFETY,
+    "PROHIBITED_CONTENT": FinishReason.SAFETY,
+    "SPII": FinishReason.SAFETY,
+    "IMAGE_SAFETY": FinishReason.SAFETY,
+    "IMAGE_PROHIBITED_CONTENT": FinishReason.SAFETY,
+    "IMAGE_RECITATION": FinishReason.SAFETY,
+
+    # Generation failures.  Named errors, not stops -- and emphatically
+    # not tool-use requests.
+    "MALFORMED_FUNCTION_CALL": FinishReason.ERROR,
+    "UNEXPECTED_TOOL_CALL": FinishReason.ERROR,
+    "TOO_MANY_TOOL_CALLS": FinishReason.ERROR,
+    "LANGUAGE": FinishReason.ERROR,
+    "UNSUPPORTED_LANGUAGE": FinishReason.ERROR,
+    "NO_IMAGE": FinishReason.ERROR,
+    "IMAGE_OTHER": FinishReason.ERROR,
+    "OTHER": FinishReason.ERROR,
+}
+
+
+def finish_reason_from_sdk(reason) -> FinishReason:
+    """Convert an SDK finish reason to the internal :class:`FinishReason`.
+
+    Used by both the streaming accumulator (per chunk) and the batch
+    converter (per candidate), so the two cannot disagree about what a
+    given Google reason means.
 
     Args:
-        reason: SDK finish reason (enum or string).
+        reason: SDK finish reason -- an enum member, its ``str()``
+            (``"FinishReason.MALFORMED_FUNCTION_CALL"``), or a bare
+            name.  All three reduce to the member name.
 
     Returns:
-        Internal FinishReason.
+        The mapped reason, or ``FinishReason.UNKNOWN`` for a name this
+        table does not carry.
     """
     if not reason:
         return FinishReason.UNKNOWN
 
-    reason_str = str(reason).upper()
+    # ``str()`` of an SDK enum is ``"FinishReason.STOP"``; a plain
+    # string is already the name.  Take the last dotted segment either
+    # way, and prefer ``.name`` when the object offers one.
+    name = getattr(reason, "name", None) or str(reason)
+    name = name.rsplit(".", 1)[-1].strip().upper()
 
-    if 'STOP' in reason_str:
-        return FinishReason.STOP
-    elif 'MAX' in reason_str or 'LENGTH' in reason_str:
-        return FinishReason.MAX_TOKENS
-    elif 'SAFETY' in reason_str:
-        return FinishReason.SAFETY
-    elif 'TOOL' in reason_str or 'FUNCTION' in reason_str:
-        return FinishReason.TOOL_USE
-
-    return FinishReason.UNKNOWN
+    return _GOOGLE_FINISH_REASONS.get(name, FinishReason.UNKNOWN)
 
 
 # ==================== Response Conversion ====================
@@ -469,21 +524,20 @@ def extract_parts_from_response(response) -> List[Part]:
 
 
 def extract_finish_reason_from_response(response) -> FinishReason:
-    """Extract finish reason from SDK response."""
+    """Extract the finish reason from a batch SDK response.
+
+    Delegates to :func:`finish_reason_from_sdk` so the batch and
+    streaming paths cannot drift apart about what a Google reason means
+    -- they carried two separate copies of the same substring mapping,
+    and therefore the same two defects, until #687.
+    """
     if not response or not hasattr(response, 'candidates') or not response.candidates:
         return FinishReason.UNKNOWN
 
     for candidate in response.candidates:
-        if hasattr(candidate, 'finish_reason'):
-            reason = str(candidate.finish_reason).upper()
-            if 'STOP' in reason:
-                return FinishReason.STOP
-            elif 'MAX' in reason or 'LENGTH' in reason:
-                return FinishReason.MAX_TOKENS
-            elif 'SAFETY' in reason:
-                return FinishReason.SAFETY
-            elif 'TOOL' in reason or 'FUNCTION' in reason:
-                return FinishReason.TOOL_USE
+        reason = getattr(candidate, 'finish_reason', None)
+        if reason:
+            return finish_reason_from_sdk(reason)
 
     return FinishReason.UNKNOWN
 

@@ -45,6 +45,7 @@ from jaato_sdk.plugins.model_provider.types import (
     ToolSchema,
     TokenUsage,
     TurnResult,
+    require_terminated_stream,
     resolve_tool_use_finish,
 )
 from .constants import (
@@ -714,6 +715,15 @@ class AntigravityProvider(ModalityCapabilityMixin):
         Raises:
             Various AntigravityProviderError subclasses.
         """
+        # ``complete()``'s except-clause calls this with the EXCEPTION,
+        # not a response.  Everything below reads HTTP fields, so
+        # ``status = response.status_code`` used to raise AttributeError
+        # and mask whatever actually went wrong -- including the
+        # interrupted-stream error that has to reach ``with_retry``
+        # (#687).  Hand a non-response back for the caller to re-raise.
+        if not isinstance(response, httpx.Response):
+            return
+
         status = response.status_code
 
         try:
@@ -965,7 +975,13 @@ class AntigravityProvider(ModalityCapabilityMixin):
         thinking_text: List[str] = []
         usage = TokenUsage()
         finish_reason = FinishReason.UNKNOWN
+        # Whether the SSE stream declared its own end -- either a chunk
+        # carrying a finish reason, or the protocol's ``done`` sentinel.
+        # Without one of those the connection simply stopped, and what
+        # arrived is a fragment (#687).
+        terminal_seen = False
         function_calls: List[FunctionCall] = []
+        chunk_count = 0
 
         try:
             for line in response.iter_lines():
@@ -990,11 +1006,13 @@ class AntigravityProvider(ModalityCapabilityMixin):
                     continue
 
                 if chunk_data.get("done"):
+                    terminal_seen = True
                     break
 
                 # Extract text
                 text = extract_text_from_stream_chunk(chunk_data)
                 if text:
+                    chunk_count += 1
                     accumulated_text.append(text)
                     on_chunk(text)
 
@@ -1027,6 +1045,7 @@ class AntigravityProvider(ModalityCapabilityMixin):
                 # Extract finish reason
                 chunk_finish = extract_finish_reason_from_stream_chunk(chunk_data)
                 if chunk_finish:
+                    terminal_seen = True
                     finish_reason = chunk_finish
 
         except httpx.HTTPError as e:
@@ -1058,11 +1077,22 @@ class AntigravityProvider(ModalityCapabilityMixin):
         # Build thinking string
         thinking = "\n".join(thinking_text) if thinking_text else None
 
-        return ProviderResponse(
-            parts=parts,
-            usage=usage,
-            finish_reason=finish_reason,
-            thinking=thinking,
+        # A stream that stopped arriving is not a turn that finished
+        # (#687).  Raises rather than returning the fragment.  A
+        # cancelled turn never reaches here -- it returns from inside the
+        # loop above -- so ``was_cancelled`` is False by construction.
+        return require_terminated_stream(
+            ProviderResponse(
+                parts=parts,
+                usage=usage,
+                finish_reason=finish_reason,
+                thinking=thinking,
+            ),
+            terminal_seen=terminal_seen,
+            was_cancelled=False,
+            provider=self.name,
+            model=self._model_name,
+            chunks=chunk_count,
         )
 
 def create_provider() -> AntigravityProvider:

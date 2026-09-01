@@ -67,6 +67,7 @@ from jaato_sdk.plugins.model_provider.types import (
     TurnResult,
     normalize_inclusive_usage,
     parse_tool_call_arguments,
+    require_terminated_stream,
     resolve_tool_use_finish,
 )
 from .._openai_compat.converters import (
@@ -821,11 +822,17 @@ class VLLMProvider(OpenAICompatLocalHostProvider):
         accumulated_text: List[str] = []
         parts: List[Part] = []
         finish_reason = FinishReason.UNKNOWN
+        # Whether the wire ever said the turn ended.  Tracked apart from
+        # ``finish_reason`` because ``map_finish_reason`` answers UNKNOWN
+        # for a label it does not recognise, which is still a terminated
+        # turn (#687).
+        terminal_seen = False
         function_calls: List[FunctionCall] = []
         usage = TokenUsage()
         was_cancelled = False
 
         tool_call_accumulators: Dict[int, Dict[str, Any]] = {}
+        chunk_count = 0
 
         def flush_text_block():
             nonlocal accumulated_text
@@ -868,7 +875,6 @@ class VLLMProvider(OpenAICompatLocalHostProvider):
         response_stream = None
         try:
             self._trace(f"{trace_prefix}_START")
-            chunk_count = 0
             response_stream = self._client.chat.completions.create(
                 model=self._model_name,
                 messages=messages,
@@ -907,6 +913,7 @@ class VLLMProvider(OpenAICompatLocalHostProvider):
                     delta = choice.delta
                     if not delta:
                         if choice.finish_reason:
+                            terminal_seen = True
                             finish_reason = map_finish_reason(choice.finish_reason)
                         continue
 
@@ -934,6 +941,7 @@ class VLLMProvider(OpenAICompatLocalHostProvider):
                                     acc["function"]["arguments"] += tc_delta.function.arguments
 
                     if choice.finish_reason:
+                        terminal_seen = True
                         finish_reason = map_finish_reason(choice.finish_reason)
 
                 if chunk.usage:
@@ -1046,12 +1054,21 @@ class VLLMProvider(OpenAICompatLocalHostProvider):
             has_function_calls=bool(function_calls) and not was_cancelled,
         )
 
-        return ProviderResponse(
-            parts=parts,
-            usage=usage,
-            finish_reason=finish_reason,
-            raw=None,
-            thinking=None,
+        # A stream that stopped arriving is not a turn that finished
+        # (#687).  Raises rather than returning the fragment.
+        return require_terminated_stream(
+            ProviderResponse(
+                parts=parts,
+                usage=usage,
+                finish_reason=finish_reason,
+                raw=None,
+                thinking=None,
+            ),
+            terminal_seen=terminal_seen,
+            was_cancelled=was_cancelled,
+            provider=self.name,
+            model=self._model_name,
+            chunks=chunk_count,
         )
 
     # ==================== Token Management ====================

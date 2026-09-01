@@ -276,7 +276,7 @@ BASELINE: Dict[str, int] = {
     "jaato-server/shared/plugins/model_provider/anthropic/converters.py::validate_tool_use_pairing": 19,
     "jaato-server/shared/plugins/model_provider/anthropic/provider.py::AnthropicProvider._handle_api_error": 22,
     "jaato-server/shared/plugins/model_provider/anthropic/provider.py::AnthropicProvider._stream_response": 51,
-    "jaato-server/shared/plugins/model_provider/anthropic/provider.py::AnthropicProvider.complete": 37,
+    "jaato-server/shared/plugins/model_provider/anthropic/provider.py::AnthropicProvider.complete": 38,  # +1 (#687): an interrupted stream is re-raised BEFORE _handle_api_error, which matches on message text
     "jaato-server/shared/plugins/model_provider/anthropic/provider.py::AnthropicProvider.initialize": 25,
     "jaato-server/shared/plugins/model_provider/anthropic/provider.py::AnthropicProvider.verify_auth": 16,
     "jaato-server/shared/plugins/model_provider/antigravity/provider.py::AntigravityProvider._make_request": 17,
@@ -297,7 +297,7 @@ BASELINE: Dict[str, int] = {
     "jaato-server/shared/plugins/model_provider/github_models/provider.py::GitHubModelsProvider._copilot_responses_streaming": 20,
     "jaato-server/shared/plugins/model_provider/github_models/provider.py::GitHubModelsProvider._copilot_streaming_response": 20,
     "jaato-server/shared/plugins/model_provider/github_models/provider.py::GitHubModelsProvider._fetch_models_from_api.parse_model": 16,
-    "jaato-server/shared/plugins/model_provider/github_models/provider.py::GitHubModelsProvider._handle_api_error": 27,
+    "jaato-server/shared/plugins/model_provider/github_models/provider.py::GitHubModelsProvider._handle_api_error": 28,  # +1 (#687): passthrough for StreamInterruptedError, whose text this mapper would otherwise pattern-match
     "jaato-server/shared/plugins/model_provider/github_models/provider.py::GitHubModelsProvider._responses_api_response_to_provider": 19,
     "jaato-server/shared/plugins/model_provider/github_models/provider.py::GitHubModelsProvider.initialize": 18,
     "jaato-server/shared/plugins/model_provider/google_genai/converters.py::part_from_sdk": 23,
@@ -440,7 +440,7 @@ BASELINE: Dict[str, int] = {
     "jaato-server/shared/plugins/web_fetch/plugin.py::WebFetchPlugin._html_to_markdown": 36,
     "jaato-server/shared/plugins/web_fetch/plugin.py::WebFetchPlugin.initialize": 18,
     "jaato-server/shared/plugins/webhook/config.py::validate_config": 40,
-    "jaato-server/shared/retry_utils.py::classify_error": 22,
+    "jaato-server/shared/retry_utils.py::classify_error": 17,  # -5 (#687): the redundant "TUPLE and isinstance(exc, TUPLE)" guards went
     "jaato-server/shared/retry_utils.py::is_context_limit_error": 22,
     "jaato-server/shared/retry_utils.py::with_retry": 23,
     "jaato-server/shared/rewind.py::detect_truncated_tool_call": 16,

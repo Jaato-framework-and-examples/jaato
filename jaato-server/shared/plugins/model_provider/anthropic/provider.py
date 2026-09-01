@@ -47,6 +47,8 @@ from jaato_sdk.plugins.model_provider.types import (
     TokenUsage,
     TurnResult,
     parse_tool_call_arguments,
+    StreamInterruptedError,
+    require_terminated_stream,
     resolve_tool_use_finish,
 )
 from .converters import (
@@ -1340,6 +1342,20 @@ class AnthropicProvider(ModalityCapabilityMixin):
                 logger.warning("PROVIDER_RESPONSE_DUMP failed: %s", _dump_err)
 
         if complete_exception is not None:
+            # An interrupted stream is not an API error to be mapped --
+            # it is already the diagnosis, and already classified as
+            # retryable (#687).  Checked BEFORE ``_handle_api_error``
+            # because that mapper matches on message TEXT (a model id
+            # containing "401" would become APIKeyInvalidError), and
+            # re-raised rather than fallen through, because
+            # ``TurnResult.from_exception`` below would make ``fn()``
+            # return NORMALLY -- no retry, terminal error at the caller,
+            # the same swallow that cost the SDK network errors below
+            # their retries.  Subclasses that override the mapper
+            # (ollama, zhipuai) inherit this, so it is the only place
+            # the check has to exist.
+            if isinstance(complete_exception, StreamInterruptedError):
+                raise complete_exception
             try:
                 self._handle_api_error(complete_exception)
             except Exception:
@@ -1414,6 +1430,12 @@ class AnthropicProvider(ModalityCapabilityMixin):
         parts: List[Part] = []  # Ordered parts preserving interleaving
         current_tool_calls: Dict[int, Dict[str, Any]] = {}  # index -> {id, name, json_chunks}
         finish_reason = FinishReason.UNKNOWN
+        # Whether Anthropic ever said the message ended.  ``message_stop``
+        # is the spec's terminal event; ``message_delta.stop_reason`` is
+        # accepted too because several Anthropic-compatible endpoints
+        # (Z.AI, Ollama) send the reason and close without a separate
+        # ``message_stop``.  Absent both, the stream was cut (#687).
+        terminal_seen = False
         usage = TokenUsage()
         was_cancelled = False
 
@@ -1425,10 +1447,10 @@ class AnthropicProvider(ModalityCapabilityMixin):
                 parts.append(Part.from_text(text))
                 accumulated_text = []
 
+        chunk_count = 0
         try:
             # Use the streaming API
             self._trace(f"STREAM_START msg_count={len(messages)}")
-            chunk_count = 0
             with self._client.messages.stream(
                 model=self._model_name,
                 messages=messages,
@@ -1502,6 +1524,11 @@ class AnthropicProvider(ModalityCapabilityMixin):
 
                     # Handle content_block_stop (finalize tool call)
                     event_type = getattr(event, "type", None)
+                    # The spec's terminal event.  Recorded with ``|=``
+                    # rather than a branch of its own because this loop
+                    # is already the most complex function in the file
+                    # and the ratchet holds it at its frozen size.
+                    terminal_seen |= event_type == "message_stop"
                     if event_type == "content_block_stop":
                         idx = getattr(event, "index", None)
                         if idx is not None and idx in current_tool_calls:
@@ -1537,6 +1564,7 @@ class AnthropicProvider(ModalityCapabilityMixin):
                     delta_info = extract_message_delta(event)
                     if delta_info:
                         if "stop_reason" in delta_info:
+                            terminal_seen = True
                             reason = delta_info["stop_reason"]
                             if reason == "end_turn":
                                 finish_reason = FinishReason.STOP
@@ -1587,6 +1615,11 @@ class AnthropicProvider(ModalityCapabilityMixin):
                 accumulated_text.append(error_notice)
                 on_chunk(error_notice)
                 finish_reason = FinishReason.STOP
+                # This branch has already accounted for the turn's end:
+                # it discarded the incomplete calls and told the model
+                # the response was cut short.  ``require_terminated_stream``
+                # must not raise on top of that recovery (#687).
+                terminal_seen = True
             else:
                 raise
 
@@ -1638,12 +1671,21 @@ class AnthropicProvider(ModalityCapabilityMixin):
             ),
         )
 
-        return ProviderResponse(
-            parts=parts,
-            usage=usage,
-            finish_reason=finish_reason,
-            raw=None,  # Streaming doesn't provide single raw response
-            thinking=thinking,
+        # A stream that stopped arriving is not a turn that finished
+        # (#687).  Raises rather than returning the fragment.
+        return require_terminated_stream(
+            ProviderResponse(
+                parts=parts,
+                usage=usage,
+                finish_reason=finish_reason,
+                raw=None,  # Streaming doesn't provide single raw response
+                thinking=thinking,
+            ),
+            terminal_seen=terminal_seen,
+            was_cancelled=was_cancelled,
+            provider=self.name,
+            model=self._model_name,
+            chunks=chunk_count,
         )
 
     # ==================== Serialization ====================

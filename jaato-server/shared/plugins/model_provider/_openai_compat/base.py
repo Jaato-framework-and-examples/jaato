@@ -60,6 +60,7 @@ from jaato_sdk.plugins.model_provider.types import (
     TurnResult,
     normalize_inclusive_usage,
     parse_tool_call_arguments,
+    require_terminated_stream,
     resolve_tool_use_finish,
 )
 from .converters import (
@@ -531,6 +532,11 @@ class OpenAICompatProvider(ModalityCapabilityMixin):
         accumulated_thinking: List[str] = []
         parts: List[Part] = []
         finish_reason = FinishReason.UNKNOWN
+        # Whether the wire ever said the turn ended.  Tracked apart from
+        # ``finish_reason`` because ``map_finish_reason`` answers UNKNOWN
+        # for a label it does not recognise, which is still an upstream
+        # that terminated the turn (#687).
+        terminal_seen = False
         function_calls: List[FunctionCall] = []
         usage = TokenUsage()
         was_cancelled = False
@@ -579,9 +585,9 @@ class OpenAICompatProvider(ModalityCapabilityMixin):
             tool_call_accumulators.clear()
 
         response_stream = None
+        chunk_count = 0
         try:
             self._trace(f"{trace_prefix}_START")
-            chunk_count = 0
             response_stream = self._client.chat.completions.create(
                 model=self._model_name,
                 messages=messages,
@@ -614,6 +620,7 @@ class OpenAICompatProvider(ModalityCapabilityMixin):
                     delta = choice.delta
                     if not delta:
                         if choice.finish_reason:
+                            terminal_seen = True
                             finish_reason = map_finish_reason(choice.finish_reason)
                         continue
 
@@ -654,6 +661,7 @@ class OpenAICompatProvider(ModalityCapabilityMixin):
 
                     # Extract finish reason
                     if choice.finish_reason:
+                        terminal_seen = True
                         finish_reason = map_finish_reason(choice.finish_reason)
 
                 # Extract usage from chunk (some providers include it per-chunk)
@@ -714,12 +722,21 @@ class OpenAICompatProvider(ModalityCapabilityMixin):
 
         thinking = "".join(accumulated_thinking) if accumulated_thinking else None
 
-        return ProviderResponse(
-            parts=parts,
-            usage=usage,
-            finish_reason=finish_reason,
-            raw=None,
-            thinking=thinking,
+        # A stream that stopped arriving is not a turn that finished
+        # (#687).  Raises rather than returning the fragment.
+        return require_terminated_stream(
+            ProviderResponse(
+                parts=parts,
+                usage=usage,
+                finish_reason=finish_reason,
+                raw=None,
+                thinking=thinking,
+            ),
+            terminal_seen=terminal_seen,
+            was_cancelled=was_cancelled,
+            provider=self.name,
+            model=self._model_name,
+            chunks=chunk_count,
         )
 
     # ==================== Error Handling ====================

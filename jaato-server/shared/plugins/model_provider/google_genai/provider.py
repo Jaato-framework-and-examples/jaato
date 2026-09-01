@@ -63,6 +63,7 @@ from jaato_sdk.plugins.model_provider.types import (
     TurnResult,
     Part,
     normalize_inclusive_usage,
+    require_terminated_stream,
     resolve_tool_use_finish,
 )
 from .converters import (
@@ -1129,6 +1130,11 @@ class GoogleGenAIProvider(ModalityCapabilityMixin):
         accumulated_text: List[str] = []
         parts: List[Part] = []
         finish_reason = FinishReason.UNKNOWN
+        # Whether a candidate ever carried a ``finish_reason``.  Tracked
+        # apart from the value because ``finish_reason_from_sdk`` answers
+        # UNKNOWN for an enum member it does not map, which is still a
+        # terminated turn (#687).
+        terminal_seen = False
         function_calls: List = []
         usage = TokenUsage()
         was_cancelled = False
@@ -1139,8 +1145,8 @@ class GoogleGenAIProvider(ModalityCapabilityMixin):
                 parts.append(Part.from_text("".join(accumulated_text)))
                 accumulated_text = []
 
+        chunk_count = 0
         try:
-            chunk_count = 0
             for chunk in self._client.models.generate_content_stream(
                 model=self._model_name,
                 contents=sdk_contents,
@@ -1189,6 +1195,7 @@ class GoogleGenAIProvider(ModalityCapabilityMixin):
 
                     if hasattr(candidate, 'finish_reason') and candidate.finish_reason:
                         from .converters import finish_reason_from_sdk
+                        terminal_seen = True
                         finish_reason = finish_reason_from_sdk(candidate.finish_reason)
 
                 # Extract usage
@@ -1229,11 +1236,22 @@ class GoogleGenAIProvider(ModalityCapabilityMixin):
             has_function_calls=bool(function_calls) and not was_cancelled,
         )
 
-        provider_response = ProviderResponse(
-            parts=parts,
-            usage=usage,
-            finish_reason=finish_reason,
-            raw=None,
+        # A stream that stopped arriving is not a turn that finished
+        # (#687).  Raises rather than returning the fragment, so the
+        # accounting and structured-output steps below are reached only
+        # by a turn the upstream actually ended.
+        provider_response = require_terminated_stream(
+            ProviderResponse(
+                parts=parts,
+                usage=usage,
+                finish_reason=finish_reason,
+                raw=None,
+            ),
+            terminal_seen=terminal_seen,
+            was_cancelled=was_cancelled,
+            provider=self.name,
+            model=self._model_name,
+            chunks=chunk_count,
         )
 
         # Update per-call accounting (NOT conversation state)

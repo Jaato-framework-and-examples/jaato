@@ -87,6 +87,8 @@ from jaato_sdk.plugins.model_provider.types import (
     ThinkingConfig,
     TurnResult,
     parse_tool_call_arguments,
+    StreamInterruptedError,
+    require_terminated_stream,
     resolve_tool_use_finish,
 )
 from .cache import (
@@ -1528,6 +1530,13 @@ class OpenRouterProvider(ModalityCapabilityMixin):
         # ``MALFORMED_FUNCTION_CALL`` is the adjacency that shortens the
         # next investigation.
         native_finish_reason: Optional[str] = None
+        # Whether a choice ever carried a finish reason.  Tracked apart
+        # from ``finish_reason`` because the normaliser answers UNKNOWN
+        # for a label it does not map, which is still a terminated turn.
+        # Absent it entirely, the stream was cut (#687) -- the sibling
+        # of the stall guard below, for the case where the connection
+        # ends instead of going quiet.
+        terminal_seen = False
         function_calls: List[FunctionCall] = []
         usage = TokenUsage()
         was_cancelled = False
@@ -1546,7 +1555,8 @@ class OpenRouterProvider(ModalityCapabilityMixin):
             outcome, where :meth:`_reject_error_finish` turns it into
             the raised diagnosis.
             """
-            nonlocal finish_reason, native_finish_reason
+            nonlocal finish_reason, native_finish_reason, terminal_seen
+            terminal_seen = True
             finish_reason = resolve_choice_finish_reason(choice)
             native = read_native_finish_reason(choice)
             if native:
@@ -1594,6 +1604,7 @@ class OpenRouterProvider(ModalityCapabilityMixin):
             tool_call_accumulators.clear()
 
         response_stream = None
+        chunk_count = 0
         # #732: the payload-idle watchdog.  Covers the whole exchange —
         # started before ``create()`` so a POST that never comes back is
         # bounded too, then pinged by every chunk the SDK yields.  The
@@ -1607,7 +1618,6 @@ class OpenRouterProvider(ModalityCapabilityMixin):
         )
         try:
             self._trace(f"{trace_prefix}_START")
-            chunk_count = 0
             guard.start()
             response_stream = self._client.chat.completions.create(
                 model=self._model_name,
@@ -1795,12 +1805,21 @@ class OpenRouterProvider(ModalityCapabilityMixin):
 
         thinking = "".join(accumulated_thinking) if accumulated_thinking else None
 
-        return ProviderResponse(
-            parts=parts,
-            usage=usage,
-            finish_reason=finish_reason,
-            raw=None,
-            thinking=thinking,
+        # A stream that stopped arriving is not a turn that finished
+        # (#687).  Raises rather than returning the fragment.
+        return require_terminated_stream(
+            ProviderResponse(
+                parts=parts,
+                usage=usage,
+                finish_reason=finish_reason,
+                raw=None,
+                thinking=thinking,
+            ),
+            terminal_seen=terminal_seen,
+            was_cancelled=was_cancelled,
+            provider=self.name,
+            model=self._model_name,
+            chunks=chunk_count,
         )
 
     # ==================== Stream Teardown / Stall Handling ====================
@@ -1970,11 +1989,13 @@ class OpenRouterProvider(ModalityCapabilityMixin):
 
         Returns without doing anything for an exception that is already
         one of ours — a mid-stream :class:`InfrastructureError`, a
-        :class:`StallTimeoutError` from the idle watchdog — so the caller
-        re-raises it unchanged.  That early exit also keeps the SDK
-        import off a path that has nothing to map.
+        :class:`StallTimeoutError` from the idle watchdog, a
+        ``StreamInterruptedError`` from a stream that ended without
+        saying why (#687) — so the caller re-raises it unchanged.  That
+        early exit also keeps the SDK import off a path that has
+        nothing to map.
         """
-        if isinstance(error, OpenRouterError):
+        if isinstance(error, (OpenRouterError, StreamInterruptedError)):
             return
 
         openai = get_openai_module()

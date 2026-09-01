@@ -34,6 +34,7 @@ from jaato_sdk.plugins.model_provider.types import (
     ToolResult,
     ToolSchema,
     TurnResult,
+    require_terminated_stream,
     resolve_tool_use_finish,
 )
 from .env import (
@@ -798,6 +799,11 @@ class ClaudeCLIProvider(ModalityCapabilityMixin):
         accumulated_thinking = ""
         function_calls: List[FunctionCall] = []
         finish_reason = FinishReason.STOP
+        # The CLI's terminal event is its ``ResultMessage``.  Absent it,
+        # the subprocess died or its stdout was cut mid-answer -- and
+        # because this accumulator OPTIMISTICALLY starts at ``STOP``,
+        # nothing else here would have noticed (#687).
+        terminal_seen = False
 
         for msg in self._stream_cli_messages(prompt):
             if isinstance(msg, SystemMessage):
@@ -823,6 +829,7 @@ class ClaudeCLIProvider(ModalityCapabilityMixin):
                             ))
 
             elif isinstance(msg, ResultMessage):
+                terminal_seen = True
                 self._last_result = msg
                 if msg.usage:
                     self._last_usage = TokenUsage(
@@ -854,10 +861,18 @@ class ClaudeCLIProvider(ModalityCapabilityMixin):
         for fc in function_calls:
             parts.append(Part.from_function_call(fc))
 
-        return ProviderResponse(
-            parts=parts,
-            finish_reason=finish_reason,
-            thinking=accumulated_thinking if accumulated_thinking else None,
+        # A CLI run that never reported its result is not a turn that
+        # finished (#687).  Raises rather than returning the fragment.
+        return require_terminated_stream(
+            ProviderResponse(
+                parts=parts,
+                finish_reason=finish_reason,
+                thinking=accumulated_thinking if accumulated_thinking else None,
+            ),
+            terminal_seen=terminal_seen,
+            was_cancelled=False,
+            provider=self.name,
+            model=self._model_name,
         )
 
     def _execute_query_streaming(
@@ -884,6 +899,11 @@ class ClaudeCLIProvider(ModalityCapabilityMixin):
         function_calls: List[FunctionCall] = []
         finish_reason = FinishReason.STOP
         cancelled = False
+        # The CLI's terminal event is its ``ResultMessage``.  Absent it,
+        # the subprocess died or its stdout was cut mid-answer -- and
+        # because this accumulator OPTIMISTICALLY starts at ``STOP``,
+        # nothing else here would have noticed (#687).
+        terminal_seen = False
 
         got_stream_events = False  # Track if we got streaming deltas
         got_thinking_stream = False  # Track if we got thinking deltas
@@ -983,6 +1003,7 @@ class ClaudeCLIProvider(ModalityCapabilityMixin):
                         self._trace(f"  tool_result id={tr.tool_use_id[:8]} is_error={tr.is_error} preview='{content_preview}'")
 
                 elif isinstance(msg, ResultMessage):
+                    terminal_seen = True
                     self._trace(f"ResultMessage: subtype={msg.subtype} is_error={msg.is_error} turns={msg.num_turns} cost=${msg.total_cost_usd or 0:.4f}")
                     self._last_result = msg
                     if msg.usage:
@@ -1002,6 +1023,9 @@ class ClaudeCLIProvider(ModalityCapabilityMixin):
         except Exception as e:
             logger.error(f"Streaming error: {e}")
             finish_reason = FinishReason.ERROR
+            # The failure is named and terminal on its own; it does not
+            # need ``require_terminated_stream`` to name it again.
+            terminal_seen = True
 
         # Determine finish reason
         if cancelled:
@@ -1025,10 +1049,18 @@ class ClaudeCLIProvider(ModalityCapabilityMixin):
         # Don't include thinking in response if it was already emitted via callback
         # This prevents duplicate emission by the session layer
         final_thinking = None if thinking_emitted else (accumulated_thinking if accumulated_thinking else None)
-        return ProviderResponse(
-            parts=parts,
-            finish_reason=finish_reason,
-            thinking=final_thinking,
+        # A CLI run that never reported its result is not a turn that
+        # finished (#687).  Raises rather than returning the fragment.
+        return require_terminated_stream(
+            ProviderResponse(
+                parts=parts,
+                finish_reason=finish_reason,
+                thinking=final_thinking,
+            ),
+            terminal_seen=terminal_seen,
+            was_cancelled=cancelled,
+            provider=self.name,
+            model=self._model_name,
         )
 
     def _stream_cli_messages(

@@ -137,6 +137,47 @@ it instead of assigning, and
 `shared/tests/test_truncation_is_not_reported_as_tool_use.py` fails if one
 goes back to assigning.
 
+#### The finish reason a stream never reported (#687)
+
+The sibling of the above, from the other direction. Every streaming
+accumulator starts at `FinishReason.UNKNOWN` and overwrites it only when the
+wire delivers a terminal event — Anthropic's `message_stop` /
+`message_delta.stop_reason`, an OpenAI-compatible chunk carrying
+`choice.finish_reason`, a Google candidate carrying `finish_reason`, the
+Claude CLI's `ResultMessage`. When the stream simply stops (a proxy drops the
+connection, a gateway times out, an upstream 5xx lands mid-body, TLS resets)
+none of those arrive, the iterator ends quietly, and the accumulator still
+holds `UNKNOWN` plus whatever text got through.
+
+`UNKNOWN` was grouped with the two *success* outcomes at every consumer, so
+that half-finished turn was accepted as a completed one: silent truncation for
+the user, a tool call severed mid-serialisation handed downstream as a
+request, and — because no exception was ever raised — no retry for the one
+failure that most deserves one.
+
+Two names now carry the distinction, and they are opposites:
+
+- **`UNKNOWN`** — the turn ended, and the upstream's word for why was not one
+  we map. Still a success.
+- **`INCOMPLETE`** — the upstream never said the turn ended at all. Terminal
+  (it is in `TERMINAL_FINISH_REASONS`, so `resolve_tool_use_finish` will not
+  relabel its fragments `TOOL_USE`), maps to `TurnOutcome.ERROR`, and in no
+  consumer's continue-set.
+
+`jaato_sdk.plugins.model_provider.types.require_terminated_stream` is the
+single implementation. Every streaming accumulator ends with it; providers
+track whether a terminal event was **seen**, separately from what it said, so
+that an unmapped label does not read as an interruption and an interruption
+does not read as an unmapped label. When the event never came it drops the
+accumulated function calls, marks the response `INCOMPLETE`, and raises
+`StreamInterruptedError` — which `shared/retry_utils.py` classifies as
+transient, so `with_retry` retries it for every provider at once (each
+provider's own `classify_error` returns `None` for types it does not know).
+
+`shared/tests/test_a_dead_stream_is_not_a_finished_turn.py` fails if a
+provider stops proving its stream terminated, or stops recording one of the
+wire signals it reads as terminal.
+
 ## Hint message template
 
 The injected user-role message should:
