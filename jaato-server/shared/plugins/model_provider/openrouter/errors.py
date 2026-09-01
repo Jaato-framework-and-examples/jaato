@@ -244,3 +244,73 @@ class StallTimeoutError(InfrastructureError):
             "  or JAATO_OPENROUTER_STREAM_IDLE_TIMEOUT=<seconds>",
         ])
         return "\n".join(lines)
+
+
+class UpstreamFinishError(InfrastructureError):
+    """A turn ended with ``finish_reason: "error"`` and no error payload.
+
+    OpenRouter reports a mid-stream upstream failure in **two** shapes,
+    and only one carries a message (#766):
+
+    1.  A top-level ``error`` object alongside a sentinel choice with
+        ``finish_reason: "error"``.  :func:`~.converters.read_chunk_error`
+        reads it and the provider raises a plain
+        :class:`InfrastructureError` carrying the upstream's own words.
+    2.  ``finish_reason: "error"`` **alone** — no ``error`` field
+        anywhere on the chunk or in the generation record.  The cause
+        lives in the sibling ``native_finish_reason``, the raw word the
+        upstream used before OpenRouter normalised it (e.g. Gemini's
+        ``MALFORMED_FUNCTION_CALL``: the model emitted a function call
+        its own serialiser rejected).
+
+    Shape 2 used to resolve to ``FinishReason.ERROR`` and travel back as
+    an ordinary response, where the session turned it into a *terminal*
+    ``RuntimeError("Provider returned an error")`` — a diagnosable,
+    resampling-shaped failure flattened into an opaque fatal one, while
+    the identical upstream condition in shape 1 was retried.  This class
+    closes both halves of that gap: it names the native reason, and it
+    subclasses :class:`InfrastructureError` so
+    :meth:`OpenRouterProvider.classify_error` routes it to ``with_retry``
+    exactly as shape 1 already was.
+
+    ``native_reason`` is ``None`` when the upstream reported nothing at
+    all.  That is still worth raising — the turn produced no usable
+    answer either way — but the message says so plainly instead of
+    implying a diagnosis exists.
+    """
+
+    def __init__(
+        self,
+        native_reason: Optional[str] = None,
+        *,
+        generation_id: Optional[str] = None,
+        model: Optional[str] = None,
+    ):
+        self.native_reason = native_reason
+        self.generation_id = generation_id
+        self.model = model
+        super().__init__(status_code=0, original_error=None)
+
+    def _format_message(self) -> str:
+        lines = [
+            'OpenRouter upstream ended the turn with finish_reason="error".',
+        ]
+        if self.native_reason:
+            lines.append(f"Upstream reason (native_finish_reason): {self.native_reason}")
+        else:
+            lines.append(
+                "The upstream reported no native_finish_reason, so no further "
+                "diagnosis is available from the response itself."
+            )
+        if self.model:
+            lines.append(f"Model: {self.model}")
+        if self.generation_id:
+            lines.append(f"Generation ID: {self.generation_id}")
+        lines.extend([
+            "",
+            "No error payload accompanied the finish reason, so the native",
+            "reason above is the whole of what the upstream said.",
+            "This is a transient error.",
+            "The request will be automatically retried.",
+        ])
+        return "\n".join(lines)
