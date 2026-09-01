@@ -1548,7 +1548,8 @@ class JaatoWSServer:
         elif isinstance(event, ClarificationBatchResponseEvent):
             self._jaato_server.respond_to_clarification_batch(
                 event.request_id,
-                event.answers
+                event.answers,
+                cancelled=event.cancelled,
             )
 
         elif isinstance(event, ReferenceSelectionResponseRequest):

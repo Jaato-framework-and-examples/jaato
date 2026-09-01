@@ -2773,6 +2773,7 @@ export type Context = string;
 export type Questions = {
   [k: string]: unknown;
 }[];
+export type BatchOnly = boolean;
 /**
  * All event types in the protocol.
  */
@@ -2895,6 +2896,7 @@ export type Timestamp21 = string;
 export type SessionId21 = string;
 export type RequestId9 = string;
 export type Answers = string[];
+export type Cancelled = boolean;
 /**
  * All event types in the protocol.
  */
@@ -14678,11 +14680,26 @@ export interface ClarificationResolvedEvent {
   qa_pairs?: QaPairs;
 }
 /**
- * All clarification questions sent at once for batch answering (WS clients only).
+ * All clarification questions sent at once for batch answering.
  *
- * Emitted before the QueueChannel loop so WS clients can display all
- * questions simultaneously in a tabbed panel and let the user answer
- * in any order.
+ * Emitted on two distinct paths, told apart by ``batch_only``:
+ *
+ * * **Daemon-local sessions** (``batch_only=False``) — emitted before the
+ *   QueueChannel loop so a client that can render every question at once
+ *   (a tabbed panel, say) does not have to wait for them to trickle in.
+ *   The per-question flow still follows: an ``AgentOutputEvent`` carrying
+ *   the question text plus a ``ClarificationInputModeEvent`` for each
+ *   question in turn.  A client that prefers the per-question flow may
+ *   ignore this event entirely.
+ * * **Runner-tier sessions** (``batch_only=True``) — emitted by
+ *   ``server.runner_rpc_handlers.clarification_relay``, which relays the
+ *   whole batch from the runner and awaits the whole answer set.  Nothing
+ *   else follows: no ``AgentOutputEvent``, no
+ *   ``ClarificationInputModeEvent``, no ``ClarificationResolvedEvent``.
+ *   A client that ignores this event leaves the tool call — and with it
+ *   the turn — blocked forever (#704), so handling it is mandatory.
+ *
+ * Either way the reply is a single :class:`ClarificationBatchResponseEvent`.
  */
 export interface ClarificationBatchEvent {
   type?: EventType20;
@@ -14693,9 +14710,17 @@ export interface ClarificationBatchEvent {
   tool_name?: ToolName8;
   context?: Context;
   questions?: Questions;
+  batch_only?: BatchOnly;
 }
 /**
- * Client responds with all answers at once (WS batch mode).
+ * Client responds with all answers at once (batch mode).
+ *
+ * ``cancelled=True`` abandons the clarification instead of answering it:
+ * the tool returns ``{"cancelled": True}`` to the model and the turn
+ * continues.  It is the only way out of a ``batch_only`` clarification
+ * the user cannot or will not answer — without it, an unanswerable
+ * question blocks the turn indefinitely.  ``answers`` is ignored when
+ * ``cancelled`` is set.
  */
 export interface ClarificationBatchResponseEvent {
   type?: EventType21;
@@ -14703,6 +14728,7 @@ export interface ClarificationBatchResponseEvent {
   session_id?: SessionId21;
   request_id?: RequestId9;
   answers?: Answers;
+  cancelled?: Cancelled;
 }
 /**
  * Reference selection has been requested.

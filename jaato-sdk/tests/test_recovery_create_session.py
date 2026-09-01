@@ -59,4 +59,17 @@ def test_recovery_batch_clarification_delegates():
     rc._check_can_send = lambda: None
     rc._client = AsyncMock()
     asyncio.run(rc.respond_to_clarification_batch("rid", ["a", "b"]))
-    rc._client.respond_to_clarification_batch.assert_awaited_once_with("rid", ["a", "b"])
+    rc._client.respond_to_clarification_batch.assert_awaited_once_with(
+        "rid", ["a", "b"], cancelled=False)
+
+
+def test_recovery_batch_clarification_delegates_a_cancel():
+    """A cancel must survive the proxy: it is the only way out of a
+    batch-only clarification the user cannot answer (#704), and a dropped
+    ``cancelled`` flag would silently turn it into an empty answer set."""
+    rc = IPCRecoveryClient.__new__(IPCRecoveryClient)
+    rc._check_can_send = lambda: None
+    rc._client = AsyncMock()
+    asyncio.run(rc.respond_to_clarification_batch("rid", [], cancelled=True))
+    rc._client.respond_to_clarification_batch.assert_awaited_once_with(
+        "rid", [], cancelled=True)

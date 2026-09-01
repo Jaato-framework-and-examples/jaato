@@ -1950,22 +1950,31 @@ class IPCClient:
         self,
         request_id: str,
         answers: List[str],
+        *,
+        cancelled: bool = False,
     ) -> None:
         """Respond to a batched clarification — all answers at once.
 
-        The blessed public form for WS/chat clients that receive every
-        question in one ``ClarificationBatchRequestedEvent`` (server PR #411)
-        and answer them together, rather than calling
-        ``respond_to_clarification`` per question.  ``answers`` is an ordered
-        list, one entry per question by index.
+        The blessed public form for clients that receive every question in
+        one ``ClarificationBatchEvent`` and answer them together, rather
+        than calling ``respond_to_clarification`` per question.  ``answers``
+        is an ordered list, one entry per question by index.
+
+        Mandatory for a ``batch_only`` batch (runner-tier sessions): no
+        per-question events follow one, so this is the only reply that
+        unblocks the tool call.
 
         Args:
             request_id: The clarification request ID.
             answers: Ordered answers, one per question (by index).
+            cancelled: Abandon the clarification instead of answering it.
+                The tool returns ``{"cancelled": True}`` to the model and
+                the turn continues; ``answers`` is ignored.
         """
         await self._send_event(ClarificationBatchResponseEvent(
             request_id=request_id,
             answers=answers,
+            cancelled=cancelled,
         ))
 
     async def respond_to_reference_selection(

@@ -43,6 +43,7 @@ import {
   type StopRequest,
   type PermissionResponseRequest,
   type ClarificationResponseRequest,
+  type ClarificationBatchResponseEvent,
   type ReferenceSelectionResponseRequest,
   type CommandListRequest,
   type HistoryRequest,
@@ -504,6 +505,37 @@ export class JaatoClient {
       question_index: questionIndex,
       response,
     } as ClarificationResponseRequest);
+  }
+
+  /**
+   * Answer a batched clarification — every answer at once.
+   *
+   * Required for a ``ClarificationBatchEvent`` carrying
+   * ``batch_only``: the server relays the whole request in that one
+   * event and nothing else follows it, so this is the only reply that
+   * unblocks the tool call and the turn behind it.  A client that
+   * ignores such an event hangs the session (#704).
+   *
+   * Mirror of Python ``IPCClient.respond_to_clarification_batch``.
+   *
+   * @param requestId The ``request_id`` from the ``ClarificationBatchEvent``.
+   * @param answers Ordered answers, one per question by index.
+   * @param cancelled Abandon the clarification instead of answering it:
+   *   the tool returns ``{cancelled: true}`` to the model and the turn
+   *   continues.  ``answers`` is ignored.  This is the way out of a
+   *   question the user cannot or will not answer.
+   */
+  async respondToClarificationBatch(
+    requestId: string,
+    answers: string[],
+    cancelled = false,
+  ): Promise<void> {
+    await this._sendEvent({
+      type: EventTypeValue.CLARIFICATION_BATCH_RESPONSE,
+      request_id: requestId,
+      answers,
+      cancelled,
+    } as ClarificationBatchResponseEvent);
   }
 
   async respondToReferenceSelection(requestId: string, response: string): Promise<void> {

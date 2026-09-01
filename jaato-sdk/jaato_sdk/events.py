@@ -809,11 +809,26 @@ class ClarificationResolvedEvent(Event):
 
 
 class ClarificationBatchEvent(Event):
-    """All clarification questions sent at once for batch answering (WS clients only).
+    """All clarification questions sent at once for batch answering.
 
-    Emitted before the QueueChannel loop so WS clients can display all
-    questions simultaneously in a tabbed panel and let the user answer
-    in any order.
+    Emitted on two distinct paths, told apart by ``batch_only``:
+
+    * **Daemon-local sessions** (``batch_only=False``) — emitted before the
+      QueueChannel loop so a client that can render every question at once
+      (a tabbed panel, say) does not have to wait for them to trickle in.
+      The per-question flow still follows: an ``AgentOutputEvent`` carrying
+      the question text plus a ``ClarificationInputModeEvent`` for each
+      question in turn.  A client that prefers the per-question flow may
+      ignore this event entirely.
+    * **Runner-tier sessions** (``batch_only=True``) — emitted by
+      ``server.runner_rpc_handlers.clarification_relay``, which relays the
+      whole batch from the runner and awaits the whole answer set.  Nothing
+      else follows: no ``AgentOutputEvent``, no
+      ``ClarificationInputModeEvent``, no ``ClarificationResolvedEvent``.
+      A client that ignores this event leaves the tool call — and with it
+      the turn — blocked forever (#704), so handling it is mandatory.
+
+    Either way the reply is a single :class:`ClarificationBatchResponseEvent`.
     """
     type: EventType = Field(default=EventType.CLARIFICATION_BATCH)
     agent_id: str = ""
@@ -822,14 +837,28 @@ class ClarificationBatchEvent(Event):
     context: str = ""
     questions: List[Dict[str, Any]] = Field(default_factory=list)
     # ^ List of {index, text, question_type, required, choices: [{text, default?}]}
+    batch_only: bool = False
+    # ^ True when this event is the ONLY delivery of the questions and the
+    #   only way to answer them.  False means the per-question
+    #   ClarificationInputModeEvent flow follows and a client may use either.
 
 
 class ClarificationBatchResponseEvent(Event):
-    """Client responds with all answers at once (WS batch mode)."""
+    """Client responds with all answers at once (batch mode).
+
+    ``cancelled=True`` abandons the clarification instead of answering it:
+    the tool returns ``{"cancelled": True}`` to the model and the turn
+    continues.  It is the only way out of a ``batch_only`` clarification
+    the user cannot or will not answer — without it, an unanswerable
+    question blocks the turn indefinitely.  ``answers`` is ignored when
+    ``cancelled`` is set.
+    """
     type: EventType = Field(default=EventType.CLARIFICATION_BATCH_RESPONSE)
     request_id: str = ""
     answers: List[str] = Field(default_factory=list)
     # ^ Ordered list of answers, one per question (by index)
+    cancelled: bool = False
+    # ^ True to cancel the clarification outright (answers ignored).
 
 
 class ReferenceSelectionRequestedEvent(Event):

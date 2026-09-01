@@ -138,6 +138,18 @@ jobs:
               pytest -q --continue-on-collection-errors \
                 jaato-server/shared/plugins/
 
+          # jaato-tui/tests ran in NO merge-gating workflow — only in the
+          # TestPyPI publish job, which runs AFTER the merge it should have
+          # been able to block. Same shape as the directories below: a suite
+          # exists, is green, and gates nothing. It is the cheapest leg here
+          # (~2s of tests), and the client is where #704 shipped — a daemon
+          # event that no handler on the other end ever answered, which hung
+          # the turn behind it.
+          - name: jaato-tui (client tier)
+            run: |
+              pytest -q --continue-on-collection-errors \
+                jaato-tui/tests/
+
           # Three directories that no workflow ran, plus live conformance.
           #
           # jaato-sdk/tests matters because test_recovery_client_parity.py
@@ -213,6 +225,7 @@ jobs:
         run: |
           pip install -e jaato-sdk/
           pip install -e "jaato-server/.[all]"
+          pip install -e "jaato-tui/.[dev]"
       - name: ${{ matrix.leg.name }}
         run: ${{ matrix.leg.run }}
 

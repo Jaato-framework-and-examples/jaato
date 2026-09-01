@@ -19,10 +19,11 @@ Wire flow:
    ``request_clarification`` on it.
 2. The channel builds a batch payload and calls
    ``rpc_client.request_clarification(payload)``.
-3. **THIS handler** emits a :class:`ClarificationBatchEvent` (the same
-   event the legacy daemon-side hook emitted, so the connected client's
-   existing ClarificationHandler renders it) and awaits the matching
-   answers on a request-id-keyed futures dict.
+3. **THIS handler** emits a :class:`ClarificationBatchEvent` — the same
+   event the legacy daemon-side hook emits, but stamped
+   ``batch_only=True``, because here it is the whole delivery: nothing
+   else about this clarification ever reaches the client.  It then
+   awaits the matching answers on a request-id-keyed futures dict.
 4. The connected client surfaces the questions, collects answers, and
    sends back a ``ClarificationBatchResponseRequest`` which the daemon
    transport routes into :meth:`JaatoServer.respond_to_clarification_batch`.
@@ -31,10 +32,17 @@ Wire flow:
 
 Batch-only: a clarification is delivered as one batch (all questions at
 once) and answered as one batch (ordered answer strings), matching the
-WS ``ClarificationBatchEvent`` / ``respond_to_clarification_batch``
+``ClarificationBatchEvent`` / ``respond_to_clarification_batch``
 contract.  Per-question streaming (the TUI's legacy in-process flow) is
 unchanged for daemon-local sessions; runner-tier sessions use the batch
 relay.
+
+``batch_only=True`` is what lets a client tell the two apart.  The
+daemon-local hook in ``server.core`` emits the batch event as an
+optional *preview* of a per-question flow that follows it, so a client
+rendering both would prompt twice; this relay emits it as the only
+prompt there will be, so a client ignoring it hangs the turn (#704).
+Same event type, opposite obligations — hence the flag.
 """
 
 from __future__ import annotations
@@ -127,6 +135,14 @@ class ClarificationRelayHandler:
             tool_name=str(args.get("tool_name", "request_clarification")),
             context=str(args.get("context", "") or ""),
             questions=list(args.get("questions") or []),
+            # This relay is the ONLY delivery: no AgentOutputEvent carrying
+            # the question text, no per-question ClarificationInputModeEvent,
+            # no ClarificationResolvedEvent follows it.  The flag says so, so
+            # a client can tell this apart from the daemon-local batch event
+            # (which is an optional preview of a per-question flow) and
+            # prompt exactly once.  A client that ignores it blocks the turn
+            # forever — see #704.
+            batch_only=True,
         )
         try:
             self._emit_event(event)
