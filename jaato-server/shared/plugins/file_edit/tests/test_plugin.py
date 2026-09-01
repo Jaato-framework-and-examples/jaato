@@ -524,6 +524,100 @@ class TestUpdateFileExecution:
         assert result["size"] == len("Updated via content param")
 
 
+    def test_update_file_path_only_preserves_file_and_errors(self, tmp_path):
+        """updateFile with only 'path' must not truncate the file (#782).
+
+        Absent content is a malformed call, not a request for an empty file.
+        The guard is the file's BYTES: reverting the fix makes this test
+        fail on the truncation even if the returned dict looks plausible.
+        """
+        plugin = FileEditPlugin()
+        plugin.initialize({"backup_dir": str(tmp_path / "backups")})
+
+        test_file = tmp_path / "victim.txt"
+        original = "line one\nline two\nline three\n"
+        test_file.write_text(original)
+
+        result = plugin._execute_update_file({"path": str(test_file)})
+
+        assert "error" in result
+        assert "success" not in result
+        # The whole defect is this line: the bytes must be untouched.
+        assert test_file.read_text() == original
+
+    def test_update_file_explicit_empty_new_content_truncates(self, tmp_path):
+        """An explicit new_content='' is a deliberate truncation and works.
+
+        The fix must distinguish OMITTED from DELIBERATELY EMPTY, not
+        forbid empty files.
+        """
+        plugin = FileEditPlugin()
+        plugin.initialize({"backup_dir": str(tmp_path / "backups")})
+
+        test_file = tmp_path / "test.txt"
+        test_file.write_text("to be cleared\n")
+
+        result = plugin._execute_update_file({
+            "path": str(test_file),
+            "new_content": "",
+        })
+
+        assert "error" not in result
+        assert result["success"] is True
+        assert test_file.read_text() == ""
+
+    def test_update_file_explicit_empty_content_alias_truncates(self, tmp_path):
+        """An explicit content='' (alias) also truncates deliberately."""
+        plugin = FileEditPlugin()
+        plugin.initialize({"backup_dir": str(tmp_path / "backups")})
+
+        test_file = tmp_path / "test.txt"
+        test_file.write_text("to be cleared\n")
+
+        result = plugin._execute_update_file({
+            "path": str(test_file),
+            "content": "",
+        })
+
+        assert "error" not in result
+        assert result["success"] is True
+        assert test_file.read_text() == ""
+
+    def test_update_file_error_names_both_modes(self, tmp_path):
+        """The guiding error must name both modes so the model can self-correct."""
+        plugin = FileEditPlugin()
+        plugin.initialize({"backup_dir": str(tmp_path / "backups")})
+
+        test_file = tmp_path / "test.txt"
+        test_file.write_text("content\n")
+
+        result = plugin._execute_update_file({"path": str(test_file)})
+
+        error = result["error"].lower()
+        assert "old" in error and "new" in error
+        assert "new_content" in error
+
+    def test_format_update_file_path_only_pre_validates_error(self, tmp_path):
+        """Permission preview for a path-only call surfaces the guiding error.
+
+        Without this, an interactive session would preview a truncation the
+        executor then refuses.
+        """
+        plugin = FileEditPlugin()
+        plugin.initialize({"backup_dir": str(tmp_path / "backups")})
+
+        test_file = tmp_path / "test.txt"
+        test_file.write_text("content\n")
+
+        display_info = plugin.format_permission_request(
+            "updateFile", {"path": str(test_file)}, "console"
+        )
+
+        assert display_info is not None
+        assert display_info.pre_validation_error
+        assert "new_content" in display_info.pre_validation_error
+
+
 class TestUpdateFileTargetedEdit:
     """Tests for updateFile targeted edit mode (old + new)."""
 
