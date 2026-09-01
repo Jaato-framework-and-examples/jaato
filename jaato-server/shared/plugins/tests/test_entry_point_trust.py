@@ -287,6 +287,29 @@ def test_allowlist_refuses_distributions_not_named(
     assert any(ENV_ENTRY_POINT_ALLOWLIST in m for m in _warnings(caplog))
 
 
+def test_unset_allowlist_blocks_nothing() -> None:
+    """The allowlist is opt-in, and that default is part of the contract.
+
+    A distribution shipping plugins through these groups — jaato-premium
+    registers ``profile_tools`` / ``session_ops`` under ``jaato.plugins``
+    and ``auto_steering`` under ``jaato.enrichment_plugins`` — must keep
+    loading with no knob set.  Flipping the default to deny would refuse
+    every such install on upgrade rather than at a moment anyone chose;
+    this guard fails if someone does.
+    """
+    registry = PluginRegistry()
+    eps = [
+        _make_ep(
+            name,
+            f"jaato_premium.{name}:create_plugin",
+            distribution="jaato-premium",
+        )
+        for name in ("profile_tools", "session_ops")
+    ]
+
+    assert _discover(registry, *eps) == ["profile_tools", "session_ops"]
+
+
 def test_allowlist_admits_named_distribution_regardless_of_spelling(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

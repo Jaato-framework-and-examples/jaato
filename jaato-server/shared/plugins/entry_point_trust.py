@@ -110,6 +110,17 @@ def builtin_plugin_names(refresh: bool = False) -> FrozenSet[str]:
     Reserving those costs nothing and stops an out-of-tree package from
     claiming a name the framework may grow into.
 
+    Consequence worth knowing before adding a built-in: because the set
+    is derived rather than declared, **a jaato release that adds a
+    plugin retroactively reserves that name**, and an out-of-tree
+    plugin already using it stops loading on upgrade.  That is the
+    intended trade — a name collision with a built-in has to resolve in
+    the built-in's favour — and the refusal message names
+    :data:`ENV_ALLOW_SHADOW`, so the operator gets a clear error naming
+    the remedy rather than a plugin that quietly vanished.  Prefer a
+    distinctive name for a new built-in over a generic one for the same
+    reason.
+
     Args:
         refresh: Recompute instead of returning the cached set.  Only
             useful in tests that add or remove plugin directories.
@@ -190,6 +201,17 @@ def allowed_distributions() -> Set[str]:
 
     An empty set means "no allowlist configured" — every distribution
     participates, which is the pre-#684 behaviour and the default.
+
+    **The opt-in default is deliberate, not an oversight.**  Callers
+    guard on ``if allowlist and ...``, so an unset knob blocks nothing.
+    Flipping this to default-deny would refuse every out-of-tree
+    distribution the moment it was released — jaato-premium registers
+    ``profile_tools`` / ``session_ops`` through ``jaato.plugins`` and
+    ``auto_steering`` through ``jaato.enrichment_plugins`` — and would
+    break those installs on upgrade rather than at a moment anyone
+    chose.  Narrowing the participating set is an operator decision
+    with an operator's knowledge of what is installed; the reservation
+    above is what protects the default configuration.
     """
     return {normalize_distribution(n) for n in _env_name_set(ENV_ENTRY_POINT_ALLOWLIST)}
 
@@ -256,7 +278,14 @@ def evaluate_entry_point(
         should hear about it.
     """
     if is_builtin_module(module):
-        # The framework's own declaration of its own plugin.
+        # LOAD-BEARING, and not obviously so from a source checkout: on
+        # an INSTALLED tree the built-ins are themselves entry points
+        # (``cli = shared.plugins.cli`` and 16 more in jaato-server's
+        # pyproject).  Drop this bypass and the framework refuses its
+        # own declarations — discovery does not merely lose the
+        # reservation, it collapses.  Verified by sabotage: making this
+        # branch unreachable fails 12 of the guards in
+        # ``test_entry_point_trust.py``, not one.
         return TrustDecision(True, "builtin")
 
     who = _describe(claim, module, distribution)
