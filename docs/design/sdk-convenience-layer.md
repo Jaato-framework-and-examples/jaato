@@ -113,10 +113,38 @@ turn at a time per session.
 ### `Session.complete(prompt) -> dict | None`
 
 For completion-gated profiles. Captures the `AGENT_COMPLETED.payload`
-(emitted before the terminal), waits on first-of `{SESSION_TERMINATED,
-TURN_COMPLETED}`, returns the typed payload (`None` if the profile declared
-no `completion_payload_schema` or the model didn't complete). Raises
+(emitted before the terminal), waits for the **session** to settle, returns
+the typed payload (`None` if the profile declared no
+`completion_payload_schema` or the model didn't complete). Raises
 `AgentError` on an error terminal.
+
+**A turn boundary is not the session's terminus** (#767). A completion-gated
+session ends at `signal_completion`; when the model instead ends its loop in
+prose, the daemon re-prompts it (`COMPLETION_NUDGE`) and the session keeps
+working — so `TURN_COMPLETED` fires with the agent's work still ahead of it.
+`complete()` waited on first-of `{SESSION_TERMINATED, TURN_COMPLETED}` and
+handed back a session that was still running; the eval harness that found
+this graded an arm 19s before its agent's first commit.
+
+The settle rule, and why it cannot hang:
+
+- `SESSION_TERMINATED` is an unconditional terminus.
+- A `TURN_COMPLETED` only *proposes* one. The daemon closes every turn of the
+  main agent with exactly one `AGENT_STATUS_CHANGED` for that agent —
+  `"active"` when another turn is starting (a nudge, a stashed continuation, a
+  drained user send), `"idle"`/`"done"` when it is not — so the status event
+  confirms or withdraws the proposal.
+- Only the agent this send started counts, latched from the
+  `AGENT_STATUS_CHANGED(status="active")` the daemon emits as `send_message`
+  begins. A **subagent's** turn no longer settles the parent's call.
+- If that opening status event never arrives (older daemon, or a connection
+  whose cascade registration filters the type), nothing is latched and the
+  first `TURN_COMPLETED` settles the call exactly as before. Version skew
+  costs accuracy, never a wait with no end.
+
+`ask` / `stream` keep turn semantics deliberately: their contract is one
+turn's output, and an interactive session must hand back each turn as it
+lands.
 
 ## Permissions (D2 — the second hang trap)
 

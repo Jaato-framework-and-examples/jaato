@@ -1,24 +1,41 @@
-"""Completion flags are per-TURN, not per-session.
+"""Which completion flags are per-TURN, and which is per-SESSION.
 
-Three flags on ``JaatoSession`` looked session-lifetime but every reader asks
-a per-turn question -- the turn terminator, the nudge predicate and its
-budget, the quiescence hook (whose own comment says "called signal_completion
-DURING THIS TURN"), the signal_completion idempotency guard ("in the same tool
-batch"), the auto-finalize synthesizer, the subagent nudge loop, and the
-embedded nudge gate.
+Two latches on ``JaatoSession`` looked session-lifetime but every reader asks
+a per-turn question -- the turn terminator, the quiescence hook (whose own
+comment says "called signal_completion DURING THIS TURN"), the
+signal_completion idempotency guard ("in the same tool batch"), and the
+auto-finalize synthesizer.
 
 Nothing reset them, which is invisible for a ONE-SHOT session: turn 0 is the
 only turn. On a SUSPEND/RESUME session the agent calls ``signal_completion``
 every turn (``outcome=suspended`` ends the turn; a driver wakes the same
-session later), so:
+session later), so ``_signal_completion_called`` latched on turn 0 and
+``_execute_tools_and_continue`` TRUNCATED every later turn at its first tool
+batch -- the model was cut off before it could reach its own exit. Reported as
+"the agent forgets its exit"; it never got there.
 
-  * ``_signal_completion_called`` latched on turn 0 and
-    ``_execute_tools_and_continue`` TRUNCATED every later turn at its first
-    tool batch -- the model was cut off before it could reach its own exit.
-  * ``_completion_nudges_fired`` spent the nudge budget once per SESSION, so
-    the safety net was gone exactly when the session became long-lived.
+``_completion_nudges_fired`` IS NOT ONE OF THEM, and this suite used to say it
+was -- it asserted that a turn start hands the budget back, on the reasoning
+that a per-session budget leaves a long-lived session with "the safety net
+gone". The reasoning inverts what the net does. Spending the budget means the
+framework STOPS asking; it is the ceiling, not the catch. And a nudge
+RE-PROMPTS the session, so the reset ran on the very turn the nudge created
+and returned the token it had just spent:
 
-Reported as "the agent forgets its exit"; it never got there.
+  * the top-level guard in ``core.py``'s model_thread re-armed every turn --
+    observed as "nudge 1/2" logged three times in one session, and measured
+    against a live daemon as 735 turns in 40 seconds for a session that never
+    signals (jaato #767);
+  * the subagent guard's ``while ... < MAX_COMPLETION_NUDGES`` in
+    ``subagent/plugin.py``, written on the assumption that the counter only
+    goes up, could not terminate at all.
+
+``max_turns``, ``budget_control`` and the caller's own wall-clock were what
+actually stopped those sessions, at whatever they had spent by then. So the
+budget is per SESSION, which is what ``MAX_COMPLETION_NUDGES`` always claimed
+to be, and the "long-lived session" the old reasoning worried about is one
+that no longer exists: spending the budget terminates the session
+(``NudgeExhausted``).
 """
 from unittest.mock import MagicMock, patch
 
@@ -57,13 +74,24 @@ def _turn_terminates(session) -> bool:
 
 
 class TestTurnStartClearsThem:
-    def test_all_three_are_cleared(self):
-        s = _session(_signal_completion_called=True, _completion_nudges_fired=2,
+    def test_both_per_turn_latches_are_cleared(self):
+        s = _session(_signal_completion_called=True,
                      _session_quiescent_emitted=True)
         JaatoSession._begin_turn_completion_state(s)
         assert s._signal_completion_called is False
-        assert s._completion_nudges_fired == 0
         assert s._session_quiescent_emitted is False
+
+    def test_the_nudge_budget_survives_a_turn_start(self):
+        """The one flag a turn start must NOT touch.
+
+        A nudge re-prompts the session, so a turn start that cleared this
+        would hand back the token the nudge had just spent -- and did.
+        """
+        s = _session(_completion_nudges_fired=2)
+        JaatoSession._begin_turn_completion_state(s)
+        assert s._completion_nudges_fired == 2, (
+            "the turn a nudge created refunded the nudge's own budget"
+        )
 
     def test_both_chat_loops_call_it(self):
         """Neither entry path may miss the reset.
@@ -95,15 +123,31 @@ class TestTruncation:
 
 
 class TestNudgeBudget:
-    def test_nudge_is_reachable_again_after_a_completed_turn(self):
-        s = _session(_signal_completion_called=True, _completion_nudges_fired=2)
-        assert JaatoSession.try_completion_nudge(s, max_nudges=2) == (False, 2)
+    def test_the_nudge_loop_terminates(self):
+        """The shape both guards actually run, not the predicate alone.
 
-        JaatoSession._begin_turn_completion_state(s)
-        assert JaatoSession.try_completion_nudge(s, max_nudges=2) == (True, 1)
+        A nudge re-prompts, and the re-prompt is a TURN -- so the budget must
+        be read across the turn the nudge itself causes. Asserting the
+        predicate in isolation is what let this ship: the counter was bounded
+        within one turn and unbounded across the only sequence that exists.
+        """
+        s = _session()
+        fired = 0
+        for _ in range(50):                      # a ceiling, not an expectation
+            should_nudge, _count = JaatoSession.try_completion_nudge(
+                s, max_nudges=2)
+            if not should_nudge:
+                break
+            fired += 1
+            # The nudge's own turn begins.  This is the step the old reset
+            # turned into a refund.
+            JaatoSession._begin_turn_completion_state(s)
+            s._signal_completion_called = False  # the model still doesn't signal
+        else:
+            pytest.fail("the completion-nudge loop never terminates")
+        assert fired == 2, f"MAX_COMPLETION_NUDGES=2 allowed {fired} nudges"
 
-    def test_budget_is_still_bounded_within_a_turn(self):
-        """Per-turn must not mean unlimited."""
+    def test_budget_is_bounded_without_a_turn_in_between(self):
         s = _session()
         assert JaatoSession.try_completion_nudge(s, max_nudges=2) == (True, 1)
         assert JaatoSession.try_completion_nudge(s, max_nudges=2) == (True, 2)

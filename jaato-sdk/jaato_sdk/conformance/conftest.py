@@ -52,12 +52,21 @@ SIGNAL_COMPLETION_CALL = {
 
 @pytest.fixture(scope="module")
 def daemon():
-    """A daemon serving BOTH profiles: prose-ending and terminus-ending.
+    """A daemon serving THREE profiles, one per ending a session can have.
 
-    Both are needed and neither substitutes for the other -- the defects that
-    hide behind a prose ending are exactly the ones the terminus exposes, and
-    a suite carrying only the second could not tell a general breakage from a
-    terminus-specific one.
+    The first two are needed and neither substitutes for the other -- the
+    defects that hide behind a prose ending are exactly the ones the terminus
+    exposes, and a suite carrying only the second could not tell a general
+    breakage from a terminus-specific one.
+
+    ``conformance-nudged`` is the third ending, and it is a COMBINATION rather
+    than a variant: a completion schema (so ``signal_completion`` is in the
+    surface and the daemon expects it) with a model that answers in prose (so
+    it never arrives).  That is the state in which the daemon RE-PROMPTS the
+    session, and both defects in jaato #767 live only there -- an unbounded
+    nudge loop, and a caller settling on the first of several turns.  Neither
+    profile above reaches it: the prose one is not gated, and the terminus one
+    signals on turn 1.
     """
     root = Path(tempfile.mkdtemp(prefix="jaato-conformance-ws-"))
     echo_workspace(root, usage=TURN_USAGE, response="conformance ok",
@@ -66,6 +75,9 @@ def daemon():
                    tool_call=SIGNAL_COMPLETION_CALL,
                    completion_schema=COMPLETION_SCHEMA,
                    name="conformance-terminus")
+    echo_workspace(root, usage=TURN_USAGE, response="conformance ok",
+                   completion_schema=COMPLETION_SCHEMA,
+                   name="conformance-nudged")
     d = ConformanceDaemon(root)
     try:
         yield d.start()

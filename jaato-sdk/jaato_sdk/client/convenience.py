@@ -211,24 +211,95 @@ class Session:
         """Send ``prompt`` and return the typed completion ``payload``.
 
         For completion-gated profiles: captures ``AGENT_COMPLETED.payload``
-        (emitted before the terminal), waits on first-of ``{SESSION_TERMINATED,
-        TURN_COMPLETED}``.  Returns the payload (``None`` if the profile
-        declared no schema or the model didn't complete).  Raises
+        (emitted before the terminal), and returns when the SESSION settles --
+        not when its first turn ends.  Returns the payload (``None`` if the
+        profile declared no schema or the model didn't complete).  Raises
         :class:`AgentError` on an error terminal.
+
+        WHY A TURN BOUNDARY IS NOT THE SESSION'S TERMINUS.
+
+        This waited on first-of ``{SESSION_TERMINATED, TURN_COMPLETED}``, and
+        for a completion-gated profile that is the WRONG event.  Such a
+        session ends at ``signal_completion``; when the model instead ends its
+        loop in prose, the daemon RE-PROMPTS it (``COMPLETION_NUDGE``) and the
+        session keeps working -- so ``TURN_COMPLETED`` fired while the agent
+        had minutes of work left.  A caller that graded on the return value
+        graded a half-finished tree, and did so silently and in both
+        directions: it can read a FAIL from a defect the next turn fixes, or a
+        PASS from a tree the next turn regresses (jaato #767, where an eval
+        arm was graded 19s before the agent's first commit and recorded FAIL
+        on a tree that compiles).
+
+        THE RULE.  A ``TURN_COMPLETED`` is the terminus only if the agent
+        SETTLES on it.  The daemon closes every turn of the main agent with
+        exactly one ``AGENT_STATUS_CHANGED`` for that agent: ``"active"`` when
+        it is starting another turn (a nudge, a stashed continuation, a
+        drained user send), ``"idle"``/``"done"`` when it is not.  So the turn
+        event proposes a terminus and the status event confirms or withdraws
+        it.  ``SESSION_TERMINATED`` remains an unconditional terminus -- it is
+        what arrives when the nudge budget is spent.
+
+        WHICH AGENT.  Only the agent this send started, latched from the
+        ``AGENT_STATUS_CHANGED(status="active")`` the daemon emits as
+        ``send_message`` begins.  Subagent turns therefore no longer settle
+        the parent's call, which they did before -- any agent's
+        ``TURN_COMPLETED`` ended the wait.
+
+        NO TIMER, AND NO HANG.  If that opening status event never arrives
+        (an older daemon, or a connection whose cascade registration filters
+        the type), nothing is latched and the first ``TURN_COMPLETED``
+        settles the call exactly as it used to.  The fallback is the
+        pre-existing behaviour, so version skew costs accuracy, never a wait
+        with no end.
+
+        ``ask``/``stream`` keep turn semantics deliberately: their contract is
+        one turn's output, and an interactive session must hand back each turn
+        as it lands.
         """
         box: Dict[str, Any] = {}
         done = asyncio.Event()
+        # The agent whose turns can settle this call, and whether one of its
+        # turns is currently PROPOSING a terminus (awaiting its status event).
+        state: Dict[str, Any] = {"agent": None, "proposed": False}
 
         def on_completed(ev: Any) -> None:
             box["payload"] = getattr(ev, "payload", None)
 
-        def on_terminal(ev: Any) -> None:
+        def settle(ev: Any) -> None:
             self._note_terminal(box, ev)
             done.set()
 
+        def on_turn(ev: Any) -> None:
+            agent = getattr(ev, "agent_id", None)
+            if state["agent"] is None:
+                # Never announced active -> old-daemon fallback: this turn IS
+                # the terminus, as it was before #767.
+                settle(ev)
+                return
+            if agent == state["agent"]:
+                state["proposed"] = True
+
+        def on_status(ev: Any) -> None:
+            agent = getattr(ev, "agent_id", None)
+            status = getattr(ev, "status", None)
+            if state["agent"] is None:
+                if status == "active":
+                    state["agent"] = agent
+                return
+            if agent != state["agent"] or not state["proposed"]:
+                return
+            if status == "active":
+                state["proposed"] = False   # another turn is starting
+            else:
+                settle(ev)                  # the agent settled on that turn
+
         unsub_comp = self._client.subscribe_once(EventType.AGENT_COMPLETED, on_completed)
-        unsub_term = self._client.subscribe_once(EventType.SESSION_TERMINATED, on_terminal)
-        unsub_turn = self._client.subscribe_once(EventType.TURN_COMPLETED, on_terminal)
+        unsub_term = self._client.subscribe_once(EventType.SESSION_TERMINATED, settle)
+        # NOT ``subscribe_once``: a nudged session runs several turns and the
+        # call must see every one of them to know which is the last.
+        unsub_turn = self._client.subscribe(EventType.TURN_COMPLETED, on_turn)
+        unsub_status = self._client.subscribe(
+            EventType.AGENT_STATUS_CHANGED, on_status)
         try:
             await self._client.send_message(
                 prompt, parallel_tools=parallel_tools, attachments=attachments)
@@ -237,6 +308,7 @@ class Session:
             unsub_comp()
             unsub_term()
             unsub_turn()
+            unsub_status()
         self._raise_if_needed(box)
         return box.get("payload")
 
