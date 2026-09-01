@@ -58,6 +58,7 @@ _SIMPLE_SCOPES = {
     "tiers": _explain.tiers,
     "paths": _explain.paths,
     "prefetch": _explain.prefetch,
+    "commands": _explain.commands,
     "archetypes": _explain.archetypes,
 }
 
@@ -75,7 +76,7 @@ _NAMED_SCOPES = {
 #: Scopes taking an OPTIONAL filter as the name argument.
 _FILTER_SCOPES = {"env": _explain.env, "events": _explain.events}
 
-_SCOPES_HELP = ("plugins | plugin | providers | provider | gc | env | events | "
+_SCOPES_HELP = ("plugins | plugin | commands | providers | provider | gc | env | events | "
                 "event | transports | clients | runtime | tiers | sets | "
                 "profile [<name>] | paths | prefetch | archetypes | archetype")
 

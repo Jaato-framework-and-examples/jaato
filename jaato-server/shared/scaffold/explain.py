@@ -47,6 +47,7 @@ def overview() -> Rendered:
         "drill down:\n"
         "  jaato-scaffold explain plugins\n"
         "  jaato-scaffold explain plugin <name>\n"
+        "  jaato-scaffold explain commands\n"
         "  jaato-scaffold explain providers\n"
         "  jaato-scaffold explain provider <name>\n"
         "  jaato-scaffold explain gc\n"
@@ -575,6 +576,41 @@ def _signature(parameters: "Optional[Dict[str, Any]]") -> str:
         p if p in required else f"{p}=..." for p in props) + ")"
 
 
+def _commands_json(commands: List[Any]) -> List[Dict[str, Any]]:
+    """The ``--json`` view of a plugin's user commands.
+
+    A separate function for the same reason as :func:`_command_block`: the
+    comprehension this replaces sat inside ``plugin``, which is frozen in the
+    complexity baseline, and radon counts a comprehension as a decision point.
+    """
+    return [{"name": c.name, "description": c.description,
+             "share_with_model": c.share_with_model,
+             "subcommands": c.subcommands} for c in commands]
+
+
+def _command_block(commands: List[Any]) -> List[str]:
+    """The per-plugin ``commands:`` block for :func:`plugin`.
+
+    Split out rather than inlined because ``plugin`` is over the complexity
+    ceiling and frozen in the audit baseline, so added logic belongs in a
+    helper (see ``test_cyclomatic_complexity_audit``).
+
+    The heading says *typed directly in the TUI, not via the model* because
+    every other block on that page describes MODEL-facing surface (tools,
+    plugin_configs); without the qualifier a reader reasonably assumes these
+    are tools too.
+    """
+    if not commands:
+        return []
+    out = ["  commands (typed directly in the TUI, not via the model):"]
+    for c in commands:
+        subs = f"  subcommands: {', '.join(c.subcommands)}" if c.subcommands else ""
+        out.append(f"    {c.name}{subs}")
+        if c.description:
+            out.append(f"           {c.description}")
+    return out
+
+
 def plugin(name: str) -> Rendered:
     PL = introspect.plugins()
     pi = PL.get(name)
@@ -600,6 +636,7 @@ def plugin(name: str) -> Rendered:
                 f"get_tool_schemas (introspection is always core, so they're never "
                 f"lost), OR add `{name}(preload)` to a profile's plugins to force "
                 f"ALL of this plugin's tools eager.")
+    lines.extend(_command_block(pi.commands))
     if pi.config_settings:
         lines.append(f"  config (plugin_configs.{name}.*):")
         for s in pi.config_settings:
@@ -608,6 +645,7 @@ def plugin(name: str) -> Rendered:
             lines.append(f"    {s.name:22} {s.type:8}{d}{dflt}")
     data = {"description": pi.description,
             "kind": pi.kind, "tier": pi.tier, "dynamic": pi.dynamic,
+            "commands": _commands_json(pi.commands),
             # ``parameters`` is what makes a tool SIGNATURE machine-checkable
             # from the CLI.  Without it a consumer validating a published spec
             # against the framework can compare names and prose but not the
@@ -619,6 +657,45 @@ def plugin(name: str) -> Rendered:
                        "parameters": t.parameters} for t in pi.tools],
             "config": [{"name": s.name, "type": s.type, "default": s.default,
                         "description": s.description} for s in pi.config_settings]}
+    return data, "\n".join(lines)
+
+
+# --------------------------------------------------------------- commands
+
+def commands() -> Rendered:
+    """Every user-facing TUI command, flat, grouped by owning plugin.
+
+    The lookup ``explain plugin <name>`` cannot answer: "I know I want to
+    change permissions / switch a model / inspect a plan — which command is
+    it?"  The reader does not yet know which plugin owns the verb, so the
+    catalog must be flat and grouped by owner.  These are the commands typed
+    directly into the TUI (``permissions allow *``, ``memory …``), NOT the
+    model's function-calling tools.
+    """
+    PL = introspect.plugins()
+    data: Dict[str, Any] = {}
+    lines = ["user commands — typed directly in the TUI, grouped by owning plugin",
+             "  (`explain plugin <name>` for the full per-plugin page)"]
+    total = 0
+    for name in sorted(PL):
+        pi = PL[name]
+        if not pi.commands:
+            continue
+        data[name] = [{"name": c.name, "description": c.description,
+                       "share_with_model": c.share_with_model,
+                       "subcommands": c.subcommands} for c in pi.commands]
+        total += len(pi.commands)
+        lines.append(f"\n  [{name}]")
+        for c in pi.commands:
+            subs = (f"  ({', '.join(c.subcommands)})" if c.subcommands else "")
+            lines.append(f"    {c.name}{subs}")
+            if c.description:
+                lines.append(f"      {c.description}")
+    if not total:
+        lines.append("\n  (no plugin exposes user commands)")
+    else:
+        lines.insert(2, f"  {total} command(s) across "
+                        f"{len(data)} plugin(s)")
     return data, "\n".join(lines)
 
 

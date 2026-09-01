@@ -102,6 +102,23 @@ class ToolInfo:
 
 
 @dataclass
+class CommandInfo:
+    """One user-facing command a plugin exposes (from ``get_user_commands``).
+
+    User commands are the operator's runtime control surface — invoked directly
+    in the TUI (``permissions allow *``, ``memory …``, auth switches), NOT via
+    the model's function calling.  ``subcommands`` are the first-argument
+    completions (``CommandCompletion`` entries from ``get_command_completions``)
+    — where the real surface lives: ``permissions`` alone tells an operator
+    nothing actionable.
+    """
+    name: str
+    description: str = ""
+    share_with_model: bool = False
+    subcommands: List[str] = field(default_factory=list)
+
+
+@dataclass
 class ConfigSetting:
     """One configurable plugin setting (from ``get_config_schema``)."""
     name: str
@@ -119,6 +136,7 @@ class PluginInfo:
     tier: Optional[str] = None
     description: str = ""               # plugin class docstring, first line
     tools: List[ToolInfo] = field(default_factory=list)
+    commands: List[CommandInfo] = field(default_factory=list)
     config_keys: List[str] = field(default_factory=list)
     config_settings: List["ConfigSetting"] = field(default_factory=list)
     dynamic: bool = False               # tool list needs a live session (mcp, …)
@@ -355,6 +373,52 @@ def _stamp_origin(info: "PluginInfo", origin: Any) -> None:
     info.builtin = origin.builtin
 
 
+def _collect_user_commands(plugin: Any) -> List["CommandInfo"]:
+    """The plugin's user-facing commands, or ``[]`` — never raising.
+
+    Split out of :func:`plugins` rather than inlined: that function is over
+    the complexity ceiling and frozen in the audit baseline, so new logic
+    belongs in a helper (see ``test_cyclomatic_complexity_audit``).
+
+    Best-effort on BOTH levels, and deliberately so.  ``get_user_commands``
+    is optional protocol — a plugin that lacks it or raises must not break
+    the whole registry walk — and the per-command completion lookup is
+    independently guarded, so one plugin with a broken completer costs its
+    own subcommands rather than every command after it.
+
+    Subcommands come from the first-argument completions, which is where the
+    actionable surface lives: ``permissions`` alone tells an operator
+    nothing, ``permissions allow|deny|suspend|…`` does.
+    """
+    out: List[CommandInfo] = []
+    try:
+        commands = plugin.get_user_commands() or []
+    except Exception:
+        return out
+    for cmd in commands:
+        out.append(CommandInfo(
+            name=getattr(cmd, "name", "?"),
+            description=getattr(cmd, "description", "") or "",
+            share_with_model=bool(getattr(cmd, "share_with_model", False)),
+            subcommands=_command_subcommands(plugin, getattr(cmd, "name", "")),
+        ))
+    return out
+
+
+def _command_subcommands(plugin: Any, command: str) -> List[str]:
+    """First-argument completions for *command*, de-duplicated, or ``[]``."""
+    subs: List[str] = []
+    try:
+        completions = plugin.get_command_completions(command, []) or []
+    except Exception:
+        return subs
+    for comp in completions:
+        value = getattr(comp, "value", None)
+        if value and value not in subs:
+            subs.append(value)
+    return subs
+
+
 def plugins() -> Dict[str, PluginInfo]:
     """All tool/enrichment plugins, best-effort offline.
 
@@ -399,6 +463,7 @@ def plugins() -> Dict[str, PluginInfo]:
                 ))
         except Exception:
             info.dynamic = True
+        info.commands.extend(_collect_user_commands(plugin))
         # plugin-level description (class docstring, first line)
         doc = (type(plugin).__doc__ or "").strip()
         info.description = doc.split("\n", 1)[0].strip() if doc else ""
