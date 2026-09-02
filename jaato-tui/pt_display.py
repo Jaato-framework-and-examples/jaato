@@ -2126,7 +2126,13 @@ class PTDisplay:
                     # In comment mode, space inserts a space character
                     event.current_buffer.insert_text(" ")
                     return
-                self._select_focused_permission_option()
+                # Space does NOT select.  While a prompt is up the input line
+                # is inert: letters are discarded above, so a space was the
+                # one keystroke that still reached a handler — and it
+                # answered the prompt with whatever happened to be focused.
+                # Typing an ordinary sentence therefore submitted "yes" on
+                # its first space.  The on-screen hint offers "⇥ cycle
+                # ↵ select" and never advertised space, so nothing is lost.
                 return
             # Normal mode - insert space character
             event.current_buffer.insert_text(" ")
@@ -4228,7 +4234,19 @@ class PTDisplay:
         self.refresh()
 
     def _select_focused_permission_option(self) -> None:
-        """Select the currently focused permission option and submit it.
+        """Select the currently focused permission option and submit it once.
+
+        Reachable from Enter, from space, and (in comment mode) from the
+        comment submit path.  The client stays in permission mode until the
+        server answers, so two selections arriving inside that window would
+        both be sent: measured at 59ms apart from two space keypresses,
+        producing two responses for one request id.  The server rejects the
+        second with ``StateError: Unknown permission request``, and when the
+        focus moved in between it answers something the user never chose.
+
+        Clearing the options after submitting disarms every selection path
+        until the next ``PermissionInputModeEvent`` repopulates them, so a
+        prompt accepts exactly one answer.
 
         Does nothing if comment mode is active — comment mode requires the
         user to type text and press Enter, not select-by-shortcut.
@@ -4245,6 +4263,9 @@ class PTDisplay:
             short = option.get('key', option.get('short', ''))
         else:
             short = getattr(option, 'short', getattr(option, 'key', ''))
+
+        # Disarm before submitting: one answer per prompt (see docstring).
+        self._permission_response_options = None
 
         # Submit the selection via input callback
         self._input_callback(short)
