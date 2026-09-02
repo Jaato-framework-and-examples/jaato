@@ -115,6 +115,30 @@ class EnvClass:
     note: str = ""
 
 
+@dataclass(frozen=True)
+class Awaiting:
+    """A session knob with no typed key yet, and where one should go.
+
+    Attributes:
+        tier: ``A`` agent-behaviour knob, ``B`` plugin knob, ``E`` credential.
+        proposed_key: Where the typed key SHOULD live, in the same notation
+            :attr:`EnvClass.typed_key` uses.  Unlike ``typed_key`` this is a
+            proposal, so the guard checks its SHAPE (a known prefix naming a
+            real plugin or provider) and deliberately cannot resolve it --
+            the thing it names does not exist yet.  That asymmetry is the
+            point: a resolvable ``typed_key`` is coverage, a ``proposed_key``
+            is an argument.  When one lands, the entry moves to ``typed_key``
+            and leaves this set.
+        note: Why this key, or what stands in the way -- the telemetry
+            entries in particular need a WIRING change, not just a key, and
+            an entry that hides that is a promotion someone will under-quote.
+    """
+
+    tier: str
+    proposed_key: str
+    note: str = ""
+
+
 #: The assessment, machine-readable.  Every env var the installed tree
 #: reads, tagged with its scope and the typed key that covers it.  Kept
 #: exhaustive by ``test_env_scope_catalog.py``, which re-derives the var
@@ -317,13 +341,16 @@ CATALOG: Dict[str, EnvClass] = {
         "belongs to plugin_configs.mermaid_formatter"),
     "JAATO_MERMAID_BACKEND": EnvClass(SESSION, None,
         "belongs to plugin_configs.mermaid_formatter"),
-    "JAATO_MERMAID_SCALE": EnvClass(SESSION, None,
-        "belongs to plugin_configs.mermaid_formatter"),
-    "JAATO_MERMAID_THEME": EnvClass(SESSION, None,
-        "belongs to plugin_configs.mermaid_formatter"),
-    "JAATO_PERMISSION_TIMEOUT": EnvClass(SESSION, None,
-        "a headless arm and an interactive session want opposite "
-        "values"),
+    "JAATO_MERMAID_SCALE": EnvClass(SESSION, "plugin_configs.mermaid_formatter.scale",
+        "the knob exists; the env read runs after config.get and overrides "
+        "it (precedence defect, not a missing key)"),
+    "JAATO_MERMAID_THEME": EnvClass(SESSION, "plugin_configs.mermaid_formatter.theme",
+        "the knob exists and a profile can set it -- but the env read runs "
+        "AFTER config.get and overrides it: a precedence defect, not a "
+        "missing key"),
+    "JAATO_PERMISSION_TIMEOUT": EnvClass(SESSION, "plugin_configs.permission.channel_config.timeout",
+        "the knob exists (channel_config seeds it); channels.py re-reads "
+        "the env at request time and overrides it (precedence defect)"),
     "JAATO_SESSION_CONFIG": EnvClass(SESSION, None,
         "a config-file path belonging to plugin_configs.session"),
     "JAATO_SESSION_ID": EnvClass(INTERNAL, None,
@@ -343,9 +370,9 @@ CATALOG: Dict[str, EnvClass] = {
     "KAGGLE_USERNAME": EnvClass(SESSION, None,
         "a credential with no typed key (see the credential "
         "policy)"),
-    "PERMISSION_WEBHOOK_TOKEN": EnvClass(SESSION, None,
-        "a credential with no typed key (see the credential "
-        "policy)"),
+    "PERMISSION_WEBHOOK_TOKEN": EnvClass(SESSION, "plugin_configs.permission.channel_config.auth_token",
+        "config.get(auth_token) or os.environ -- the knob already WINS and "
+        "the env var is its fallback"),
     "PSModulePath": EnvClass(AMBIENT, None,
         "PowerShell detection"),
     "PSVersionTable": EnvClass(AMBIENT, None,
@@ -354,9 +381,9 @@ CATALOG: Dict[str, EnvClass] = {
         "the user's shell"),
     "TODO_STORAGE_PATH": EnvClass(SESSION, "plugin_configs.todo.storage_path",
         "the plugin config already wins; the env var is its default"),
-    "TODO_WEBHOOK_TOKEN": EnvClass(SESSION, None,
-        "a credential with no typed key (see the credential "
-        "policy)"),
+    "TODO_WEBHOOK_TOKEN": EnvClass(SESSION, "plugin_configs.todo.reporter_config.auth_token",
+        "config.get(auth_token) or os.environ -- the knob already WINS and "
+        "the env var is its fallback"),
     "USER": EnvClass(AMBIENT, None,
         "expanded as a ${USER} template variable in profiles/personas"),
     "VISUAL": EnvClass(AMBIENT, None,
@@ -589,51 +616,155 @@ CATALOG: Dict[str, EnvClass] = {
 #:      added, not a default: a knob that accepts a literal secret in a
 #:      YAML file is worse than no knob.  The ones listed here are the
 #:      providers and plugins whose peers already expose one.
-AWAITING_TYPED_KEY: Dict[str, str] = {
-    "AI_EXECUTE_TOOLS":                     "A",
-    "AI_REQUEST_INTERVAL":                  "A",
-    "AI_RETRY_ATTEMPTS":                    "A",
-    "AI_RETRY_BASE_DELAY":                  "A",
-    "AI_RETRY_MAX_DELAY":                   "A",
-    "GITHUB_TOKEN":                         "E",
-    "GOOGLE_APPLICATION_CREDENTIALS":       "E",
-    "GOOGLE_GENAI_API_KEY":                 "E",
-    "JAATO_AMBIGUOUS_WIDTH":                "B",
-    "JAATO_CLARIFICATION_TIMEOUT":          "A",
-    "JAATO_DEFERRED_TOOLS":                 "A",
-    "JAATO_FILE_BACKUP_COUNT":              "B",
-    "JAATO_GITHUB_AUTH_METHOD":             "E",
-    "JAATO_GOOGLE_AUTH_METHOD":             "E",
-    "JAATO_GOOGLE_TARGET_SERVICE_ACCOUNT":  "E",
-    "JAATO_GOOGLE_USE_VERTEX":              "E",
-    "JAATO_KROKI_URL":                      "B",
-    "JAATO_MERMAID_BACKEND":                "B",
-    "JAATO_MERMAID_SCALE":                  "B",
-    "JAATO_MERMAID_THEME":                  "B",
-    "JAATO_PARALLEL_TOOLS":                 "A",
-    "JAATO_PERMISSION_TIMEOUT":             "A",
-    "JAATO_SESSION_CONFIG":                 "B",
-    "JAATO_SESSION_LOG_DIR":                "B",
-    "JAATO_TELEMETRY_BACKEND":              "A",
-    "JAATO_TELEMETRY_ENABLED":              "A",
-    "JAATO_TELEMETRY_EXPORTER":             "A",
-    "JAATO_TELEMETRY_FILE":                 "A",
-    "JAATO_TELEMETRY_REDACT_CONTENT":       "A",
-    "JAATO_TOOL_BINDINGS":                  "B",
-    "JAATO_VISION_DIR":                     "B",
-    "JAATO_ZHIPUAI_API_KEY":                "E",
-    "KAGGLE_API_TOKEN":                     "E",
-    "KAGGLE_KEY":                           "E",
-    "KAGGLE_USERNAME":                      "E",
-    "LANGFUSE_PUBLIC_KEY":                  "E",
-    "LANGFUSE_SECRET_KEY":                  "E",
-    "LEDGER_PATH":                          "B",
-    "LOCATION":                             "E",
-    "PERMISSION_WEBHOOK_TOKEN":             "E",
-    "PROJECT_ID":                           "E",
-    "TODO_WEBHOOK_TOKEN":                   "E",
-    "ZHIPUAI_API_KEY":                      "E",
+AWAITING_TYPED_KEY: Dict[str, Awaiting] = {
+
+    # ---- tier A: agent-behaviour knobs -----------------------
+    "AI_EXECUTE_TOOLS": Awaiting(
+        "A", "tools.execute_unregistered",
+    ),
+    "AI_REQUEST_INTERVAL": Awaiting(
+        "A", "retry.request_interval",
+        "top-level block overridden by plugin_configs.<provider>.retry, "
+        "mirroring how cache: layers with the per-provider knobs",
+    ),
+    "AI_RETRY_ATTEMPTS": Awaiting(
+        "A", "retry.attempts",
+    ),
+    "AI_RETRY_BASE_DELAY": Awaiting(
+        "A", "retry.base_delay",
+    ),
+    "AI_RETRY_MAX_DELAY": Awaiting(
+        "A", "retry.max_delay",
+    ),
+    "JAATO_CLARIFICATION_TIMEOUT": Awaiting(
+        "A", "plugin_configs.clarification.channel_config.timeout",
+        "matches the plugin's existing channel_config shape",
+    ),
+    "JAATO_DEFERRED_TOOLS": Awaiting(
+        "A", "tools.deferred",
+    ),
+    "JAATO_PARALLEL_TOOLS": Awaiting(
+        "A", "tools.parallel",
+    ),
+    "JAATO_TELEMETRY_BACKEND": Awaiting(
+        "A", "plugin_configs.telemetry.backend",
+    ),
+    "JAATO_TELEMETRY_ENABLED": Awaiting(
+        "A", "plugin_configs.telemetry.enabled",
+        "the key EXISTS; create_plugin() gates construction on the env "
+        "var and returns NullTelemetryPlugin, so no profile key can "
+        "reach it. Needs the factory to consult the profile -- wiring, "
+        "not a key",
+    ),
+    "JAATO_TELEMETRY_EXPORTER": Awaiting(
+        "A", "plugin_configs.telemetry.exporter",
+        "the key EXISTS; create_plugin() builds the config dict from "
+        "env and passes it to initialize(), so plugin_configs.telemetry "
+        "never arrives",
+    ),
+    "JAATO_TELEMETRY_FILE": Awaiting(
+        "A", "plugin_configs.telemetry.file_path",
+        "the key EXISTS and already wins (config.get(file_path, env)) "
+        "-- but create_plugin() never passes it, so the win is "
+        "unreachable",
+    ),
+    "JAATO_TELEMETRY_REDACT_CONTENT": Awaiting(
+        "A", "plugin_configs.telemetry.redact_content",
+        "as JAATO_TELEMETRY_EXPORTER -- the key exists, the factory "
+        "overwrites it",
+    ),
+
+    # ---- tier B: plugin knobs --------------------------------
+    "JAATO_AMBIGUOUS_WIDTH": Awaiting(
+        "B", "plugin_configs.table_formatter.ambiguous_width",
+        "sibling of the existing console_width knob",
+    ),
+    "JAATO_FILE_BACKUP_COUNT": Awaiting(
+        "B", "plugin_configs.file_edit.backup_count",
+        "sibling of the existing backup_dir knob",
+    ),
+    "JAATO_KROKI_URL": Awaiting(
+        "B", "plugin_configs.mermaid_formatter.kroki_url",
+    ),
+    "JAATO_MERMAID_BACKEND": Awaiting(
+        "B", "plugin_configs.mermaid_formatter.backend",
+    ),
+    "JAATO_SESSION_CONFIG": Awaiting(
+        "B", "plugin_configs.session.config_path",
+        "mirrors the permission plugin's config_path knob",
+    ),
+    "JAATO_SESSION_LOG_DIR": Awaiting(
+        "B", "trace.log_dir",
+        "the trace: block already owns per-session diagnostic output "
+        "paths",
+    ),
+    "JAATO_TOOL_BINDINGS": Awaiting(
+        "B", "plugin_configs.notebook.tool_bindings",
+    ),
+    "JAATO_VISION_DIR": Awaiting(
+        "B", "plugin_configs.mermaid_formatter.vision_dir",
+    ),
+    "LEDGER_PATH": Awaiting(
+        "B", "trace.ledger",
+        "same block; also fixes the inversion where the env var "
+        "outranks the filepath argument its caller passed",
+    ),
+
+    # ---- tier E: credentials + connection identity -----------
+    "GITHUB_TOKEN": Awaiting(
+        "E", "plugin_configs.github_models.api_key",
+    ),
+    "GOOGLE_APPLICATION_CREDENTIALS": Awaiting(
+        "E", "plugin_configs.google_genai.credentials_path",
+    ),
+    "GOOGLE_GENAI_API_KEY": Awaiting(
+        "E", "plugin_configs.google_genai.api_key",
+    ),
+    "JAATO_GITHUB_AUTH_METHOD": Awaiting(
+        "E", "plugin_configs.github_models.auth_method",
+    ),
+    "JAATO_GOOGLE_AUTH_METHOD": Awaiting(
+        "E", "plugin_configs.google_genai.auth_method",
+    ),
+    "JAATO_GOOGLE_TARGET_SERVICE_ACCOUNT": Awaiting(
+        "E", "plugin_configs.google_genai.target_service_account",
+    ),
+    "JAATO_GOOGLE_USE_VERTEX": Awaiting(
+        "E", "plugin_configs.google_genai.use_vertex",
+        "not a secret -- a backend selector",
+    ),
+    "JAATO_ZHIPUAI_API_KEY": Awaiting(
+        "E", "plugin_configs.zhipuai.api_key",
+    ),
+    "KAGGLE_API_TOKEN": Awaiting(
+        "E", "plugin_configs.notebook.kaggle.api_token",
+    ),
+    "KAGGLE_KEY": Awaiting(
+        "E", "plugin_configs.notebook.kaggle.key",
+    ),
+    "KAGGLE_USERNAME": Awaiting(
+        "E", "plugin_configs.notebook.kaggle.username",
+    ),
+    "LANGFUSE_PUBLIC_KEY": Awaiting(
+        "E", "plugin_configs.telemetry.langfuse.public_key",
+    ),
+    "LANGFUSE_SECRET_KEY": Awaiting(
+        "E", "plugin_configs.telemetry.langfuse.secret_key",
+    ),
+    "LOCATION": Awaiting(
+        "E", "plugin_configs.google_genai.location",
+        "not a secret -- connection identity",
+    ),
+    "PROJECT_ID": Awaiting(
+        "E", "plugin_configs.google_genai.project_id",
+        "not a secret -- connection identity; antigravity already "
+        "exposes project_id",
+    ),
+    "ZHIPUAI_API_KEY": Awaiting(
+        "E", "plugin_configs.zhipuai.api_key",
+    ),
 }
+
 
 
 

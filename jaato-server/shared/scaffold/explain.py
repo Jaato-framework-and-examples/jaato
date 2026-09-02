@@ -980,8 +980,8 @@ def _scope_summary(EV) -> List[str]:
 def _tier_counts(awaiting: Dict[str, str]) -> str:
     """``A=14 B=11 E=18`` for the summary line."""
     counts: Dict[str, int] = {}
-    for tier in awaiting.values():
-        counts[tier] = counts.get(tier, 0) + 1
+    for entry in awaiting.values():
+        counts[entry.tier] = counts.get(entry.tier, 0) + 1
     return " ".join(f"{t}={counts[t]}" for t in sorted(counts))
 
 
@@ -1011,18 +1011,30 @@ def _env_rows(vs: list, width: int) -> List[str]:
     legible rather than merely absent).  Everything else -- host,
     ambient, internal -- says what it is with the glyph alone.
     """
-    from shared.env_scope import SESSION
+    from shared.env_scope import AWAITING_TYPED_KEY, SESSION
 
     out: List[str] = []
+    pad = " " * (width + 2)
     for v in vs:
         d = f" = {v.default}" if v.default not in (None, "") else ""
         desc = f"   — {v.description}" if v.description else ""
         glyph = _SCOPE_GLYPH.get(v.scope, "?")
         out.append(f"    {glyph} {v.name:<{width}}{d}{desc}")
         if v.typed_key:
-            out.append(f"    {' ' * (width + 2)}  → typed: {v.typed_key}")
-        elif v.scope == SESSION and v.scope_note:
-            out.append(f"    {' ' * (width + 2)}  → no typed key: {v.scope_note}")
+            out.append(f"    {pad}  → typed: {v.typed_key}")
+            continue
+        if v.scope != SESSION:
+            continue
+        # A debt entry shows WHERE the key should go, not just that one is
+        # missing: the proposal is the part a reader can act on or argue with.
+        owed = AWAITING_TYPED_KEY.get(v.name)
+        if owed is not None:
+            out.append(f"    {pad}  → proposed: {owed.proposed_key}  "
+                       f"[tier {owed.tier}]")
+            if owed.note:
+                out.append(f"    {pad}    {owed.note}")
+        elif v.scope_note:
+            out.append(f"    {pad}  → no typed key: {v.scope_note}")
     return out
 
 

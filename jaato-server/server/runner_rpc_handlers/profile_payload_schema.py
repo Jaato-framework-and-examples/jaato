@@ -202,8 +202,7 @@ def validate_profile_payload(payload: Any) -> None:
         # during profile reconstruction — its existing test
         # coverage validates the field set + per-field types.
 
-    if "trace" in payload:
-        _check_trace(payload["trace"])
+    _check_trace(payload.get("trace"))
 
 
 # ──────────────────────────────────────────────────────────────────
@@ -223,9 +222,15 @@ def _check_trace(value: Any) -> None:
 
     ``TraceProfileConfig.from_dict`` is the single rule -- duplicating
     its vocabulary here would be a second place for it to drift.
+
+    ``None`` means the key was absent, which is legal: taking the
+    absent-check here rather than at the call site keeps
+    ``validate_profile_payload`` at its complexity baseline.
     """
     from shared.plugins.subagent.config import TraceProfileConfig
 
+    if value is None:          # key absent — the block is optional
+        return
     if not isinstance(value, dict):
         raise ValueError(
             f"profile_payload.trace must be a dict, "

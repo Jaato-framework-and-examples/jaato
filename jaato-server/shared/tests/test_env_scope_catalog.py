@@ -48,6 +48,13 @@ from shared.env_scope import (
 )
 from shared.scaffold import introspect
 
+# The plugin NAME list comes from the directory listing, never from a live
+# ``registry.discover()``: discovery imports every plugin, so an unrelated
+# dependency skew (an MCP SDK version bump, say) would fail this guard for a
+# reason that has nothing to do with the catalog. ``builtin_plugin_names`` is
+# the same ``pkgutil`` read the entry-point trust policy uses.
+from shared.plugins.entry_point_trust import builtin_plugin_names
+
 
 # --------------------------------------------------------------------------
 # Reversions -- see test_every_guard_detects_its_own_reversion.py.  A guard
@@ -70,6 +77,14 @@ REVERSIONS = [
         because=("a session knob relabelled `host` drops out of the ratchet "
                  "-- the exact way a catalog is 'fixed' into a lie"),
         test="test_ratchet_matches_the_catalog",
+    ),
+    Reversion(
+        target="jaato-server/shared/env_scope.py",
+        find='        "A", "tools.parallel",',
+        replace='        "A", "plugin_configs.no_such_plugin.parallel",',
+        because=("a proposal aimed at a plugin nobody ships is a typo, and "
+                 "a typo in a plan is a plan nobody can follow"),
+        test="test_proposed_keys_name_a_real_owner",
     ),
 ]
 
@@ -184,10 +199,64 @@ def test_ratchet_matches_the_catalog():
 
 def test_ratchet_tiers_are_from_the_assessment():
     """Only the three tiers the assessment defines."""
-    bad = {n: t for n, t in AWAITING_TYPED_KEY.items() if t not in ("A", "B", "E")}
+    bad = {n: a.tier for n, a in AWAITING_TYPED_KEY.items()
+           if a.tier not in ("A", "B", "E")}
     assert not bad, (
         f"unknown tier(s) {bad}. A = agent-behaviour knob, B = plugin knob, "
         f"E = credential (needs the policy decided, not a default)."
+    )
+
+
+def test_every_ratchet_entry_proposes_a_home():
+    """A debt entry must say where the key should go.
+
+    "This wants a typed key" without "and it belongs here" is a
+    complaint, not a plan -- and it is what makes a ratchet sit at the
+    same size for a year. The proposal is also the reviewable claim: a
+    wrong `proposed_key` can be argued with, a missing one cannot.
+    """
+    silent = sorted(n for n, a in AWAITING_TYPED_KEY.items()
+                    if not a.proposed_key.strip())
+    assert not silent, (
+        "ratchet entries with no proposed_key:\n"
+        + "\n".join(f"  - {n}" for n in silent)
+    )
+
+
+def test_proposed_keys_name_a_real_owner():
+    """The proposal's SHAPE is checked even though it cannot resolve.
+
+    A ``proposed_key`` names something that does not exist yet -- that
+    is what makes it a proposal -- so the guard cannot resolve it the
+    way it resolves ``typed_key``. What it CAN check is that the owner
+    exists: ``plugin_configs.<x>`` must name a real plugin or provider,
+    and a top-level proposal must not collide with an unrelated
+    existing field. A proposal aimed at a plugin nobody ships is a
+    typo, and a typo in a plan is a plan nobody can follow.
+    """
+    from shared.plugins.subagent import config as cfg
+
+    known_plugins = set(builtin_plugin_names())
+    profile_fields = {f.name for f in dataclasses.fields(cfg.SubagentProfile)}
+    bad = []
+    for name in sorted(AWAITING_TYPED_KEY):
+        key = AWAITING_TYPED_KEY[name].proposed_key
+        if key.startswith("plugin_configs."):
+            owner = key.split(".")[1]
+            if (owner not in known_plugins
+                    and introspect.resolve_provider(owner) is None):
+                bad.append((name, key, f"no plugin or provider {owner!r}"))
+            continue
+        head = key.split(".")[0]
+        # A top-level proposal is either a NEW block (tools:, retry:) or an
+        # extension of one that exists (trace.log_dir). Both are fine; a
+        # proposal that lands on an unrelated existing scalar is not.
+        if head in profile_fields and head not in ("trace", "gc", "cache"):
+            bad.append((name, key, f"collides with existing profile field {head!r}"))
+
+    assert not bad, (
+        "proposed_key entries that name nothing usable:\n"
+        + "\n".join(f"  - {n}: {k}  ({why})" for n, k, why in bad)
     )
 
 
@@ -272,7 +341,7 @@ def test_every_typed_key_resolves():
             if introspect.resolve_provider(plugin) is not None:
                 if not _provider_knob_exists(plugin, rest):
                     unresolved.append((name, key, f"no such {plugin} knob"))
-            elif plugin not in introspect.plugins():
+            elif plugin not in builtin_plugin_names():
                 unresolved.append((name, key, "no such plugin"))
         elif _profile_field_type(key) is None:
             unresolved.append((name, key, "no such profile field"))
