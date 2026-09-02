@@ -86,6 +86,14 @@ REVERSIONS = [
                  "a typo in a plan is a plan nobody can follow"),
         test="test_proposed_keys_name_a_real_owner",
     ),
+    Reversion(
+        target="jaato-server/shared/env_scope.py",
+        find='    "PERMISSION_WEBHOOK_TOKEN": EnvClass(SESSION, "plugin_configs.permission.channel_config.auth_token",',
+        replace='    "PERMISSION_WEBHOOK_TOKEN": EnvClass(SESSION, "plugin_configs.permission.no_such_block.nonexistent",',
+        because=("a non-provider plugin key was verified only as far as the "
+                 "plugin NAME, so a bogus knob path passed as coverage"),
+        test="test_every_typed_key_resolves",
+    ),
 ]
 
 
@@ -317,6 +325,35 @@ def _provider_knob_exists(provider: str, knob_path: str) -> bool:
     return False
 
 
+def _plugin_knob_unresolved(plugin: str, knob_path: str) -> Optional[str]:
+    """Why *knob_path* does not resolve against *plugin*, or ``None``.
+
+    THE HALF THIS GUARD USED TO MISS.  Provider keys were verified down to
+    the knob, but a non-provider plugin key was verified only as far as the
+    plugin NAME -- so ``plugin_configs.permission.no_such_block.nonexistent``
+    passed. That is exactly the "unverified claim is indistinguishable from
+    a wrong one" failure this module's docstring is about, and every key the
+    correcting commit added (permission, mermaid_formatter, todo) fell in
+    the unverified half.
+
+    Every segment must be a key the plugin actually consumes, so a nested
+    path (``channel_config.auth_token``) is checked at both levels rather
+    than only at its root.
+
+    A plugin that reads no config at all is reported as unverifiable
+    rather than passed: "we could not check" and "we checked and it is
+    fine" are different answers, and only one of them is coverage.
+    """
+    known = introspect.plugin_config_keys(plugin)
+    if not known:
+        return (f"{plugin} declares no config surface to resolve against "
+                f"(cannot verify — not the same as verified)")
+    missing = [seg for seg in knob_path.split(".") if seg not in known]
+    if missing:
+        return f"{plugin} reads no config key(s) {missing}"
+    return None
+
+
 def test_every_typed_key_resolves():
     """A ``typed_key`` must name something that exists.
 
@@ -343,6 +380,10 @@ def test_every_typed_key_resolves():
                     unresolved.append((name, key, f"no such {plugin} knob"))
             elif plugin not in builtin_plugin_names():
                 unresolved.append((name, key, "no such plugin"))
+            else:
+                why = _plugin_knob_unresolved(plugin, rest)
+                if why:
+                    unresolved.append((name, key, why))
         elif _profile_field_type(key) is None:
             unresolved.append((name, key, "no such profile field"))
 
