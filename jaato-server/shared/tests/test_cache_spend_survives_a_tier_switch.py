@@ -372,7 +372,15 @@ class TestTheChainCarriesIt:
     the wire.  Verified by removing each in turn.
     """
 
-    FIELDS = ("spend_cache_read_tokens", "spend_cache_creation_tokens")
+    #: Every BILLED figure the chain must carry.  The prompt/output pair
+    #: joined it in jaato #802: the session had accumulated
+    #: ``spend_prompt`` / ``spend_output`` per response all along, but
+    #: neither reached the wire, so a consumer had only the LAST
+    #: response's ``prompt_tokens`` / ``output_tokens`` and summing those
+    #: across turns undercounts for exactly the reason measured of
+    #: ``total_tokens``.  Same chain, same links, same guard.
+    FIELDS = ("spend_cache_read_tokens", "spend_cache_creation_tokens",
+              "spend_prompt_tokens", "spend_output_tokens")
 
     @staticmethod
     def _tree(path):
@@ -441,8 +449,14 @@ class TestTheChainCarriesIt:
     def test_the_runner_reads_it_from_turn_accounting(self):
         """The other end of the same file: the session's turn dict."""
         reads = self._get_string_args("jaato-server/server/runner/rpc.py")
-        assert "spend_cache_read" in reads
-        assert "spend_cache_creation" in reads
+        # The accounting keys are NOT the wire names — the session's turn
+        # dict predates them — so these are spelled out rather than derived.
+        for key in ("spend_cache_read", "spend_cache_creation",
+                    "spend_prompt", "spend_output"):
+            assert key in reads, (
+                f"the runner never reads {key!r} out of turn accounting, so "
+                f"the wire field it feeds is always None"
+            )
 
     def test_the_daemon_unpacks_it_from_the_wire(self):
         keys = self._get_string_args("jaato-server/server/core.py")
@@ -468,17 +482,27 @@ class TestTheChainCarriesIt:
             prompt_tokens=1, output_tokens=1, total_tokens=2,
             spend_cache_read_tokens=58_000,
             spend_cache_creation_tokens=1_024,
+            spend_prompt_tokens=91_000,
+            spend_output_tokens=2_048,
         )
         assert usage.spend_cache_read_tokens == 58_000
         assert usage.spend_cache_creation_tokens == 1_024
+        # The billed split, distinct from prompt_tokens/output_tokens above,
+        # which are this turn's LAST response only.
+        assert usage.spend_prompt_tokens == 91_000
+        assert usage.spend_output_tokens == 2_048
+        assert usage.prompt_tokens == 1
 
     def test_the_fields_default_to_none_not_zero(self):
         from jaato_sdk.events import UsageBreakdown
 
         usage = UsageBreakdown(
             prompt_tokens=1, output_tokens=1, total_tokens=2)
-        assert usage.spend_cache_read_tokens is None
-        assert usage.spend_cache_creation_tokens is None
+        for field in self.FIELDS:
+            assert getattr(usage, field) is None, (
+                f"{field} defaults to 0, which claims the provider reported "
+                f"none spent rather than reported nothing"
+            )
 
 
 class TestTierAttribution:

@@ -3527,6 +3527,8 @@ class RunnerRPC:
                 cache_read_tokens=last_turn.get("cache_read"),
                 cache_creation_tokens=last_turn.get("cache_creation"),
                 spend_total_tokens=last_turn.get("spend_total"),
+                spend_prompt_tokens=last_turn.get("spend_prompt"),
+                spend_output_tokens=last_turn.get("spend_output"),
                 spend_cache_read_tokens=last_turn.get("spend_cache_read"),
                 spend_cache_creation_tokens=last_turn.get(
                     "spend_cache_creation"),
@@ -4922,6 +4924,28 @@ class RunnerRPC:
 # ----------------------------------------------------------------------
 
 
+def _spend(value: Optional[int]) -> Optional[int]:
+    """Coerce a BILLED token figure for the wire, keeping ``None``.
+
+    ``None`` means the provider reported no such figure; ``0`` means it
+    reported none spent.  Collapsing the two would make a turn on a
+    provider that reports no cache traffic indistinguishable from a turn
+    that genuinely used none.
+
+    Extracted because the payload repeats it once per spend field, and
+    the fifth repetition (jaato #802) pushed the enclosing forwarder past
+    the complexity ceiling.  One coercion also means a sixth field cannot
+    be added with subtly different semantics.
+
+    Args:
+        value: The figure, or ``None`` when unreported.
+
+    Returns:
+        ``int(value)``, or ``None``.
+    """
+    return int(value) if value is not None else None
+
+
 class _AgentUIHooksNotificationShim:
     """Runner-side ``AgentUIHooks`` shim that emits NotificationFrames.
 
@@ -5238,6 +5262,8 @@ class _AgentUIHooksNotificationShim:
         cache_read_tokens: Optional[int] = None,
         cache_creation_tokens: Optional[int] = None,
         spend_total_tokens: Optional[int] = None,
+        spend_prompt_tokens: Optional[int] = None,
+        spend_output_tokens: Optional[int] = None,
         spend_cache_read_tokens: Optional[int] = None,
         spend_cache_creation_tokens: Optional[int] = None,
         cost_usd: Optional[float] = None,
@@ -5261,20 +5287,15 @@ class _AgentUIHooksNotificationShim:
                 payload={
                     "agent_id": str(agent_id or ""),
                     "turn_number": int(turn_number or 0),
-                    "spend_total_tokens": (
-                        int(spend_total_tokens)
-                        if spend_total_tokens is not None else None
-                    ),
-                    # None stays None here too — "no cache usage reported"
-                    # is not "zero cache traffic".
-                    "spend_cache_read_tokens": (
-                        int(spend_cache_read_tokens)
-                        if spend_cache_read_tokens is not None else None
-                    ),
-                    "spend_cache_creation_tokens": (
-                        int(spend_cache_creation_tokens)
-                        if spend_cache_creation_tokens is not None else None
-                    ),
+                    # Every spend figure keeps None as None: "the provider
+                    # reported nothing" is not "it reported zero", and a 0
+                    # here would be indistinguishable from a real free turn.
+                    "spend_total_tokens": _spend(spend_total_tokens),
+                    "spend_prompt_tokens": _spend(spend_prompt_tokens),
+                    "spend_output_tokens": _spend(spend_output_tokens),
+                    "spend_cache_read_tokens": _spend(spend_cache_read_tokens),
+                    "spend_cache_creation_tokens": _spend(
+                        spend_cache_creation_tokens),
                     "prompt_tokens": int(prompt_tokens or 0),
                     "output_tokens": int(output_tokens or 0),
                     "total_tokens": int(total_tokens or 0),

@@ -29,8 +29,14 @@ class _Usage:
     """Shape of the usage object carried on a TurnCompletedEvent."""
 
     def __init__(self, prompt=0, output=0, cost=0.0):
+        # ``spend_*`` is what the runner records: the figures BILLED across
+        # the turn.  ``prompt_tokens`` / ``output_tokens`` are the turn's
+        # LAST response only and are carried here too, so a test asserting
+        # on spend cannot pass by accidentally reading the level (#802).
         self.prompt_tokens = prompt
         self.output_tokens = output
+        self.spend_prompt_tokens = prompt
+        self.spend_output_tokens = output
         self.cost_usd = cost
 
 
@@ -77,7 +83,7 @@ def test_a_blocked_arm_reports_what_it_spent() -> None:
         "ceiling is evaluated against this number, so under-reporting it "
         "makes the ceiling unenforceable"
     )
-    assert result.usage["prompt_tokens"] == 1900
+    assert result.usage["spend_prompt_tokens"] == 1900
     assert result.turns == 2, "turns completed before the cut must survive it"
 
 
@@ -104,7 +110,7 @@ def test_usage_is_never_left_unset_on_a_blocked_result() -> None:
     result = _arm_result()
     _record_partial_usage(result, _TurnAccumulator())
     assert isinstance(result.usage, dict)
-    for key in ("prompt_tokens", "output_tokens", "cost_usd"):
+    for key in ("spend_prompt_tokens", "spend_output_tokens", "cost_usd"):
         assert key in result.usage, f"{key} missing from a blocked arm's usage"
 
 

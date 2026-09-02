@@ -1399,6 +1399,8 @@ class JaatoServer:
         thinking_tokens: Optional[int] = None,
         cost_usd_override: Optional[float] = None,
         spend_total_tokens: Optional[int] = None,
+        spend_prompt_tokens: Optional[int] = None,
+        spend_output_tokens: Optional[int] = None,
         spend_cache_read_tokens: Optional[int] = None,
         spend_cache_creation_tokens: Optional[int] = None,
     ) -> "UsageBreakdown":
@@ -1442,6 +1444,8 @@ class JaatoServer:
             thinking_tokens=thinking_tokens,
             cost_usd=cost,
             spend_total_tokens=spend_total_tokens,
+            spend_prompt_tokens=spend_prompt_tokens,
+            spend_output_tokens=spend_output_tokens,
             spend_cache_read_tokens=spend_cache_read_tokens,
             spend_cache_creation_tokens=spend_cache_creation_tokens,
         )
@@ -3340,6 +3344,8 @@ class JaatoServer:
                                         function_calls, cache_read_tokens=None,
                                         cache_creation_tokens=None,
                                         spend_total_tokens=None,
+                                        spend_prompt_tokens=None,
+                                        spend_output_tokens=None,
                                         spend_cache_read_tokens=None,
                                         spend_cache_creation_tokens=None,
                                         cost_usd=None,
@@ -3407,6 +3413,8 @@ class JaatoServer:
                         cache_read_tokens=cache_read_tokens,
                         cache_creation_tokens=cache_creation_tokens,
                         spend_total_tokens=spend_total_tokens,
+                        spend_prompt_tokens=spend_prompt_tokens,
+                        spend_output_tokens=spend_output_tokens,
                         spend_cache_read_tokens=spend_cache_read_tokens,
                         spend_cache_creation_tokens=(
                             spend_cache_creation_tokens),
@@ -4955,6 +4963,10 @@ class JaatoServer:
                             cache_read_tokens=payload.get("cache_read_tokens"),
                             cache_creation_tokens=payload.get("cache_creation_tokens"),
                             spend_total_tokens=payload.get("spend_total_tokens"),
+                            spend_prompt_tokens=payload.get(
+                                "spend_prompt_tokens"),
+                            spend_output_tokens=payload.get(
+                                "spend_output_tokens"),
                             spend_cache_read_tokens=payload.get(
                                 "spend_cache_read_tokens"),
                             spend_cache_creation_tokens=payload.get(
