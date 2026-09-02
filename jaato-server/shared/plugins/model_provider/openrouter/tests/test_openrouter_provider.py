@@ -648,6 +648,98 @@ class TestAuthentication:
         assert headers.get(HEADER_APP_TITLE) == "Example App"
 
 
+class TestAppAttributionIdentity:
+    """Which APPLICATION the attribution headers name.
+
+    Before ``shared/app_identity.py`` every product built on the SDK sent
+    ``X-OpenRouter-Title: jaato``, so an integrator could not see their own
+    app on the OpenRouter dashboard.  These pin the four-tier precedence:
+    profile knob > ``JAATO_OPENROUTER_*`` env > the framework-stamped
+    application identity > jaato itself.
+    """
+
+    def _headers(self, extra=None, env=None):
+        """Initialize a provider and return the headers it would send."""
+        captured = {}
+
+        def fake_client_class(**kwargs):
+            captured.update(kwargs)
+            return MagicMock()
+
+        base_env = {"JAATO_OPENROUTER_API_KEY": "sk-or-test"}
+        base_env.update(env or {})
+        with patch.dict("os.environ", base_env, clear=True), patch(
+            "shared.plugins.model_provider.openrouter.provider."
+            "get_openai_client_class",
+            return_value=fake_client_class,
+        ):
+            OpenRouterProvider().initialize(
+                ProviderConfig(extra=dict(extra or {})),
+            )
+        return captured.get("default_headers") or {}
+
+    def test_unconfigured_still_reports_as_the_framework(self):
+        headers = self._headers()
+        assert headers.get(HEADER_APP_TITLE) == "jaato"
+        assert "jaato" in headers.get(HEADER_HTTP_REFERER, "").lower()
+
+    def test_stamped_identity_names_the_application(self):
+        headers = self._headers(
+            extra={"app_identity": {
+                "name": "Acme Copilot",
+                "url": "https://acme.example",
+                "powered_by": True,
+            }},
+        )
+        assert headers.get(HEADER_APP_TITLE) == "Acme Copilot (powered by jaato)"
+        assert headers.get(HEADER_HTTP_REFERER) == "https://acme.example"
+
+    def test_app_can_opt_out_of_the_powered_by_suffix(self):
+        headers = self._headers(
+            extra={"app_identity": {"name": "Acme", "powered_by": False}},
+        )
+        assert headers.get(HEADER_APP_TITLE) == "Acme"
+
+    def test_app_env_names_the_application(self):
+        headers = self._headers(env={"JAATO_APP_NAME": "EnvApp"})
+        assert headers.get(HEADER_APP_TITLE) == "EnvApp (powered by jaato)"
+
+    def test_openrouter_env_outranks_the_identity(self):
+        headers = self._headers(
+            extra={"app_identity": {"name": "Acme"}},
+            env={"JAATO_OPENROUTER_APP_TITLE": "Narrower"},
+        )
+        assert headers.get(HEADER_APP_TITLE) == "Narrower"
+
+    def test_profile_knob_outranks_everything(self):
+        headers = self._headers(
+            extra={
+                "app_identity": {"name": "Acme"},
+                "app_title": "FromProfile",
+                "http_referer": "https://profile.example",
+            },
+            env={"JAATO_OPENROUTER_APP_TITLE": "FromEnv"},
+        )
+        assert headers.get(HEADER_APP_TITLE) == "FromProfile"
+        assert headers.get(HEADER_HTTP_REFERER) == "https://profile.example"
+
+    def test_empty_openrouter_env_still_suppresses_the_header(self):
+        # Long-standing opt-out: an explicitly empty env var means "send no
+        # header", and must not fall through to the identity tier.
+        headers = self._headers(
+            extra={"app_identity": {"name": "Acme"}},
+            env={"JAATO_OPENROUTER_APP_TITLE": ""},
+        )
+        assert HEADER_APP_TITLE not in headers
+
+    def test_header_injection_via_the_app_name_is_neutralised(self):
+        headers = self._headers(
+            extra={"app_identity": {"name": "Acme\r\nX-Evil: 1"}},
+        )
+        title = headers.get(HEADER_APP_TITLE, "")
+        assert "\r" not in title and "\n" not in title
+
+
 class TestExtraHeaders:
     """Tests for the ``extra_headers`` profile knob.
 

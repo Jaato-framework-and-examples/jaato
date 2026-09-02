@@ -145,6 +145,27 @@ class Awaiting:
 #: list from source and fails on any disagreement in either direction.
 CATALOG: Dict[str, EnvClass] = {
 
+    # ---- application identity (app attribution) -----------------------
+    # WHICH application is making these requests -- the product built on
+    # the SDK, not the framework.  ``host`` rather than ``session``: an
+    # application is a property of the deployment, and two sessions in one
+    # process disagreeing about who is spending the money would be a lie.
+    # Per-session attribution is a real need and is served by the typed
+    # provider knobs (``plugin_configs.openrouter.app_title`` /
+    # ``http_referer``), which outrank these.  See shared/app_identity.py.
+    "JAATO_APP_NAME": EnvClass(HOST, None,
+        "names the application embedding the framework; one app per "
+        "deployment, and the per-session need is served by the provider "
+        "knobs that outrank it"),
+    "JAATO_APP_POWERED_BY": EnvClass(HOST, None,
+        "whether app attribution appends '(powered by jaato)'; a property "
+        "of the product, not of a conversation"),
+    "JAATO_APP_URL": EnvClass(HOST, None,
+        "the embedding application's own site/repo, attributed upstream; "
+        "one app per deployment"),
+    "JAATO_APP_VERSION": EnvClass(HOST, None,
+        "the embedding application's own version; one app per deployment"),
+
     # ---- daemon / runner lifecycle -----------------------------------
     "JAATO_APPARMOR_COMPLAIN": EnvClass(HOST, None,
         "kernel policy load mode; a host-wide diagnostic posture"),

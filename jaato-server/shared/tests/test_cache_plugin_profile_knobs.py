@@ -262,6 +262,9 @@ class TestTheTwoMergesAgree:
         rt._provider_configs = {provider_name: _Config(extra=dict(base_extra))}
         rt._registry = None
         rt._config_root = None
+        # ``__init__`` sets this; with none set, ``_inject_session_extras``
+        # stamps no app identity and the extras stay what the merge made.
+        rt._app_identity = None
 
         rt.create_provider(
             'test-model',

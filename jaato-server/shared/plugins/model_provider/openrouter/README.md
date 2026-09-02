@@ -60,11 +60,31 @@ session profile overrides per session.
 | `JAATO_OPENROUTER_BASE_URL` | `https://openrouter.ai/api/v1` | Endpoint |
 | `JAATO_OPENROUTER_MODEL` | — | Default model |
 | `JAATO_OPENROUTER_CONTEXT_LENGTH` | catalog | Context-window override |
-| `JAATO_OPENROUTER_HTTP_REFERER` | `https://github.com/Jaato-framework-and-examples/jaato` | [App attribution](https://openrouter.ai/docs/app-attribution): site URL (required for rankings) |
-| `JAATO_OPENROUTER_APP_TITLE` | `jaato` | App attribution: display name |
+| `JAATO_OPENROUTER_HTTP_REFERER` | the application's URL | [App attribution](https://openrouter.ai/docs/app-attribution): site URL (required for rankings) |
+| `JAATO_OPENROUTER_APP_TITLE` | the application's name | App attribution: display name |
 | `JAATO_OPENROUTER_APP_CATEGORIES` | `cli-agent` | App attribution: comma-separated marketplace categories |
 | `JAATO_OPENROUTER_REQUEST_TIMEOUT` | `600` | Byte-level per-request deadline, seconds (`0` disables) |
 | `JAATO_OPENROUTER_STREAM_IDLE_TIMEOUT` | `300` | Streaming payload idle deadline, seconds (`0` disables) |
+
+### Naming your application
+
+The two attribution defaults above are **the application's**, not the
+framework's. Set `JAATO_APP_NAME` (plus optionally `JAATO_APP_URL` /
+`JAATO_APP_VERSION`) and every product built on the SDK reports under its own
+name instead of collapsing into jaato's row on the OpenRouter dashboard:
+
+```bash
+export JAATO_APP_NAME="Acme Copilot"
+export JAATO_APP_URL="https://acme.example"
+# → X-OpenRouter-Title: Acme Copilot (powered by jaato)
+# → HTTP-Referer:       https://acme.example
+```
+
+Set `JAATO_APP_POWERED_BY=false` to drop the suffix, or
+`JaatoRuntime(app_identity=AppIdentity(...))` to declare it in code. The
+per-session knobs below still outrank all of it. With nothing set, the
+headers are jaato's own, exactly as before. See
+[Application Identity](../../../../docs/design/app-identity.md).
 
 ### Profile `plugin_configs["openrouter"]`
 
@@ -75,8 +95,8 @@ plugin_configs:
   openrouter:
     # Top-level — auth / identity
     api_key: "sk-or-..."           # overrides env / stored credentials
-    http_referer: "https://..."    # HTTP-Referer header
-    app_title: "MyApp"             # X-OpenRouter-Title header
+    http_referer: "https://..."    # HTTP-Referer header (outranks JAATO_APP_URL)
+    app_title: "MyApp"             # X-OpenRouter-Title header (outranks JAATO_APP_NAME)
     app_categories: ["cli-agent"]  # X-OpenRouter-Categories header
                                    # (marketplace categories for rankings;
                                    # pass [] to opt out of category attribution)

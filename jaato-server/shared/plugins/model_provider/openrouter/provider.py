@@ -116,6 +116,8 @@ from .._prose_tools import (
     read_prose_tool_calls_quirk,
     rewrite_prose_tool_calls,
 )
+from shared.app_identity import AppIdentity, resolve_app_identity
+
 from .env import (
     DEFAULT_BASE_URL,
     DEFAULT_CONNECT_TIMEOUT,
@@ -173,6 +175,22 @@ REASONING_CAPABLE_HINTS = (
 # are silently dropped server-side — so the regex covers wire shape
 # only.  See https://openrouter.ai/docs/app-attribution.
 _CATEGORY_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
+
+
+def _resolve_identity(extra: Dict[str, Any]) -> AppIdentity:
+    """Resolve the application identity behind a provider config.
+
+    ``extra["app_identity"]`` is what ``JaatoRuntime._inject_session_extras``
+    stamps when an application named itself; it is absent for the framework's
+    own identity and for a provider constructed outside a session, in which
+    case the environment is consulted directly.  Split out of
+    ``initialize()`` so the branch does not add to that method's (already
+    baselined) complexity.
+    """
+    stamped = extra.get("app_identity")
+    if stamped:
+        return AppIdentity.from_dict(stamped)
+    return resolve_app_identity()
 
 
 def _validate_categories(categories: List[str]) -> List[str]:
@@ -397,6 +415,15 @@ class OpenRouterProvider(ModalityCapabilityMixin):
         self._base_url: str = DEFAULT_BASE_URL
         self._http_referer: str = ""
         self._app_title: str = ""
+
+        # The APPLICATION this provider is speaking for — the product built
+        # on the SDK, not the framework.  Resolved at initialize() from the
+        # identity the runtime stamped onto ``config.extra``, falling back to
+        # the environment.  Only used to derive the two attribution values
+        # above, but retained whole: a header that wants more than a display
+        # name (a ``User-Agent``, which AppIdentity already knows how to
+        # render) should not have to re-resolve it.
+        self._app_identity: Optional[AppIdentity] = None
 
         # Marketplace categories for OpenRouter's app rankings — emitted
         # as the ``X-OpenRouter-Categories`` header (comma-separated).
@@ -754,11 +781,21 @@ class OpenRouterProvider(ModalityCapabilityMixin):
         self._base_url = (
             _knob("base_url", layer=framework_overrides) or resolve_base_url()
         )
+        # App attribution, three tiers (highest first): the profile knob,
+        # the OpenRouter-specific env var, then the framework-resolved
+        # application identity — which is what makes a product built on the
+        # SDK report under ITS name rather than jaato's.  The identity is
+        # stamped onto ``config.extra`` per session by
+        # ``JaatoRuntime._inject_session_extras`` (not a profile knob, same
+        # as ``session_id``); absent that — a provider constructed outside a
+        # session — it is resolved from the environment here.
+        identity = _resolve_identity(config.extra)
+        self._app_identity = identity
         self._http_referer = (
-            config.extra.get("http_referer") or resolve_http_referer()
+            config.extra.get("http_referer") or resolve_http_referer(identity)
         )
         self._app_title = (
-            config.extra.get("app_title") or resolve_app_title()
+            config.extra.get("app_title") or resolve_app_title(identity)
         )
 
         # Marketplace categories — profile takes precedence over env

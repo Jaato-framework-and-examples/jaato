@@ -13,6 +13,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, TYPE_CHECKING
 
+from .app_identity import FRAMEWORK_IDENTITY, AppIdentity, resolve_app_identity
 from .token_accounting import TokenLedger
 from .instruction_token_cache import InstructionTokenCache
 from jaato_sdk.plugins.model_provider.types import (
@@ -459,7 +460,8 @@ class JaatoRuntime:
     def __init__(self, provider_name: str = "google_genai",
                  workspace_path: Optional[Path] = None,
                  config_root: Optional[str] = None,
-                 instruction_token_cache: Optional[InstructionTokenCache] = None):
+                 instruction_token_cache: Optional[InstructionTokenCache] = None,
+                 app_identity: Optional[AppIdentity] = None):
         """Initialize JaatoRuntime.
 
         Args:
@@ -480,11 +482,26 @@ class JaatoRuntime:
                 counts survive across session creates/restores within the same
                 daemon process.  When ``None``, a new per-runtime cache is
                 created.
+            app_identity: The APPLICATION this runtime speaks for — the
+                product built on the SDK, which upstream services should see
+                instead of the framework's own name (see
+                ``shared/app_identity.py``).  This is the programmatic
+                surface for an embedder; when ``None`` the identity is
+                resolved from ``JAATO_APP_*`` at provider-creation time and
+                falls back to jaato's own identity, so an unconfigured
+                deployment behaves exactly as before.
         """
         self._provider_name: str = provider_name
         self._workspace_path: Optional[Path] = workspace_path
         self._config_root: Optional[str] = config_root
         self._provider_config: Optional[ProviderConfig] = None
+
+        # Explicit application identity from the embedder, or ``None`` to
+        # resolve from the environment per provider creation.  NOT resolved
+        # eagerly here: the daemon overlays a session's ``env`` onto
+        # ``os.environ`` for the duration of a turn, so an identity frozen at
+        # construction would ignore a workspace that names its own app.
+        self._app_identity: Optional[AppIdentity] = app_identity
 
         # Multi-provider support: map provider_name -> ProviderConfig
         # Allows subagents to use different providers than the parent
@@ -1341,7 +1358,7 @@ class JaatoRuntime:
     ) -> 'ProviderConfig':
         """Stamp per-session context onto ``config.extra`` for the provider.
 
-        Three keys, three different provenances:
+        Four keys, four different provenances:
 
         * ``workspace_path`` / ``config_root`` — from the registry (or the
           runtime's stored ``_config_root`` when there is no registry).
@@ -1360,6 +1377,16 @@ class JaatoRuntime:
           therefore stamped independently of the two branches above: a
           session with neither registry nor config_root still has an
           identity worth putting on the wire.
+        * ``app_identity`` — WHICH APPLICATION is making these requests
+          (``shared/app_identity.py``): from the embedder's
+          ``app_identity=`` kwarg, else from ``JAATO_APP_*`` in the
+          environment as it stands at this call.  Stamped only when
+          something actually named an application; the framework's own
+          identity is left implicit so an unconfigured deployment's config
+          is byte-identical to what it was before app identity existed.
+          Resolved here rather than at construction because the daemon
+          overlays a session's ``env`` for the duration of a turn, and a
+          workspace that names its own app should be attributed to it.
 
         Extracted from ``create_provider`` so that method stays under its
         complexity baseline; the behaviour is unchanged.
@@ -1387,6 +1414,23 @@ class JaatoRuntime:
 
         if session_id:
             extra['session_id'] = session_id
+
+        # ``app_identity`` — WHICH APPLICATION is making these requests.
+        # Not a profile knob and not per-session in spirit (see
+        # ``shared/app_identity.py``): it is the embedder's explicit
+        # identity, else whatever ``JAATO_APP_*`` says under the session env
+        # in force right now.  Stamped as a plain dict so every provider can
+        # consume it without importing the dataclass.  A provider-specific
+        # knob (``plugin_configs.openrouter.app_title``) still outranks it,
+        # because the profile merge below runs after this stamp.
+        #
+        # The framework's OWN identity is deliberately not stamped: nothing
+        # named an application, so there is nothing to say that a provider
+        # falling back to its own defaults does not already say.  That keeps
+        # an unconfigured deployment's config byte-identical to before.
+        identity = resolve_app_identity(self._app_identity)
+        if identity != FRAMEWORK_IDENTITY:
+            extra['app_identity'] = identity.to_dict()
 
         return replace(config, extra=extra) if extra != config.extra else config
 

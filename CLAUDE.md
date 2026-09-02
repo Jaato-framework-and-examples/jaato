@@ -178,6 +178,47 @@ When model returns multiple function calls, jaato executes them in parallel usin
 - Maximum 8 concurrent tools per turn
 - Thread-safe callbacks via thread-local storage
 
+### Application Identity (naming the app, not the framework)
+
+Anything built on the SDK used to introduce itself upstream as **jaato** —
+the framework's name and repo were hardcoded as OpenRouter's app-attribution
+headers, so every integrator's harness collapsed into one row on the
+dashboard. `shared/app_identity.py` separates the two: `AppIdentity` is the
+*application*, and the framework rides along in a `(powered by jaato)` suffix.
+
+```bash
+export JAATO_APP_NAME="Acme Copilot"
+export JAATO_APP_URL="https://acme.example"
+export JAATO_APP_VERSION="1.4.0"
+# → X-OpenRouter-Title: Acme Copilot (powered by jaato)
+# → HTTP-Referer:       https://acme.example
+```
+
+```python
+from shared.app_identity import AppIdentity
+runtime = JaatoRuntime(app_identity=AppIdentity(name="Acme Copilot",
+                                                url="https://acme.example",
+                                                version="1.4.0"))
+```
+
+Precedence, highest first:
+
+| # | Surface | Scope |
+|---|---------|-------|
+| 1 | `plugin_configs.openrouter.app_title` / `http_referer` | one session |
+| 2 | `JAATO_OPENROUTER_APP_TITLE` / `JAATO_OPENROUTER_HTTP_REFERER` | provider-specific env |
+| 3 | `JaatoRuntime(app_identity=...)` | the embedding process |
+| 4 | `JAATO_APP_*` | deployment (process env, workspace `.env`, a profile's `env:` map) |
+
+With none of them set the identity is the framework's own and the provider
+config is byte-identical to before — an unconfigured checkout still reports as
+`jaato`. `JAATO_APP_POWERED_BY=false` drops the suffix; every field is sanitised
+(CR/LF stripped, length-capped) because these strings become HTTP headers.
+`AppIdentity.user_agent()` (`Acme-Copilot/1.4.0 (powered by jaato/0.7.0)`) is
+the general form for providers that gain a `User-Agent` later. Full rationale
+— including why the env vars are `host`-scoped and why there is no typed
+profile block — in [Application Identity](docs/design/app-identity.md).
+
 ### Agent Profiles
 
 Sessions can be created with a predefined agent profile that configures model, provider, plugins, and GC strategy. Profiles are YAML files in `.jaato/profiles/` (preferred; JSON is also accepted).
@@ -1003,7 +1044,7 @@ plugin_configs:
 
 | Layer | Keys | Purpose |
 |-------|------|---------|
-| top-level | `api_key`, `http_referer`, `app_title`, `app_categories`, `extra_headers` | auth / identity. `app_categories` (`List[str]`) is jaato's hook into [OpenRouter's app marketplace](https://openrouter.ai/docs/app-attribution) — emitted as the `X-OpenRouter-Categories` header. Default is `["cli-agent"]` (jaato is a terminal-driven agentic tool orchestrator); pass `[]` to opt out of category attribution entirely. Validated strictly: lowercase hyphen-separated slugs, ≤30 chars each, ≤5 entries; unrecognized categories are silently dropped server-side. `extra_headers` (`Dict[str,str]`) is the hook for OpenRouter's [provider-specific beta headers](https://openrouter.ai/docs/features/provider-routing#provider-specific-headers) — Anthropic `x-anthropic-beta` is the canonical case (`fine-grained-tool-streaming-2025-05-14`, `interleaved-thinking-2025-05-14`, `structured-outputs-2025-11-13`). Both merge into the OpenAI client's `default_headers`; profile values win on key collisions. |
+| top-level | `api_key`, `http_referer`, `app_title`, `app_categories`, `extra_headers` | auth / identity. `http_referer` / `app_title` are the highest tier of app attribution: unset, they fall back to `JAATO_OPENROUTER_*` and then to the resolved [application identity](#application-identity-naming-the-app-not-the-framework) (`JAATO_APP_NAME` → `"<app> (powered by jaato)"`), and finally to jaato's own name. `app_categories` (`List[str]`) is jaato's hook into [OpenRouter's app marketplace](https://openrouter.ai/docs/app-attribution) — emitted as the `X-OpenRouter-Categories` header. Default is `["cli-agent"]` (jaato is a terminal-driven agentic tool orchestrator); pass `[]` to opt out of category attribution entirely. Validated strictly: lowercase hyphen-separated slugs, ≤30 chars each, ≤5 entries; unrecognized categories are silently dropped server-side. `extra_headers` (`Dict[str,str]`) is the hook for OpenRouter's [provider-specific beta headers](https://openrouter.ai/docs/features/provider-routing#provider-specific-headers) — Anthropic `x-anthropic-beta` is the canonical case (`fine-grained-tool-streaming-2025-05-14`, `interleaved-thinking-2025-05-14`, `structured-outputs-2025-11-13`). Both merge into the OpenAI client's `default_headers`; profile values win on key collisions. |
 | `api_params` | `temperature`, `top_p`, `top_k`, `max_tokens`, `models`, `service_tier`, `enable_thinking`, `thinking_budget`, `thinking_level`, `cache_prompt`, `cache_ttl`, `strict_tools` | OpenAI Chat Completions body fields. `models` is OpenRouter's request-level cross-model fallback list (sibling of `model`; OpenRouter walks candidates on failure). `service_tier` (`auto` / `default` / `flex` / `priority` / `scale`) is the OpenAI-style processing-tier selector, forwarded to tier-supporting upstreams (OpenAI, Gemini, ...) per [service tiers](https://openrouter.ai/docs/guides/features/service-tiers) — `flex` trades latency for ~50% off, `priority` the reverse; the response reports the tier actually used. `thinking_*` keys mirror Anthropic / Antigravity; when both `thinking_level` and `thinking_budget` are set, `level` wins (more portable across upstreams). `cache_prompt: "auto"` (default) places `cache_control: {type: ephemeral}` breakpoints on the system block and last tool definition for explicit-cache upstreams (Anthropic, Gemini 1.5+/2.5+/3+); other upstreams (OpenAI, DeepSeek, Grok) cache automatically and need no client annotation. Response-side parsing of `prompt_tokens_details.cached_tokens` / `cache_creation_input_tokens` / `cost` is unconditional. `strict_tools: true` (server 0.6.118+) emits `"strict": true` as a sibling of `parameters` in each tool definition; OpenRouter forwards to supported upstreams (Sonnet 4.5 / Opus 4.1+, GPT-4o+, Gemini, OSS, Fireworks per [structured outputs list](https://openrouter.ai/docs/guides/features/structured-outputs)) for grammar-constrained tool-arg sampling. Required for cascade-determinism use cases (see `feedback_cascade_completion_schemas_require_strict_model_support` memory); the framework does NOT auto-rewrite schemas to satisfy OpenAI's strict-mode requirements (kb authors own schema shape — `additionalProperties: false` on every object, exhaustive `required` arrays, no `oneOf`/`anyOf` if you enable strict). |
 | `routing` | any [provider routing](https://openrouter.ai/docs/features/provider-routing) key (`order`, `allow_fallbacks`, `require_parameters`, `data_collection`, `ignore`, `only`, `quantizations`, `sort` (string or `{by, partition}`), `zdr`, `enforce_distillable_text`, `max_price`, `preferred_min_throughput`, `preferred_max_latency`, ...) | constrains which upstream host serves a request. Composes with `model: "openrouter/auto"` (auto picks model, routing constrains hosts) and `api_params.models` (cross-model fallback list, routing constrains providers across all of them). Opaque pass-through — new routing keys land automatically. |
 | `framework_overrides` | `context_length`, `base_url`, `connect_timeout`, `request_timeout`, `stream_idle_timeout` | rare escape hatches; normally context length is discovered from the OpenRouter catalog at connect time. The three deadlines are what bounds a single request (#732) — before them, a stalled upstream left the provider waiting forever and delegated the timeout to whoever sat above it. `connect_timeout` (15s) and `request_timeout` (600s, httpx read/write/pool) are byte-level; `stream_idle_timeout` (300s) is *payload*-level, enforced by a watchdog around the streaming chunk loop, because OpenRouter's `: OPENROUTER PROCESSING` keep-alive comments reset httpx's read clock while no chunk is ever yielded. On expiry the provider closes the transport and raises `StallTimeoutError` (a retryable `InfrastructureError`), so `with_retry` handles it like any other transient. Each accepts `0` to disable. The OpenAI SDK's own `max_retries` is pinned to 0 — the framework owns retries, and a hidden second budget would triple every deadline. |
@@ -1234,6 +1275,10 @@ covers it, where one exists. `jaato-scaffold explain env` renders the tags;
 
 | Variable | Purpose |
 |----------|---------|
+| `JAATO_APP_NAME` | Display name of the **application** built on the framework, used for upstream app attribution (today: OpenRouter's `X-OpenRouter-Title`). Unset means jaato attributes as itself, exactly as before. See [Application Identity](#application-identity-naming-the-app-not-the-framework). |
+| `JAATO_APP_URL` | The application's own site/repo — becomes the attributed `HTTP-Referer`. Falls back to the framework's repository. |
+| `JAATO_APP_VERSION` | The application's own version (not the framework's); used by `AppIdentity.user_agent()`. |
+| `JAATO_APP_POWERED_BY` | Whether attribution appends `(powered by jaato)` (default `true`). Set `false` for a white-labelled product. |
 | `AI_USE_CHAT_FUNCTIONS` | Enable function calling mode (`1`/`true`) |
 | `LEDGER_PATH` | Output path for token accounting JSONL |
 | `JAATO_GC_THRESHOLD` | GC trigger threshold % (default: 80.0) |
@@ -1434,6 +1479,7 @@ This is not optional cleanup — treat missing or inaccurate docstrings as a def
 - [OpenTelemetry Design](docs/opentelemetry-design.md) - Comprehensive OTel tracing integration
 - [Reliability Policies Config](docs/reliability-policies-config.md) - JSON schema, per-tool thresholds, prerequisite policies, usage examples
 - [Daemon Extensions](docs/design/daemon-extensions.md) - Extension points for external packages (session hooks, WS interceptors, custom aspects, remote handlers)
+- [Application Identity](docs/design/app-identity.md) - Naming the application an integrator built, rather than reporting every SDK-based harness upstream as "jaato". `AppIdentity` + the four-tier precedence (provider knob → provider env → `JaatoRuntime(app_identity=)` → `JAATO_APP_*`), the `(powered by jaato)` suffix, header-safety sanitisation, and why the env vars are `host`-scoped.
 - [Env Vars vs Profile Keys](docs/design/env-vars-vs-profile-keys.md) - Which of the 186 env vars earned a typed profile/`plugin_configs` key, and which are correctly env-only. The tagged catalog lives in `shared/env_scope.py` (scope: `session` / `host` / `ambient` / `internal`, plus the typed key where one exists) and is enforced by `test_env_scope_catalog.py`; 38 session-scoped knobs with no typed key sit in a may-only-shrink ratchet, each carrying a tier and a **proposed** key (`explain env untyped` prints both). Includes the credential policy for the three providers whose peers expose an `api_key` knob and they don't.
 - [Payload-Schema Conventions](docs/design/payload-schema-conventions.md) - Symmetric authoring guide for `spawn_payload_schema` (input boundary) and `completion_payload_schema` (output boundary). Mirror prefetch required-keys; always carry `warnings[]` / `errors[]` escape hatches; persona ↔ schema consistency check; canonical-hash strip rules; `agent_params` interaction with agent-continuity (§6).
 - [Competitor Memory Systems](docs/design/competitor-memory-systems.md) - Survey of nine agent-memory products, sorted by what a *framework* owes: pattern (nothing) / seam (an extension point) / fidelity (a fix) / not ours. Records which items were already expressible as cascade patterns, which memory hot paths are not pluggable, and why the pattern corpus needs `certify/`-style contract tests run against `main`.
