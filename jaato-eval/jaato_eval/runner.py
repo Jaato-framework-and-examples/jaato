@@ -55,8 +55,23 @@ from .verdict import Verdict
 #: ``total_tokens`` is deliberately excluded: for a prompt-inclusive
 #: provider it is the end-of-turn CONTEXT SIZE, not spend, so summing it
 #: across turns overcounts.  ``spend_total_tokens`` is the billed figure.
+#:
+#: The cache pair follows the same rule, and used to break it.
+#: ``cache_read_tokens`` / ``cache_creation_tokens`` are the turn's LAST
+#: RESPONSE's figures — a level, not spend — so adding them across turns
+#: produced neither.  The SDK documents the distinction as load-bearing
+#: (``jaato_sdk.events``): under ``model_tiers`` a mid-turn tier switch
+#: re-reads the whole prefix cold at the new model, and the last-response
+#: figures hide exactly that miss.  The fingerprint of the bug was visible
+#: in the archived corpus — three of four Gemini arms reported
+#: ``cache_creation`` equal to ``cache_read`` to the token, which is one
+#: level reading copied into two fields, not two independent billed sums
+#: (jaato #800).  ``spend_cache_read_tokens`` /
+#: ``spend_cache_creation_tokens`` are already summed over the turn's
+#: responses, the same shape as ``spend_total_tokens``, so summing them
+#: across turns is the right operation.
 _SUMMED_USAGE = ("prompt_tokens", "output_tokens", "spend_total_tokens",
-                 "cache_read_tokens", "cache_creation_tokens",
+                 "spend_cache_read_tokens", "spend_cache_creation_tokens",
                  "reasoning_tokens", "thinking_tokens")
 
 
