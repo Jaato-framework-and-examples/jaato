@@ -645,6 +645,19 @@ class SessionManager:
             storage_path: Override for session storage path.
         """
 
+        # Freeze the revive posture (issue #787) BEFORE any session exists.
+        # ``JAATO_REVIVE_PROFILE`` / ``JAATO_REVIVE_PERSONA`` are ``host``-
+        # scoped: one answer for this process, decided by whoever started it.
+        # Read live per revive they would NOT be, because
+        # ``JaatoServer._with_session_env`` copies every key of a session's
+        # workspace ``.env`` into the daemon-global ``os.environ`` for that
+        # session's turn, with no scope filter — so one workspace could set
+        # the posture for every other session's revive, and
+        # ``PERSONA=disk`` re-runs prefetch scripts.  Capturing here removes
+        # the window instead of narrowing it; see ``server/revive_policy.py``.
+        from server import revive_policy
+        revive_policy.capture()
+
         # Initialize session plugin for persistence.
         # storage_path stays relative (e.g. ".jaato/sessions") — it is
         # resolved per-workspace via _session_storage_dir() at each call site.

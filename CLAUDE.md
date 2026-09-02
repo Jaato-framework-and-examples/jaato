@@ -269,6 +269,15 @@ was persisted, so records written before 2.8 revive exactly as before. The
 rationale for these being env vars rather than profile keys, and the matrix
 of which combination each workflow needs, live in `server/revive_policy.py`.
 
+Both are **per-process, not per-invocation**: they are resolved once when the
+`SessionManager` is constructed and held for the life of the daemon, so
+changing the posture means restarting the daemon and the new posture then
+applies to *every* session that revives until the next restart. Freezing is
+also what makes their `host` scope true — read live they would be settable
+process-wide from any single workspace's `.env`, because
+`JaatoServer._with_session_env` overlays every key of it onto the daemon's
+`os.environ` for the duration of a turn.
+
 **Contract for persona authors: never pass a credential as an
 `agent_param`.** They are substituted into the persona by `resolve_agent`,
 so they already reach the model in its system prompt — and the rendered

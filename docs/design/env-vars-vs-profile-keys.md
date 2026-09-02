@@ -113,6 +113,14 @@ agent. See `server/revive_policy.py` for the matrix of which combination
 each workflow needs; the useful one for interrogation is neither knob's
 default.
 
+Their `host` tag is enforced rather than merely declared: both are resolved
+once in `SessionManager.__init__` and held for the process. Read live they
+would not be host-scoped at all — `JaatoServer._with_session_env` copies
+every key of a session's workspace `.env` into the daemon-global
+`os.environ` for that session's turn with no scope filter, so one workspace
+could set the posture for every other session's revive. That is a general
+hazard for `host` vars read live, and the reason this pair freezes.
+
 The 20 `ambient` vars are the issue's tier D — `PATH`, `TERM`, `HOME`, `USER`,
 `SHELL`, `TMUX`, `MSYSTEM`, `APPDATA`, `XDG_CONFIG_HOME`, `COLORTERM`,
 `PSModulePath`, `ComSpec`, `workspaceRoot` and friends. `env_scope.is_knob()`

@@ -35,6 +35,7 @@ from types import SimpleNamespace
 import pytest
 
 from server.session_manager import Session, SessionManager
+from server import revive_policy
 from server.revive_policy import (
     DISK,
     ENV_REVIVE_PERSONA,
@@ -50,6 +51,21 @@ from shared.plugins.subagent.config import (
 
 
 _RENDERED = "PERSONA AS RENDERED\n<worktree at /w/issue-787>"
+
+
+@pytest.fixture(autouse=True)
+def _unfrozen_posture():
+    """Read the knobs live in these tests, and leave nothing captured.
+
+    Production freezes the posture once (``revive_policy.capture()`` from
+    ``SessionManager.__init__``).  A capture leaking out of one test would
+    pin the value for every test after it in the same process, so each test
+    starts and ends with nothing captured; the freeze itself is exercised
+    explicitly by the tests that name it.
+    """
+    revive_policy.reset()
+    yield
+    revive_policy.reset()
 
 
 def _profile(name="worker", model="m1"):
@@ -286,10 +302,18 @@ def test_a_pre_2_8_named_session_resolves_from_disk_exactly_as_before():
     ("DISK", DISK),
     (" reload ", DISK),
     ("re-render", DISK),
+    ("rerender", DISK),
     # An unrecognised value must NOT be read as the opt-in: silently doing
     # the opposite of what a typo asked for is worse than doing the default
     # and saying so.
     ("yes", PERSISTED),
+    # ``render`` used to map to DISK, which is backwards: the PERSISTED
+    # value IS the rendered prompt (the field is ``rendered_instructions``).
+    # An operator typing it meant "the rendered one" and silently got the
+    # opposite — and the opposite is the side-effecting one, accepted
+    # without a warning because it was recognised.  It must now warn and
+    # take the default, which is the safe direction.
+    ("render", PERSISTED),
 ])
 def test_the_knobs_parse_defensively(monkeypatch, raw, expected):
     for var, fn in ((ENV_REVIVE_PROFILE, profile_source),
@@ -397,3 +421,58 @@ def test_a_capture_failure_never_blocks_the_save():
 
     assert session.rendered_instructions is None
     assert session.profile_snapshot is None
+
+
+# ------------------------------------------------- the posture is frozen
+
+def test_the_posture_is_captured_once_and_cannot_move(monkeypatch):
+    """A workspace ``.env`` must not be able to re-point another revive.
+
+    ``JaatoServer._with_session_env`` copies EVERY key of a session's
+    workspace ``.env`` into the daemon-global ``os.environ`` for that
+    session's turn, with no scope filter.  A ``host``-scoped knob read live
+    would therefore be settable process-wide by one workspace — and
+    ``JAATO_REVIVE_PERSONA=disk`` re-runs prefetch scripts, one of which
+    (the case in #787) runs ``git worktree add``.
+    """
+    monkeypatch.setenv(ENV_REVIVE_PERSONA, "persisted")
+    monkeypatch.setenv(ENV_REVIVE_PROFILE, "disk")
+    revive_policy.capture()
+
+    # Stand in for the overlay window: another workspace's .env lands in the
+    # daemon-global environ while a revive is in flight.
+    monkeypatch.setenv(ENV_REVIVE_PERSONA, "disk")
+    monkeypatch.setenv(ENV_REVIVE_PROFILE, "persisted")
+
+    assert persona_source() == PERSISTED, (
+        "a workspace .env moved the process-wide revive posture; the next "
+        "revive would re-run its persona's prefetch scripts"
+    )
+    assert profile_source() == DISK
+
+
+def test_the_session_manager_captures_the_posture_at_construction(monkeypatch):
+    """The freeze has to happen somewhere, and before any session exists.
+
+    ``SessionManager.__init__`` is the earliest point at which a daemon
+    exists and the latest at which no session does — so nothing can have
+    opened an env-overlay window yet.
+    """
+    monkeypatch.setenv(ENV_REVIVE_PERSONA, "disk")
+    SessionManager(storage_path=".jaato/sessions")
+    monkeypatch.setenv(ENV_REVIVE_PERSONA, "persisted")
+
+    assert persona_source() == DISK, (
+        "SessionManager.__init__ did not capture the posture, so it is "
+        "still a live os.environ read"
+    )
+
+
+def test_an_uncaptured_process_still_reads_the_knobs(monkeypatch):
+    """The live fallback keeps an embedded caller working without a manager.
+
+    Not the production path — production goes through ``capture()`` — but
+    it must not silently ignore the knobs either.
+    """
+    monkeypatch.setenv(ENV_REVIVE_PROFILE, "disk")
+    assert profile_source() == DISK
