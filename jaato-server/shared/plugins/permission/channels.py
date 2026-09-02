@@ -142,7 +142,7 @@ DEFAULT_PERMISSION_OPTIONS: List['PermissionResponseOption'] = [
     PermissionResponseOption("once", "once", "Allow once without remembering", ChannelDecision.ALLOW_ONCE),
     PermissionResponseOption("never", "never", "Deny and blacklist for session", ChannelDecision.DENY_SESSION),
     PermissionResponseOption("all", "all", "Allow all future requests in session", ChannelDecision.ALLOW_ALL),
-    PermissionResponseOption("c", "comment", "Deny with feedback the model sees", ChannelDecision.COMMENT),
+    PermissionResponseOption("c", "deny-comment", "Deny with feedback the model sees", ChannelDecision.COMMENT),
     PermissionResponseOption("yc", "allow-comment", "Allow with feedback the model sees", ChannelDecision.ALLOW_COMMENT),
 ]
 

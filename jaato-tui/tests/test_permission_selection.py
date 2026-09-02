@@ -284,3 +284,74 @@ class TestNoCompletionFloat:
         c.set_permission_mode(False)
         completions = list(c.get_completions(Document("hel"), None))
         assert any("help" in x.text for x in completions)
+
+
+class TestFeedbackOptionsUnlockTyping:
+    """Both feedback options must unlock typing, and submit their own prefix.
+
+    Two decisions carry free text: ``c``/``comment`` (deny with feedback,
+    ``ChannelDecision.COMMENT``) and ``yc``/``allow-comment`` (allow with
+    feedback, ``ChannelDecision.ALLOW_COMMENT``).  Recognising only the
+    first left ``allow-comment`` focusable but untypeable, so the feedback
+    it exists to collect could not be entered.
+
+    The prefix matters as much as the unlock: the server parses ``yc:`` and
+    ``c:`` as different decisions, so submitting a hardcoded ``c:`` for an
+    allow-comment selection DENIED the tool the user had chosen to allow.
+    """
+
+    class _Obj:
+        def __init__(self, short, full, decision=None):
+            self.short, self.full = short, full
+            if decision is not None:
+                self.decision = decision
+
+    @pytest.mark.parametrize("option", [
+        {"key": "c", "label": "comment", "action": "comment"},
+        {"key": "yc", "label": "allow-comment", "action": "allow_comment"},
+        {"key": "c", "label": "comment"},              # no action field
+        {"key": "yc", "label": "allow-comment"},       # no action field
+    ], ids=["comment-action", "allow-comment-action",
+            "comment-key-only", "allow-comment-key-only"])
+    def test_dict_feedback_options_are_recognised(self, option):
+        assert PTDisplay._is_comment_option(option) is True
+
+    @pytest.mark.parametrize("short,decision", [
+        ("c", "comment"), ("yc", "allow_comment"), ("c", None), ("yc", None),
+    ])
+    def test_object_feedback_options_are_recognised(self, short, decision):
+        opt = self._Obj(short, "x", decision)
+        assert PTDisplay._is_comment_option(opt) is True
+
+    @pytest.mark.parametrize("option", [
+        {"key": "y", "label": "yes", "action": "allow"},
+        {"key": "n", "label": "no", "action": "deny"},
+        {"key": "a", "label": "always", "action": "allow_session"},
+    ])
+    def test_plain_options_are_not_feedback_options(self, option):
+        assert PTDisplay._is_comment_option(option) is False
+
+    def test_prefix_follows_the_focused_option(self):
+        """yc must submit "yc:", not "c:" — they are opposite decisions."""
+        d = object.__new__(PTDisplay)
+        d._permission_response_options = [
+            {"key": "c", "label": "comment"},
+            {"key": "yc", "label": "allow-comment"},
+        ]
+        d._permission_focus_index = 1
+        assert d._focused_option_short() == "yc"
+        d._permission_focus_index = 0
+        assert d._focused_option_short() == "c"
+
+    def test_prefix_is_empty_when_there_is_nothing_focused(self):
+        """Empty must mean submit nothing, never fall back to a guess."""
+        d = object.__new__(PTDisplay)
+        d._permission_response_options = None
+        d._permission_focus_index = 0
+        assert d._focused_option_short() == ""
+
+    def test_prefix_is_empty_on_an_out_of_range_focus(self):
+        d = object.__new__(PTDisplay)
+        d._permission_response_options = [{"key": "c", "label": "comment"}]
+        d._permission_focus_index = 5
+        assert d._focused_option_short() == ""

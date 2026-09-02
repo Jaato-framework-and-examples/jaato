@@ -926,9 +926,15 @@ class OutputBuffer:
             if self._active_tools:
                 self._finalize_completed_tools()
 
-        # If this is new model text and there are completed tools, finalize the tree first
-        # This ensures the tool tree appears BEFORE the new response, not after
-        if source == "model" and mode == "write" and self._active_tools:
+        # Model prose closes a finished tool tree, so the next tool call opens
+        # its own block.  Deliberately NOT restricted to mode == "write": only
+        # the FIRST chunk of a model message is a write, and a model that
+        # narrates between tool calls inside one message emits every later
+        # chunk as an append.  Gating on "write" left the tree open, so every
+        # subsequent tool call was rendered into the same block as the first.
+        # Re-entry is harmless — finalize_tool_tree empties _active_tools, so
+        # the following append chunks fail this guard.
+        if source == "model" and self._active_tools:
             all_completed = all(tool.completed for tool in self._active_tools)
             any_pending = any(
                 tool.permission_state == "pending" or tool.clarification_state == "pending"

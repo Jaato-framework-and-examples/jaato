@@ -382,3 +382,55 @@ def test_prompt_operator_raises_generic_exception_returns_deny() -> None:
     response = channel.request_permission(_make_request())
     assert response.decision == ChannelDecision.DENY
     assert "malformed payload" in response.reason
+
+
+class TestFeedbackOptionLabels:
+    """The two feedback options read as a pair, and both labels are accepted.
+
+    ``comment`` was relabelled ``deny-comment`` so it names its decision the
+    way ``allow-comment`` does — the pair is deny-with-feedback vs
+    allow-with-feedback, and "comment" alone said neither.  The response map
+    keys off these strings, so the new label has to be accepted; the old one
+    stays accepted for clients that have not been updated.
+    """
+
+    def test_the_option_is_labelled_deny_comment(self):
+        from shared.plugins.permission.channels import (
+            DEFAULT_PERMISSION_OPTIONS, ChannelDecision,
+        )
+        labels = {
+            o.full for o in DEFAULT_PERMISSION_OPTIONS
+            if o.decision is ChannelDecision.COMMENT
+        }
+        assert labels == {"deny-comment"}
+
+    def test_it_pairs_with_allow_comment(self):
+        from shared.plugins.permission.channels import (
+            DEFAULT_PERMISSION_OPTIONS, ChannelDecision,
+        )
+        by_decision = {o.decision: o.full for o in DEFAULT_PERMISSION_OPTIONS}
+        assert by_decision[ChannelDecision.COMMENT] == "deny-comment"
+        assert by_decision[ChannelDecision.ALLOW_COMMENT] == "allow-comment"
+
+    def test_the_new_label_resolves_to_the_comment_decision(self):
+        from shared.plugins.permission.runner_rpc_channel import (
+            _RESPONSE_KEY_TO_DECISION,
+        )
+        from shared.plugins.permission.channels import ChannelDecision
+        assert _RESPONSE_KEY_TO_DECISION["deny-comment"] is ChannelDecision.COMMENT
+
+    def test_the_old_label_is_still_accepted(self):
+        """Clients predating the rename must keep working."""
+        from shared.plugins.permission.runner_rpc_channel import (
+            _RESPONSE_KEY_TO_DECISION,
+        )
+        from shared.plugins.permission.channels import ChannelDecision
+        assert _RESPONSE_KEY_TO_DECISION["comment"] is ChannelDecision.COMMENT
+
+    def test_the_shortcut_still_resolves(self):
+        from shared.plugins.permission.runner_rpc_channel import (
+            _RESPONSE_KEY_TO_DECISION,
+        )
+        from shared.plugins.permission.channels import ChannelDecision
+        assert _RESPONSE_KEY_TO_DECISION["c"] is ChannelDecision.COMMENT
+        assert _RESPONSE_KEY_TO_DECISION["yc"] is ChannelDecision.ALLOW_COMMENT
