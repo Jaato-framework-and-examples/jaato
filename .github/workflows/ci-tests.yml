@@ -198,13 +198,20 @@ jobs:
           # ``-m conformance`` is required: these are deselected by default
           # (pyproject ``addopts``) because they start a subprocess and are
           # slower than a unit test.
-          - name: SDK + scaffold + conformance
+          # jaato-eval joins this leg rather than getting its own: the suite
+          # is ~3s, and the reasoning above applies unchanged — a dedicated
+          # runner would cost a minute of setup to save nothing.  It ran in
+          # NO merge-gating workflow until jaato #798, which is how a `det`
+          # column reporting 100% agreement from a single observation stayed
+          # shipped.
+          - name: SDK + scaffold + conformance + eval
             run: |
               rc=0
               pytest -q --continue-on-collection-errors jaato-sdk/tests/ || rc=1
               pytest -q --continue-on-collection-errors jaato-sdk/jaato_sdk/tests/ || rc=1
               pytest -q --continue-on-collection-errors jaato-server/shared/scaffold/tests/ || rc=1
               pytest -q -m conformance jaato-sdk/jaato_sdk/conformance/ || rc=1
+              pytest -q --continue-on-collection-errors jaato-eval/tests/ || rc=1
               exit $rc
 
     steps:
@@ -228,6 +235,7 @@ jobs:
           pip install -e jaato-sdk/
           pip install -e "jaato-server/.[all]"
           pip install -e "jaato-tui/.[dev]"
+          pip install -e jaato-eval/
       - name: ${{ matrix.leg.name }}
         run: ${{ matrix.leg.run }}
 
