@@ -671,3 +671,70 @@ class TestScanProfilesDirLogProvenance:
                     f"count/name-list mismatch: {count} vs "
                     f"{len(names)} names in {record.message!r}"
                 )
+
+
+class TestSuppressInheritedProcessorsEndToEnd:
+    """#791 measured through ``discover_profiles``, the surface a profile
+    author actually writes against — YAML in, resolved profile out."""
+
+    BASE = """
+name: base
+description: Base worker
+plugins: []
+completion_processors:
+  - script: scripts/processors/accept.py
+    name: acceptance
+  - script: scripts/processors/audit.py
+max_turns: 4
+env:
+  STAGE: worker
+"""
+
+    def _write(self, tmpdir, child_yaml):
+        (Path(tmpdir) / "base.yaml").write_text(self.BASE)
+        (Path(tmpdir) / "child.yaml").write_text(child_yaml)
+        return discover_profiles(tmpdir)
+
+    def test_child_declines_one_processor_and_keeps_the_rest(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            result = self._write(tmpdir, """
+name: child
+description: Interrogate
+plugins: []
+inherits: [base]
+suppress_inherited_processors:
+  - acceptance
+""")
+            assert not result.errors
+            child = result.profiles["child"]
+            assert [p.script for p in child.completion_processors] == [
+                "scripts/processors/audit.py"]
+            # ...and every ceiling the base declared survives
+            assert child.max_turns == 4
+            assert child.env == {"STAGE": "worker"}
+
+    def test_empty_completion_processors_still_inherits(self):
+        """The behaviour #791 measured and the docs never stated."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            result = self._write(tmpdir, """
+name: child
+description: Child
+plugins: []
+inherits: [base]
+completion_processors: []
+""")
+            assert not result.errors
+            assert len(result.profiles["child"].completion_processors) == 2
+
+    def test_stale_suppression_fails_the_profile_load(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            result = self._write(tmpdir, """
+name: child
+description: Child
+plugins: []
+inherits: [base]
+suppress_inherited_processors:
+  - renamed_away
+""")
+            assert "child" not in result.profiles
+            assert "renamed_away" in result.errors["child"]

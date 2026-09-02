@@ -3,9 +3,12 @@
 import pytest
 
 from shared.plugins.subagent.config import (
+    CompletionProcessor,
     SubagentProfile,
     GCProfileConfig,
     _normalize_inherits,
+    _normalize_suppress_inherited_processors,
+    _parse_completion_processors,
     resolve_profiles,
 )
 from shared.runtime_limits import RuntimeLimits
@@ -922,3 +925,257 @@ class TestApparmorFragmentsInheritance:
         assert not errors
         # p1 declared first → its value wins.
         assert resolved["child"].apparmor_fragments == ["a", "b"]
+
+
+class TestCompletionProcessorsInheritance:
+    """#791: ``completion_processors`` concatenate, and
+    ``suppress_inherited_processors`` is the one way to scope that down.
+
+    Before the opt-out existed, a child whose stage genuinely completed
+    differently had to stop inheriting altogether — and silently lost
+    ``budget_control`` / ``max_turns`` / ``runtime_limits`` / ``env`` /
+    ``plugin_configs`` in the process.  ``test_the_wrong_turn_...`` below
+    pins the cost that made this worth a field.
+    """
+
+    ACCEPT = CompletionProcessor(
+        script="scripts/processors/accept.py", name="acceptance")
+    AUDIT = CompletionProcessor(script="scripts/processors/audit.py")
+
+    def _base(self, **kwargs):
+        return SubagentProfile(
+            name="base", description="Base",
+            completion_processors=[self.ACCEPT, self.AUDIT],
+            **kwargs,
+        )
+
+    def test_concatenates_parent_then_child(self):
+        own = CompletionProcessor(script="scripts/processors/own.py")
+        profiles = {
+            "base": self._base(),
+            "child": SubagentProfile(
+                name="child", description="Child", inherits=["base"],
+                completion_processors=[own],
+            ),
+        }
+        resolved, errors = resolve_profiles(profiles)
+        assert not errors
+        assert resolved["child"].completion_processors == [
+            self.ACCEPT, self.AUDIT, own]
+
+    def test_empty_child_list_does_not_clear_the_parents(self):
+        """The measured surprise in #791: `[]` adds nothing, it is not a reset."""
+        profiles = {
+            "base": self._base(),
+            "child": SubagentProfile(
+                name="child", description="Child", inherits=["base"],
+                completion_processors=[],
+            ),
+        }
+        resolved, errors = resolve_profiles(profiles)
+        assert not errors
+        assert resolved["child"].completion_processors == [self.ACCEPT, self.AUDIT]
+
+    def test_suppress_by_name(self):
+        profiles = {
+            "base": self._base(),
+            "child": SubagentProfile(
+                name="child", description="Child", inherits=["base"],
+                suppress_inherited_processors=["acceptance"],
+            ),
+        }
+        resolved, errors = resolve_profiles(profiles)
+        assert not errors
+        assert resolved["child"].completion_processors == [self.AUDIT]
+
+    def test_suppress_by_script_path(self):
+        """A processor answers to its script path too, named or not."""
+        profiles = {
+            "base": self._base(),
+            "child": SubagentProfile(
+                name="child", description="Child", inherits=["base"],
+                suppress_inherited_processors=[
+                    "scripts/processors/accept.py",
+                    "scripts/processors/audit.py",
+                ],
+            ),
+        }
+        resolved, errors = resolve_profiles(profiles)
+        assert not errors
+        assert resolved["child"].completion_processors == []
+
+    def test_suppression_keeps_everything_else_the_base_declared(self):
+        """The whole point: decline ONE processor, keep the ceilings."""
+        from shared.budget_control import BudgetControlConfig
+        profiles = {
+            "base": self._base(
+                max_turns=4,
+                env={"STAGE": "worker"},
+                budget_control=BudgetControlConfig(limits={"usd": 1.5}),
+            ),
+            "child": SubagentProfile(
+                name="child", description="Child", inherits=["base"],
+                suppress_inherited_processors=["acceptance"],
+            ),
+        }
+        resolved, errors = resolve_profiles(profiles)
+        assert not errors
+        child = resolved["child"]
+        assert child.completion_processors == [self.AUDIT]
+        assert child.max_turns == 4
+        assert child.env == {"STAGE": "worker"}
+        assert child.budget_control.limits == {"usd": 1.5}
+
+    def test_the_wrong_turn_it_replaces_loses_every_ceiling(self):
+        """Pin the cost of the only pre-#791 escape: not inheriting at all."""
+        from shared.budget_control import BudgetControlConfig
+        profiles = {
+            "base": self._base(
+                max_turns=4,
+                env={"STAGE": "worker"},
+                budget_control=BudgetControlConfig(limits={"usd": 1.5}),
+            ),
+            # Same intent as the suppression above, expressed by declaring
+            # the profile from scratch.
+            "child": SubagentProfile(name="child", description="Child"),
+        }
+        resolved, errors = resolve_profiles(profiles)
+        assert not errors
+        child = resolved["child"]
+        assert child.completion_processors == []
+        assert child.budget_control is None      # no cost ceiling
+        assert child.max_turns == 10             # and the default is LOOSER
+        assert child.env == {}
+
+    def test_suppression_does_not_touch_the_childs_own_processors(self):
+        """Scoped to what the PARENTS contributed: a child re-declaring the
+        same script keeps its own copy (different `output`, say)."""
+        own = CompletionProcessor(
+            script="scripts/processors/accept.py",
+            name="acceptance",
+            output="out/{case_id}/accept.json",
+        )
+        profiles = {
+            "base": self._base(),
+            "child": SubagentProfile(
+                name="child", description="Child", inherits=["base"],
+                completion_processors=[own],
+                suppress_inherited_processors=["acceptance"],
+            ),
+        }
+        resolved, errors = resolve_profiles(profiles)
+        assert not errors
+        assert resolved["child"].completion_processors == [self.AUDIT, own]
+
+    def test_unmatched_suppression_is_a_load_error(self):
+        """A stale entry means the base renamed the processor and this child
+        is running one it declared it did not want — say so, loudly."""
+        profiles = {
+            "base": self._base(),
+            "child": SubagentProfile(
+                name="child", description="Child", inherits=["base"],
+                suppress_inherited_processors=["acceptence"],  # typo
+            ),
+        }
+        resolved, errors = resolve_profiles(profiles)
+        assert "child" not in resolved
+        assert "acceptence" in errors["child"]
+        # names what WAS available, so a rename is told apart from a typo
+        assert "acceptance" in errors["child"]
+
+    def test_suppression_is_not_inherited_further(self):
+        """Consumed at the merge that resolves it: a grandchild neither
+        re-applies an ancestor's suppression nor trips its stale-entry error
+        on a processor that is already gone."""
+        profiles = {
+            "base": self._base(),
+            "mid": SubagentProfile(
+                name="mid", description="Mid", inherits=["base"],
+                suppress_inherited_processors=["acceptance"],
+            ),
+            "leaf": SubagentProfile(
+                name="leaf", description="Leaf", inherits=["mid"],
+            ),
+        }
+        resolved, errors = resolve_profiles(profiles)
+        assert not errors
+        assert resolved["mid"].suppress_inherited_processors == []
+        assert resolved["leaf"].completion_processors == [self.AUDIT]
+
+    def test_suppresses_across_multiple_parents(self):
+        other = CompletionProcessor(script="scripts/processors/other.py")
+        profiles = {
+            "p1": SubagentProfile(
+                name="p1", description="P1",
+                completion_processors=[self.ACCEPT]),
+            "p2": SubagentProfile(
+                name="p2", description="P2",
+                completion_processors=[other]),
+            "child": SubagentProfile(
+                name="child", description="Child", inherits=["p1", "p2"],
+                suppress_inherited_processors=["scripts/processors/other.py"],
+            ),
+        }
+        resolved, errors = resolve_profiles(profiles)
+        assert not errors
+        assert resolved["child"].completion_processors == [self.ACCEPT]
+
+    def test_no_inherits_is_an_inert_no_op_with_a_warning(self, caplog):
+        """Nothing to suppress without a parent — say so rather than letting
+        the key look effective."""
+        profiles = {
+            "solo": SubagentProfile(
+                name="solo", description="Solo",
+                completion_processors=[self.ACCEPT],
+                suppress_inherited_processors=["acceptance"],
+            ),
+        }
+        with caplog.at_level("WARNING"):
+            resolved, errors = resolve_profiles(profiles)
+        assert not errors
+        assert resolved["solo"].completion_processors == [self.ACCEPT]
+        assert "does not inherit" in caplog.text
+
+
+class TestParseSuppressInheritedProcessors:
+    """Authoring-surface normalization for the #791 opt-out."""
+
+    def test_absent_is_empty(self):
+        assert _normalize_suppress_inherited_processors(None) == []
+
+    def test_single_string(self):
+        assert _normalize_suppress_inherited_processors("acceptance") == [
+            "acceptance"]
+
+    def test_list(self):
+        assert _normalize_suppress_inherited_processors(
+            ["a", "b"]) == ["a", "b"]
+
+    def test_non_string_entries_are_coerced_not_dropped(self):
+        """Coerced so the merge's "matched nothing" error catches them —
+        dropping quietly would leave a processor the author declined."""
+        assert _normalize_suppress_inherited_processors([42]) == ["42"]
+
+    def test_wrong_type_is_ignored(self):
+        assert _normalize_suppress_inherited_processors({"a": 1}) == []
+
+
+class TestParseCompletionProcessorName:
+    """``name:`` is the stable identity a suppression matches (#791)."""
+
+    def test_name_parsed_and_stripped(self):
+        [proc] = _parse_completion_processors(
+            [{"script": "a.py", "name": "  acceptance  "}])
+        assert proc.name == "acceptance"
+        assert proc.identity == "acceptance"
+
+    def test_identity_falls_back_to_script(self):
+        [proc] = _parse_completion_processors([{"script": "a.py"}])
+        assert proc.name is None
+        assert proc.identity == "a.py"
+
+    def test_invalid_name_ignored_entry_survives(self):
+        [proc] = _parse_completion_processors(
+            [{"script": "a.py", "name": 7}])
+        assert proc.name is None
+        assert proc.script == "a.py"

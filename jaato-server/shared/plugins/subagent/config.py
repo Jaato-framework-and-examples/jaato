@@ -1011,6 +1011,12 @@ class CompletionProcessor:
         script: kb Python file path resolved through the standard
             ``script_loader`` tier (absolute → ``<config_root>/<path>``
             → ``~/.jaato/<path>``).
+        name: Optional stable identifier for this processor, used by an
+            inheriting profile's ``suppress_inherited_processors`` to
+            decline it by name.  When ``None`` the ``script`` path is the
+            identity (a suppression entry matches either).  Declare one on
+            a base profile's processors when you want the identity to
+            survive moving the script file.  Ignored at runtime.
         output: Optional output file path with simple ``{field}``
             templating.  When set, the ``render`` symbol's return is
             written to this path.  Substitutes from the payload first,
@@ -1054,6 +1060,18 @@ class CompletionProcessor:
     on_error: str = "fail_completion"
     description: Optional[str] = None
     phase: str = "finalization"
+    name: Optional[str] = None
+
+    @property
+    def identity(self) -> str:
+        """What ``suppress_inherited_processors`` matches this entry by.
+
+        The declared ``name`` when there is one, else the ``script``
+        path.  Used for the "no inherited processor matched" diagnostic;
+        the match itself accepts EITHER form so a child can suppress by
+        script path even when the parent named the processor.
+        """
+        return self.name or self.script
 
 
 @dataclass
@@ -1233,7 +1251,37 @@ class SubagentProfile:
         "description": "kb Python hooks (.jaato/scripts/processors/, probed for "
         "`render` and/or `validate`) run after jsonschema.validate passes; a "
         "validator's error list blocks completion, a renderer produces files. "
-        "Inheritance concatenates parent + child; all fire."})
+        "Inheritance concatenates parent + child; all fire. To drop ONE "
+        "inherited processor, name it in `suppress_inherited_processors` — "
+        "an empty list here adds nothing, it does not clear the parents'."})
+    # The one opt-out of ``completion_processors``' concatenation
+    # (#791).  Every other inherited key can be scoped down by the
+    # child somehow — a scalar by replacing it, a dict per key — but
+    # concatenation only ever grows, so a child whose stage genuinely
+    # completes differently had no move except to stop inheriting, and
+    # silently lose ``budget_control`` / ``max_turns`` /
+    # ``runtime_limits`` / ``env`` / ``plugin_configs`` with it.
+    #
+    # Scoped deliberately narrow:
+    #   - BY NAME, never "drop them all", so a base that later adds a
+    #     second processor does not silently re-enable the one this
+    #     child declined;
+    #   - applies only to what the PARENTS contributed — the child's own
+    #     ``completion_processors`` are its to edit directly;
+    #   - an entry matching no inherited processor is a profile-load
+    #     ERROR, not a silent no-op, because a stale suppression means
+    #     the base moved or renamed the processor and this child is
+    #     once again running one it declared it did not want;
+    #   - NOT itself inherited: it is consumed at the merge that
+    #     resolves this profile, so a grandchild never re-applies (and
+    #     never trips over) an ancestor's suppression.
+    suppress_inherited_processors: List[str] = field(
+        default_factory=list, metadata={
+        "description": "Names (or script paths) of INHERITED "
+        "completion_processors this profile declines — the only way to scope "
+        "down a key that otherwise only concatenates. Matches a parent "
+        "entry's `name` or its `script`. An entry matching nothing is a load "
+        "error. Not inherited further; only meaningful alongside `inherits`."})
     runtime_limits: Optional[RuntimeLimits] = field(default=None, metadata={
         "description": "Per-session resource caps (memory, PIDs, CPU weight, "
         "tool wall-clock timeout, stdout). 'How much can it consume' — "
@@ -1470,6 +1518,108 @@ def _normalize_apparmor_fragments(value: Any) -> Optional[List[str]]:
     return normalised
 
 
+def _normalize_suppress_inherited_processors(value: Any) -> List[str]:
+    """Normalize ``suppress_inherited_processors`` to a list of strings.
+
+    Accepts a single string (``"acceptance"``), a list, or None/absent.
+    Entries are coerced with ``str()`` rather than dropped: a non-string
+    entry becomes a string that matches no inherited processor, and
+    :func:`_merge_completion_processors` then fails the profile load with
+    the same "matched nothing" diagnostic a typo gets.  Dropping it
+    quietly would leave the author with a processor they declared they
+    did not want, which is precisely the silent loss #791 is about.
+
+    A value that is neither a string nor a list (a dict, an int) is not
+    coercible to a *set* of identities at all, so it warns and yields
+    ``[]``.
+
+    Args:
+        value: Raw value pulled from ``data.get('suppress_inherited_processors')``.
+
+    Returns:
+        A list of identity strings; empty when nothing was declared.
+    """
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, list):
+        return [str(v) for v in value if v is not None and v != ""]
+    logger.warning(
+        "suppress_inherited_processors must be a string or a list of "
+        "strings, got %s: %r; ignoring",
+        type(value).__name__, value,
+    )
+    return []
+
+
+def _processor_opt_str(
+    entry: Dict[str, Any], key: str, script: str,
+) -> Optional[str]:
+    """Read an optional free-text key off one ``completion_processors`` entry.
+
+    Shared by ``description`` and ``name``: both are optional strings that
+    are stripped, both collapse to ``None`` when blank, and both warn
+    (naming the offending ``script``) rather than raise when the author
+    wrote a non-string — a typo'd annotation must not take the whole
+    profile down with it.
+
+    Args:
+        entry: One raw ``completion_processors`` list item.
+        key: The key to read (``"description"`` / ``"name"``).
+        script: The entry's script path, for the warning message.
+
+    Returns:
+        The stripped string, or ``None`` when absent, blank, or invalid.
+    """
+    value = entry.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        logger.warning(
+            "completion_processors: %r must be a string for script=%r "
+            "(got %s); ignoring",
+            key, script, type(value).__name__,
+        )
+        return None
+    return value.strip() or None
+
+
+def _processor_enum(
+    entry: Dict[str, Any],
+    key: str,
+    allowed: Tuple[str, ...],
+    default: str,
+    script: str,
+) -> str:
+    """Read a closed-vocabulary key off one ``completion_processors`` entry.
+
+    Shared by ``on_error`` and ``phase``.  An unrecognised value warns and
+    falls back to *default* rather than rejecting the entry: the safe
+    default (``fail_completion`` / ``finalization``) is the conservative
+    one in both cases, so a typo degrades to strictness, never past it.
+
+    Args:
+        entry: One raw ``completion_processors`` list item.
+        key: The key to read.
+        allowed: The permitted values.
+        default: Value used when the key is absent or unrecognised.
+        script: The entry's script path, for the warning message.
+
+    Returns:
+        One of *allowed*.
+    """
+    value = entry.get(key, default)
+    if value not in allowed:
+        logger.warning(
+            "completion_processors: invalid %s=%r for script=%r "
+            "(expected one of %r); defaulting to %r",
+            key, value, script, list(allowed), default,
+        )
+        return default
+    return value
+
+
 def _parse_completion_processors(value: Any) -> List[CompletionProcessor]:
     """Parse a profile's ``completion_processors`` list from raw JSON/YAML.
 
@@ -1480,12 +1630,17 @@ def _parse_completion_processors(value: Any) -> List[CompletionProcessor]:
         {"script": "scripts/processors/foo.py",
          "output": "out/{case_id}/foo",      # optional
          "on_error": "fail_completion",      # default
+         "phase": "finalization",            # default
+         "name": "acceptance",               # optional
          "description": "..."}               # optional
 
     ``output`` is optional — when omitted, the processor runs for
     side-effect (validator-only) and ``render``'s return is logged
     but not written.  ``description`` travels with the wiring for
-    documentation; ignored at runtime.
+    documentation; ignored at runtime.  ``name`` is the stable
+    identity an inheriting profile's ``suppress_inherited_processors``
+    can decline the processor by (#791); when absent the ``script``
+    path is that identity.
 
     Skips malformed entries with a warning rather than raising —
     partial profiles still load and the missing/typo'd processor
@@ -1523,37 +1678,19 @@ def _parse_completion_processors(value: Any) -> List[CompletionProcessor]:
                 script, output,
             )
             continue
-        on_error = entry.get("on_error", "fail_completion")
-        if on_error not in ("fail_completion", "warn"):
-            logger.warning(
-                "completion_processors: invalid on_error=%r for script=%r, "
-                "defaulting to 'fail_completion'",
-                on_error, script,
-            )
-            on_error = "fail_completion"
-        description = entry.get("description")
-        if description is not None and not isinstance(description, str):
-            logger.warning(
-                "completion_processors: 'description' must be a string for "
-                "script=%r (got %s); ignoring",
-                script, type(description).__name__,
-            )
-            description = None
-        phase = entry.get("phase", "finalization")
-        if phase not in ("finalization", "completeness"):
-            logger.warning(
-                "completion_processors: invalid phase=%r for script=%r "
-                "(expected 'finalization' or 'completeness'); defaulting "
-                "to 'finalization'",
-                phase, script,
-            )
-            phase = "finalization"
         out.append(CompletionProcessor(
             script=script.strip(),
             output=normalized_output,
-            on_error=on_error,
-            description=description.strip() if description else None,
-            phase=phase,
+            on_error=_processor_enum(
+                entry, "on_error", ("fail_completion", "warn"),
+                "fail_completion", script,
+            ),
+            description=_processor_opt_str(entry, "description", script),
+            phase=_processor_enum(
+                entry, "phase", ("finalization", "completeness"),
+                "finalization", script,
+            ),
+            name=_processor_opt_str(entry, "name", script),
         ))
     return out
 
@@ -1783,8 +1920,19 @@ def resolve_profiles(
 
         profile = profiles[name]
 
-        # No inheritance — resolve immediately
+        # No inheritance — resolve immediately.  Nothing to suppress
+        # here, so say so rather than letting the key look effective:
+        # ``suppress_inherited_processors`` only ever removes what a
+        # PARENT contributed (#791).
         if not profile.inherits:
+            if profile.suppress_inherited_processors:
+                logger.warning(
+                    "Profile '%s' declares suppress_inherited_processors %r "
+                    "but does not inherit from anything; it has no effect. "
+                    "Remove the entries, or the processors themselves from "
+                    "completion_processors.",
+                    name, list(profile.suppress_inherited_processors),
+                )
             resolved[name] = profile
             return profile
 
@@ -1870,6 +2018,127 @@ def _merge_budget_control(
     if not limits and not degrade:
         return None
     return BudgetControlConfig(limits=limits, degrade=degrade)
+
+
+def _processor_identities(
+    processors: List[CompletionProcessor],
+) -> FrozenSet[str]:
+    """Every string a ``suppress_inherited_processors`` entry may match.
+
+    A processor answers to its declared ``name`` AND to its ``script``
+    path, so a child can decline one without knowing which of the two the
+    base chose to write.  See :attr:`CompletionProcessor.identity` for the
+    single canonical form used in diagnostics.
+
+    Args:
+        processors: The inherited processors to index.
+
+    Returns:
+        The union of every entry's script path and (when set) name.
+    """
+    ids: set = set()
+    for proc in processors:
+        ids.add(proc.script)
+        if proc.name:
+            ids.add(proc.name)
+    return frozenset(ids)
+
+
+def _unmatched_suppression_error(
+    child_name: str,
+    unmatched: List[str],
+    parents: List['SubagentProfile'],
+    inherited: List[CompletionProcessor],
+) -> str:
+    """Explain a ``suppress_inherited_processors`` entry that matched nothing.
+
+    Names what was asked for AND what was actually on offer, because the
+    two ways to get here — a typo, or a base that renamed/moved the
+    processor — are told apart by reading the available list.
+
+    Args:
+        child_name: Profile that declared the suppression.
+        unmatched: The entries that matched no inherited processor.
+        parents: The resolved parents, named in the message.
+        inherited: Everything the parents contributed.
+
+    Returns:
+        The error message recorded against *child_name*.
+    """
+    listing = sorted(proc.identity for proc in inherited) or ["(none)"]
+    return (
+        f"Profile '{child_name}' declares suppress_inherited_processors "
+        f"{unmatched!r}, which match no inherited completion_processor.  "
+        f"Inherited from {[p.name for p in parents]!r}: {listing!r}.  A "
+        f"suppression that matches nothing means the processor was renamed "
+        f"or moved and this profile is running it again — fix the entry or "
+        f"drop it."
+    )
+
+
+def _merge_completion_processors(
+    parents: List['SubagentProfile'],
+    child: 'SubagentProfile',
+) -> Tuple[List[CompletionProcessor], Optional[str]]:
+    """Merge ``completion_processors`` across parents + child (#791).
+
+    The default is **concatenation**, parent → child: each processor is
+    independent (writes a different artefact or checks a different
+    invariant) and all of them fire.  A child's ``completion_processors``
+    only ever ADDS — an empty list there clears nothing.
+
+    ``suppress_inherited_processors`` is the single, deliberately narrow
+    opt-out.  It names inherited processors to drop, matching either a
+    parent entry's ``name`` or its ``script`` path.  Three properties are
+    load-bearing:
+
+    * **By name, never wholesale.**  A base that later adds a second
+      processor must not silently re-enable the one this child declined,
+      and "drop everything the parent completes with" is not a thing a
+      cascade stage should be able to say in passing.
+    * **Parents only.**  The child's own processors are its to edit
+      directly, so suppression never has to disambiguate between "the one
+      I inherited" and "the one I declared".
+    * **A stale entry is an error.**  If nothing matches, the base moved
+      or renamed the processor and this child is running one it declared
+      it did not want.  Failing the profile load says so; a silent no-op
+      is how #791's "an interrogation ran with no cost ceiling" happens.
+
+    One entry drops EVERY inherited processor it matches — with multiple
+    parents contributing the same script, declining it declines all of
+    them, which is what "I do not complete that way" means.
+
+    Args:
+        parents: Resolved parent profiles, in declaration order.
+        child: The child profile with its own overrides.
+
+    Returns:
+        ``(processors, error)``.  ``error`` is ``None`` on success, else a
+        message naming the unmatched entries and what WAS available; the
+        caller records it and drops the profile.
+    """
+    inherited: List[CompletionProcessor] = []
+    for parent in parents:
+        inherited.extend(parent.completion_processors)
+
+    suppress = list(child.suppress_inherited_processors or [])
+    if not suppress:
+        return inherited + list(child.completion_processors), None
+
+    available = _processor_identities(inherited)
+    unmatched = [entry for entry in suppress if entry not in available]
+    if unmatched:
+        return [], _unmatched_suppression_error(
+            child.name, unmatched, parents, inherited,
+        )
+
+    # Keep a processor when NEITHER of its identities is suppressed.
+    suppress_set = set(suppress)
+    kept = [
+        proc for proc in inherited
+        if suppress_set.isdisjoint((proc.script, proc.identity))
+    ]
+    return kept + list(child.completion_processors), None
 
 
 def _merge_profiles(
@@ -2058,16 +2327,18 @@ def _merge_profiles(
         'spawn_payload_schema', child.spawn_payload_schema
     )
 
-    # completion_processors: concatenation across parent → child.  Each
-    # processor is independent (writes a different artefact or checks a
-    # different invariant); concatenating fires all of them.  Child
-    # entries appear last; the framework invokes them sequentially and
-    # aggregates ALL errors so the agent sees the full set on the
-    # retry prompt rather than playing whack-a-mole turn by turn.
-    merged_completion_processors: List[CompletionProcessor] = []
-    for parent in parents:
-        merged_completion_processors.extend(parent.completion_processors)
-    merged_completion_processors.extend(child.completion_processors)
+    # completion_processors: concatenation across parent → child, minus
+    # whatever the child declines by name in
+    # ``suppress_inherited_processors``.  Each processor is independent
+    # (writes a different artefact or checks a different invariant);
+    # concatenating fires all of them.  Child entries appear last; the
+    # framework invokes them sequentially and aggregates ALL errors so
+    # the agent sees the full set on the retry prompt rather than
+    # playing whack-a-mole turn by turn.  See
+    # :func:`_merge_completion_processors` for the opt-out's rules.
+    merged_completion_processors, processor_error = (
+        _merge_completion_processors(parents, child)
+    )
 
     # --- Concatenation: system_instructions ---
     instruction_parts = []
@@ -2079,6 +2350,10 @@ def _merge_profiles(
     merged_instructions = "\n\n".join(instruction_parts) if instruction_parts else None
 
     # --- Check for conflicts ---
+    if processor_error:
+        errors[child_name] = processor_error
+        return None
+
     all_conflicts = conflict_details + scalar_conflicts
     if all_conflicts:
         conflict_msg = (
@@ -2171,6 +2446,11 @@ def _merge_profiles(
         completion_payload_schema=merged_completion_schema,
         spawn_payload_schema=merged_spawn_schema,
         completion_processors=merged_completion_processors,
+        # Consumed by the merge above — the resolved profile carries no
+        # residual suppression, so a grandchild inheriting THIS profile
+        # neither re-applies it nor trips the "matched nothing" error on
+        # a processor that is already gone.
+        suppress_inherited_processors=[],
         runtime_limits=merged_runtime_limits,
         budget_control=merged_budget_control,
         model_tiers=merged_model_tiers,
@@ -2398,6 +2678,8 @@ def _scan_profiles_dir(
             completion_payload_schema=data.get('completion_payload_schema'),
             spawn_payload_schema=data.get('spawn_payload_schema'),
             completion_processors=_parse_completion_processors(data.get('completion_processors')),
+            suppress_inherited_processors=_normalize_suppress_inherited_processors(
+                data.get('suppress_inherited_processors')),
             runtime_limits=runtime_limits,
             budget_control=budget_control,
             model_tiers=model_tiers,
@@ -2812,6 +3094,8 @@ def _discover_premium_profiles() -> Dict[str, 'SubagentProfile']:
             completion_payload_schema=data.get('completion_payload_schema'),
             spawn_payload_schema=data.get('spawn_payload_schema'),
             completion_processors=_parse_completion_processors(data.get('completion_processors')),
+            suppress_inherited_processors=_normalize_suppress_inherited_processors(
+                data.get('suppress_inherited_processors')),
             runtime_limits=runtime_limits,
             budget_control=budget_control,
             model_tiers=model_tiers,
@@ -3097,6 +3381,8 @@ class SubagentConfig:
                 inherits=_normalize_inherits(profile_data.get('inherits')),
                 completion_payload_schema=profile_data.get('completion_payload_schema'),
                 completion_processors=_parse_completion_processors(profile_data.get('completion_processors')),
+                suppress_inherited_processors=_normalize_suppress_inherited_processors(
+                    profile_data.get('suppress_inherited_processors')),
                 runtime_limits=runtime_limits,
                 budget_control=budget_control,
                 model_tiers=model_tiers,
