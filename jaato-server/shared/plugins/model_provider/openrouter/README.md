@@ -62,7 +62,7 @@ session profile overrides per session.
 | `JAATO_OPENROUTER_CONTEXT_LENGTH` | catalog | Context-window override |
 | `JAATO_OPENROUTER_HTTP_REFERER` | the application's URL | [App attribution](https://openrouter.ai/docs/app-attribution): site URL (required for rankings) |
 | `JAATO_OPENROUTER_APP_TITLE` | the application's name | App attribution: display name |
-| `JAATO_OPENROUTER_APP_CATEGORIES` | `cli-agent` | App attribution: comma-separated marketplace categories |
+| `JAATO_OPENROUTER_APP_CATEGORIES` | the application's categories | App attribution: comma-separated marketplace categories |
 | `JAATO_OPENROUTER_REQUEST_TIMEOUT` | `600` | Byte-level per-request deadline, seconds (`0` disables) |
 | `JAATO_OPENROUTER_STREAM_IDLE_TIMEOUT` | `300` | Streaming payload idle deadline, seconds (`0` disables) |
 
@@ -76,9 +76,18 @@ name instead of collapsing into jaato's row on the OpenRouter dashboard:
 ```bash
 export JAATO_APP_NAME="Acme Copilot"
 export JAATO_APP_URL="https://acme.example"
-# → X-OpenRouter-Title: Acme Copilot (powered by jaato)
-# → HTTP-Referer:       https://acme.example
+export JAATO_APP_CATEGORIES="chat-bot"   # optional — see below
+# → X-OpenRouter-Title:      Acme Copilot (powered by jaato)
+# → HTTP-Referer:            https://acme.example
+# → X-OpenRouter-Categories: chat-bot
 ```
+
+**Categories do not inherit.** `cli-agent` is jaato's own claim about itself;
+an app that names itself sends no category header until it declares one, because
+a Slack bot filed under "terminal-based coding assistants" is mis-filed. A slug
+outside OpenRouter's taxonomy coming from either env var is dropped with a
+`WARNING` (the `app_categories` profile knob still raises — authored config
+fails loud).
 
 Set `JAATO_APP_POWERED_BY=false` to drop the suffix, or
 `JaatoRuntime(app_identity=AppIdentity(...))` to declare it in code. The
@@ -98,6 +107,7 @@ plugin_configs:
     http_referer: "https://..."    # HTTP-Referer header (outranks JAATO_APP_URL)
     app_title: "MyApp"             # X-OpenRouter-Title header (outranks JAATO_APP_NAME)
     app_categories: ["cli-agent"]  # X-OpenRouter-Categories header
+                                   # (outranks JAATO_APP_CATEGORIES)
                                    # (marketplace categories for rankings;
                                    # pass [] to opt out of category attribution)
     extra_headers:                 # arbitrary HTTP headers (e.g. beta opt-ins)

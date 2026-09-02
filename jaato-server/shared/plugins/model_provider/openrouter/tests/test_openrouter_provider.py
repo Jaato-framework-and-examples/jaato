@@ -739,6 +739,65 @@ class TestAppAttributionIdentity:
         title = headers.get(HEADER_APP_TITLE, "")
         assert "\r" not in title and "\n" not in title
 
+    # -- categories: the third attribution value ------------------------
+
+    def test_unconfigured_still_claims_the_framework_category(self):
+        assert self._headers().get(HEADER_APP_CATEGORIES) == "cli-agent"
+
+    def test_a_named_app_does_not_inherit_the_frameworks_category(self):
+        # Filing a Slack bot under "cli-agent" mis-files it; no header is
+        # the honest answer until the app declares its own.
+        headers = self._headers(extra={"app_identity": {"name": "Acme Bot"}})
+        assert HEADER_APP_CATEGORIES not in headers
+
+    def test_a_named_app_sends_the_categories_it_declared(self):
+        headers = self._headers(
+            extra={"app_identity": {
+                "name": "Acme Bot", "categories": ["chat-bot", "productivity"],
+            }},
+        )
+        assert headers.get(HEADER_APP_CATEGORIES) == "chat-bot,productivity"
+
+    def test_app_categories_env_names_the_categories(self):
+        headers = self._headers(
+            env={"JAATO_APP_NAME": "Acme Bot",
+                 "JAATO_APP_CATEGORIES": "chat-bot"},
+        )
+        assert headers.get(HEADER_APP_CATEGORIES) == "chat-bot"
+
+    def test_openrouter_categories_env_outranks_the_identity(self):
+        headers = self._headers(
+            extra={"app_identity": {"name": "Acme", "categories": ["chat-bot"]}},
+            env={"JAATO_OPENROUTER_APP_CATEGORIES": "writing-assistant"},
+        )
+        assert headers.get(HEADER_APP_CATEGORIES) == "writing-assistant"
+
+    def test_profile_knob_outranks_the_identity_categories(self):
+        headers = self._headers(
+            extra={
+                "app_identity": {"name": "Acme", "categories": ["chat-bot"]},
+                "app_categories": ["productivity"],
+            },
+        )
+        assert headers.get(HEADER_APP_CATEGORIES) == "productivity"
+
+    def test_a_category_outside_openrouters_taxonomy_is_dropped_not_fatal(self):
+        # JAATO_APP_CATEGORIES is provider-agnostic, so it may legitimately
+        # carry a slug some other directory uses.  Losing the listing is the
+        # right cost; killing every session in the deployment is not.
+        headers = self._headers(
+            extra={"app_identity": {
+                "name": "Acme", "categories": ["Customer Support", "chat-bot"],
+            }},
+        )
+        assert headers.get(HEADER_APP_CATEGORIES) == "chat-bot"
+
+    def test_the_profile_knob_still_fails_loud_on_a_bad_slug(self):
+        # Authored, reviewed, OpenRouter-specific config: a typo there is
+        # worth an exception.
+        with pytest.raises(ValueError, match="lowercase"):
+            self._headers(extra={"app_categories": ["Customer Support"]})
+
 
 class TestExtraHeaders:
     """Tests for the ``extra_headers`` profile knob.

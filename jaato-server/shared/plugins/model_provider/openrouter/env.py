@@ -11,6 +11,7 @@ import os
 from typing import List, Optional
 
 from shared.app_identity import (
+    FRAMEWORK_CATEGORIES,
     FRAMEWORK_NAME,
     FRAMEWORK_URL,
     AppIdentity,
@@ -50,13 +51,18 @@ DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
 DEFAULT_HTTP_REFERER = FRAMEWORK_URL
 DEFAULT_APP_TITLE = FRAMEWORK_NAME
 
-# Marketplace category for jaato.  ``cli-agent`` is the closest fit in
-# OpenRouter's taxonomy ("Terminal-based coding assistants") — jaato is
-# a terminal-driven multi-provider agentic tool orchestrator.  Per
+# Marketplace categories for the FRAMEWORK — ``cli-agent`` is the closest
+# fit in OpenRouter's taxonomy ("Terminal-based coding assistants") for a
+# terminal-driven multi-provider agentic tool orchestrator.  Per
 # https://openrouter.ai/docs/app-attribution, OpenRouter silently
 # drops unrecognized categories, so the worst case for the default is
 # that future taxonomy changes turn it into a no-op until we update.
-DEFAULT_APP_CATEGORIES = ("cli-agent",)
+#
+# An application that names itself does NOT inherit this: jaato's claim
+# about what jaato is does not transfer to a Slack bot.  Such an app sends
+# no categories unless it declares its own (``JAATO_APP_CATEGORIES`` or the
+# knob below) — see ``AppIdentity.attribution_categories``.
+DEFAULT_APP_CATEGORIES = FRAMEWORK_CATEGORIES
 
 # OpenRouter's documented limits on the X-OpenRouter-Categories header.
 MAX_CATEGORIES_PER_REQUEST = 5
@@ -206,25 +212,35 @@ def resolve_app_title(identity: Optional[AppIdentity] = None) -> str:
     return (identity or resolve_app_identity()).attribution_title()
 
 
-def resolve_app_categories() -> List[str]:
+def resolve_app_categories(identity: Optional[AppIdentity] = None) -> List[str]:
     """Resolve the X-OpenRouter-Categories header value as a list.
 
-    The env var is read as a comma-separated string (the same form
-    that becomes the wire header value); whitespace around each entry
-    is stripped, empty entries are dropped.  Returns the
-    :data:`DEFAULT_APP_CATEGORIES` tuple as a list when unset.
+    Two tiers, like the other two attribution values: the
+    OpenRouter-specific env var wins, read as a comma-separated string (the
+    same form that becomes the wire header value, whitespace trimmed, empty
+    entries dropped); then the application identity's
+    :meth:`~shared.app_identity.AppIdentity.attribution_categories` — its
+    own declared categories, jaato's when the identity IS jaato, and none
+    for an application that never declared any.
 
-    Format validation is the caller's job — this function trusts that
-    the user knows OpenRouter's taxonomy.  Unrecognized categories are
-    silently ignored by OpenRouter per
-    https://openrouter.ai/docs/app-attribution, so the failure mode is
-    "no category attached" rather than a request error.
+    An empty result means the header is omitted entirely, which is also how
+    ``JAATO_OPENROUTER_APP_CATEGORIES=`` opts out.
+
+    OpenRouter *taxonomy* validation is the caller's job (see
+    ``provider._validate_categories``); this only resolves which list to
+    send.  Unrecognized categories are silently ignored by OpenRouter per
+    https://openrouter.ai/docs/app-attribution, so a wrong slug costs the
+    listing rather than the request.
+
+    Args:
+        identity: Pre-resolved application identity; resolved from the
+            environment when omitted.
     """
-    raw = os.environ.get(ENV_OPENROUTER_APP_CATEGORIES)  # env: comma-separated X-OpenRouter-Categories header (default cli-agent)
-    if raw is None:
-        return list(DEFAULT_APP_CATEGORIES)
-    parts = [c.strip() for c in raw.split(",")]
-    return [c for c in parts if c]
+    raw = os.environ.get(ENV_OPENROUTER_APP_CATEGORIES)  # env: comma-separated X-OpenRouter-Categories header (defaults to the application's own categories)
+    if raw is not None:
+        parts = [c.strip() for c in raw.split(",")]
+        return [c for c in parts if c]
+    return list((identity or resolve_app_identity()).attribution_categories())
 
 
 def get_checked_credential_locations(config=None) -> List[str]:

@@ -190,8 +190,10 @@ dashboard. `shared/app_identity.py` separates the two: `AppIdentity` is the
 export JAATO_APP_NAME="Acme Copilot"
 export JAATO_APP_URL="https://acme.example"
 export JAATO_APP_VERSION="1.4.0"
-# → X-OpenRouter-Title: Acme Copilot (powered by jaato)
-# → HTTP-Referer:       https://acme.example
+export JAATO_APP_CATEGORIES="chat-bot"   # optional; no marketplace listing without it
+# → X-OpenRouter-Title:      Acme Copilot (powered by jaato)
+# → HTTP-Referer:            https://acme.example
+# → X-OpenRouter-Categories: chat-bot
 ```
 
 ```python
@@ -205,8 +207,8 @@ Precedence, highest first:
 
 | # | Surface | Scope |
 |---|---------|-------|
-| 1 | `plugin_configs.openrouter.app_title` / `http_referer` | one session |
-| 2 | `JAATO_OPENROUTER_APP_TITLE` / `JAATO_OPENROUTER_HTTP_REFERER` | provider-specific env |
+| 1 | `plugin_configs.openrouter.app_title` / `http_referer` / `app_categories` | one session |
+| 2 | `JAATO_OPENROUTER_APP_TITLE` / `_HTTP_REFERER` / `_APP_CATEGORIES` | provider-specific env |
 | 3 | `JaatoRuntime(app_identity=...)` | the embedding process |
 | 4 | `JAATO_APP_*` | deployment (process env, workspace `.env`, a profile's `env:` map) |
 
@@ -215,7 +217,10 @@ config is byte-identical to before — an unconfigured checkout still reports as
 `jaato`. `JAATO_APP_POWERED_BY=false` drops the suffix; every field is sanitised
 (CR/LF stripped, length-capped) because these strings become HTTP headers.
 `AppIdentity.user_agent()` (`Acme-Copilot/1.4.0 (powered by jaato/0.7.0)`) is
-the general form for providers that gain a `User-Agent` later. Full rationale
+the general form for providers that gain a `User-Agent` later. Categories are
+the one value that does **not** fall back to the framework's: an app filed
+under jaato's `cli-agent` by default would be mis-filed, so a named app sends
+none until it declares its own. Full rationale
 — including why the env vars are `host`-scoped and why there is no typed
 profile block — in [Application Identity](docs/design/app-identity.md).
 
@@ -1279,6 +1284,7 @@ covers it, where one exists. `jaato-scaffold explain env` renders the tags;
 | `JAATO_APP_URL` | The application's own site/repo — becomes the attributed `HTTP-Referer`. Falls back to the framework's repository. |
 | `JAATO_APP_VERSION` | The application's own version (not the framework's); used by `AppIdentity.user_agent()`. |
 | `JAATO_APP_POWERED_BY` | Whether attribution appends `(powered by jaato)` (default `true`). Set `false` for a white-labelled product. |
+| `JAATO_APP_CATEGORIES` | Comma-separated marketplace categories the application claims (OpenRouter's `X-OpenRouter-Categories`). An app that names itself does **not** inherit jaato's `cli-agent` — declare your own or send none. |
 | `AI_USE_CHAT_FUNCTIONS` | Enable function calling mode (`1`/`true`) |
 | `LEDGER_PATH` | Output path for token accounting JSONL |
 | `JAATO_GC_THRESHOLD` | GC trigger threshold % (default: 80.0) |

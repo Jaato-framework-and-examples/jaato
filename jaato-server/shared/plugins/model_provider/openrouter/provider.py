@@ -193,6 +193,47 @@ def _resolve_identity(extra: Dict[str, Any]) -> AppIdentity:
     return resolve_app_identity()
 
 
+def _filter_categories(categories: List[str]) -> List[str]:
+    """Keep the categories OpenRouter's taxonomy accepts; warn about the rest.
+
+    The lenient sibling of :func:`_validate_categories`, and the split is
+    between AUTHORED config and the ENVIRONMENT rather than between
+    OpenRouter-specific and generic:
+
+    * ``plugin_configs.openrouter.app_categories`` is authored, reviewed and
+      provider-specific, so a typo there fails loud — the author is stating
+      OpenRouter's taxonomy and should be told when they state it wrong.
+    * The env tiers (``JAATO_OPENROUTER_APP_CATEGORIES``, and the
+      application identity's ``JAATO_APP_CATEGORIES``, which is
+      provider-agnostic and may legitimately carry a slug from some other
+      directory's taxonomy) are filtered instead.  Killing every session in
+      a deployment over an attribution nicety is the wrong trade: the
+      documented worst case for a bad category is that OpenRouter drops it
+      server-side, i.e. no listing.
+
+    Rules are not restated — each entry is run through
+    :func:`_validate_categories` singly, so the two can't drift.
+    """
+    kept: List[str] = []
+    for entry in categories:
+        try:
+            _validate_categories([entry])
+        except (TypeError, ValueError) as exc:
+            logger.warning(
+                "OpenRouter: dropping app category %r — %s", entry, exc,
+            )
+            continue
+        kept.append(entry)
+    if len(kept) > MAX_CATEGORIES_PER_REQUEST:
+        logger.warning(
+            "OpenRouter accepts at most %d app categories; keeping the "
+            "first %d of %d", MAX_CATEGORIES_PER_REQUEST,
+            MAX_CATEGORIES_PER_REQUEST, len(kept),
+        )
+        kept = kept[:MAX_CATEGORIES_PER_REQUEST]
+    return kept
+
+
 def _validate_categories(categories: List[str]) -> List[str]:
     """Validate marketplace categories against OpenRouter's documented rules.
 
@@ -798,15 +839,19 @@ class OpenRouterProvider(ModalityCapabilityMixin):
             config.extra.get("app_title") or resolve_app_title(identity)
         )
 
-        # Marketplace categories — profile takes precedence over env
-        # (and env is parsed from a comma-separated string).  Both
-        # paths share the same validation: format violations raise
-        # immediately so a typo can't silently invalidate the header.
+        # Marketplace categories — the third attribution value, resolved on
+        # the same tiers as the two above: profile knob, then the
+        # OpenRouter-specific env var, then the application identity's own
+        # categories (jaato's ``cli-agent`` only when the identity IS
+        # jaato).  Both paths share the same validation: format violations
+        # raise immediately so a typo can't silently invalidate the header.
         # Pass an explicit empty list to opt out of category attribution
-        # entirely without touching DEFAULT_APP_CATEGORIES.
+        # entirely.
         categories_extra = config.extra.get("app_categories")
         if categories_extra is None:
-            self._app_categories = _validate_categories(resolve_app_categories())
+            self._app_categories = _filter_categories(
+                resolve_app_categories(identity),
+            )
         else:
             if not isinstance(categories_extra, (list, tuple)):
                 raise TypeError(

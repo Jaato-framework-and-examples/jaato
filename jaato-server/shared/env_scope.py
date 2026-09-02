@@ -153,6 +153,9 @@ CATALOG: Dict[str, EnvClass] = {
     # Per-session attribution is a real need and is served by the typed
     # provider knobs (``plugin_configs.openrouter.app_title`` /
     # ``http_referer``), which outrank these.  See shared/app_identity.py.
+    "JAATO_APP_CATEGORIES": EnvClass(HOST, None,
+        "comma-separated marketplace categories the application claims; a "
+        "property of the product, not of a conversation"),
     "JAATO_APP_NAME": EnvClass(HOST, None,
         "names the application embedding the framework; one app per "
         "deployment, and the per-session need is served by the provider "

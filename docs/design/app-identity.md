@@ -46,12 +46,30 @@ turns it off explicitly.
 | `url` | The application's own site/repo — what OpenRouter attributes rankings to. Falls back to the framework's repository. |
 | `version` | The *application's* version, not the framework's. Used by `user_agent()`. |
 | `powered_by` | Whether attribution appends `(powered by jaato)`. Default `True`; ignored when the identity *is* the framework. |
+| `categories` | Marketplace categories the app claims — what an upstream directory files it under (OpenRouter's `X-OpenRouter-Categories`). Empty by default and **not** inherited from the framework; see below. |
 
-Three derived forms:
+Four derived forms:
 
 - `attribution_title()` → `"Acme Copilot (powered by jaato)"`
 - `attribution_url()` → the app's URL, else the framework's
+- `attribution_categories()` → the app's categories, else the framework's *only if this is the framework*
 - `user_agent()` → `"Acme-Copilot/1.4.0 (powered by jaato/0.7.0)"`
+
+### Why categories do not fall back the way the URL does
+
+`attribution_url()` hands a nameless app the framework's URL;
+`attribution_categories()` does not hand it the framework's category. The
+asymmetry is deliberate:
+
+- a **referer** is what rankings key on, so an app with none is better served
+  landing in jaato's row than in no row at all;
+- a **category** is a claim about *what the application is*. Once an app has
+  said it is not jaato, jaato's claim about itself no longer transfers. A
+  Slack bot silently filed under `cli-agent` is worse than one filed nowhere
+  — it mis-files the app and pollutes the directory for everyone reading it.
+
+So an application that wants a listing names its own categories
+(`JAATO_APP_CATEGORIES`, or the provider knob).
 
 `user_agent()` has no consumer inside the framework yet. It exists so the next
 provider or HTTP client that wants to identify the caller does not re-derive
@@ -65,16 +83,20 @@ unchanged; the mechanism is the last two.
 
 | # | Surface | Scope | Use when |
 |---|---------|-------|----------|
-| 1 | `plugin_configs.openrouter.app_title` / `http_referer` | one session | one profile must attribute differently from the rest |
-| 2 | `JAATO_OPENROUTER_APP_TITLE` / `JAATO_OPENROUTER_HTTP_REFERER` | process / session env | you are tuning OpenRouter specifically |
+| 1 | `plugin_configs.openrouter.app_title` / `http_referer` / `app_categories` | one session | one profile must attribute differently from the rest |
+| 2 | `JAATO_OPENROUTER_APP_TITLE` / `_HTTP_REFERER` / `_APP_CATEGORIES` | process / session env | you are tuning OpenRouter specifically |
 | 3 | `JaatoRuntime(app_identity=AppIdentity(...))` | the embedding process | your product embeds the framework in-process |
-| 4 | `JAATO_APP_NAME` / `JAATO_APP_URL` / `JAATO_APP_VERSION` / `JAATO_APP_POWERED_BY` | deployment | a daemon started by your app, a workspace `.env`, a profile's `env:` map |
+| 4 | `JAATO_APP_NAME` / `JAATO_APP_URL` / `JAATO_APP_VERSION` / `JAATO_APP_POWERED_BY` / `JAATO_APP_CATEGORIES` | deployment | a daemon started by your app, a workspace `.env`, a profile's `env:` map |
+
+(For categories, tiers 1 and 2 are `plugin_configs.openrouter.app_categories`
+and `JAATO_OPENROUTER_APP_CATEGORIES`.)
 
 ```bash
 # tier 4 — the deployment surface
 export JAATO_APP_NAME="Acme Copilot"
 export JAATO_APP_URL="https://acme.example"
 export JAATO_APP_VERSION="1.4.0"
+export JAATO_APP_CATEGORIES="chat-bot,productivity"   # optional; no listing without it
 ```
 
 ```python
@@ -115,7 +137,7 @@ ProviderConfig.extra
 OpenRouterProvider.initialize()
         │  profile knob  >  JAATO_OPENROUTER_*  >  app_identity  >  framework
         ▼
-HTTP-Referer / X-OpenRouter-Title
+HTTP-Referer / X-OpenRouter-Title / X-OpenRouter-Categories
 ```
 
 Two properties of that path are deliberate:
@@ -148,10 +170,31 @@ are written verbatim into HTTP headers. This is not hypothetical hygiene — an
 app name is attacker-influenced in exactly the deployment that most wants this
 feature: a hosted product naming itself after the tenant it is serving.
 
+## Strict where it is authored, lenient where it is ambient
+
+A category slug has to satisfy OpenRouter's taxonomy (lowercase
+`[a-z0-9-]`, ≤30 chars, ≤5 entries). Where that rule is enforced differs by
+*who wrote the value*, not by which variable carried it:
+
+| Source | On a bad slug |
+|--------|---------------|
+| `plugin_configs.openrouter.app_categories` | raises — authored, reviewed, OpenRouter-specific config; the author is stating a taxonomy and should be told when they state it wrong |
+| `JAATO_OPENROUTER_APP_CATEGORIES`, `JAATO_APP_CATEGORIES` | dropped with a `WARNING`, the rest kept |
+
+The env tiers are filtered because `JAATO_APP_CATEGORIES` is
+provider-agnostic — it may legitimately carry a slug from another directory's
+taxonomy — and because killing every session in a deployment over an
+attribution nicety is the wrong trade. OpenRouter's own documented worst case
+for an unrecognised category is that it drops it server-side, i.e. no listing.
+The lenient path runs each entry through the strict validator singly, so the
+two cannot drift.
+
 ## Scope, and what is not here
 
 - **OpenRouter is the only consumer today** because it is the only provider
-  with an app-attribution protocol. Anthropic, Google and the OpenAI-compatible
+  with an app-attribution protocol. All three of its attribution headers now
+  read from the identity, so there is no piece of "who is this app" left
+  living in the provider. Anthropic, Google and the OpenAI-compatible
   providers have no equivalent header; when one gains a `User-Agent` worth
   setting, `AppIdentity.user_agent()` is already the value to send.
 - **No typed profile block.** An `app:` key on `SubagentProfile` would have to

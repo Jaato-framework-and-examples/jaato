@@ -15,6 +15,7 @@ into HTTP headers.
 import pytest
 
 from shared.app_identity import (
+    FRAMEWORK_CATEGORIES,
     FRAMEWORK_NAME,
     FRAMEWORK_URL,
     MAX_NAME_LENGTH,
@@ -28,6 +29,7 @@ _APP_ENV_VARS = (
     "JAATO_APP_URL",
     "JAATO_APP_VERSION",
     "JAATO_APP_POWERED_BY",
+    "JAATO_APP_CATEGORIES",
 )
 
 
@@ -209,9 +211,15 @@ class TestSerialisation:
     def test_round_trip_preserves_every_field(self):
         identity = AppIdentity(
             name="Acme", url="https://acme.example", version="1.0",
-            powered_by=False,
+            powered_by=False, categories=("chat-bot", "productivity"),
         )
         assert AppIdentity.from_dict(identity.to_dict()) == identity
+
+    def test_categories_cross_the_wire_as_a_list(self):
+        # ``to_dict`` output is JSON on ProviderConfig.extra; a tuple is not.
+        assert AppIdentity(name="Acme", categories=("chat-bot",)).to_dict()[
+            "categories"
+        ] == ["chat-bot"]
 
     def test_unset_fields_are_omitted(self):
         assert AppIdentity(name="Acme").to_dict() == {
@@ -226,6 +234,58 @@ class TestSerialisation:
         # than raising.
         identity = AppIdentity.from_dict({"name": "Acme", "future_key": 1})
         assert identity.name == "Acme"
+
+
+# ==================== Categories ====================
+
+
+class TestCategories:
+    """The third attribution value: what an upstream directory files the
+    application under."""
+
+    def test_framework_claims_its_own_category(self):
+        assert (
+            resolve_app_identity().attribution_categories() == FRAMEWORK_CATEGORIES
+        )
+
+    def test_a_named_app_does_not_inherit_the_frameworks_category(
+        self, monkeypatch,
+    ):
+        # The whole point: jaato's claim about what jaato is does not
+        # transfer to a Slack bot.  Filing it under "cli-agent" would be
+        # worse than filing it nowhere.
+        monkeypatch.setenv("JAATO_APP_NAME", "Acme Bot")
+        assert resolve_app_identity().attribution_categories() == ()
+
+    def test_a_named_app_gets_the_categories_it_declares(self, monkeypatch):
+        monkeypatch.setenv("JAATO_APP_NAME", "Acme Bot")
+        monkeypatch.setenv("JAATO_APP_CATEGORIES", "chat-bot,productivity")
+        assert resolve_app_identity().attribution_categories() == (
+            "chat-bot", "productivity",
+        )
+
+    def test_env_entries_are_trimmed_and_empties_dropped(self, monkeypatch):
+        monkeypatch.setenv("JAATO_APP_NAME", "Acme Bot")
+        monkeypatch.setenv("JAATO_APP_CATEGORIES", " chat-bot , , productivity ")
+        assert resolve_app_identity().categories == ("chat-bot", "productivity")
+
+    def test_a_list_is_accepted_programmatically(self):
+        assert AppIdentity(name="Acme", categories=["a", "b"]).categories == (
+            "a", "b",
+        )
+
+    def test_categories_are_a_tuple_so_an_identity_stays_immutable(self):
+        # A provider keeps the identity; a caller must not be able to
+        # mutate the list out from under it.
+        assert isinstance(AppIdentity(name="A", categories=["x"]).categories, tuple)
+
+    def test_control_characters_are_stripped_from_a_category(self):
+        entry = AppIdentity(name="A", categories=["chat\r\nbot"]).categories[0]
+        assert "\r" not in entry and "\n" not in entry
+
+    def test_the_framework_identity_carries_the_framework_categories(self):
+        from shared.app_identity import FRAMEWORK_IDENTITY
+        assert FRAMEWORK_IDENTITY.categories == FRAMEWORK_CATEGORIES
 
 
 # ==================== Runtime stamping ====================
@@ -296,5 +356,6 @@ def test_module_reads_only_the_catalogued_env_vars():
     found = set(re.findall(r'os\.environ\.get\(\s*(ENV_\w+)', source))
     assert found == {
         "ENV_APP_NAME", "ENV_APP_URL", "ENV_APP_VERSION", "ENV_APP_POWERED_BY",
+        "ENV_APP_CATEGORIES",
     }
     assert {getattr(module, name) for name in found} == set(_APP_ENV_VARS)

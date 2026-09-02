@@ -23,8 +23,9 @@ HOW AN AUTHOR SETS IT.  Three surfaces, highest precedence first:
 2. **Programmatic** — ``JaatoRuntime(app_identity=AppIdentity(...))``, for
    a product that embeds the framework in its own process.
 3. **Environment** — :data:`ENV_APP_NAME` / :data:`ENV_APP_URL` /
-   :data:`ENV_APP_VERSION` / :data:`ENV_APP_POWERED_BY`.  The deployment
-   surface: a daemon started by an app, or a workspace ``.env``.
+   :data:`ENV_APP_VERSION` / :data:`ENV_APP_POWERED_BY` /
+   :data:`ENV_APP_CATEGORIES`.  The deployment surface: a daemon started by
+   an app, or a workspace ``.env``.
 
 Absent all three the identity is the framework's own (:data:`FRAMEWORK_NAME`),
 so an unconfigured checkout keeps reporting exactly as it did before.
@@ -35,8 +36,12 @@ deployment, not of a conversation, and two sessions in one process disagreeing
 about it would be a lie about who is spending the money.  Per-session
 attribution is a real need — it is what tier 1 above serves.
 
-WHAT CONSUMES IT.  Today: the OpenRouter provider's app-attribution headers
-(``HTTP-Referer`` / ``X-OpenRouter-Title``).  :meth:`AppIdentity.user_agent`
+WHAT CONSUMES IT.  Today: all three of the OpenRouter provider's
+app-attribution headers (``HTTP-Referer`` / ``X-OpenRouter-Title`` /
+``X-OpenRouter-Categories``) — no part of "who is this app" is left living in
+the provider.  Note that :meth:`AppIdentity.attribution_categories` does NOT
+fall back to the framework's category the way ``attribution_url`` falls back
+to its URL; the reason is on that method.  :meth:`AppIdentity.user_agent`
 is the general form for any provider or HTTP client that wants to identify the
 caller; it is deliberately shaped like a conventional UA string
 (``Acme-Copilot/1.4.0 (powered by jaato/0.7.0)``) so nothing has to parse the
@@ -51,10 +56,11 @@ naming itself after a tenant.
 
 import os
 from dataclasses import dataclass
-from typing import Any, Dict, Mapping, Optional, Union
+from typing import Any, Dict, Iterable, Mapping, Optional, Tuple, Union
 
 __all__ = [
     "AppIdentity",
+    "FRAMEWORK_CATEGORIES",
     "FRAMEWORK_IDENTITY",
     "FRAMEWORK_NAME",
     "FRAMEWORK_URL",
@@ -75,6 +81,13 @@ FRAMEWORK_NAME = "jaato"
 #: application supplies a name but no URL of its own.
 FRAMEWORK_URL = "https://github.com/Jaato-framework-and-examples/jaato"
 
+#: Marketplace categories jaato itself claims.  ``cli-agent`` is the closest
+#: fit in OpenRouter's taxonomy ("terminal-based coding assistants") for a
+#: terminal-driven agentic tool orchestrator.  Deliberately NOT inherited by
+#: an application that names itself — see
+#: :meth:`AppIdentity.attribution_categories`.
+FRAMEWORK_CATEGORIES = ("cli-agent",)
+
 #: Distribution whose version is the framework version.
 _FRAMEWORK_DISTRIBUTION = "jaato-server"
 
@@ -86,6 +99,7 @@ ENV_APP_NAME = "JAATO_APP_NAME"
 ENV_APP_URL = "JAATO_APP_URL"
 ENV_APP_VERSION = "JAATO_APP_VERSION"
 ENV_APP_POWERED_BY = "JAATO_APP_POWERED_BY"
+ENV_APP_CATEGORIES = "JAATO_APP_CATEGORIES"
 
 # ============================================================
 # Sanitisation limits
@@ -97,6 +111,10 @@ MAX_NAME_LENGTH = 128
 
 #: URLs are longer by nature but still bounded.
 MAX_URL_LENGTH = 512
+
+#: Per-category cap.  Category taxonomies are short slugs everywhere they
+#: appear; the consuming provider applies its own (usually tighter) rules.
+MAX_CATEGORY_LENGTH = 64
 
 _FALSE_WORDS = frozenset({"0", "false", "no", "off", "none", ""})
 
@@ -130,6 +148,27 @@ def _as_flag(raw: Optional[str], default: bool) -> bool:
     if raw is None:
         return default
     return raw.strip().lower() not in _FALSE_WORDS
+
+
+def _as_categories(value: Any) -> Tuple[str, ...]:
+    """Coerce a categories value to a tuple of slugs.
+
+    Accepts the two shapes categories arrive in: a comma-separated string
+    (the env-var form, which is also the wire form of the header) and any
+    iterable of strings (the programmatic and JSON forms).  ``None`` and
+    anything unrecognised become the empty tuple — a malformed category
+    list should cost the listing, not the request.
+
+    Entry-level cleaning (trim / drop empties / cap) happens in
+    ``AppIdentity.__post_init__``, so every construction path shares it.
+    """
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        return tuple(value.split(","))
+    if isinstance(value, Iterable):
+        return tuple(str(entry) for entry in value)
+    return ()
 
 
 _framework_version_cache: Optional[str] = None
@@ -177,12 +216,20 @@ class AppIdentity:
             integrator's app would otherwise take from it; set ``False`` for
             a white-labelled product.  Ignored when this *is* the framework
             identity — ``jaato (powered by jaato)`` helps nobody.
+        categories: Marketplace categories the application claims, as a
+            tuple of slugs — what an upstream app directory files it under
+            (OpenRouter's ``X-OpenRouter-Categories`` today).  Empty by
+            default, and NOT inherited from the framework: see
+            :meth:`attribution_categories`.  Only lightly sanitised here;
+            each consumer enforces its own taxonomy rules, because the legal
+            slugs are the upstream's to define, not the framework's.
     """
 
     name: str = FRAMEWORK_NAME
     url: Optional[str] = None
     version: Optional[str] = None
     powered_by: bool = True
+    categories: Tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         # frozen dataclass: normalise through object.__setattr__.
@@ -195,6 +242,16 @@ class AppIdentity:
             self, "version", _sanitise(self.version, limit=MAX_NAME_LENGTH),
         )
         object.__setattr__(self, "powered_by", bool(self.powered_by))
+        # A tuple, so the dataclass stays frozen-and-hashable and a caller
+        # cannot mutate an identity out from under a provider that kept it.
+        object.__setattr__(self, "categories", tuple(
+            cleaned
+            for cleaned in (
+                _sanitise(entry, limit=MAX_CATEGORY_LENGTH)
+                for entry in (self.categories or ())
+            )
+            if cleaned
+        ))
 
     # -- Identity ---------------------------------------------------------
 
@@ -231,6 +288,31 @@ class AppIdentity:
         app with no URL is attributed to jaato rather than to nothing.
         """
         return self.url or FRAMEWORK_URL
+
+    def attribution_categories(self) -> Tuple[str, ...]:
+        """Marketplace categories to attribute this application under.
+
+        The application's own when it declared any; the framework's
+        (:data:`FRAMEWORK_CATEGORIES`) only when this *is* the framework;
+        empty otherwise.
+
+        That last clause is the one worth stating out loud, because it is
+        the opposite of :meth:`attribution_url`, which DOES hand a nameless
+        app the framework's URL.  The asymmetry is deliberate:
+
+        * a referer is what rankings key on, so an app with none is better
+          served landing in jaato's row than in no row at all;
+        * a category is a claim about *what the application is*, and once an
+          app has told us it is not jaato, jaato's claim about itself does
+          not transfer.  A Slack bot silently filed under "cli-agent" is
+          worse than one filed nowhere — it mis-files the app and pollutes
+          the directory for everyone reading it.
+
+        So an application that wants a listing names its own categories.
+        """
+        if self.categories:
+            return self.categories
+        return FRAMEWORK_CATEGORIES if self.is_framework else ()
 
     def user_agent(self) -> str:
         """Conventional ``User-Agent`` string naming app and framework.
@@ -270,6 +352,9 @@ class AppIdentity:
             data["url"] = self.url
         if self.version:
             data["version"] = self.version
+        if self.categories:
+            # A list, not a tuple: this dict is JSON on the wire.
+            data["categories"] = list(self.categories)
         return data
 
     @classmethod
@@ -287,11 +372,14 @@ class AppIdentity:
             url=data.get("url"),
             version=data.get("version"),
             powered_by=bool(data.get("powered_by", True)),
+            categories=_as_categories(data.get("categories")),
         )
 
 
 #: The framework's own identity — the resolution default.
-FRAMEWORK_IDENTITY = AppIdentity(name=FRAMEWORK_NAME, url=FRAMEWORK_URL)
+FRAMEWORK_IDENTITY = AppIdentity(
+    name=FRAMEWORK_NAME, url=FRAMEWORK_URL, categories=FRAMEWORK_CATEGORIES,
+)
 
 
 def resolve_app_identity(
@@ -306,8 +394,8 @@ def resolve_app_identity(
        programmatic surface (``JaatoRuntime(app_identity=...)``) and the
        carrier for an identity stamped onto a provider config.
     2. :data:`ENV_APP_NAME` / :data:`ENV_APP_URL` / :data:`ENV_APP_VERSION` /
-       :data:`ENV_APP_POWERED_BY`.
-    3. :data:`FRAMEWORK_IDENTITY` — jaato's own name and URL.
+       :data:`ENV_APP_POWERED_BY` / :data:`ENV_APP_CATEGORIES`.
+    3. :data:`FRAMEWORK_IDENTITY` — jaato's own name, URL and categories.
 
     Note that tier 2 is read per call rather than cached: the daemon overlays
     a session's ``env`` onto ``os.environ`` for the duration of a turn, so a
@@ -329,12 +417,16 @@ def resolve_app_identity(
     powered_by = _as_flag(
         os.environ.get(ENV_APP_POWERED_BY), True,  # env: append "(powered by jaato)" to app attribution (default true)
     )
+    categories = _as_categories(
+        os.environ.get(ENV_APP_CATEGORIES),  # env: comma-separated marketplace categories the application claims (app attribution)
+    )
 
     fields: Dict[str, Any] = {
         "name": name,
         "url": url,
         "version": version,
         "powered_by": powered_by,
+        "categories": categories,
     }
     for key in fields:
         if overrides and overrides.get(key) is not None:
@@ -342,10 +434,13 @@ def resolve_app_identity(
 
     if not fields["name"]:
         # Nobody named an application: this is the framework itself, which
-        # does have a URL of its own.  An app that names itself but gives no
-        # URL keeps ``url=None`` and is attributed to FRAMEWORK_URL by
-        # attribution_url() — the distinction survives a to_dict() round-trip.
+        # does have a URL and categories of its own.  An app that names
+        # itself but gives no URL keeps ``url=None`` and is attributed to
+        # FRAMEWORK_URL by attribution_url() — the distinction survives a
+        # to_dict() round-trip; categories are NOT filled in the same way,
+        # per attribution_categories().
         fields["name"] = FRAMEWORK_NAME
         fields["url"] = fields["url"] or FRAMEWORK_URL
+        fields["categories"] = fields["categories"] or FRAMEWORK_CATEGORIES
 
     return AppIdentity(**fields)
