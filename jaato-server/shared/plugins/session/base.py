@@ -136,6 +136,89 @@ class SessionState:
     sessions (unchanged behavior — the agent id falls back to "main").
     """
 
+    profile_snapshot: Optional[Dict[str, Any]] = None
+    """The RESOLVED profile this session actually ran under, frozen at
+    creation (record version 2.8+, issue #787).
+
+    Distinct from :attr:`profile_spec`, which persists an *inline* recipe
+    because there is no name to resolve back to.  This one persists a
+    *named* profile's resolved form, because re-resolving a name reads the
+    profile FILES AS THEY ARE AT REVIVE TIME — so an edit between creation
+    and revive silently changed what a revived session ran under, and a
+    session came back with its original history under a different recipe.
+
+    The operator decision recorded on #787 is that a revived session keeps
+    what it was created with, and a session that wants new instructions is
+    a new session.  This field is what makes that true rather than
+    aspirational.
+
+    Written by :func:`shared.plugins.subagent.config.profile_to_snapshot`
+    and read back by ``profile_from_snapshot``.  Secret URIs
+    (``pass://``, ``vault://``) are carried UNRESOLVED, exactly as
+    ``profile_spec`` carries them — a resolved profile holds the URI, not
+    the credential; expansion happens later on the daemon.
+
+    ``None`` on records written before 2.8 and on inline-profile sessions
+    (which restore via ``profile_spec``).  Absent, the revive falls back to
+    re-resolving ``profile_name`` from disk — i.e. exactly the pre-2.8
+    behaviour, so old records keep loading.
+    """
+
+    rendered_instructions: Optional[str] = None
+    """The system instruction EXACTLY as rendered at session-prep — the
+    prompt the model was actually given on turn 1 (record version 2.8+,
+    issue #787).
+
+    Includes the persona, the framework layers the profile did not
+    suppress, plugin instructions, and the OUTPUT of every ``{{!py:...}}``
+    prefetch placeholder.  Snapshotted at the end of
+    ``JaatoSession.configure()`` and read back through
+    ``BootstrapEnvelope.system_instruction_override``.
+
+    WHY THIS IS PERSISTED AT ALL.  A revived session used to REBUILD its
+    prompt: re-read ``.jaato/instructions/``, re-resolve the agent
+    markdown, and RE-RUN the prefetch scripts.  Re-running is what broke
+    #787 — ``agent_params`` were not persisted, so a mandatory prefetch
+    that reads them aborted session-prep and the session could not be
+    woken by anything that goes through ``_load_session``.  It was also
+    wrong in two quieter ways: a prefetch is documented as running once,
+    before turn 1, yet a side-effecting one (the reported case
+    *materialises a git worktree*) re-ran on every revive; and the rebuilt
+    prompt could differ from the original, so the session resumed with a
+    history produced under one prompt and continued under another.
+
+    Restoring the render removes all three.  ``None`` on pre-2.8 records
+    and on sessions whose runner never reported one — both fall back to
+    re-rendering, which is the pre-2.8 behaviour, so this change is
+    backward compatible by construction.
+    """
+
+    agent_params: Optional[Dict[str, str]] = None
+    """The ``agent_params`` the session was created with (record version
+    2.8+, issue #787).
+
+    These fill ``{{param}}`` placeholders in the persona and are the
+    documented channel a ``{{!py:...}}`` prefetch reads its per-agent
+    inputs from (``context.agent_params``).  Not persisting them is the
+    proximate cause of #787: bootstrap re-ran the prefetch on revive and
+    handed it an empty dict, so the script raised and blamed the task
+    definition — which was correct all along.
+
+    On the default revive path the prefetch does not re-run at all
+    (``rendered_instructions`` above is restored instead), so these are
+    persisted for the OPT-IN re-render path
+    (``JAATO_REVIVE_PERSONA=disk``), which re-renders the persona from
+    disk against the ORIGINAL params rather than against nothing.
+
+    CONTRACT FOR AUTHORS: **never pass a credential as an agent_param.**
+    ``resolve_agent`` substitutes them into the persona, so anything put
+    here already reaches the model in its system prompt — and, since 2.8,
+    lands on disk inside ``rendered_instructions`` whether or not this
+    field exists.  Use ``profile.env`` with a ``pass://`` / ``vault://``
+    URI for secrets; those stay unresolved on disk and are resolved
+    daemon-side at spawn.
+    """
+
     budget_state: Optional[Dict[str, Any]] = None
     # Accumulated budget_control usage (usd / tokens / seconds / tool_calls /
     # turns).  DISTINCT from ``budget_state`` above, which is the

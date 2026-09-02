@@ -595,6 +595,24 @@ class JaatoSession:
         # budget without having to be re-passed the value through every
         # call site.
         self._system_instruction_override: Optional[str] = None
+        # The system instruction EXACTLY as it stood at the end of
+        # ``configure()`` — after assembly (or override), after
+        # ``{{!py:...}}`` prefetch expansion, and BEFORE any of the
+        # runtime mutations that follow (deferred plugin instructions
+        # injected when a tool first activates, pinned-reference blocks).
+        #
+        # This is the artifact a revive restores (issue #787): a session
+        # whose persona carries a mandatory prefetch could not be woken at
+        # all, because bootstrap re-ran the prefetch with an empty
+        # ``agent_params`` and the script aborted session-prep.  Persisting
+        # what was rendered removes the re-run instead of working around it.
+        #
+        # Deliberately the CONFIGURE-TIME value and not the live one: the
+        # runtime additions are re-produced by the revived session itself
+        # (a tool that activates again re-injects its deferred
+        # instructions), so restoring the live value would DOUBLE them,
+        # once per revive.
+        self._rendered_system_instruction: Optional[str] = None
         # Granular partial-suppression: the canonical frozenset of framework
         # instruction pieces to drop (subset of {disk, constants, security};
         # see ``instruction_suppression``).  Empty = suppress nothing.  Ignored
@@ -1904,6 +1922,30 @@ class JaatoSession:
         """
         return self._system_instruction
 
+    def get_rendered_system_instruction(self) -> Optional[str]:
+        """Return the system instruction as it stood at the end of
+        ``configure()`` — the SNAPSHOT, not the live value.
+
+        Differs from :meth:`get_system_instruction` in exactly one way:
+        that one returns the live attribute, which keeps growing after
+        configure (a plugin's deferred instructions are appended when one
+        of its tools first activates; a pinned reference appends its
+        content).  This one returns the frozen render.
+
+        That distinction is the whole point of the accessor.  The daemon
+        persists this value so a revive can restore the prompt instead of
+        re-deriving it (issue #787), and re-deriving is what re-ran a
+        mandatory ``{{!py:...}}`` prefetch with an empty ``agent_params``
+        and made the session unwakeable.  Persisting the LIVE value
+        instead would restore the runtime additions too — and the revived
+        session re-produces them, so each revive would duplicate them.
+
+        Returns:
+            The rendered prompt, or ``None`` if ``configure()`` has not
+            run yet (nothing has been rendered to snapshot).
+        """
+        return self._rendered_system_instruction
+
     # ==================== Cancellation Support ====================
 
     @property
@@ -2701,6 +2743,13 @@ class JaatoSession:
                 self._system_instruction = expand_py_placeholders(
                     self._system_instruction, ctx,
                 )
+
+        # Freeze what was rendered.  Everything that mutates
+        # ``_system_instruction`` after this point is a RUNTIME addition
+        # the revived session re-produces for itself, so the snapshot is
+        # taken here rather than at save time.  See the field's docstring
+        # in ``__init__`` and issue #787.
+        self._rendered_system_instruction = self._system_instruction
 
         # Store user commands
         if self._runtime.registry:

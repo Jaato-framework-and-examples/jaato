@@ -101,6 +101,26 @@ OTel collector wiring, and the developer toggles (`JAATO_DUMP_PROVIDER_REQUEST`,
 global. Each carries a one-line note saying why; the guard requires the note,
 because an unexplained tag cannot stop a later reader from removing it.
 
+Two later additions belong to the same tier for a sharper reason than
+"global". `JAATO_REVIVE_PROFILE` and `JAATO_REVIVE_PERSONA` (issue #787)
+choose whether a revived session takes its profile and its rendered prompt
+from what it persisted or re-reads them from disk. Neither can be a profile
+key, because **both decide whether the profile is read at all** — a key
+inside the file would require loading the file to learn whether loading it
+is allowed. They are also per-invocation operator choices (run the
+interrogation harness against a finished session), not properties of an
+agent. See `server/revive_policy.py` for the matrix of which combination
+each workflow needs; the useful one for interrogation is neither knob's
+default.
+
+Their `host` tag is enforced rather than merely declared: both are resolved
+once in `SessionManager.__init__` and held for the process. Read live they
+would not be host-scoped at all — `JaatoServer._with_session_env` copies
+every key of a session's workspace `.env` into the daemon-global
+`os.environ` for that session's turn with no scope filter, so one workspace
+could set the posture for every other session's revive. That is a general
+hazard for `host` vars read live, and the reason this pair freezes.
+
 The 20 `ambient` vars are the issue's tier D — `PATH`, `TERM`, `HOME`, `USER`,
 `SHELL`, `TMUX`, `MSYSTEM`, `APPDATA`, `XDG_CONFIG_HOME`, `COLORTERM`,
 `PSModulePath`, `ComSpec`, `workspaceRoot` and friends. `env_scope.is_knob()`

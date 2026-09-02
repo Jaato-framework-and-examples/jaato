@@ -1547,6 +1547,21 @@ def prefetch() -> Rendered:
         "context_attrs": ["agent_params", "registry", "runtime", "workspace_path",
                           "config_root", "env", "session_id", "logger", "tool_calls"],
         "example": "shared/plugins/subagent/README.md (prefetch_kyc_aml.py)",
+        "agent_params_are_not_secret": (
+            "agent_params are substituted into the persona, so anything put "
+            "there reaches the model in its system prompt AND is persisted "
+            "with the session (the rendered persona is stored so a revive "
+            "restores it instead of re-running this script -- issue #787).  "
+            "Pass credentials via profile env: with a pass:// / vault:// "
+            "URI, which stays unresolved on disk and is resolved "
+            "daemon-side at spawn."
+        ),
+        "runs_once": (
+            "once per session, at session-prep.  A revived session restores "
+            "the rendered prompt rather than re-running this script; "
+            "JAATO_REVIVE_PERSONA=disk opts back into re-running it, so a "
+            "side-effecting prefetch should be idempotent."
+        ),
     }
     lines = [
         "prefetch scripts — deterministic per-agent session-start behaviour",
@@ -1579,6 +1594,21 @@ def prefetch() -> Rendered:
         "        runtime, workspace_path, config_root, env (os.environ snapshot),",
         "        session_id, logger, tool_calls (completion-time only; [] for",
         "        input-side prefetch).",
+        "",
+        "",
+        "  NEVER PASS A CREDENTIAL AS AN agent_param.  They are substituted",
+        "  into the persona, so they already reach the model in its system",
+        "  prompt — and the rendered persona is PERSISTED with the session",
+        "  (a revive restores it rather than re-running this script; #787).",
+        "  Secrets belong in the profile's `env:` as a pass:// / vault:// URI,",
+        "  which stays unresolved on disk and is resolved daemon-side.",
+        "",
+        "  RUNS ONCE, at session-prep.  A revived session restores the",
+        "  rendered prompt instead of re-running the script; the operator can",
+        "  opt back into re-rendering with JAATO_REVIVE_PERSONA=disk, which",
+        "  re-runs render() against the session's ORIGINAL agent_params.  So",
+        "  a prefetch with side effects (fetching, writing a file, taking a",
+        "  lock) should be idempotent.",
         "",
         "  WORKED EXAMPLE: shared/plugins/subagent/README.md -> prefetch_kyc_aml.py",
         "  (a full persona placeholder + render() pulling plugin data into the prompt).",
