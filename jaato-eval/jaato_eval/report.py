@@ -18,7 +18,7 @@ read as success.
 """
 from __future__ import annotations
 
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
@@ -38,7 +38,10 @@ class Cell:
     tokens: int = 0
     seconds: float = 0.0
     turns: int = 0
-    payload_hashes: set = field(default_factory=set)
+    #: How many arms produced each payload hash.  A Counter rather than a
+    #: set because the modal SHARE is the statistic being reported, and a
+    #: set discards exactly the frequencies that share is computed from.
+    payload_hash_counts: "Counter[str]" = field(default_factory=Counter)
     blocked_reasons: List[str] = field(default_factory=list)
 
     @property
@@ -55,15 +58,47 @@ class Cell:
         return (self.passed / self.exercised) if self.exercised else None
 
     @property
-    def determinism(self) -> Optional[float]:
-        """Share of arms that produced the modal payload hash.
+    def payload_hashes(self) -> set:
+        """The distinct payload hashes, derived from the counts."""
+        return set(self.payload_hash_counts)
 
-        ``None`` when no arm produced a payload.  ``1.0`` means every arm
-        emitted byte-identical output.
+    @property
+    def answered(self) -> int:
+        """Arms that produced a payload hash at all.
+
+        The denominator of :attr:`determinism`, and deliberately not
+        :attr:`exercised`: an arm that died before emitting a payload is
+        not evidence that the arms disagreed, only that we never found out
+        what it would have said.
         """
-        if not self.payload_hashes:
+        return sum(self.payload_hash_counts.values())
+
+    @property
+    def determinism(self) -> Optional[float]:
+        """Share of ANSWERING arms that produced the modal payload hash.
+
+        ``1.0`` means every arm that answered emitted byte-identical
+        output.  Read it together with :attr:`answered` and
+        :attr:`exercised`: ``100%`` over 2 of 5 arms is agreement among a
+        minority, and the renderers print both numbers for that reason.
+
+        ``None`` — rendered as an em dash — when fewer than two arms
+        answered.  A single observation cannot agree with anything, and
+        one arm answering out of two used to print ``100%``, which the
+        footer then described as "byte-identical across repeats"
+        (jaato #798).
+
+        Counting distinct hashes instead of the modal share, as this did
+        before, also mis-scored every cell with three or more arms: two
+        arms agreeing out of three is 2 distinct hashes, which printed
+        ``50%`` where the modal share is ``67%``.  The two definitions
+        coincide only when every hash is equally frequent, which is why
+        two-arm cells — all that existed — looked right.
+        """
+        if self.answered < 2:
             return None
-        return 1.0 / len(self.payload_hashes) if len(self.payload_hashes) else None
+        modal = self.payload_hash_counts.most_common(1)[0][1]
+        return modal / self.answered
 
 
 def build_cells(records: Iterable[Dict[str, Any]]) -> Dict[Tuple[str, str], Cell]:
@@ -103,7 +138,7 @@ def build_cells(records: Iterable[Dict[str, Any]]) -> Dict[Tuple[str, str], Cell
             hashes[key].append(h)
 
     for key, hs in hashes.items():
-        cells[key].payload_hashes = set(hs)
+        cells[key].payload_hash_counts = Counter(hs)
     return cells
 
 
@@ -128,7 +163,7 @@ def render_markdown(records: Iterable[Dict[str, Any]]) -> str:
         c = cells[key]
         rate = "—" if c.pass_rate is None else f"{c.pass_rate * 100:.0f}%"
         cost = "—" if c.cost_usd is None else f"{c.cost_usd:.4f}"
-        det = "—" if c.determinism is None else f"{c.determinism * 100:.0f}%"
+        det = _det_cell(c)
         lines.append(
             f"| {c.task_id} | {c.profile_set} | {rate} | {c.passed} | {c.failed} "
             f"| {c.blocked} | {cost} | {c.tokens} | {det} |")
@@ -142,11 +177,35 @@ def render_markdown(records: Iterable[Dict[str, Any]]) -> str:
 
     lines.append("")
     lines.append("_Pass rate excludes blocked arms from the denominator; "
-                 "`det` is the share of arms sharing the modal payload hash "
-                 "(100% = byte-identical across repeats). A cost of `—` means "
+                 "`det` is the share of ANSWERING arms sharing the modal "
+                 "payload hash, over the count of arms that produced one "
+                 "(100% = byte-identical across the arms that answered). "
+                 "`—` means fewer than two arms answered, so there was "
+                 "nothing to agree. A cost of `—` means "
                  "neither the provider nor `.jaato/pricing.json` reported one — "
                  "it does not mean free._")
     return "\n".join(lines) + "\n"
+
+
+def _det_cell(cell: Cell) -> str:
+    """Render the ``det`` column: the share, and what it is a share OF.
+
+    The denominator is printed because the percentage alone overstates.
+    ``100%`` said nothing about how many arms stayed silent, and a cell
+    where one arm of two answered rendered as ``100%`` under a footer
+    calling that "byte-identical across repeats" (jaato #798).
+
+    Args:
+        cell: The pivot cell being rendered.
+
+    Returns:
+        ``"67% (3 of 3)"``, or ``"— (1 of 2)"`` when fewer than two arms
+        answered, or a bare ``"—"`` when no arm answered at all.
+    """
+    if not cell.answered:
+        return "—"
+    share = "—" if cell.determinism is None else f"{cell.determinism * 100:.0f}%"
+    return f"{share} ({cell.answered} of {cell.exercised})"
 
 
 def _blocked_digest(cells: Dict[Tuple[str, str], Cell]) -> List[str]:

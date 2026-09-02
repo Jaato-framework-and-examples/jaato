@@ -120,6 +120,28 @@ def _money(value: Any) -> str:
     return f"${float(value):.4f}"
 
 
+def _det_cell(cell: Any) -> str:
+    """Render ``det``: the modal share, and the count it is a share OF.
+
+    The bare percentage overstated.  ``100%`` carried no indication of how
+    many arms stayed silent, so a cell where one arm of two produced a
+    payload rendered as ``100%`` under a legend calling that agreement
+    (jaato #798).  Mirrors ``report._det_cell`` — the markdown and HTML
+    views must not disagree about a column's meaning.
+
+    Args:
+        cell: The pivot cell being rendered.
+
+    Returns:
+        HTML for the cell: the share plus ``(answered of exercised)``, or a
+        bare em dash when no arm answered at all.
+    """
+    if not cell.answered:
+        return "&mdash;"
+    share = _percent(cell.determinism)
+    return f'{share} <span class="qual">({cell.answered} of {cell.exercised})</span>'
+
+
 def _percent(value: Any) -> str:
     if not isinstance(value, (int, float)) or isinstance(value, bool):
         return UNKNOWN
@@ -315,6 +337,9 @@ body { font: 13px/1.45 -apple-system, "Segoe UI", Roboto, sans-serif;
 h1 { font-size: 1.5rem; margin: 0 0 .25rem; }
 h2 { font-size: 1.1rem; margin: 2rem 0 .5rem; }
 .sub { color: var(--muted); margin: 0 0 1.5rem; }
+/* Inline sibling of .sub: same muted tone, no block margin, so it can sit
+   beside a number inside a table cell. */
+.qual { color: var(--muted); font-size: .85em; white-space: nowrap; }
 table { border-collapse: collapse; width: 100%; margin-bottom: .5rem;
         background: var(--bg); }
 th, td { border-bottom: 1px solid var(--rule); padding: .35rem .5rem;
@@ -430,7 +455,7 @@ def _pivot_table(cells: Dict[Tuple[str, str], Cell]) -> str:
             f'<td class="num">{c.blocked}</td>',
             f'<td class="num">{_money(c.cost_usd)}</td>',
             f'<td class="num">{c.tokens}</td>',
-            f'<td class="num">{_percent(c.determinism)}</td>',
+            f'<td class="num">{_det_cell(c)}</td>',
         )) + "</tr>")
     return ('<div class="wrap"><table><thead><tr>' + head
             + "</tr></thead><tbody>" + "".join(rows) + "</tbody></table></div>")
@@ -440,6 +465,9 @@ def _pivot_table(cells: Dict[Tuple[str, str], Cell]) -> str:
 #: of these is a place a reader can silently draw the opposite conclusion.
 _FOOTNOTES = (
     "<strong>—</strong> means <em>not established</em>, never zero. "
+    "<strong>det</strong> is the share of ANSWERING arms sharing the modal "
+    "payload hash, over how many arms produced one at all; — there means "
+    "fewer than two arms answered, so there was nothing to agree. "
     "A cost of — means neither the provider nor <code>.jaato/pricing.json</code> "
     "reported one; it does not mean free. Nudges of — means the count could not "
     "be read from the session log, not that none fired. "
