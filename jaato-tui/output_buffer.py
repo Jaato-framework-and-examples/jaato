@@ -926,9 +926,15 @@ class OutputBuffer:
             if self._active_tools:
                 self._finalize_completed_tools()
 
-        # If this is new model text and there are completed tools, finalize the tree first
-        # This ensures the tool tree appears BEFORE the new response, not after
-        if source == "model" and mode == "write" and self._active_tools:
+        # Model prose closes a finished tool tree, so the next tool call opens
+        # its own block.  Deliberately NOT restricted to mode == "write": only
+        # the FIRST chunk of a model message is a write, and a model that
+        # narrates between tool calls inside one message emits every later
+        # chunk as an append.  Gating on "write" left the tree open, so every
+        # subsequent tool call was rendered into the same block as the first.
+        # Re-entry is harmless — finalize_tool_tree empties _active_tools, so
+        # the following append chunks fail this guard.
+        if source == "model" and self._active_tools:
             all_completed = all(tool.completed for tool in self._active_tools)
             any_pending = any(
                 tool.permission_state == "pending" or tool.clarification_state == "pending"
@@ -2833,6 +2839,13 @@ class OutputBuffer:
                         else:
                             # No truncation - all lines shown
                             height += logical_lines
+
+                    # Options hint line.  _render_permission_prompt emits it
+                    # whenever options exist, independently of
+                    # permission_content, so it has to be measured the same
+                    # way — otherwise the panel reserves one row too few and
+                    # clips the very line telling the user what to type.
+                    height += self._permission_hint_height()
                 # Clarification prompt (if pending)
                 if tool.clarification_state == "pending":
                     height += 1  # header ("Clarification needed" or progress)
@@ -4002,6 +4015,9 @@ class OutputBuffer:
         output.append(f"{prefix}{continuation}", style=self._style("tree_connector", "dim"))
         output.append("  🔒 Permission required", style=self._style("permission_prompt", "bold yellow"))
 
+        # Indent shared by the content lines and the options hint below.
+        indent = f"{prefix}{continuation}     "
+
         # Render permission_content inline under the tool
         if tool.permission_content:
             content_text = tool.permission_content
@@ -4010,7 +4026,6 @@ class OutputBuffer:
             if "<security-warning " in content_text:
                 content_text = self._extract_and_render_security_warnings(output, content_text, prefix, continuation)
 
-            indent = f"{prefix}{continuation}     "
             indent_width = len(indent)  # 12 chars
             content_lines = content_text.split('\n')
 
@@ -4039,51 +4054,115 @@ class OutputBuffer:
                 preserve_ansi=True
             )
 
-            # Append focused options line rendered from structured data
-            if self._permission_response_options:
+        # Append focused options line rendered from structured data.
+        # Deliberately OUTSIDE the permission_content branch: the options are
+        # built from structured data the client already holds, while
+        # permission_content arrives only via AgentOutputEvent(source=
+        # "permission").  When the server emits no such event the prompt would
+        # otherwise render a bare "Permission required" with no indication of
+        # what the user may type.
+        if self._permission_response_options:
+            output.append("\n")
+            output.append(indent, style=self._style("tree_connector", "dim"))
+            self._append_focused_options(output)
+
+            # One-line gloss on the focused option (see the method's docstring
+            # for why only the focused one is described).
+            description = self._render_focused_option_description()
+            if description:
                 output.append("\n")
                 output.append(indent, style=self._style("tree_connector", "dim"))
-                output.append(self._render_focused_options_line())
+                output.append(f"  {description}",
+                              style=self._style("permission_bar_hint", "dim italic"))
 
-            return
+    def _append_focused_options(self, output: Text) -> None:
+        """Append the response options, highlighting the focused one.
 
-    def _render_focused_options_line(self) -> str:
-        """Render the permission options line with the focused option highlighted.
+        Styled through the theme (``permission_bar_option`` /
+        ``permission_bar_focused`` / ``permission_bar_hint``) rather than by
+        embedding ANSI escapes in the text.  The escapes were the bug: this
+        line is appended straight to a Rich ``Text``, which counted every
+        escape byte as a visible column, padded the row to the panel width on
+        that inflated count, and left the rendered line ~69 columns short —
+        putting the panel's right border in the middle of the row.
 
-        Uses ANSI escape codes for styling since the output is processed with preserve_ansi=True.
-
-        Returns:
-            The options line with the focused option highlighted using reverse video.
+        Args:
+            output: The Text being built for this tool block; appended to
+                in place.
         """
-        if not self._permission_response_options:
-            return ""
-
-        # ANSI escape codes for styling
-        REVERSE = "\x1b[7m"  # Reverse video
-        BOLD = "\x1b[1m"
-        RESET = "\x1b[0m"
-        DIM = "\x1b[2m"
-
-        parts = []
-        for i, option in enumerate(self._permission_response_options):
-            # Extract option properties (handle both dict and object forms)
+        for index, option in enumerate(self._permission_response_options):
+            if index:
+                output.append(" ")
             if isinstance(option, dict):
                 full = option.get('label', option.get('full', ''))
             else:
                 full = getattr(option, 'full', getattr(option, 'label', ''))
-
-            is_focused = (i == self._permission_focus_index)
-
-            # Apply styling based on focus state
-            if is_focused:
-                parts.append(f"{BOLD}{REVERSE} [{full}] {RESET}")
+            if index == self._permission_focus_index:
+                output.append(
+                    f" [{full}] ",
+                    style=self._style("permission_bar_focused", "reverse bold"),
+                )
             else:
-                parts.append(f"{DIM}[{full}]{RESET}")
+                output.append(
+                    f"[{full}]",
+                    style=self._style("permission_bar_option", "dim"),
+                )
+        output.append(
+            "  ⇥ cycle  ↵ select",
+            style=self._style("permission_bar_hint", "dim italic"),
+        )
 
-        # Add hint at the end
-        hint = f"{DIM}  ⇥ cycle  ↵ select{RESET}"
+    def _permission_hint_height(self) -> int:
+        """Rows the options hint occupies under a pending permission prompt.
 
-        return " ".join(parts) + hint
+        Mirrors exactly what :meth:`_render_permission_prompt` emits, and is
+        the reason the two must be changed together: the options line
+        whenever there are options at all, plus one more for the focused
+        option's description when it carries one.  Under-counting here makes
+        the panel reserve too few rows and clip the very line that tells the
+        user what to press.
+
+        Kept as a helper rather than inline in
+        ``_calculate_tool_tree_height`` because that function is already over
+        the complexity ceiling and frozen at its recorded size.
+
+        Returns:
+            0, 1 or 2 rows.
+        """
+        if not self._permission_response_options:
+            return 0
+        return 2 if self._render_focused_option_description() else 1
+
+    def _render_focused_option_description(self) -> str:
+        """Describe the focused response option, e.g. "allow until session goes idle".
+
+        The options line shows bare labels, and several of them —
+        ``turn``, ``idle``, ``once``, ``never``, ``all`` — do not explain
+        themselves.  Those descriptions used to reach the user only through
+        the completion menu; that menu was a ``Float`` painting over the
+        permission payload, so it was removed and its one irreplaceable
+        contribution moved here, inside the panel where it reserves space.
+
+        Only the focused option is described: showing all of them is what
+        made the menu tall enough to cover the payload in the first place.
+        Cycling with TAB walks the descriptions one at a time.
+
+        Returns:
+            The focused option's description, or ``""`` when there are no
+            options or the focused one carries no description — in which
+            case the caller renders no line at all.
+        """
+        if not self._permission_response_options:
+            return ""
+        index = self._permission_focus_index
+        if not (0 <= index < len(self._permission_response_options)):
+            return ""
+        option = self._permission_response_options[index]
+        if isinstance(option, dict):
+            description = option.get('description', '')
+        else:
+            description = getattr(option, 'description', '')
+        return description or ""
 
     def _render_clarification_prompt(self, output: Text, tool: 'ActiveToolCall', is_last: bool) -> None:
         """Render clarification prompt for a tool awaiting user input."""

@@ -497,7 +497,10 @@ BASELINE: Dict[str, int] = {
     "jaato-tui/output_buffer.py::OutputBuffer._render_tool_block": 53,
     "jaato-tui/output_buffer.py::OutputBuffer._scroll_to_selected_tool": 21,
     "jaato-tui/output_buffer.py::OutputBuffer.add_active_tool": 31,
-    "jaato-tui/output_buffer.py::OutputBuffer.append": 48,
+    # 47 since the tool-tree finalize stopped being gated on
+    # ``mode == "write"`` — one fewer decision point, and prose of any
+    # mode now closes a finished block.
+    "jaato-tui/output_buffer.py::OutputBuffer.append": 47,
     "jaato-tui/output_buffer.py::OutputBuffer.mark_tool_completed": 24,
     "jaato-tui/output_buffer.py::format_turn_for_clipboard": 20,
     "jaato-tui/plan_panel.py::PlanPanel.render_popup": 27,

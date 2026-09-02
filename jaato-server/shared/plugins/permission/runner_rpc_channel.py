@@ -80,6 +80,10 @@ _RESPONSE_KEY_TO_DECISION: Dict[str, ChannelDecision] = {
     "edit": ChannelDecision.EDIT,
     "c": ChannelDecision.COMMENT,
     "comment": ChannelDecision.COMMENT,
+    # The option is labelled "deny-comment" so it reads as the pair of
+    # "allow-comment"; "comment" stays accepted for older clients.
+    "deny-comment": ChannelDecision.COMMENT,
+    "deny_comment": ChannelDecision.COMMENT,
     "yc": ChannelDecision.ALLOW_COMMENT,
     "allow-comment": ChannelDecision.ALLOW_COMMENT,
     "allow_comment": ChannelDecision.ALLOW_COMMENT,

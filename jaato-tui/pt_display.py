@@ -424,6 +424,17 @@ class RichRenderer:
         return buffer.getvalue()
 
 
+#: Permission decisions that carry free-text feedback to the model, and so
+#: must unlock typing while a prompt is up.  ``comment`` denies with
+#: feedback, ``allow_comment`` allows with it; they are separate decisions
+#: server-side and are submitted under separate prefixes ("c:" / "yc:").
+_FEEDBACK_ACTIONS = frozenset({"comment", "allow_comment"})
+
+#: The shortcut forms of the same two options, for payloads that carry no
+#: decision field.
+_FEEDBACK_SHORTS = frozenset({"c", "yc"})
+
+
 class PTDisplay:
     """Display manager using prompt_toolkit with Rich content.
 
@@ -2022,14 +2033,23 @@ class PTDisplay:
                 # In pager mode - advance page
                 self._advance_pager_page()
                 return
-            # Comment mode: submit comment text with "c:" prefix, require non-empty
+            # Comment mode: submit the text under the FOCUSED option's own
+            # prefix.  Hardcoding "c:" sent deny-with-feedback even when the
+            # user had selected allow-comment, whose prefix is "yc:" — the
+            # server parses the two separately (ChannelDecision.COMMENT vs
+            # ALLOW_COMMENT), so the tool was denied instead of allowed.
             if self._comment_mode_active:
                 text = self._input_buffer.text.strip()
                 if not text:
                     return  # Require non-empty comment
+                prefix = self._focused_option_short()
+                if not prefix:
+                    return  # No option to attribute the feedback to
                 self._input_buffer.reset()
+                # One answer per prompt, as for every other selection path.
+                self._permission_response_options = None
                 if self._input_callback:
-                    self._input_callback(f"c:{text}")
+                    self._input_callback(f"{prefix}:{text}")
                 return
             # Permission mode: always select the focused option via tab-cycling
             if (getattr(self, '_waiting_for_channel_input', False) and
@@ -2126,7 +2146,13 @@ class PTDisplay:
                     # In comment mode, space inserts a space character
                     event.current_buffer.insert_text(" ")
                     return
-                self._select_focused_permission_option()
+                # Space does NOT select.  While a prompt is up the input line
+                # is inert: letters are discarded above, so a space was the
+                # one keystroke that still reached a handler — and it
+                # answered the prompt with whatever happened to be focused.
+                # Typing an ordinary sentence therefore submitted "yes" on
+                # its first space.  The on-screen hint offers "⇥ cycle
+                # ↵ select" and never advertised space, so nothing is lost.
                 return
             # Normal mode - insert space character
             event.current_buffer.insert_text(" ")
@@ -4069,7 +4095,14 @@ class PTDisplay:
 
     @staticmethod
     def _is_comment_option(option) -> bool:
-        """Check if a permission option is the comment option.
+        """Check whether an option carries free-text feedback to the model.
+
+        TWO options do, and both must unlock typing: ``c``/``comment``
+        (:class:`ChannelDecision` ``comment`` — deny with feedback) and
+        ``yc``/``allow-comment`` (``allow_comment`` — allow with feedback).
+        Matching only the first left ``allow-comment`` focusable but
+        untypeable, so the feedback it exists to collect could not be
+        entered.
 
         Handles both dict (from IPC event serialization, keys: ``key``,
         ``label``, ``action``) and object formats (attrs: ``short``,
@@ -4087,16 +4120,16 @@ class PTDisplay:
             action = option.get('action', option.get('decision', ''))
             if hasattr(action, 'value'):
                 action = action.value
-            if action == 'comment':
+            if action in _FEEDBACK_ACTIONS:
                 return True
             short = option.get('key', option.get('short', ''))
-            return short == 'c'
+            return short in _FEEDBACK_SHORTS
         decision = getattr(option, 'decision', None)
         if decision is not None:
             # Handle both enum and string values
             val = decision.value if hasattr(decision, 'value') else decision
-            return val == 'comment'
-        return getattr(option, 'short', '') == 'c'
+            return val in _FEEDBACK_ACTIONS
+        return getattr(option, 'short', '') in _FEEDBACK_SHORTS
 
     def _comment_has_pending_file_ref(self) -> bool:
         """Check if the comment input has a pending @/@ file reference pattern.
@@ -4227,8 +4260,45 @@ class PTDisplay:
             )
         self.refresh()
 
+    def _focused_option_short(self) -> str:
+        """The focused option's shortcut form, used as the response prefix.
+
+        Comment-style answers are submitted as ``<short>:<text>``, and the
+        server distinguishes ``c:`` (deny with feedback) from ``yc:`` (allow
+        with feedback).  Reading the prefix off the focused option keeps the
+        submitted decision equal to the selected one.
+
+        Returns:
+            The short form, or ``""`` when there is no focused option — in
+            which case the caller must submit nothing rather than guess.
+        """
+        options = self._permission_response_options
+        if not options:
+            return ""
+        index = self._permission_focus_index
+        if not (0 <= index < len(options)):
+            return ""
+        option = options[index]
+        if isinstance(option, dict):
+            short = option.get('key', option.get('short', ''))
+        else:
+            short = getattr(option, 'short', getattr(option, 'key', ''))
+        return short or ""
+
     def _select_focused_permission_option(self) -> None:
-        """Select the currently focused permission option and submit it.
+        """Select the currently focused permission option and submit it once.
+
+        Reachable from Enter, from space, and (in comment mode) from the
+        comment submit path.  The client stays in permission mode until the
+        server answers, so two selections arriving inside that window would
+        both be sent: measured at 59ms apart from two space keypresses,
+        producing two responses for one request id.  The server rejects the
+        second with ``StateError: Unknown permission request``, and when the
+        focus moved in between it answers something the user never chose.
+
+        Clearing the options after submitting disarms every selection path
+        until the next ``PermissionInputModeEvent`` repopulates them, so a
+        prompt accepts exactly one answer.
 
         Does nothing if comment mode is active — comment mode requires the
         user to type text and press Enter, not select-by-shortcut.
@@ -4245,6 +4315,9 @@ class PTDisplay:
             short = option.get('key', option.get('short', ''))
         else:
             short = getattr(option, 'short', getattr(option, 'key', ''))
+
+        # Disarm before submitting: one answer per prompt (see docstring).
+        self._permission_response_options = None
 
         # Submit the selection via input callback
         self._input_callback(short)
