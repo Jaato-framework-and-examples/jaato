@@ -32,7 +32,7 @@ import re
 import tokenize
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, FrozenSet, List, Optional
 
 from shared.plugins.model_provider import base as _pbase
 from jaato_sdk.plugins.model_provider.types import DISCOVERABILITY_DEFERRED
@@ -195,6 +195,13 @@ class EnvVar:
     ``os.environ`` at process scope, not from a profile.  Discovered by
     scanning ``os.environ.get`` / ``os.getenv`` / ``os.environ[...]`` sites,
     so the list reflects the INSTALLED code, never prose.
+
+    ``scope`` / ``typed_key`` / ``scope_note`` are the exception: they are
+    DECLARED in ``shared/env_scope.py`` rather than derived, because "is a
+    per-session value meaningful here?" is not a property the source can be
+    asked (issue #775).  They are stamped on by :func:`_apply_env_scope`
+    after the scan, and default to ``"unclassified"`` when the catalog does
+    not know the var.
     """
 
     name: str
@@ -203,6 +210,14 @@ class EnvVar:
     tier: str = "daemon"                # daemon | runner | daemon_callable | unknown (PLUGIN_TIER of the reader)
     sources: List[str] = field(default_factory=list)  # relative file paths
     description: Optional[str] = None   # one-line goal, from an `# env: ...` comment on the read line
+    # WHAT the var is, from the declared catalog in ``shared/env_scope.py``
+    # (issue #775).  The scan can only report that a var is READ; whether a
+    # per-session value is meaningful, and whether a typed profile key
+    # already covers it, are declarations -- and unclassified is a real
+    # answer, meaning the guard has not run since the var appeared.
+    scope: str = "unclassified"         # session | host | ambient | internal | unclassified
+    typed_key: Optional[str] = None     # dotted path of the typed equivalent, if any
+    scope_note: Optional[str] = None    # one line on why that scope
 
 
 # ---------------------------------------------------------------- providers
@@ -702,6 +717,133 @@ def _scan_env_vars() -> Dict[str, EnvVar]:
                     desc = doc_comments.get(lineno)
                     if desc:
                         ev.description = desc
+    _apply_env_scope(out)
+    return out
+
+
+def _apply_env_scope(found: Dict[str, EnvVar]) -> None:
+    """Stamp each scanned var with its declared scope + typed equivalent.
+
+    The scan and the catalog answer different questions -- "is this read?"
+    versus "what is it?" -- and only the first can be derived from source.
+    A var the catalog does not know keeps ``scope="unclassified"`` rather
+    than being given a plausible default, so ``explain env`` shows the gap
+    and the guard fails on it.
+    """
+    from shared.env_scope import CATALOG
+
+    for name, ev in found.items():
+        entry = CATALOG.get(name)
+        if entry is None:
+            continue
+        ev.scope = entry.scope
+        ev.typed_key = entry.typed_key
+        ev.scope_note = entry.note or None
+
+
+#: Memo for :func:`plugin_config_keys` — plugin name → its config-key set.
+_PLUGIN_CONFIG_KEYS_CACHE: Dict[str, FrozenSet[str]] = {}
+
+
+def _config_base(node: ast.AST) -> str:
+    """The receiver name of a ``<x>.get(...)`` / ``<x>[...]`` expression."""
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        return node.attr
+    return ""
+
+
+def plugin_config_keys(plugin: str) -> FrozenSet[str]:
+    """Every ``plugin_configs.<plugin>`` key the plugin actually consumes.
+
+    AST-scans the plugin package for the two ways a config value is read --
+    ``<something>config.get("key")`` and ``<something>config["key"]`` -- and
+    unions them with the ``properties`` of any ``get_config_schema`` the
+    plugin declares.  No imports: same offline discipline as
+    :func:`env_vars`, which matters because importing every plugin makes an
+    unrelated dependency skew look like a catalog error.
+
+    WHY THE READ SITES AND NOT THE SCHEMA.  ``get_config_schema`` is the
+    obvious source and is not sufficient on its own: four of the plugins
+    this is used for declare none at all, and ``todo`` declares one that
+    omits ``reporter_config`` -- a key it genuinely reads.  Verifying
+    against the schema alone would fail correct entries, which is worse
+    than not checking.  The union is what the plugin will actually honour.
+
+    Returns an empty set when the plugin reads no config at all; callers
+    treat that as "cannot verify" rather than as a pass.
+    """
+    if plugin in _PLUGIN_CONFIG_KEYS_CACHE:
+        return _PLUGIN_CONFIG_KEYS_CACHE[plugin]
+
+    keys: set = set()
+    root = _PLUGIN_DIR / plugin
+    if root.is_dir():
+        for py in root.rglob("*.py"):
+            if "__pycache__" in py.parts or "/tests/" in str(py):
+                continue
+            try:
+                tree = ast.parse(py.read_text(encoding="utf-8"))
+            except (SyntaxError, OSError, UnicodeDecodeError):
+                continue
+            keys |= _config_keys_in(tree)
+    result = frozenset(keys)
+    _PLUGIN_CONFIG_KEYS_CACHE[plugin] = result
+    return result
+
+
+def _key_from_config_get(node: ast.AST) -> set:
+    """``<something>config.get("key")`` → ``{"key"}``, else empty."""
+    if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "get" and node.args):
+        return set()
+    base = _config_base(node.func.value).lower()
+    if not (base.endswith("config") or base in ("cfg", "opts")):
+        return set()
+    arg = node.args[0]
+    if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+        return {arg.value}
+    return set()
+
+
+def _key_from_config_subscript(node: ast.AST) -> set:
+    """``<something>config["key"]`` → ``{"key"}``, else empty."""
+    if not isinstance(node, ast.Subscript):
+        return set()
+    if not _config_base(node.value).lower().endswith("config"):
+        return set()
+    sl = node.slice
+    if isinstance(sl, ast.Constant) and isinstance(sl.value, str):
+        return {sl.value}
+    return set()
+
+
+def _keys_from_schema_properties(node: ast.AST) -> set:
+    """A JSON-schema ``"properties": {...}`` block → its declared keys."""
+    if not isinstance(node, ast.Dict):
+        return set()
+    out: set = set()
+    for key, val in zip(node.keys, node.values):
+        if isinstance(key, ast.Constant) and key.value == "properties" \
+                and isinstance(val, ast.Dict):
+            out |= {k.value for k in val.keys
+                    if isinstance(k, ast.Constant) and isinstance(k.value, str)}
+    return out
+
+
+def _config_keys_in(tree: ast.AST) -> set:
+    """Config keys read (or schema-declared) in one parsed module.
+
+    Three independent node shapes, one helper each — the shapes share
+    nothing but the walk, and inlining them put this function over the
+    complexity ceiling.
+    """
+    out: set = set()
+    for n in ast.walk(tree):
+        out |= _key_from_config_get(n)
+        out |= _key_from_config_subscript(n)
+        out |= _keys_from_schema_properties(n)
     return out
 
 
@@ -710,7 +852,11 @@ def env_vars() -> Dict[str, EnvVar]:
 
     Keyed by var name; merges read sites (union of sources; first literal
     default wins).  Each var carries the ``tier`` (daemon/runner/...) of the
-    code that reads it.  Reflects the INSTALLED code — no prose, no declaration.
+    code that reads it.  Reflects the INSTALLED code — no prose.
+
+    The one declared part is ``scope`` / ``typed_key`` / ``scope_note``,
+    stamped on from ``shared/env_scope.py`` (see :class:`EnvVar`): the scan
+    can say a var is read, not what it is for.
 
     **Memoized for the life of the process.**  The underlying scan
     (:func:`_scan_env_vars`) AST-parses the whole installed tree and costs

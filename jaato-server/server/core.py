@@ -1071,7 +1071,13 @@ class JaatoServer:
                 reset_config_root(cr_token)
 
     def _resolve_session_env(self) -> None:
-        """Populate ``self._session_env`` from env_file + profile.env + overrides.
+        """Populate ``self._session_env`` from the four session-env sources.
+
+        Precedence, lowest to highest: the workspace ``.env`` file, the
+        profile's ``env:`` map, the profile's typed ``trace:`` block, and
+        the post-auth ``_env_overrides``.  The typed block outranks the
+        stringly-typed map deliberately -- it is the only one of the two
+        whose values were validated (issue #775).
 
         Idempotent — returns immediately on second call.  Designed so
         :class:`SessionManager` can invoke it BEFORE the runner-spawn
@@ -1141,6 +1147,18 @@ class JaatoServer:
         if self._profile and self._profile.env:
             expanded_env = expand_variables(self._profile.env)
             self._session_env.update(expanded_env)
+
+        # Typed `trace:` block (issue #775) — outranks both the
+        # workspace .env and the profile's own `env:` map, because it is
+        # the only one of the three whose values were validated.  The
+        # literal ``"1"`` that started this cannot reach here:
+        # ``TraceProfileConfig.from_dict`` refused it at profile-parse
+        # time as a switch written into a path field.  An author who
+        # still reaches for `env:` gets the old stringly-typed
+        # behaviour; the env vars stay the lower-precedence default and
+        # nothing downstream changed.
+        if self._profile and getattr(self._profile, 'trace', None):
+            self._session_env.update(self._profile.trace.as_env())
 
         # Highest precedence — post-auth wizard overrides everything.
         if self._env_overrides:

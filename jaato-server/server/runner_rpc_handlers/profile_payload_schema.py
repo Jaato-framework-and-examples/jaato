@@ -64,6 +64,7 @@ PROFILE_PAYLOAD_ALLOWED_KEYS: FrozenSet[str] = frozenset({
     "max_turns",
     "env",
     "gc",
+    "trace",
     "runtime_limits",
 })
 
@@ -201,10 +202,44 @@ def validate_profile_payload(payload: Any) -> None:
         # during profile reconstruction — its existing test
         # coverage validates the field set + per-field types.
 
+    _check_trace(payload.get("trace"))
+
 
 # ──────────────────────────────────────────────────────────────────
 # Per-key helpers
 # ──────────────────────────────────────────────────────────────────
+
+
+def _check_trace(value: Any) -> None:
+    """Validate a ``trace`` block at the runner->daemon boundary.
+
+    Unlike ``runtime_limits``, this one is validated HERE rather than
+    only at reconstruction: the block's entire reason for existing is
+    that a trace path arriving as a switch (``"1"``) is accepted by
+    every string-typed surface it crosses and produces a file named
+    ``1`` in a workspace (issue #775).  A boundary that re-checks a
+    thing it already knows how to reject costs one call.
+
+    ``TraceProfileConfig.from_dict`` is the single rule -- duplicating
+    its vocabulary here would be a second place for it to drift.
+
+    ``None`` means the key was absent, which is legal: taking the
+    absent-check here rather than at the call site keeps
+    ``validate_profile_payload`` at its complexity baseline.
+    """
+    from shared.plugins.subagent.config import TraceProfileConfig
+
+    if value is None:          # key absent — the block is optional
+        return
+    if not isinstance(value, dict):
+        raise ValueError(
+            f"profile_payload.trace must be a dict, "
+            f"got {type(value).__name__}"
+        )
+    try:
+        TraceProfileConfig.from_dict(value)
+    except ValueError as exc:
+        raise ValueError(f"profile_payload.{exc}") from exc
 
 
 def _require_nonempty_str(

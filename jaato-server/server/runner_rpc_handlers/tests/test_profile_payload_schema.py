@@ -73,6 +73,7 @@ class TestHappyPath:
             "max_turns": 10,
             "env": {"KEY1": "value1", "KEY2": "value2"},
             "gc": {"type": "summarize", "config": {"threshold": 0.8}},
+            "trace": {"provider_log": ".jaato/logs/provider_trace.jsonl"},
             "runtime_limits": {"max_memory_mb": 512},
         }
         validate_profile_payload(payload)
@@ -99,7 +100,7 @@ class TestProducerRoundTrip:
             "name", "description", "model", "provider",
             "plugins", "plugin_configs", "system_instructions",
             "suppress_base_instructions", "max_turns", "env",
-            "gc", "runtime_limits",
+            "gc", "trace", "runtime_limits",
         }
         # Every producer-side key is allow-listed:
         assert producer_keys <= PROFILE_PAYLOAD_ALLOWED_KEYS, (

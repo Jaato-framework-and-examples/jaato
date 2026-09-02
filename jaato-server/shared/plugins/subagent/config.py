@@ -920,6 +920,143 @@ class CacheProfileConfig:
         return cls(enabled=enabled, ttl=ttl, history=history)
 
 
+#: Profile ``trace:`` key -> the env var it seeds.  ONE mapping, read by
+#: :meth:`TraceProfileConfig.from_dict` (key validation), by
+#: :meth:`TraceProfileConfig.as_env` (the export) and by the env-scope
+#: catalog's ``typed_key`` entries, so a rename cannot desynchronise them.
+TRACE_ENV_VARS: Dict[str, str] = {
+    "session_log": "JAATO_TRACE_LOG",
+    "provider_log": "JAATO_PROVIDER_TRACE",
+}
+
+#: Values that mean "on" to a human and nothing at all to a path reader.
+#: An author who writes one of these into ``trace:`` is reaching for a
+#: switch; there is no file they could plausibly have meant, so the value
+#: is refused rather than turned into a file with that name.
+_TRACE_BOOLEAN_TOKENS = frozenset({
+    "0", "1", "true", "false", "yes", "no", "on", "off", "y", "n",
+    "enable", "enabled", "disable", "disabled", "none", "null",
+})
+
+
+@dataclass
+class TraceProfileConfig:
+    """Diagnostic trace-log paths for a profile -- the ``trace:`` block.
+
+    THE KNOB THAT MADE THE CASE FOR TYPED KEYS (issue #775).  Both values
+    are *paths*, and before this block the only per-session route to them
+    was the profile's ``env:`` map::
+
+        env:
+          JAATO_PROVIDER_TRACE: "1"      # accepted, and catastrophic
+
+    ``env`` is ``Dict[str, str]`` and ``"1"`` is a valid string, so
+    nothing rejected it -- and nothing was in a position to.  Every
+    session then wrote its provider trace to a file literally named ``1``,
+    including eval-arm workspaces, contaminating the very trees a
+    comparative judge was diffing.  The failure is silent on both sides:
+    the trace is written, the run completes, and the contamination is
+    visible only by listing the arm directories afterwards.
+
+    WHAT THIS BLOCK REJECTS, AND WHAT IT DELIBERATELY DOES NOT.  The
+    defect in ``"1"`` is not that it is relative -- a *relative* trace
+    path is the supported per-session idiom, resolved against
+    ``JAATO_WORKSPACE_ROOT`` by ``jaato_sdk.trace._resolve_trace_file`` so
+    each session gets its own file in its own workspace.  Rejecting
+    relative paths here would break that.  The defect is that ``"1"`` is a
+    *boolean written into a path field*: the author reached for a switch,
+    and a string-typed map had no way to say so.  So this block refuses
+    the boolean vocabulary (:data:`_TRACE_BOOLEAN_TOKENS`), a value that
+    names a directory rather than a file, and anything that is not a
+    non-empty string -- and passes every real path through untouched.
+
+    The env vars remain the lower-precedence default -- a workspace
+    ``.env`` or an ``env:`` entry still works -- and this block simply
+    outranks them (see ``JaatoServer._resolve_session_env``).  Nothing
+    downstream reads the block: it is a validated *producer* of the two
+    env vars the framework already reads, which is why promoting a knob
+    costs no reader changes.
+
+    Attributes:
+        session_log: Path for the framework's own session event trace
+            (``JAATO_TRACE_LOG``).  Absolute, or relative to the session
+            workspace.
+        provider_log: Path for the provider request/response trace
+            (``JAATO_PROVIDER_TRACE``).  Same resolution.
+    """
+
+    session_log: Optional[str] = None
+    provider_log: Optional[str] = None
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'TraceProfileConfig':
+        """Build from a profile's ``trace:`` block.
+
+        Raises:
+            ValueError: on a non-mapping block, an unknown key, a
+                non-string or empty value, a boolean-shaped token, or a
+                value that names a directory.  Failing loud is the whole
+                point -- a trace path that is quietly wrong produces a
+                file nobody looks for and a diagnosis nobody can make.
+        """
+        if not isinstance(data, dict):
+            raise ValueError(
+                f"trace: must be a mapping, got {type(data).__name__}")
+
+        unknown = set(data) - set(TRACE_ENV_VARS)
+        if unknown:
+            raise ValueError(
+                f"trace: unknown key(s) {sorted(unknown)}. "
+                f"Allowed: {sorted(TRACE_ENV_VARS)}")
+
+        values: Dict[str, Optional[str]] = {}
+        for key in TRACE_ENV_VARS:
+            value = data.get(key)
+            values[key] = (None if value is None
+                           else _validate_trace_path(key, value))
+        return cls(**values)
+
+    def as_env(self) -> Dict[str, str]:
+        """The env vars this block seeds, omitting the keys left unset."""
+        return {
+            TRACE_ENV_VARS[key]: value
+            for key, value in (("session_log", self.session_log),
+                               ("provider_log", self.provider_log))
+            if value
+        }
+
+
+def _validate_trace_path(key: str, value: Any) -> str:
+    """Return *value* as a usable trace path, or raise ``ValueError``.
+
+    Split out of :meth:`TraceProfileConfig.from_dict` so the rule has one
+    home and one set of tests; the two keys are validated identically.
+    """
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(
+            f"trace.{key} must be a non-empty string path, got {value!r}")
+    text = value.strip()
+
+    if text.lower() in _TRACE_BOOLEAN_TOKENS:
+        raise ValueError(
+            f"trace.{key}={value!r} is a switch, not a path. This knob is "
+            f"the FILE the trace is written to -- setting it to {value!r} "
+            f"through the untyped `env:` map is what produced a file "
+            f"literally named {value!r} in every session's workspace "
+            f"(issue #775). Give a path: an absolute one is shared by "
+            f"every session using this profile, a relative one resolves "
+            f"against each session's own workspace "
+            f"(e.g. .jaato/logs/{key}.jsonl).")
+
+    if text.endswith(("/", "\\")) or os.path.isdir(text):
+        raise ValueError(
+            f"trace.{key}={value!r} names a directory; this knob is the "
+            f"trace FILE. Append a filename "
+            f"(e.g. {text.rstrip('/')}/{key}.jsonl).")
+
+    return text
+
+
 @dataclass
 class GCProfileConfig:
     """Garbage collection configuration for a profile.
@@ -1099,6 +1236,13 @@ class SubagentProfile:
                   Allows subagents to use a different provider than the parent.
         max_turns: Maximum conversation turns before returning (default: 10).
         gc: Optional garbage collection configuration for this subagent.
+        trace: Optional diagnostic trace-log paths (``session_log`` /
+            ``provider_log``).  The typed, validated sibling of
+            ``JAATO_TRACE_LOG`` / ``JAATO_PROVIDER_TRACE``, which remain
+            the lower-precedence default.  Seeded into the session env by
+            ``JaatoServer._resolve_session_env`` -- see
+            :class:`TraceProfileConfig` for the failure that motivated it
+            (issue #775).
         env: Session-scoped environment variables for this profile.
             Values support ``${VAR}`` expansion and secret URI resolution
             (e.g. ``vault://secret/myapp#db_password``).  For main sessions
@@ -1213,6 +1357,14 @@ class SubagentProfile:
         "'auto' leaves the provider's own default alone and is a no-op on "
         "a provider that cannot cache. plugin_configs.<provider> overrides "
         "this for mechanism-specific tuning (more specific wins)."})
+    trace: Optional['TraceProfileConfig'] = field(default=None, metadata={
+        "description": "Diagnostic trace-log paths: {session_log, provider_log}. "
+        "Typed sibling of the JAATO_TRACE_LOG / JAATO_PROVIDER_TRACE env vars, "
+        "which stay the lower-precedence default (this block outranks them). "
+        "Absolute = one shared file; relative = one file per session, resolved "
+        "against the workspace. Refuses a switch written into a path field -- "
+        "`env: {JAATO_PROVIDER_TRACE: \'1\'}` is a valid str and wrote every "
+        "session\'s trace to a file named `1` (#775)."})
     gc: Optional[GCProfileConfig] = field(default=None, metadata={
         "description": "Garbage-collection strategy + thresholds for this "
         "session (type + threshold_percent / target / preserve_recent_turns). "
@@ -1742,6 +1894,24 @@ def parse_gc_block(data: Dict[str, Any]) -> Optional['GCProfileConfig']:
     return GCProfileConfig.from_dict(block)
 
 
+def parse_trace_block(data: Dict[str, Any]) -> Optional['TraceProfileConfig']:
+    """Parse a profile dict's optional ``trace:`` block.
+
+    Third sibling of :func:`parse_cache_block` / :func:`parse_gc_block`,
+    for the reason both of those exist: FOUR ingresses build a
+    ``SubagentProfile`` from a dict, and a block field wired into three
+    of them is silently inert in the fourth.
+
+    Returns ``None`` when the block is absent or empty; raises
+    ``ValueError`` (from ``TraceProfileConfig.from_dict``) on an
+    unusable one, which is the whole reason the block exists.
+    """
+    block = data.get('trace')
+    if not block:
+        return None
+    return TraceProfileConfig.from_dict(block)
+
+
 def build_inline_profile(
     data: Dict[str, Any],
     name: str = "<inline>",
@@ -1777,6 +1947,7 @@ def build_inline_profile(
     """
     cache_config = parse_cache_block(data)
     gc_config = parse_gc_block(data)
+    trace_config = parse_trace_block(data)
 
     runtime_limits = None
     if data.get('runtime_limits'):
@@ -1852,6 +2023,7 @@ def build_inline_profile(
         max_turns=data.get('max_turns', 10),
         gc=gc_config,
             cache=cache_config,
+            trace=trace_config,
         env=env,
         inherits=None,
         completion_payload_schema=data.get('completion_payload_schema'),
@@ -2290,6 +2462,11 @@ def _merge_profiles(
     # gc: agreement-or-override (compare as dicts for equality)
     merged_cache = _resolve_scalar('cache', child.cache)
     merged_gc = _resolve_scalar('gc', child.gc)
+    # trace: scalar-override.  A stage that redirects its trace redirects
+    # the whole of it -- merging session_log from one layer with
+    # provider_log from another produces a split diagnosis nobody asked
+    # for, which is the class of failure the block exists to prevent.
+    merged_trace = _resolve_scalar('trace', child.trace)
 
     # runtime_limits: scalar-override (parents must agree or child
     # overrides).  Compared via str() inside _resolve_scalar — frozen
@@ -2441,6 +2618,7 @@ def _merge_profiles(
         max_turns=merged_max_turns,
         gc=merged_gc,
         cache=merged_cache,
+        trace=merged_trace,
         env=merged_env,
         inherits=None,  # Fully resolved
         completion_payload_schema=merged_completion_schema,
@@ -2580,6 +2758,7 @@ def _scan_profiles_dir(
         cache_config = parse_cache_block(data)
 
         gc_config = parse_gc_block(data)
+        trace_config = parse_trace_block(data)
 
         runtime_limits = None
         if 'runtime_limits' in data and data['runtime_limits']:
@@ -2673,6 +2852,7 @@ def _scan_profiles_dir(
             max_turns=data.get('max_turns', 10),
             gc=gc_config,
             cache=cache_config,
+            trace=trace_config,
             env=env,
             inherits=_normalize_inherits(data.get('inherits')),
             completion_payload_schema=data.get('completion_payload_schema'),
@@ -3018,6 +3198,7 @@ def _discover_premium_profiles() -> Dict[str, 'SubagentProfile']:
         cache_config = parse_cache_block(data)
 
         gc_config = parse_gc_block(data)
+        trace_config = parse_trace_block(data)
 
         runtime_limits = None
         if 'runtime_limits' in data and data['runtime_limits']:
@@ -3089,6 +3270,7 @@ def _discover_premium_profiles() -> Dict[str, 'SubagentProfile']:
             max_turns=data.get('max_turns', 10),
             gc=gc_config,
             cache=cache_config,
+            trace=trace_config,
             env=env,
             inherits=_normalize_inherits(data.get('inherits')),
             completion_payload_schema=data.get('completion_payload_schema'),
@@ -3330,6 +3512,7 @@ class SubagentConfig:
             # Parse GC configuration if present
             cache_config = parse_cache_block(profile_data)
             gc_config = parse_gc_block(profile_data)
+            trace_config = parse_trace_block(profile_data)
 
             # Parse runtime_limits (cgroup-enforced + app-enforced caps).
             # Validation runs in __post_init__ — bad values raise here so
@@ -3377,6 +3560,7 @@ class SubagentConfig:
                 max_turns=profile_data.get('max_turns', 10),
                 gc=gc_config,
             cache=cache_config,
+            trace=trace_config,
                 env=env,
                 inherits=_normalize_inherits(profile_data.get('inherits')),
                 completion_payload_schema=profile_data.get('completion_payload_schema'),

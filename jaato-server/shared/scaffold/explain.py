@@ -917,27 +917,152 @@ def _profile_env_note() -> List[str]:
         "        env:",
         f"          {ENV_EXAMPLE_VAR}: {ENV_EXAMPLE_VALUE}"
         "    # one file per session",
+        "",
+        "  A var with a TYPED key (the `→ typed:` line on its row below) has a",
+        "  better route than `env:`: the typed one is validated, and `env:` is",
+        "  not.  The two trace vars are the worked example in both directions —",
+        "  `env: {JAATO_PROVIDER_TRACE: 1}` is a valid str and wrote every",
+        "  session's trace to a file named `1` (#775); the block refuses it:",
+        "",
+        "        trace:",
+        f"          provider_log: {ENV_EXAMPLE_VALUE}"
+        "   # same resolution, checked",
     ]
     return lines
+
+
+#: Compact scope glyphs for the per-var rows.  The full word is in the
+#: ``--json`` payload and in the legend; a 186-row listing cannot spend
+#: nine columns per row on it.
+_SCOPE_GLYPH = {
+    "session": "S",
+    "host": "H",
+    "ambient": "a",
+    "internal": "i",
+    "unclassified": "?",
+}
+
+
+def _scope_summary(EV) -> List[str]:
+    """The scope/typed-key headline for ``explain env`` (issue #775).
+
+    The catalog's whole point is the count in the third line: how many
+    session-scoped knobs a profile author still cannot set with a typed,
+    validated key.  Printing it above the listing is what makes the
+    number get smaller.
+    """
+    from shared.env_scope import AWAITING_TYPED_KEY, SESSION
+
+    session = [v for v in EV.values() if v.scope == SESSION]
+    typed = [v for v in session if v.typed_key]
+    unclassified = [v for v in EV.values() if v.scope == "unclassified"]
+    out = [
+        "",
+        "  scope (shared/env_scope.py — S session, H host, a ambient, "
+        "i internal):",
+        f"    {len(session):>3} session   a knob two sessions on one host may "
+        f"differ on — {len(typed)} have a typed key,",
+        f"        {len(session) - len(typed):>3} do not "
+        f"(tiers: {_tier_counts(AWAITING_TYPED_KEY)}). `explain env untyped`",
+        f"    {sum(1 for v in EV.values() if v.scope == 'host'):>3} host      "
+        f"process/host-scoped — a per-session value would be a lie",
+        f"    {sum(1 for v in EV.values() if v.scope == 'ambient'):>3} ambient   "
+        f"the host environment being READ, not a knob at all",
+        f"    {sum(1 for v in EV.values() if v.scope == 'internal'):>3} internal  "
+        f"one framework process handing a value to another",
+    ]
+    if unclassified:
+        out.append(f"    {len(unclassified):>3} UNCLASSIFIED — "
+                   + ", ".join(sorted(v.name for v in unclassified)))
+    return out
+
+
+def _tier_counts(awaiting: Dict[str, str]) -> str:
+    """``A=14 B=11 E=18`` for the summary line."""
+    counts: Dict[str, int] = {}
+    for entry in awaiting.values():
+        counts[entry.tier] = counts.get(entry.tier, 0) + 1
+    return " ".join(f"{t}={counts[t]}" for t in sorted(counts))
+
+
+def _env_selected(v, filter_: str, want_untyped: bool) -> bool:
+    """Does this var pass the ``explain env`` filter?
+
+    Split out of :func:`env` for the complexity ceiling, and it reads
+    better here anyway: the filter has three independent modes (the
+    untyped view, a scope name, a category/name substring) and inlining
+    them made the listing loop look like the interesting part.
+    """
+    from shared.env_scope import SESSION
+
+    if want_untyped:
+        return v.scope == SESSION and not v.typed_key
+    if not filter_:
+        return True
+    return (filter_ in v.category or filter_ in v.name
+            or filter_ == v.scope)
+
+
+def _env_rows(vs: list, width: int) -> List[str]:
+    """The per-var lines for one category, with the scope annotation.
+
+    A var either has a typed key (named, so an author can reach for it)
+    or is session-scoped without one (the reason given, so the gap is
+    legible rather than merely absent).  Everything else -- host,
+    ambient, internal -- says what it is with the glyph alone.
+    """
+    from shared.env_scope import AWAITING_TYPED_KEY, SESSION
+
+    out: List[str] = []
+    pad = " " * (width + 2)
+    for v in vs:
+        d = f" = {v.default}" if v.default not in (None, "") else ""
+        desc = f"   — {v.description}" if v.description else ""
+        glyph = _SCOPE_GLYPH.get(v.scope, "?")
+        out.append(f"    {glyph} {v.name:<{width}}{d}{desc}")
+        if v.typed_key:
+            out.append(f"    {pad}  → typed: {v.typed_key}")
+            continue
+        if v.scope != SESSION:
+            continue
+        # A debt entry shows WHERE the key should go, not just that one is
+        # missing: the proposal is the part a reader can act on or argue with.
+        owed = AWAITING_TYPED_KEY.get(v.name)
+        if owed is not None:
+            out.append(f"    {pad}  → proposed: {owed.proposed_key}  "
+                       f"[tier {owed.tier}]")
+            if owed.note:
+                out.append(f"    {pad}    {owed.note}")
+        elif v.scope_note:
+            out.append(f"    {pad}  → no typed key: {v.scope_note}")
+    return out
 
 
 def env(filter_: str = None) -> Rendered:
     """Env vars the installed daemon + plugins read (optionally filtered).
 
-    ``filter_`` matches a category substring or a var-name substring, so
-    ``explain env nebius`` → ``provider:nebius`` vars, ``explain env gc`` →
-    GC knobs, ``explain env framework`` → the daemon-general knobs.
+    ``filter_`` matches a category substring, a var-name substring, or a
+    scope — so ``explain env nebius`` → ``provider:nebius`` vars,
+    ``explain env gc`` → GC knobs, ``explain env host`` → the vars that are
+    deliberately NOT per-session, and ``explain env untyped`` → the
+    session-scoped knobs that still have no typed profile key (issue #775).
+
+    Each row carries its scope glyph and, where one exists, the typed key
+    that already covers it — so the answer to "should this be a profile
+    field?" is in the listing rather than in a reader's head.
     """
     EV = introspect.env_vars()
+    want_untyped = filter_ in ("untyped", "awaiting")
     groups: Dict[str, list] = {}
     for name in sorted(EV):
         v = EV[name]
-        if filter_ and filter_ not in v.category and filter_ not in name:
-            continue
-        groups.setdefault(v.category, []).append(v)
+        if _env_selected(v, filter_, want_untyped):
+            groups.setdefault(v.category, []).append(v)
 
     data = {
         cat: {v.name: {"default": v.default, "description": v.description,
+                       "scope": v.scope, "typed_key": v.typed_key,
+                       "scope_note": v.scope_note,
                        "sources": v.sources[:2]}
               for v in vs}
         for cat, vs in groups.items()
@@ -950,14 +1075,12 @@ def env(filter_: str = None) -> Rendered:
     lines = [head,
              "  (commented = optional; descriptions come from `# env: ...` "
              "comments at the read site)"]
+    lines += _scope_summary(EV)
     lines += _profile_env_note()
     for cat in sorted(groups):
         lines.append(f"\n  [{cat}]")
-        w = max((len(v.name) for v in groups[cat]), default=0)
-        for v in groups[cat]:
-            d = f" = {v.default}" if v.default not in (None, "") else ""
-            desc = f"   — {v.description}" if v.description else ""
-            lines.append(f"    {v.name:<{w}}{d}{desc}")
+        lines += _env_rows(groups[cat],
+                           max((len(v.name) for v in groups[cat]), default=0))
     return data, "\n".join(lines)
 
 
