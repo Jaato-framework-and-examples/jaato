@@ -2845,13 +2845,7 @@ class OutputBuffer:
                     # permission_content, so it has to be measured the same
                     # way — otherwise the panel reserves one row too few and
                     # clips the very line telling the user what to type.
-                    if self._permission_response_options:
-                        height += 1
-                        # Plus the focused option's description, when it has
-                        # one — rendered by _render_permission_prompt on its
-                        # own line directly under the options.
-                        if self._render_focused_option_description():
-                            height += 1
+                    height += self._permission_hint_height()
                 # Clarification prompt (if pending)
                 if tool.clarification_state == "pending":
                     height += 1  # header ("Clarification needed" or progress)
@@ -4117,6 +4111,27 @@ class OutputBuffer:
             "  ⇥ cycle  ↵ select",
             style=self._style("permission_bar_hint", "dim italic"),
         )
+
+    def _permission_hint_height(self) -> int:
+        """Rows the options hint occupies under a pending permission prompt.
+
+        Mirrors exactly what :meth:`_render_permission_prompt` emits, and is
+        the reason the two must be changed together: the options line
+        whenever there are options at all, plus one more for the focused
+        option's description when it carries one.  Under-counting here makes
+        the panel reserve too few rows and clip the very line that tells the
+        user what to press.
+
+        Kept as a helper rather than inline in
+        ``_calculate_tool_tree_height`` because that function is already over
+        the complexity ceiling and frozen at its recorded size.
+
+        Returns:
+            0, 1 or 2 rows.
+        """
+        if not self._permission_response_options:
+            return 0
+        return 2 if self._render_focused_option_description() else 1
 
     def _render_focused_option_description(self) -> str:
         """Describe the focused response option, e.g. "allow until session goes idle".
