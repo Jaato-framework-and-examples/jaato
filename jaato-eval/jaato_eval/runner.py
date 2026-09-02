@@ -70,7 +70,15 @@ from .verdict import Verdict
 #: ``spend_cache_creation_tokens`` are already summed over the turn's
 #: responses, the same shape as ``spend_total_tokens``, so summing them
 #: across turns is the right operation.
-_SUMMED_USAGE = ("prompt_tokens", "output_tokens", "spend_total_tokens",
+#:
+#: ``prompt_tokens`` / ``output_tokens`` were the last pair here with the
+#: same defect, and could not be fixed with the cache pair because no spend
+#: counterpart reached the wire: the session accumulated ``spend_prompt`` /
+#: ``spend_output`` per response and dropped both at the boundary.
+#: jaato #802 carries them, so every member of this tuple is now a billed
+#: figure and the tuple's name is true of all of it.
+_SUMMED_USAGE = ("spend_prompt_tokens", "spend_output_tokens",
+                 "spend_total_tokens",
                  "spend_cache_read_tokens", "spend_cache_creation_tokens",
                  "reasoning_tokens", "thinking_tokens")
 

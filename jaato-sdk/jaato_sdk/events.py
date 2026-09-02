@@ -1031,6 +1031,17 @@ class UsageBreakdown(BaseModel):
     # ``total_tokens`` across turns undercounts spend (measured: 59% of
     # actual).  ``None`` on per-response usage, where spend == total.
     spend_total_tokens: Optional[int] = None
+    # The same split, BILLED across the turn.  ``prompt_tokens`` and
+    # ``output_tokens`` above are the LAST response's figures, so a consumer
+    # summing them across turns hits the identical undercount measured for
+    # ``total_tokens``: a turn with a tool call has >=2 billed responses and
+    # only the last one is visible there.  The session has accumulated both
+    # per response all along (``spend_prompt`` / ``spend_output``); until
+    # jaato #802 neither reached the wire, so ``jaato-eval`` summed the
+    # level pair for want of anything else to record.  ``None`` on
+    # per-response usage, where spend == the response's own figure.
+    spend_prompt_tokens: Optional[int] = None
+    spend_output_tokens: Optional[int] = None
     # Cache traffic BILLED across the turn — summed over the turn's
     # responses, the same shape as ``spend_total_tokens``.  Distinct from
     # ``cache_read_tokens`` / ``cache_creation_tokens``, which are the LAST

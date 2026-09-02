@@ -207,6 +207,8 @@ class AgentUIHooks(Protocol):
         cache_read_tokens: Optional[int] = None,
         cache_creation_tokens: Optional[int] = None,
         spend_total_tokens: Optional[int] = None,
+        spend_prompt_tokens: Optional[int] = None,
+        spend_output_tokens: Optional[int] = None,
         spend_cache_read_tokens: Optional[int] = None,
         spend_cache_creation_tokens: Optional[int] = None,
         cost_usd: Optional[float] = None,

@@ -4409,6 +4409,8 @@ export type ReasoningTokens = number | null;
 export type ThinkingTokens = number | null;
 export type CostUsd = number | null;
 export type SpendTotalTokens = number | null;
+export type SpendPromptTokens = number | null;
+export type SpendOutputTokens = number | null;
 export type SpendCacheReadTokens = number | null;
 export type SpendCacheCreationTokens = number | null;
 export type ContextLimit = number;
@@ -14935,6 +14937,8 @@ export interface UsageBreakdown {
   thinking_tokens?: ThinkingTokens;
   cost_usd?: CostUsd;
   spend_total_tokens?: SpendTotalTokens;
+  spend_prompt_tokens?: SpendPromptTokens;
+  spend_output_tokens?: SpendOutputTokens;
   spend_cache_read_tokens?: SpendCacheReadTokens;
   spend_cache_creation_tokens?: SpendCacheCreationTokens;
 }
