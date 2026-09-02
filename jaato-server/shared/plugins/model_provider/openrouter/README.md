@@ -106,6 +106,11 @@ plugin_configs:
     api_key: "sk-or-..."           # overrides env / stored credentials
     http_referer: "https://..."    # HTTP-Referer header (outranks JAATO_APP_URL)
     app_title: "MyApp"             # X-OpenRouter-Title header (outranks JAATO_APP_NAME)
+                                   # All three attribution knobs distinguish
+                                   # ABSENT (fall through to env / the app
+                                   # identity) from EXPLICITLY EMPTY -- `""`
+                                   # / `[]` means "send no header", same as
+                                   # an empty JAATO_OPENROUTER_* env var.
     app_categories: ["cli-agent"]  # X-OpenRouter-Categories header
                                    # (outranks JAATO_APP_CATEGORIES)
                                    # (marketplace categories for rankings;

@@ -91,6 +91,14 @@ unchanged; the mechanism is the last two.
 (For categories, tiers 1 and 2 are `plugin_configs.openrouter.app_categories`
 and `JAATO_OPENROUTER_APP_CATEGORIES`.)
 
+At tiers 1 and 2, **absent and explicitly empty are different answers**: an
+omitted knob falls through to the next tier, while `http_referer: ""` /
+`app_title: ""` / `app_categories: []` — and likewise an empty
+`JAATO_OPENROUTER_*` value — mean "send no header". Before this branch the
+first two collapsed the two cases (`extra.get(key) or fallback()`), which was
+merely useless while the fallback was the framework's own URL and became wrong
+once an application identity supplied a different one.
+
 ```bash
 # tier 4 — the deployment surface
 export JAATO_APP_NAME="Acme Copilot"

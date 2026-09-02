@@ -54,7 +54,7 @@ import json
 import logging
 import re
 from functools import partial
-from typing import Any, Dict, List, Optional, Set, TYPE_CHECKING
+from typing import Any, Callable, Dict, List, Optional, Set, TYPE_CHECKING
 
 logger = logging.getLogger(__name__)
 
@@ -191,6 +191,32 @@ def _resolve_identity(extra: Dict[str, Any]) -> AppIdentity:
     if stamped:
         return AppIdentity.from_dict(stamped)
     return resolve_app_identity()
+
+
+def _attribution_knob(
+    extra: Dict[str, Any], key: str, fallback: Callable[[], str],
+) -> str:
+    """Read an attribution knob, distinguishing ABSENT from EXPLICITLY EMPTY.
+
+    ``extra.get(key) or fallback()`` cannot tell the two apart, so a profile
+    saying ``http_referer: ""`` — the natural way to write "send no referer"
+    — fell through and sent one anyway.  Harmless while the fallback was the
+    framework's own URL (the value the empty string would have suppressed);
+    not harmless once an application identity supplies a *different* URL,
+    because then the knob publishes a value neither reading intended.
+
+    ``env.py`` answers the same question the same way one tier down
+    (``JAATO_OPENROUTER_HTTP_REFERER=`` is honoured as "no header"), and
+    ``app_categories`` answers it the same way twenty lines below.  This
+    makes the three agree.
+
+    ``fallback`` is a callable so the resolution — which reads the
+    environment — is skipped when the knob already decided.  Split out of
+    ``initialize()`` so the branch stays off that method's complexity
+    baseline.
+    """
+    value = extra.get(key)
+    return fallback() if value is None else value
 
 
 def _filter_categories(categories: List[str]) -> List[str]:
@@ -832,11 +858,11 @@ class OpenRouterProvider(ModalityCapabilityMixin):
         # session — it is resolved from the environment here.
         identity = _resolve_identity(config.extra)
         self._app_identity = identity
-        self._http_referer = (
-            config.extra.get("http_referer") or resolve_http_referer(identity)
+        self._http_referer = _attribution_knob(
+            config.extra, "http_referer", lambda: resolve_http_referer(identity),
         )
-        self._app_title = (
-            config.extra.get("app_title") or resolve_app_title(identity)
+        self._app_title = _attribution_knob(
+            config.extra, "app_title", lambda: resolve_app_title(identity),
         )
 
         # Marketplace categories — the third attribution value, resolved on

@@ -792,6 +792,34 @@ class TestAppAttributionIdentity:
         )
         assert headers.get(HEADER_APP_CATEGORIES) == "chat-bot"
 
+    def test_an_explicitly_empty_referer_knob_suppresses_the_header(self):
+        # A profile writing http_referer: "" means "send no referer".
+        # ``or`` could not tell that from "absent" and sent the identity's
+        # URL instead — publishing a value neither reading intended.
+        headers = self._headers(
+            extra={
+                "app_identity": {"name": "Acme", "url": "https://acme.example"},
+                "http_referer": "",
+            },
+        )
+        assert HEADER_HTTP_REFERER not in headers
+
+    def test_an_explicitly_empty_title_knob_suppresses_the_header(self):
+        headers = self._headers(
+            extra={"app_identity": {"name": "Acme"}, "app_title": ""},
+        )
+        assert HEADER_APP_TITLE not in headers
+
+    def test_an_absent_knob_still_falls_through_to_the_identity(self):
+        # The other half of the distinction: absent is not empty.
+        headers = self._headers(
+            extra={"app_identity": {
+                "name": "Acme", "url": "https://acme.example",
+            }},
+        )
+        assert headers.get(HEADER_HTTP_REFERER) == "https://acme.example"
+        assert headers.get(HEADER_APP_TITLE) == "Acme (powered by jaato)"
+
     def test_the_profile_knob_still_fails_loud_on_a_bad_slug(self):
         # Authored, reviewed, OpenRouter-specific config: a typo there is
         # worth an exception.
