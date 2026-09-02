@@ -166,6 +166,16 @@ CATALOG: Dict[str, EnvClass] = {
         "of them"),
     "JAATO_PROVIDER_TRACE": EnvClass(SESSION, "trace.provider_log",
         "the incident in issue #775; now typed and validated"),
+    "JAATO_REVIVE_PERSONA": EnvClass(HOST, None,
+        "revive posture of the daemon: reuse the session's persisted "
+        "rendered prompt (default) or re-render it from disk, re-running "
+        "the persona's prefetch scripts.  Cannot be a profile key -- it "
+        "decides whether the persona is read at all (#787)"),
+    "JAATO_REVIVE_PROFILE": EnvClass(HOST, None,
+        "revive posture of the daemon: reuse the session's persisted "
+        "resolved profile (default) or re-resolve the name from disk.  "
+        "Self-referential as a profile key: the daemon would have to load "
+        "the file to learn whether it may load the file (#787)"),
     "JAATO_RUNNER_DISABLE_CONFINE": EnvClass(HOST, None,
         "disables runner self-confinement host-wide; deliberately NOT per "
         "session"),

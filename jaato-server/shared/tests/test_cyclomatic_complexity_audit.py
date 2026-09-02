@@ -118,7 +118,14 @@ BASELINE: Dict[str, int] = {
     "jaato-server/server/core.py::JaatoServer.shutdown": 35,
     "jaato-server/server/egress_proxy/config.py::validate_allowlist": 22,
     "jaato-server/server/ipc.py::JaatoIPCServer._handle_message": 30,
-    "jaato-server/server/runner/rpc.py::RunnerRPC._dispatch_method": 53,
+    # +1 for ``session.get_rendered_system_instruction`` (#787).  This is a
+    # flat ``if env.method == "..."`` dispatch table, so every verb the
+    # runner serves costs exactly one point and no amount of splitting the
+    # HANDLERS (which is what this one already does -- the body is one line
+    # per branch) moves it.  Reducing it means replacing the chain with a
+    # lookup table, which is a refactor of the whole dispatcher rather than
+    # part of adding a read.
+    "jaato-server/server/runner/rpc.py::RunnerRPC._dispatch_method": 54,
     "jaato-server/server/runner/rpc.py::RunnerRPC._handle_session_register_client_tools": 17,
     "jaato-server/server/runner/rpc.py::RunnerRPC._handle_session_resolve_fork_point": 17,
     "jaato-server/server/runner/rpc.py::RunnerRPC._handle_session_send_message": 20,
@@ -141,7 +148,7 @@ BASELINE: Dict[str, int] = {
     "jaato-server/server/session_manager.py::SessionManager._expand_prompt_references": 18,
     "jaato-server/server/session_manager.py::SessionManager._handle_turn_tracking_event": 21,
     "jaato-server/server/session_manager.py::SessionManager._intercept_prompt_help_refs": 17,
-    "jaato-server/server/session_manager.py::SessionManager._load_session_impl": 58,
+    "jaato-server/server/session_manager.py::SessionManager._load_session_impl": 51,
     "jaato-server/server/session_manager.py::SessionManager._provision_ipc_apparmor_and_spawn_runner": 25,
     "jaato-server/server/session_manager.py::SessionManager._run_ephemeral_session_impl": 21,
     "jaato-server/server/session_manager.py::SessionManager._save_session": 42,

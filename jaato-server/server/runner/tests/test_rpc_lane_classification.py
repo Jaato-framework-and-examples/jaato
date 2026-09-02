@@ -105,6 +105,7 @@ _CONTROL_PLANE = frozenset({
     "session.get_context_usage",
     "session.get_history",
     "session.get_model_completions",
+    "session.get_rendered_system_instruction",
     "session.get_session_state",
     "session.get_tool_schemas",
     "session.get_turn_accounting",

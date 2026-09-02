@@ -243,7 +243,10 @@ def serialize_session_state(state: SessionState) -> Dict[str, Any]:
         JSON-compatible dictionary.
     """
     return {
-        'version': '2.7',  # Bumped for profile_spec (inline-profile resume)
+        # 2.8: profile_snapshot / rendered_instructions / agent_params --
+        # a revived session RESTORES the recipe and the prompt it ran
+        # under instead of re-deriving them from disk (issue #787).
+        'version': '2.8',
         'session_id': state.session_id,
         'description': state.description,
         'created_at': state.created_at.isoformat(),
@@ -254,6 +257,14 @@ def serialize_session_state(state: SessionState) -> Dict[str, Any]:
         'metadata': state.metadata,
         'profile_name': state.profile_name,
         'profile_spec': state.profile_spec,  # unresolved inline recipe (2.7+)
+        # 2.8+ (issue #787).  The frozen recipe and the frozen prompt: a
+        # revive reads these rather than re-resolving the profile name and
+        # re-running the persona's prefetch scripts.  All three are None on
+        # older records, and the loader falls back to re-deriving -- which
+        # is the pre-2.8 behaviour, so old records keep loading unchanged.
+        'profile_snapshot': state.profile_snapshot,
+        'rendered_instructions': state.rendered_instructions,
+        'agent_params': state.agent_params,
         'workspace_path': state.workspace_path,
         'config_root': state.config_root,
         'sandbox_mode': state.sandbox_mode,
@@ -310,6 +321,9 @@ def deserialize_session_state(data: Dict[str, Any]) -> SessionState:
         metadata=data.get('metadata', {}),
         profile_name=data.get('profile_name'),
         profile_spec=data.get('profile_spec'),  # None on pre-2.7 records
+        profile_snapshot=data.get('profile_snapshot'),  # None pre-2.8
+        rendered_instructions=data.get('rendered_instructions'),  # pre-2.8
+        agent_params=data.get('agent_params'),  # None on pre-2.8 records
         workspace_path=data.get('workspace_path'),
         config_root=data.get('config_root'),
         sandbox_mode=data.get('sandbox_mode'),
