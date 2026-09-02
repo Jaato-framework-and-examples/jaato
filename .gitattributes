@@ -1,0 +1,30 @@
+# Line endings are normalised: every text file is stored with LF in the
+# repository and checked out with LF on every platform.
+#
+# Before this the tree carried both — 456 CRLF and 945 LF .py files, plus 6
+# with BOTH endings inside one file.  Endings tracked whoever last wrote each
+# file, so an editor that rewrote a whole file turned a two-line change into a
+# whole-file diff and review had to be done with --ignore-cr-at-eol.  It was
+# also converging on LF by accident, one branch at a time (LF +114 in a single
+# week) — the same change, arriving without the review or the single commit.
+#
+# eol=lf rather than eol=native on purpose: native reintroduces the split the
+# moment a Windows checkout appears, and this repo is developed on Linux and
+# WSL2 where LF is already what every tool produces.
+#
+# NOTE for existing clones.  After pulling this, `git status` stays clean even
+# where files on disk still hold CRLF: the text=auto clean filter normalises on
+# read, so a CRLF working file and an LF blob compare equal.  The repository is
+# normalised either way.  To make an existing working tree match, run:
+#
+#     git rm --cached -r . && git reset --hard
+#
+# NOTE for branches created before this commit.  Set
+#
+#     git config merge.renormalize true
+#
+# which normalises both sides before merging, so a pre-normalisation branch
+# merges without a conflict on every line of every file it touches.
+#
+# See jaato #794.
+* text=auto eol=lf
