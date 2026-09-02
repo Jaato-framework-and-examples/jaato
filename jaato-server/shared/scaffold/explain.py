@@ -1147,10 +1147,24 @@ def profile() -> Rendered:
         "  parent(s), resolved at discover_profiles() (config.py:_merge_profiles):\n"
         "    plugins, preloaded_plugins   UNION / additive — child ADDS to the parents'; it\n"
         "                                 CANNOT scope DOWN here (the list only grows).\n"
+        "    completion_processors        CONCATENATED parent → child; all of them fire. `[]`\n"
+        "                                 in the child ADDS NOTHING — it does NOT clear the\n"
+        "                                 parents'. Scope DOWN by naming inherited entries in\n"
+        "                                 `suppress_inherited_processors` (matches an entry's\n"
+        "                                 `name`, else its `script`); an entry matching nothing\n"
+        "                                 is a load ERROR, and it is not inherited further.\n"
         "    tool_scopes, env,            per-KEY dict-merge — child wins on keys it sets;\n"
-        "    plugin_configs               the parent's other keys survive.\n"
-        "    model, provider, gc,         child REPLACES — the child's value wins outright\n"
-        "    apparmor, apparmor_fragments (this is how a child scopes DOWN, unlike plugins).\n"
+        "    plugin_configs, quirks       the parent's other keys survive.\n"
+        "    model, provider, gc, cache,  child REPLACES — the child's value wins outright\n"
+        "    model_tiers, runtime_limits, (this is how a child scopes DOWN, unlike plugins).\n"
+        "    apparmor_fragments,          For the two payload schemas an empty dict `{}` IS a\n"
+        "    completion_payload_schema,   value and overrides; `null`/absent reads as unset and\n"
+        "    spawn_payload_schema         inherits.\n"
+        "    max_turns,                   MOST RESTRICTIVE wins — a child may only TIGHTEN a\n"
+        "    budget_control.limits        ceiling, never raise the one it was spawned under.\n"
+        "                                 (budget_control.degrade is child-REPLACES.)\n"
+        "    suppress_base_instructions,  UNION / OR — STICKY: a piece any layer drops stays\n"
+        "    apparmor                     dropped, and a confined parent can't be un-confined.\n"
         "\n  empty vs listed `plugins` (a REQUIRED key — authors must pick):\n"
         "    plugins: []   → tools=[] → NONE of the registry tool plugins; only the framework\n"
         "                   set (permission, reliability, lifecycle/signal_completion) is wired.\n"
@@ -1158,6 +1172,14 @@ def profile() -> Rendered:
         "    plugins: [x]  → exactly those, UNIONed with any inherited.\n"
         "    To scope DOWN per stage, use tool_scopes (per-plugin allow-list) or the permission\n"
         "    plugin's whitelist — NOT the plugins list, which only ADDS to the inherited set.")
+    lines.append(
+        "\n  declining ONE inherited completion_processor (the only removal opt-out there is):\n"
+        "    inherits: [_base_worker]\n"
+        "    suppress_inherited_processors:\n"
+        "      - acceptance              a parent entry's `name:`, or its `script:` path\n"
+        "    Everything else scopes down by REPLACING a value, never by removing an entry.\n"
+        "    Don't stop inheriting just to drop a processor: you lose budget_control,\n"
+        "    max_turns, runtime_limits, env and plugin_configs with it, silently.")
     return data, "\n".join(lines)
 
 

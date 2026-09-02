@@ -49,6 +49,8 @@ Fields fall into two categories based on their type:
 | `preloaded_plugins` | Union of all parent sets + child set. |
 | `env` | Dict merge: parents merged left-to-right, child overrides last. **Conflict rule**: if two parents define the same env key with different values and child doesn't override → error. |
 | `plugin_configs` | Deep merge by plugin name. Within a plugin's config dict, same conflict rule as `env`. |
+| `completion_processors` | Concatenation, parents (in order) then child. Every processor fires. A child's `[]` **adds nothing — it does not clear the parents'**. The one removal opt-out is `suppress_inherited_processors` (below). |
+| `suppress_inherited_processors` | Not inherited. Names inherited `completion_processors` entries — by an entry's `name`, else its `script` path — for the child to decline. Consumed by the merge that resolves the child, so a grandchild neither re-applies it nor trips over it. An entry matching no inherited processor is a **load error**, because a stale suppression means the base renamed or moved the processor and the child is silently running one it declared it did not want. |
 
 ### Scalar Fields (agreement-or-override)
 
@@ -59,13 +61,35 @@ Fields fall into two categories based on their type:
 | `system_instructions` | Concatenation in inheritance order (grandparent → parent → child), separated by `\n\n`. No conflict possible — all layers contribute. |
 | `max_turns` | Most restrictive (minimum) across parents. Child can override. |
 | `gc` | If multiple parents define it, values must agree (field-by-field) or child must override the entire `gc` block. |
+| `completion_payload_schema` | Same as `model`. An empty dict `{}` **is a value** and overrides; `null`/absent reads as unset and inherits. |
+| `spawn_payload_schema` | Same as `completion_payload_schema`, at the spawn boundary. |
 | `description` | Child must define its own. Not inherited. |
 
 ### The Golden Rule
 
 > **A child can only narrow collections inherited from parents by explicitly
-> removing entries (not yet supported — omission means "inherit all"). A child
-> can override any scalar. Conflicts between parents are always errors.**
+> removing entries (supported for `completion_processors` alone, via
+> `suppress_inherited_processors`; elsewhere omission means "inherit all"). A
+> child can override any scalar. Conflicts between parents are always errors.**
+
+`completion_processors` is the exception because it was the one inherited key
+with *no* way down at all (#791). `plugins` is additive too, but a stage scopes
+its tools down with `tool_scopes` or the permission whitelist; a stage that
+genuinely completes differently had only one move — stop inheriting — and that
+silently costs it `budget_control`, `max_turns`, `runtime_limits`, `env` and
+`plugin_configs`. In the case that prompted this, an interrogation ran with no
+cost ceiling and nothing said so.
+
+The opt-out is deliberately narrow: **by name, never wholesale** (so a base that
+later adds a second processor cannot silently re-enable the one a child
+declined), **parents only** (the child's own list is its to edit), and **loud
+when stale** (a suppression matching nothing fails the profile load).
+
+```yaml
+inherits: [_base_worker]
+suppress_inherited_processors:
+  - acceptance          # a parent entry's `name:`, or its `script:` path
+```
 
 ## Error Reporting
 
@@ -284,6 +308,10 @@ Fix: add `"model": "claude-sonnet-4-20250514"` to `broken.json`.
 
 - **Plugin removal syntax** (e.g. `"-cli"` in plugins list). Not needed yet.
   If a parent grants a plugin you don't want, create a different base profile.
+- **A general collection-removal syntax.** `suppress_inherited_processors`
+  covers `completion_processors` alone, because that key had no other way down.
+  `plugins` scopes down through `tool_scopes` or the permission whitelist, and
+  the remaining collections are dicts a child overrides per key.
 - **Trait-based filtering**. Profiles work at plugin-name granularity, which is
   concrete and sufficient. Trait-based rules add abstraction without clear
   immediate value.
