@@ -729,6 +729,15 @@ class RunnerRPC:
             # snapshot).
             return self._handle_session_get_context_limit()
 
+        if env.method == "session.get_rendered_system_instruction":
+            # Issue #787: the system instruction as it stood at the end
+            # of ``configure()`` — after prefetch expansion, before the
+            # runtime additions.  The daemon persists it so a revive
+            # RESTORES the prompt instead of re-deriving it (which
+            # re-ran mandatory prefetch scripts against an empty
+            # ``agent_params`` and made such sessions unwakeable).
+            return self._handle_session_get_rendered_system_instruction()
+
         if env.method == "session.send_message":
             # Phase 3 §7b.2: the big one — runner-side
             # JaatoSession.send_message dispatched via runner-RPC.
@@ -1614,6 +1623,48 @@ class RunnerRPC:
                 "stage": "read",
             }
         return True, {"context_limit": limit}
+
+    def _handle_session_get_rendered_system_instruction(
+        self,
+    ) -> "tuple[bool, Any]":
+        """Read-only snapshot of the configure-time system instruction.
+
+        Returns ``{"rendered_system_instruction": str | None}``.  ``None``
+        is a legitimate answer (the session has not been configured yet),
+        so it is NOT an error — the daemon persists nothing in that case
+        and the revive falls back to re-rendering, which is exactly the
+        pre-#787 behaviour.
+
+        See :meth:`JaatoSession.get_rendered_system_instruction` for why
+        this is the frozen render rather than the live attribute.
+        """
+        ready, err, session = self._require_ready_session()
+        if not ready:
+            return err
+        getter = getattr(session, "get_rendered_system_instruction", None)
+        if not callable(getter):
+            # Older runner-side session object (mixed-build test stubs).
+            # Absent is the same answer as "nothing rendered yet".
+            return True, {"rendered_system_instruction": None}
+        try:
+            rendered = getter()
+        except Exception as exc:  # noqa: BLE001 — read boundary
+            return False, {
+                "error": (
+                    f"session.get_rendered_system_instruction: read "
+                    f"failed: {type(exc).__name__}: {exc}"
+                ),
+                "stage": "read",
+            }
+        if rendered is not None and not isinstance(rendered, str):
+            return False, {
+                "error": (
+                    f"session.get_rendered_system_instruction: expected "
+                    f"str or None, got {type(rendered).__name__}"
+                ),
+                "stage": "read",
+            }
+        return True, {"rendered_system_instruction": rendered}
 
     def _handle_session_apply_budget_degrade(
         self, params: "dict",

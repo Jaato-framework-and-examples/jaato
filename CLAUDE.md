@@ -241,6 +241,50 @@ await client.create_session(profile="researcher")
 
 **Flow:** Client sends `session.new --profile researcher` → server discovers profiles from `.jaato/profiles/` → resolves `SubagentProfile` → `JaatoServer` applies profile overrides (model, provider, plugins, plugin_configs, GC) during `initialize()`.
 
+### Session Revive (waking a persisted session)
+
+A session woken from disk — `session.wake`, a reattach, anything reaching
+`SessionManager._load_session` — comes back with **what it persisted**, not
+with what the files on disk say today (issue #787):
+
+| What | Persisted as | Restored via |
+|------|--------------|--------------|
+| the resolved profile | `SessionState.profile_snapshot` (`profile_to_snapshot`) | `profile_from_snapshot` → `BootstrapEnvelope.profile` |
+| the rendered system instruction | `SessionState.rendered_instructions` (snapshotted at the end of `JaatoSession.configure()`) | `BootstrapEnvelope.system_instruction_override` |
+| the creation `agent_params` | `SessionState.agent_params` | `BootstrapEnvelope.agent_params` |
+
+Record version 2.8+. Restoring the render means a revive does **not** re-run
+the persona's `{{!py:...}}` prefetch scripts — which is what made a session
+whose prefetch reads `context.agent_params` impossible to wake at all (the
+params were not persisted, so the script was handed an empty dict and
+aborted session-prep, blaming the task definition). It also makes a prefetch
+run **once**, as `explain prefetch` documents, and stops a revived session's
+prompt from silently diverging from the one its own history was produced
+under.
+
+Two env knobs (`JAATO_REVIVE_PROFILE`, `JAATO_REVIVE_PERSONA` — see the
+General env table) opt back into re-deriving either half; both default to
+`persisted`, and both fall back to re-deriving automatically when nothing
+was persisted, so records written before 2.8 revive exactly as before. The
+rationale for these being env vars rather than profile keys, and the matrix
+of which combination each workflow needs, live in `server/revive_policy.py`.
+
+Both are **per-process, not per-invocation**: they are resolved once when the
+`SessionManager` is constructed and held for the life of the daemon, so
+changing the posture means restarting the daemon and the new posture then
+applies to *every* session that revives until the next restart. Freezing is
+also what makes their `host` scope true — read live they would be settable
+process-wide from any single workspace's `.env`, because
+`JaatoServer._with_session_env` overlays every key of it onto the daemon's
+`os.environ` for the duration of a turn.
+
+**Contract for persona authors: never pass a credential as an
+`agent_param`.** They are substituted into the persona by `resolve_agent`,
+so they already reach the model in its system prompt — and the rendered
+persona is now a persisted artifact. Secrets belong in the profile's `env:`
+as a `pass://` / `vault://` URI, which stays unresolved on disk and is
+resolved daemon-side at spawn.
+
 ### Subagent Architecture
 
 Subagents share the parent's `JaatoRuntime` but get their own `JaatoSession`:
@@ -1203,6 +1247,8 @@ covers it, where one exists. `jaato-scaffold explain env` renders the tags;
 | `JAATO_REQUIRE_APPARMOR` | Require kernel-enforced AppArmor confinement (`1`/`true`/`yes`). Promotes the WS server's auto-detect mode to *required*: if confinement is unavailable the server refuses to start instead of silently degrading to directory-sandbox-only isolation. Equivalent to the WS `--apparmor` flag; combining it with `--no-apparmor` is a contradiction the server rejects at startup. When unset (auto), unavailability is logged at WARNING with the specific failing precondition and the server degrades. |
 | `JAATO_NOTEBOOK_ALLOW_INPROCESS_EXEC` | Opt into in-process execution of model-authored notebook cells (`1`/`true`/`yes`). The `notebook` plugin's `local` backend runs cells via `exec`/`eval` in the host interpreter, so by default it **fails closed** unless a kernel-enforced AppArmor profile is active (the production confined-runner path). Set this (or notebook plugin config `allow_inprocess_exec: true`) to accept in-process execution on unconfined hosts (e.g. trusted single-user dev). Logs a one-time WARNING when execution runs unconfined via this opt-in. |
 | `JAATO_PLUGIN_ENTRY_POINT_ALLOWLIST` | Comma-separated distribution names allowed to contribute plugins through the `jaato.*` entry-point groups. Unset (the default) means every installed distribution participates. When set, an entry point from any other distribution is refused **before** `ep.load()` — so its module is never imported — with a WARNING naming it. The built-in package is always honoured and never needs listing. See [Entry-point plugin trust](#entry-point-plugin-trust). |
+| `JAATO_REVIVE_PROFILE` | Where a REVIVED session's profile comes from: `persisted` (default — the resolved recipe the session froze at creation) or `disk` (re-resolve `profile_name` against the profile files as they stand now). Set `disk` to interrogate a finished session under a different contract, where a `JAATO_PROFILE_SET` switch must actually take effect. |
+| `JAATO_REVIVE_PERSONA` | Where a REVIVED session's system instruction comes from: `persisted` (default — the exact prompt rendered at session-prep, prefetch output included) or `disk` (re-render from the agent markdown, **re-running** the persona's `{{!py:...}}` prefetch scripts against the session's original `agent_params`). The default is what makes a prefetch run once as documented; `disk` may execute side effects. |
 | `JAATO_PLUGIN_ALLOW_SHADOW` | Comma-separated built-in plugin names an out-of-tree distribution IS allowed to replace. Built-in names are reserved by default; a foreign entry point claiming one is refused. Names in the never-shadowable set (`permission`, `cli`, `file_edit`, `mcp`, `sandbox_manager`, `interactive_shell`) are refused even when listed here. An honoured shadow still logs a WARNING naming the distribution that won. |
 
 ### Rate Limiting

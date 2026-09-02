@@ -204,6 +204,27 @@ class Session:
     # named-profile sessions.  Set at create (from the BootstrapEnvelope)
     # and at restore (from state.profile_spec) so it survives save cycles.
     inline_profile_spec: Optional[Dict[str, Any]] = None
+    # The RESOLVED recipe and the RENDERED prompt this session ran under,
+    # frozen at creation and re-persisted unchanged on every save (issue
+    # #787).  Both are WRITE-ONCE by intent: ``_save_session`` fills them
+    # in on the first save that finds them empty and never overwrites
+    # them, and ``_load_session`` carries the persisted values straight
+    # back onto the restored record.
+    #
+    # Write-once is the load-bearing part.  Reviving with
+    # ``JAATO_REVIVE_PERSONA=disk`` deliberately re-renders the prompt, so
+    # a save that recomputed from the live server would replace the
+    # original artifact with the re-render -- and the original is the
+    # thing an interrogation exists to ask about.  Testing an alternative
+    # must not destroy the record it is being compared against.
+    profile_snapshot: Optional[Dict[str, Any]] = None
+    rendered_instructions: Optional[str] = None
+    # The ``agent_params`` this session was created with, captured with the
+    # two snapshots above and under the same write-once rule.  Persisted so
+    # the OPT-IN re-render path can re-run the persona's prefetch against
+    # the ORIGINAL inputs; handing it an empty dict is the #787 defect.
+    # NEVER a place for a credential -- see SessionState.agent_params.
+    agent_params: Optional[Dict[str, str]] = None
     # Server 0.6.164+ (Bug B real root cause): opaque cascade tenant
     # ID stamped at session creation.  Consumed by
     # :meth:`_dispatch_to_cascade_clients` (Phase 1 cascade-as-client
@@ -623,6 +644,19 @@ class SessionManager:
         Args:
             storage_path: Override for session storage path.
         """
+
+        # Freeze the revive posture (issue #787) BEFORE any session exists.
+        # ``JAATO_REVIVE_PROFILE`` / ``JAATO_REVIVE_PERSONA`` are ``host``-
+        # scoped: one answer for this process, decided by whoever started it.
+        # Read live per revive they would NOT be, because
+        # ``JaatoServer._with_session_env`` copies every key of a session's
+        # workspace ``.env`` into the daemon-global ``os.environ`` for that
+        # session's turn, with no scope filter — so one workspace could set
+        # the posture for every other session's revive, and
+        # ``PERSONA=disk`` re-runs prefetch scripts.  Capturing here removes
+        # the window instead of narrowing it; see ``server/revive_policy.py``.
+        from server import revive_policy
+        revive_policy.capture()
 
         # Initialize session plugin for persistence.
         # storage_path stays relative (e.g. ".jaato/sessions") — it is
@@ -8021,78 +8055,36 @@ class SessionManager:
             state.workspace_path,
         )
 
-        restored_profile = None
-        if state.profile_spec:
-            # INLINE-profile restore: the persisted spec is authoritative and
-            # self-contained, so reconstruct from it DIRECTLY — never named-
-            # resolve.  This is both correct (an inline session was never a
-            # named profile) and collision-safe: now that an inline spec's own
-            # ``name`` is honored (e.g. "nano-chat", not the "<inline>"
-            # sentinel), a named lookup could otherwise match an unrelated
-            # same-named DISK profile.  Uses the SAME build_inline_profile path
-            # create uses (re-resolving any pass:// secrets daemon-side —
-            # nothing sensitive is on disk).  The spec is also carried onto the
-            # restored Session (below) so re-saves re-persist it.
-            from shared.plugins.subagent.config import build_inline_profile
-            try:
-                restored_profile = build_inline_profile(state.profile_spec)
-                logger.info(
-                    "_load_session: reconstructed inline profile for session "
-                    "%s from persisted profile_spec (name=%s, model=%s, "
-                    "provider=%s)", session_id, restored_profile.name,
-                    restored_profile.model, restored_profile.provider)
-            except ValueError as exc:
-                logger.error(
-                    "_load_session: persisted inline profile_spec for session "
-                    "%s failed to rebuild: %s", session_id, exc)
-        elif state.profile_name:
-            restored_profile, profile_err = self._resolve_profile(
-                state.profile_name,
-                workspace_path=state.workspace_path or workspace_path or "",
-                config_root=restore_config_root,
-                env_file=session_env_file,
-            )
-            if restored_profile is None:
-                logger.error(
-                    "_load_session: profile %r for session %s not "
-                    "resolvable (%s) — initialize will likely fail "
-                    "(workspace=%s config_root=%s) — verify the "
-                    "profile still exists at "
-                    "<config_root>/profiles/[<JAATO_PROFILE_SET>/]<name>",
-                    state.profile_name, session_id, profile_err,
-                    state.workspace_path, restore_config_root,
-                )
+        # The RECIPE.  Issue #787: a revived session comes back with the
+        # profile it ran under rather than with whatever the profile files
+        # say today.  ``JAATO_REVIVE_PROFILE=disk`` opts back into
+        # re-resolving; see ``server/revive_policy.py``.
+        restored_profile = self._resolve_revive_profile(
+            state,
+            session_id=session_id,
+            workspace_path=state.workspace_path or workspace_path or "",
+            config_root=restore_config_root,
+            env_file=session_env_file,
+        )
 
         self._attach_budget_ceiling(
             getattr(state, "budget_control", None), restored_profile,
             session_id)
 
-        # Rebind the agent PERSONA on restore.  Persisting + restoring
-        # ``agent_name`` (below, on the envelope) restores the agent IDENTITY
-        # but NOT the persona prose: the create path composes the persona via
-        # ``_resolve_agent`` → ``profile.system_instructions`` (which
-        # ``build_session_envelope`` forwards to the runner), and disk-restore
-        # must do the same.  Without this, a revived session had its agent id
-        # but a profile whose ``system_instructions`` lacked the persona, so
-        # persona-only guidance (e.g. "call ``enter_tier('vision')`` on user
-        # images") was silently dropped and multimodal revives confabulated.
-        # agent_params are not persisted, so ``{{param}}`` personas restore
-        # unsubstituted — a separate, pre-existing limitation.
-        if state.profile_name and restored_profile is not None and state.agent_name:
-            agent_result = self._resolve_agent(
-                state.agent_name, None,
-                state.workspace_path or workspace_path or "",
-                config_root=restore_config_root,
-            )
-            if agent_result is not None:
-                restored_profile.system_instructions = agent_result["system_instructions"]
-            else:
-                logger.warning(
-                    "_load_session: agent %r for session %s not resolvable — "
-                    "persona (e.g. enter_tier guidance) missing on restore "
-                    "(config_root=%s)",
-                    state.agent_name, session_id, restore_config_root,
-                )
+        # The PROMPT.  Issue #787: a revived session RESTORES the system
+        # instruction it was rendered with rather than rebuilding it, so the
+        # persona's ``{{!py:...}}`` prefetch scripts do not re-run.  When
+        # this returns None the persona is rebuilt from disk exactly as
+        # before (pre-2.8 records, and the ``JAATO_REVIVE_PERSONA=disk``
+        # opt-in), and the helper has rebound
+        # ``restored_profile.system_instructions`` for that path.
+        restored_instruction_override = self._resolve_revive_persona(
+            state,
+            restored_profile,
+            session_id=session_id,
+            workspace_path=state.workspace_path or workspace_path or "",
+            config_root=restore_config_root,
+        )
 
         # Phase 3 §3.12 disk-restore migration: route the JaatoServer
         # construction + pre-init hooks + initialize through the
@@ -8147,6 +8139,16 @@ class SessionManager:
             # (e.g. enter_tier on images) survives — else JaatoServer(agent_name
             # =None) drops it and multimodal revives confabulate.
             agent_name=getattr(state, "agent_name", None),
+            # #787: the frozen prompt, when this revive is using it.  None
+            # leaves the runner assembling normally (pre-2.8 records, or
+            # ``JAATO_REVIVE_PERSONA=disk``).
+            system_instruction_override=restored_instruction_override,
+            # #787: the ORIGINAL agent_params.  Needed by the re-render
+            # path (a prefetch reads ``context.agent_params``; handing it
+            # an empty dict is what made such sessions unwakeable), and
+            # carried on the default path too so a save→revive→save cycle
+            # keeps them rather than dropping them on the first revive.
+            agent_params=dict(getattr(state, "agent_params", None) or {}),
             restore_state={"loaded_state": state},
             env_file=session_env_file,
             instruction_token_cache=self._instruction_token_cache,
@@ -8372,6 +8374,16 @@ class SessionManager:
             # Carry the inline spec forward so a re-save of the restored
             # session re-persists it (survives restore → save → restore).
             inline_profile_spec=getattr(state, "profile_spec", None),
+            # #787: carry the frozen recipe + frozen prompt forward so a
+            # re-save of the restored session re-persists the ORIGINALS.
+            # Without this, the write-once capture in ``_save_session``
+            # would see empty fields on the restored record and re-snapshot
+            # from the live server -- which on a ``=disk`` revive means the
+            # re-derived value replacing the artifact it was meant to be
+            # compared against.
+            profile_snapshot=getattr(state, "profile_snapshot", None),
+            rendered_instructions=getattr(state, "rendered_instructions", None),
+            agent_params=getattr(state, "agent_params", None),
             # A sibling ADDRESS that does not survive a reload is not an
             # address: sessions unload on ORPHAN, so a sibling that came back
             # nameless would be unreachable by every sibling still holding
@@ -8900,6 +8912,12 @@ class SessionManager:
                     getattr(session.server, "_main_agent_display_name", None)
                     if session.server else None
                 )
+                # Freeze the recipe and the prompt this session ran under
+                # (issue #787).  Both are captured ONCE -- see the
+                # write-once note on the Session fields -- so a revive that
+                # deliberately re-derives one of them cannot overwrite the
+                # original artifact on its next save.
+                self._capture_revive_snapshots(session, server_profile)
                 state = SessionState(
                     session_id=session.session_id,
                     history=history,
@@ -8915,6 +8933,19 @@ class SessionManager:
                     # named-profile ``profile_name`` ("<inline>") isn't
                     # re-resolvable.  None for named-profile sessions.
                     profile_spec=session.inline_profile_spec,
+                    # 2.8+ (#787): the frozen recipe + the frozen prompt, so
+                    # the revive restores rather than re-derives.  Both are
+                    # None for sessions whose runner never reported one, and
+                    # the loader then falls back to re-deriving -- the
+                    # pre-2.8 behaviour.
+                    profile_snapshot=session.profile_snapshot,
+                    rendered_instructions=session.rendered_instructions,
+                    # Persisted for the OPT-IN re-render path only (the
+                    # default revive never re-runs a prefetch).  Never put a
+                    # credential here: agent_params are substituted into the
+                    # persona, so they already reach the model -- and the
+                    # rendered persona above is on disk regardless.
+                    agent_params=session.agent_params,
                     budget_control=budget_control_cfg,
                     sibling_name=session.sibling_name,
                     cascade_driver_id=session.cascade_driver_id,
@@ -8942,6 +8973,292 @@ class SessionManager:
             except Exception as e:
                 logger.error(f"Failed to save session {session.session_id}: {e}")
                 return False
+
+    def _resolve_revive_profile(
+        self,
+        state: Any,
+        *,
+        session_id: str,
+        workspace_path: str,
+        config_root: Optional[str],
+        env_file: Optional[str],
+    ) -> Optional[Any]:
+        """Rebind the profile a revived session runs under.
+
+        Three sources, tried in this order (issue #787):
+
+        1. ``state.profile_snapshot`` -- the RESOLVED profile the session
+           actually ran under, frozen at creation.  The default, and the
+           one that makes the operator ruling on #787 true: *a revived
+           session keeps what it was created under.*  Skipped when the
+           operator asked for ``JAATO_REVIVE_PROFILE=disk``.
+        2. ``state.profile_spec`` -- an INLINE session's own recipe.
+           Authoritative and self-contained; an inline session was never a
+           named profile, so it is never name-resolved (which could match
+           an unrelated same-named profile on disk).
+        3. ``state.profile_name`` -- re-resolved against the profile files
+           AS THEY STAND NOW.  The pre-2.8 behaviour, and still the right
+           one in two cases: a record with no snapshot (every session
+           written before 2.8), and the deliberate
+           ``JAATO_REVIVE_PROFILE=disk`` opt-in, which interrogation needs
+           because a ``JAATO_PROFILE_SET`` switch is resolved inside
+           ``discover_profiles`` and a frozen profile would make it inert.
+
+        A snapshot that fails to rebuild falls through to (3) rather than
+        failing the load: the worst case is the pre-#787 behaviour, and a
+        session that cannot be woken at all is exactly the failure this
+        change exists to remove.
+
+        Args:
+            state: The deserialized :class:`SessionState`.
+            session_id: For log messages.
+            workspace_path: Workspace to resolve a named profile against.
+            config_root: Framework-config root override for discovery.
+            env_file: Session ``.env``, overlaid before ``discover_profiles``
+                so a workspace-declared ``JAATO_PROFILE_SET`` is visible.
+
+        Returns:
+            The rebound profile, or ``None`` when the session had none (or
+            none of the three sources produced one -- ``initialize`` then
+            falls back to env-only resolution, as it always has).
+        """
+        from server.revive_policy import DISK, profile_source
+
+        snapshot = getattr(state, "profile_snapshot", None)
+        if (
+            snapshot
+            and state.profile_spec is None
+            and profile_source() != DISK
+        ):
+            from shared.plugins.subagent.config import profile_from_snapshot
+            try:
+                profile = profile_from_snapshot(snapshot)
+                logger.info(
+                    "_load_session: session %s restored from its persisted "
+                    "profile snapshot (name=%s, model=%s, provider=%s); set "
+                    "JAATO_REVIVE_PROFILE=disk to re-resolve from disk",
+                    session_id, profile.name, profile.model, profile.provider,
+                )
+                return profile
+            except (ValueError, TypeError) as exc:
+                logger.error(
+                    "_load_session: persisted profile snapshot for session "
+                    "%s failed to rebuild (%s) -- falling back to resolving "
+                    "%r from disk", session_id, exc, state.profile_name,
+                )
+
+        if state.profile_spec:
+            # Uses the SAME build_inline_profile path create uses
+            # (re-resolving any pass:// secrets daemon-side -- nothing
+            # sensitive is on disk).  The spec is also carried onto the
+            # restored Session so re-saves re-persist it.
+            from shared.plugins.subagent.config import build_inline_profile
+            try:
+                profile = build_inline_profile(state.profile_spec)
+                logger.info(
+                    "_load_session: reconstructed inline profile for session "
+                    "%s from persisted profile_spec (name=%s, model=%s, "
+                    "provider=%s)", session_id, profile.name, profile.model,
+                    profile.provider,
+                )
+                return profile
+            except ValueError as exc:
+                logger.error(
+                    "_load_session: persisted inline profile_spec for session "
+                    "%s failed to rebuild: %s", session_id, exc)
+                return None
+
+        if not state.profile_name:
+            return None
+
+        profile, profile_err = self._resolve_profile(
+            state.profile_name,
+            workspace_path=workspace_path,
+            config_root=config_root,
+            env_file=env_file,
+        )
+        if profile is None:
+            logger.error(
+                "_load_session: profile %r for session %s not "
+                "resolvable (%s) -- initialize will likely fail "
+                "(workspace=%s config_root=%s) -- verify the "
+                "profile still exists at "
+                "<config_root>/profiles/[<JAATO_PROFILE_SET>/]<name>",
+                state.profile_name, session_id, profile_err,
+                workspace_path, config_root,
+            )
+        return profile
+
+    def _resolve_revive_persona(
+        self,
+        state: Any,
+        restored_profile: Optional[Any],
+        *,
+        session_id: str,
+        workspace_path: str,
+        config_root: Optional[str],
+    ) -> Optional[str]:
+        """Decide what system instruction a revived session comes back with.
+
+        Two outcomes (issue #787):
+
+        * **Restore.**  The session persisted the prompt it was rendered
+          with, and the operator has not asked for a re-render.  Returned
+          as a ``system_instruction_override``, so the runner skips
+          assembly entirely: no instruction layers re-read, no agent
+          markdown re-resolved, and — the point — **no prefetch scripts
+          re-run**.  Re-running them is what made a session with a
+          mandatory ``{{!py:...}}`` prefetch unwakeable: ``agent_params``
+          were not persisted, the script was handed an empty dict, raised,
+          and aborted session-prep.  Re-running also repeated whatever side
+          effects the script has (the reported case materialises a git
+          worktree) and could hand the session a prompt its own history was
+          not produced under.
+
+        * **Re-render.**  No prompt was persisted (every record written
+          before 2.8), or ``JAATO_REVIVE_PERSONA=disk`` asked for one.  The
+          persona is re-resolved from disk and rebound onto
+          ``restored_profile.system_instructions``, exactly as before —
+          except that the ORIGINAL ``agent_params`` are now passed, so
+          ``{{param}}`` placeholders substitute and a prefetch reading
+          ``context.agent_params`` sees what it saw at creation.
+
+        Note the snapshot deliberately restores the CONFIGURE-TIME render,
+        not the live prompt: instructions a plugin injects when one of its
+        tools first activates are re-produced by the revived session
+        itself, so restoring them too would double them once per revive.
+
+        Args:
+            state: The deserialized :class:`SessionState`.
+            restored_profile: The rebound profile, mutated in place on the
+                re-render path.  ``None`` for profile-less sessions.
+            session_id: For log messages.
+            workspace_path: Workspace to resolve the agent markdown against.
+            config_root: Framework-config root override for that lookup.
+
+        Returns:
+            The prompt to send as ``system_instruction_override``, or
+            ``None`` to let the runner assemble normally.
+        """
+        from server.revive_policy import DISK, persona_source
+
+        rendered = getattr(state, "rendered_instructions", None)
+        if rendered and persona_source() != DISK:
+            logger.info(
+                "_load_session: session %s restored with its persisted "
+                "system instruction (%d chars); prefetch scripts are NOT "
+                "re-run.  Set JAATO_REVIVE_PERSONA=disk to re-render.",
+                session_id, len(rendered),
+            )
+            return rendered
+
+        if not (state.profile_name and restored_profile is not None
+                and state.agent_name):
+            return None
+
+        # Rebind the persona from disk.  Restoring ``agent_name`` alone
+        # gives the revived session the agent IDENTITY but not the persona
+        # prose, and persona-only guidance (e.g. "call
+        # ``enter_tier('vision')`` on user images") was silently dropped —
+        # a revived multimodal session kept the tool and lost the
+        # instruction to use it.
+        agent_result = self._resolve_agent(
+            state.agent_name,
+            dict(getattr(state, "agent_params", None) or {}) or None,
+            workspace_path,
+            config_root=config_root,
+        )
+        if agent_result is None:
+            logger.warning(
+                "_load_session: agent %r for session %s not resolvable — "
+                "persona (e.g. enter_tier guidance) missing on restore "
+                "(config_root=%s)",
+                state.agent_name, session_id, config_root,
+            )
+            return None
+        restored_profile.system_instructions = agent_result["system_instructions"]
+        return None
+
+    def _capture_revive_snapshots(
+        self, session: Session, server_profile: Optional[Any],
+    ) -> None:
+        """Fill in this session's frozen recipe + frozen prompt, once.
+
+        Issue #787.  A revived session is supposed to come back as the
+        session that was saved, and before this it came back as whatever
+        the profile files and the persona's prefetch scripts produced at
+        revive time.  These two snapshots are what "wake from persisted
+        state" actually requires; :meth:`_load_session_impl` consumes
+        them.
+
+        WRITE-ONCE.  Each field is filled only when empty, so:
+
+        * the value persisted is the one from the ORIGINAL run, even after
+          many save cycles;
+        * a revive that deliberately re-derives one of them
+          (``JAATO_REVIVE_PROFILE=disk`` / ``JAATO_REVIVE_PERSONA=disk``)
+          cannot overwrite the original on its next save -- testing an
+          alternative must not destroy the record it is compared against;
+        * an already-persisted session picks its snapshots up on its next
+          save, so records written before 2.8 migrate forward by being
+          used rather than by a migration step.
+
+        Failures are logged and swallowed: a session that cannot be
+        snapshotted must still SAVE.  The cost of a missing snapshot is a
+        revive that re-derives, which is the pre-#787 behaviour -- the
+        cost of a raised exception here would be a lost session.
+
+        Args:
+            session: The record being saved; mutated in place.
+            server_profile: The resolved profile bound to the session's
+                server, or ``None`` for profile-less sessions.
+        """
+        # --- the recipe ---------------------------------------------------
+        # Inline sessions are already frozen: ``profile_spec`` persists the
+        # spec itself because there is no name to re-resolve.  Snapshotting
+        # them again would store the same recipe twice and give the loader
+        # two sources to disagree about.
+        if (
+            session.profile_snapshot is None
+            and session.inline_profile_spec is None
+            and server_profile is not None
+        ):
+            try:
+                from shared.plugins.subagent.config import profile_to_snapshot
+                session.profile_snapshot = profile_to_snapshot(server_profile)
+            except Exception as exc:  # noqa: BLE001 -- never block a save
+                logger.warning(
+                    "session %s: could not snapshot profile %r for revive "
+                    "(%s: %s); a revive will re-resolve it from disk",
+                    session.session_id,
+                    getattr(server_profile, "name", None),
+                    type(exc).__name__, exc,
+                )
+
+        # --- the prefetch inputs -------------------------------------------
+        if session.agent_params is None and session.server is not None:
+            params = getattr(session.server, "_agent_params", None)
+            session.agent_params = dict(params) if params else None
+
+        # --- the prompt ---------------------------------------------------
+        if session.rendered_instructions is not None:
+            return
+        rpc = getattr(session.server, "_runner_rpc", None) if session.server else None
+        reader = getattr(
+            rpc, "session_get_rendered_system_instruction_threadsafe", None,
+        ) if rpc is not None else None
+        if not callable(reader):
+            return
+        try:
+            rendered = reader(timeout=5.0)
+        except Exception as exc:  # noqa: BLE001 -- never block a save
+            logger.debug(
+                "session %s: rendered-instruction snapshot failed: %s",
+                session.session_id, exc,
+            )
+            return
+        if rendered:
+            session.rendered_instructions = rendered
 
     def _get_todo_plugin(self, server: JaatoServer) -> Optional[Any]:
         """Get the TODO plugin from a server's registry.

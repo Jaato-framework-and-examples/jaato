@@ -2043,6 +2043,283 @@ def build_inline_profile(
     )
 
 
+# ---------------------------------------------------------------------------
+# Resolved-profile snapshots (issue #787)
+#
+# ``build_inline_profile`` reconstructs a profile from an AUTHORED spec —
+# the JSON/YAML shape a human writes.  A snapshot is the other direction:
+# the RESOLVED ``SubagentProfile`` a session actually ran under, frozen so
+# a revive can rebuild it without re-reading (and re-resolving, and
+# re-merging) the profile files on disk.
+#
+# Why not reuse ``build_inline_profile``: it accepts the authored key set
+# only.  A resolved profile carries fields inheritance produced
+# (``suppress_inherited_processors``, merged ``completion_processors``) and
+# fields derived at parse time (``preloaded_plugins``, ``tool_scopes``,
+# normalized ``suppress_base_instructions``).  Round-tripping through the
+# authored shape would silently drop them, which is the opposite of what a
+# snapshot is for.
+#
+# Secrets: the snapshot stores what the resolved profile holds, and a
+# resolved profile holds ``pass://`` / ``vault://`` URIs UNRESOLVED —
+# expansion happens later, at ``expand_plugin_configs`` / ``env`` overlay
+# time on the daemon (see ``runner_spawn.build_session_envelope``).  So a
+# snapshot lands the same unresolved URIs on disk that ``profile_spec``
+# already does, and no plaintext credential is introduced by persisting it.
+# ---------------------------------------------------------------------------
+
+#: Snapshot format version.  Bumped when the field set changes in a way a
+#: reader must notice; readers tolerate an unknown-but-newer minor by
+#: ignoring keys they do not recognise (``SubagentProfile`` construction is
+#: keyword-explicit, so an unknown key is simply never read).
+PROFILE_SNAPSHOT_VERSION = 1
+
+
+def _emit_plugin_entry(
+    name: str,
+    preloaded: bool,
+    tools: Optional[List[str]],
+) -> str:
+    """Render one ``plugins:`` entry back to its authored string form.
+
+    Inverse of :func:`parse_plugin_entry`.  Emits the explicit tagged form
+    (``name(mode:preload, tools:[a,b])``) rather than the positional one so
+    the result is unambiguous regardless of which knobs are present.
+
+    Args:
+        name: Plugin name.
+        preloaded: Whether the plugin is in the profile's preload set.
+        tools: Per-plugin tool allow-list, or ``None`` for "all tools".
+
+    Returns:
+        A string :func:`parse_plugin_entry` parses back to the same triple.
+    """
+    parts: List[str] = []
+    if preloaded:
+        parts.append("mode:preload")
+    if tools is not None:
+        parts.append("tools:[" + ",".join(str(t) for t in tools) + "]")
+    if not parts:
+        return name
+    return f"{name}({', '.join(parts)})"
+
+
+def _runtime_limits_to_dict(
+    limits: Optional['RuntimeLimits'],
+) -> Optional[Dict[str, Any]]:
+    """Render :class:`RuntimeLimits` back to its authored mapping.
+
+    Inverse of :meth:`RuntimeLimits.from_dict`, which splits a profile's
+    ``runtime_limits:`` block into known fields plus an ``extra`` bag for
+    keys it does not recognise.  ``dataclasses.asdict`` would emit that bag
+    as a nested ``extra`` key, which ``from_dict`` then parks in ANOTHER
+    ``extra`` -- one level deeper per save/restore cycle.  Flattening here
+    keeps the round trip a fixed point.
+
+    Args:
+        limits: The resolved limits, or ``None``.
+
+    Returns:
+        A mapping ``RuntimeLimits.from_dict`` reconstructs identically, or
+        ``None`` when there were no limits.
+    """
+    if limits is None:
+        return None
+    import dataclasses as _dc
+    data = _dc.asdict(limits)
+    extra = data.pop("extra", None) or {}
+    data.update(extra)
+    return data
+
+
+def profile_to_snapshot(profile: 'SubagentProfile') -> Dict[str, Any]:
+    """Freeze a RESOLVED profile into a JSON-serializable snapshot.
+
+    The inverse of :func:`profile_from_snapshot`.  Every field of
+    :class:`SubagentProfile` is carried, with the derived plugin knobs
+    (``preloaded_plugins`` / ``tool_scopes``) folded back into the
+    ``plugins`` entry strings so there is one source of truth for them on
+    the way back in.
+
+    Args:
+        profile: The resolved profile a session was created with.
+
+    Returns:
+        A JSON-serializable dict.  ``pass://`` / ``vault://`` URIs inside
+        ``env`` / ``plugin_configs`` are carried UNRESOLVED (see the module
+        note above) — the snapshot never lands a plaintext credential that
+        the profile file did not already contain.
+    """
+    import dataclasses as _dc
+
+    preloaded = set(getattr(profile, "preloaded_plugins", None) or ())
+    scopes = dict(getattr(profile, "tool_scopes", None) or {})
+    plugins = [
+        _emit_plugin_entry(name, name in preloaded, scopes.get(name))
+        for name in (profile.plugins or [])
+    ]
+
+    def _block(value: Any) -> Optional[Dict[str, Any]]:
+        return _dc.asdict(value) if value is not None else None
+
+    budget = getattr(profile, "budget_control", None)
+
+    return {
+        "snapshot_version": PROFILE_SNAPSHOT_VERSION,
+        "name": profile.name,
+        "description": profile.description,
+        "plugins": plugins,
+        "plugin_configs": dict(profile.plugin_configs or {}),
+        "system_instructions": profile.system_instructions,
+        "suppress_base_instructions": sorted(
+            profile.suppress_base_instructions or ()
+        ),
+        "model": profile.model,
+        "provider": profile.provider,
+        "max_turns": profile.max_turns,
+        "cache": _block(getattr(profile, "cache", None)),
+        "trace": _block(getattr(profile, "trace", None)),
+        "gc": _block(getattr(profile, "gc", None)),
+        "env": dict(profile.env or {}),
+        # ``inherits`` is deliberately dropped: a snapshot is POST-merge, so
+        # re-declaring the parents would re-apply them on top of a profile
+        # that already carries their fields.
+        "completion_payload_schema": profile.completion_payload_schema,
+        "spawn_payload_schema": profile.spawn_payload_schema,
+        "completion_processors": [
+            _dc.asdict(p) for p in (profile.completion_processors or [])
+        ],
+        "suppress_inherited_processors": list(
+            getattr(profile, "suppress_inherited_processors", None) or []
+        ),
+        # ``RuntimeLimits`` parks unknown keys in an ``extra`` dict and
+        # ``from_dict`` re-parks anything it does not recognise -- so a
+        # plain ``asdict`` would nest ``extra`` one level deeper on every
+        # round trip.  Flatten it back into the mapping ``from_dict``
+        # expects, which is the shape the profile file had.
+        "runtime_limits": _runtime_limits_to_dict(
+            getattr(profile, "runtime_limits", None)
+        ),
+        "model_tiers": dict(getattr(profile, "model_tiers", None) or {}),
+        "budget_control": budget.to_dict() if budget is not None else None,
+        "apparmor": bool(getattr(profile, "apparmor", False)),
+        "apparmor_fragments": (
+            list(profile.apparmor_fragments)
+            if getattr(profile, "apparmor_fragments", None) is not None
+            else None
+        ),
+        "quirks": dict(getattr(profile, "quirks", None) or {}),
+    }
+
+
+def _snapshot_blocks(data: Dict[str, Any]) -> Dict[str, Any]:
+    """Re-parse a snapshot's five structured sub-blocks.
+
+    Split out of :func:`profile_from_snapshot` so that function stays under
+    the cyclomatic-complexity ceiling: each block is an
+    absent-or-parse pair, and five of them in one body is most of its
+    branching.
+
+    Args:
+        data: The snapshot dict.
+
+    Returns:
+        ``{"gc", "cache", "trace", "runtime_limits", "budget_control"}``,
+        each either the parsed config or ``None``.
+
+    Raises:
+        ValueError: When a block is present but unparseable.  Loud, because
+            a session silently revived with (say) no GC strategy is worse
+            than one that refuses to revive: the first is discovered when
+            the context window overflows.
+    """
+    limits_raw = data.get("runtime_limits")
+    budget_raw = data.get("budget_control")
+    try:
+        return {
+            # The SHARED block parsers, deliberately -- a snapshot is one
+            # more profile ingress, and the whole point of
+            # ``parse_gc_block`` / ``parse_cache_block`` /
+            # ``parse_trace_block`` is that a new block field is wired in
+            # once rather than once per ingress.  They read their own key
+            # out of the dict, so the whole snapshot is what they take.
+            "gc": parse_gc_block(data),
+            "cache": parse_cache_block(data),
+            "trace": parse_trace_block(data),
+            "runtime_limits": (
+                RuntimeLimits.from_dict(limits_raw) if limits_raw else None
+            ),
+            "budget_control": (
+                BudgetControlConfig.from_dict(budget_raw)
+                if budget_raw else None
+            ),
+        }
+    except (ValueError, TypeError) as exc:
+        raise ValueError(f"invalid block in profile snapshot: {exc}") from exc
+
+
+def profile_from_snapshot(data: Dict[str, Any]) -> 'SubagentProfile':
+    """Rebuild a resolved profile from a :func:`profile_to_snapshot` dict.
+
+    Args:
+        data: A snapshot dict.
+
+    Returns:
+        The reconstructed :class:`SubagentProfile`.
+
+    Raises:
+        ValueError: When ``data`` is not a dict, or a structured sub-block
+            fails to parse.  Callers surface this rather than silently
+            reviving a session under a half-built recipe.
+    """
+    if not isinstance(data, dict):
+        raise ValueError(
+            f"profile snapshot must be a dict, got {type(data).__name__}"
+        )
+
+    clean_plugins, preloaded, tool_scopes = parse_plugin_list(
+        list(data.get("plugins") or [])
+    )
+    blocks = _snapshot_blocks(data)
+
+    return SubagentProfile(
+        name=data.get("name") or "<snapshot>",
+        description=data.get("description") or "",
+        plugins=clean_plugins,
+        preloaded_plugins=preloaded,
+        tool_scopes=tool_scopes,
+        plugin_configs=data.get("plugin_configs") or {},
+        system_instructions=data.get("system_instructions"),
+        suppress_base_instructions=data.get(
+            "suppress_base_instructions", False
+        ),
+        model=data.get("model"),
+        provider=data.get("provider"),
+        max_turns=data.get("max_turns", 10),
+        cache=blocks["cache"],
+        trace=blocks["trace"],
+        gc=blocks["gc"],
+        env=dict(data.get("env") or {}),
+        inherits=None,
+        completion_payload_schema=data.get("completion_payload_schema"),
+        spawn_payload_schema=data.get("spawn_payload_schema"),
+        completion_processors=_parse_completion_processors(
+            data.get("completion_processors")
+        ),
+        suppress_inherited_processors=list(
+            data.get("suppress_inherited_processors") or []
+        ),
+        runtime_limits=blocks["runtime_limits"],
+        model_tiers=dict(data.get("model_tiers") or {}),
+        budget_control=blocks["budget_control"],
+        apparmor=bool(data.get("apparmor", False)),
+        apparmor_fragments=_normalize_apparmor_fragments(
+            data.get("apparmor_fragments")
+        ),
+        quirks=dict(data.get("quirks") or {}),
+    )
+
+
 def resolve_profiles(
     profiles: Dict[str, 'SubagentProfile'],
 ) -> Tuple[Dict[str, 'SubagentProfile'], Dict[str, str]]:

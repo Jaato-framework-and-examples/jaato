@@ -1711,6 +1711,38 @@ class RunnerRPCClient:
             timeout=timeout,
         )
 
+    async def session_get_rendered_system_instruction(
+        self, *, timeout: Optional[float] = 5.0,
+    ) -> Optional[str]:
+        """The system instruction as it stood at the end of ``configure()``.
+
+        Issue #787: the daemon persists this so a revive RESTORES the
+        prompt (via ``BootstrapEnvelope.system_instruction_override``)
+        instead of re-deriving it.  Re-deriving re-runs the profile's
+        mandatory ``{{!py:...}}`` prefetch, which on revive was handed an
+        empty ``agent_params`` and aborted session-prep — a session that
+        ran fine and persisted fine could then not be woken at all.
+
+        Returns:
+            The rendered prompt, or ``None`` when the runner-side session
+            has not been configured (nothing to snapshot).  ``None`` is a
+            valid answer, not an error: the caller persists nothing and
+            the revive falls back to re-rendering.
+        """
+        result = await self._call_named(
+            "session.get_rendered_system_instruction", {}, timeout=timeout,
+        )
+        rendered = result.get("rendered_system_instruction")
+        return rendered if isinstance(rendered, str) else None
+
+    def session_get_rendered_system_instruction_threadsafe(
+        self, *, timeout: Optional[float] = 5.0,
+    ) -> Optional[str]:
+        return self._run_threadsafe(
+            self.session_get_rendered_system_instruction(timeout=timeout),
+            timeout=timeout,
+        )
+
     async def session_apply_budget_degrade(
         self, rungs: list, pool_pressure: Optional[str] = None,
         *, timeout: Optional[float] = 5.0,
