@@ -44,9 +44,14 @@ class ReportCase(unittest.TestCase):
         same = build_cells([_rec("t", "s", PASS, payload_hash="a"),
                             _rec("t", "s", PASS, payload_hash="a")])
         self.assertAlmostEqual(same[("t", "s")].determinism, 1.0)
+        # Two arms that differ agree on NOTHING, so the share is 0.0.
+        # This asserted 0.5 while `det` was a modal share, whose floor is
+        # 1/n rather than zero — the same printed 50% then meant "nothing
+        # matched" across two arms and "half matched" across four
+        # (jaato #798).
         split = build_cells([_rec("t", "s", PASS, payload_hash="a"),
                              _rec("t", "s", PASS, payload_hash="b")])
-        self.assertAlmostEqual(split[("t", "s")].determinism, 0.5)
+        self.assertAlmostEqual(split[("t", "s")].determinism, 0.0)
 
     def test_blocked_reasons_surface_in_markdown(self):
         md = render_markdown([_rec("t", "s", BLOCKED, blocked_reason="toolchain absent")])
@@ -93,10 +98,25 @@ class DeterminismCase(unittest.TestCase):
         self.assertAlmostEqual(self._cell("a", "a", "a").determinism, 1.0)
 
     def test_three_arms_none_agreeing(self):
-        """Three distinct hashes: the modal share is 1 of 3, not 1/3 by
-        coincidence — this case reads the same under both definitions and
-        is here to pin it rather than to discriminate."""
-        self.assertAlmostEqual(self._cell("a", "b", "c").determinism, 1 / 3)
+        """No two arms matched, so the share is zero — not 1/3.
+
+        A largest "group" of one is not agreement.  Without that floor the
+        column read 33% here and 25% across four arms, both meaning the
+        same thing: nothing reproduced.
+        """
+        self.assertAlmostEqual(self._cell("a", "b", "c").determinism, 0.0)
+
+    def test_four_arms_none_agreeing_is_also_zero(self):
+        """The floor must not move with the arm count."""
+        self.assertAlmostEqual(
+            self._cell("a", "b", "c", "d").determinism, 0.0)
+
+    def test_two_separate_pairs(self):
+        """Two arms said X and two said Y: the largest agreeing group is
+        half the arms.  Every arm found a partner, but they did not all
+        agree, so this must not read as 100%."""
+        self.assertAlmostEqual(
+            self._cell("a", "a", "b", "b").determinism, 0.5)
 
     def test_four_arms_three_agreeing(self):
         """Distinct-count would say 50%; the modal share is 75%."""
@@ -128,17 +148,19 @@ class DeterminismCase(unittest.TestCase):
         self.assertEqual(cell.answered, 0)
         self.assertIsNone(cell.determinism)
 
-    def test_silent_arms_do_not_dilute_the_share(self):
-        """A missing payload must not count AGAINST agreement either.
+    def test_a_silent_arm_lowers_the_share(self):
+        """The denominator is every arm that RAN, not every arm that spoke.
 
-        Two arms agreed and a third never answered: the honest reading is
-        "both arms that answered agreed", not 2/3. Counting it against
-        would repeat the error `pass_rate` returns None to avoid.
+        Two arms agreed and a third produced nothing: 2 of 3 runs
+        reproduced the answer, so 67%.  Dividing by the arms that answered
+        would print 100% off a minority of the runs — a determinism claim
+        the run does not support.  The renderer discloses which arms were
+        silent so a crash is not read as a disagreement.
         """
         cell = self._cell("a", "a", None, states=[PASS, PASS, FAIL])
         self.assertEqual(cell.answered, 2)
         self.assertEqual(cell.exercised, 3)
-        self.assertAlmostEqual(cell.determinism, 1.0)
+        self.assertAlmostEqual(cell.determinism, 2 / 3)
 
     # -- what the reader is shown --------------------------------------
 
@@ -148,14 +170,14 @@ class DeterminismCase(unittest.TestCase):
             _rec("t", "s", PASS, payload_hash="a"),
             _rec("t", "s", FAIL, payload_hash=None),
         ])
-        self.assertIn("100% (2 of 3)", md)
+        self.assertIn("67% (2 of 3 answered)", md)
 
     def test_markdown_shows_an_em_dash_when_one_arm_answered(self):
         md = render_markdown([
             _rec("t", "s", FAIL, payload_hash=None),
             _rec("t", "s", FAIL, payload_hash="a"),
         ])
-        self.assertIn("— (1 of 2)", md)
+        self.assertIn("— (1 of 2 answered)", md)
         # Assert on the DATA ROW, not the document: the footer legitimately
         # contains "100% = byte-identical" as part of its explanation.
         row = next(l for l in md.split("\n")
@@ -164,4 +186,4 @@ class DeterminismCase(unittest.TestCase):
 
     def test_footer_describes_what_is_actually_computed(self):
         md = render_markdown([_rec("t", "s", PASS, payload_hash="a")])
-        self.assertIn("ANSWERING arms", md)
+        self.assertIn("largest group of arms that agreed", md)

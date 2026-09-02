@@ -75,30 +75,40 @@ class Cell:
 
     @property
     def determinism(self) -> Optional[float]:
-        """Share of ANSWERING arms that produced the modal payload hash.
+        """Share of arms that produced the single most repeated payload.
 
-        ``1.0`` means every arm that answered emitted byte-identical
-        output.  Read it together with :attr:`answered` and
-        :attr:`exercised`: ``100%`` over 2 of 5 arms is agreement among a
-        minority, and the renderers print both numbers for that reason.
+        The largest group of arms that agreed with each other, over every
+        arm that ran (:attr:`exercised`) — and ``0.0`` when no payload was
+        produced more than once, because a group of one is not agreement.
 
-        ``None`` — rendered as an em dash — when fewer than two arms
-        answered.  A single observation cannot agree with anything, and
-        one arm answering out of two used to print ``100%``, which the
-        footer then described as "byte-identical across repeats"
-        (jaato #798).
+        ``None`` — rendered as an em dash — until at least two arms have
+        answered.  One observation cannot agree with anything, and it
+        cannot disagree either: ``0%`` would claim the arms differed when
+        the truth is that only one of them spoke.
 
-        Counting distinct hashes instead of the modal share, as this did
-        before, also mis-scored every cell with three or more arms: two
-        arms agreeing out of three is 2 distinct hashes, which printed
-        ``50%`` where the modal share is ``67%``.  The two definitions
-        coincide only when every hash is equally frequent, which is why
-        two-arm cells — all that existed — looked right.
+        Three earlier readings of this column were wrong (jaato #798):
+
+        * ``1 / distinct_hashes`` discarded how many arms stood behind each
+          hash, so two arms agreeing out of three printed 50% where the
+          answer is 67%.
+        * An arm that produced no payload was dropped from BOTH sides of
+          the fraction, so one arm answering out of two printed ``100%``
+          under a footer calling it "byte-identical across repeats".
+        * Any modal SHARE has a floor of ``1/n`` rather than 0, so total
+          disagreement read as 50% across two arms and 25% across four —
+          the same printed number meaning "nothing matched" in one cell
+          and "half matched" in another.
+
+        Silent arms stay in the denominator on purpose: they did not
+        disagree, but they did not reproduce the answer either, and a
+        determinism figure that ignored them would claim 100% from a
+        minority of the runs.  :attr:`answered` is rendered beside the
+        share so a reader can see which it is.
         """
         if self.answered < 2:
             return None
         modal = self.payload_hash_counts.most_common(1)[0][1]
-        return modal / self.answered
+        return 0.0 if modal == 1 else modal / self.exercised
 
 
 def build_cells(records: Iterable[Dict[str, Any]]) -> Dict[Tuple[str, str], Cell]:
@@ -177,35 +187,42 @@ def render_markdown(records: Iterable[Dict[str, Any]]) -> str:
 
     lines.append("")
     lines.append("_Pass rate excludes blocked arms from the denominator; "
-                 "`det` is the share of ANSWERING arms sharing the modal "
-                 "payload hash, over the count of arms that produced one "
-                 "(100% = byte-identical across the arms that answered). "
-                 "`—` means fewer than two arms answered, so there was "
-                 "nothing to agree. A cost of `—` means "
+                 "`det` is the largest group of arms that agreed with each "
+                 "other, over every arm that ran — 100% = byte-identical "
+                 "across all repeats, 0% = no two arms matched. A count in "
+                 "brackets means some arm produced no payload at all, so it "
+                 "lowered the share without having disagreed. `—` means "
+                 "fewer than two arms answered, so agreement could not be "
+                 "established either way. A cost of `—` means "
                  "neither the provider nor `.jaato/pricing.json` reported one — "
                  "it does not mean free._")
     return "\n".join(lines) + "\n"
 
 
 def _det_cell(cell: Cell) -> str:
-    """Render the ``det`` column: the share, and what it is a share OF.
+    """Render the ``det`` column, disclosing arms that never answered.
 
-    The denominator is printed because the percentage alone overstates.
-    ``100%`` said nothing about how many arms stayed silent, and a cell
-    where one arm of two answered rendered as ``100%`` under a footer
-    calling that "byte-identical across repeats" (jaato #798).
+    The share is already over every arm that ran, so it needs no
+    denominator spelled out — ``0%`` means no two arms matched and
+    ``100%`` means they all did.  What the percentage cannot show is WHY
+    it is below 100: arms that disagreed and arms that produced nothing
+    both pull it down.  The count is therefore appended only when some
+    arm stayed silent, which is exactly when the reader would otherwise
+    mistake a crash for a disagreement.
 
     Args:
         cell: The pivot cell being rendered.
 
     Returns:
-        ``"67% (3 of 3)"``, or ``"— (1 of 2)"`` when fewer than two arms
-        answered, or a bare ``"—"`` when no arm answered at all.
+        ``"67%"``; ``"67% (2 of 3 answered)"`` when an arm produced no
+        payload; ``"—"`` when fewer than two arms answered at all.
     """
-    if not cell.answered:
-        return "—"
-    share = "—" if cell.determinism is None else f"{cell.determinism * 100:.0f}%"
-    return f"{share} ({cell.answered} of {cell.exercised})"
+    qual = ""
+    if cell.answered < cell.exercised:
+        qual = f" ({cell.answered} of {cell.exercised} answered)"
+    if cell.determinism is None:
+        return f"—{qual}"
+    return f"{cell.determinism * 100:.0f}%{qual}"
 
 
 def _blocked_digest(cells: Dict[Tuple[str, str], Cell]) -> List[str]:

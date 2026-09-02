@@ -121,25 +121,27 @@ def _money(value: Any) -> str:
 
 
 def _det_cell(cell: Any) -> str:
-    """Render ``det``: the modal share, and the count it is a share OF.
+    """Render ``det``, disclosing arms that never answered.
 
-    The bare percentage overstated.  ``100%`` carried no indication of how
-    many arms stayed silent, so a cell where one arm of two produced a
-    payload rendered as ``100%`` under a legend calling that agreement
-    (jaato #798).  Mirrors ``report._det_cell`` — the markdown and HTML
-    views must not disagree about a column's meaning.
+    Mirrors ``report._det_cell`` — the markdown and HTML views must not
+    disagree about a column's meaning.  The share is already over every
+    arm that ran, so no denominator is spelled out; the bracketed count
+    appears only when an arm produced no payload, which is the case a
+    reader would otherwise mistake for a disagreement.
 
     Args:
         cell: The pivot cell being rendered.
 
     Returns:
-        HTML for the cell: the share plus ``(answered of exercised)``, or a
-        bare em dash when no arm answered at all.
+        HTML for the cell.
     """
-    if not cell.answered:
-        return "&mdash;"
-    share = _percent(cell.determinism)
-    return f'{share} <span class="qual">({cell.answered} of {cell.exercised})</span>'
+    qual = ""
+    if cell.answered < cell.exercised and cell.answered:
+        qual = (f' <span class="qual">({cell.answered} of '
+                f'{cell.exercised} answered)</span>')
+    if cell.determinism is None:
+        return f"&mdash;{qual}"
+    return f"{cell.determinism * 100:.0f}%{qual}"
 
 
 def _percent(value: Any) -> str:
@@ -465,9 +467,12 @@ def _pivot_table(cells: Dict[Tuple[str, str], Cell]) -> str:
 #: of these is a place a reader can silently draw the opposite conclusion.
 _FOOTNOTES = (
     "<strong>—</strong> means <em>not established</em>, never zero. "
-    "<strong>det</strong> is the share of ANSWERING arms sharing the modal "
-    "payload hash, over how many arms produced one at all; — there means "
-    "fewer than two arms answered, so there was nothing to agree. "
+    "<strong>det</strong> is the largest group of arms that agreed with "
+    "each other, over every arm that ran: 100% = byte-identical across all "
+    "repeats, 0% = no two arms matched. A bracketed count means some arm "
+    "produced no payload, lowering the share without having disagreed; — "
+    "means fewer than two arms answered, so agreement could not be "
+    "established either way. "
     "A cost of — means neither the provider nor <code>.jaato/pricing.json</code> "
     "reported one; it does not mean free. Nudges of — means the count could not "
     "be read from the session log, not that none fired. "
