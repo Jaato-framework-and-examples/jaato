@@ -331,6 +331,39 @@ these rules — not a persona):
   outward until unique. Never pre-emptively, never from memory:
   `prologue`+`old`+`epilogue` must be an exact substring of the file.
 
+### Rejections name the failure, not just the remedy
+
+An error that prescribes a remedy for a failure the caller does not have is
+worse than no advice: the caller follows it, fails the same way, and loops.
+`edit_core.py` therefore keeps three outcomes distinct, each with its own
+remedy (jaato #813, #814):
+
+| Outcome | What it means | Remedy the message gives |
+|---------|---------------|--------------------------|
+| `MalformedEditError` | The request is degenerate — empty `old`, or `old == new`. No file content could make it valid. | Change the call. Empty `old` is refused *before* matching, so it is never reported as "matched N times" (it matches between every pair of characters, which no anchor can narrow). |
+| `EditNotFoundError` | The locator is not a substring of the file. | Split by one extra count: if `old` occurs on its own, the anchors are **not adjacent** to it — the message names where `old` and each anchor actually sit, by line, and states that they are concatenated verbatim. If `old` does not occur at all, it says the anchors are irrelevant and `old` is what to fix. |
+| `AmbiguousEditError` | The locator matched more than once. | Add or extend anchors — the one case where that advice can work. |
+
+A whitespace-only `old` is deliberately **not** refused: unlike an empty one
+it can match exactly once (an anchored indentation fix is a legitimate edit),
+and where it cannot, "add anchors" is followable.
+
+These messages are longer than the ones they replace — measured on #813's own
+reproduction, 201 -> 292 chars for an empty `old` and 251 -> 700 for
+mis-anchored ones. The addition is a **constant** ~450 characters of
+diagnosis: everything else is the echoed pieces, which both versions carry
+identically. So the multiple is worst on the *smallest* messages (5.7x when
+the pieces are one character) and falls as they grow; and because every piece
+is truncated at 80 chars, the whole message is bounded — it stops growing at
+~700 characters however large the file or the anchors. The overhead does not
+scale with file size. That trade is deliberate, and the arithmetic is
+one-sided. The run in
+the issues hit the anchor error **20 times**, so one message that ends the
+misunderstanding is cheaper than twenty that cannot. And the truncation those
+runs died of was on the *output* side — a longer tool **result** is input, and
+does not feed it. Shortening a diagnostic that stops a loop to save tokens
+spends far more of them than it saves.
+
 ## Line Endings
 
 A write reproduces the line ending the file will hold in the working tree —
