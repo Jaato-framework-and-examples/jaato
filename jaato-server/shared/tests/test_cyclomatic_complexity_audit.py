@@ -394,7 +394,7 @@ BASELINE: Dict[str, int] = {
     "jaato-server/shared/plugins/sandbox_manager/plugin.py::SandboxManagerPlugin._execute_sandbox_command": 16,
     "jaato-server/shared/plugins/sandbox_manager/plugin.py::SandboxManagerPlugin._replay_pending_paths": 19,
     "jaato-server/shared/plugins/sandbox_manager/plugin.py::SandboxManagerPlugin.add_path_programmatic": 17,
-    "jaato-server/shared/plugins/sandbox_utils.py::check_path_with_jaato_containment": 31,
+    "jaato-server/shared/plugins/sandbox_utils.py::check_path_with_jaato_containment": 22,
     "jaato-server/shared/plugins/service_connector/auth.py::AuthManager.get_auth_headers": 19,
     "jaato-server/shared/plugins/service_connector/bruno_import.py::parse_bru_file": 18,
     "jaato-server/shared/plugins/service_connector/bruno_import.py::parse_bruno_collection": 28,

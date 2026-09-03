@@ -32,9 +32,21 @@ Key feature: /tmp Access
 ========================
 The /tmp directory is allowed by default for sandboxed tools to support
 temporary file operations. This can be disabled via the allow_tmp parameter.
+
+Key feature: POSIX pseudo-devices
+=================================
+``/dev/null`` and its siblings (``/dev/zero``, ``/dev/stdout``,
+``/dev/fd/<n>``, ...) are always allowed -- they hold no workspace data and
+their semantics are fixed by the kernel, so they are not what the sandbox
+exists to contain.  Refusing them made ``2>/dev/null`` -- one of the most
+common idioms a model emits -- look like a broken environment rather than a
+boundary (jaato issue #784).  The allowance is an explicit list, not a
+``/dev/`` prefix match: block devices and ``/dev/mem`` stay subject to the
+ordinary workspace rules.  See :func:`is_pseudo_device_path`.
 """
 
 import os
+import re
 import tempfile
 from functools import lru_cache
 from typing import Optional, Tuple
@@ -47,6 +59,66 @@ JAATO_CONFIG_DIR = ".jaato"
 
 # System temp directories that are allowed by default
 SYSTEM_TEMP_PATHS = ["/tmp", tempfile.gettempdir()]
+
+# Standard POSIX pseudo-devices, allowed regardless of workspace_root.
+#
+# These are not filesystem locations in the sandbox's sense: they carry no
+# workspace data, reading or writing them cannot reach another tenant's
+# files, and their semantics are fixed by the kernel.  ``2>/dev/null`` is
+# one of the most common idioms a model emits, and refusing it made the
+# sandbox look like a broken environment rather than a boundary -- the
+# refusal is reported as ``<cmd>: /dev/null: No such file or directory``
+# (see ``CLIToolPlugin._make_not_found_result``), from which the only
+# available inference is "this machine has no /dev/null" (jaato issue
+# #784).
+#
+# The list is deliberately exhaustive rather than a ``/dev/`` prefix
+# match: block devices (``/dev/sda``), the tty multiplexer's peers
+# (``/dev/pts/*``) and memory devices (``/dev/mem``) are real access, and
+# stay subject to the ordinary workspace rules.
+PSEUDO_DEVICE_PATHS = frozenset({
+    "/dev/null",
+    "/dev/zero",
+    "/dev/full",
+    "/dev/random",
+    "/dev/urandom",
+    "/dev/tty",
+    "/dev/stdin",
+    "/dev/stdout",
+    "/dev/stderr",
+})
+
+# ``/dev/fd/<n>`` names a descriptor the process already holds -- what
+# bash process substitution (``<(...)``, ``>(...)``) expands to.  Allowing
+# it grants nothing the process cannot already reach.
+_PSEUDO_DEVICE_FD_RE = re.compile(r"^/dev/fd/\d+$")
+
+
+def is_pseudo_device_path(path: str) -> bool:
+    """Return ``True`` for a standard POSIX pseudo-device path.
+
+    Matches the literal path, deliberately *before* symlink resolution:
+    ``/dev/stdin`` and friends resolve through ``/proc/self/fd/<n>`` to
+    whatever the descriptor currently points at, which may legitimately
+    live outside the workspace.  It is the well-known name that is being
+    allowed, not the target it happens to have right now.
+
+    Args:
+        path: Path to check.  Normalised with ``os.path.normpath`` so
+            ``/dev/./null`` and ``/dev/foo/../null`` are recognised, but
+            not made absolute -- a relative ``dev/null`` inside the
+            workspace is an ordinary file and is not matched here.
+
+    Returns:
+        ``True`` if *path* names one of the allowed pseudo-devices.
+    """
+    if not path or not path.startswith("/"):
+        return False
+    normalised = os.path.normpath(path)
+    return (
+        normalised in PSEUDO_DEVICE_PATHS
+        or bool(_PSEUDO_DEVICE_FD_RE.match(normalised))
+    )
 
 
 def is_jaato_path(path: str, workspace_root: str) -> bool:
@@ -279,6 +351,47 @@ def is_under_temp_path(path: str) -> bool:
     return False
 
 
+def is_proc_attr_path(path: str) -> bool:
+    """Return ``True`` for a procfs *security attribute* path.
+
+    ``/proc/**/attr/**`` and ``/proc/**/task/**/attr/**`` carry process
+    security attributes.  Writing to ``/proc/self/attr/current`` with the
+    literal string ``changeprofile unconfined`` transitions the current
+    task out of any AppArmor profile that permits the
+    ``change_profile -> unconfined`` capability — including the
+    ``jaato-ws-*`` per-session profiles, which need that capability for
+    the framework's ``apparmor_confine.__exit__`` to restore unconfined
+    when a tool finishes.  Without an application-layer denylist, an agent
+    driving a path-taking in-process tool (file_edit, readFile,
+    glob_files) at ``/proc/self/attr/current`` can escape confinement
+    entirely.  Verified empirically against apparmor.py template v10
+    (2026-05-01).
+
+    Callers must check both the literal and the ``realpath``-resolved
+    form: a symlink into ``/proc`` reaches the same file.
+
+    See ``server/apparmor.py:296`` for the kernel-level analysis and
+    ``project_backlog_apparmor_child_subprofile`` for the subprocess-side
+    fix that complements this in-process gate.
+
+    Args:
+        path: An absolute path (literal or resolved).
+
+    Returns:
+        ``True`` when the path names a process security attribute.
+    """
+    if path.startswith(("/proc/self/attr/", "/proc/thread-self/attr/")):
+        return True
+    if not path.startswith("/proc/"):
+        return False
+    # parts: ['', 'proc', '<pid>', 'attr', ...] OR
+    #        ['', 'proc', '<pid>', 'task', '<tid>', 'attr', ...]
+    parts = path.split("/")
+    if len(parts) >= 4 and parts[3] == "attr":
+        return True
+    return len(parts) >= 6 and parts[3] == "task" and parts[5] == "attr"
+
+
 def check_path_with_jaato_containment(
     path: str,
     workspace_root: str,
@@ -290,13 +403,16 @@ def check_path_with_jaato_containment(
 
     This is the main entry point for path validation that respects:
     1. Denied paths (checked first, takes precedence over all other rules)
-    2. .jaato restriction: denied by default, requires explicit authorization
+    2. Standard POSIX pseudo-devices (``/dev/null``, ``/dev/stdout``,
+       ``/dev/fd/<n>``, ...) -- always allowed; see
+       :func:`is_pseudo_device_path`
+    3. .jaato restriction: denied by default, requires explicit authorization
        via ``sandbox add`` (registered in plugin registry). Even when authorized,
        containment checks still apply (no traversal escapes, no nested symlinks).
        This takes precedence over /tmp allowance.
-    3. System temp directories (/tmp) when allow_tmp=True
-    4. Standard workspace sandboxing (paths must be within workspace)
-    5. Plugin registry authorization (for external paths, respects access mode)
+    4. System temp directories (/tmp) when allow_tmp=True
+    5. Standard workspace sandboxing (paths must be within workspace)
+    6. Plugin registry authorization (for external paths, respects access mode)
 
     Args:
         path: Path to check (absolute or will be made absolute).
@@ -319,48 +435,8 @@ def check_path_with_jaato_containment(
     real_abs_path = os.path.realpath(abs_path)
 
     # Hard denylist — applies even when workspace_root is unset.
-    #
-    # /proc/**/attr/** and /proc/**/task/**/attr/** carry process
-    # security attributes.  Writing to /proc/self/attr/current with
-    # the literal string ``changeprofile unconfined`` transitions the
-    # current task out of any AppArmor profile that permits the
-    # ``change_profile -> unconfined`` capability — including the
-    # jaato-ws-* per-session profiles, which need that capability
-    # for the framework's apparmor_confine.__exit__ to restore
-    # unconfined when a tool finishes.  Without an application-layer
-    # denylist, an agent driving a path-taking in-process tool
-    # (file_edit, readFile, glob_files) at /proc/self/attr/current
-    # can escape confinement entirely.  Verified empirically against
-    # apparmor.py template v10 (2026-05-01).
-    #
-    # See ``server/apparmor.py:296`` for the kernel-level analysis
-    # and ``project_backlog_apparmor_child_subprofile`` for the
-    # subprocess-side fix that complements this in-process gate.
-    proc_attr = (
-        "/proc/self/attr/",
-        "/proc/thread-self/attr/",
-    )
-    proc_task_attr_marker = "/attr/"  # combined with /proc/.../task/.../
-    if (
-        abs_path.startswith(proc_attr) or real_abs_path.startswith(proc_attr)
-    ):
+    if is_proc_attr_path(abs_path) or is_proc_attr_path(real_abs_path):
         return False
-    # /proc/<pid>/attr/* and /proc/<pid>/task/<tid>/attr/*
-    if abs_path.startswith("/proc/") or real_abs_path.startswith("/proc/"):
-        for candidate in (abs_path, real_abs_path):
-            parts = candidate.split("/")
-            # parts: ['', 'proc', '<pid>', 'attr', ...] OR
-            #        ['', 'proc', '<pid>', 'task', '<tid>', 'attr', ...]
-            if (
-                (len(parts) >= 4 and parts[1] == "proc" and parts[3] == "attr")
-                or (
-                    len(parts) >= 6
-                    and parts[1] == "proc"
-                    and parts[3] == "task"
-                    and parts[5] == "attr"
-                )
-            ):
-                return False
 
     if not workspace_root:
         # No further sandboxing configured (after the global denylist above).
@@ -370,6 +446,14 @@ def check_path_with_jaato_containment(
     if plugin_registry and hasattr(plugin_registry, 'is_path_denied'):
         if plugin_registry.is_path_denied(abs_path):
             return False
+
+    # Standard POSIX pseudo-devices are allowed once an explicit deny rule
+    # has had its say.  Checked on the pre-resolution path: /dev/stdin and
+    # friends are symlinks through /proc/self/fd/<n>, so their realpath is
+    # whatever the descriptor points at and would fail the workspace test
+    # for reasons that have nothing to do with the sandbox's purpose.
+    if is_pseudo_device_path(path):
+        return True
 
     # IMPORTANT: Check if path references .jaato BEFORE /tmp or workspace checks.
     # .jaato is denied by default and this takes precedence over /tmp allowance.
