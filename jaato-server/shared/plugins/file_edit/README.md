@@ -350,8 +350,14 @@ and where it cannot, "add anchors" is followable.
 
 These messages are longer than the ones they replace — measured on #813's own
 reproduction, 201 -> 292 chars for an empty `old` and 251 -> 700 for
-mis-anchored ones (the multiple grows with the size of the pieces echoed
-back). That trade is deliberate, and the arithmetic is one-sided. The run in
+mis-anchored ones. The addition is a **constant** ~450 characters of
+diagnosis: everything else is the echoed pieces, which both versions carry
+identically. So the multiple is worst on the *smallest* messages (5.7x when
+the pieces are one character) and falls as they grow; and because every piece
+is truncated at 80 chars, the whole message is bounded — it stops growing at
+~700 characters however large the file or the anchors. The overhead does not
+scale with file size. That trade is deliberate, and the arithmetic is
+one-sided. The run in
 the issues hit the anchor error **20 times**, so one message that ends the
 misunderstanding is cheaper than twenty that cannot. And the truncation those
 runs died of was on the *output* side — a longer tool **result** is input, and
