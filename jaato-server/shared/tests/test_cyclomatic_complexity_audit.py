@@ -176,7 +176,7 @@ BASELINE: Dict[str, int] = {
     "jaato-server/shared/ai_tool_runner.py::ToolExecutor._execute_with_auto_background": 16,
     "jaato-server/shared/change_tools.py::changed_lines_tool": 24,
     "jaato-server/shared/client_commands.py::parse_user_input": 24,
-    "jaato-server/shared/completion_processors.py::invoke_processors": 30,
+    "jaato-server/shared/completion_processors.py::invoke_processors": 18,
     "jaato-server/shared/event_bus_tools.py::_format_event_notification": 18,
     "jaato-server/shared/instruction_budget_builder.py::collect_instruction_texts": 28,
     "jaato-server/shared/jaato_runtime.py::JaatoRuntime._cache_tool_configuration": 26,
