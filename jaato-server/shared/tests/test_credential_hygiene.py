@@ -40,6 +40,9 @@ from typing import Any, Dict, List, Tuple
 import pytest
 
 from shared.secret_repr import REDACTED, SECRET_FIELD_NAMES
+from shared.tests.test_every_guard_detects_its_own_reversion import (
+    Reversion,
+)
 
 #: Root of the installed server tree (``jaato-server/``), two levels up
 #: from ``shared/tests/``.
@@ -319,3 +322,61 @@ class TestCredentialsCannotBePrinted:
         assert "api_key=''" in repr(
             OpenRouterCredentials(api_key="", created_at=0.0)
         )
+
+
+#: The defect, put back.
+#
+# Both halves of #721 were falsified by hand before landing — the fix
+# removed, the guard watched to go red, the fix restored.  Doing it by
+# hand is doing it once; these declarations run the same three
+# sabotages on every commit, which is the whole argument of
+# ``test_every_guard_detects_its_own_reversion``.
+#
+# The third one is not a reversion of the product code but of this
+# module's own discovery, and it is the one most worth having.  A
+# scan-driven parametrised guard fails characteristically by finding
+# NOTHING: zero cases collected, every assertion vacuous, suite green.
+# So the anchor test is sabotaged too, to prove the empty scan is
+# caught rather than celebrated.
+REVERSIONS = [
+    Reversion(
+        target="jaato-server/shared/plugins/model_provider/openrouter/auth.py",
+        find='''    # Never print the key: a bare dataclass repr put a live
+    # ``sk-…`` into a pytest failure message, and from there into
+    # scrollback and CI logs (#721).  ``to_dict`` below still
+    # returns the real value — this guards display, not storage.
+    __repr__ = secret_safe_repr("api_key")
+
+''',
+        replace="",
+        test="test_secret_never_appears_in_repr[auth.OpenRouterCredentials]",
+        because="the credential dataclass from #721 printing its own key "
+                "again, which is how a live sk-or-v1-… reached terminal "
+                "scrollback and would reach any CI log capturing pytest "
+                "output",
+    ),
+    Reversion(
+        target="jaato-server/conftest.py",
+        find='    "HOME": str(_ISOLATED_HOME),',
+        replace='    "HOME": str(REAL_HOME),',
+        test="test_home_points_at_the_isolated_tree",
+        because="tests resolving ~/.jaato against the developer's real "
+                "home, so every 'no credential is configured' assertion "
+                "reads their installed credentials instead of the case it "
+                "names",
+    ),
+    Reversion(
+        target="jaato-server/shared/tests/test_credential_hygiene.py",
+        # Assembled rather than written whole ON PURPOSE.  This
+        # reversion targets the module it is declared in, so an anchor
+        # spelled literally would appear twice — once in the scan, once
+        # here — and the meta-guard would (correctly) report BLOCKED
+        # rather than exercise anything.
+        find="            if fields & SECRET_" + "FIELD_NAMES:",
+        replace="            if False:  # scan finds nothing",
+        test="test_the_scan_found_the_known_credential_types",
+        because="the dataclass scan finding nothing, which collects zero "
+                "parametrised cases and reports the disclosure guard as "
+                "green while exercising it on no types at all",
+    ),
+]
