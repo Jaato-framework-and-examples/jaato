@@ -27,27 +27,24 @@ def _mock_client(status_code=200, body_text: str = ""):
 
 
 @pytest.fixture(autouse=True)
-def _isolate_home_credentials(monkeypatch, tmp_path):
-    """Keep the developer's real ~/.jaato credentials out of these tests.
+def _isolate_credential_tiers(empty_project_tier):
+    """Keep the developer's real credentials out of these tests.
 
-    Credential resolution falls through to a HOME tier, so "no key
-    configured" tests found a REAL stored key on a machine where the
-    developer has actually authenticated -- one asserted a
-    ZhipuAIAPIKeyNotFoundError that never came.  Clean CI has no such file,
-    which is why it passed there while failing locally.
+    Resolution walks a project tier (``<workspace>/.jaato/``, falling
+    back to the working directory) and then a HOME tier
+    (``~/.jaato/``).  Tests that clear ``os.environ`` or point
+    ``workspace_path`` at a tmpdir still hit both fallbacks, so on a
+    machine where the developer has actually authenticated they load
+    REAL credentials: "no token" tests found one, and an env-token test
+    saw the stored token win on precedence.  A clean CI box has no such
+    file, which is why it never showed there.
+
+    The HOME tier is now isolated for every test in the tree by
+    ``jaato-server/conftest.py`` (#721).  This fixture adds the tier
+    that cannot be closed globally — the working directory — via the
+    shared ``empty_project_tier`` fixture in the model_provider
+    conftest.
     """
-    empty_home = tmp_path / "home"
-    (empty_home / ".jaato").mkdir(parents=True)
-    monkeypatch.setenv("HOME", str(empty_home))
-    monkeypatch.setattr(Path, "home", classmethod(lambda cls: empty_home))
-    # BOTH tiers leak, not just home: the project tier resolves to
-    # ``<cwd>/.jaato/`` and pytest runs from the repo root, which carries real
-    # stored credentials.  Move cwd somewhere empty and clear the workspace
-    # env so neither tier can reach them.
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    monkeypatch.chdir(workspace)
-    monkeypatch.delenv("JAATO_WORKSPACE_ROOT", raising=False)
 
 
 class TestValidateApiKey:
@@ -244,10 +241,41 @@ class TestTryLoadCredentialsWithReason:
     """
 
     def test_file_missing_returns_none_and_no_reason(self, tmp_path):
-        """Missing file is not an error; reason is None."""
-        # tmp_path has no .jaato/zhipuai_auth.json
+        """Missing file is not an error; reason is None.
+
+        Depends on the ``HOME`` isolation in ``jaato-server/conftest.py``:
+        the loader consults the project tier and then ``~/.jaato/``, so
+        an empty ``tmp_path`` workspace alone does not make the file
+        missing.  Without that isolation this assertion failed on any
+        machine where the developer had authenticated — and pytest
+        rendered the loaded credential into the failure message, which
+        put a live key into scrollback and CI logs (#721).  The
+        companion below is what proves the home tier is still read.
+        """
         creds, reason = try_load_credentials_with_reason(workspace_path=str(tmp_path))
         assert creds is None
+        assert reason is None
+
+    def test_home_tier_is_read_when_the_project_tier_is_empty(
+        self, tmp_path, fake_home,
+    ):
+        """``~/.jaato/zhipuai_auth.json`` answers when the workspace has none.
+
+        The companion to the test above, and the reason that one means
+        anything: "returns None" is only evidence of the missing-file
+        path if the home tier would otherwise have answered.  Asserting
+        both pins the resolution order the docstring on
+        ``_get_token_storage_path`` claims — project first, then home.
+        """
+        home_file = fake_home / ".jaato" / "zhipuai_auth.json"
+        home_file.write_text(json.dumps({
+            "api_key": "zai-home-tier",
+            "created_at": 1234567890,
+        }))
+
+        creds, reason = try_load_credentials_with_reason(workspace_path=str(tmp_path))
+        assert creds is not None
+        assert creds.api_key == "zai-home-tier"
         assert reason is None
 
     def test_valid_file_loads_credentials(self, tmp_path):

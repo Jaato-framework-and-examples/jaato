@@ -153,8 +153,41 @@ class TestTryLoadCredentialsWithReason:
     """
 
     def test_file_missing_returns_none_and_no_reason(self, tmp_path):
+        """Missing file is not an error; reason is None.
+
+        Depends on the ``HOME`` isolation in ``jaato-server/conftest.py``:
+        the loader consults the project tier and then ``~/.jaato/``, so
+        an empty ``tmp_path`` workspace alone does not make the file
+        missing.  Without that isolation this assertion failed on any
+        machine where the developer had authenticated — and pytest
+        rendered the loaded credential into the failure message, which
+        put a live key into scrollback and CI logs (#721).  The
+        companion below is what proves the home tier is still read.
+        """
         creds, reason = try_load_credentials_with_reason(workspace_path=str(tmp_path))
         assert creds is None
+        assert reason is None
+
+    def test_home_tier_is_read_when_the_project_tier_is_empty(
+        self, tmp_path, fake_home,
+    ):
+        """``~/.jaato/doubleword_auth.json`` answers when the workspace has none.
+
+        The companion to the test above, and the reason that one means
+        anything: "returns None" is only evidence of the missing-file
+        path if the home tier would otherwise have answered.  Asserting
+        both pins the resolution order the docstring on
+        ``_get_token_storage_path`` claims — project first, then home.
+        """
+        home_file = fake_home / ".jaato" / "doubleword_auth.json"
+        home_file.write_text(json.dumps({
+            "api_key": "dw-home-tier",
+            "created_at": 1234567890,
+        }))
+
+        creds, reason = try_load_credentials_with_reason(workspace_path=str(tmp_path))
+        assert creds is not None
+        assert creds.api_key == "dw-home-tier"
         assert reason is None
 
     def test_valid_file_loads_credentials(self, tmp_path):

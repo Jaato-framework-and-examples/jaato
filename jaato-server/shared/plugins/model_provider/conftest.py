@@ -9,6 +9,23 @@ causes", no "common causes" lists, no "almost always X" prose, no
 knob-tuning suggestions for failure modes the framework didn't
 actually detect.
 
+The two fixtures here isolate the tiers of credential resolution that
+``jaato-server/conftest.py`` cannot close for every test on its own
+(issue #721: a mis-isolated assertion read a developer's real
+credential, and pytest printed the key into the failure message).
+
+``fake_home`` is a writable stand-in for ``~/.jaato``, so a test can
+exercise the HOME tier ON PURPOSE.  The global isolation points every
+test's ``HOME`` at an empty directory, which makes "no credential is
+configured" true — and also makes the home tier unreachable, so a
+suite that only ever asserts the empty case can no longer tell "the
+tier is empty" from "the tier is never consulted".  ``fake_home``
+restores the second half.
+
+``empty_project_tier`` closes the tier the global fixture deliberately
+leaves alone: the working directory, which the project tier falls back
+to when no workspace is passed.
+
 Three providers (tensorrt_llm, triton, vllm) all wrap an
 OpenAI-compatible self-hosted inference server and surface the same
 mid-stream connection-drop failure mode (HTTP 200 committed before the
@@ -20,7 +37,69 @@ mid-stream test at the same helper.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Iterable
+
+import pytest
+
+
+@pytest.fixture
+def fake_home(tmp_path, monkeypatch) -> Path:
+    """Point ``Path.home()`` at a writable directory this test owns.
+
+    Overrides the session-wide isolation from ``jaato-server/
+    conftest.py`` for one test — function-scoped monkeypatching runs
+    after the autouse fixture, so this wins — and pre-creates
+    ``.jaato/`` so a caller can drop a credential file straight in::
+
+        (fake_home / ".jaato" / "openrouter_auth.json").write_text(...)
+
+    Use it for the companion to every "no credential file" test: that
+    one proves the loader returns ``None`` when no tier answers, this
+    one proves the home tier is a tier at all.  Both are needed —
+    together they say the loader consults exactly the tiers it claims.
+
+    Returns:
+        The directory ``HOME`` (and ``USERPROFILE``) now point at.
+    """
+    home = tmp_path / "home"
+    (home / ".jaato").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    # The global fixture also pins ``Path.home`` (so a test that clears
+    # the environment cannot fall through to the pwd database); repoint
+    # it here or the env vars above would have no effect.
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    return home
+
+
+@pytest.fixture
+def empty_project_tier(tmp_path, monkeypatch) -> Path:
+    """Neutralise the PROJECT tier of credential resolution.
+
+    Every provider resolves ``workspace_path or get_workspace_root() or
+    os.getcwd()``, so a test that passes no explicit workspace lands on
+    the current working directory — and pytest runs from the repo root,
+    where a developer running the daemon in their checkout has real
+    stored credentials in ``.jaato/``.  Moving cwd somewhere empty and
+    clearing ``JAATO_WORKSPACE_ROOT`` closes that tier.
+
+    Unlike the ``HOME`` tier — isolated for every test by
+    ``jaato-server/conftest.py`` — this one cannot be neutralised
+    globally: the working directory is state a great many tests
+    legitimately derive paths from, and a suite-wide ``chdir`` would
+    move them all.  So it is opt-in, for the suites whose subject is
+    credential resolution.
+
+    Returns:
+        The empty directory that is now the working directory.
+    """
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+    monkeypatch.delenv("JAATO_WORKSPACE_ROOT", raising=False)
+    monkeypatch.delenv("JAATO_CONFIG_ROOT", raising=False)
+    return workspace
 
 
 # Keywords that signal hardcoded likely-cause guessing.  Lower-case for

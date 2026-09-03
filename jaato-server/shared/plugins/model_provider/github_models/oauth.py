@@ -17,6 +17,7 @@ import json
 import logging
 import os
 from shared.session_context import get_workspace_root, get_config_root
+from shared.secret_repr import secret_safe_repr
 import time
 import urllib.parse
 from dataclasses import dataclass
@@ -55,6 +56,12 @@ class OAuthTokens:
     token_type: str = "bearer"
     scope: str = ""
 
+    # Never print the tokens: a bare dataclass repr puts live
+    # credentials into pytest failure messages, log lines and
+    # tracebacks (#721).  ``to_dict`` still returns the real
+    # values — this guards display, not storage.
+    __repr__ = secret_safe_repr("access_token")
+
     def to_dict(self) -> dict:
         return {
             "access_token": self.access_token,
@@ -81,6 +88,12 @@ class CopilotToken:
     token: str
     expires_at: int  # Unix timestamp
     refresh_in: int = 0  # Seconds until refresh recommended
+
+    # Never print the tokens: a bare dataclass repr puts live
+    # credentials into pytest failure messages, log lines and
+    # tracebacks (#721).  ``to_dict`` still returns the real
+    # values — this guards display, not storage.
+    __repr__ = secret_safe_repr("token")
 
     def to_dict(self) -> dict:
         return {
@@ -117,6 +130,12 @@ class DeviceCodeResponse:
     verification_uri: str
     expires_in: int
     interval: int
+
+    # ``device_code`` is the bearer of the pending authorization and
+    # must not reach a log line or a pytest failure message (#721).
+    # ``user_code`` is deliberately NOT redacted — the whole point of
+    # the device flow is to show it to the person authorizing.
+    __repr__ = secret_safe_repr("device_code")
 
     @classmethod
     def from_dict(cls, data: dict) -> "DeviceCodeResponse":

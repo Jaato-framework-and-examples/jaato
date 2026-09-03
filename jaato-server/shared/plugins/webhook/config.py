@@ -11,6 +11,7 @@ import json
 import logging
 import os
 from dataclasses import dataclass, field
+from shared.secret_repr import secret_safe_repr
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -139,6 +140,12 @@ class WebhookConfig:
     tls: TLSConfig = field(default_factory=TLSConfig)
     allowed_ips: List[str] = field(default_factory=list)
     rate_limit_per_second: float = 0
+
+    # Never print the shared secret (#721).  The config is loaded
+    # from ``.jaato/webhook.json`` with ``${ENV_VAR}`` expansion, so
+    # by the time it is an object the placeholder has been resolved
+    # to the real HMAC key.
+    __repr__ = secret_safe_repr("secret")
 
     def __post_init__(self):
         # Intentionally do NOT auto-create a route.  A zero-config default route

@@ -156,12 +156,68 @@ class TestProfileDiscoveryForSession:
 
             assert result.profiles.get("nonexistent") is None
 
-    def test_resolve_profile_no_profiles_dir(self):
-        """Missing .jaato/profiles/ directory returns empty dict."""
+    def test_resolve_profile_no_profiles_dir(self, monkeypatch):
+        """A workspace with no profiles dir contributes no profiles.
+
+        Asserted per tier, because ``discover_profiles`` reads three of
+        them: the workspace, ``~/.jaato/profiles/``, and profiles
+        registered through ``jaato.premium`` entry points.  "The
+        workspace has no profiles dir" has never implied "there are no
+        profiles" — it implies "none from tier 1" — and the flat
+        ``== {}`` this replaces measured all three at once.  On a
+        developer box with jaato-premium installed it saw 21 profiles
+        and read as though ``base_path`` were being ignored (#734).
+
+        The home tier is empty because ``jaato-server/conftest.py``
+        points ``HOME`` at an empty directory; the premium tier is
+        stubbed here, since an installed package is not something an
+        env var can isolate.
+        """
+        from shared.plugins.subagent import config as config_module
+
+        monkeypatch.setattr(
+            config_module, "_discover_premium_profiles", lambda: {},
+        )
         with tempfile.TemporaryDirectory() as workspace:
-            from shared.plugins.subagent.config import discover_profiles
-            result = discover_profiles(".jaato/profiles", base_path=workspace)
+            result = config_module.discover_profiles(
+                ".jaato/profiles", base_path=workspace,
+            )
             assert result.profiles == {}
+
+    def test_user_tier_is_scanned_when_the_workspace_has_none(
+        self, tmp_path, monkeypatch,
+    ):
+        """``~/.jaato/profiles/`` answers when the workspace tier is empty.
+
+        The companion to the test above: an empty result only says
+        "tier 1 is empty" if the other tiers would otherwise have
+        spoken.  This one proves the user tier is read at all, so the
+        two together pin the precedence the docstring on
+        ``discover_profiles`` claims.
+        """
+        from shared.plugins.subagent import config as config_module
+
+        monkeypatch.setattr(
+            config_module, "_discover_premium_profiles", lambda: {},
+        )
+        home = tmp_path / "home"
+        user_profiles = home / ".jaato" / "profiles"
+        user_profiles.mkdir(parents=True)
+        (user_profiles / "user_tier.yaml").write_text(
+            "name: user_tier\ndescription: from the user tier\nplugins: []\n"
+        )
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setenv("USERPROFILE", str(home))
+        # jaato-server/conftest.py pins ``Path.home`` as well as the env
+        # vars, so a test that wants the user tier back must repoint it.
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        result = config_module.discover_profiles(
+            ".jaato/profiles", base_path=str(workspace),
+        )
+        assert "user_tier" in result.profiles
 
 
 class TestBuildProfileSessionKwargs:

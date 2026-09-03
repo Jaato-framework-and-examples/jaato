@@ -12,6 +12,7 @@ import json
 import logging
 import os
 from shared.session_context import get_workspace_root, get_config_root
+from shared.secret_repr import secret_safe_repr
 import secrets
 import threading
 import time
@@ -46,6 +47,12 @@ class OAuthTokens:
     access_token: str
     refresh_token: str
     expires_at: float  # Unix timestamp
+
+    # Never print the tokens: a bare dataclass repr puts live
+    # credentials into pytest failure messages, log lines and
+    # tracebacks (#721).  ``to_dict`` still returns the real
+    # values — this guards display, not storage.
+    __repr__ = secret_safe_repr("access_token", "refresh_token")
 
     @property
     def is_expired(self) -> bool:

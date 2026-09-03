@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import os
 from shared.session_context import get_workspace_root, get_config_root
+from shared.secret_repr import secret_safe_repr
 import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
@@ -191,6 +192,9 @@ class GitHubModelsConfig:
     organization: Optional[str] = None
     enterprise: Optional[str] = None
     endpoint: str = DEFAULT_ENDPOINT
+
+    # Never print the token (#721).
+    __repr__ = secret_safe_repr("token")
 
 
 class GitHubModelsProvider(ModalityCapabilityMixin):

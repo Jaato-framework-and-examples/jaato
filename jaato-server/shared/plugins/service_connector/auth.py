@@ -26,6 +26,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 from shared.session_context import get_session_env
+from shared.secret_repr import secret_safe_repr
 from ..subagent.config import (
     _SECRET_URI_RE,
     _resolve_secret_uri,
@@ -274,6 +275,9 @@ class OAuth2Token:
     token_type: str = "Bearer"
     expires_at: Optional[float] = None
     scope: Optional[str] = None
+
+    # Never print the token (#721).
+    __repr__ = secret_safe_repr("access_token")
 
     @property
     def is_expired(self) -> bool:
