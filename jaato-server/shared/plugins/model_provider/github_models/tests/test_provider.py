@@ -62,29 +62,24 @@ def create_mock_response(
 
 
 @pytest.fixture(autouse=True)
-def _isolate_home_credentials(monkeypatch, tmp_path):
-    """Keep the real ~/.jaato/github_oauth.json out of these tests.
+def _isolate_credential_tiers(empty_project_tier):
+    """Keep the developer's real credentials out of these tests.
 
-    Token resolution walks a project tier (``<workspace>/.jaato/``) and then a
-    HOME tier (``~/.jaato/github_oauth.json``).  Tests that clear os.environ or
-    point workspace_path at a tmpdir still hit the home tier, so on a machine
-    where the developer has actually run ``github-auth login`` they load REAL
-    credentials: "no token" tests found one, and an env-token test saw the
-    stored OAuth token win on precedence.  A clean CI box has no such file,
-    which is why this never showed there -- on top of CI not running this path.
+    Resolution walks a project tier (``<workspace>/.jaato/``, falling
+    back to the working directory) and then a HOME tier
+    (``~/.jaato/``).  Tests that clear ``os.environ`` or point
+    ``workspace_path`` at a tmpdir still hit both fallbacks, so on a
+    machine where the developer has actually authenticated they load
+    REAL credentials: "no token" tests found one, and an env-token test
+    saw the stored token win on precedence.  A clean CI box has no such
+    file, which is why it never showed there.
+
+    The HOME tier is now isolated for every test in the tree by
+    ``jaato-server/conftest.py`` (#721).  This fixture adds the tier
+    that cannot be closed globally — the working directory — via the
+    shared ``empty_project_tier`` fixture in the model_provider
+    conftest.
     """
-    empty_home = tmp_path / "home"
-    (empty_home / ".jaato").mkdir(parents=True)
-    monkeypatch.setenv("HOME", str(empty_home))
-    monkeypatch.setattr(Path, "home", classmethod(lambda cls: empty_home))
-    # BOTH tiers leak, not just home: the project tier resolves to
-    # ``<cwd>/.jaato/`` and pytest runs from the repo root, which carries real
-    # stored credentials.  Move cwd somewhere empty and clear the workspace
-    # env so neither tier can reach them.
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    monkeypatch.chdir(workspace)
-    monkeypatch.delenv("JAATO_WORKSPACE_ROOT", raising=False)
 
 class TestAuthentication:
     """Tests for authentication and initialization."""

@@ -11,6 +11,7 @@ Providers hold only connection/auth state set by ``initialize()`` and
 """
 
 from dataclasses import dataclass, field
+from shared.secret_repr import secret_safe_repr
 from typing import (
     Any,
     Callable,
@@ -114,6 +115,18 @@ class ProviderConfig:
     target_service_account: Optional[str] = None
     credentials: Optional[Any] = None
     extra: Dict[str, Any] = field(default_factory=dict)
+
+    # Never print the key, and never print a secret that arrived
+    # through ``extra`` (a provider's whole ``plugin_configs`` block
+    # lands there, ``api_token`` included).  A bare dataclass repr put
+    # a live key into a pytest failure message once already (#721);
+    # this config object is passed through far more code than that
+    # one was.  ``extra``'s non-secret keys still render, because
+    # ``host`` / ``context_length`` / ``routing`` are what the repr is
+    # read for.
+    __repr__ = secret_safe_repr(
+        "api_key", "credentials", mappings=("extra",),
+    )
 
 
 def profile_api_key_location(
