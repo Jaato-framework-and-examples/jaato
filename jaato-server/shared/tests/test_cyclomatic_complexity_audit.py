@@ -173,7 +173,7 @@ BASELINE: Dict[str, int] = {
     "jaato-server/server/workspace_monitor.py::WorkspaceMonitor._on_fs_event": 18,
     "jaato-server/server/workspace_monitor.py::WorkspaceMonitor.reconcile": 30,
     "jaato-server/shared/ai_tool_runner.py::ToolExecutor._execute_impl": 73,
-    "jaato-server/shared/ai_tool_runner.py::ToolExecutor._execute_with_auto_background": 17,
+    "jaato-server/shared/ai_tool_runner.py::ToolExecutor._execute_with_auto_background": 16,
     "jaato-server/shared/budget_control.py::DegradeRung.from_dict": 16,
     "jaato-server/shared/change_tools.py::changed_lines_tool": 24,
     "jaato-server/shared/client_commands.py::parse_user_input": 24,

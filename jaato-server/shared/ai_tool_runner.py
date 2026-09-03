@@ -36,6 +36,24 @@ ToolOutputCallback = Callable[[str], None]
 # Used for parallel tool execution where each thread needs its own state.
 _thread_local = threading.local()
 
+# Name of the tool that redeems an auto-background ``task_id``.  It is
+# registered by the ``background`` plugin (``shared/plugins/background``),
+# which a profile must load *separately* from the plugin whose tool got
+# backgrounded — ``cli`` acquires the capability through
+# ``BackgroundCapableMixin``, not by depending on ``background``.  When the
+# reader is absent the receipt is unredeemable, so the runner must not hand
+# one out as if it were (#804).
+BACKGROUND_READER_TOOL = 'getBackgroundTask'
+
+# How much longer than the auto-background threshold a tool is allowed to
+# run when no reader tool is loaded.  With nothing able to read a task_id,
+# waiting for the real output is strictly better than returning a handle
+# nobody can redeem, so the runner sits on the task up to this deadline
+# before giving up.  Bounded (rather than unbounded) because ``cli`` itself
+# imposes no wall-clock timeout unless RuntimeLimits sets one, and a
+# genuinely hung command must not wedge the session forever.
+DEFAULT_NO_READER_TIMEOUT_SECONDS = 300.0
+
 
 def get_current_tool_output_callback() -> Optional[ToolOutputCallback]:
     """Get the tool output callback for the current thread.
@@ -135,7 +153,7 @@ def trusted_bridge_context():
 if TYPE_CHECKING:
     from shared.plugins.registry import PluginRegistry
     from shared.plugins.permission import PermissionPlugin
-    from shared.plugins.background.protocol import BackgroundCapable
+    from shared.plugins.background.protocol import BackgroundCapable, TaskHandle
     from shared.plugins.reliability import ReliabilityPlugin
     from shared.runtime_limits import RuntimeLimits
 
@@ -642,6 +660,174 @@ class ToolExecutor:
             return plugin
         return None
 
+    def _background_reader_tool(self) -> Optional[str]:
+        """Return the name of the loaded background-task reader tool, if any.
+
+        An auto-background receipt (``task_id``) is only redeemable when the
+        session has a tool that accepts one.  That tool
+        (:data:`BACKGROUND_READER_TOOL`) is supplied by the ``background``
+        plugin, which is loaded independently of the plugin whose tool got
+        backgrounded — so a profile can perfectly well have auto-background
+        active with no way to read the result (#804).
+
+        The lookup is deliberately executor-level rather than
+        schema-level: the reader ships as a *deferred* tool, so it is
+        callable once discovered even though it is absent from the model's
+        initial schema surface.  What matters is whether an executor for it
+        exists in this session at all.
+
+        Returns:
+            :data:`BACKGROUND_READER_TOOL` when a reader is loaded, else
+            ``None``.
+        """
+        if BACKGROUND_READER_TOOL in self._map:
+            return BACKGROUND_READER_TOOL
+        if self._registry is not None:
+            try:
+                if self._registry.get_plugin_for_tool(BACKGROUND_READER_TOOL):
+                    return BACKGROUND_READER_TOOL
+            except Exception as exc:
+                logger.debug(f"Background reader lookup failed: {exc}")
+        return None
+
+    def _no_reader_deadline(self, threshold: float) -> float:
+        """Seconds to wait for a backgrounded tool when nothing can read it.
+
+        Used only on the no-reader path, where returning a ``task_id`` at
+        ``threshold`` would strand the caller.  Waiting longer is the
+        better trade: most commands that cross a 10s threshold (a test
+        run, a build) still finish well inside this deadline, and the
+        caller then gets the real output instead of an unredeemable handle.
+
+        The deadline is :data:`DEFAULT_NO_READER_TIMEOUT_SECONDS`, capped by
+        ``RuntimeLimits.tool_timeout_seconds`` when the session sets one —
+        waiting past the session's own wall-clock cap is pointless, since
+        the tool is due to be killed at that point anyway.  No separate env
+        knob: a profile that wants longer inline runs raises the plugin's
+        auto-background threshold instead, which is the typed lever for it.
+
+        Args:
+            threshold: The plugin's auto-background threshold, which is the
+                floor — a deadline shorter than it would defeat the point.
+
+        Returns:
+            The deadline in seconds, never below ``threshold``.
+        """
+        deadline = DEFAULT_NO_READER_TIMEOUT_SECONDS
+        limits = self._runtime_limits
+        tool_timeout = getattr(limits, 'tool_timeout_seconds', None) if limits else None
+        if tool_timeout:
+            deadline = min(deadline, float(tool_timeout))
+        return max(deadline, threshold)
+
+    def _wait_for_background_task(
+        self,
+        plugin: 'BackgroundCapable',
+        task_id: str,
+        wait_for: float,
+    ) -> Optional[str]:
+        """Poll a background task until it settles, or the window closes.
+
+        Cancellation is honoured while polling: the no-reader window can be
+        minutes long, so a stop request must not be queued behind it.  A
+        cancelled task is reported as settled, and its terminal status is
+        read back by the caller like any other.
+
+        Args:
+            plugin: The BackgroundCapable plugin owning the task.
+            task_id: Id of the task to poll.
+            wait_for: How long to poll, in seconds.
+
+        Returns:
+            The terminal status value (``'completed'``, ``'failed'``,
+            ``'cancelled'``, ``'timeout'``) when the task settled inside the
+            window, or ``None`` when it is still running.
+        """
+        start_time = time.time()
+        cancel_token = get_current_cancel_token()
+        while time.time() - start_time < wait_for:
+            status = plugin.get_status(task_id)
+            if status.value not in ('pending', 'running'):
+                return status.value
+            if cancel_token is not None and cancel_token.is_cancelled():
+                try:
+                    plugin.cancel(task_id)
+                except Exception as exc:
+                    logger.debug(f"Cancelling background task {task_id} failed: {exc}")
+                # cancel() is a request, not a guarantee - only report the
+                # task as settled if it actually reached a terminal state.
+                final = plugin.get_status(task_id).value
+                return final if final not in ('pending', 'running') else None
+            time.sleep(0.1)  # Small poll interval
+        return None
+
+    def _build_backgrounded_result(
+        self,
+        task_id: str,
+        handle: 'TaskHandle',
+        threshold: float,
+        reader: Optional[str],
+        waited: float,
+    ) -> Tuple[bool, Dict[str, Any]]:
+        """Build the result returned when a task outlives its wait window.
+
+        Two shapes, depending on whether the session can redeem the handle:
+
+        * **Reader loaded** — success.  The message names the tool and the
+          call shape (``getBackgroundTask(task_id='…')``) rather than just
+          quoting the id, so the model is told *what to do* and not merely
+          what it holds.
+        * **No reader** — failure.  The task is left running (killing a
+          half-finished install or build is worse than leaking it), but the
+          result carries ``is_error`` semantics and says plainly that the
+          output cannot be retrieved and that the ``background`` plugin is
+          what makes it retrievable.  Reporting success here is what made
+          the fault invisible: the model got a handle, no error, and no
+          way to reach the output (#804).
+
+        Args:
+            task_id: Id of the still-running background task.
+            handle: The :class:`TaskHandle` from ``start_background``.
+            threshold: The plugin's auto-background threshold, in seconds.
+            reader: Name of the loaded reader tool, or ``None``.
+            waited: Seconds actually waited before giving up — equals
+                ``threshold`` on the reader path and the no-reader deadline
+                otherwise.
+
+        Returns:
+            ``(success, result)`` ready to hand back from ``execute()``.
+        """
+        result: Dict[str, Any] = {
+            "auto_backgrounded": True,
+            "task_id": task_id,
+            "plugin_name": handle.plugin_name,
+            "tool_name": handle.tool_name,
+            "threshold_seconds": threshold,
+            "background_reader_available": reader is not None,
+        }
+        if reader:
+            result["reader_tool"] = reader
+            result["message"] = (
+                f"Task exceeded {threshold}s threshold, continuing in background. "
+                f"Use {reader}(task_id='{task_id}') to check status and output."
+            )
+            return True, result
+
+        result["error"] = (
+            f"Task exceeded {waited}s and is still running, but no "
+            f"background-task reader is loaded in this session, so its "
+            f"output cannot be retrieved."
+        )
+        result["message"] = (
+            f"{result['error']} The task_id is not usable here — no tool in "
+            f"this session accepts one. Add the 'background' plugin to this "
+            f"profile to enable '{BACKGROUND_READER_TOOL}', or re-run the "
+            f"command so it produces output you can read directly (for "
+            f"example, redirect it to a file and read the file). The task is "
+            f"still running; do not assume it succeeded."
+        )
+        return False, result
+
     def _can_resolve_executor(self, name: str) -> bool:
         """Check whether an executor can be resolved for the given tool name.
 
@@ -773,6 +959,19 @@ class ToolExecutor:
         Uses the plugin's streaming executor from the start so that output
         is captured incrementally even if the task gets auto-backgrounded.
 
+        The wait window depends on whether this session can redeem a
+        ``task_id`` at all (see :meth:`_background_reader_tool`):
+
+        * **Reader loaded** — wait ``threshold`` seconds, then hand back a
+          receipt naming the tool that reads it.
+        * **No reader** — wait up to :meth:`_no_reader_deadline` instead,
+          because real output beats a handle nobody can redeem.  If the
+          task outlives even that, the call is reported as a *failure*
+          rather than a silent success (#804).
+
+        The wait honours the thread's cancel token, so a stop request is
+        not held for the (much longer) no-reader deadline.
+
         Args:
             name: Tool name.
             args: Arguments dict.
@@ -782,7 +981,9 @@ class ToolExecutor:
 
         Returns:
             Tuple of (success, result). If auto-backgrounded, result contains
-            task handle info with auto_backgrounded=True.
+            task handle info with auto_backgrounded=True, plus
+            ``background_reader_available`` saying whether the handle can
+            actually be redeemed.
         """
         # Get the executor function for this tool
         executor_fn = None
@@ -806,37 +1007,32 @@ class ToolExecutor:
             )
             task_id = handle.task_id
 
-            # Wait up to threshold seconds for completion
-            start_time = time.time()
-            while time.time() - start_time < threshold:
-                status = plugin.get_status(task_id)
-                if status.value not in ('pending', 'running'):
-                    # Task completed within threshold - get full result
-                    task_result = plugin.get_result(task_id)
-                    result = task_result.result
-                    if task_result.status.value == 'failed':
-                        if permission_meta and isinstance(result, dict):
-                            result['_permission'] = permission_meta
-                        return False, result or {'error': task_result.error}
-                    if permission_meta and isinstance(result, dict):
-                        result['_permission'] = permission_meta
-                    return True, result
-                time.sleep(0.1)  # Small poll interval
+            # A receipt is only worth issuing if something in this session
+            # accepts one.  With no reader, sit on the task far longer and
+            # try to return its real output instead (#804).
+            reader = self._background_reader_tool()
+            wait_for = threshold if reader else self._no_reader_deadline(threshold)
 
-            # Task exceeded threshold - register done callback for UI completion
+            settled = self._wait_for_background_task(plugin, task_id, wait_for)
+            if settled is not None:
+                task_result = plugin.get_result(task_id)
+                result = task_result.result
+                if permission_meta and isinstance(result, dict):
+                    result['_permission'] = permission_meta
+                if task_result.status.value != 'completed':
+                    return False, result or {
+                        'error': task_result.error
+                                 or f'Task {task_result.status.value}'
+                    }
+                return True, result
+
+            # Task outlived the wait window - register done callback for UI completion
             if self._task_done_callback and hasattr(plugin, 'set_task_done_callback'):
                 plugin.set_task_done_callback(task_id, self._task_done_callback)
 
-            # Return as auto-backgrounded
-            result = {
-                "auto_backgrounded": True,
-                "task_id": task_id,
-                "plugin_name": handle.plugin_name,
-                "tool_name": handle.tool_name,
-                "threshold_seconds": threshold,
-                "message": f"Task exceeded {threshold}s threshold, continuing in background. "
-                           f"Use task_id '{task_id}' to check status and output."
-            }
+            ok, result = self._build_backgrounded_result(
+                task_id, handle, threshold, reader, wait_for
+            )
 
             # Inject permission metadata
             if permission_meta:
@@ -848,9 +1044,11 @@ class ToolExecutor:
                     'tool': name,
                     'task_id': task_id,
                     'threshold': threshold,
+                    'waited_seconds': wait_for,
+                    'background_reader_available': reader is not None,
                 })
 
-            return True, result
+            return ok, result
 
         except Exception as e:
             # If start_background fails, fall back to sync execution

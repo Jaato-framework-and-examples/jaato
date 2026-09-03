@@ -585,7 +585,14 @@ You have the ability to run long-running tool executions in the background.
 
 **Auto-backgrounding:**
 Some tools automatically move to background if they exceed a time threshold.
-When this happens, you'll receive `auto_backgrounded: true` and a `task_id`.
+When this happens, you'll receive `auto_backgrounded: true` and a `task_id`,
+plus a `message` naming the tool that reads it. The `task_id` is a handle for
+`getBackgroundTask` only — it is not a file path, and nothing on disk
+corresponds to it.
+
+Auto-backgrounding only happens while this plugin is loaded; without it there
+is no tool that accepts a `task_id`, so the runner waits for the real output
+instead of issuing a handle nobody could redeem.
 """
 
     def get_auto_approved_tools(self) -> List[str]:

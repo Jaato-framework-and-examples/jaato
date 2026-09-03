@@ -62,6 +62,25 @@ class NonBackgroundPlugin:
         return {"status": "sync_completed"}
 
 
+class BackgroundReaderPlugin:
+    """Stand-in for the ``background`` plugin's reader tool.
+
+    Auto-background hands back a ``task_id``, and only
+    ``getBackgroundTask`` accepts one.  That tool lives in the separately
+    loaded ``background`` plugin, so its presence — not the backgrounded
+    plugin's capability — is what decides whether a receipt is redeemable
+    (#804).  Registering this double is how a test says "the profile
+    loaded ``background``".
+    """
+
+    @property
+    def name(self) -> str:
+        return "background"
+
+    def get_executors(self) -> Dict[str, Any]:
+        return {"getBackgroundTask": lambda args: {"status": "running"}}
+
+
 class MockRegistry:
     """Mock registry for testing."""
 
@@ -191,12 +210,17 @@ class TestToolExecutorAutoBackground:
         assert "auto_backgrounded" not in result
 
     def test_auto_background_slow_execution(self):
-        """Test that slow execution triggers auto-background."""
+        """Test that slow execution triggers auto-background.
+
+        The reader plugin is registered, so the receipt is redeemable and
+        the runner is free to return it at the threshold.
+        """
         executor = ToolExecutor(auto_background_enabled=True)
 
         slow_plugin = SlowBackgroundPlugin()
         registry = MockRegistry()
         registry.add_plugin(slow_plugin)
+        registry.add_plugin(BackgroundReaderPlugin())
 
         executor.set_registry(registry)
         executor.register("auto_bg_tool", slow_plugin._execute_auto_bg)
@@ -215,6 +239,109 @@ class TestToolExecutorAutoBackground:
         assert result["plugin_name"] == "slow_plugin"
         assert result["tool_name"] == "auto_bg_tool"
         assert result["threshold_seconds"] == 0.2
+        assert result["background_reader_available"] is True
+
+    def test_auto_background_message_names_the_reader_tool(self):
+        """The receipt must say which tool redeems it, not just quote the id.
+
+        Regression guard for #804: the old message was "Use task_id '…' to
+        check status and output", which names no verb — an agent that has
+        never seen ``getBackgroundTask`` cannot act on it, and one observed
+        arm guessed the id was a filesystem path instead.
+        """
+        executor = ToolExecutor(auto_background_enabled=True)
+
+        slow_plugin = SlowBackgroundPlugin()
+        registry = MockRegistry()
+        registry.add_plugin(slow_plugin)
+        registry.add_plugin(BackgroundReaderPlugin())
+
+        executor.set_registry(registry)
+        executor.register("auto_bg_tool", slow_plugin._execute_auto_bg)
+
+        ok, result = executor.execute("auto_bg_tool", {"duration": 1.0})
+
+        assert ok is True
+        assert result["reader_tool"] == "getBackgroundTask"
+        assert f"getBackgroundTask(task_id='{result['task_id']}')" in result["message"]
+
+    def test_no_reader_waits_for_the_real_result(self):
+        """With no reader loaded, wait for output instead of issuing a receipt.
+
+        A ``task_id`` nobody can redeem is worse than a slower call, so the
+        runner sits on the task past the threshold and returns what the
+        tool actually produced (#804).
+        """
+        executor = ToolExecutor(auto_background_enabled=True)
+
+        slow_plugin = SlowBackgroundPlugin()
+        registry = MockRegistry()
+        registry.add_plugin(slow_plugin)  # note: no BackgroundReaderPlugin
+
+        executor.set_registry(registry)
+        executor.register("auto_bg_tool", slow_plugin._execute_auto_bg)
+
+        # 0.5s duration against a 0.2s threshold: the old behaviour returned
+        # a handle at 0.2s; the new one waits and returns the result.
+        start = time.time()
+        ok, result = executor.execute("auto_bg_tool", {"duration": 0.5})
+        elapsed = time.time() - start
+
+        assert elapsed >= 0.5
+        assert ok is True
+        assert result["status"] == "completed"
+        assert "auto_backgrounded" not in result
+
+    def test_no_reader_past_deadline_is_an_error(self):
+        """Outliving even the no-reader deadline must not report success.
+
+        The fault in #804 was invisible precisely because the call came
+        back ``is_error=False`` with a handle: the agent had no output, no
+        error, and no way to get either.  Past the deadline the runner
+        fails the call and names the remedy.
+        """
+        executor = ToolExecutor(auto_background_enabled=True)
+
+        slow_plugin = SlowBackgroundPlugin()
+        registry = MockRegistry()
+        registry.add_plugin(slow_plugin)  # no reader
+
+        executor.set_registry(registry)
+        executor.register("auto_bg_tool", slow_plugin._execute_auto_bg)
+
+        # Squeeze the no-reader deadline so the test does not wait 300s.
+        with patch.object(executor, "_no_reader_deadline", return_value=0.3):
+            ok, result = executor.execute("auto_bg_tool", {"duration": 5.0})
+
+        assert ok is False
+        assert result["auto_backgrounded"] is True
+        assert result["background_reader_available"] is False
+        assert "reader_tool" not in result
+        assert "error" in result
+        # The message must name the plugin that fixes it, and the tool it
+        # would supply -- "say what to do, not how".
+        assert "background" in result["message"]
+        assert "getBackgroundTask" in result["message"]
+
+        slow_plugin.cancel(result["task_id"])
+
+    def test_no_reader_deadline_capped_by_runtime_limits(self):
+        """The session's own tool timeout caps the no-reader wait.
+
+        Waiting past ``tool_timeout_seconds`` is pointless -- the tool is
+        due to be killed at that point anyway.
+        """
+        executor = ToolExecutor(auto_background_enabled=True)
+
+        assert executor._no_reader_deadline(10.0) == 300.0
+
+        executor._runtime_limits = MagicMock(tool_timeout_seconds=45.0)
+        assert executor._no_reader_deadline(10.0) == 45.0
+
+        # Never below the threshold itself -- a shorter deadline would
+        # defeat the point of waiting at all.
+        executor._runtime_limits = MagicMock(tool_timeout_seconds=2.0)
+        assert executor._no_reader_deadline(10.0) == 10.0
 
     def test_auto_background_result_retrieval(self):
         """Test retrieving result from auto-backgrounded task."""
@@ -223,6 +350,7 @@ class TestToolExecutorAutoBackground:
         slow_plugin = SlowBackgroundPlugin()
         registry = MockRegistry()
         registry.add_plugin(slow_plugin)
+        registry.add_plugin(BackgroundReaderPlugin())
 
         executor.set_registry(registry)
         executor.register("auto_bg_tool", slow_plugin._execute_auto_bg)
@@ -252,6 +380,7 @@ class TestToolExecutorAutoBackground:
         slow_plugin = SlowBackgroundPlugin()
         registry = MockRegistry()
         registry.add_plugin(slow_plugin)
+        registry.add_plugin(BackgroundReaderPlugin())
 
         executor.set_registry(registry)
         executor.register("auto_bg_tool", slow_plugin._execute_auto_bg)
@@ -415,6 +544,7 @@ class TestToolExecutorWithLedger:
         slow_plugin = SlowBackgroundPlugin()
         registry = MockRegistry()
         registry.add_plugin(slow_plugin)
+        registry.add_plugin(BackgroundReaderPlugin())
 
         executor.set_registry(registry)
         executor.register("auto_bg_tool", slow_plugin._execute_auto_bg)
@@ -433,3 +563,7 @@ class TestToolExecutorWithLedger:
         assert event_data['tool'] == 'auto_bg_tool'
         assert 'task_id' in event_data
         assert event_data['threshold'] == 0.2
+        # The ledger records whether the receipt was redeemable, so a sweep
+        # can find the arms that were handed an unusable handle (#804).
+        assert event_data['background_reader_available'] is True
+        assert event_data['waited_seconds'] == 0.2
