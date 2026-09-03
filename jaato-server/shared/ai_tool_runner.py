@@ -676,6 +676,13 @@ class ToolExecutor:
         initial schema surface.  What matters is whether an executor for it
         exists in this session at all.
 
+        A failed registry lookup degrades to "no reader", which is the safe
+        direction — the caller then waits for the real output instead of
+        issuing a handle that might not be redeemable.  It is logged at
+        WARNING rather than DEBUG precisely because it is quiet otherwise:
+        the session silently changes wait behaviour, and at DEBUG the only
+        evidence would be a tool that mysteriously took minutes.
+
         Returns:
             :data:`BACKGROUND_READER_TOOL` when a reader is loaded, else
             ``None``.
@@ -687,7 +694,12 @@ class ToolExecutor:
                 if self._registry.get_plugin_for_tool(BACKGROUND_READER_TOOL):
                     return BACKGROUND_READER_TOOL
             except Exception as exc:
-                logger.debug(f"Background reader lookup failed: {exc}")
+                logger.warning(
+                    f"Background reader lookup failed ({exc}); treating "
+                    f"'{BACKGROUND_READER_TOOL}' as unavailable, so "
+                    f"auto-background will wait for the real result instead "
+                    f"of returning a task_id."
+                )
         return None
 
     def _no_reader_deadline(self, threshold: float) -> float:
@@ -784,6 +796,20 @@ class ToolExecutor:
           what makes it retrievable.  Reporting success here is what made
           the fault invisible: the model got a handle, no error, and no
           way to reach the output (#804).
+
+        **Nothing reaps the leaked task in-session.**  The plugin's
+        ``shutdown()`` calls ``_shutdown_bg_executor``, which is
+        ``ThreadPoolExecutor.shutdown(wait=False)`` — that stops new work
+        being accepted, it does NOT cancel a task already running.  So the
+        task runs to its own completion and its resources go when the
+        runner process does; on a session confined to a cgroup, the
+        ``cgroup.kill`` at session teardown takes the subprocess tree with
+        it.  Neither is a reaper on any shorter timescale, and there is
+        deliberately no timeout-and-kill here: the whole reason the task
+        survives is that killing it mid-write is the worse failure.  A
+        session that must bound it should set
+        ``RuntimeLimits.tool_timeout_seconds``, which caps the wait AND is
+        the layer that actually enforces a deadline on the command.
 
         Args:
             task_id: Id of the still-running background task.

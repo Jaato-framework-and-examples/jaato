@@ -92,6 +92,15 @@ absent (issue #804):
 | yes | Returns `auto_backgrounded: true` with a message naming `getBackgroundTask(task_id=…)`. |
 | no | Keeps waiting — up to `DEFAULT_NO_READER_TIMEOUT_SECONDS` (300s), capped by `RuntimeLimits.tool_timeout_seconds` — and returns the tool's real result. Only if the task outlives *that* does it return `auto_backgrounded: true`, with `background_reader_available: false` and **`success=False`**, so the caller sees an error rather than a handle it cannot redeem. |
 
+Nothing reaps the task left running in that last case. `shutdown()` calls
+`ThreadPoolExecutor.shutdown(wait=False)`, which refuses new work but does not
+cancel a task already running, so it runs to its own completion and goes when
+the runner process does — or with `cgroup.kill` at teardown, on a session
+confined to a cgroup. That is deliberate: killing a half-finished install or
+build is the worse failure. A deployment that needs a hard bound sets
+`RuntimeLimits.tool_timeout_seconds`, which is both the cap on the wait and the
+layer that actually enforces a deadline on the command.
+
 The failure this closes was silent: an agent whose profile omitted `background`
 was handed nine `task_id`s it had no tool for, `is_error` was `false` every
 time, and it burned roughly a quarter of its run inventing a `nohup` + `sleep`
