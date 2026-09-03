@@ -84,6 +84,7 @@ def test_runtime_threads_the_id_into_provider_config():
     rt = JaatoRuntime.__new__(JaatoRuntime)
     rt._registry = None
     rt._config_root = None
+    rt._app_identity = None  # nothing named an app: nothing extra is stamped
 
     stamped = rt._inject_session_extras(ProviderConfig(), session_id="sid-1")
     assert stamped.extra["session_id"] == "sid-1"
@@ -104,6 +105,7 @@ def test_runtime_never_sources_the_id_from_the_shared_registry():
 
     rt = JaatoRuntime.__new__(JaatoRuntime)
     rt._config_root = None
+    rt._app_identity = None
     rt._registry = MagicMock()
     rt._registry.get_workspace_path.return_value = "/ws"
     rt._registry.get_config_root.return_value = "/cfg"

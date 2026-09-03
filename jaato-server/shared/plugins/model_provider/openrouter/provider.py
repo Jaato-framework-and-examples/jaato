@@ -54,7 +54,7 @@ import json
 import logging
 import re
 from functools import partial
-from typing import Any, Dict, List, Optional, Set, TYPE_CHECKING
+from typing import Any, Callable, Dict, List, Optional, Set, TYPE_CHECKING
 
 logger = logging.getLogger(__name__)
 
@@ -116,6 +116,8 @@ from .._prose_tools import (
     read_prose_tool_calls_quirk,
     rewrite_prose_tool_calls,
 )
+from shared.app_identity import AppIdentity, resolve_app_identity
+
 from .env import (
     DEFAULT_BASE_URL,
     DEFAULT_CONNECT_TIMEOUT,
@@ -173,6 +175,89 @@ REASONING_CAPABLE_HINTS = (
 # are silently dropped server-side — so the regex covers wire shape
 # only.  See https://openrouter.ai/docs/app-attribution.
 _CATEGORY_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
+
+
+def _resolve_identity(extra: Dict[str, Any]) -> AppIdentity:
+    """Resolve the application identity behind a provider config.
+
+    ``extra["app_identity"]`` is what ``JaatoRuntime._inject_session_extras``
+    stamps when an application named itself; it is absent for the framework's
+    own identity and for a provider constructed outside a session, in which
+    case the environment is consulted directly.  Split out of
+    ``initialize()`` so the branch does not add to that method's (already
+    baselined) complexity.
+    """
+    stamped = extra.get("app_identity")
+    if stamped:
+        return AppIdentity.from_dict(stamped)
+    return resolve_app_identity()
+
+
+def _attribution_knob(
+    extra: Dict[str, Any], key: str, fallback: Callable[[], str],
+) -> str:
+    """Read an attribution knob, distinguishing ABSENT from EXPLICITLY EMPTY.
+
+    ``extra.get(key) or fallback()`` cannot tell the two apart, so a profile
+    saying ``http_referer: ""`` — the natural way to write "send no referer"
+    — fell through and sent one anyway.  Harmless while the fallback was the
+    framework's own URL (the value the empty string would have suppressed);
+    not harmless once an application identity supplies a *different* URL,
+    because then the knob publishes a value neither reading intended.
+
+    ``env.py`` answers the same question the same way one tier down
+    (``JAATO_OPENROUTER_HTTP_REFERER=`` is honoured as "no header"), and
+    ``app_categories`` answers it the same way twenty lines below.  This
+    makes the three agree.
+
+    ``fallback`` is a callable so the resolution — which reads the
+    environment — is skipped when the knob already decided.  Split out of
+    ``initialize()`` so the branch stays off that method's complexity
+    baseline.
+    """
+    value = extra.get(key)
+    return fallback() if value is None else value
+
+
+def _filter_categories(categories: List[str]) -> List[str]:
+    """Keep the categories OpenRouter's taxonomy accepts; warn about the rest.
+
+    The lenient sibling of :func:`_validate_categories`, and the split is
+    between AUTHORED config and the ENVIRONMENT rather than between
+    OpenRouter-specific and generic:
+
+    * ``plugin_configs.openrouter.app_categories`` is authored, reviewed and
+      provider-specific, so a typo there fails loud — the author is stating
+      OpenRouter's taxonomy and should be told when they state it wrong.
+    * The env tiers (``JAATO_OPENROUTER_APP_CATEGORIES``, and the
+      application identity's ``JAATO_APP_CATEGORIES``, which is
+      provider-agnostic and may legitimately carry a slug from some other
+      directory's taxonomy) are filtered instead.  Killing every session in
+      a deployment over an attribution nicety is the wrong trade: the
+      documented worst case for a bad category is that OpenRouter drops it
+      server-side, i.e. no listing.
+
+    Rules are not restated — each entry is run through
+    :func:`_validate_categories` singly, so the two can't drift.
+    """
+    kept: List[str] = []
+    for entry in categories:
+        try:
+            _validate_categories([entry])
+        except (TypeError, ValueError) as exc:
+            logger.warning(
+                "OpenRouter: dropping app category %r — %s", entry, exc,
+            )
+            continue
+        kept.append(entry)
+    if len(kept) > MAX_CATEGORIES_PER_REQUEST:
+        logger.warning(
+            "OpenRouter accepts at most %d app categories; keeping the "
+            "first %d of %d", MAX_CATEGORIES_PER_REQUEST,
+            MAX_CATEGORIES_PER_REQUEST, len(kept),
+        )
+        kept = kept[:MAX_CATEGORIES_PER_REQUEST]
+    return kept
 
 
 def _validate_categories(categories: List[str]) -> List[str]:
@@ -397,6 +482,15 @@ class OpenRouterProvider(ModalityCapabilityMixin):
         self._base_url: str = DEFAULT_BASE_URL
         self._http_referer: str = ""
         self._app_title: str = ""
+
+        # The APPLICATION this provider is speaking for — the product built
+        # on the SDK, not the framework.  Resolved at initialize() from the
+        # identity the runtime stamped onto ``config.extra``, falling back to
+        # the environment.  Only used to derive the two attribution values
+        # above, but retained whole: a header that wants more than a display
+        # name (a ``User-Agent``, which AppIdentity already knows how to
+        # render) should not have to re-resolve it.
+        self._app_identity: Optional[AppIdentity] = None
 
         # Marketplace categories for OpenRouter's app rankings — emitted
         # as the ``X-OpenRouter-Categories`` header (comma-separated).
@@ -754,22 +848,36 @@ class OpenRouterProvider(ModalityCapabilityMixin):
         self._base_url = (
             _knob("base_url", layer=framework_overrides) or resolve_base_url()
         )
-        self._http_referer = (
-            config.extra.get("http_referer") or resolve_http_referer()
+        # App attribution, three tiers (highest first): the profile knob,
+        # the OpenRouter-specific env var, then the framework-resolved
+        # application identity — which is what makes a product built on the
+        # SDK report under ITS name rather than jaato's.  The identity is
+        # stamped onto ``config.extra`` per session by
+        # ``JaatoRuntime._inject_session_extras`` (not a profile knob, same
+        # as ``session_id``); absent that — a provider constructed outside a
+        # session — it is resolved from the environment here.
+        identity = _resolve_identity(config.extra)
+        self._app_identity = identity
+        self._http_referer = _attribution_knob(
+            config.extra, "http_referer", lambda: resolve_http_referer(identity),
         )
-        self._app_title = (
-            config.extra.get("app_title") or resolve_app_title()
+        self._app_title = _attribution_knob(
+            config.extra, "app_title", lambda: resolve_app_title(identity),
         )
 
-        # Marketplace categories — profile takes precedence over env
-        # (and env is parsed from a comma-separated string).  Both
-        # paths share the same validation: format violations raise
-        # immediately so a typo can't silently invalidate the header.
+        # Marketplace categories — the third attribution value, resolved on
+        # the same tiers as the two above: profile knob, then the
+        # OpenRouter-specific env var, then the application identity's own
+        # categories (jaato's ``cli-agent`` only when the identity IS
+        # jaato).  Both paths share the same validation: format violations
+        # raise immediately so a typo can't silently invalidate the header.
         # Pass an explicit empty list to opt out of category attribution
-        # entirely without touching DEFAULT_APP_CATEGORIES.
+        # entirely.
         categories_extra = config.extra.get("app_categories")
         if categories_extra is None:
-            self._app_categories = _validate_categories(resolve_app_categories())
+            self._app_categories = _filter_categories(
+                resolve_app_categories(identity),
+            )
         else:
             if not isinstance(categories_extra, (list, tuple)):
                 raise TypeError(

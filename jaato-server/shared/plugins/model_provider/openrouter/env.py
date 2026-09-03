@@ -10,6 +10,14 @@ Resolution priority:
 import os
 from typing import List, Optional
 
+from shared.app_identity import (
+    FRAMEWORK_CATEGORIES,
+    FRAMEWORK_NAME,
+    FRAMEWORK_URL,
+    AppIdentity,
+    resolve_app_identity,
+)
+
 # ============================================================
 # Environment Variable Names
 # ============================================================
@@ -33,18 +41,28 @@ HEADER_APP_CATEGORIES = "X-OpenRouter-Categories"
 # Default OpenRouter endpoint.  The same key works for all upstream models.
 DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
 
-# Default attribution headers — OpenRouter uses these for app rankings
-# when an integrator opts in.  Users can override via env vars.
-DEFAULT_HTTP_REFERER = "https://github.com/Jaato-framework-and-examples/jaato"
-DEFAULT_APP_TITLE = "jaato"
+# Last-resort attribution values — the FRAMEWORK's own identity, used when
+# nothing named an application.  These are no longer the normal answer: the
+# resolvers below ask :mod:`shared.app_identity` first, so a product built on
+# the SDK reports under its own name (``JAATO_APP_NAME`` / the runtime's
+# ``app_identity=`` kwarg) instead of collapsing into jaato's row on the
+# OpenRouter dashboard.  Kept as module constants because they are the values
+# an unconfigured checkout still sends.
+DEFAULT_HTTP_REFERER = FRAMEWORK_URL
+DEFAULT_APP_TITLE = FRAMEWORK_NAME
 
-# Marketplace category for jaato.  ``cli-agent`` is the closest fit in
-# OpenRouter's taxonomy ("Terminal-based coding assistants") — jaato is
-# a terminal-driven multi-provider agentic tool orchestrator.  Per
+# Marketplace categories for the FRAMEWORK — ``cli-agent`` is the closest
+# fit in OpenRouter's taxonomy ("Terminal-based coding assistants") for a
+# terminal-driven multi-provider agentic tool orchestrator.  Per
 # https://openrouter.ai/docs/app-attribution, OpenRouter silently
 # drops unrecognized categories, so the worst case for the default is
 # that future taxonomy changes turn it into a no-op until we update.
-DEFAULT_APP_CATEGORIES = ("cli-agent",)
+#
+# An application that names itself does NOT inherit this: jaato's claim
+# about what jaato is does not transfer to a Slack bot.  Such an app sends
+# no categories unless it declares its own (``JAATO_APP_CATEGORIES`` or the
+# knob below) — see ``AppIdentity.attribution_categories``.
+DEFAULT_APP_CATEGORIES = FRAMEWORK_CATEGORIES
 
 # OpenRouter's documented limits on the X-OpenRouter-Categories header.
 MAX_CATEGORIES_PER_REQUEST = 5
@@ -153,35 +171,76 @@ def resolve_stream_idle_timeout() -> float:
     )
 
 
-def resolve_http_referer() -> str:
-    """Resolve the HTTP-Referer header for OpenRouter app rankings."""
-    return os.environ.get(ENV_OPENROUTER_HTTP_REFERER, DEFAULT_HTTP_REFERER)  # env: app-attribution HTTP-Referer header (required for OpenRouter app rankings)
+def resolve_http_referer(identity: Optional[AppIdentity] = None) -> str:
+    """Resolve the HTTP-Referer header for OpenRouter app rankings.
+
+    Two tiers: the OpenRouter-specific env var wins (it is the narrower,
+    more explicit statement), then the resolved application identity's
+    :meth:`~shared.app_identity.AppIdentity.attribution_url` — the app's own
+    site when it has one, the framework's repository when it does not.
+
+    An env var set to the empty string is honoured as-is rather than falling
+    through, so ``JAATO_OPENROUTER_HTTP_REFERER=`` remains the way to send no
+    referer header at all.
+
+    Args:
+        identity: Pre-resolved application identity (the one the framework
+            stamped onto the provider config).  Resolved from the
+            environment when omitted.
+    """
+    env_value = os.environ.get(ENV_OPENROUTER_HTTP_REFERER)  # env: app-attribution HTTP-Referer header (required for OpenRouter app rankings)
+    if env_value is not None:
+        return env_value
+    return (identity or resolve_app_identity()).attribution_url()
 
 
-def resolve_app_title() -> str:
-    """Resolve the X-Title header for OpenRouter app rankings."""
-    return os.environ.get(ENV_OPENROUTER_APP_TITLE, DEFAULT_APP_TITLE)  # env: app-attribution X-OpenRouter-Title header (display name)
+def resolve_app_title(identity: Optional[AppIdentity] = None) -> str:
+    """Resolve the X-OpenRouter-Title header for OpenRouter app rankings.
+
+    Same two tiers as :func:`resolve_http_referer`.  The identity tier
+    renders ``"<app> (powered by jaato)"`` unless the app opted out or is
+    the framework itself — so naming an application keeps jaato's
+    attribution instead of replacing it.
+
+    Args:
+        identity: Pre-resolved application identity; resolved from the
+            environment when omitted.
+    """
+    env_value = os.environ.get(ENV_OPENROUTER_APP_TITLE)  # env: app-attribution X-OpenRouter-Title header (display name)
+    if env_value is not None:
+        return env_value
+    return (identity or resolve_app_identity()).attribution_title()
 
 
-def resolve_app_categories() -> List[str]:
+def resolve_app_categories(identity: Optional[AppIdentity] = None) -> List[str]:
     """Resolve the X-OpenRouter-Categories header value as a list.
 
-    The env var is read as a comma-separated string (the same form
-    that becomes the wire header value); whitespace around each entry
-    is stripped, empty entries are dropped.  Returns the
-    :data:`DEFAULT_APP_CATEGORIES` tuple as a list when unset.
+    Two tiers, like the other two attribution values: the
+    OpenRouter-specific env var wins, read as a comma-separated string (the
+    same form that becomes the wire header value, whitespace trimmed, empty
+    entries dropped); then the application identity's
+    :meth:`~shared.app_identity.AppIdentity.attribution_categories` — its
+    own declared categories, jaato's when the identity IS jaato, and none
+    for an application that never declared any.
 
-    Format validation is the caller's job — this function trusts that
-    the user knows OpenRouter's taxonomy.  Unrecognized categories are
-    silently ignored by OpenRouter per
-    https://openrouter.ai/docs/app-attribution, so the failure mode is
-    "no category attached" rather than a request error.
+    An empty result means the header is omitted entirely, which is also how
+    ``JAATO_OPENROUTER_APP_CATEGORIES=`` opts out.
+
+    OpenRouter *taxonomy* validation is the caller's job (see
+    ``provider._validate_categories``); this only resolves which list to
+    send.  Unrecognized categories are silently ignored by OpenRouter per
+    https://openrouter.ai/docs/app-attribution, so a wrong slug costs the
+    listing rather than the request.
+
+    Args:
+        identity: Pre-resolved application identity; resolved from the
+            environment when omitted.
     """
-    raw = os.environ.get(ENV_OPENROUTER_APP_CATEGORIES)  # env: comma-separated X-OpenRouter-Categories header (default cli-agent)
-    if raw is None:
-        return list(DEFAULT_APP_CATEGORIES)
-    parts = [c.strip() for c in raw.split(",")]
-    return [c for c in parts if c]
+    raw = os.environ.get(ENV_OPENROUTER_APP_CATEGORIES)  # env: comma-separated X-OpenRouter-Categories header (defaults to the application's own categories)
+    if raw is not None:
+        parts = [c.strip() for c in raw.split(",")]
+        return [c for c in parts if c]
+    return list((identity or resolve_app_identity()).attribution_categories())
 
 
 def get_checked_credential_locations(config=None) -> List[str]:
