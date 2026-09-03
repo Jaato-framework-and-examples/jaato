@@ -348,6 +348,16 @@ A whitespace-only `old` is deliberately **not** refused: unlike an empty one
 it can match exactly once (an anchored indentation fix is a legitimate edit),
 and where it cannot, "add anchors" is followable.
 
+These messages are longer than the ones they replace — measured on #813's own
+reproduction, 201 -> 292 chars for an empty `old` and 251 -> 700 for
+mis-anchored ones (the multiple grows with the size of the pieces echoed
+back). That trade is deliberate, and the arithmetic is one-sided. The run in
+the issues hit the anchor error **20 times**, so one message that ends the
+misunderstanding is cheaper than twenty that cannot. And the truncation those
+runs died of was on the *output* side — a longer tool **result** is input, and
+does not feed it. Shortening a diagnostic that stops a loop to save tokens
+spends far more of them than it saves.
+
 ## Line Endings
 
 A write reproduces the line ending the file will hold in the working tree —
