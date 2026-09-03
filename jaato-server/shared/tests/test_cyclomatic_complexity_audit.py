@@ -252,7 +252,7 @@ BASELINE: Dict[str, int] = {
     "jaato-server/shared/plugins/gc_budget/plugin.py::BudgetGCPlugin.collect": 28,
     "jaato-server/shared/plugins/gc_budget/tests/test_budget_gc.py::TestEndToEndPairAwareGC.test_gc_removes_tool_result_keeps_pairing": 21,
     "jaato-server/shared/plugins/interactive_shell/session.py::ShellSession._read_until_idle_windows": 18,
-    "jaato-server/shared/plugins/introspection/plugin.py::IntrospectionPlugin._execute_list_tools": 50,
+    "jaato-server/shared/plugins/introspection/plugin.py::IntrospectionPlugin._execute_list_tools": 32,
     "jaato-server/shared/plugins/lsp/plugin.py::LSPToolPlugin._build_empty_result_error": 19,
     "jaato-server/shared/plugins/lsp/plugin.py::LSPToolPlugin._build_no_server_error": 16,
     "jaato-server/shared/plugins/lsp/plugin.py::LSPToolPlugin._call_lsp_method": 35,

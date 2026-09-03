@@ -402,6 +402,254 @@ class IntrospectionPlugin(RunnerForwardingMixin):
 
         return filtered
 
+    def _unknown_category_response(
+        self,
+        category_id: Any,
+        all_schemas: List[Any],
+        category_hints: Dict[str, str],
+        preloaded_tools_hint: List[str],
+    ) -> Dict[str, Any]:
+        """Answer an unrecognised ``category_id`` with the ids that ARE valid.
+
+        A wrong ``category_id`` is not a typo -- it is the expected first
+        move.  Ids are hashed (``c_cbf61858`` for ``filesystem``), so no
+        amount of reasoning gets a model to one; the only way to hold a
+        valid id is to have called ``list_tools()`` with no arguments
+        already.  A model that has not is certain to guess, and observed
+        sessions guess a plausible category *name* on turn one.
+
+        So this returns the full category summary -- the same payload the
+        no-argument call returns -- alongside the error, turning the dead
+        end into a self-correcting call.  When the guess matches a visible
+        category's name, ``did_you_mean`` names that category's id outright,
+        because "you passed the name, here is the id" is the single most
+        likely correction.
+
+        Args:
+            category_id: The unrecognised value, echoed back in the error.
+            all_schemas: Tool schemas visible to THIS session.
+            category_hints: Registry-registered category descriptions.
+            preloaded_tools_hint: Names of already-loaded tools.
+
+        Returns:
+            The category summary payload plus an ``error`` string and,
+            when applicable, a ``did_you_mean`` correction.
+        """
+        response = self._build_category_summary(
+            all_schemas, category_hints, preloaded_tools_hint
+        )
+        response["error"] = (
+            f"Unknown category_id '{category_id}'. Category ids are hashed "
+            f"and cannot be guessed -- every valid id is listed under "
+            f"'categories' below. Retry with one of them."
+        )
+        # Guess matched a category NAME rather than its id: name the id.
+        # Drawn from the FILTERED summary, so a category this session
+        # cannot see is not disclosed by the correction.
+        guess = str(category_id).strip().lower()
+        for entry in response.get("categories", []):
+            if str(entry.get("name", "")).lower() == guess:
+                response["did_you_mean"] = {
+                    "name": entry["name"],
+                    "category_id": entry["id"],
+                    "retry": f"list_tools(category_id='{entry['id']}')",
+                }
+                break
+        response["_telemetry"]["jaato.introspection.operation"] = (
+            "list_tools.unknown_category"
+        )
+        return response
+
+    def _category_summary_entry(
+        self,
+        cat: str,
+        session_counts: Dict[str, int],
+        global_counts: Dict[str, int],
+        category_hints: Dict[str, str],
+        category_plugins: Dict[str, Set[str]],
+        allowed_plugins: Optional[Set[str]],
+    ) -> Optional[Dict[str, Any]]:
+        """Build one category's summary entry, or ``None`` to hide it.
+
+        Hiding is a disclosure decision, not a formatting one, which is
+        why it lives with the entry rather than at the call site: a
+        category whose tools all belong to plugins outside the session's
+        profile names a capability the model cannot invoke, and listing it
+        reliably primes hallucinated calls ("MCP server failed", etc.).
+        :meth:`_unknown_category_response` replays this same payload, so
+        whatever is withheld here stays withheld on the recovery path too.
+
+        Args:
+            cat: Category name.
+            session_counts: Tools per category visible to THIS session.
+            global_counts: Tools per category across all exposed plugins.
+            category_hints: Registry-registered category descriptions.
+            category_plugins: Plugins contributing to each category.
+            allowed_plugins: The session's plugin set, or ``None`` when the
+                caller has an unrestricted view.
+
+        Returns:
+            An ``{id, name, tool_count, description}`` dict -- plus an
+            ``availability`` note when the session sees only some of the
+            category's tools -- or ``None`` when the category must not be
+            disclosed to this session.
+        """
+        available = session_counts.get(cat, 0)
+        total = global_counts.get(cat, 0)
+
+        # Skip categories the session has zero access to.  When a profile's
+        # plugin list excludes a plugin, that plugin's registered category
+        # (e.g. ``"MCP"`` from ``mcp.plugin.set_plugin_registry``) and any
+        # category description still live in the registry — but listing them
+        # in introspection output leaks plugin/protocol names the model
+        # cannot actually invoke and primes hallucinations ("MCP server
+        # failed", etc.).  Two exceptions:
+        #   1. No allowed-plugin filter is in effect — caller has
+        #      unrestricted view (e.g. an admin-tier session enumerating
+        #      the daemon).
+        #   2. The category is intrinsically empty for everyone
+        #      (``total == 0``) AND has no description hint — nothing to leak.
+        if available == 0 and allowed_plugins is not None:
+            if total > 0:
+                # Session-invisible plugin contributes tools to this
+                # category — hide entirely.  Don't surface the plugin name
+                # in an "enable X" hint either.
+                return None
+            # total == 0: only a category description hint references this
+            # category.  If a hint is registered AND the category isn't part
+            # of the session's plugin set, hide it too — that's exactly the
+            # MCP leak path (registered description with no tools).
+            if cat in category_hints:
+                return None
+
+        entry: Dict[str, Any] = {
+            "id": name_to_id(cat, prefix="c"),
+            "name": cat,
+            "tool_count": available,
+            "description": category_hints.get(cat, ""),
+        }
+
+        # Annotate partial availability only when the session already sees
+        # SOME tools in this category — the all-zero case is filtered above.
+        if available == 0 and total == 0:
+            entry["availability"] = "no tools loaded"
+        elif available < total and allowed_plugins is not None:
+            missing = sorted(
+                category_plugins.get(cat, set()) - allowed_plugins
+            )
+            if missing:
+                entry["availability"] = (
+                    f"partial ({available}/{total} tools — "
+                    f"{', '.join(missing)} not enabled for this profile)"
+                )
+            else:
+                entry["availability"] = (
+                    f"partial ({available}/{total} tools)"
+                )
+        # else: fully available — no extra annotation needed
+
+        return entry
+
+    def _build_category_summary(
+        self,
+        all_schemas: List[Any],
+        category_hints: Dict[str, str],
+        preloaded_tools_hint: List[str],
+    ) -> Dict[str, Any]:
+        """Build the no-argument ``list_tools`` payload: the category summary.
+
+        This is the only place a caller can learn a valid ``category_id``:
+        ids are hashed (``name_to_id(cat, prefix="c")``) precisely so they
+        cannot be derived from a category's name.  It is therefore reached
+        from two directions -- the deliberate no-argument call, and
+        :meth:`_unknown_category_response`, which replays this same payload
+        so a wrong guess is recoverable in one round-trip instead of two.
+
+        Categories the session has no access to are filtered out here, so
+        the recovery path inherits that filtering and cannot leak the id of
+        a category the caller could not use anyway.
+
+        Args:
+            all_schemas: Tool schemas visible to THIS session (profile-filtered).
+            category_hints: Registry-registered category descriptions.
+            preloaded_tools_hint: Names of tools already in the session's
+                initial schema, surfaced so their absence from the
+                categories is not read as unavailability.
+
+        Returns:
+            The category summary payload, with ``categories`` carrying an
+            ``{id, name, tool_count, description}`` entry per visible category.
+        """
+        # Count tools visible to THIS session (profile-filtered)
+        session_counts: Dict[str, int] = {}
+        for schema in all_schemas:
+            cat = schema.category or "uncategorized"
+            session_counts[cat] = session_counts.get(cat, 0) + 1
+
+        # Count ALL tools across ALL exposed plugins (unfiltered)
+        # and track which plugins contribute to each category.
+        global_counts: Dict[str, int] = {}
+        category_plugins: Dict[str, Set[str]] = {}
+        for schema in self._registry.get_exposed_tool_schemas():
+            cat = schema.category or "uncategorized"
+            global_counts[cat] = global_counts.get(cat, 0) + 1
+            plugin = self._registry.get_plugin_for_tool(schema.name)
+            if plugin:
+                category_plugins.setdefault(cat, set()).add(plugin.name)
+
+        # Determine which plugins the session has enabled
+        session = self._session
+        allowed_plugins: Optional[Set[str]] = None
+        if session:
+            raw = getattr(session, '_tool_plugins', None)
+            if raw is not None:
+                allowed_plugins = set(raw)
+                allowed_plugins.add("introspection")
+
+        # Merge all known categories: from schemas + registered descriptions.
+        all_categories = dict.fromkeys(
+            sorted(
+                set(session_counts.keys())
+                | set(global_counts.keys())
+                | set(category_hints.keys())
+            )
+        )
+
+        categories_list = []
+        for cat in all_categories:
+            entry = self._category_summary_entry(
+                cat,
+                session_counts,
+                global_counts,
+                category_hints,
+                category_plugins,
+                allowed_plugins,
+            )
+            if entry is None:
+                continue
+            categories_list.append(entry)
+
+        response: Dict[str, Any] = {
+            "categories": categories_list,
+            "total_tools": len(all_schemas),
+            "hint": "Call list_tools(category_id='<id>') to see tools in a specific category.",
+            "_telemetry": {
+                "jaato.introspection.operation": "list_tools",
+                "jaato.introspection.total_tools": len(all_schemas),
+            },
+        }
+        if preloaded_tools_hint:
+            response["preloaded_tools_already_in_schema"] = sorted(
+                set(preloaded_tools_hint)
+            )
+            response["preloaded_tools_note"] = (
+                "These tools are PRELOADED in your initial tool schema "
+                "and intentionally do NOT appear in the categories above. "
+                "list_tools returns only deferred (discoverable) tools. "
+                "Call preloaded tools directly without further discovery."
+            )
+        return response
+
     def _execute_list_tools(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Execute the list_tools tool.
 
@@ -409,8 +657,12 @@ class IntrospectionPlugin(RunnerForwardingMixin):
             args: Dictionary with optional 'category_id' and 'verbose' keys.
 
         Returns:
-            - If no category_id: returns available categories with tool counts
-            - If category_id specified: returns tools in that category
+            - If no category_id: the category summary — every visible
+              category with its hashed id and tool count.
+            - If category_id resolves: the tools in that category.
+            - If category_id does NOT resolve: the same category summary
+              plus an ``error``, so the caller holds a valid id without a
+              second round-trip.  See :meth:`_unknown_category_response`.
         """
         if not self._registry:
             return {"error": "Registry not available. Plugin not properly initialized."}
@@ -463,130 +715,18 @@ class IntrospectionPlugin(RunnerForwardingMixin):
         if category_id is not None:
             category = cat_id_to_name.get(str(category_id))
             if category is None:
-                return {
-                    "error": f"Unknown category_id '{category_id}'.",
-                }
+                return self._unknown_category_response(
+                    category_id,
+                    all_schemas,
+                    category_hints,
+                    preloaded_tools_hint,
+                )
 
         # If no category specified, return category summary only
         if not category:
-            # Count tools visible to THIS session (profile-filtered)
-            session_counts: Dict[str, int] = {}
-            for schema in all_schemas:
-                cat = schema.category or "uncategorized"
-                session_counts[cat] = session_counts.get(cat, 0) + 1
-
-            # Count ALL tools across ALL exposed plugins (unfiltered)
-            # and track which plugins contribute to each category.
-            global_counts: Dict[str, int] = {}
-            category_plugins: Dict[str, Set[str]] = {}
-            for schema in self._registry.get_exposed_tool_schemas():
-                cat = schema.category or "uncategorized"
-                global_counts[cat] = global_counts.get(cat, 0) + 1
-                plugin = self._registry.get_plugin_for_tool(schema.name)
-                if plugin:
-                    category_plugins.setdefault(cat, set()).add(plugin.name)
-
-            # Determine which plugins the session has enabled
-            session = self._session
-            allowed_plugins: Optional[Set[str]] = None
-            if session:
-                raw = getattr(session, '_tool_plugins', None)
-                if raw is not None:
-                    allowed_plugins = set(raw)
-                    allowed_plugins.add("introspection")
-
-            # Merge all known categories: from schemas + registered descriptions.
-            all_categories = dict.fromkeys(
-                sorted(
-                    set(session_counts.keys())
-                    | set(global_counts.keys())
-                    | set(category_hints.keys())
-                )
+            return self._build_category_summary(
+                all_schemas, category_hints, preloaded_tools_hint
             )
-
-            categories_list = []
-            for cat in all_categories:
-                available = session_counts.get(cat, 0)
-                total = global_counts.get(cat, 0)
-
-                # Skip categories the session has zero access to.  When
-                # a profile's plugin list excludes a plugin, that plugin's
-                # registered category (e.g. ``"MCP"`` from
-                # ``mcp.plugin.set_plugin_registry``) and any category
-                # description still live in the registry — but listing
-                # them in introspection output leaks plugin/protocol
-                # names the model cannot actually invoke and primes
-                # hallucinations ("MCP server failed", etc.).  Two
-                # exceptions:
-                #   1. No allowed-plugin filter is in effect — caller
-                #      has unrestricted view (e.g. an admin-tier session
-                #      enumerating the daemon).
-                #   2. The category is intrinsically empty for everyone
-                #      (``total == 0``) AND has no description hint —
-                #      nothing to leak.
-                if available == 0 and allowed_plugins is not None:
-                    if total > 0:
-                        # Session-invisible plugin contributes tools to
-                        # this category — hide entirely.  Don't surface
-                        # the plugin name in an "enable X" hint either.
-                        continue
-                    # total == 0: only a category description hint
-                    # references this category.  If a hint is registered
-                    # AND the category isn't part of the session's
-                    # plugin set, hide it too — that's exactly the MCP
-                    # leak path (registered description with no tools).
-                    if cat in category_hints:
-                        continue
-
-                entry: Dict[str, Any] = {
-                    "id": name_to_id(cat, prefix="c"),
-                    "name": cat,
-                    "tool_count": available,
-                    "description": category_hints.get(cat, ""),
-                }
-
-                # Annotate partial availability only when the session
-                # already sees SOME tools in this category — the
-                # all-zero case is filtered out above.
-                if available == 0 and total == 0:
-                    entry["availability"] = "no tools loaded"
-                elif available < total and allowed_plugins is not None:
-                    missing = sorted(
-                        category_plugins.get(cat, set()) - allowed_plugins
-                    )
-                    if missing:
-                        entry["availability"] = (
-                            f"partial ({available}/{total} tools — "
-                            f"{', '.join(missing)} not enabled for this profile)"
-                        )
-                    else:
-                        entry["availability"] = (
-                            f"partial ({available}/{total} tools)"
-                        )
-                # else: fully available — no extra annotation needed
-
-                categories_list.append(entry)
-
-            response: Dict[str, Any] = {
-                "categories": categories_list,
-                "total_tools": len(all_schemas),
-                "hint": "Call list_tools(category_id='<id>') to see tools in a specific category.",
-                "_telemetry": {
-                    "jaato.introspection.operation": "list_tools",
-                    "jaato.introspection.total_tools": len(all_schemas),
-                },
-            }
-            if preloaded_tools_hint:
-                response["preloaded_tools_already_in_schema"] = sorted(
-                    set(preloaded_tools_hint)
-                )
-                response["preloaded_tools_note"] = (
-                    "These tools are PRELOADED in your initial tool schema "
-                    "and intentionally do NOT appear in the categories above. "
-                    "list_tools returns only deferred (discoverable) tools. "
-                    "Call preloaded tools directly without further discovery."
-                )
-            return response
 
         # Category specified - return tools in that category.
         # No string-based validation needed — category was resolved from
