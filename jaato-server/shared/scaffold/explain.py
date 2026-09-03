@@ -59,6 +59,7 @@ def overview() -> Rendered:
         "  jaato-scaffold explain profile\n"
         "  jaato-scaffold explain paths\n"
         "  jaato-scaffold explain prefetch\n"
+        "  jaato-scaffold explain completion       # the OUTPUT-side hook\n"
         "  jaato-scaffold explain archetypes        # what `new` WRITES\n"
         "  jaato-scaffold explain archetype <name>\n"
     )
@@ -240,8 +241,14 @@ def archetypes() -> Rendered:
     from :mod:`archetypes`, whose registry is guarded to cover every archetype
     ``new`` accepts.
     """
+    # The WHOLE registry, ordered with the default first — never
+    # profile-set-plus-the-client-templates, which silently omits any
+    # archetype that is neither (the processor generator is the first).
+    # A hand-kept subset standing in for the registry is how `explain` came
+    # to advertise four archetypes out of six (jaato #716).
     docs = [_archetypes.ARCHETYPES[_archetypes.PROFILE_SET]] + [
-        _archetypes.ARCHETYPES[n] for n in _archetypes.CLIENT_ARCHETYPES]
+        _archetypes.ARCHETYPES[n] for n in sorted(_archetypes.ARCHETYPES)
+        if n != _archetypes.PROFILE_SET]
     data = {
         d.name: {
             "kind": d.kind,
@@ -249,14 +256,15 @@ def archetypes() -> Rendered:
             "aliases": list(d.aliases),
             "requires": list(d.requires),
             "writes": [e.render_path(archetype=d.name, set="<set>",
-                                     agent="<agent>") for e in d.writes],
+                                     agent="<agent>", name="<name>")
+                       for e in d.writes],
         }
         for d in docs
     }
     import textwrap
     lines = ["`jaato-scaffold new <archetype>` — what each one WRITES into your",
-             "workspace.  Every archetype re-checks its own output: a profile-set",
-             "is run back through the validator, a client is compile-checked.",
+             "workspace.  Every archetype re-checks its own output — see each",
+             "one's `check` under `explain archetype <name>`.",
              ""]
     for d in docs:
         tags = []
@@ -268,7 +276,8 @@ def archetypes() -> Rendered:
         lines += textwrap.wrap(d.summary, width=76,
                                initial_indent="      ", subsequent_indent="      ")
         paths = ", ".join(e.render_path(archetype=d.name, set="<set>",
-                                        agent="<agent>") for e in d.writes)
+                                        agent="<agent>", name="<name>")
+                          for e in d.writes)
         lines += textwrap.wrap("writes: " + paths, width=76,
                                initial_indent="      ", subsequent_indent="              ")
         lines.append(f"      needs:  {' '.join(d.requires)}")
@@ -297,7 +306,8 @@ def archetype(name: str) -> Rendered:
         return ({"error": f"unknown archetype {name!r}", "known": list(_archetypes.accepted())},
                 f"unknown archetype {name!r} — one of: {known}")
 
-    subs = dict(archetype=doc.name, **{"set": "<set>", "agent": "<agent>"})
+    subs = dict(archetype=doc.name,
+                **{"set": "<set>", "agent": "<agent>", "name": "<name>"})
     data = {
         "name": doc.name,
         "kind": doc.kind,
@@ -1525,6 +1535,159 @@ def paths() -> Rendered:
         "",
         "  TL;DR  ~/.jaato = daemon-global (creds + reactors, shared).  Per-session",
         "  isolation = a fresh workspace + config_root, NEVER a $HOME override.",
+    ]
+    return data, "\n".join(lines)
+
+
+def completion() -> Rendered:
+    """The completion-processor capability — the OUTPUT-side script hook.
+
+    The symmetric sibling of :func:`prefetch`, and the closest analogue to
+    read first: prefetch seeds the prompt BEFORE turn 1, a completion
+    processor gates ``signal_completion`` AFTER the work.
+    ``docs/design/payload-schema-conventions.md`` already frames the two
+    boundaries as a pair (``spawn_payload_schema`` in,
+    ``completion_payload_schema`` out); scaffold documented only the input
+    half, so an author wanting a self-correcting agent had to rediscover
+    the shape, and the failure modes are not the ones you would guess
+    (jaato #768, #769).
+
+    Every field name, vocabulary and channel below is READ from the
+    framework (``introspect.processor_schema``), never spelled here.
+    """
+    S = introspect.processor_schema()
+    vocab = S["vocabularies"]
+    data = {
+        "lives_in": ".jaato/profiles/<set>/<agent>.yaml  (completion_processors:)",
+        "script_at": "<config_root>/scripts/processors/<name>.py  OR  "
+                     "~/.jaato/scripts/processors/<name>.py",
+        "entries": [{"name": f.name, "type": f.type, "default": f.default}
+                    for f in S["fields"]],
+        "vocabularies": vocab,
+        "validate_channels": S["channels"],
+        "render_entry": "def render(payload, context) -> str | bytes",
+        "validate_entry": "def validate(payload, context) -> ProcessorResult",
+        "retry_budget_is_max_turns": (
+            "a blocked signal_completion is retried inside the session's "
+            "own max_turns; there is no second attempts knob.  What "
+            "max_refusals bounds is how many times THIS GATE may block, "
+            "which is a different thing and did not exist before #768."
+        ),
+        "does_not_terminate_on_its_own": (
+            "without max_refusals the processor refuses, the agent "
+            "re-claims completion, forever — seven refusals in 156 "
+            "seconds, same two errors, no work in between, budget gone "
+            "and no verdict (#768 rule 2)."
+        ),
+        "generator": "jaato-scaffold new processor --name <n> --workspace DIR",
+    }
+    fields = "\n".join(
+        f"    {f.name:16} {f.type:22}"
+        + ("(required)" if f.default == "<required>"
+           else f"default {f.default!r}")
+        for f in S["fields"]
+    )
+    lines = [
+        "completion processors — the OUTPUT-side script hook "
+        "(shared/completion_processors.py):",
+        "",
+        "  WHAT: profile-declared Python that runs when the agent calls",
+        "  signal_completion, AFTER its payload passes "
+        "completion_payload_schema.",
+        "  A `validate` that returns errors BLOCKS the completion and hands the",
+        "  agent a `validation_failed` result carrying every string, so it fixes",
+        "  and calls signal_completion again.  It is the framework's",
+        "  fix-until-it-passes loop.  The INPUT-side sibling is `explain",
+        "  prefetch` — read it first; this is the same shape at the other",
+        "  boundary.",
+        "",
+        "  AUTHOR IT in two places:",
+        "    .jaato/profiles/<set>/<agent>.yaml   the wiring (fields below)",
+        "    <config_root>/scripts/processors/<f>.py   the module (or",
+        "                                     ~/.jaato/scripts/processors/<f>.py,",
+        "                                     daemon-global; same loader as",
+        "                                     prefetch scripts and reactors)",
+        "",
+        "  WIRING (a `completion_processors:` list entry):",
+        fields,
+        "    " + "  ".join(f"{k} → {'|'.join(v)}" for k, v in vocab.items()),
+        "",
+        "  MODULE contract — one or both top-level callables:",
+        "    def render(payload, context) -> str | bytes",
+        "        content; written to the entry's `output:` template when it",
+        "        declares one, else logged for audit only.",
+        "    def validate(payload, context) -> ProcessorResult",
+        "        from jaato_sdk.cascade_authoring import ProcessorResult",
+        "        A dict of four channels (a bare list[str] is still accepted",
+        "        and read as all-errors):",
+        "",
+        "      channel      blocks completion?        spends a refusal?",
+        "      errors       yes, per on_error         yes — one per CALL, not",
+        "                                             per message",
+        "      faults       once per session          never",
+        "      warnings     never                     never",
+        "      incomplete   never (gates is_complete  never",
+        "                   on a phase:completeness",
+        "                   processor)",
+        "",
+        "    context = RenderContext: agent_params, workspace_path,",
+        "      config_root, env, session_id, registry, runtime, logger, and",
+        "      tool_calls — the paired ledger of every function_call and its",
+        "      response, for cross-checking a payload's claims against what",
+        "      the session ACTUALLY did.",
+        "",
+        "  THE RETRY BUDGET IS max_turns.  A blocked completion is retried",
+        "  inside the session's own max_turns; there is no second attempts",
+        "  knob, and adding one to a driver is the wrong fix (that PR was",
+        "  closed on finding this mechanism).",
+        "",
+        "  THE LOOP DOES NOT TERMINATE ON ITS OWN.  Without `max_refusals`",
+        "  the processor refuses, the agent re-claims completion, and round",
+        "  it goes: an observed run spent SEVEN refusals in 156 seconds on",
+        "  the same two errors, with no work in between, and ended with its",
+        "  budget gone and no verdict.  Nothing upstream catches this —",
+        "  MAX_COMPLETION_NUDGES bounds the opposite direction (an agent",
+        "  that stops WITHOUT signalling).  Declare a ceiling:",
+        "",
+        "    completion_processors:",
+        "      - script: scripts/processors/acceptance.py",
+        "        name: acceptance",
+        "        max_refusals: 3",
+        "        on_exhausted: allow      # allow | fail",
+        "",
+        "  on_exhausted: allow  lets the unfinished completion stand (errors",
+        "    downgraded to warnings) — right when something grades the run",
+        "    afterwards, because a FAIL verdict carries information and a",
+        "    BLOCKED arm carries none.",
+        "  on_exhausted: fail   keeps blocking — right when an unfinished",
+        "    completion is worse than none (it writes to a shared store, say).",
+        "  Both are real choices.  The counter lives on the framework's",
+        "  per-session LoadedProcessor, so a module-level global in your",
+        "  script is no longer the place for it.",
+        "",
+        "  SEPARATE A WRONG ANSWER FROM AN ENVIRONMENT FAULT.  A missing",
+        "  acceptance script, an absent agent_param, a checks timeout: no fix",
+        "  the agent makes can clear those, so a retryable message about one",
+        "  burns the whole budget without ever producing a verdict.  Return",
+        "  them in `faults[]` — budget-exempt, and blocking only the single",
+        "  round-trip the agent needs to record the fault in its payload.",
+        "",
+        "  NEVER RETURN [] ON A BROKEN GATE.  If your checking script exits",
+        "  non-zero with no output, the gate did not RUN — returning [] there",
+        "  waves the completion through on a check that never happened.  An",
+        "  error path returning the same value as success is the defect class",
+        "  this hook attracts most.  The framework holds the same line: a",
+        "  raise, a malformed return, a missing module and a failed write all",
+        "  BLOCK, spend no refusal, and are never waved through by",
+        "  exhaustion.",
+        "",
+        "  WRITE THE STRINGS AS INSTRUCTIONS FOR THE RETRY, not as a report:",
+        "  they are read by a model about to try again.  Name the failure and",
+        "  what to do about it; the framework appends the attempts remaining.",
+        "",
+        "  GENERATE ONE with those parts already right:",
+        "    jaato-scaffold new processor --name <n> --workspace DIR",
+        "  and see `explain archetype processor` for what it writes.",
     ]
     return data, "\n".join(lines)
 

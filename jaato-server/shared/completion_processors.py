@@ -25,7 +25,11 @@ present:
   Returns a list of error strings.  Empty list → pass.  Non-empty →
   completion blocked per the entry's ``on_error`` policy.  Use
   ``context.tool_calls`` to cross-check payload claims against the
-  session's actual tool-call history.
+  session's actual tool-call history.  A richer return —
+  ``jaato_sdk.cascade_authoring.ProcessorResult``, a dict with
+  ``errors`` / ``warnings`` / ``incomplete`` / ``faults`` — separates
+  a wrong answer (``errors``, retryable, budgeted) from an environment
+  fault (``faults``, unfixable by retrying, budget-exempt).
 
 Both can be present in one module — useful when a processor both
 writes an audit record AND checks consistency.  At least one must
@@ -46,6 +50,22 @@ All are bucketed per the processor's ``on_error`` policy
 (``fail_completion`` vs ``warn``).  When any ``fail_completion``
 error fires, the caller returns the ``validation_failed`` shape to
 the model so it retries within ``max_turns``.
+
+**The retry loop does not terminate on its own** (issue #768).  The
+processor refuses, the agent re-claims completion, the processor
+refuses again — an observed run spent seven refusals in 156 seconds
+on the same two errors and ended with its whole budget gone and no
+verdict.  ``max_turns`` bounds the SESSION, not this gate, and
+nothing upstream bounds the gate: ``MAX_COMPLETION_NUDGES`` bounds
+the opposite direction (an agent that stops WITHOUT signalling).  So
+a processor entry may declare ``max_refusals:`` with an
+``on_exhausted:`` policy (``allow`` / ``fail``), and the framework
+counts the refusals on the per-session :class:`LoadedProcessor` —
+see :func:`_record_errors`.  Only genuine wrong answers are counted:
+never a ``faults[]`` entry, and never a broken gate (a load error, a
+raise, a malformed return, a failed write), because retries cannot
+fix those and a gate that did not run must never read as one that
+passed.
 
 **Trust boundary.**  Processors run in the runner subprocess at the
 same trust level as dynamic-instructions prefetch scripts and
@@ -121,11 +141,49 @@ class LoadedProcessor:
     is set when the import succeeded.  A module with neither symbol
     counts as a load failure ("kb authoring error") so the agent
     sees the issue at signal_completion time, never silently.
+
+    **This object is also the framework's declared home for
+    per-session processor state** (issue #768).  ``LifecycleTools``
+    loads processors ONCE per session and caches the resulting list
+    (``LifecycleTools._processors_loaded``), so the same instance is
+    handed to every ``signal_completion`` / ``prepare_completion``
+    call of that session — which is what lets ``refusals`` and
+    ``fault_blocks_used`` accumulate across the retry loop.  That
+    caching used to be an undocumented implementation detail on which
+    processor authors nonetheless relied, by keeping their refusal
+    counter in a module-level global; if it ever changed, the counter
+    silently degraded to a no-op bound and the "ceiling" quietly
+    stopped existing.  Stating the guarantee here and holding the
+    state on the framework's own object is what retires that folklore
+    (#765).  ``shared/tests/test_completion_processor_refusal_budget.py``
+    holds the guard.
+
+    Attributes:
+        processor: The profile's ``CompletionProcessor`` entry.
+        render_fn: The module's ``render`` callable, if it has one.
+        validate_fn: The module's ``validate`` callable, if it has one.
+        load_error: Why resolution/import failed, else ``None``.
+        refusals: How many invocations of this processor have BLOCKED
+            completion by returning ``errors[]``.  Compared against the
+            entry's ``max_refusals``.  Counts one per invocation, not
+            one per message, and counts ONLY genuine wrong-answer
+            refusals — never a fault, never a broken gate (a load
+            error, a raise, a malformed return, a failed write), which
+            the agent's retries cannot fix and so must not pay for.
+        fault_blocks_used: Whether the budget-exempt ``faults[]``
+            channel has already blocked once this session.  A fault is
+            unfixable by retrying, so it blocks exactly one
+            round-trip — long enough for the agent to record it in its
+            payload — and is advisory from then on.  Blocking
+            repeatedly on a condition no retry can clear is the
+            non-terminating loop the budget exists to prevent.
     """
     processor: Any  # CompletionProcessor — Any to avoid the import cycle
     render_fn: Optional[Callable[..., Any]] = None
     validate_fn: Optional[Callable[..., Any]] = None
     load_error: Optional[str] = None
+    refusals: int = 0
+    fault_blocks_used: int = 0
 
 
 def load_processors(
@@ -224,6 +282,13 @@ class ProcessorInvocationResult:
         warned: List of ``(processor, message)`` tuples for
             failures whose ``on_error="warn"`` policy let them fail
             non-fatally.  Logged; the completion still succeeds.
+            Also where an ``errors[]`` entry lands once the
+            processor's ``max_refusals`` ceiling is spent under
+            ``on_exhausted="allow"`` — the completion is accepted as
+            it stands, but the errors survive in the audit trail
+            rather than vanishing.  Advisory ``warnings[]`` entries
+            arrive here regardless of ``on_error``, as does a
+            ``faults[]`` entry after its one blocking round-trip.
         failed: List of ``(processor, message)`` tuples for failures
             whose ``on_error="fail_completion"`` policy forces a
             hard failure.  Caller MUST treat the agent's
@@ -298,6 +363,246 @@ def _bucket(result: ProcessorInvocationResult, proc: Any, msg: str) -> None:
         result.failed.append((proc, msg))
 
 
+#: Sentinel for "this processor's ``validate`` raised and the failure has
+#: already been reported".  Distinct from ``None``, which is what a
+#: ``validate`` that forgets to return produces — that is a malformed
+#: return, not a pass (issue #768 rule 5).
+_RAISED = object()
+
+
+def _labelled(entries: List[Any], script_ref: str, channel: str) -> List[str]:
+    """Prefix each entry with its script, naming any non-string entry.
+
+    Every channel of a ``validate`` return goes through here so a
+    malformed entry is REPORTED rather than coerced or dropped — a
+    dropped entry is an error path that produces the same value as
+    success, which is the defect class this module is most prone to
+    (issue #768 rule 5).
+
+    Args:
+        entries: One channel's raw entries, as returned by the kb script.
+        script_ref: The processor's script path, for attribution.
+        channel: ``"error"`` / ``"warning"`` / ``"incomplete"`` / ``"fault"``
+            — used only in the message describing a non-string entry.
+
+    Returns:
+        One message per entry, in order.
+    """
+    out: List[str] = []
+    for item in entries:
+        if isinstance(item, str):
+            out.append(f"[{script_ref}] {item}")
+        else:
+            out.append(
+                f"completion_processor {script_ref!r} validate returned a "
+                f"non-string {channel} entry: {item!r}"
+            )
+    return out
+
+
+def _classify_validate_return(
+    raw: Any,
+) -> Optional[Tuple[List[Any], List[Any], List[Any], List[Any]]]:
+    """Split a ``validate`` return into its four channels.
+
+    Accepts the legacy ``list[str]`` shape (all-errors) and the
+    :class:`jaato_sdk.cascade_authoring.ProcessorResult` TypedDict.
+
+    Args:
+        raw: Whatever the kb script returned (already known non-None).
+
+    Returns:
+        ``(errors, warnings, incomplete, faults)``, or ``None`` when the
+        return is neither shape — which the caller reports as a broken
+        gate rather than treating as "no errors".
+    """
+    if isinstance(raw, list):
+        return raw, [], [], []
+    if isinstance(raw, dict):
+        return (
+            raw.get("errors", []) or [],
+            raw.get("warnings", []) or [],
+            raw.get("incomplete", []) or [],
+            raw.get("faults", []) or [],
+        )
+    return None
+
+
+def _budget_note(proc: Any, script_ref: str, remaining: int) -> str:
+    """The remaining-attempts sentence appended to a bounded refusal.
+
+    The return value of a processor is read by a MODEL about to try
+    again, not by a human reading a log, so it is written as an
+    instruction for the retry: name the attempts left, and say that
+    re-sending an unchanged claim spends one (issue #768 rule 7).  The
+    framework writes it rather than each author, because it is the
+    framework that owns the count.
+
+    Args:
+        proc: The ``CompletionProcessor`` entry (read for ``on_exhausted``).
+        script_ref: The processor's script path, for attribution.
+        remaining: Attempts left AFTER the refusal being reported.
+
+    Returns:
+        One message string, already script-prefixed.
+    """
+    outcome = (
+        "accepted as it stands and processed unfinished"
+        if getattr(proc, "on_exhausted", "allow") == "allow"
+        else "refused for good"
+    )
+    if remaining <= 0:
+        return (
+            f"[{script_ref}] That was your last attempt at this gate — the "
+            f"next signal_completion will be {outcome}, whether or not the "
+            f"errors above are fixed. Fix them now."
+        )
+    return (
+        f"[{script_ref}] You have {remaining} further attempt(s) at this gate "
+        f"before this completion is {outcome}. Re-sending the same claim "
+        f"without changing anything spends one."
+    )
+
+
+def _record_errors(
+    result: ProcessorInvocationResult, lp: LoadedProcessor,
+    errors: List[Any], script_ref: str,
+) -> None:
+    """Bucket this invocation's ``errors[]``, applying the refusal budget.
+
+    A processor with no ``max_refusals`` behaves exactly as it always
+    did: every error blocks, forever.  With a ceiling declared, this
+    counts ONE refusal per invocation (not per message) and, once the
+    ceiling is spent, applies ``on_exhausted``:
+
+    - ``"allow"`` — the errors are downgraded to warnings and the
+      completion stands unfinished.  The checks still failed and
+      whatever grades the run says so; a FAIL verdict carries
+      information where a BLOCKED arm carries none.
+    - ``"fail"`` — the errors keep blocking.
+
+    Args:
+        result: The accumulating invocation result.
+        lp: The per-session loaded processor holding ``refusals``.
+        errors: The raw ``errors[]`` channel.
+        script_ref: The processor's script path, for attribution.
+    """
+    if not errors:
+        return
+    proc = lp.processor
+    messages = _labelled(errors, script_ref, "error")
+    ceiling = getattr(proc, "max_refusals", None)
+    if ceiling is None:
+        for msg in messages:
+            _bucket(result, proc, msg)
+        return
+    if lp.refusals >= ceiling:
+        spent = (
+            f"[{script_ref}] refusal budget spent (max_refusals={ceiling}); "
+            f"on_exhausted={getattr(proc, 'on_exhausted', 'allow')!r}"
+        )
+        if getattr(proc, "on_exhausted", "allow") == "allow":
+            logger.warning(
+                "completion_processor %r: %d refusal(s) spent — accepting the "
+                "completion as it stands and downgrading %d error(s) to "
+                "warnings", script_ref, ceiling, len(messages),
+            )
+            for msg in messages + [spent]:
+                result.warned.append((proc, msg))
+        else:
+            for msg in messages + [spent]:
+                _bucket(result, proc, msg)
+        return
+    lp.refusals += 1
+    for msg in messages:
+        _bucket(result, proc, msg)
+    _bucket(result, proc, _budget_note(proc, script_ref, ceiling - lp.refusals))
+
+
+def _record_faults(
+    result: ProcessorInvocationResult, lp: LoadedProcessor,
+    faults: List[Any], script_ref: str,
+) -> None:
+    """Bucket the budget-exempt ``faults[]`` channel.
+
+    A fault is an ENVIRONMENT fault — a missing acceptance script, an
+    absent parameter, a checks timeout — as opposed to a wrong answer.
+    Nothing the agent's next attempt does can clear it, so:
+
+    - it never consumes a refusal (a retryable message about an
+      unfixable fault burns the whole budget without ever producing a
+      verdict — issue #768 rule 6); and
+    - it blocks exactly ONCE per session, which is the single
+      round-trip the agent needs to record the fault in its payload.
+      Blocking again on a condition no retry can clear is precisely the
+      loop that does not terminate.
+
+    Args:
+        result: The accumulating invocation result.
+        lp: The per-session loaded processor holding ``fault_blocks_used``.
+        faults: The raw ``faults[]`` channel.
+        script_ref: The processor's script path, for attribution.
+    """
+    if not faults:
+        return
+    proc = lp.processor
+    messages = _labelled(faults, script_ref, "fault")
+    if lp.fault_blocks_used:
+        for msg in messages:
+            result.warned.append((proc, msg))
+        return
+    lp.fault_blocks_used = 1
+    for msg in messages:
+        _bucket(result, proc, msg)
+
+
+def _record_validate_outcome(
+    result: ProcessorInvocationResult, lp: LoadedProcessor,
+    raw: Any, script_ref: str,
+) -> None:
+    """Route one ``validate`` return into the result's four buckets.
+
+    Channel semantics, all four of which a processor may use at once:
+
+    ============  ==========================  ======================
+    channel       blocks completion?          consumes a refusal?
+    ============  ==========================  ======================
+    ``errors``    yes, per ``on_error``       yes (once per call)
+    ``faults``    once per session            never
+    ``warnings``  never                       never
+    ``incomplete``never (gates is_complete)   never
+    ============  ==========================  ======================
+
+    A return that is neither shape is reported as a malformed return
+    and BLOCKS: a gate that did not run must never read as a gate that
+    passed.
+
+    Args:
+        result: The accumulating invocation result.
+        lp: The per-session loaded processor.
+        raw: The ``validate`` return value (already known non-None).
+        script_ref: The processor's script path, for attribution.
+    """
+    proc = lp.processor
+    classified = _classify_validate_return(raw)
+    if classified is None:
+        _bucket(result, proc, (
+            f"completion_processor {script_ref!r} validate "
+            f"returned {type(raw).__name__}; expected "
+            f"list[str] or ProcessorResult TypedDict "
+            f"({{'errors': [...], 'warnings': [...], "
+            f"'incomplete': [...], 'faults': [...]}})"
+        ))
+        return
+    errors, warnings, incomplete, faults = classified
+    _record_errors(result, lp, errors, script_ref)
+    _record_faults(result, lp, faults, script_ref)
+    for msg in _labelled(warnings, script_ref, "warning"):
+        result.warned.append((proc, msg))
+    for msg in _labelled(incomplete, script_ref, "incomplete"):
+        result.incomplete.append((proc, msg))
+
+
 def invoke_processors(
     loaded: List[LoadedProcessor],
     payload: Dict[str, Any],
@@ -366,6 +671,12 @@ def invoke_processors(
 
         # 1. Validate first (cheaper, no side-effects)
         if lp.validate_fn is not None:
+            # ``_RAISED`` rather than ``None`` as the "already reported"
+            # sentinel: a ``validate`` that falls off the end RETURNS
+            # ``None``, and conflating the two made that function read as
+            # a pass — an error path producing the same value as success,
+            # the exact class of defect issue #768 rule 5 is about.  A
+            # real ``None`` return now reports a malformed return.
             try:
                 raw = lp.validate_fn(payload, context)
             except Exception as exc:
@@ -376,76 +687,15 @@ def invoke_processors(
                 logger.exception(
                     "completion_processor %r validate raised", script_ref,
                 )
-                raw = None
-            if raw is not None:
-                # Server 0.6.160+: accept BOTH legacy ``list[str]`` AND
-                # the new ``ProcessorResult`` TypedDict from
-                # ``jaato_sdk.cascade_authoring``.  Legacy returns are
-                # treated as all-errors (backwards-compat).  TypedDict
-                # returns split errors → ``_bucket`` (subject to
-                # ``on_error`` policy) and warnings → ``result.warned``
-                # (always advisory, never escalates regardless of
-                # policy).  See ``ProcessorResult`` docstring for the
-                # full contract.
-                errors_iter: List[str] = []
-                warnings_iter: List[str] = []
-                incomplete_iter: List[str] = []
-                shape_ok = True
-                if isinstance(raw, list):
-                    errors_iter = raw  # type: ignore[assignment]
-                elif isinstance(raw, dict):
-                    errors_iter = raw.get("errors", []) or []
-                    warnings_iter = raw.get("warnings", []) or []
-                    incomplete_iter = raw.get("incomplete", []) or []
-                else:
-                    shape_ok = False
-                    _bucket(result, proc, (
-                        f"completion_processor {script_ref!r} validate "
-                        f"returned {type(raw).__name__}; expected "
-                        f"list[str] or ProcessorResult TypedDict "
-                        f"({{'errors': [...], 'warnings': [...], "
-                        f"'incomplete': [...]}})"
-                    ))
-
-                if shape_ok:
-                    # Errors path: subject to on_error policy via _bucket.
-                    for item in errors_iter:
-                        if not isinstance(item, str):
-                            _bucket(result, proc, (
-                                f"completion_processor {script_ref!r} "
-                                f"validate returned a non-string error "
-                                f"entry: {item!r}"
-                            ))
-                        else:
-                            _bucket(result, proc, f"[{script_ref}] {item}")
-                    # Warnings path: always advisory, bypasses _bucket.
-                    for item in warnings_iter:
-                        if not isinstance(item, str):
-                            result.warned.append((proc, (
-                                f"completion_processor {script_ref!r} "
-                                f"validate returned a non-string warning "
-                                f"entry: {item!r}"
-                            )))
-                        else:
-                            result.warned.append(
-                                (proc, f"[{script_ref}] {item}")
-                            )
-                    # Incomplete path: neither fatal nor advisory — gates
-                    # is_complete during prepare_completion.  Bypasses
-                    # _bucket entirely (never escalates, never blocks);
-                    # the prepare_completion consumer reads
-                    # result.incomplete to decide is_complete.
-                    for item in incomplete_iter:
-                        if not isinstance(item, str):
-                            result.incomplete.append((proc, (
-                                f"completion_processor {script_ref!r} "
-                                f"validate returned a non-string incomplete "
-                                f"entry: {item!r}"
-                            )))
-                        else:
-                            result.incomplete.append(
-                                (proc, f"[{script_ref}] {item}")
-                            )
+                raw = _RAISED
+            if raw is not _RAISED:
+                # Route the return into the four channels and apply the
+                # refusal budget.  Extracted into
+                # ``_record_validate_outcome`` because this function is
+                # frozen in the cyclomatic-complexity baseline and new
+                # logic may not grow it (see the coding policy in
+                # CLAUDE.md and ``test_cyclomatic_complexity_audit``).
+                _record_validate_outcome(result, lp, raw, script_ref)
 
         # 2. Render (and maybe write) — runs even when validate already
         #    queued failures; processors are independent surfaces.

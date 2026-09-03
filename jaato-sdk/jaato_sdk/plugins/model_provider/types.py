@@ -805,7 +805,6 @@ TERMINAL_FINISH_REASONS = frozenset({
     FinishReason.SAFETY,
     FinishReason.ERROR,
     FinishReason.CANCELLED,
-    FinishReason.INCOMPLETE,
 })
 
 

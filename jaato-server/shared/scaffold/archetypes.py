@@ -46,6 +46,13 @@ PROFILE_SET_ALIASES = ("profile-set", "set")
 #: The canonical name for the profile-set archetype.
 PROFILE_SET = "profile-set"
 
+#: The completion-processor archetype — neither a client nor a profile-set.
+#: It emits kb Python for the OUTPUT-side script hook (jaato #769); the
+#: input-side hook has no generator because a prefetch script's body is
+#: entirely the author's, while a processor's hard part is the contract
+#: around the body.
+PROCESSOR = "processor"
+
 #: Client archetypes, derived from the template registry so a new template is
 #: automatically an accepted archetype (and, via the guard, must be documented).
 CLIENT_ARCHETYPES: Tuple[str, ...] = tuple(sorted(TEMPLATES))
@@ -57,9 +64,12 @@ class EmittedFile:
 
     Attributes:
         path: Workspace-relative path.  May carry the ``{archetype}``,
-            ``{set}`` and ``{agent}`` placeholders, which the renderer fills
-            from the invocation (and which the guard expands into a glob when
-            it checks a real run's output against this declaration).
+            ``{set}``, ``{agent}`` and ``{name}`` placeholders, which the
+            renderer fills from the invocation (and which the guard expands
+            into a glob when it checks a real run's output against this
+            declaration).  ``{name}`` is the ``--name`` argument, distinct
+            from ``{agent}``: a processor's module is named after the
+            processor, not after any agent.
         what: One line — what the file is.
         status: Who owns the contents afterwards.  One of:
             ``generated`` (correct as emitted; edit only to customise),
@@ -78,7 +88,8 @@ class EmittedFile:
     when: Optional[str] = None
 
     def render_path(self, **subs) -> str:
-        """The path with ``{archetype}`` / ``{set}`` / ``{agent}`` filled in."""
+        """The path with ``{archetype}`` / ``{set}`` / ``{agent}`` / ``{name}``
+        filled in."""
         out = self.path
         for k, v in subs.items():
             out = out.replace("{" + k + "}", str(v))
@@ -87,7 +98,7 @@ class EmittedFile:
     def glob(self) -> str:
         """The path as an fnmatch pattern (placeholders → ``*``)."""
         out = self.path
-        for token in ("{archetype}", "{set}", "{agent}"):
+        for token in ("{archetype}", "{set}", "{agent}", "{name}"):
             out = out.replace(token, "*")
         return out
 
@@ -419,6 +430,79 @@ ARCHETYPES: Dict[str, ArchetypeDoc] = {
         ),
         edit=("the JOBS matrix — the example varies the persona with "
               "capabilities held fixed; vary profile, agent, or both",),
+    ),
+
+    PROCESSOR: ArchetypeDoc(
+        name=PROCESSOR,
+        kind="processor",
+        summary="A completion processor — kb Python that gates "
+                "signal_completion, with the bounded-refusal contract "
+                "already right.",
+        requires=("--workspace", "--name"),
+        writes=(
+            EmittedFile(
+                path=".jaato/scripts/processors/{name}.py",
+                what="the processor module — a working `validate` with the "
+                     "parts that are easy to get wrong already right",
+                status="edit",
+                detail=(
+                    "validate(payload, context) -> ProcessorResult over the "
+                    "four channels: errors (blocks, spends a refusal), "
+                    "faults (blocks once, spends nothing), warnings, "
+                    "incomplete",
+                    "NO refusal counter of its own — the ceiling is "
+                    "`max_refusals:` on the profile entry and the framework "
+                    "counts it, so the module cannot carry a second budget "
+                    "or a global that depends on a caching detail",
+                    "a subprocess gate that reads a non-zero exit with EMPTY "
+                    "output as 'the checker broke' (a fault) rather than as "
+                    "'no failures' — the error-path-returns-success defect "
+                    "this hook attracts",
+                    "an environment-fault split so a missing script or a "
+                    "timeout does not consume the agent's retries",
+                    "a worked ledger check: a payload claiming a clean run "
+                    "over failed tool calls is caught against "
+                    "context.tool_calls",
+                    "CHECKS_COMMAND at the top — the one blank to fill",
+                ),
+            ),
+        ),
+        flags=(
+            ("--name NAME", "REQUIRED — the module stem, the entry's `name:`, "
+                            "and what the printed wiring refers to"),
+            ("--force", "overwrite a processor of that name that already "
+                        "exists"),
+        ),
+        edit_before_running=(
+            "CHECKS_COMMAND — None as emitted, so the subprocess gate is "
+            "skipped; set it to a command printing one line per failure",
+            "_check_claims_against_the_ledger — the worked check is the "
+            "cheapest useful one; replace it with what your completion "
+            "schema actually promises",
+            "max_refusals / on_exhausted in the printed wiring — 3 and "
+            "`allow` are a starting point, not a recommendation",
+        ),
+        generated_correct=(
+            "the four-channel return, and which of them spends a refusal",
+            "the broken-gate discrimination: a check that did not RUN must "
+            "never read as a check that PASSED",
+            "the absence of a module-level refusal counter — that is the "
+            "framework's job now, and emitting one would codify the folklore "
+            "jaato #768 retired",
+            "return strings written as instructions for the retry; the "
+            "framework appends the attempts remaining",
+        ),
+        check="py_compile, then the module is loaded through the framework's "
+              "own `load_processors` and driven through `invoke_processors` — "
+              "so a generated processor that would not load, or that would "
+              "wave a completion through, fails at scaffold time",
+        next_steps=(
+            "paste the printed completion_processors: block into the profile "
+            "whose completions it should gate",
+            "set CHECKS_COMMAND, or delete _run_checks if the ledger check is "
+            "all you want",
+            "jaato-scaffold explain completion",
+        ),
     ),
 
     "host-tools": _client(

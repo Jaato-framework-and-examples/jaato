@@ -58,6 +58,7 @@ _SIMPLE_SCOPES = {
     "tiers": _explain.tiers,
     "paths": _explain.paths,
     "prefetch": _explain.prefetch,
+    "completion": _explain.completion,
     "commands": _explain.commands,
     "archetypes": _explain.archetypes,
 }
@@ -78,7 +79,8 @@ _FILTER_SCOPES = {"env": _explain.env, "events": _explain.events}
 
 _SCOPES_HELP = ("plugins | plugin | commands | providers | provider | gc | env | events | "
                 "event | transports | clients | runtime | tiers | sets | "
-                "profile [<name>] | paths | prefetch | archetypes | archetype")
+                "profile [<name>] | paths | prefetch | completion | archetypes | "
+                "archetype")
 
 
 def _cmd_explain(args) -> int:
@@ -196,13 +198,18 @@ def _new_epilog() -> str:
     #716).  Sourced from the same registry ``explain archetypes`` renders.
     """
     from . import archetypes as _archetypes
-    docs = [_archetypes.ARCHETYPES[_archetypes.PROFILE_SET]] + [
-        _archetypes.ARCHETYPES[n] for n in _archetypes.CLIENT_ARCHETYPES]
+    # Every documented archetype, never a hand-kept subset: the epilog used
+    # to enumerate profile-set + the client templates, so an archetype that
+    # was neither (the processor generator) would have been absent from
+    # `new --help` while `new` accepted it — the same shape of drift that
+    # made the banner advertise four archetypes out of six (jaato #716).
+    docs = [_archetypes.ARCHETYPES[n] for n in sorted(_archetypes.ARCHETYPES)]
     width = max(len(d.name) for d in docs)
     lines = ["what each archetype writes into --workspace:"]
     for d in docs:
         paths = ", ".join(e.render_path(archetype=d.name, set="<set>",
-                                        agent="<agent>") for e in d.writes)
+                                        agent="<agent>", name="<name>")
+                          for e in d.writes)
         lines.append(f"  {d.name.ljust(width)}  {paths}")
     lines += [
         "",
@@ -298,6 +305,10 @@ def main(argv=None) -> int:
     pn.add_argument("--model", help="model name")
     pn.add_argument("--set", help="profile-set name (provider_model)")
     pn.add_argument("--agents", help="comma-separated agent names for a set")
+    pn.add_argument("--name", help="processor name for `new processor` — the "
+                                   "module stem under "
+                                   ".jaato/scripts/processors/ and the "
+                                   "`name:` of its profile entry")
     pn.add_argument("--force", action="store_true", help="overwrite existing")
     pn.add_argument("--secrets", metavar="MODE",
                     help="how profiles reference the provider credential: "

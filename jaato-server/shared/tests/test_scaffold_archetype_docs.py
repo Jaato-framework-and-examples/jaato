@@ -68,7 +68,7 @@ def _args(**kw) -> argparse.Namespace:
                     model="m", set=None, agents=None, force=False, json=False,
                     recoverable=False, dry_run=False, secrets=None,
                     secret_path=None, transport="ipc", url=None, token=None,
-                    ca=None)
+                    ca=None, name=None)
     defaults.update(kw)
     for k, v in defaults.items():
         setattr(ns, k, v)
@@ -80,6 +80,8 @@ def _invocation(name: str, ws) -> argparse.Namespace:
     if name == A.PROFILE_SET:
         return _args(archetype=name, workspace=str(ws), set="s1",
                      agents="alpha,beta")
+    if name == A.PROCESSOR:
+        return _args(archetype=name, workspace=str(ws), name="gate")
     return _args(archetype=name, workspace=str(ws))
 
 
@@ -182,7 +184,8 @@ def test_explain_renders_every_archetype(name):
     rendered = {w["path"]: w for w in data["writes"]}
     assert len(rendered) == len(doc.writes), f"{name}: rendered no file list"
     for ef in doc.writes:
-        path = ef.render_path(archetype=name, set="<set>", agent="<agent>")
+        path = ef.render_path(archetype=name, set="<set>",
+                              agent="<agent>", name="<name>")
         assert path in rendered, f"{name}: {path} missing from the rendering"
         assert rendered[path]["what"] == ef.what
         assert rendered[path]["status"] == ef.status
@@ -314,7 +317,8 @@ def test_new_help_epilog_names_the_output_of_every_archetype():
     for name, doc in A.ARCHETYPES.items():
         assert name in epilog
         for ef in doc.writes:
-            leaf = ef.render_path(archetype=name, set="<set>", agent="<agent>")
+            leaf = ef.render_path(archetype=name, set="<set>",
+                                  agent="<agent>", name="<name>")
             assert leaf in epilog, f"{name}: {leaf} missing from `new --help`"
     assert "--dry-run" in epilog
     assert "explain archetype" in epilog

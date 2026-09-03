@@ -372,6 +372,54 @@ def profile_schema() -> List[ProfileField]:
     return out
 
 
+# ------------------------------------------------------- completion processors
+
+def processor_schema() -> Dict[str, Any]:
+    """The ``completion_processors`` entry schema — the OUTPUT-side script hook.
+
+    Sibling of :func:`profile_schema`, and read the same way: names /
+    types / defaults come from ``dataclasses.fields(CompletionProcessor)``,
+    the closed vocabularies from the framework's own
+    ``PROCESSOR_*`` constants, and the ``validate`` return channels from
+    ``ProcessorResult.__annotations__``.  Nothing here is spelled.
+
+    That matters more than usual for this scope.  ``explain prefetch``
+    documented the INPUT-side hook while the output-side one had no
+    scaffold coverage at all (``grep -rn completion_processor
+    jaato-server/shared/scaffold/`` returned nothing — jaato #769), and
+    the reason a doc-shaped fix is not enough is visible one directory
+    over: an archetype doc asserted framework behaviour in prose and
+    outlived the behaviour it described.  A rendering computed from the
+    dataclass cannot: adding a field to ``CompletionProcessor`` without
+    documenting it fails ``test_scaffold_completion_contract``.
+
+    Returns:
+        ``{"fields": [ProfileField], "vocabularies": {key: [values]},
+        "channels": [str], "defaults": {key: value}}``.
+    """
+    from shared.plugins.subagent import config as _cfg
+    from jaato_sdk.cascade_authoring import ProcessorResult
+
+    fields: List[ProfileField] = []
+    for f in dataclasses.fields(_cfg.CompletionProcessor):
+        default = ("<required>" if f.default is dataclasses.MISSING
+                   else f.default)
+        fields.append(ProfileField(
+            name=f.name,
+            type=_type_name(f.type),
+            default=default,
+        ))
+    return {
+        "fields": fields,
+        "vocabularies": {
+            "on_error": list(_cfg.PROCESSOR_ON_ERROR),
+            "phase": list(_cfg.PROCESSOR_PHASES),
+            "on_exhausted": list(_cfg.PROCESSOR_ON_EXHAUSTED),
+        },
+        "channels": list(ProcessorResult.__annotations__),
+    }
+
+
 # ----------------------------------------------------------------- plugins
 
 def _stamp_origin(info: "PluginInfo", origin: Any) -> None:

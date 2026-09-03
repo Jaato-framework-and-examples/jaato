@@ -312,6 +312,8 @@ def run(args) -> int:
         return _new_profile_set(args)
     if archetype in _archetypes.CLIENT_ARCHETYPES:
         return _new_client_archetype(args, archetype)
+    if archetype == _archetypes.PROCESSOR:
+        return _new_processor(args)
     print(f"unknown archetype {archetype!r} — one of: "
           + ", ".join(_archetypes.accepted()))
     return 2
@@ -560,6 +562,124 @@ def _new_client_archetype(args, archetype: str) -> int:
           f"  python -m jaato_sdk.doctor --workspace {ws} "
           f"--env-file {env_file}{secret_hint}\n"
           f"  python {py_file}")
+    return 0
+
+
+# ----------------------------------------------------- completion processor
+
+def _probe_generated_processor(path: Path) -> Optional[str]:
+    """Drive the emitted module through the framework; return a reason to fail.
+
+    The emit-then-check for this archetype, and deliberately stronger than
+    the clients' ``py_compile``: a processor that compiles can still be
+    unloadable (the framework probes for ``render`` / ``validate`` by name)
+    or, worse, can accept a completion it should have gated — the failure
+    mode that does not announce itself.  So the check is the framework's own
+    loader and invoker, run against a payload that a correct processor must
+    refuse.
+
+    Args:
+        path: The emitted module.
+
+    Returns:
+        A one-line reason the generated processor is not usable, or ``None``
+        when it loads and gates correctly.
+    """
+    from shared.completion_processors import invoke_processors, load_processors
+    from shared.plugins.subagent.config import CompletionProcessor
+
+    loaded = load_processors(
+        [CompletionProcessor(script=str(path), max_refusals=2)],
+        workspace_path=str(path.parent), config_root=None,
+    )
+    if loaded[0].load_error:
+        return loaded[0].load_error
+    if loaded[0].validate_fn is None:
+        return "the module exposes no top-level `validate` callable"
+
+    class _Ctx:
+        workspace_path = str(path.parent)
+        config_root = None
+        agent_params: Dict[str, object] = {}
+        # A session in which a tool call failed and the payload says nothing
+        # about it: the emitted ledger check must refuse this.
+        tool_calls = [{"name": "cli", "success": False,
+                       "result": {"error": "boom"}, "turn_index": 0}]
+
+    clean = invoke_processors(loaded, payload={}, context=_Ctx())
+    if not clean.has_fatal:
+        return ("it accepted a payload claiming a clean run over a failed "
+                "tool call — a gate that does not gate")
+    honest = invoke_processors(
+        loaded, payload={"errors": ["the cli call failed"]}, context=_Ctx())
+    if honest.has_fatal:
+        return "it refused an honest payload that already reported the failure"
+    return None
+
+
+def _new_processor(args) -> int:
+    """Emit a completion processor, then load it through the framework.
+
+    The output-side sibling of :func:`_new_client_archetype`.  What it emits
+    is documented in :mod:`_processor_template`; what makes it worth
+    generating rather than describing is that the contract around the check
+    — the refusal ceiling being declared rather than hand-rolled, the
+    environment-fault split, the broken-gate discrimination — is the part a
+    hand-written processor gets wrong, not the check itself (jaato #768).
+    """
+    from . import _processor_template as _tpl
+
+    dry_run = bool(getattr(args, "dry_run", False))
+    doc = _archetypes.resolve(_archetypes.PROCESSOR)
+    missing = [f for f in ("workspace", "name") if not getattr(args, f, None)]
+    if missing:
+        print(f"new processor: missing required --{' / --'.join(missing)}")
+        return 2
+    name = str(args.name).strip()
+    if not name.isidentifier():
+        print(f"new processor: --name {name!r} must be a valid Python "
+              f"identifier — it becomes the module stem, which the loader "
+              f"imports by name")
+        return 2
+
+    ws = Path(args.workspace).resolve()
+    target = ws / ".jaato" / "scripts" / "processors" / f"{name}.py"
+    if target.exists() and not args.force:
+        print(f"new processor: {target} already exists — pass --force to "
+              f"overwrite")
+        return 2
+    if not dry_run:
+        ws.mkdir(parents=True, exist_ok=True)
+
+    plan = _Plan(ws, doc, dry_run=dry_run)
+    provenance = (f"jaato-scaffold new processor --name {name} "
+                  f"--workspace {ws}")
+    plan.write(target, _tpl.render(name, provenance),
+               "update" if target.exists() else "create")
+
+    if dry_run:
+        print(f"`new processor --name {name}` would write into {ws}:\n")
+        print(plan.render())
+        _dry_run_footer(doc, "the load check")
+        return 0
+
+    print(f"scaffolded processor '{name}' in {ws}:")
+    for w in plan.labels:
+        print(f"  + {w}")
+
+    # emit-then-check: load it the way the daemon will, and prove it gates.
+    print("\nloading the generated processor through the framework …")
+    reason = _probe_generated_processor(target)
+    if reason:
+        print(f"✘ generated processor is not usable — generator bug: {reason}")
+        return 1
+    print("✓ it loads, refuses a dishonest payload, and passes an honest one.")
+
+    print("\nnext:\n  wire it into the profile it should gate —\n")
+    for line in _tpl.wiring_for(name).splitlines():
+        print(f"    {line}")
+    print("\n  then set CHECKS_COMMAND in the module, and read:\n"
+          "    jaato-scaffold explain completion")
     return 0
 
 

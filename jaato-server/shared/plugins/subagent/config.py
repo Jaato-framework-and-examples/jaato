@@ -1191,6 +1191,43 @@ class CompletionProcessor:
             Its ``incomplete[]`` entries gate ``is_complete`` to False
             and surface to the model as neutral "still needed" guidance
             (no retry penalty); its ``errors[]`` still reject as usual.
+        max_refusals: How many times this processor may BLOCK completion
+            before the framework stops letting it (issue #768).  ``None`` (the default) is unbounded, which is
+            what every processor did before this field existed — and
+            which does not terminate on its own: the processor refuses,
+            the agent re-claims completion, forever.  An observed run
+            spent seven refusals in 156 seconds on the same two errors
+            and ended BLOCKED with its whole budget gone.  Set an
+            integer and the framework counts the refusals per session
+            and applies ``on_exhausted`` at the ceiling.
+
+            **What counts as one refusal:** ONE invocation of this
+            processor in which its ``validate`` returned at least one
+            ``errors[]`` entry, however many entries that was.  What
+            does NOT count: ``warnings[]``, ``incomplete[]``, the
+            budget-exempt ``faults[]`` channel (see
+            :class:`jaato_sdk.cascade_authoring.ProcessorResult`), and
+            every broken-gate condition — a load failure, a raise, a
+            malformed return, a failed write.  Those are not the agent
+            getting the answer wrong, so spending its retries on them
+            would burn the budget without ever producing a verdict.
+            The counter lives on the framework's per-session
+            ``LoadedProcessor`` (see
+            :mod:`shared.completion_processors`), which is what makes
+            it a declared home rather than a module-level global
+            resting on an undocumented caching guarantee (#765).
+        on_exhausted: What happens on the invocation AFTER
+            ``max_refusals`` is spent.  ``"allow"`` (default) downgrades
+            this processor's errors to warnings and lets the completion
+            stand unfinished — the checks still failed and whatever
+            grades the run afterwards will say so, on the reasoning that
+            **a FAIL verdict carries information and a BLOCKED arm
+            carries none**.  ``"fail"`` keeps blocking forever, which is
+            right when an unfinished completion is worse than no
+            completion (a run that writes to a shared store, say).  Both
+            are real choices; the default is the one that keeps a
+            harness producing verdicts.  Ignored when ``max_refusals``
+            is ``None``.
     """
     script: str
     output: Optional[str] = None
@@ -1198,6 +1235,8 @@ class CompletionProcessor:
     description: Optional[str] = None
     phase: str = "finalization"
     name: Optional[str] = None
+    max_refusals: Optional[int] = None
+    on_exhausted: str = "allow"
 
     @property
     def identity(self) -> str:
@@ -1772,6 +1811,50 @@ def _processor_enum(
     return value
 
 
+#: The closed vocabularies of a ``completion_processors`` entry.  Named
+#: constants rather than literals at the call site because they are read
+#: back by ``jaato-scaffold explain completion`` (via
+#: ``shared.scaffold.introspect.processor_schema``): a doc that quotes the
+#: framework's own vocabulary cannot drift from it, and a doc that spells
+#: it out silently can — which is the whole of jaato #769.
+PROCESSOR_ON_ERROR: Tuple[str, ...] = ("fail_completion", "warn")
+PROCESSOR_PHASES: Tuple[str, ...] = ("finalization", "completeness")
+PROCESSOR_ON_EXHAUSTED: Tuple[str, ...] = ("allow", "fail")
+
+
+def _processor_opt_int(
+    entry: Dict[str, Any], key: str, script: str,
+) -> Optional[int]:
+    """Read an optional non-negative integer key off one processor entry.
+
+    Used for ``max_refusals``.  Rejects non-integers (including ``bool``,
+    which ``isinstance(True, int)`` would otherwise wave through as 1) and
+    negatives, warning and returning ``None`` — i.e. degrading to the
+    unbounded pre-#768 behaviour rather than inventing a ceiling the author
+    did not write.  Consistent with every other key here: a typo'd
+    annotation must not take the whole profile down with it.
+
+    Args:
+        entry: One raw ``completion_processors`` list item.
+        key: The key to read (``"max_refusals"``).
+        script: The entry's script path, for the warning message.
+
+    Returns:
+        The integer, or ``None`` when absent or invalid.
+    """
+    value = entry.get(key)
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        logger.warning(
+            "completion_processors: %r must be a non-negative integer for "
+            "script=%r (got %r); ignoring — this processor stays unbounded",
+            key, script, value,
+        )
+        return None
+    return value
+
+
 def _parse_completion_processors(value: Any) -> List[CompletionProcessor]:
     """Parse a profile's ``completion_processors`` list from raw JSON/YAML.
 
@@ -1784,6 +1867,8 @@ def _parse_completion_processors(value: Any) -> List[CompletionProcessor]:
          "on_error": "fail_completion",      # default
          "phase": "finalization",            # default
          "name": "acceptance",               # optional
+         "max_refusals": 3,                  # optional; None = unbounded
+         "on_exhausted": "allow",            # default; "allow" | "fail"
          "description": "..."}               # optional
 
     ``output`` is optional — when omitted, the processor runs for
@@ -1834,15 +1919,20 @@ def _parse_completion_processors(value: Any) -> List[CompletionProcessor]:
             script=script.strip(),
             output=normalized_output,
             on_error=_processor_enum(
-                entry, "on_error", ("fail_completion", "warn"),
+                entry, "on_error", PROCESSOR_ON_ERROR,
                 "fail_completion", script,
             ),
             description=_processor_opt_str(entry, "description", script),
             phase=_processor_enum(
-                entry, "phase", ("finalization", "completeness"),
+                entry, "phase", PROCESSOR_PHASES,
                 "finalization", script,
             ),
             name=_processor_opt_str(entry, "name", script),
+            max_refusals=_processor_opt_int(entry, "max_refusals", script),
+            on_exhausted=_processor_enum(
+                entry, "on_exhausted", PROCESSOR_ON_EXHAUSTED,
+                "allow", script,
+            ),
         ))
     return out
 

@@ -270,6 +270,23 @@ gc:
 trace:
   provider_log: .jaato/logs/provider_trace.jsonl
   session_log: .jaato/logs/session_trace.jsonl
+# completion_processors: kb Python that gates signal_completion — the
+#   OUTPUT-side script hook (the input-side one is the persona's
+#   `{{!py:...}}` prefetch).  A `validate` returning errors blocks the
+#   completion and hands the agent every string, so it fixes and signals
+#   again within max_turns, which IS the retry budget.
+#   `max_refusals:` bounds how many times THIS GATE may block — without it
+#   the loop does not terminate (the processor refuses, the agent
+#   re-claims, forever); `on_exhausted:` says what happens at the ceiling.
+#   Full contract: `jaato-scaffold explain completion`, and
+#   docs/design/completion-gate.md.
+completion_processors:
+  - script: scripts/processors/acceptance.py
+    name: acceptance          # stable identity for suppress_inherited_processors
+    on_error: fail_completion # fail_completion (default) | warn
+    phase: finalization       # finalization (default) | completeness
+    max_refusals: 3           # unset = unbounded (the pre-#768 behaviour)
+    on_exhausted: allow       # allow (default) | fail
 ```
 
 **SDK API:**
@@ -1487,6 +1504,7 @@ This is not optional cleanup — treat missing or inaccurate docstrings as a def
 - [Daemon Extensions](docs/design/daemon-extensions.md) - Extension points for external packages (session hooks, WS interceptors, custom aspects, remote handlers)
 - [Application Identity](docs/design/app-identity.md) - Naming the application an integrator built, rather than reporting every SDK-based harness upstream as "jaato". `AppIdentity` + the four-tier precedence (provider knob → provider env → `JaatoRuntime(app_identity=)` → `JAATO_APP_*`), the `(powered by jaato)` suffix, header-safety sanitisation, and why the env vars are `host`-scoped.
 - [Env Vars vs Profile Keys](docs/design/env-vars-vs-profile-keys.md) - Which of the 186 env vars earned a typed profile/`plugin_configs` key, and which are correctly env-only. The tagged catalog lives in `shared/env_scope.py` (scope: `session` / `host` / `ambient` / `internal`, plus the typed key where one exists) and is enforced by `test_env_scope_catalog.py`; 38 session-scoped knobs with no typed key sit in a may-only-shrink ratchet, each carrying a tier and a **proposed** key (`explain env untyped` prints both). Includes the credential policy for the three providers whose peers expose an `api_key` knob and they don't.
+- [The Self-Bounding Completion Gate](docs/design/completion-gate.md) - What `completion_processors` is for and the seven rules a working one had to get right, each attached to the incident that produced it. Covers `max_refusals:` / `on_exhausted:` (the gate's own refusal ceiling, distinct from `max_turns`, which is and remains the retry budget), the `faults[]` channel that keeps an unfixable environment fault from burning the retry budget, why a broken gate must never read as a passing one, and the load-once-per-session caching the counter used to depend on as folklore. Start from `jaato-scaffold explain completion` and `jaato-scaffold new processor` — both are computed from the framework, so they cannot drift the way the prose can.
 - [Payload-Schema Conventions](docs/design/payload-schema-conventions.md) - Symmetric authoring guide for `spawn_payload_schema` (input boundary) and `completion_payload_schema` (output boundary). Mirror prefetch required-keys; always carry `warnings[]` / `errors[]` escape hatches; persona ↔ schema consistency check; canonical-hash strip rules; `agent_params` interaction with agent-continuity (§6).
 - [Competitor Memory Systems](docs/design/competitor-memory-systems.md) - Survey of nine agent-memory products, sorted by what a *framework* owes: pattern (nothing) / seam (an extension point) / fidelity (a fix) / not ours. Records which items were already expressible as cascade patterns, which memory hot paths are not pluggable, and why the pattern corpus needs `certify/`-style contract tests run against `main`.
 - [Agent Continuity Pattern](docs/design/agent-continuity.md) - `{{continuity_scope}}` + memory plugin enrichment + raw/curated lifecycle: persona-level continuity across sessions composed from existing primitives, no new framework code. Reference impl in `jaato-knowledge-manager/.jaato.example/`.
