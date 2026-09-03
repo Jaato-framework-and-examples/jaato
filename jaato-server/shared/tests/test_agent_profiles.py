@@ -208,9 +208,6 @@ class TestProfileDiscoveryForSession:
         )
         monkeypatch.setenv("HOME", str(home))
         monkeypatch.setenv("USERPROFILE", str(home))
-        # jaato-server/conftest.py pins ``Path.home`` as well as the env
-        # vars, so a test that wants the user tier back must repoint it.
-        monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
 
         workspace = tmp_path / "workspace"
         workspace.mkdir()

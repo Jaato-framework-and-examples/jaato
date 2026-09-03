@@ -111,7 +111,39 @@ def _credential_env_vars() -> tuple:
 
 CREDENTIAL_ENV_VARS = _credential_env_vars()
 
-_ISOLATED_HOME = Path(tempfile.mkdtemp(prefix="jaato-test-home-"))
+def _make_isolated_home() -> Path:
+    """Create the fake home, OUTSIDE the sandbox's always-allowed temp roots.
+
+    The obvious place is ``tempfile.mkdtemp()``, and it is wrong here.
+    ``sandbox_utils.SYSTEM_TEMP_PATHS`` makes ``/tmp`` reachable from
+    any workspace by design, so a fake home under it stops being a
+    home in the sandbox's eyes: ``~/.bashrc`` becomes an *allowed*
+    path, and every "a path outside the workspace is refused" test
+    quietly changes meaning.  ``shared/plugins/CLAUDE.md`` names this
+    trap for fixtures that put their "outside" target in ``tmp_path``;
+    a suite-wide ``HOME`` has the same shape and a wider blast radius.
+
+    So prefer a base directory that is not under any temp root.  If
+    none is available the plain temp dir is still used — an isolated
+    home in the wrong neighbourhood beats reading the developer's real
+    credentials — and the sandbox suites that care set their own
+    ``HOME`` anyway.
+    """
+    temp_roots = {os.path.realpath(p) for p in ("/tmp", tempfile.gettempdir())}
+    for candidate in ("/var/tmp", None):
+        if candidate is None:
+            break
+        base = Path(candidate)
+        if not base.is_dir() or os.path.realpath(base) in temp_roots:
+            continue
+        try:
+            return Path(tempfile.mkdtemp(prefix="jaato-test-home-", dir=str(base)))
+        except OSError:
+            continue
+    return Path(tempfile.mkdtemp(prefix="jaato-test-home-"))
+
+
+_ISOLATED_HOME = _make_isolated_home()
 atexit.register(shutil.rmtree, _ISOLATED_HOME, ignore_errors=True)
 
 #: Env vars that steer ``Path.home()`` / ``expanduser`` and the XDG
@@ -128,6 +160,25 @@ ISOLATED_HOME_ENV = {
     "XDG_STATE_HOME": str(_ISOLATED_HOME / ".local" / "state"),
     "XDG_CACHE_HOME": str(_ISOLATED_HOME / ".cache"),
 }
+
+
+def _home_honouring_env(_cls) -> Path:
+    """``Path.home`` with the ``pwd`` fallback replaced, nothing else.
+
+    ``Path.home()`` is ``expanduser("~")``, which reads ``HOME`` and —
+    when ``HOME`` is absent — falls back to the ``pwd`` database, i.e.
+    to the real home no matter what the environment says.  A test
+    asserting "nothing is configured" typically wipes the environment
+    to get there (``patch.dict("os.environ", {}, clear=True)``), so the
+    tests most determined to start from nothing were the ones reaching
+    furthest into the developer's machine.
+
+    This keeps the ``HOME`` lookup exactly as it was — a test that
+    repoints ``HOME`` still gets what it asked for — and substitutes
+    the isolated tree for the ``pwd`` fallback alone.
+    """
+    value = os.environ.get("HOME") or os.environ.get("USERPROFILE")
+    return Path(value) if value else _ISOLATED_HOME
 
 
 def _apply_isolation() -> None:
@@ -155,14 +206,7 @@ def isolated_machine_state(monkeypatch):
         monkeypatch.setenv(name, value)
     for name in AMBIENT_CONFIG_VARS + CREDENTIAL_ENV_VARS:
         monkeypatch.delenv(name, raising=False)
-    # ``Path.home()`` reads ``HOME`` — until a test clears the whole
-    # environment (``patch.dict("os.environ", {}, clear=True)`` is a
-    # common way to assert "no credentials are configured").  With
-    # ``HOME`` gone, ``expanduser`` falls back to the ``pwd`` database
-    # and resolves the real home again, so the tests most determined to
-    # start from nothing were the ones that reached furthest into the
-    # developer's machine.  Pinning the attribute closes that.
-    monkeypatch.setattr(Path, "home", classmethod(lambda cls: _ISOLATED_HOME))
+    monkeypatch.setattr(Path, "home", classmethod(_home_honouring_env))
     return _ISOLATED_HOME
 
 

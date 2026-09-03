@@ -66,10 +66,6 @@ def fake_home(tmp_path, monkeypatch) -> Path:
     (home / ".jaato").mkdir(parents=True)
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("USERPROFILE", str(home))
-    # The global fixture also pins ``Path.home`` (so a test that clears
-    # the environment cannot fall through to the pwd database); repoint
-    # it here or the env vars above would have no effect.
-    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
     return home
 
 
