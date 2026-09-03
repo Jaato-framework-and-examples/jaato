@@ -52,7 +52,7 @@ REDACTED = "<redacted>"
 #: Field / mapping-key names that hold a secret.  Two consumers share
 #: it, which is the point: :func:`redact_mapping` uses it to decide
 #: which entries of a free-form dict to hide, and
-#: ``shared/tests/test_credential_disclosure.py`` uses it to find every
+#: ``shared/tests/test_credential_hygiene.py`` uses it to find every
 #: dataclass in the tree that carries one and assert the value cannot
 #: be printed.  A new provider whose credential field is named from
 #: this set is covered the day it lands; one that invents a new name
@@ -119,7 +119,7 @@ def secret_safe_repr(
         *secret_fields: Names of the fields holding secrets.  A name
             that is not a field of the instance is ignored, so a field
             can be renamed or dropped without breaking the repr — the
-            guard in ``shared/tests/test_credential_disclosure.py`` is
+            guard in ``shared/tests/test_credential_hygiene.py`` is
             what catches a secret field that stops being covered.
         mappings: Names of dict-valued fields whose secret-named *keys*
             should be redacted while the rest of the dict is rendered
