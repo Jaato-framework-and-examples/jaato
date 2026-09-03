@@ -1051,3 +1051,73 @@ class TestCLIPluginAnalyzerFailsClosed:
         assert isinstance(result, dict), f"not blocked: {command}"
         assert result["returncode"] == 1
         assert "No such file or directory" in result["stderr"]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX pseudo-devices")
+class TestRedirectToPseudoDevices:
+    """``2>/dev/null`` must survive the path sandbox (jaato issue #784).
+
+    The plugin is configured here exactly as a runner session configures
+    it -- ``set_workspace_path`` on the session workspace -- because that
+    is the only tier where the defect showed.  A test driving
+    ``shared.subprocess_runner.run_command`` directly passes on the broken
+    build and proves nothing: ``run_command`` has no path sandbox, so it
+    honoured the redirect all along.
+
+    What actually failed: ``_classify_path_modes`` reads ``2>/dev/null``
+    as a *write* redirection whose target is outside the workspace, so
+    ``_validate_command_paths`` refused the command before it ever
+    reached a shell and synthesised
+    ``<cmd>: /dev/null: No such file or directory``.  The program-name
+    prefix comes from ``_make_not_found_result``, not from the program --
+    which is why the observed inference was "this sandbox has no
+    /dev/null" rather than "my command was refused".
+    """
+
+    def _plugin(self, workspace):
+        plugin = CLIToolPlugin()
+        plugin.initialize()
+        plugin.set_workspace_path(str(workspace))
+        return plugin
+
+    def test_stderr_redirect_is_not_refused(self, tmp_path):
+        """The whole defect, at the tier where it happened."""
+        plugin = self._plugin(tmp_path)
+
+        result = plugin._execute({"command": "ls does-not-exist 2>/dev/null"})
+
+        # The redirect was applied by a real shell: ls's complaint went to
+        # /dev/null, so nothing reaches us.
+        assert result["stderr"] == ""
+        assert "/dev/null" not in result.get("stderr", "")
+        assert "error" not in result
+
+    @pytest.mark.parametrize("command", [
+        "find . -type d -name scaffold 2>/dev/null",
+        "ls tests/ 2>/dev/null || ls .",
+        "cat missing.txt 2>/dev/null; echo ok",
+        "ls -la . 2>/dev/null | head -20",
+        "echo hi >/dev/null",
+        "cat /dev/null",
+        "echo hi 2>&1 >/dev/null",
+    ])
+    def test_shapes_from_the_report_are_allowed(self, tmp_path, command):
+        """Every failing shape recorded on the issue, plus its relatives."""
+        assert self._plugin(tmp_path)._validate_command_paths(command) is None
+
+    def test_out_of_workspace_targets_are_still_refused(self, tmp_path):
+        """The allowance is for pseudo-devices, not for redirects at large."""
+        plugin = self._plugin(tmp_path)
+
+        refusal = plugin._validate_command_paths("echo x > /etc/cron.d/pwn")
+
+        assert refusal is not None
+        assert refusal["returncode"] == 1
+        assert "/etc/cron.d/pwn" in refusal["stderr"]
+
+    def test_block_devices_are_still_refused(self, tmp_path):
+        """``/dev/`` is not blanket-allowed -- only the pseudo-devices are."""
+        plugin = self._plugin(tmp_path)
+
+        assert plugin._validate_command_paths("echo x > /dev/sda") is not None
+        assert plugin._validate_command_paths("cat /dev/mem") is not None

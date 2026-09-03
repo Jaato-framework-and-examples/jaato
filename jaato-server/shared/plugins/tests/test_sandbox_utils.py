@@ -22,6 +22,7 @@ from shared.plugins.sandbox_utils import (
     has_nested_symlink,
     is_path_within_jaato_boundary,
     check_path_with_jaato_containment,
+    is_pseudo_device_path,
     JAATO_CONFIG_DIR,
 )
 
@@ -1103,4 +1104,80 @@ class TestTempAllowanceResolvesTheTarget:
 
         assert check_path_with_jaato_containment(
             str(target), str(tmp_path / "workspace"), None, allow_tmp=False, mode="read"
+        ) is False
+
+
+class TestPseudoDevicePaths:
+    """Standard POSIX pseudo-devices are outside the sandbox's remit.
+
+    Regression cover for jaato issue #784: ``2>/dev/null`` classified
+    ``/dev/null`` as an out-of-workspace *write* target, so the cli path
+    sandbox refused the whole command and reported the refusal as
+    ``<cmd>: /dev/null: No such file or directory`` -- from which an agent
+    can only conclude the machine has no ``/dev/null``.
+    """
+
+    @pytest.mark.parametrize("path", [
+        "/dev/null",
+        "/dev/zero",
+        "/dev/full",
+        "/dev/random",
+        "/dev/urandom",
+        "/dev/tty",
+        "/dev/stdin",
+        "/dev/stdout",
+        "/dev/stderr",
+        "/dev/fd/0",
+        "/dev/fd/63",
+        "/dev/./null",
+        "/dev/foo/../null",
+    ])
+    def test_recognised(self, path):
+        assert is_pseudo_device_path(path) is True
+
+    @pytest.mark.parametrize("path", [
+        "/dev/sda",
+        "/dev/mem",
+        "/dev/kmem",
+        "/dev/pts/3",
+        "/dev/shm/secret",
+        "/dev",
+        "/dev/nullx",
+        "/dev/fd/notanumber",
+        "/dev/fd",
+        "dev/null",            # relative: an ordinary workspace file
+        "./dev/null",
+        "",
+    ])
+    def test_not_recognised(self, path):
+        assert is_pseudo_device_path(path) is False
+
+    def test_traversal_out_of_dev_is_not_recognised(self):
+        """``/dev/../etc/passwd`` normalises out of /dev entirely."""
+        assert is_pseudo_device_path("/dev/../etc/passwd") is False
+
+    @pytest.mark.parametrize("path", ["/dev/null", "/dev/stdout", "/dev/fd/2"])
+    @pytest.mark.parametrize("mode", ["read", "write"])
+    def test_allowed_by_the_gate(self, tmp_path, path, mode):
+        """The gate allows them for both access modes, with a workspace set."""
+        assert check_path_with_jaato_containment(
+            path, str(tmp_path), None, mode=mode
+        ) is True
+
+    def test_block_devices_still_refused(self, tmp_path):
+        """The allowance is an explicit list, not a ``/dev/`` prefix match."""
+        for path in ("/dev/sda", "/dev/mem", "/dev/pts/3"):
+            assert check_path_with_jaato_containment(
+                path, str(tmp_path), None, mode="write"
+            ) is False
+
+    def test_explicit_deny_rule_still_wins(self, tmp_path):
+        """An operator denylist entry outranks the pseudo-device allowance."""
+
+        class _Registry:
+            def is_path_denied(self, path):
+                return os.path.abspath(path) == "/dev/null"
+
+        assert check_path_with_jaato_containment(
+            "/dev/null", str(tmp_path), _Registry(), mode="write"
         ) is False
