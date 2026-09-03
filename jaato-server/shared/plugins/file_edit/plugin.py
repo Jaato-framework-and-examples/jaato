@@ -37,6 +37,7 @@ from .diff_utils import (
     DEFAULT_MAX_LINES,
     DEFAULT_MAX_PATH_WIDTH,
 )
+from .line_endings import LineEndingPolicy, restore
 from .multi_file import (
     MultiFileExecutor,
     MultiFileResult,
@@ -114,6 +115,10 @@ class FileEditPlugin(RunnerForwardingMixin):
     def __init__(self):
         self._backup_manager: Optional[BackupManager] = None
         self._initialized = False
+        # Line-ending policy, shared by every write path so they cannot
+        # drift apart.  Holds the git lookup caches, so it must outlive a
+        # single tool call to be worth anything (jaato #805).
+        self._line_endings = LineEndingPolicy()
         # Agent context for trace logging
         self._agent_name: Optional[str] = None
         # Workspace root for path sandboxing — drives which paths the
@@ -1751,6 +1756,33 @@ Backups are automatically created for file modifications."""
         except OSError as e:
             return {"error": f"Failed to read file: {e}"}
 
+    def _write_line_ending(
+        self,
+        file_path: Path,
+        existing_eol: Optional[str],
+        content_loaded: bool,
+    ) -> str:
+        """Pick the line ending an ``updateFile`` write should produce.
+
+        Args:
+            file_path: Destination, used to find the enclosing repository.
+            existing_eol: The ending the file was found to use.  Only
+                meaningful when *content_loaded* is true.
+            content_loaded: Whether the old content was read.  A targeted
+                edit reads it and so already knows the ending; a whole-file
+                replacement does not, and the file has to be sniffed
+                instead.
+
+        Returns:
+            The ending to write.  See
+            :class:`~.line_endings.LineEndingPolicy` for the precedence.
+        """
+        if content_loaded:
+            return self._line_endings.ending_for(file_path, existing_eol)
+        return self._line_endings.ending_for_file(
+            file_path, validate=self._sandbox_validator("read")
+        )
+
     def _execute_update_file(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Execute updateFile tool.
 
@@ -1780,7 +1812,12 @@ Backups are automatically created for file modifications."""
         if not file_path.is_file():
             return {"error": f"Not a file: {path}"}
 
-        # Determine mode and compute final content
+        # Determine mode and compute final content.  ``existing_eol`` is
+        # only meaningful once the old content has actually been read;
+        # ``content_loaded`` records that, so the whole-file path does not
+        # mistake "file has no line endings" for "not read yet".
+        existing_eol: Optional[str] = None
+        content_loaded = False
         if old_text is not None:
             # Targeted mode
             new_text = args.get("new")
@@ -1802,9 +1839,12 @@ Backups are automatically created for file modifications."""
                 return {"error": span_error}
 
             try:
-                current_content = read_text_verified(
+                # LF-normalised for matching, with the file's own ending
+                # handed back so the write can put it back (#805).
+                current_content, existing_eol = self._line_endings.load(
                     file_path, validate=self._sandbox_validator("read")
                 )
+                content_loaded = True
             except OSError as e:
                 return {"error": f"Failed to read file: {e}"}
 
@@ -1836,6 +1876,11 @@ Backups are automatically created for file modifications."""
                 return {"error": self._missing_content_error()}
             self._trace(f"updateFile(full): path={path}, content_len={len(new_content)}")
 
+        new_content = restore(
+            new_content,
+            self._write_line_ending(file_path, existing_eol, content_loaded),
+        )
+
         # Create backup before modification
         backup_path = None
         if self._backup_manager:
@@ -1848,6 +1893,7 @@ Backups are automatically created for file modifications."""
                 file_path,
                 new_content,
                 validate=self._sandbox_validator("write"),
+                newline="",
             )
             result = {
                 "success": True,
@@ -1887,6 +1933,10 @@ Backups are automatically created for file modifications."""
         if file_path.exists():
             return {"error": f"File already exists: {path}. Use updateFile to modify existing files."}
 
+        # A new file has no convention of its own to preserve, so only the
+        # repository can have an opinion; absent one this is LF, as before.
+        content = restore(content, self._line_endings.ending_for(file_path))
+
         try:
             # Create parent directories if needed
             file_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1898,6 +1948,7 @@ Backups are automatically created for file modifications."""
                 content,
                 validate=self._sandbox_validator("write"),
                 exclusive=True,
+                newline="",
             )
             return {
                 "success": True,
@@ -2096,7 +2147,8 @@ Backups are automatically created for file modifications."""
         executor = MultiFileExecutor(
             resolve_path_fn=self._resolve_path,
             is_path_allowed_fn=self._is_path_allowed,
-            trace_fn=self._trace
+            trace_fn=self._trace,
+            line_endings=self._line_endings,
         )
 
         # Execute the batch
@@ -2145,7 +2197,8 @@ Backups are automatically created for file modifications."""
             resolve_path_fn=self._resolve_path,
             is_path_allowed_fn=self._is_path_allowed,
             backup_fn=backup_fn,
-            trace_fn=self._trace
+            trace_fn=self._trace,
+            line_endings=self._line_endings,
         )
 
         # Execute find/replace

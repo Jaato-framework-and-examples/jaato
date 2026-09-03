@@ -331,6 +331,45 @@ these rules — not a persona):
   outward until unique. Never pre-emptively, never from memory:
   `prologue`+`old`+`epilogue` must be an exact substring of the file.
 
+## Line Endings
+
+A write reproduces the line ending the file will hold in the working tree —
+it never converts the rest of the file as a side effect of editing one line
+(jaato #805). What the model sees is always LF: content is normalised on
+read, matched and diffed as LF, and the ending is re-applied on write.
+
+Resolution order, highest first:
+
+| # | Source | Wins because |
+|---|--------|--------------|
+| 1 | `.gitattributes` — `-text` / `binary` | The path is not text; its bytes are left exactly as they are. |
+| 2 | `.gitattributes` — `eol=crlf` / `eol=lf` | The repository has named the ending for this path. |
+| 3 | `core.autocrlf` — `true` → CRLF, `input` → LF | The repository (or the user's global config) has named it for every path. |
+| 4 | `core.eol` (default `native`), when a `text` attribute is in force | Same, one tier down. Ignored without a `text` attribute, because git's default configuration converts nothing. |
+| 5 | The file's own dominant ending | Nothing in the repository has an opinion, so the file keeps its convention. |
+| 6 | LF | A new file, in a repository with no opinion. |
+
+**A file with mixed endings is repaired to its dominant one.** Editing one
+line of a file that holds 2 CRLF and 1 LF returns it with 3 CRLF — so an
+edit does change other lines' endings there, which is the complaint this
+feature answers, bounded to the minority lines instead of every line. That
+is deliberate: rule 5 has to pick one ending, and a file cannot be left half
+converted. Ties break towards CRLF, because nothing adds a CR to an LF file
+by accident while every LF-only editor strips them — the mixed files #794
+found were each a stray LF inside an otherwise-CRLF file, which is exactly
+that signature.
+
+Applies to `updateFile` (both modes), `writeNewFile`, `multiFileEdit` and
+`findAndReplace` alike. The git lookup reads `.gitattributes`, `.git/config`
+and the user's global config directly — no `git` binary is required — and
+caches per repository; an edited `.gitattributes` is picked up without a
+daemon restart. Every failure path (no repository, unreadable config,
+malformed pattern) degrades to "no opinion", so a line-ending preference is
+never the reason an edit fails.
+
+The implementation is `line_endings.py` (the LF round trip) over
+`git_eol.py` (the repository lookup).
+
 ## Environment Variables
 
 | Variable | Default | Description |

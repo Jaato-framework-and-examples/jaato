@@ -372,3 +372,34 @@ class TestEnsurePrivateDir:
         sticky.mkdir()
         os.chmod(sticky, 0o1777)
         assert ensure_private_dir(sticky) == str(sticky)
+
+
+class TestNewlineHandling:
+    """``newline`` decides whether the helpers translate line endings.
+
+    The defaults keep Python's own behaviour — universal newlines on read,
+    ``os.linesep`` translation on write — because existing callers rely on
+    it.  Callers that intend to preserve a file's endings pass ``""`` and
+    get the bytes they asked for (jaato #805).
+    """
+
+    def test_read_translates_by_default(self, tmp_path):
+        target = tmp_path / "a.txt"
+        target.write_bytes(b"one\r\ntwo\r\n")
+        assert read_text_verified(target) == "one\ntwo\n"
+
+    def test_read_preserves_endings_with_empty_newline(self, tmp_path):
+        target = tmp_path / "a.txt"
+        target.write_bytes(b"one\r\ntwo\r\n")
+        assert read_text_verified(target, newline="") == "one\r\ntwo\r\n"
+
+    def test_write_preserves_bytes_with_empty_newline(self, tmp_path):
+        target = tmp_path / "a.txt"
+        write_text_verified(target, "one\r\ntwo\r\n", newline="")
+        assert target.read_bytes() == b"one\r\ntwo\r\n"
+
+    def test_write_round_trips_through_read(self, tmp_path):
+        target = tmp_path / "a.txt"
+        write_text_verified(target, "one\r\ntwo\r\n", newline="")
+        assert read_text_verified(target, newline="") == "one\r\ntwo\r\n"
+
