@@ -29,7 +29,12 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from shared.ui_utils import ellipsize_path, ellipsize_path_pair
-from .edit_core import apply_edit, EditNotFoundError, AmbiguousEditError
+from .edit_core import (
+    apply_edit,
+    EditNotFoundError,
+    AmbiguousEditError,
+    MalformedEditError,
+)
 from .line_endings import LineEndingPolicy, detect_line_ending, normalize, restore
 
 # Default maximum width for file paths in multi-file previews
@@ -297,16 +302,10 @@ class MultiFileExecutor:
                         except OSError as e:
                             return False, f"Cannot read file {op.path}: {e}", i
 
-                    try:
-                        working_content[resolved_str] = apply_edit(
-                            working_content[resolved_str],
-                            op.old_content, op.new_content,
-                            op.prologue, op.epilogue,
-                        )
-                    except EditNotFoundError:
-                        return False, f"Edit target not found in {op.path}: {_truncate_for_msg(op.old_content, 80)}", i
-                    except AmbiguousEditError:
-                        return False, f"Edit target is ambiguous in {op.path} (matched multiple times). Use prologue/epilogue to disambiguate.", i
+                    edited, error = _dry_run_edit(working_content[resolved_str], op)
+                    if error is not None:
+                        return False, error, i
+                    working_content[resolved_str] = edited
 
                 files_to_edit.setdefault(resolved_str, []).append(i)
 
@@ -551,7 +550,7 @@ class MultiFileExecutor:
                 current_content, op.old_content, op.new_content,
                 op.prologue, op.epilogue,
             )
-        except (EditNotFoundError, AmbiguousEditError) as e:
+        except (EditNotFoundError, AmbiguousEditError, MalformedEditError) as e:
             return OperationResult(
                 success=False,
                 operation_index=index,
@@ -813,11 +812,33 @@ class MultiFileExecutor:
         return all_succeeded
 
 
-def _truncate_for_msg(text: str, max_len: int) -> str:
-    """Truncate *text* for use in error/log messages."""
-    if len(text) <= max_len:
-        return text
-    return text[:max_len] + "..."
+def _dry_run_edit(content: str, op: "FileOperation") -> Tuple[str, Optional[str]]:
+    """Apply *op* to *content* for batch validation, without touching disk.
+
+    Returns ``(edited_content, None)`` when the edit resolves to exactly one
+    site, or ``(content, error_message)`` when it does not.  Lives outside
+    ``validate_operations`` so each new failure mode is a branch here rather
+    than another arm on an already-oversized loop.
+
+    The three failures are worded differently on purpose: handing a caller
+    the remedy for a failure it did not have is what makes it loop (#813,
+    #814).  ``MalformedEditError`` in particular is passed through verbatim
+    — restating it as "not found" or "ambiguous" would replace the one
+    actionable message with the one remedy that cannot apply.
+    """
+    try:
+        return apply_edit(
+            content, op.old_content, op.new_content, op.prologue, op.epilogue,
+        ), None
+    except MalformedEditError as e:
+        return content, f"Invalid edit for {op.path}: {e}"
+    except EditNotFoundError as e:
+        return content, f"Edit target not found in {op.path}: {e}"
+    except AmbiguousEditError:
+        return content, (
+            f"Edit target is ambiguous in {op.path} (matched multiple times). "
+            f"Use prologue/epilogue to disambiguate."
+        )
 
 
 def generate_multi_file_diff_preview(
@@ -870,7 +891,7 @@ def generate_multi_file_diff_preview(
                 try:
                     after = apply_edit(before, old_text, new_text, prologue, epilogue)
                     working_content[resolved_str] = after
-                except (EditNotFoundError, AmbiguousEditError):
+                except (EditNotFoundError, AmbiguousEditError, MalformedEditError):
                     # Fall through to simple fragment diff below
                     before = old_text
                     after = new_text

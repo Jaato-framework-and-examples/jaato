@@ -331,6 +331,23 @@ these rules — not a persona):
   outward until unique. Never pre-emptively, never from memory:
   `prologue`+`old`+`epilogue` must be an exact substring of the file.
 
+### Rejections name the failure, not just the remedy
+
+An error that prescribes a remedy for a failure the caller does not have is
+worse than no advice: the caller follows it, fails the same way, and loops.
+`edit_core.py` therefore keeps three outcomes distinct, each with its own
+remedy (jaato #813, #814):
+
+| Outcome | What it means | Remedy the message gives |
+|---------|---------------|--------------------------|
+| `MalformedEditError` | The request is degenerate — empty `old`, or `old == new`. No file content could make it valid. | Change the call. Empty `old` is refused *before* matching, so it is never reported as "matched N times" (it matches between every pair of characters, which no anchor can narrow). |
+| `EditNotFoundError` | The locator is not a substring of the file. | Split by one extra count: if `old` occurs on its own, the anchors are **not adjacent** to it — the message names where `old` and each anchor actually sit, by line, and states that they are concatenated verbatim. If `old` does not occur at all, it says the anchors are irrelevant and `old` is what to fix. |
+| `AmbiguousEditError` | The locator matched more than once. | Add or extend anchors — the one case where that advice can work. |
+
+A whitespace-only `old` is deliberately **not** refused: unlike an empty one
+it can match exactly once (an anchored indentation fix is a legitimate edit),
+and where it cannot, "add anchors" is followable.
+
 ## Line Endings
 
 A write reproduces the line ending the file will hold in the working tree —

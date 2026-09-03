@@ -48,7 +48,12 @@ from .find_replace import (
     FindReplaceResult,
     generate_find_replace_preview,
 )
-from .edit_core import apply_edit, EditNotFoundError, AmbiguousEditError
+from .edit_core import (
+    apply_edit,
+    EditNotFoundError,
+    AmbiguousEditError,
+    MalformedEditError,
+)
 from shared.path_utils import msys2_to_windows_path, normalize_result_path
 from shared.plugins.runner_forwarding import RunnerForwardingMixin
 from shared.trace import trace as _trace_write
@@ -1449,7 +1454,7 @@ Backups are automatically created for file modifications."""
                 )
             try:
                 new_content = apply_edit(old_content, old_text, new_text, prologue, epilogue)
-            except (EditNotFoundError, AmbiguousEditError) as e:
+            except (EditNotFoundError, AmbiguousEditError, MalformedEditError) as e:
                 display_path = ellipsize_path(path, DEFAULT_MAX_PATH_WIDTH)
                 return PermissionDisplayInfo(
                     summary=f"Update file: {display_path} (edit error)",
@@ -1852,9 +1857,10 @@ Backups are automatically created for file modifications."""
 
             try:
                 new_content = apply_edit(current_content, old_text, new_text, prologue, epilogue)
-            except EditNotFoundError as e:
-                return {"error": f"Targeted edit failed: {e}"}
-            except AmbiguousEditError as e:
+            except (EditNotFoundError, AmbiguousEditError, MalformedEditError) as e:
+                # One arm for all three: each exception already carries the
+                # message specific to its own remedy, so the only job here
+                # is to pass it through unrewritten (#813, #814).
                 return {"error": f"Targeted edit failed: {e}"}
         else:
             # Full replacement mode
