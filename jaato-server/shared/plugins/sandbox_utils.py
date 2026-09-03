@@ -89,8 +89,15 @@ PSEUDO_DEVICE_PATHS = frozenset({
 })
 
 # ``/dev/fd/<n>`` names a descriptor the process already holds -- what
-# bash process substitution (``<(...)``, ``>(...)``) expands to.  Allowing
-# it grants nothing the process cannot already reach.
+# bash process substitution (``<(...)``, ``>(...)``) expands to.  It is the
+# widest entry here, and it is deliberate: removing it breaks process
+# substitution in a way that is hard to trace back to this list.
+#
+# It grants nothing the process cannot already reach.  ``subprocess.Popen``
+# defaults to ``close_fds=True`` and neither cli spawn site overrides it
+# (``subprocess_runner.run_command``, ``CLIToolPlugin._execute_streaming``),
+# so a spawned shell inherits only 0/1/2 -- every other descriptor it can
+# name under /dev/fd is one it opened itself.
 _PSEUDO_DEVICE_FD_RE = re.compile(r"^/dev/fd/\d+$")
 
 
@@ -102,6 +109,22 @@ def is_pseudo_device_path(path: str) -> bool:
     whatever the descriptor currently points at, which may legitimately
     live outside the workspace.  It is the well-known name that is being
     allowed, not the target it happens to have right now.
+
+    **This inverts "allow rules must resolve too"** (``plugins/CLAUDE.md``),
+    and the inversion is the point.  That rule exists for *path-shaped*
+    allowances like ``/tmp``, where the allowance names a region of the
+    filesystem and a symlink into it (``/tmp/x -> ~/.ssh/id_rsa``) is an
+    escape.  A pseudo-device allowance names a fixed identity, not a
+    region: resolving it would make the verdict depend on a moving target
+    -- ``/dev/stdin`` would be allowed or refused according to what the
+    descriptor happens to point at this instant.  The escape the rule
+    guards against is closed here by the shape of the match instead:
+    ``os.path.normpath`` collapses traversal before comparison, so
+    ``/dev/../etc/passwd`` normalises out of ``/dev`` and is refused, and
+    the set is exact names rather than a ``/dev/`` prefix.
+
+    Do not "fix" this by resolving -- that breaks ``/dev/stdin``,
+    ``/dev/stdout``, ``/dev/stderr`` and ``/dev/fd/<n>`` outright.
 
     Args:
         path: Path to check.  Normalised with ``os.path.normpath`` so
