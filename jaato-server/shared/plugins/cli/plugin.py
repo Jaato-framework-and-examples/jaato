@@ -684,20 +684,35 @@ Shell features like pipes (|), redirections (>, >>), and command chaining (&&, |
 The tool returns stdout, stderr, and returncode from the executed command.
 
 LONG-RUNNING COMMANDS AND AUTO-BACKGROUNDING:
-Commands that take longer than 10 seconds are automatically moved to background execution.
-When this happens, instead of stdout/stderr, you receive:
+Commands that take longer than 10 seconds may be moved to background execution.
+This only happens when a background-task reader tool (`getBackgroundTask`) is
+loaded in this session — otherwise the command is simply given longer to finish
+and you get its real stdout/stderr, because a task_id you cannot read would be
+useless. When a command IS backgrounded, instead of stdout/stderr you receive:
 {
     "auto_backgrounded": true,
     "task_id": "abc-123",
-    "message": "Task exceeded 10.0s threshold, continuing in background..."
+    "background_reader_available": true,
+    "message": "Task exceeded 10.0s threshold, continuing in background.
+                Use getBackgroundTask(task_id='abc-123') to check status and output."
 }
+
+Read the "message" field and use the tool it names. The task_id is a handle for
+that tool only — it is NOT a file path, and nothing on disk corresponds to it.
+
+If a command outlives even the extended wait with no reader loaded, the call
+comes back as an ERROR saying so. That is not a command failure: the command is
+still running, you just cannot retrieve its output. Do not assume it succeeded.
+Either re-run it so the output lands somewhere you can read (redirect to a file,
+then read the file), or report that the profile needs the `background` plugin.
 
 Known slow commands that will be auto-backgrounded:
 - Package managers: npm install, pip install, cargo build, mvn install, gradle build
 - Build commands: make, cmake, docker build
 - Test suites: pytest, npm test, mvn test, cargo test
 
-When a command is auto-backgrounded, use `getBackgroundTask` to monitor it:
+When a command is auto-backgrounded, use `getBackgroundTask` to monitor it
+(the "message" field names it; it is available whenever backgrounding happens):
 
 Example workflow for a Maven build:
 1. cli_based_tool(command="mvn clean install")
