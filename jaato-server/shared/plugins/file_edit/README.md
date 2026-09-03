@@ -349,6 +349,16 @@ Resolution order, highest first:
 | 5 | The file's own dominant ending | Nothing in the repository has an opinion, so the file keeps its convention. |
 | 6 | LF | A new file, in a repository with no opinion. |
 
+**A file with mixed endings is repaired to its dominant one.** Editing one
+line of a file that holds 2 CRLF and 1 LF returns it with 3 CRLF — so an
+edit does change other lines' endings there, which is the complaint this
+feature answers, bounded to the minority lines instead of every line. That
+is deliberate: rule 5 has to pick one ending, and a file cannot be left half
+converted. Ties break towards CRLF, because nothing adds a CR to an LF file
+by accident while every LF-only editor strips them — the mixed files #794
+found were each a stray LF inside an otherwise-CRLF file, which is exactly
+that signature.
+
 Applies to `updateFile` (both modes), `writeNewFile`, `multiFileEdit` and
 `findAndReplace` alike. The git lookup reads `.gitattributes`, `.git/config`
 and the user's global config directly — no `git` binary is required — and

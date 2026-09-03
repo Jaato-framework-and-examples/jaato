@@ -348,6 +348,22 @@ class TestUpdateFilePreservesEndings:
 
         assert target.read_bytes() == b"alpha\r\nbeta\r\n"
 
+    def test_mixed_file_is_repaired_to_its_dominant_ending(self, tmp_path):
+        """Deliberate: rule 5 picks one ending, so the minority lines convert.
+
+        This is the one case where an edit still changes a line it was not
+        asked to change — bounded to the minority, where the whole file used
+        to convert.  Pinned so it cannot happen by accident.
+        """
+        target = tmp_path / "mixed.txt"
+        target.write_bytes(b"one\r\ntwo\nthree\r\n")
+
+        make_plugin(tmp_path)._execute_update_file(
+            {"path": "mixed.txt", "old": "one", "new": "ONE"}
+        )
+
+        assert target.read_bytes() == b"ONE\r\ntwo\r\nthree\r\n"
+
     def test_repository_setting_overrides_the_file(self, tmp_path):
         make_repo(tmp_path, attributes="* text=auto eol=lf\n")
         target = tmp_path / "stale.txt"

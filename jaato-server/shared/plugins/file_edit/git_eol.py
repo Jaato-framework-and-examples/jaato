@@ -22,6 +22,18 @@ attributes line, or a repository that isn't there resolves to "no opinion"
 rather than an error, because a line-ending preference must never be the
 reason a file edit fails.
 
+Why this reads the files rather than asking git.  ``git check-attr text eol
+-- <path>`` would answer the same question authoritatively in one call, and
+is the obvious first suggestion — but ``file_edit`` is a ``runner``-tier
+plugin (``PLUGIN_TIER`` in ``file_edit/__init__.py``), so it runs under
+AppArmor confinement, and its ``get_apparmor_rules`` contributes backup-path
+``rw`` rules only.  It has no exec grant: ``cli``, which does spawn things,
+has to ask for ``ix`` explicitly (``pip_apparmor_rules`` in
+``shared/plugins/workspace_venv.py``).  A subprocess to ``git`` from here
+would simply be denied in the deployment this plugin actually runs in.  The
+pure-Python path is not a preference — it is the only one that works.  Per
+write it is also the cheaper of the two, which is why the caches below exist.
+
 Not implemented (deliberately): ``core.attributesFile``, the system-level
 gitconfig, ``include``/``includeIf`` directives, and attribute macros other
 than the built-in ``binary``.  Each would widen the surface well past what
