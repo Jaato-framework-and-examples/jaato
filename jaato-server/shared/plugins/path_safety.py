@@ -380,6 +380,7 @@ def read_text_verified(
     validate: Optional[Callable[[str], bool]] = None,
     encoding: str = "utf-8",
     errors: str = "strict",
+    newline: Optional[str] = None,
 ) -> str:
     """Read a file's text through :func:`open_verified`.
 
@@ -388,6 +389,12 @@ def read_text_verified(
         validate: Sandbox callback, as for :func:`open_verified`.
         encoding: Text encoding.
         errors: Decoding error policy (e.g. ``"replace"``).
+        newline: Newline handling, as for :func:`open`.  The default
+            ``None`` enables universal newlines, which *translates* CRLF to
+            LF — convenient for reading, but it erases the file's own
+            convention.  Pass ``""`` to read the endings verbatim, which is
+            what a caller that intends to write the file back must do
+            (see :mod:`shared.plugins.file_edit.line_endings`).
 
     Returns:
         The decoded contents.
@@ -397,7 +404,7 @@ def read_text_verified(
         OSError: on ordinary read failures.
     """
     fd = open_verified(path, os.O_RDONLY, validate=validate)
-    with os.fdopen(fd, "r", encoding=encoding, errors=errors) as handle:
+    with os.fdopen(fd, "r", encoding=encoding, errors=errors, newline=newline) as handle:
         return handle.read()
 
 
@@ -409,6 +416,7 @@ def write_text_verified(
     encoding: str = "utf-8",
     exclusive: bool = False,
     mode: int = 0o666,
+    newline: Optional[str] = None,
 ) -> int:
     """Write ``data`` to ``path`` through :func:`open_verified`.
 
@@ -421,6 +429,12 @@ def write_text_verified(
             anything already exists at the path.  Use for "new file" tools so
             a symlink planted at the target cannot be followed.
         mode: Creation mode for new files.
+        newline: Newline handling, as for :func:`open`.  The default
+            ``None`` rewrites every ``"\n"`` in *data* to ``os.linesep``,
+            so the caller does not get the bytes it passed: on Windows
+            ``"\r\n"`` becomes ``"\r\r\n"``.  Pass ``""`` to write *data*
+            verbatim, which any caller that has already chosen its endings
+            must do (see :mod:`shared.plugins.file_edit.line_endings`).
 
     Returns:
         Number of characters written.
@@ -433,7 +447,7 @@ def write_text_verified(
     flags = os.O_WRONLY | os.O_CREAT
     flags |= os.O_EXCL if exclusive else os.O_TRUNC
     fd = open_verified(path, flags, mode, validate=validate)
-    with os.fdopen(fd, "w", encoding=encoding) as handle:
+    with os.fdopen(fd, "w", encoding=encoding, newline=newline) as handle:
         return handle.write(data)
 
 

@@ -30,6 +30,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from shared.ui_utils import ellipsize_path, ellipsize_path_pair
 from .edit_core import apply_edit, EditNotFoundError, AmbiguousEditError
+from .line_endings import LineEndingPolicy, detect_line_ending, normalize, restore
 
 # Default maximum width for file paths in multi-file previews
 DEFAULT_MAX_PATH_WIDTH = 50
@@ -212,7 +213,8 @@ class MultiFileExecutor:
         self,
         resolve_path_fn: Callable[[str], Path],
         is_path_allowed_fn: Callable,
-        trace_fn: Optional[Callable[[str], None]] = None
+        trace_fn: Optional[Callable[[str], None]] = None,
+        line_endings: Optional[LineEndingPolicy] = None,
     ):
         """Initialize the multi-file executor.
 
@@ -221,10 +223,15 @@ class MultiFileExecutor:
             is_path_allowed_fn: Function to check if a path is within sandbox.
                 Signature: (path: str, mode: str = "read") -> bool
             trace_fn: Optional function for debug tracing
+            line_endings: Policy deciding what line ending each write
+                produces.  Pass the plugin's shared instance so its git
+                lookups stay cached across batches; a private one is created
+                when omitted, which is what the standalone tests use.
         """
         self._resolve_path = resolve_path_fn
         self._is_path_allowed = is_path_allowed_fn
         self._trace = trace_fn or (lambda msg: None)
+        self._line_endings = line_endings or LineEndingPolicy()
 
     def validate_operations(
         self,
@@ -521,10 +528,14 @@ class MultiFileExecutor:
         """
         resolved = self._resolve_path(op.path)
 
-        # Read original content for rollback
+        # Read original content for rollback.  The rollback copy stays the
+        # raw bytes — restoring must reproduce the file exactly — while the
+        # working copy is LF-normalised so a model-supplied ``old`` written
+        # with "\n" matches a CRLF file (#805).
         try:
             original_bytes = resolved.read_bytes()
-            current_content = original_bytes.decode()
+            raw_content = original_bytes.decode()
+            current_content = normalize(raw_content)
         except OSError as e:
             return OperationResult(
                 success=False,
@@ -549,9 +560,13 @@ class MultiFileExecutor:
                 error=f"Targeted edit failed: {e}"
             )
 
-        # Write result
+        # Write result, putting the file's own ending back
+        new_content = restore(
+            new_content,
+            self._line_endings.ending_for(resolved, detect_line_ending(raw_content)),
+        )
         try:
-            resolved.write_text(new_content, encoding="utf-8")
+            resolved.write_text(new_content, encoding="utf-8", newline="")
         except OSError as e:
             return OperationResult(
                 success=False,
@@ -598,9 +613,11 @@ class MultiFileExecutor:
                 error=f"Failed to create parent directories: {e}"
             )
 
-        # Write content
+        # Write content.  A new file has no ending of its own to preserve,
+        # so only the repository can have an opinion; absent one, LF.
+        content = restore(op.content, self._line_endings.ending_for(resolved))
         try:
-            resolved.write_text(op.content, encoding="utf-8")
+            resolved.write_text(content, encoding="utf-8", newline="")
         except OSError as e:
             return OperationResult(
                 success=False,
@@ -622,7 +639,7 @@ class MultiFileExecutor:
             operation_index=index,
             action="create",
             path=op.path,
-            details={"size": len(op.content)}
+            details={"size": len(content)}
         )
 
     def _execute_delete(

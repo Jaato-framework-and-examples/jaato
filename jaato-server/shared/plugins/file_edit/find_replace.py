@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from shared.ui_utils import ellipsize_path
+from .line_endings import LineEndingPolicy, detect_line_ending, normalize, restore
 
 # Default maximum width for file paths in find/replace previews
 DEFAULT_MAX_PATH_WIDTH = 50
@@ -113,7 +114,8 @@ class FindReplaceExecutor:
         resolve_path_fn: Callable[[str], Path],
         is_path_allowed_fn: Callable,
         backup_fn: Optional[Callable[[Path], Optional[Path]]] = None,
-        trace_fn: Optional[Callable[[str], None]] = None
+        trace_fn: Optional[Callable[[str], None]] = None,
+        line_endings: Optional[LineEndingPolicy] = None,
     ):
         """Initialize the find/replace executor.
 
@@ -124,12 +126,16 @@ class FindReplaceExecutor:
                 Signature: (path: str, mode: str = "read") -> bool
             backup_fn: Optional function to create backups before changes
             trace_fn: Optional function for debug tracing
+            line_endings: Policy deciding what line ending each write
+                produces.  Pass the plugin's shared instance so its git
+                lookups stay cached; a private one is created when omitted.
         """
         self._workspace_root = workspace_root
         self._resolve_path = resolve_path_fn
         self._is_path_allowed = is_path_allowed_fn
         self._backup_fn = backup_fn
         self._trace = trace_fn or (lambda msg: None)
+        self._line_endings = line_endings or LineEndingPolicy()
 
     def _should_ignore(
         self,
@@ -325,10 +331,17 @@ class FindReplaceExecutor:
                     if self._backup_fn:
                         self._backup_fn(file_path)
 
-                    # Apply replacement
-                    content = file_path.read_text(encoding="utf-8")
-                    new_content = compiled_pattern.sub(replacement, content)
-                    file_path.write_text(new_content, encoding="utf-8")
+                    # Apply replacement.  The pattern is matched against
+                    # LF-normalised text, the same text the dry-run preview
+                    # reported matches in, and the file's own ending is put
+                    # back on the way out (#805).
+                    raw = original_content.decode("utf-8")
+                    new_content = compiled_pattern.sub(replacement, normalize(raw))
+                    new_content = restore(
+                        new_content,
+                        self._line_endings.ending_for(file_path, detect_line_ending(raw)),
+                    )
+                    file_path.write_text(new_content, encoding="utf-8", newline="")
 
                     self._trace(f"find_and_replace: updated {fm.path}")
 
