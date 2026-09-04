@@ -251,19 +251,22 @@ def _parse_degrade_overlay(
                 f"degrade[{index}].model_tiers: '{key}' is not a tier name "
                 f"({', '.join(sorted(VALID_TIER_NAMES))})"
             )
-        # A rung rebinds a tier's MODEL; the tier's role — and so the prose
-        # describing it — is untouched by a brownout.  Accepting a
-        # description here would also be a lie: the ``enter_tier`` schema is
-        # built once at session configure time and lives in the prompt-cache
-        # prefix, so a rung firing mid-session could never change what the
-        # model reads.  Refuse it rather than silently ignore it.
-        if isinstance(entry, Mapping) and "description" in entry:
-            raise BudgetControlConfigError(
-                f"degrade[{index}].model_tiers.{key}: 'description' is "
-                f"not valid in an overlay (a rung rebinds a tier's model, "
-                f"not its role; describe the tier on the base model_tiers "
-                f"instead)"
-            )
+        # A rung rebinds a tier's MODEL; the tier's ROLE — the prose
+        # describing it and the modalities it fills — is untouched by a
+        # brownout.  Accepting either here would also be a lie: the
+        # ``enter_tier`` schema is built once at session configure time and
+        # lives in the prompt-cache prefix, so a rung firing mid-session
+        # could never change what the model reads.  Refuse rather than
+        # silently ignore.
+        if isinstance(entry, Mapping):
+            for role_key in ("description", "modalities"):
+                if role_key in entry:
+                    raise BudgetControlConfigError(
+                        f"degrade[{index}].model_tiers.{key}: '{role_key}' "
+                        f"is not valid in an overlay (a rung rebinds a "
+                        f"tier's model, not its role; declare it on the "
+                        f"base model_tiers instead)"
+                    )
         try:
             overlay[key] = _normalize_tier_entry(key, entry)
         except Exception as exc:
@@ -705,14 +708,26 @@ def overlay_tier_table(
         ):
             continue
         was = current.model if current is not None else "(undeclared)"
-        # Carry the base tier's description forward.  A rung cannot set one
-        # (DegradeRung.from_dict refuses it), so the overlay entry's is
-        # always None — replacing the entry wholesale would drop the
-        # profile's prose, contradicting "only the model each tier points
-        # at changes".  Harmless for the tool schema, which was already
-        # built, but ``describe_tier`` is also read by diagnostics.
-        if current is not None and current.description:
-            entry = _dc_replace(entry, description=current.description)
+        # Carry the base tier's ROLE forward — its prose and its modality
+        # roles.  A rung cannot set either (DegradeRung.from_dict refuses
+        # them), so the overlay entry carries neither; replacing the entry
+        # wholesale would drop them, contradicting "only the model each tier
+        # points at changes".
+        #
+        # For ``modalities`` this is load-bearing, not cosmetic: the content
+        # gate and the startup capability check both resolve the image tier
+        # BY ROLE, so a brownout that dropped it would leave the session
+        # with no tier to send images to — mid-run, exactly when budget is
+        # tight.  (``description`` is only read after the schema is built,
+        # so losing it would merely mislead diagnostics.)
+        if current is not None:
+            carried = {}
+            if current.description:
+                carried["description"] = current.description
+            if current.modalities and not entry.modalities:
+                carried["modalities"] = current.modalities
+            if carried:
+                entry = _dc_replace(entry, **carried)
         tiers[tier_name] = entry
         changes[tier_name] = f"{was} -> {entry.model}"
     return changes

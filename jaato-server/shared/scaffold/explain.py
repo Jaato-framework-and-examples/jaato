@@ -473,11 +473,13 @@ def tiers() -> Rendered:
     from shared import model_tiers as mt
     valid = sorted(mt.VALID_TIER_NAMES)
     reserved = sorted(mt.RESERVED_KEYS)
+    modalities = sorted(mt.VALID_TIER_MODALITIES)
     data = {
         "tier_names": valid,
         "reserved_keys": reserved,
+        "modalities": modalities,
         "shape": "model_tiers: { <tier>: <model-str> | "
-                 "{model, provider, description}, "
+                 "{model, provider, description, modalities}, "
                  "initial: <tier>, fallback: <tier> }",
         "switching": "the MODEL calls enter_tier('<tier>') mid-session; the "
                      "active tier selects the model (and, V2, the provider); "
@@ -495,6 +497,16 @@ def tiers() -> Rendered:
                        "advertised.  read once when the tool schema is built "
                        "(it sits in the prompt-cache prefix), so a budget "
                        "degrade rung cannot set it.",
+        "modalities_key": "a tier declares which non-text INPUT modalities it "
+                          "fills (" + ", ".join(modalities) + ").  the content "
+                          "gate and the startup capability check resolve the "
+                          "tier BY ROLE, not by the name 'vision' — which "
+                          "still implies ['image'] so pre-existing profiles "
+                          "are unchanged.  this DECLARES a role and is "
+                          "VERIFIED (a tier whose model can't accept the "
+                          "modality fails loud at connect); the opposite of "
+                          "plugin_configs.<provider>.modalities, which "
+                          "ASSERTS capability to correct catalog detection.",
         "cross_provider": "V2 (#354): tiers may declare DIFFERENT providers; "
                           "switch_tier swaps to a cached per-tier provider "
                           "instance (history is provider-neutral; switch-back is "
@@ -522,11 +534,20 @@ def tiers() -> Rendered:
         "  'executor' means something specific to your deployment can say so.\n"
         "  it is read once, when the tool schema is built: the tool block sits in\n"
         "  the prompt-cache prefix, so a budget degrade rung may NOT set one.\n\n"
-        "VISION  (a modality tier)\n"
-        "  map a 'vision' tier to an image-capable model.  an image reaching a\n"
-        "  non-vision active provider trips the content gate: a synthetic note\n"
-        "  'enter_tier(\"vision\") first' the agent self-corrects on.  user-message\n"
-        "  images ride the attachment ferry — SDK send_message(attachments=...).\n\n"
+        "MODALITY ROLES  (which tier can SEE what)\n"
+        f"  a tier may declare  modalities: [{', '.join(modalities)}]  — the input\n"
+        "  roles it fills.  content of a modality the ACTIVE model can't accept is\n"
+        "  withheld by the content gate, which names a tier that declares the role:\n"
+        "  a synthetic 'enter_tier(\"<tier>\") first' the agent self-corrects on.\n"
+        "  the tier is found BY ROLE, so an image tier need not be called 'vision'\n"
+        "  — though that name still implies ['image'], so older profiles are\n"
+        "  unchanged.  a tier whose model cannot accept a role it declares fails\n"
+        "  LOUD at connect, not at the first image.\n"
+        "  NOTE this DECLARES a role and is VERIFIED — the opposite direction from\n"
+        "  plugin_configs.<provider>.modalities, which ASSERTS what a model\n"
+        "  supports to correct catalog detection.\n"
+        "  user-message images ride the attachment ferry — SDK\n"
+        "  send_message(attachments=...).\n\n"
         "CROSS-PROVIDER  (V2)\n"
         "  tiers may declare DIFFERENT providers — switch_tier swaps to a cached\n"
         "  per-tier provider instance (history is provider-neutral; switch-back is\n"

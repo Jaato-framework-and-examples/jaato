@@ -276,6 +276,47 @@ def validate_profile(
     return out
 
 
+def _check_tier_modalities(key, raw, add):
+    """Validate one tier entry's ``modalities`` list statically.
+
+    Mirrors ``shared.model_tiers._normalize_tier_modalities`` so an author
+    sees the defect from ``jaato-scaffold validate`` rather than at session
+    create.  Kept separate from :func:`_check_model_tiers` so neither grows
+    past the complexity ceiling.
+
+    Args:
+        key: Tier name, for the diagnostic's ``where``.
+        raw: The entry's raw ``modalities`` value, or ``None``.
+        add: ``validate_profile``'s diagnostic collector.
+    """
+    if raw is None:
+        return
+    from shared.model_tiers import VALID_TIER_MODALITIES
+    where = f"model_tiers.{key}.modalities"
+    valid = ", ".join(sorted(VALID_TIER_MODALITIES))
+    if isinstance(raw, str) or not isinstance(raw, (list, tuple)):
+        add("error", "invalid_tier_modalities",
+            f"model_tiers.{key} modalities must be a LIST of modality names "
+            f"({valid})", where=where)
+        return
+    for token in raw:
+        if not isinstance(token, str) or not token.strip():
+            add("error", "invalid_tier_modalities",
+                f"model_tiers.{key} modalities entries must be non-empty "
+                "strings", where=where)
+            continue
+        kind = token.strip().lower()
+        if kind == "text":
+            add("error", "invalid_tier_modalities",
+                f"model_tiers.{key} may not declare the 'text' modality — "
+                "every model accepts text, so it asserts nothing; list only "
+                f"the non-text roles this tier fills ({valid})", where=where)
+        elif kind not in VALID_TIER_MODALITIES:
+            add("error", "invalid_tier_modalities",
+                f"model_tiers.{key} modality '{kind}' is not a modality "
+                f"({valid})", where=where)
+
+
 def _check_model_tiers(mt_cfg, add):
     """Static checks on a profile's ``model_tiers`` table.
 
@@ -326,6 +367,11 @@ def _check_model_tiers(mt_cfg, add):
                 "— it is rendered verbatim as this tier's bullet in the "
                 "enter_tier tool description",
                 where=f"model_tiers.{key}.description")
+        # ``modalities`` declares which input roles this tier fills.  A typo
+        # here is silent at runtime in the worst way: the content gate finds
+        # no tier for an image and the agent is told none exists, while the
+        # profile plainly declares one.
+        _check_tier_modalities(key, entry.get("modalities"), add)
 
 
 def _validate_plugin_knobs(cfg_name, cfg, plugins, add):

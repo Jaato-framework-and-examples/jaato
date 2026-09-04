@@ -340,9 +340,15 @@ Three **cognitive** tiers, plus one **modality** role:
 
 `vision` is a modality role rather than a cognitive one, but it shares the
 same single-active-tier machinery: the session is in exactly one tier at a
-time. An image reaching a non-vision active model is **withheld**, with a
-tool-result note telling the model to `enter_tier("vision")` first. See
+time. Content of a modality the active model can't accept is **withheld**,
+with a tool-result note telling the model which tier to enter first. See
 [Multimodal Model Support](design/multimodal-model-support.md).
+
+Since the `modalities` key (see [§5.2](#tier-entry-forms)), that role is
+carried by the **key, not the name** — any tier can declare it, and the gate
+finds the tier by role. `vision` remains the only name with a built-in
+meaning: it implies `modalities: [image]` so profiles written before the key
+behave unchanged.
 
 The names are **semantic conventions**, not capability levels. You can assign
 any model to any tier — the framework doesn't enforce that `planner` gets the
@@ -363,6 +369,7 @@ strongest model. What the model is told each tier is *for* comes from the
       "model": "claude-haiku-4-5",
       "description": "apply the agreed migration plan file by file; do not re-plan"
     },
+    "vision": {"model": "claude-sonnet-4-6", "modalities": ["image"]},
     "initial": "dispatcher",
     "fallback": "dispatcher"
   }
@@ -385,6 +392,43 @@ Rich-form keys:
 | `model` | `string` | yes | The model this tier selects. |
 | `provider` | `string` | no | Provider plugin for this tier. Tiers may name **different** providers (see §5.5). Unset = the session's main provider. |
 | `description` | `string` | no | What this tier is *for*, in the words the model reads. Becomes that tier's bullet in the `enter_tier` tool description, replacing the framework's default wording for the name. |
+| `modalities` | `string[]` | no | Non-text **input** roles this tier fills — any of `image`, `audio`, `video`, `file`. Declaring `["image"]` means "this is the tier to enter to look at an image". A tier named `vision` implies `["image"]`. |
+
+##### `modalities` — declaring a role, not asserting a capability
+
+Two places used to branch on the literal tier name `vision`: the content
+gate (which withholds an attachment the active model can't view, and tells
+the agent which tier to enter) and the startup capability check (which fails
+loud when the image tier maps to a model that can't see). Both now resolve
+the tier **by role**:
+
+```yaml
+model_tiers:
+  executor: openai/gpt-5-mini
+  planner:
+    model: google/gemini-3-pro
+    modalities: [image]        # the planner doubles as the image tier
+  initial: executor
+  fallback: executor
+```
+
+An image read from the `executor` tier is now withheld with
+`Call enter_tier("planner") first` — before the key, the note said no vision
+tier existed, because the profile happened not to use that name.
+
+> **This DECLARES a role and is VERIFIED — the opposite direction from
+> `plugin_configs.<provider>.modalities`, which ASSERTS what a model supports
+> in order to correct catalog detection.** Declaring a role the tier's model
+> can't fill is a config error, and catching it is the point: session
+> creation fails loud at connect rather than at the first image. Use the
+> provider knob when the catalog is wrong about a model; use this key when
+> you're saying which tier plays which part.
+
+`text` is rejected: every model accepts text, so declaring it would assert
+nothing. The gate can withhold `image` / `audio` / `video` / `file`, and a
+tier can declare any of them — though only image *conversion* is implemented
+across providers today, so the others are declarable ahead of the converters
+that will fill them.
 
 ##### Why override `description`
 

@@ -59,7 +59,7 @@ from __future__ import annotations
 
 import logging
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace as _dc_replace
 from typing import Any, Dict, FrozenSet, Optional, Tuple
 
 logger = logging.getLogger(__name__)
@@ -124,6 +124,40 @@ DEFAULT_TIER_DESCRIPTIONS: Dict[str, str] = {
     ),
 }
 
+# Non-text input modalities a tier may declare a ROLE for.  Deliberately
+# duplicated from ``MODALITY_*`` in
+# ``shared/plugins/model_provider/base.py`` rather than imported: this
+# module costs ~14ms to import and sits on the profile-load path (it is
+# pulled in by ``budget_control`` and by every session bootstrap), while
+# the provider base costs ~196ms.  ``test_tier_modalities.py`` pins the two
+# sets equal, so the duplication cannot drift.
+#
+# ``text`` is deliberately ABSENT.  Every text-completion model accepts
+# text, so a tier declaring it would assert nothing; the parser rejects it
+# with that explanation rather than accepting a no-op.
+MODALITY_IMAGE = "image"
+MODALITY_AUDIO = "audio"
+MODALITY_VIDEO = "video"
+MODALITY_FILE = "file"  # PDFs / documents (OpenRouter's term)
+VALID_TIER_MODALITIES: FrozenSet[str] = frozenset(
+    {MODALITY_IMAGE, MODALITY_AUDIO, MODALITY_VIDEO, MODALITY_FILE}
+)
+
+# Modality roles implied by a tier's NAME when it declares none itself.
+#
+# This is what keeps every profile written before the ``modalities`` key
+# working unchanged: a tier called ``vision`` has always meant "the tier to
+# enter to look at an image", and the content gate and the startup
+# capability check both branched on that literal name.  They now read the
+# modality role instead, so the name has to keep implying the role.
+#
+# It is also the ONLY place a tier name carries built-in meaning.  Anything
+# else — including a differently-named image tier — must say so with the
+# key.
+IMPLICIT_TIER_MODALITIES: Dict[str, FrozenSet[str]] = {
+    TIER_VISION: frozenset({MODALITY_IMAGE}),
+}
+
 # Framework defaults when neither profile nor env vars specify them.
 DEFAULT_INITIAL_TIER = TIER_DISPATCHER
 DEFAULT_TIER_FALLBACK = TIER_DISPATCHER
@@ -179,6 +213,22 @@ class TierEntry:
             degrade rung therefore cannot set it (see
             :meth:`shared.budget_control.DegradeRung.from_dict`) — a
             brownout rebinds a tier's model, never its role.
+        modalities: Non-text INPUT modalities this tier plays the role for
+            (a subset of :data:`VALID_TIER_MODALITIES`).  Declaring
+            ``{"image"}`` means "this is the tier to enter to look at an
+            image": the content gate names it when it withholds an image
+            from a model that can't see one, and the startup capability
+            check verifies the tier's model really does accept that input.
+
+            This DECLARES a role and is VERIFIED — the opposite direction
+            from ``plugin_configs.<provider>.modalities``, which ASSERTS
+            what a model supports in order to correct catalog detection.
+            Declaring a role the model can't fill is a config error, and
+            the whole point of the check.
+
+            Empty by default, except for a tier named ``vision``, which
+            implies ``{"image"}`` (:data:`IMPLICIT_TIER_MODALITIES`) so
+            profiles written before this key behave unchanged.
         provider: Provider plugin name (e.g. ``"anthropic"``).  When
             ``None``, the session's main provider is used and entering
             the tier just re-points it via
@@ -191,6 +241,62 @@ class TierEntry:
     model: str
     provider: Optional[str] = None
     description: Optional[str] = None
+    modalities: FrozenSet[str] = frozenset()
+
+
+def _normalize_tier_modalities(name: str, raw: object) -> FrozenSet[str]:
+    """Coerce a tier entry's ``modalities`` value into a validated set.
+
+    Split from :func:`_normalize_tier_entry` to keep it simple; the
+    per-token validation is its own concern.
+
+    Args:
+        name: Tier name, for error messages and for the implicit-role
+            lookup when nothing is declared.
+        raw: The entry's raw ``modalities`` value, or ``None`` when the
+            entry declares none (including the shorthand string form).
+
+    Returns:
+        The declared roles, unioned with the name's implicit role
+        (:data:`IMPLICIT_TIER_MODALITIES`).  A tier named ``vision`` is
+        always an image tier — the name is the one that carries built-in
+        meaning, and a profile that doesn't want that should use a
+        different name rather than an empty list.
+
+    Raises:
+        ModelTierConfigError: Not a list/tuple of strings, an unknown
+            token, or ``"text"`` (which would assert nothing).
+    """
+    implicit = IMPLICIT_TIER_MODALITIES.get(name, frozenset())
+    if raw is None:
+        return implicit
+    if isinstance(raw, str) or not isinstance(raw, (list, tuple, set, frozenset)):
+        raise ModelTierConfigError(
+            f"tier {name!r}: 'modalities' must be a list of modality names "
+            f"({', '.join(sorted(VALID_TIER_MODALITIES))}), got "
+            f"{type(raw).__name__}"
+        )
+    out = set()
+    for token in raw:
+        if not isinstance(token, str) or not token.strip():
+            raise ModelTierConfigError(
+                f"tier {name!r}: 'modalities' entries must be non-empty strings"
+            )
+        kind = token.strip().lower()
+        if kind == "text":
+            raise ModelTierConfigError(
+                f"tier {name!r}: 'modalities' may not list 'text' — every "
+                f"model accepts text, so declaring it asserts nothing.  List "
+                f"only the non-text roles this tier fills "
+                f"({', '.join(sorted(VALID_TIER_MODALITIES))})"
+            )
+        if kind not in VALID_TIER_MODALITIES:
+            raise ModelTierConfigError(
+                f"tier {name!r}: '{kind}' is not a modality "
+                f"({', '.join(sorted(VALID_TIER_MODALITIES))})"
+            )
+        out.add(kind)
+    return frozenset(out) | implicit
 
 
 def _normalize_tier_entry(name: str, raw: object) -> TierEntry:
@@ -199,17 +305,24 @@ def _normalize_tier_entry(name: str, raw: object) -> TierEntry:
     Accepts:
         * ``str`` — shorthand for ``{"model": <str>}``
         * ``dict`` with ``model`` (required) and optional ``provider`` /
-          ``description``
+          ``description`` / ``modalities``
+
+    Either form picks up the name's implicit modality role (a tier called
+    ``vision`` is the image tier unless it says otherwise) — see
+    :func:`_normalize_tier_modalities`.
 
     Raises:
-        ModelTierConfigError: Invalid shape, empty model, or a
-            ``provider`` / ``description`` present but not a non-empty
-            string.
+        ModelTierConfigError: Invalid shape, empty model, a ``provider`` /
+            ``description`` present but not a non-empty string, or a
+            malformed ``modalities`` list.
     """
     if isinstance(raw, str):
         if not raw.strip():
             raise ModelTierConfigError(f"tier {name!r} has empty model string")
-        return TierEntry(model=raw.strip())
+        return TierEntry(
+            model=raw.strip(),
+            modalities=_normalize_tier_modalities(name, None),
+        )
     if isinstance(raw, dict):
         model = raw.get("model")
         if not isinstance(model, str) or not model.strip():
@@ -235,6 +348,7 @@ def _normalize_tier_entry(name: str, raw: object) -> TierEntry:
             model=model.strip(),
             provider=provider.strip() if provider else None,
             description=description.strip() if description else None,
+            modalities=_normalize_tier_modalities(name, raw.get("modalities")),
         )
     raise ModelTierConfigError(
         f"tier {name!r}: expected str or dict, got {type(raw).__name__}"
@@ -297,6 +411,20 @@ class ModelTierConfig:
                 f"tier_fallback {self.tier_fallback!r} not in declared "
                 f"tiers {sorted(self.tiers)}"
             )
+        # Apply name-implied modality roles here, not only in
+        # _normalize_tier_entry, so a config built DIRECTLY (tests, premium
+        # code, anything not going through from_unified_dict) still gets
+        # them.  Without this a hand-built TierEntry("...") under the key
+        # "vision" carried no role, and the content gate + startup check —
+        # which now read the role rather than the name — silently went
+        # quiet.  Mutating in place is safe: the dataclass is frozen but
+        # its tiers mapping is not (overlay_tier_table relies on the same).
+        for _name, _entry in list(self.tiers.items()):
+            _implicit = IMPLICIT_TIER_MODALITIES.get(_name)
+            if _implicit and not _implicit <= _entry.modalities:
+                self.tiers[_name] = _dc_replace(
+                    _entry, modalities=_entry.modalities | _implicit)
+
         # No same-provider gate: tiers may name different providers.
         # JaatoSession.switch_tier swaps to a cached per-tier provider instance
         # when the entered tier's provider differs from the active one (history
@@ -316,27 +444,67 @@ class ModelTierConfig:
         rest = sorted(n for n in self.tiers if n not in TIER_ORDER)
         return tuple(known + rest)
 
+    def tiers_for_modality(self, kind: str) -> Tuple[str, ...]:
+        """Declared tiers that play the role for input modality ``kind``.
+
+        The replacement for every ``"vision" in tier_config.tiers`` check.
+        Returns names in canonical order (:meth:`ordered_tier_names`), so a
+        caller that needs exactly one — the content gate naming a tier for
+        the agent to enter — can take the first deterministically.
+
+        Args:
+            kind: A modality token such as ``"image"``
+                (:data:`VALID_TIER_MODALITIES`).
+
+        Returns:
+            Matching tier names, empty when this session has no tier for
+            that modality.
+        """
+        return tuple(
+            name for name in self.ordered_tier_names()
+            if kind in self.tiers[name].modalities
+        )
+
     def describe_tier(self, tier_name: str) -> str:
         """Prose for one tier, as the model should read it.
 
-        Resolution order: the tier entry's own ``description`` (set in the
-        profile), then the framework default for that name
-        (:data:`DEFAULT_TIER_DESCRIPTIONS`), then a bare fallback naming
-        the model — which is all the framework can honestly say about a
-        tier nobody described.
+        Resolution order for the base prose: the tier entry's own
+        ``description`` (set in the profile), then the framework default for
+        that name (:data:`DEFAULT_TIER_DESCRIPTIONS`), then a bare fallback
+        naming the model — which is all the framework can honestly say about
+        a tier nobody described.
+
+        A tier that declares modality roles its NAME doesn't already imply
+        gets a sentence appended saying so, unless the author wrote their own
+        description (in which case they own the whole bullet).  Without it a
+        ``planner`` tier declaring ``modalities: [image]`` read as pure
+        cognitive prose, so the model had no reason to switch there for an
+        image — it would only find out from the content gate after trying
+        and failing.  The ``vision`` tier is unaffected: image is its
+        implicit role and its default prose already covers it.
 
         Returns:
-            A single-sentence-ish fragment with no leading bullet or tier
-            name; the caller formats it into the tool description.
+            A fragment with no leading bullet or tier name; the caller
+            formats it into the tool description.
         """
         entry = self.tiers.get(tier_name)
         if entry is not None and entry.description:
             return entry.description
-        default = DEFAULT_TIER_DESCRIPTIONS.get(tier_name)
-        if default:
-            return default
-        model = entry.model if entry is not None else "an unspecified model"
-        return f"routes this session to {model}."
+        base = DEFAULT_TIER_DESCRIPTIONS.get(tier_name)
+        if base is None:
+            model = entry.model if entry is not None else "an unspecified model"
+            base = f"routes this session to {model}."
+        if entry is None:
+            return base
+        implicit = IMPLICIT_TIER_MODALITIES.get(tier_name, frozenset())
+        extra = entry.modalities - implicit
+        if not extra:
+            return base
+        kinds = ", ".join(sorted(extra))
+        return (
+            f"{base}  This tier can also view {kinds} content — switch here "
+            f"BEFORE reading it with a tool, then switch back when done."
+        )
 
     def model_for(self, tier_name: str) -> Tuple[str, TierEntry]:
         """Resolve a tier name to ``(actual_tier, entry)``.

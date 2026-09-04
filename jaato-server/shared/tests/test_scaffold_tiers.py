@@ -75,3 +75,49 @@ def test_validate_flags_a_malformed_tier_description(tmp_path):
     bad = [d for d in diags if d.code == "invalid_tier_description"]
     assert len(bad) == 1
     assert "planner" in bad[0].where
+
+
+def test_explain_tiers_documents_modality_roles():
+    data, text = explain.tiers()
+    assert "image" in data["modalities"]
+    assert "text" not in data["modalities"]      # never declarable on a tier
+    assert "modalities" in data["shape"]
+    assert "MODALITY ROLES" in text
+
+
+def test_validate_flags_bad_tier_modalities(tmp_path):
+    # A typo here fails silently at runtime in the worst way: the gate finds
+    # no tier for an image and tells the agent none exists, while the profile
+    # plainly declares one.
+    pdir = tmp_path / ".jaato" / "profiles" / "setM"
+    pdir.mkdir(parents=True)
+    (tmp_path / ".jaato" / "profiles" / "_base_m.yaml").write_text(
+        "name: _base_m\ndescription: b\nplugins: []\n")
+    (pdir / "m.yaml").write_text(
+        "name: m\ninherits: [_base_m]\nplugins: []\n"
+        "model_tiers:\n"
+        "  executor: {model: e}\n"
+        "  vision:   {model: v, modalities: [image]}\n"        # ok
+        "  planner:  {model: p, modalities: [smell]}\n"        # unknown
+        "  dispatcher: {model: d, modalities: image}\n"        # not a list
+        "  initial: executor\n  fallback: executor\n")
+    diags = V.validate_workspace(str(tmp_path), profile_set="setM", only="m")
+    bad = [d for d in diags if d.code == "invalid_tier_modalities"]
+    assert {d.where for d in bad} == {
+        "model_tiers.planner.modalities", "model_tiers.dispatcher.modalities"}
+
+
+def test_validate_flags_text_modality_with_an_explanation(tmp_path):
+    pdir = tmp_path / ".jaato" / "profiles" / "setT2"
+    pdir.mkdir(parents=True)
+    (tmp_path / ".jaato" / "profiles" / "_base_t2.yaml").write_text(
+        "name: _base_t2\ndescription: b\nplugins: []\n")
+    (pdir / "t2.yaml").write_text(
+        "name: t2\ninherits: [_base_t2]\nplugins: []\n"
+        "model_tiers:\n"
+        "  executor: {model: e, modalities: [text]}\n"
+        "  initial: executor\n  fallback: executor\n")
+    diags = V.validate_workspace(str(tmp_path), profile_set="setT2", only="t2")
+    bad = [d for d in diags if d.code == "invalid_tier_modalities"]
+    assert len(bad) == 1
+    assert "asserts nothing" in bad[0].message

@@ -1449,8 +1449,10 @@ class SubagentProfile:
     # ``VALID_TIER_NAMES``) with reserved control keys (``initial`` /
     # ``fallback``).  Each tier entry is either a model-name string or a
     # dict with ``model`` (required) plus optional ``provider`` (tiers may
-    # name different ones) and ``description`` (prose the MODEL reads as
-    # that tier's bullet in the ``enter_tier`` tool).  See
+    # name different ones), ``description`` (prose the MODEL reads as that
+    # tier's bullet in the ``enter_tier`` tool) and ``modalities`` (the
+    # non-text INPUT roles the tier fills; ``vision`` implies ``image``).
+    # See
     # ``shared/model_tiers.py`` for the resolver and validation, and
     # ``project_backlog_per_turn_model`` for the full design.
     model_tiers: Dict[str, Any] = field(default_factory=dict, metadata={
@@ -1459,7 +1461,10 @@ class SubagentProfile:
         "{model (required), provider (optional; tiers may span providers), "
         "description (optional; prose the model reads as that tier's bullet "
         "in the enter_tier tool — default is the framework's own wording for "
-        "the tier name)}), plus the reserved control keys initial / fallback. "
+        "the tier name), modalities (optional; non-text input roles this tier "
+        "fills, e.g. [\"image\"] — the content gate and the startup capability "
+        "check resolve a tier BY ROLE, and a tier named vision implies "
+        "[\"image\"])}), plus the reserved control keys initial / fallback. "
         "The enter_tier tool advertises ONLY the declared tiers. "
         "Non-empty silently ignores `model` (warns at load) — the active model "
         "is picked per turn from model_tiers[<active_tier>]. Empty = "
