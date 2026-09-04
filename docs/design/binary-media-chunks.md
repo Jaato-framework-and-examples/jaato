@@ -387,7 +387,14 @@ response path); an outbound media column in `ProviderCapabilities`; and the
 3. **Whole-blob vs chunked threshold** for tool-produced media — is a
    single-chunk stream always right, or is there a size above which a tool
    should be required to chunk?
-4. **Should `PresentationContext` renderability gate production**, or only
+4. **Should the startup capability check cover cross-provider tiers?**
+   Today it skips them so validating one doesn't eagerly construct that
+   provider on turn 1, and there is no lazy check on entry. The gate now
+   reports the misconfiguration as a profile error instead of looping, so
+   this is a diagnosis-latency question rather than a correctness one —
+   but it is the only role declaration nothing verifies before content
+   arrives.
+5. **Should `PresentationContext` renderability gate production**, or only
    delivery? Generating TTS audio no client can play is waste, but the
    capability is known only per-connected-client and a session may have
    several.

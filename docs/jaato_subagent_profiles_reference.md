@@ -573,6 +573,14 @@ touches no modality. So for a tier on another provider the runtime **content
 gate is the only backstop** — a role its model can't fill surfaces at the
 first piece of content, not at startup.
 
+What the gate does in that case is report it as the profile error it is.
+Since the tier declaring the role is the one the agent is already in, there
+is nothing to switch to, so the note names the tier and says its model does
+not accept that input rather than suggesting `enter_tier` (which would be a
+no-op, and re-running the tool would produce the identical note — a loop the
+turn budget ends). It does **not** say no tier declares the role: one does,
+it just doesn't work.
+
 ### 5.6 The `enter_tier` Lifecycle Tool
 
 When tier mode is active (a non-null `ModelTierConfig` is resolved), the framework registers an `enter_tier` tool that the model can call to switch tiers mid-conversation.
