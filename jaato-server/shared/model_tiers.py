@@ -143,6 +143,21 @@ VALID_TIER_MODALITIES: FrozenSet[str] = frozenset(
     {MODALITY_IMAGE, MODALITY_AUDIO, MODALITY_VIDEO, MODALITY_FILE}
 )
 
+# Directions a modality role can be declared in.
+#
+# ``bidirectional`` rather than ``both``: "both" says nothing about what it is
+# both OF, and does not parallel ``inbound``/``outbound`` grammatically.  Not
+# ``duplex`` either — that connotes SIMULTANEITY, and a tier declares
+# capability, not concurrency (a half-duplex voice loop is still a tier that
+# does audio in and out).  None of these three are YAML 1.1 booleans, unlike
+# ``on``/``off``/``yes``/``no``, so a profile can write them unquoted.
+DIRECTION_INBOUND = "inbound"
+DIRECTION_OUTBOUND = "outbound"
+DIRECTION_BIDIRECTIONAL = "bidirectional"
+VALID_MODALITY_DIRECTIONS: FrozenSet[str] = frozenset(
+    {DIRECTION_INBOUND, DIRECTION_OUTBOUND, DIRECTION_BIDIRECTIONAL}
+)
+
 # Modality roles implied by a tier's NAME when it declares none itself.
 #
 # This is what keeps every profile written before the ``modalities`` key
@@ -154,8 +169,8 @@ VALID_TIER_MODALITIES: FrozenSet[str] = frozenset(
 # It is also the ONLY place a tier name carries built-in meaning.  Anything
 # else — including a differently-named image tier — must say so with the
 # key.
-IMPLICIT_TIER_MODALITIES: Dict[str, FrozenSet[str]] = {
-    TIER_VISION: frozenset({MODALITY_IMAGE}),
+IMPLICIT_TIER_MODALITIES: Dict[str, Dict[str, FrozenSet[str]]] = {
+    TIER_VISION: {DIRECTION_INBOUND: frozenset({MODALITY_IMAGE})},
 }
 
 # Framework defaults when neither profile nor env vars specify them.
@@ -213,8 +228,8 @@ class TierEntry:
             degrade rung therefore cannot set it (see
             :meth:`shared.budget_control.DegradeRung.from_dict`) — a
             brownout rebinds a tier's model, never its role.
-        modalities: Non-text INPUT modalities this tier plays the role for
-            (a subset of :data:`VALID_TIER_MODALITIES`).  Declaring
+        inbound_modalities: Non-text modalities this tier can ACCEPT as
+            input (a subset of :data:`VALID_TIER_MODALITIES`).  Declaring
             ``{"image"}`` means "this is the tier to enter to look at an
             image": the content gate names it when it withholds an image
             from a model that can't see one, and the startup capability
@@ -229,6 +244,21 @@ class TierEntry:
             Empty by default, except for a tier named ``vision``, which
             implies ``{"image"}`` (:data:`IMPLICIT_TIER_MODALITIES`) so
             profiles written before this key behave unchanged.
+        outbound_modalities: Non-text modalities this tier can EMIT.
+            Parsed and validated in full, but **the framework cannot yet
+            deliver model-generated media**: no adapter parses response
+            media and the streaming callback is text-only.  So an outbound
+            role is honest declaration ahead of delivery —
+            ``jaato-scaffold validate`` warns that it is inert, and the
+            startup check verifies it only against a provider that
+            implements ``supports_output_modality`` (none do today, so it
+            is skipped rather than failing falsely).  See
+            ``docs/design/binary-media-chunks.md``.
+
+            Two sets rather than one ``{kind: direction}`` map because
+            every consumer asks a DIRECTIONAL question ("which tier
+            accepts an image?", "which tier can emit audio?"); a map would
+            make each of them filter.
         provider: Provider plugin name (e.g. ``"anthropic"``).  When
             ``None``, the session's main provider is used and entering
             the tier just re-points it via
@@ -241,62 +271,148 @@ class TierEntry:
     model: str
     provider: Optional[str] = None
     description: Optional[str] = None
-    modalities: FrozenSet[str] = frozenset()
+    inbound_modalities: FrozenSet[str] = frozenset()
+    outbound_modalities: FrozenSet[str] = frozenset()
+
+    def modalities_for(self, direction: str) -> FrozenSet[str]:
+        """The roles this tier declares in ``direction``.
+
+        Args:
+            direction: :data:`DIRECTION_INBOUND` or
+                :data:`DIRECTION_OUTBOUND`.  ``bidirectional`` is a
+                DECLARATION spelling, not a query one — a bidirectional
+                role lands in both sets at parse time, so asking for it
+                here would be ambiguous and raises.
+
+        Raises:
+            ValueError: ``direction`` is not inbound or outbound.
+        """
+        if direction == DIRECTION_INBOUND:
+            return self.inbound_modalities
+        if direction == DIRECTION_OUTBOUND:
+            return self.outbound_modalities
+        raise ValueError(
+            f"direction must be {DIRECTION_INBOUND!r} or "
+            f"{DIRECTION_OUTBOUND!r}, got {direction!r}"
+        )
+
+    @property
+    def declares_any_modality(self) -> bool:
+        """Whether this tier claims any modality role, either direction."""
+        return bool(self.inbound_modalities or self.outbound_modalities)
 
 
-def _normalize_tier_modalities(name: str, raw: object) -> FrozenSet[str]:
-    """Coerce a tier entry's ``modalities`` value into a validated set.
-
-    Split from :func:`_normalize_tier_entry` to keep it simple; the
-    per-token validation is its own concern.
-
-    Args:
-        name: Tier name, for error messages and for the implicit-role
-            lookup when nothing is declared.
-        raw: The entry's raw ``modalities`` value, or ``None`` when the
-            entry declares none (including the shorthand string form).
-
-    Returns:
-        The declared roles, unioned with the name's implicit role
-        (:data:`IMPLICIT_TIER_MODALITIES`).  A tier named ``vision`` is
-        always an image tier — the name is the one that carries built-in
-        meaning, and a profile that doesn't want that should use a
-        different name rather than an empty list.
+def _normalize_modality_token(name: str, raw: object) -> str:
+    """Validate one modality token (the KEY side of a role declaration).
 
     Raises:
-        ModelTierConfigError: Not a list/tuple of strings, an unknown
-            token, or ``"text"`` (which would assert nothing).
+        ModelTierConfigError: Not a non-empty string, ``"text"`` (which
+            would assert nothing — every model accepts text), or a token
+            outside :data:`VALID_TIER_MODALITIES`.
     """
-    implicit = IMPLICIT_TIER_MODALITIES.get(name, frozenset())
+    if not isinstance(raw, str) or not raw.strip():
+        raise ModelTierConfigError(
+            f"tier {name!r}: 'modalities' entries must be non-empty strings"
+        )
+    kind = raw.strip().lower()
+    valid = ", ".join(sorted(VALID_TIER_MODALITIES))
+    if kind == "text":
+        raise ModelTierConfigError(
+            f"tier {name!r}: 'modalities' may not list 'text' — every model "
+            f"accepts text, so declaring it asserts nothing.  List only the "
+            f"non-text roles this tier fills ({valid})"
+        )
+    if kind not in VALID_TIER_MODALITIES:
+        raise ModelTierConfigError(
+            f"tier {name!r}: '{kind}' is not a modality ({valid})"
+        )
+    return kind
+
+
+def _normalize_direction(name: str, kind: str, raw: object) -> str:
+    """Validate the DIRECTION side of a role declaration.
+
+    Raises:
+        ModelTierConfigError: Not a non-empty string, or outside
+            :data:`VALID_MODALITY_DIRECTIONS`.  The message calls out
+            ``both`` and ``duplex`` by name, because they are the two
+            spellings an author is most likely to reach for.
+    """
+    if not isinstance(raw, str) or not raw.strip():
+        raise ModelTierConfigError(
+            f"tier {name!r}: direction for modality '{kind}' must be a "
+            f"non-empty string ({', '.join(sorted(VALID_MODALITY_DIRECTIONS))})"
+        )
+    direction = raw.strip().lower()
+    if direction in VALID_MODALITY_DIRECTIONS:
+        return direction
+    hint = ""
+    if direction in ("both", "duplex", "inout", "in_out", "io"):
+        hint = f"  (use '{DIRECTION_BIDIRECTIONAL}')"
+    raise ModelTierConfigError(
+        f"tier {name!r}: '{direction}' is not a modality direction for "
+        f"'{kind}' ({', '.join(sorted(VALID_MODALITY_DIRECTIONS))}){hint}"
+    )
+
+
+def _normalize_tier_modalities(
+    name: str, raw: object
+) -> Tuple[FrozenSet[str], FrozenSet[str]]:
+    """Coerce a tier entry's ``modalities`` value into (inbound, outbound).
+
+    Two accepted spellings:
+
+    * **list sugar** — ``[image, file]`` means those roles INBOUND.  This
+      is the form every profile written before directions existed uses, so
+      it must keep meaning exactly what it meant.
+    * **direction map** — ``{image: inbound, audio: bidirectional}``.
+      ``bidirectional`` lands the role in BOTH returned sets, which is why
+      the stored form is two sets and not the map itself.
+
+    Either way the name's implicit role
+    (:data:`IMPLICIT_TIER_MODALITIES`) is unioned in, so a tier called
+    ``vision`` is an inbound image tier whatever else it declares.
+
+    Args:
+        name: Tier name — for error messages and the implicit-role lookup.
+        raw: The entry's raw ``modalities`` value, or ``None``.
+
+    Returns:
+        ``(inbound, outbound)`` frozensets.
+
+    Raises:
+        ModelTierConfigError: Not a list or map, or a malformed token or
+            direction within it.
+    """
+    implicit = IMPLICIT_TIER_MODALITIES.get(name, {})
+    inbound = set(implicit.get(DIRECTION_INBOUND, frozenset()))
+    outbound = set(implicit.get(DIRECTION_OUTBOUND, frozenset()))
+
     if raw is None:
-        return implicit
+        return frozenset(inbound), frozenset(outbound)
+
+    if isinstance(raw, dict):
+        for kind_raw, direction_raw in raw.items():
+            kind = _normalize_modality_token(name, kind_raw)
+            direction = _normalize_direction(name, kind, direction_raw)
+            if direction in (DIRECTION_INBOUND, DIRECTION_BIDIRECTIONAL):
+                inbound.add(kind)
+            if direction in (DIRECTION_OUTBOUND, DIRECTION_BIDIRECTIONAL):
+                outbound.add(kind)
+        return frozenset(inbound), frozenset(outbound)
+
+    # A bare string must NOT be walked as a sequence of characters.
     if isinstance(raw, str) or not isinstance(raw, (list, tuple, set, frozenset)):
         raise ModelTierConfigError(
             f"tier {name!r}: 'modalities' must be a list of modality names "
-            f"({', '.join(sorted(VALID_TIER_MODALITIES))}), got "
+            f"({', '.join(sorted(VALID_TIER_MODALITIES))}) or a map of "
+            f"name -> direction "
+            f"({', '.join(sorted(VALID_MODALITY_DIRECTIONS))}), got "
             f"{type(raw).__name__}"
         )
-    out = set()
     for token in raw:
-        if not isinstance(token, str) or not token.strip():
-            raise ModelTierConfigError(
-                f"tier {name!r}: 'modalities' entries must be non-empty strings"
-            )
-        kind = token.strip().lower()
-        if kind == "text":
-            raise ModelTierConfigError(
-                f"tier {name!r}: 'modalities' may not list 'text' — every "
-                f"model accepts text, so declaring it asserts nothing.  List "
-                f"only the non-text roles this tier fills "
-                f"({', '.join(sorted(VALID_TIER_MODALITIES))})"
-            )
-        if kind not in VALID_TIER_MODALITIES:
-            raise ModelTierConfigError(
-                f"tier {name!r}: '{kind}' is not a modality "
-                f"({', '.join(sorted(VALID_TIER_MODALITIES))})"
-            )
-        out.add(kind)
-    return frozenset(out) | implicit
+        inbound.add(_normalize_modality_token(name, token))
+    return frozenset(inbound), frozenset(outbound)
 
 
 def _normalize_tier_entry(name: str, raw: object) -> TierEntry:
@@ -319,9 +435,11 @@ def _normalize_tier_entry(name: str, raw: object) -> TierEntry:
     if isinstance(raw, str):
         if not raw.strip():
             raise ModelTierConfigError(f"tier {name!r} has empty model string")
+        inbound, outbound = _normalize_tier_modalities(name, None)
         return TierEntry(
             model=raw.strip(),
-            modalities=_normalize_tier_modalities(name, None),
+            inbound_modalities=inbound,
+            outbound_modalities=outbound,
         )
     if isinstance(raw, dict):
         model = raw.get("model")
@@ -344,11 +462,14 @@ def _normalize_tier_entry(name: str, raw: object) -> TierEntry:
                 f"tier {name!r}: 'description' must be a non-empty string "
                 f"when set"
             )
+        inbound, outbound = _normalize_tier_modalities(
+            name, raw.get("modalities"))
         return TierEntry(
             model=model.strip(),
             provider=provider.strip() if provider else None,
             description=description.strip() if description else None,
-            modalities=_normalize_tier_modalities(name, raw.get("modalities")),
+            inbound_modalities=inbound,
+            outbound_modalities=outbound,
         )
     raise ModelTierConfigError(
         f"tier {name!r}: expected str or dict, got {type(raw).__name__}"
@@ -421,9 +542,17 @@ class ModelTierConfig:
         # its tiers mapping is not (overlay_tier_table relies on the same).
         for _name, _entry in list(self.tiers.items()):
             _implicit = IMPLICIT_TIER_MODALITIES.get(_name)
-            if _implicit and not _implicit <= _entry.modalities:
-                self.tiers[_name] = _dc_replace(
-                    _entry, modalities=_entry.modalities | _implicit)
+            if not _implicit:
+                continue
+            _in = _implicit.get(DIRECTION_INBOUND, frozenset())
+            _out = _implicit.get(DIRECTION_OUTBOUND, frozenset())
+            if _in <= _entry.inbound_modalities and _out <= _entry.outbound_modalities:
+                continue
+            self.tiers[_name] = _dc_replace(
+                _entry,
+                inbound_modalities=_entry.inbound_modalities | _in,
+                outbound_modalities=_entry.outbound_modalities | _out,
+            )
 
         # No same-provider gate: tiers may name different providers.
         # JaatoSession.switch_tier swaps to a cached per-tier provider instance
@@ -444,8 +573,10 @@ class ModelTierConfig:
         rest = sorted(n for n in self.tiers if n not in TIER_ORDER)
         return tuple(known + rest)
 
-    def tiers_for_modality(self, kind: str) -> Tuple[str, ...]:
-        """Declared tiers that play the role for input modality ``kind``.
+    def tiers_for_modality(
+        self, kind: str, direction: str = DIRECTION_INBOUND
+    ) -> Tuple[str, ...]:
+        """Declared tiers that play the role for modality ``kind``.
 
         The replacement for every ``"vision" in tier_config.tiers`` check.
         Returns names in canonical order (:meth:`ordered_tier_names`), so a
@@ -455,14 +586,25 @@ class ModelTierConfig:
         Args:
             kind: A modality token such as ``"image"``
                 (:data:`VALID_TIER_MODALITIES`).
+            direction: :data:`DIRECTION_INBOUND` (default — the content
+                gate's question, "who can look at this?") or
+                :data:`DIRECTION_OUTBOUND`.  Defaulted because inbound is
+                the only direction with machinery behind it today, so an
+                unqualified call is asking the question that can be
+                answered.
 
         Returns:
             Matching tier names, empty when this session has no tier for
-            that modality.
+            that modality in that direction.
+
+        Raises:
+            ValueError: ``direction`` is not inbound or outbound (a
+                ``bidirectional`` tier appears under BOTH, so querying for
+                it would be ambiguous).
         """
         return tuple(
             name for name in self.ordered_tier_names()
-            if kind in self.tiers[name].modalities
+            if kind in self.tiers[name].modalities_for(direction)
         )
 
     def describe_tier(self, tier_name: str) -> str:
@@ -475,7 +617,9 @@ class ModelTierConfig:
         a tier nobody described.
 
         A tier that declares modality roles its NAME doesn't already imply
-        gets a sentence appended saying so, unless the author wrote their own
+        gets a sentence appended saying so — one clause per direction, since
+        "can look at an image" and "can emit audio" are different
+        instructions to the model — unless the author wrote their own
         description (in which case they own the whole bullet).  Without it a
         ``planner`` tier declaring ``modalities: [image]`` read as pure
         cognitive prose, so the model had no reason to switch there for an
@@ -496,15 +640,30 @@ class ModelTierConfig:
             base = f"routes this session to {model}."
         if entry is None:
             return base
-        implicit = IMPLICIT_TIER_MODALITIES.get(tier_name, frozenset())
-        extra = entry.modalities - implicit
-        if not extra:
+        implicit = IMPLICIT_TIER_MODALITIES.get(tier_name, {})
+        extra_in = entry.inbound_modalities - implicit.get(
+            DIRECTION_INBOUND, frozenset())
+        extra_out = entry.outbound_modalities - implicit.get(
+            DIRECTION_OUTBOUND, frozenset())
+        clauses = []
+        if extra_in:
+            kinds = ", ".join(sorted(extra_in))
+            # "accept ... input" rather than "view ...": the clause is
+            # generated for audio and file roles too, where "view" is wrong.
+            clauses.append(
+                f"This tier can accept {kinds} input — switch here BEFORE "
+                f"reading such content with a tool, then switch back when "
+                f"done."
+            )
+        if extra_out:
+            kinds = ", ".join(sorted(extra_out))
+            clauses.append(
+                f"This tier can produce {kinds} output — switch here before "
+                f"work that must emit it."
+            )
+        if not clauses:
             return base
-        kinds = ", ".join(sorted(extra))
-        return (
-            f"{base}  This tier can also view {kinds} content — switch here "
-            f"BEFORE reading it with a tool, then switch back when done."
-        )
+        return f"{base}  " + "  ".join(clauses)
 
     def model_for(self, tier_name: str) -> Tuple[str, TierEntry]:
         """Resolve a tier name to ``(actual_tier, entry)``.

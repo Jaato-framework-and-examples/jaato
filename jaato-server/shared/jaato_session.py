@@ -7901,7 +7901,9 @@ NOTES
             # Sorted for determinism when several modalities were withheld
             # at once; first match in canonical tier order wins.
             for kind in sorted(withheld):
-                candidates = tier_config.tiers_for_modality(kind)
+                # INBOUND explicitly: the gate's question is "who can look
+                # at this?", never "who could emit one".
+                candidates = tier_config.tiers_for_modality(kind, "inbound")
                 if candidates:
                     target = candidates[0]
                     break
@@ -7939,9 +7941,16 @@ NOTES
         validated too — the defect this closes is that renaming ``vision``
         silently disabled the check.
 
+        Inbound roles are checked against ``provider.supports_modality``.
+        Outbound roles are checked only when the provider implements
+        ``supports_output_modality``; none do yet, so an outbound role is
+        currently left unverified here rather than failing falsely — its
+        inertness is reported by ``jaato-scaffold validate`` instead.
+
         Raises:
             ModelTierConfigError: A tier declares a modality its model
-                doesn't accept and no ``modalities`` knob asserts.
+                doesn't accept (or, where checkable, can't emit) and no
+                ``modalities`` knob asserts.
         """
         tier_config = self._tier_config
         provider = self._provider
@@ -7950,7 +7959,7 @@ NOTES
         from .model_tiers import ModelTierConfigError
         for tier_name in tier_config.ordered_tier_names():
             entry = tier_config.tiers[tier_name]
-            if not entry.modalities:
+            if not entry.declares_any_modality:
                 continue
             # A tier on a DIFFERENT provider is NOT checked here — validating
             # it would eagerly create that provider (paying its init cost on
@@ -7960,17 +7969,36 @@ NOTES
             # model) are fail-fast checked at startup.
             if entry.provider and entry.provider != self._active_provider_name:
                 continue
-            for kind in sorted(entry.modalities):
+            provider_name = getattr(provider, "name", "the provider")
+            for kind in sorted(entry.inbound_modalities):
                 if provider.supports_modality(kind, model=entry.model):
                     continue
-                provider_name = getattr(provider, "name", "the provider")
                 raise ModelTierConfigError(
                     f"The {tier_name!r} tier declares the {kind!r} modality "
-                    f"but maps to {entry.model!r} ({provider_name}), which "
-                    f"does not declare {kind} input.  Map the tier to a "
+                    f"inbound but maps to {entry.model!r} ({provider_name}), "
+                    f"which does not declare {kind} input.  Map the tier to a "
                     f"{kind}-capable model, or set "
                     f"plugin_configs.{provider_name}.modalities: "
                     f'["text", "{kind}"] to assert it.'
+                )
+            # Outbound is verified only against a provider that can answer.
+            # No provider implements ``supports_output_modality`` yet (the
+            # output half of the catalog's ``architecture.modality`` is still
+            # discarded), so this is a forward hook: absent the method the
+            # role is left unverified rather than failing falsely.  The
+            # inertness itself is surfaced by ``jaato-scaffold validate``,
+            # not by refusing to start.  See docs/design/binary-media-chunks.md.
+            supports_out = getattr(provider, "supports_output_modality", None)
+            if supports_out is None:
+                continue
+            for kind in sorted(entry.outbound_modalities):
+                if supports_out(kind, model=entry.model):
+                    continue
+                raise ModelTierConfigError(
+                    f"The {tier_name!r} tier declares the {kind!r} modality "
+                    f"outbound but maps to {entry.model!r} ({provider_name}), "
+                    f"which does not declare {kind} output.  Map the tier to "
+                    f"a model that can emit {kind}, or drop the outbound role."
                 )
 
     def _sync_budget_after_truncation(

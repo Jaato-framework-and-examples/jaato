@@ -121,3 +121,48 @@ def test_validate_flags_text_modality_with_an_explanation(tmp_path):
     bad = [d for d in diags if d.code == "invalid_tier_modalities"]
     assert len(bad) == 1
     assert "asserts nothing" in bad[0].message
+
+
+def test_explain_tiers_documents_directions():
+    data, text = explain.tiers()
+    assert set(data["modality_directions"]) == {
+        "inbound", "outbound", "bidirectional"}
+    assert "outbound_is_inert" in data
+    assert "inbound" in text
+
+
+def test_validate_warns_that_outbound_is_inert(tmp_path):
+    # Outbound parses and is stored, so it must NOT be an error — a profile
+    # should be writable ahead of the delivery work. But it is inert, so
+    # staying silent would be the silent-no-op failure mode.
+    pdir = tmp_path / ".jaato" / "profiles" / "setO"
+    pdir.mkdir(parents=True)
+    (tmp_path / ".jaato" / "profiles" / "_base_o.yaml").write_text(
+        "name: _base_o\ndescription: b\nplugins: []\n")
+    (pdir / "o.yaml").write_text(
+        "name: o\ninherits: [_base_o]\nplugins: []\n"
+        "model_tiers:\n"
+        "  executor: {model: e}\n"
+        "  planner: {model: p, modalities: {audio: outbound}}\n"
+        "  initial: executor\n  fallback: executor\n")
+    diags = V.validate_workspace(str(tmp_path), profile_set="setO", only="o")
+    warns = [d for d in diags if d.code == "outbound_modality_not_deliverable"]
+    assert len(warns) == 1
+    assert warns[0].severity == "warning"
+    assert not [d for d in diags if d.code == "invalid_tier_modalities"]
+
+
+def test_validate_flags_a_bad_direction_and_suggests_bidirectional(tmp_path):
+    pdir = tmp_path / ".jaato" / "profiles" / "setB"
+    pdir.mkdir(parents=True)
+    (tmp_path / ".jaato" / "profiles" / "_base_b.yaml").write_text(
+        "name: _base_b\ndescription: b\nplugins: []\n")
+    (pdir / "b.yaml").write_text(
+        "name: b\ninherits: [_base_b]\nplugins: []\n"
+        "model_tiers:\n"
+        "  executor: {model: e, modalities: {image: both}}\n"
+        "  initial: executor\n  fallback: executor\n")
+    diags = V.validate_workspace(str(tmp_path), profile_set="setB", only="b")
+    bad = [d for d in diags if d.code == "invalid_tier_modalities"]
+    assert len(bad) == 1
+    assert "bidirectional" in bad[0].message

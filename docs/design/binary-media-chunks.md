@@ -1,7 +1,10 @@
 # Binary Media Chunks — modality direction, and getting bytes to a client
 
-**Status:** design note, nothing implemented beyond the tier-side `modalities`
-key (server 0.7.x, `shared/model_tiers.py`). Written to give two parallel
+**Status:** design note. §5.5 (the direction-qualified tier key) is
+**implemented** — `shared/model_tiers.py` parses `{kind: direction}` into
+`TierEntry.inbound_modalities` / `.outbound_modalities`, the content gate and
+startup check ask directional questions, and `jaato-scaffold validate` warns
+that outbound roles are inert. Everything else here is still a proposal. Written to give two parallel
 workstreams — model-tier modality roles, and OpenAI audio streaming output —
 one shared chunk primitive instead of two.
 

@@ -236,7 +236,7 @@ class TestModalityRoleByKey:
         return ModelTierConfig(
             tiers={
                 "executor": TierEntry("openai/gpt-5-mini"),
-                "planner": TierEntry(model, modalities=frozenset(modalities)),
+                "planner": TierEntry(model, inbound_modalities=frozenset(modalities)),
             },
             initial_tier="executor", tier_fallback="executor",
         )

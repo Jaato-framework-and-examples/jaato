@@ -277,12 +277,21 @@ def validate_profile(
 
 
 def _check_tier_modalities(key, raw, add):
-    """Validate one tier entry's ``modalities`` list statically.
+    """Validate one tier entry's ``modalities`` declaration statically.
 
     Mirrors ``shared.model_tiers._normalize_tier_modalities`` so an author
     sees the defect from ``jaato-scaffold validate`` rather than at session
     create.  Kept separate from :func:`_check_model_tiers` so neither grows
     past the complexity ceiling.
+
+    Accepts both spellings: the list sugar (``[image]``, meaning inbound)
+    and the direction map (``{image: bidirectional}``).
+
+    Emits a **warning**, not an error, for an outbound role: it parses and
+    is stored, but no adapter can deliver model-generated media yet, so the
+    declaration is inert.  Warning rather than error because a profile
+    should be writable ahead of the delivery work landing — see
+    ``docs/design/binary-media-chunks.md``.
 
     Args:
         key: Tier name, for the diagnostic's ``where``.
@@ -291,15 +300,24 @@ def _check_tier_modalities(key, raw, add):
     """
     if raw is None:
         return
-    from shared.model_tiers import VALID_TIER_MODALITIES
+    from shared.model_tiers import (
+        DIRECTION_INBOUND, VALID_MODALITY_DIRECTIONS, VALID_TIER_MODALITIES,
+    )
     where = f"model_tiers.{key}.modalities"
     valid = ", ".join(sorted(VALID_TIER_MODALITIES))
-    if isinstance(raw, str) or not isinstance(raw, (list, tuple)):
+
+    if isinstance(raw, dict):
+        pairs = list(raw.items())
+    elif isinstance(raw, (list, tuple)):
+        pairs = [(tok, DIRECTION_INBOUND) for tok in raw]
+    else:
         add("error", "invalid_tier_modalities",
             f"model_tiers.{key} modalities must be a LIST of modality names "
-            f"({valid})", where=where)
+            f"({valid}) or a MAP of name -> direction "
+            f"({', '.join(sorted(VALID_MODALITY_DIRECTIONS))})", where=where)
         return
-    for token in raw:
+
+    for token, direction in pairs:
         if not isinstance(token, str) or not token.strip():
             add("error", "invalid_tier_modalities",
                 f"model_tiers.{key} modalities entries must be non-empty "
@@ -311,10 +329,49 @@ def _check_tier_modalities(key, raw, add):
                 f"model_tiers.{key} may not declare the 'text' modality — "
                 "every model accepts text, so it asserts nothing; list only "
                 f"the non-text roles this tier fills ({valid})", where=where)
-        elif kind not in VALID_TIER_MODALITIES:
+            continue
+        if kind not in VALID_TIER_MODALITIES:
             add("error", "invalid_tier_modalities",
                 f"model_tiers.{key} modality '{kind}' is not a modality "
                 f"({valid})", where=where)
+            continue
+        _check_modality_direction(key, kind, direction, where, add)
+
+
+def _check_modality_direction(key, kind, direction, where, add):
+    """Validate the direction of one modality role, and flag inert outbound.
+
+    Split from :func:`_check_tier_modalities` to keep both under the
+    complexity ceiling.
+    """
+    from shared.model_tiers import (
+        DIRECTION_BIDIRECTIONAL, DIRECTION_OUTBOUND,
+        VALID_MODALITY_DIRECTIONS,
+    )
+    if not isinstance(direction, str) or not direction.strip():
+        add("error", "invalid_tier_modalities",
+            f"model_tiers.{key} direction for '{kind}' must be a string "
+            f"({', '.join(sorted(VALID_MODALITY_DIRECTIONS))})", where=where)
+        return
+    value = direction.strip().lower()
+    if value not in VALID_MODALITY_DIRECTIONS:
+        hint = (f"  (use '{DIRECTION_BIDIRECTIONAL}')"
+                if value in ("both", "duplex", "inout", "in_out", "io") else "")
+        add("error", "invalid_tier_modalities",
+            f"model_tiers.{key} direction '{value}' for '{kind}' is not a "
+            f"direction ({', '.join(sorted(VALID_MODALITY_DIRECTIONS))})"
+            f"{hint}", where=where)
+        return
+    if value in (DIRECTION_OUTBOUND, DIRECTION_BIDIRECTIONAL):
+        add("warning", "outbound_modality_not_deliverable",
+            f"model_tiers.{key} declares '{kind}' {value}, which parses but "
+            "is INERT: no adapter parses model-generated media and the "
+            "streaming callback is text-only, so nothing can deliver it "
+            "yet.  The declaration is kept so profiles can be written "
+            "ahead of that work — see docs/design/binary-media-chunks.md."
+            + ("  The inbound half of this role IS live."
+               if value == DIRECTION_BIDIRECTIONAL else ""),
+            where=where)
 
 
 def _check_model_tiers(mt_cfg, add):

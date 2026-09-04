@@ -474,10 +474,12 @@ def tiers() -> Rendered:
     valid = sorted(mt.VALID_TIER_NAMES)
     reserved = sorted(mt.RESERVED_KEYS)
     modalities = sorted(mt.VALID_TIER_MODALITIES)
+    directions = sorted(mt.VALID_MODALITY_DIRECTIONS)
     data = {
         "tier_names": valid,
         "reserved_keys": reserved,
         "modalities": modalities,
+        "modality_directions": directions,
         "shape": "model_tiers: { <tier>: <model-str> | "
                  "{model, provider, description, modalities}, "
                  "initial: <tier>, fallback: <tier> }",
@@ -497,16 +499,25 @@ def tiers() -> Rendered:
                        "advertised.  read once when the tool schema is built "
                        "(it sits in the prompt-cache prefix), so a budget "
                        "degrade rung cannot set it.",
-        "modalities_key": "a tier declares which non-text INPUT modalities it "
-                          "fills (" + ", ".join(modalities) + ").  the content "
+        "modalities_key": "a tier declares which non-text modalities it "
+                          "fills (" + ", ".join(modalities) + ") and in which "
+                          "direction (" + ", ".join(directions) + ").  list "
+                          "form [image] is sugar for inbound.  the content "
                           "gate and the startup capability check resolve the "
                           "tier BY ROLE, not by the name 'vision' — which "
-                          "still implies ['image'] so pre-existing profiles "
-                          "are unchanged.  this DECLARES a role and is "
-                          "VERIFIED (a tier whose model can't accept the "
+                          "still implies image inbound so pre-existing "
+                          "profiles are unchanged.  this DECLARES a role and "
+                          "is VERIFIED (a tier whose model can't accept the "
                           "modality fails loud at connect); the opposite of "
                           "plugin_configs.<provider>.modalities, which "
                           "ASSERTS capability to correct catalog detection.",
+        "outbound_is_inert": "an OUTBOUND role parses and is stored, but "
+                             "nothing can deliver model-generated media yet "
+                             "(no adapter parses response media; the "
+                             "streaming callback is text-only).  validate "
+                             "warns rather than errors so profiles can be "
+                             "written ahead of that work.  see "
+                             "docs/design/binary-media-chunks.md.",
         "cross_provider": "V2 (#354): tiers may declare DIFFERENT providers; "
                           "switch_tier swaps to a cached per-tier provider "
                           "instance (history is provider-neutral; switch-back is "
@@ -535,8 +546,10 @@ def tiers() -> Rendered:
         "  it is read once, when the tool schema is built: the tool block sits in\n"
         "  the prompt-cache prefix, so a budget degrade rung may NOT set one.\n\n"
         "MODALITY ROLES  (which tier can SEE what)\n"
-        f"  a tier may declare  modalities: [{', '.join(modalities)}]  — the input\n"
-        "  roles it fills.  content of a modality the ACTIVE model can't accept is\n"
+        f"  a tier may declare  modalities: {{<kind>: <direction>}}  where kind is\n"
+        f"  one of {', '.join(modalities)} and direction is one of\n"
+        f"  {', '.join(directions)}.  the list form  modalities: [image]  is sugar\n"
+        "  for inbound.  content of a modality the ACTIVE model can't accept is\n"
         "  withheld by the content gate, which names a tier that declares the role:\n"
         "  a synthetic 'enter_tier(\"<tier>\") first' the agent self-corrects on.\n"
         "  the tier is found BY ROLE, so an image tier need not be called 'vision'\n"
@@ -546,6 +559,9 @@ def tiers() -> Rendered:
         "  NOTE this DECLARES a role and is VERIFIED — the opposite direction from\n"
         "  plugin_configs.<provider>.modalities, which ASSERTS what a model\n"
         "  supports to correct catalog detection.\n"
+        "  OUTBOUND roles parse but are INERT — nothing delivers model-generated\n"
+        "  media yet, so `validate` warns.  declare them anyway if you want the\n"
+        "  profile ready; see docs/design/binary-media-chunks.md.\n"
         "  user-message images ride the attachment ferry — SDK\n"
         "  send_message(attachments=...).\n\n"
         "CROSS-PROVIDER  (V2)\n"

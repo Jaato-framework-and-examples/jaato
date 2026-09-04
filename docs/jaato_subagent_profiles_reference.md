@@ -392,7 +392,7 @@ Rich-form keys:
 | `model` | `string` | yes | The model this tier selects. |
 | `provider` | `string` | no | Provider plugin for this tier. Tiers may name **different** providers (see §5.5). Unset = the session's main provider. |
 | `description` | `string` | no | What this tier is *for*, in the words the model reads. Becomes that tier's bullet in the `enter_tier` tool description, replacing the framework's default wording for the name. |
-| `modalities` | `string[]` | no | Non-text **input** roles this tier fills — any of `image`, `audio`, `video`, `file`. Declaring `["image"]` means "this is the tier to enter to look at an image". A tier named `vision` implies `["image"]`. |
+| `modalities` | `string[]` or `map` | no | Non-text roles this tier fills, and in which direction. Map form `{image: inbound}`; list form `["image"]` is sugar for inbound. Kinds: `image`, `audio`, `video`, `file`. Directions: `inbound`, `outbound`, `bidirectional`. A tier named `vision` implies `image: inbound`. |
 
 ##### `modalities` — declaring a role, not asserting a capability
 
@@ -407,7 +407,7 @@ model_tiers:
   executor: openai/gpt-5-mini
   planner:
     model: google/gemini-3-pro
-    modalities: [image]        # the planner doubles as the image tier
+    modalities: {image: inbound}   # the planner doubles as the image tier
   initial: executor
   fallback: executor
 ```
@@ -429,6 +429,36 @@ nothing. The gate can withhold `image` / `audio` / `video` / `file`, and a
 tier can declare any of them — though only image *conversion* is implemented
 across providers today, so the others are declarable ahead of the converters
 that will fill them.
+
+##### Direction
+
+Each role carries a direction. The list form is sugar for the common case:
+
+```yaml
+modalities: [image]                 # ≡ {image: inbound}
+modalities: {image: inbound}        # the tier can ACCEPT images
+modalities: {audio: outbound}       # the tier can EMIT audio
+modalities: {audio: bidirectional}  # both
+```
+
+`bidirectional`, not `both` — "both" says nothing about what it is both *of*,
+and doesn't parallel `inbound`/`outbound`. Not `duplex` either: that connotes
+simultaneity, and a tier declares capability, not concurrency. Writing any of
+`both` / `duplex` / `inout` produces an error that names `bidirectional`.
+
+Internally a role is stored as **two sets** (`inbound_modalities` /
+`outbound_modalities`) rather than a map, because every consumer asks a
+directional question; `bidirectional` simply lands the role in both.
+
+> **Outbound roles parse but are INERT today.** No adapter parses
+> model-generated media and the streaming callback is text-only, so nothing
+> can deliver what an outbound role promises. `jaato-scaffold validate` emits
+> a **warning** (not an error) saying so — the declaration is accepted
+> deliberately, so a profile can be written ahead of that work landing. The
+> startup capability check verifies an outbound role only against a provider
+> implementing `supports_output_modality`; none do yet, so it is skipped
+> rather than failing falsely. See
+> [Binary Media Chunks](design/binary-media-chunks.md).
 
 ##### Why override `description`
 
@@ -754,6 +784,8 @@ class TierEntry:
     model: str                  # e.g. "claude-opus-4-7"
     provider: Optional[str]     # None = the session's main provider
     description: Optional[str]  # this tier's bullet in the enter_tier tool
+    inbound_modalities: FrozenSet[str]   # roles the tier can ACCEPT
+    outbound_modalities: FrozenSet[str]  # roles the tier can EMIT (inert today)
 ```
 
 **Key methods**:
@@ -781,6 +813,10 @@ All validation runs at construction time (`__post_init__`). Invalid configs rais
 | Tier model must be non-empty string | `"tier '...': 'model' must be a non-empty string"` |
 | Tier provider must be non-empty when set | `"tier '...': 'provider' must be a non-empty string"` |
 | Tier description must be non-empty when set | `"tier '...': 'description' must be a non-empty string"` |
+| Modality must be a known kind | `"tier '...': '...' is not a modality"` |
+| `text` may not be declared as a role | `"'modalities' may not list 'text'"` |
+| Direction must be known | `"tier '...': '...' is not a modality direction"` |
+| `modalities` must be a list or a map | `"'modalities' must be a list ... or a map"` |
 | Invalid tier value type | `"tier '...': expected str or dict, got ..."` |
 
 ---

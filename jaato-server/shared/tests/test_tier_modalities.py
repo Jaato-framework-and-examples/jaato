@@ -59,21 +59,21 @@ class TestParsing:
     def test_declared_modalities_parsed(self):
         cfg = _cfg({"planner": {"model": "m", "modalities": ["image"]},
                     "initial": "planner", "fallback": "planner"})
-        assert cfg.tiers["planner"].modalities == frozenset({"image"})
+        assert cfg.tiers["planner"].inbound_modalities == frozenset({"image"})
 
     def test_multiple_modalities(self):
         cfg = _cfg({"planner": {"model": "m", "modalities": ["image", "file"]},
                     "initial": "planner", "fallback": "planner"})
-        assert cfg.tiers["planner"].modalities == frozenset({"image", "file"})
+        assert cfg.tiers["planner"].inbound_modalities == frozenset({"image", "file"})
 
     def test_tokens_are_normalised(self):
         cfg = _cfg({"planner": {"model": "m", "modalities": ["  IMAGE "]},
                     "initial": "planner", "fallback": "planner"})
-        assert cfg.tiers["planner"].modalities == frozenset({"image"})
+        assert cfg.tiers["planner"].inbound_modalities == frozenset({"image"})
 
     def test_undeclared_is_empty(self):
         cfg = _cfg({"planner": "m", "initial": "planner", "fallback": "planner"})
-        assert cfg.tiers["planner"].modalities == frozenset()
+        assert cfg.tiers["planner"].inbound_modalities == frozenset()
 
     def test_unknown_modality_rejected(self):
         with pytest.raises(ModelTierConfigError, match="not a modality"):
@@ -85,10 +85,11 @@ class TestParsing:
             _cfg({"planner": {"model": "m", "modalities": ["text"]},
                   "initial": "planner", "fallback": "planner"})
 
-    @pytest.mark.parametrize("bad", ["image", 7, {"image": True}])
-    def test_non_list_rejected(self, bad):
-        # A bare string is the likely typo and must not be parsed as a
-        # sequence of characters.
+    @pytest.mark.parametrize("bad", ["image", 7, 3.5])
+    def test_non_list_non_map_rejected(self, bad):
+        # A bare string is the likely typo and must not be walked as a
+        # sequence of characters.  A dict is NOT in this list — that is the
+        # direction-map form (see TestDirections).
         with pytest.raises(ModelTierConfigError, match="must be a list"):
             _cfg({"planner": {"model": "m", "modalities": bad},
                   "initial": "planner", "fallback": "planner"})
@@ -106,12 +107,12 @@ class TestImplicitVisionRole:
     def test_shorthand_vision_implies_image(self):
         cfg = _cfg({"executor": "e", "vision": "v",
                     "initial": "executor", "fallback": "executor"})
-        assert cfg.tiers["vision"].modalities == frozenset({"image"})
+        assert cfg.tiers["vision"].inbound_modalities == frozenset({"image"})
 
     def test_rich_vision_implies_image(self):
         cfg = _cfg({"executor": "e", "vision": {"model": "v"},
                     "initial": "executor", "fallback": "executor"})
-        assert cfg.tiers["vision"].modalities == frozenset({"image"})
+        assert cfg.tiers["vision"].inbound_modalities == frozenset({"image"})
 
     def test_direct_construction_also_implies_image(self):
         # __post_init__ applies it, so a config built in code (tests,
@@ -119,13 +120,13 @@ class TestImplicitVisionRole:
         cfg = ModelTierConfig(
             tiers={"executor": TierEntry("e"), "vision": TierEntry("v")},
             initial_tier="executor", tier_fallback="executor")
-        assert cfg.tiers["vision"].modalities == frozenset({"image"})
+        assert cfg.tiers["vision"].inbound_modalities == frozenset({"image"})
 
     def test_vision_may_add_roles_but_keeps_image(self):
         cfg = _cfg({"executor": "e",
                     "vision": {"model": "v", "modalities": ["file"]},
                     "initial": "executor", "fallback": "executor"})
-        assert cfg.tiers["vision"].modalities == frozenset({"image", "file"})
+        assert cfg.tiers["vision"].inbound_modalities == frozenset({"image", "file"})
 
     def test_only_vision_has_an_implicit_role(self):
         assert set(IMPLICIT_TIER_MODALITIES) == {"vision"}
@@ -187,10 +188,10 @@ class TestBudgetOverlayPreservesRole:
 
     def test_overlay_carries_the_role_forward(self):
         from shared.budget_control import overlay_tier_table
-        tiers = {"vision": TierEntry("pricey", modalities=frozenset({"image"}))}
+        tiers = {"vision": TierEntry("pricey", inbound_modalities=frozenset({"image"}))}
         overlay_tier_table(tiers, {"vision": TierEntry("cheap")})
         assert tiers["vision"].model == "cheap"
-        assert tiers["vision"].modalities == frozenset({"image"})
+        assert tiers["vision"].inbound_modalities == frozenset({"image"})
 
 
 class TestDescribeTierAnnouncesTheRole:
@@ -208,7 +209,7 @@ class TestDescribeTierAnnouncesTheRole:
                     "initial": "executor", "fallback": "executor"})
         prose = cfg.describe_tier("planner")
         assert "deep thought" in prose            # framework base kept
-        assert "view image content" in prose      # role announced
+        assert "accept image input" in prose      # role announced
 
     def test_vision_does_not_double_announce(self):
         # image is vision's implicit role and its default prose covers it.
@@ -232,4 +233,134 @@ class TestDescribeTierAnnouncesTheRole:
         schema = LifecycleTools(SimpleNamespace(
             _tier_config=cfg, _completion_payload_schema=None,
             workspace_path=None, runtime=None))._enter_tier_schema()
-        assert "view file content" in schema.description
+        assert "accept file input" in schema.description
+
+
+class TestDirections:
+    """The direction-qualified map form: `{image: inbound|outbound|bidirectional}`."""
+
+    def _entry(self, mods):
+        cfg = _cfg({"planner": {"model": "m", "modalities": mods},
+                    "initial": "planner", "fallback": "planner"})
+        return cfg.tiers["planner"]
+
+    def test_inbound_map(self):
+        e = self._entry({"image": "inbound"})
+        assert e.inbound_modalities == frozenset({"image"})
+        assert e.outbound_modalities == frozenset()
+
+    def test_outbound_map(self):
+        e = self._entry({"audio": "outbound"})
+        assert e.inbound_modalities == frozenset()
+        assert e.outbound_modalities == frozenset({"audio"})
+
+    def test_bidirectional_lands_in_both_sets(self):
+        # Which is exactly why the stored form is two sets and not the map.
+        e = self._entry({"audio": "bidirectional"})
+        assert e.inbound_modalities == frozenset({"audio"})
+        assert e.outbound_modalities == frozenset({"audio"})
+
+    def test_mixed_directions(self):
+        e = self._entry({"image": "inbound", "audio": "outbound"})
+        assert e.inbound_modalities == frozenset({"image"})
+        assert e.outbound_modalities == frozenset({"audio"})
+
+    def test_direction_is_normalised(self):
+        assert self._entry({"audio": "  OUTBOUND "}).outbound_modalities == \
+            frozenset({"audio"})
+
+    def test_list_sugar_is_inbound(self):
+        e = self._entry(["image"])
+        assert e.inbound_modalities == frozenset({"image"})
+        assert e.outbound_modalities == frozenset()
+
+    @pytest.mark.parametrize("bad", ["both", "duplex", "inout", "io"])
+    def test_near_miss_spellings_suggest_bidirectional(self, bad):
+        # These are the spellings an author actually reaches for; the error
+        # has to name the right one rather than just listing the enum.
+        with pytest.raises(ModelTierConfigError, match="bidirectional"):
+            self._entry({"audio": bad})
+
+    @pytest.mark.parametrize("bad", ["", "   ", 7, None, True])
+    def test_malformed_direction_rejected(self, bad):
+        with pytest.raises(ModelTierConfigError, match="direction"):
+            self._entry({"audio": bad})
+
+    def test_modalities_for_rejects_bidirectional_as_a_query(self):
+        # bidirectional is a DECLARATION spelling; querying for it would be
+        # ambiguous since the role lands in both sets.
+        e = self._entry({"audio": "bidirectional"})
+        assert e.modalities_for("inbound") == frozenset({"audio"})
+        assert e.modalities_for("outbound") == frozenset({"audio"})
+        with pytest.raises(ValueError, match="direction must be"):
+            e.modalities_for("bidirectional")
+
+    def test_vision_keeps_inbound_image_alongside_a_declared_outbound(self):
+        cfg = _cfg({"executor": "e",
+                    "vision": {"model": "v", "modalities": {"audio": "outbound"}},
+                    "initial": "executor", "fallback": "executor"})
+        v = cfg.tiers["vision"]
+        assert v.inbound_modalities == frozenset({"image"})
+        assert v.outbound_modalities == frozenset({"audio"})
+
+
+class TestDirectionalLookup:
+    def test_tiers_for_modality_defaults_to_inbound(self):
+        cfg = _cfg({"executor": "e",
+                    "planner": {"model": "p", "modalities": {"audio": "outbound"}},
+                    "initial": "executor", "fallback": "executor"})
+        assert cfg.tiers_for_modality("audio") == ()               # inbound
+        assert cfg.tiers_for_modality("audio", "outbound") == ("planner",)
+
+    def test_bidirectional_tier_appears_in_both(self):
+        cfg = _cfg({"executor": "e",
+                    "planner": {"model": "p",
+                                "modalities": {"audio": "bidirectional"}},
+                    "initial": "executor", "fallback": "executor"})
+        assert cfg.tiers_for_modality("audio", "inbound") == ("planner",)
+        assert cfg.tiers_for_modality("audio", "outbound") == ("planner",)
+
+    def test_bad_direction_raises(self):
+        cfg = _cfg({"executor": "e", "initial": "executor", "fallback": "executor"})
+        with pytest.raises(ValueError, match="direction must be"):
+            cfg.tiers_for_modality("image", "sideways")
+
+
+class TestOutboundDescribedButInert:
+    def test_outbound_role_announced_separately_from_inbound(self):
+        cfg = _cfg({"executor": {"model": "e",
+                                 "modalities": {"audio": "bidirectional"}},
+                    "initial": "executor", "fallback": "executor"})
+        prose = cfg.describe_tier("executor")
+        assert "accept audio input" in prose        # inbound clause
+        assert "produce audio output" in prose      # outbound clause
+
+    def test_startup_check_skips_outbound_when_provider_cannot_answer(self):
+        # No provider implements supports_output_modality yet; the role must
+        # be left unverified rather than failing falsely.
+        from types import SimpleNamespace
+        from shared.jaato_session import JaatoSession
+        cfg = _cfg({"executor": {"model": "m", "modalities": {"audio": "outbound"}},
+                    "initial": "executor", "fallback": "executor"})
+        s = JaatoSession.__new__(JaatoSession)
+        s._tier_config = cfg
+        s._active_provider_name = "p"
+        s._provider = SimpleNamespace(
+            name="p", supports_modality=lambda kind, model=None: False)
+        s._validate_modality_tier_capabilities()  # no raise
+
+    def test_startup_check_enforces_outbound_when_provider_can_answer(self):
+        from types import SimpleNamespace
+        from shared.jaato_session import JaatoSession
+        cfg = _cfg({"executor": {"model": "m", "modalities": {"audio": "outbound"}},
+                    "initial": "executor", "fallback": "executor"})
+        s = JaatoSession.__new__(JaatoSession)
+        s._tier_config = cfg
+        s._active_provider_name = "p"
+        s._provider = SimpleNamespace(
+            name="p",
+            supports_modality=lambda kind, model=None: True,
+            supports_output_modality=lambda kind, model=None: False,
+        )
+        with pytest.raises(ModelTierConfigError, match="outbound"):
+            s._validate_modality_tier_capabilities()

@@ -724,8 +724,10 @@ def overlay_tier_table(
             carried = {}
             if current.description:
                 carried["description"] = current.description
-            if current.modalities and not entry.modalities:
-                carried["modalities"] = current.modalities
+            if current.inbound_modalities and not entry.inbound_modalities:
+                carried["inbound_modalities"] = current.inbound_modalities
+            if current.outbound_modalities and not entry.outbound_modalities:
+                carried["outbound_modalities"] = current.outbound_modalities
             if carried:
                 entry = _dc_replace(entry, **carried)
         tiers[tier_name] = entry
