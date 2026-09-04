@@ -407,9 +407,15 @@ class TestInteractiveRootFilter:
         running in interactive root (the per-turn model switching is a
         cost optimization, not a completion contract).
         """
-        # Tier mode requires _tier_config — set on the session.
+        # Tier mode requires _tier_config — set on the session.  A real
+        # ModelTierConfig, not a sentinel: the enter_tier schema is now
+        # built FROM the declared tiers (names + per-tier descriptions),
+        # so the builder reads the config rather than merely checking it
+        # for None.
+        from shared.model_tiers import ModelTierConfig
         session = StubInteractiveSession(client_type=ClientType.TERMINAL)
-        session._tier_config = object()  # sentinel non-None
+        session._tier_config = ModelTierConfig.from_unified_dict(
+            {"executor": "e", "initial": "executor", "fallback": "executor"})
         lt = LifecycleTools(session)
         names = [s.name for s in lt.get_tool_schemas()]
         assert "signal_completion" not in names

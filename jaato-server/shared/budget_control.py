@@ -47,7 +47,7 @@ that applies an overlay to the *currently active* tier.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace as _dc_replace
 from typing import Any, Dict, Mapping, NamedTuple, Optional, Tuple
 
 # Deliberate reuse of the tier-entry normalizer: a ``degrade[].model_tiers``
@@ -202,6 +202,77 @@ def _parse_at(raw: object) -> float:
     return value
 
 
+def _parse_degrade_overlay(
+    raw_overlay: Any, *, index: int
+) -> Dict[str, TierEntry]:
+    """Parse one rung's ``model_tiers`` overlay into tier entries.
+
+    Split out of :meth:`DegradeRung.from_dict` to keep that method under
+    the complexity ceiling — the per-key validation is a self-contained
+    concern (it enforces what an OVERLAY may say, as opposed to what a
+    base tier table may say).
+
+    Args:
+        raw_overlay: The rung's raw ``model_tiers`` value.  Falsy yields
+            an empty overlay.
+        index: The rung's position, used only in error messages.
+
+    Returns:
+        Tier name → :class:`~shared.model_tiers.TierEntry`.  Entries never
+        carry a ``description`` — see the refusal below.
+
+    Raises:
+        BudgetControlConfigError: Not an object; a reserved control key; a
+            name outside :data:`~shared.model_tiers.VALID_TIER_NAMES`; a
+            ``description`` (a rung rebinds a tier's model, not its role);
+            or an entry the shared tier-entry normalizer rejects.
+    """
+    overlay: Dict[str, TierEntry] = {}
+    if not raw_overlay:
+        return overlay
+    if not isinstance(raw_overlay, Mapping):
+        raise BudgetControlConfigError(
+            f"degrade[{index}].model_tiers: expected an object, "
+            f"got {type(raw_overlay).__name__}"
+        )
+    for tier_name, entry in raw_overlay.items():
+        key = str(tier_name)
+        # An overlay rebinds EXISTING tiers; the control keys (initial /
+        # fallback) select a tier rather than bind a model, so they are
+        # meaningless in an overlay.
+        if key in RESERVED_KEYS:
+            raise BudgetControlConfigError(
+                f"degrade[{index}].model_tiers: control key '{key}' is "
+                f"not valid in an overlay (an overlay rebinds tier→model "
+                f"only; set initial/fallback on the base model_tiers)"
+            )
+        if key not in VALID_TIER_NAMES:
+            raise BudgetControlConfigError(
+                f"degrade[{index}].model_tiers: '{key}' is not a tier name "
+                f"({', '.join(sorted(VALID_TIER_NAMES))})"
+            )
+        # A rung rebinds a tier's MODEL; the tier's role — and so the prose
+        # describing it — is untouched by a brownout.  Accepting a
+        # description here would also be a lie: the ``enter_tier`` schema is
+        # built once at session configure time and lives in the prompt-cache
+        # prefix, so a rung firing mid-session could never change what the
+        # model reads.  Refuse it rather than silently ignore it.
+        if isinstance(entry, Mapping) and "description" in entry:
+            raise BudgetControlConfigError(
+                f"degrade[{index}].model_tiers.{key}: 'description' is "
+                f"not valid in an overlay (a rung rebinds a tier's model, "
+                f"not its role; describe the tier on the base model_tiers "
+                f"instead)"
+            )
+        try:
+            overlay[key] = _normalize_tier_entry(key, entry)
+        except Exception as exc:
+            raise BudgetControlConfigError(
+                f"degrade[{index}].model_tiers.{key}: {exc}"
+            ) from None
+    return overlay
+
+
 @dataclass(frozen=True)
 class DegradeRung:
     """One rung of the degradation ladder.
@@ -240,36 +311,7 @@ class DegradeRung:
         except BudgetControlConfigError as exc:
             raise BudgetControlConfigError(f"degrade[{index}]: {exc}") from None
 
-        overlay: Dict[str, TierEntry] = {}
-        raw_overlay = raw.get("model_tiers") or {}
-        if raw_overlay:
-            if not isinstance(raw_overlay, Mapping):
-                raise BudgetControlConfigError(
-                    f"degrade[{index}].model_tiers: expected an object, "
-                    f"got {type(raw_overlay).__name__}"
-                )
-            for tier_name, entry in raw_overlay.items():
-                key = str(tier_name)
-                # An overlay rebinds EXISTING tiers; the control keys
-                # (initial / fallback) select a tier rather than bind a
-                # model, so they are meaningless in an overlay.
-                if key in RESERVED_KEYS:
-                    raise BudgetControlConfigError(
-                        f"degrade[{index}].model_tiers: control key '{key}' is "
-                        f"not valid in an overlay (an overlay rebinds tier→model "
-                        f"only; set initial/fallback on the base model_tiers)"
-                    )
-                if key not in VALID_TIER_NAMES:
-                    raise BudgetControlConfigError(
-                        f"degrade[{index}].model_tiers: '{key}' is not a tier name "
-                        f"({', '.join(sorted(VALID_TIER_NAMES))})"
-                    )
-                try:
-                    overlay[key] = _normalize_tier_entry(key, entry)
-                except Exception as exc:
-                    raise BudgetControlConfigError(
-                        f"degrade[{index}].model_tiers.{key}: {exc}"
-                    ) from None
+        overlay = _parse_degrade_overlay(raw.get("model_tiers"), index=index)
 
         action = raw.get("action")
         if action is not None:
@@ -663,6 +705,14 @@ def overlay_tier_table(
         ):
             continue
         was = current.model if current is not None else "(undeclared)"
+        # Carry the base tier's description forward.  A rung cannot set one
+        # (DegradeRung.from_dict refuses it), so the overlay entry's is
+        # always None — replacing the entry wholesale would drop the
+        # profile's prose, contradicting "only the model each tier points
+        # at changes".  Harmless for the tool schema, which was already
+        # built, but ``describe_tier`` is also read by diagnostics.
+        if current is not None and current.description:
+            entry = _dc_replace(entry, description=current.description)
         tiers[tier_name] = entry
         changes[tier_name] = f"{was} -> {entry.model}"
     return changes

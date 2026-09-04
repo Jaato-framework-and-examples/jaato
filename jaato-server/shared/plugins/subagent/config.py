@@ -1447,16 +1447,20 @@ class SubagentProfile:
     #
     # Single-level dict mixing tier→model entries (keys in
     # ``VALID_TIER_NAMES``) with reserved control keys (``initial`` /
-    # ``fallback``).  Each tier entry is either a model-name string or
-    # a dict with ``model`` (required) and ``provider`` (optional, V1
-    # enforces same-provider across all tiers).  See
+    # ``fallback``).  Each tier entry is either a model-name string or a
+    # dict with ``model`` (required) plus optional ``provider`` (tiers may
+    # name different ones) and ``description`` (prose the MODEL reads as
+    # that tier's bullet in the ``enter_tier`` tool).  See
     # ``shared/model_tiers.py`` for the resolver and validation, and
     # ``project_backlog_per_turn_model`` for the full design.
     model_tiers: Dict[str, Any] = field(default_factory=dict, metadata={
         "description": "Per-turn model-tier selection. Single-level dict "
         "mapping a tier key to a model (a model-name string, or "
-        "{model (required), provider (optional; V1 requires the same provider "
-        "across all tiers)}), plus the reserved control keys initial / fallback. "
+        "{model (required), provider (optional; tiers may span providers), "
+        "description (optional; prose the model reads as that tier's bullet "
+        "in the enter_tier tool — default is the framework's own wording for "
+        "the tier name)}), plus the reserved control keys initial / fallback. "
+        "The enter_tier tool advertises ONLY the declared tiers. "
         "Non-empty silently ignores `model` (warns at load) — the active model "
         "is picked per turn from model_tiers[<active_tier>]. Empty = "
         "single-model mode (falls back to the JAATO_TIER_* env vars, then "

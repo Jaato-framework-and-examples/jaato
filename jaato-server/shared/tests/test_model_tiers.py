@@ -486,12 +486,17 @@ class TestEnterTierTool:
         assert "enter_tier" not in lt.get_executors()
         assert "enter_tier" not in lt.get_auto_approved_tools()
 
-    def test_enter_tier_schema_constrains_to_three_names(self):
+    def test_enter_tier_schema_constrains_to_declared_names(self):
+        # The enum is the profile's DECLARED tiers, in canonical order —
+        # not VALID_TIER_NAMES.  This fixture declares three, so `vision`
+        # (valid but undeclared) must not be advertised: offering it would
+        # invite a call that silently routes to tier_fallback.
         s = self._session_with_tier()
         lt = self._lifecycle_tools(s)
         schema = next(sch for sch in lt.get_tool_schemas() if sch.name == "enter_tier")
         enum = schema.parameters["properties"]["name"]["enum"]
-        assert set(enum) == VALID_TIER_NAMES
+        assert enum == ["planner", "dispatcher", "executor"]
+        assert set(enum) < VALID_TIER_NAMES
 
     def test_enter_tier_valid_switch(self):
         s = self._session_with_tier()

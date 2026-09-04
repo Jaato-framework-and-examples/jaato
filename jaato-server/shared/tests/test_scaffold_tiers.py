@@ -49,3 +49,29 @@ def test_validate_accepts_cross_provider_tiers(tmp_path):
     tier_codes = {d.code for d in diags
                   if d.code in ("unknown_tier", "unknown_provider")}
     assert tier_codes == set()   # cross-provider accepted, no tier findings
+
+
+def test_explain_tiers_documents_the_description_key():
+    data, text = explain.tiers()
+    assert "description" in data
+    assert "description" in data["shape"]
+    assert "DESCRIPTION" in text
+
+
+def test_validate_flags_a_malformed_tier_description(tmp_path):
+    # A description reaches the MODEL (it becomes the tier's bullet in the
+    # enter_tier schema), so a malformed one is worth catching statically.
+    pdir = tmp_path / ".jaato" / "profiles" / "setD"
+    pdir.mkdir(parents=True)
+    (tmp_path / ".jaato" / "profiles" / "_base_d.yaml").write_text(
+        "name: _base_d\ndescription: b\nplugins: []\n")
+    (pdir / "d.yaml").write_text(
+        "name: d\ninherits: [_base_d]\nplugins: []\n"
+        "model_tiers:\n"
+        "  executor: {model: m, description: 'grind through edits'}\n"  # ok
+        "  planner:  {model: p, description: 42}\n"                    # bad
+        "  initial: executor\n  fallback: executor\n")
+    diags = V.validate_workspace(str(tmp_path), profile_set="setD", only="d")
+    bad = [d for d in diags if d.code == "invalid_tier_description"]
+    assert len(bad) == 1
+    assert "planner" in bad[0].where

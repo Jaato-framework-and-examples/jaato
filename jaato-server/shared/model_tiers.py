@@ -87,6 +87,43 @@ VALID_TIER_NAMES: FrozenSet[str] = frozenset(
     {TIER_PLANNER, TIER_DISPATCHER, TIER_EXECUTOR, TIER_VISION}
 )
 
+# Canonical presentation order for the ``enter_tier`` tool schema.  A set
+# has no order and ``sorted()`` would put ``dispatcher`` before ``planner``
+# — neither is wrong, but the order must be DETERMINISTIC: the tool block
+# sits in the prompt-cache prefix, so a tier list that reordered between
+# processes would invalidate the cache for no reason.  Names outside this
+# tuple sort alphabetically after it.
+TIER_ORDER: Tuple[str, ...] = (
+    TIER_PLANNER, TIER_DISPATCHER, TIER_EXECUTOR, TIER_VISION,
+)
+
+# Framework-supplied prose for each known tier, used by the ``enter_tier``
+# tool schema when a profile's tier entry declares no ``description``.
+# A profile that DOES declare one replaces the corresponding line — that is
+# the whole point of the key: the framework cannot know what a given
+# deployment means by "planner", only what the name suggests.
+DEFAULT_TIER_DESCRIPTIONS: Dict[str, str] = {
+    TIER_PLANNER: (
+        "deep thought, multi-step reasoning, complex problem "
+        "decomposition.  Most expensive; use when you genuinely need the "
+        "strongest model."
+    ),
+    TIER_DISPATCHER: (
+        "coordination, light reasoning, deciding which tools to call."
+    ),
+    TIER_EXECUTOR: (
+        "mechanical tool calls and result interpretation when the plan is "
+        "clear.  Cheapest; use when the work doesn't need reasoning."
+    ),
+    TIER_VISION: (
+        "view image content (diagrams, screenshots).  Switch here BEFORE "
+        "reading an image with a tool (e.g. viewing a file that is an "
+        "image), then switch back when done.  If you try to read an image "
+        "while in a non-vision tier, the image is withheld and the tool "
+        "result tells you to switch here first."
+    ),
+}
+
 # Framework defaults when neither profile nor env vars specify them.
 DEFAULT_INITIAL_TIER = TIER_DISPATCHER
 DEFAULT_TIER_FALLBACK = TIER_DISPATCHER
@@ -127,6 +164,21 @@ class TierEntry:
 
     Attributes:
         model: Model name (e.g. ``"claude-opus-4-7"``).  Required.
+        description: What this tier is FOR, in the second person, as the
+            model reads it.  Rendered verbatim as the tier's bullet in the
+            ``enter_tier`` tool description, replacing the framework's
+            default prose for that tier name
+            (:data:`DEFAULT_TIER_DESCRIPTIONS`).  ``None`` keeps the
+            default.  This is the only channel by which a profile tells
+            the model what its own tier ladder means — the framework knows
+            the names, not the deployment's intent behind them.
+
+            It lands in the tool block, which is part of the prompt-cache
+            prefix, so it must be stable for the life of a session: it is
+            read once when the tool schema is built.  A budget-control
+            degrade rung therefore cannot set it (see
+            :meth:`shared.budget_control.DegradeRung.from_dict`) — a
+            brownout rebinds a tier's model, never its role.
         provider: Provider plugin name (e.g. ``"anthropic"``).  When
             ``None``, the session's main provider is used and entering
             the tier just re-points it via
@@ -138,6 +190,7 @@ class TierEntry:
     """
     model: str
     provider: Optional[str] = None
+    description: Optional[str] = None
 
 
 def _normalize_tier_entry(name: str, raw: object) -> TierEntry:
@@ -145,10 +198,13 @@ def _normalize_tier_entry(name: str, raw: object) -> TierEntry:
 
     Accepts:
         * ``str`` — shorthand for ``{"model": <str>}``
-        * ``dict`` with ``model`` (required) and optional ``provider``
+        * ``dict`` with ``model`` (required) and optional ``provider`` /
+          ``description``
 
     Raises:
-        ModelTierConfigError: Invalid shape or empty model.
+        ModelTierConfigError: Invalid shape, empty model, or a
+            ``provider`` / ``description`` present but not a non-empty
+            string.
     """
     if isinstance(raw, str):
         if not raw.strip():
@@ -167,9 +223,18 @@ def _normalize_tier_entry(name: str, raw: object) -> TierEntry:
             raise ModelTierConfigError(
                 f"tier {name!r}: 'provider' must be a non-empty string when set"
             )
+        description = raw.get("description")
+        if description is not None and (
+            not isinstance(description, str) or not description.strip()
+        ):
+            raise ModelTierConfigError(
+                f"tier {name!r}: 'description' must be a non-empty string "
+                f"when set"
+            )
         return TierEntry(
             model=model.strip(),
             provider=provider.strip() if provider else None,
+            description=description.strip() if description else None,
         )
     raise ModelTierConfigError(
         f"tier {name!r}: expected str or dict, got {type(raw).__name__}"
@@ -237,6 +302,41 @@ class ModelTierConfig:
         # when the entered tier's provider differs from the active one (history
         # is provider-neutral, so it flows across the swap).  Same-provider
         # configs are unaffected — no swap path is taken.
+
+    def ordered_tier_names(self) -> Tuple[str, ...]:
+        """Declared tier names in canonical (cache-stable) order.
+
+        Known names come first in :data:`TIER_ORDER`; anything else sorts
+        alphabetically after them.  Deterministic because the result feeds
+        the ``enter_tier`` tool schema, which sits in the prompt-cache
+        prefix — an order that varied between processes would invalidate
+        the cache without changing meaning.
+        """
+        known = [n for n in TIER_ORDER if n in self.tiers]
+        rest = sorted(n for n in self.tiers if n not in TIER_ORDER)
+        return tuple(known + rest)
+
+    def describe_tier(self, tier_name: str) -> str:
+        """Prose for one tier, as the model should read it.
+
+        Resolution order: the tier entry's own ``description`` (set in the
+        profile), then the framework default for that name
+        (:data:`DEFAULT_TIER_DESCRIPTIONS`), then a bare fallback naming
+        the model — which is all the framework can honestly say about a
+        tier nobody described.
+
+        Returns:
+            A single-sentence-ish fragment with no leading bullet or tier
+            name; the caller formats it into the tool description.
+        """
+        entry = self.tiers.get(tier_name)
+        if entry is not None and entry.description:
+            return entry.description
+        default = DEFAULT_TIER_DESCRIPTIONS.get(tier_name)
+        if default:
+            return default
+        model = entry.model if entry is not None else "an unspecified model"
+        return f"routes this session to {model}."
 
     def model_for(self, tier_name: str) -> Tuple[str, TierEntry]:
         """Resolve a tier name to ``(actual_tier, entry)``.

@@ -108,28 +108,7 @@ def validate_profile(
                 "`jaato-scaffold explain plugins`)", where=f"plugins.{plug}")
 
     # --- model_tiers (V2: cross-provider tiers allowed) ------------------
-    # Catch tier-name typos + a (V2) cross-provider tier naming an uninstalled
-    # provider, statically — runtime ModelTierConfig would otherwise only raise
-    # at session create.  See `jaato-scaffold explain tiers`.  (model_tiers now
-    # survives the inherits/set merge — see config._merge_profiles.)
-    mt_cfg = getattr(profile, "model_tiers", None) or {}
-    if mt_cfg:
-        from shared.model_tiers import VALID_TIER_NAMES, RESERVED_KEYS
-        for key, entry in mt_cfg.items():
-            if key not in VALID_TIER_NAMES and key not in RESERVED_KEYS:
-                add("error", "unknown_tier",
-                    f"model_tiers key '{key}' is neither a tier name "
-                    f"({', '.join(sorted(VALID_TIER_NAMES))}) nor a control key "
-                    f"({', '.join(sorted(RESERVED_KEYS))})",
-                    where=f"model_tiers.{key}")
-                continue
-            tprov = entry.get("provider") if isinstance(entry, dict) else None
-            if tprov and introspect.resolve_provider(tprov) is None:
-                add("error", "unknown_provider",
-                    f"model_tiers.{key} provider '{tprov}' is not installed "
-                    "(V2 cross-provider tiers must name a real provider — see "
-                    "`jaato-scaffold explain providers`)",
-                    where=f"model_tiers.{key}.provider")
+    _check_model_tiers(getattr(profile, "model_tiers", None) or {}, add)
 
     # --- budget_control --------------------------------------------------
     # The block is already parsed + structurally validated at profile-load
@@ -295,6 +274,58 @@ def validate_profile(
                 f"gc type '{gc_type}' not among {gc_names}", where="gc.type")
 
     return out
+
+
+def _check_model_tiers(mt_cfg, add):
+    """Static checks on a profile's ``model_tiers`` table.
+
+    Catches, before a session is ever created, what
+    :class:`~shared.model_tiers.ModelTierConfig` would only raise at
+    session-create time: tier-name typos, a cross-provider tier naming an
+    uninstalled provider, and a malformed ``description``.  See
+    ``jaato-scaffold explain tiers``.  (``model_tiers`` survives the
+    inherits/set merge — see ``config._merge_profiles``.)
+
+    Split out of :func:`validate_profile` to keep that function under the
+    complexity ceiling.
+
+    Args:
+        mt_cfg: The profile's raw ``model_tiers`` dict (possibly empty).
+        add: ``validate_profile``'s diagnostic collector,
+            ``add(severity, code, message, where=...)``.
+    """
+    if not mt_cfg:
+        return
+    from shared.model_tiers import VALID_TIER_NAMES, RESERVED_KEYS
+    for key, entry in mt_cfg.items():
+        if key not in VALID_TIER_NAMES and key not in RESERVED_KEYS:
+            add("error", "unknown_tier",
+                f"model_tiers key '{key}' is neither a tier name "
+                f"({', '.join(sorted(VALID_TIER_NAMES))}) nor a control key "
+                f"({', '.join(sorted(RESERVED_KEYS))})",
+                where=f"model_tiers.{key}")
+            continue
+        if not isinstance(entry, dict):
+            continue
+        tprov = entry.get("provider")
+        if tprov and introspect.resolve_provider(tprov) is None:
+            add("error", "unknown_provider",
+                f"model_tiers.{key} provider '{tprov}' is not installed "
+                "(V2 cross-provider tiers must name a real provider — see "
+                "`jaato-scaffold explain providers`)",
+                where=f"model_tiers.{key}.provider")
+        # ``description`` reaches the MODEL (it becomes this tier's bullet
+        # in the enter_tier tool schema), so a malformed one is worth
+        # catching before a session pays to discover it.
+        tdesc = entry.get("description")
+        if tdesc is not None and (
+            not isinstance(tdesc, str) or not tdesc.strip()
+        ):
+            add("error", "invalid_tier_description",
+                f"model_tiers.{key} description must be a non-empty string "
+                "— it is rendered verbatim as this tier's bullet in the "
+                "enter_tier tool description",
+                where=f"model_tiers.{key}.description")
 
 
 def _validate_plugin_knobs(cfg_name, cfg, plugins, add):

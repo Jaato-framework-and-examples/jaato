@@ -476,7 +476,8 @@ def tiers() -> Rendered:
     data = {
         "tier_names": valid,
         "reserved_keys": reserved,
-        "shape": "model_tiers: { <tier>: <model-str> | {model, provider}, "
+        "shape": "model_tiers: { <tier>: <model-str> | "
+                 "{model, provider, description}, "
                  "initial: <tier>, fallback: <tier> }",
         "switching": "the MODEL calls enter_tier('<tier>') mid-session; the "
                      "active tier selects the model (and, V2, the provider); "
@@ -486,6 +487,14 @@ def tiers() -> Rendered:
                   "'enter_tier(\"vision\") first' the agent self-corrects on). "
                   "user-message images ride the attachment ferry (#353): SDK "
                   "send_message(attachments=[path | {mime_type,data,display_name}])",
+        "description": "each tier entry may carry a 'description' — prose the "
+                       "MODEL reads as that tier's bullet in the enter_tier "
+                       "tool schema (default: the framework's own wording for "
+                       "the name).  the enter_tier enum lists only the tiers "
+                       "the profile DECLARES, so an undeclared tier is never "
+                       "advertised.  read once when the tool schema is built "
+                       "(it sits in the prompt-cache prefix), so a budget "
+                       "degrade rung cannot set it.",
         "cross_provider": "V2 (#354): tiers may declare DIFFERENT providers; "
                           "switch_tier swaps to a cached per-tier provider "
                           "instance (history is provider-neutral; switch-back is "
@@ -499,12 +508,20 @@ def tiers() -> Rendered:
         f"CONTROL KEYS {', '.join(reserved)}  (reserved: initial tier + fallback)\n\n"
         "SHAPE  (in a profile)\n"
         "  model_tiers:\n"
-        "    <tier>:   <model-string>   OR   {model: <m>, provider: <p>}\n"
+        "    <tier>:   <model-string>   OR\n"
+        "              {model: <m>, provider: <p>, description: <prose>}\n"
         "    initial:  <tier>           # the tier a session starts in\n"
         "    fallback: <tier>           # when enter_tier names an undeclared tier\n\n"
         "SWITCHING\n"
         "  the MODEL calls enter_tier('<tier>') mid-session; the active tier picks\n"
         "  the model (and, V2, the provider).  conversation history is preserved.\n\n"
+        "DESCRIPTION  (what the model reads)\n"
+        "  the enter_tier tool advertises ONLY the tiers this profile declares,\n"
+        "  each with a bullet.  the bullet is the tier's 'description' when set,\n"
+        "  else the framework's own wording for that name — so a ladder whose\n"
+        "  'executor' means something specific to your deployment can say so.\n"
+        "  it is read once, when the tool schema is built: the tool block sits in\n"
+        "  the prompt-cache prefix, so a budget degrade rung may NOT set one.\n\n"
         "VISION  (a modality tier)\n"
         "  map a 'vision' tier to an image-capable model.  an image reaching a\n"
         "  non-vision active provider trips the content gate: a synthetic note\n"

@@ -617,9 +617,12 @@ def _set_profile_yaml(agent: str, provider: str, model: str,
         "# executor + a vision model elsewhere).  See `jaato-scaffold explain tiers`.",
         "# model_tiers:",
         f"#   executor: {{model: {model}, provider: {provider}}}",
-        "#   vision:   {model: google/gemini-2.5-flash-lite, provider: openrouter}",
+        "#   vision:   {model: google/gemini-2.5-flash-lite, provider: openrouter,",
+        "#              description: 'view screenshots and diagrams; switch back after'}",
         "#   initial: executor",
         "#   fallback: executor",
+        "# 'description' is what the MODEL reads as that tier's bullet in the",
+        "# enter_tier tool; omit it to keep the framework's own wording.",
         "# Optional per-SESSION env vars.  This block:",
     ]
     lines += [f"#   - {fact}" for fact in _explain.PROFILE_ENV_FACTS]
