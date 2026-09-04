@@ -21,12 +21,17 @@ Resolution order:
    build the config from env.
 3. Neither set → ``None`` returned, single-model mode.
 
-**V1 constraint**: all tiers must use the same provider.  The schema
-already supports per-tier ``provider`` overrides (forward-compat for
-V2's cross-provider tiers) — but at construction time the config
-rejects any mix.  When V2 lifts this, drop the
-``_validate_same_provider_v1`` call and add cross-provider provider
-swap logic at the session layer.
+**Cross-provider tiers**: a tier may declare its own ``provider``, and
+tiers are free to disagree — the historical same-provider gate
+(``_validate_same_provider_v1``) is gone.  When the tier being entered
+names a provider other than the active one,
+``JaatoSession.switch_tier`` swaps to a per-tier provider instance
+cached by ``_provider_for_tier``; conversation history is
+provider-neutral, so it flows across the swap untouched.  A tier that
+leaves ``provider`` unset uses the session's main provider, which
+switches model in place via
+``provider.connect(model, skip_model_test=True)`` — no swap path is
+taken, so same-provider configs behave exactly as before.
 
 **Schema** — single-level dict mixing tier→model mappings (keys in
 :data:`VALID_TIER_NAMES`) and reserved control keys (``initial`` and
@@ -117,20 +122,19 @@ class ModelTierConfigError(ValueError):
 class TierEntry:
     """One tier's model + optional provider.
 
-    The provider field is forward-compat for V2 (cross-provider tiers).
-    In V1 the same-provider check in
-    :meth:`ModelTierConfig._validate_same_provider_v1` rejects configs
-    where tiers declare different providers; when the constraint lifts,
-    drop that call and let the session layer handle provider swaps.
+    Tiers may name different providers; the session layer handles the
+    swap (see the module docstring's *Cross-provider tiers* note).
 
     Attributes:
         model: Model name (e.g. ``"claude-opus-4-7"``).  Required.
         provider: Provider plugin name (e.g. ``"anthropic"``).  When
-            ``None``, the session's main provider is used.  V1: if any
-            tier sets this, all tiers that set it must agree (and
-            usually you'd leave it ``None`` everywhere — the session's
-            provider then handles the model switch via
-            ``provider.connect(new_model_name, skip_model_test=True)``).
+            ``None``, the session's main provider is used and entering
+            the tier just re-points it via
+            ``provider.connect(new_model_name, skip_model_test=True)``.
+            When set to something other than the active provider,
+            entering the tier swaps to a cached per-tier provider
+            instance instead.  Tiers need not agree — leaving this
+            ``None`` everywhere keeps the whole session on one provider.
     """
     model: str
     provider: Optional[str] = None
@@ -181,8 +185,12 @@ class ModelTierConfig:
     consulted by ``LifecycleTools`` (to decide whether to register
     ``enter_tier``), ``JaatoSession`` (to compute the initial model
     name and to switch the provider on tier transitions), and
-    ``get_system_instructions`` (to append the per-turn tier-identity
-    line).
+    ``get_system_instructions`` (to append the tier-mode line naming
+    :attr:`initial_tier`).  That line is deliberately *stable* — it
+    reports where the session started, never which tier is active now,
+    because the system block must stay byte-identical across tier
+    switches or every switch invalidates the prompt cache.  See
+    ``docs/design/model-tier-prompt-cache.md`` §5.1.
 
     Attributes:
         tiers: Map of tier name → :class:`TierEntry`.  Must be
@@ -224,11 +232,11 @@ class ModelTierConfig:
                 f"tier_fallback {self.tier_fallback!r} not in declared "
                 f"tiers {sorted(self.tiers)}"
             )
-        # V2 (cross-provider tiers): the V1 same-provider gate is lifted.  A
-        # tier may declare its own ``provider``; JaatoSession.switch_tier swaps
-        # to a cached per-tier provider instance when the active tier's provider
-        # differs (history is provider-neutral, so it flows across the swap).
-        # Same-provider configs are unaffected (no swap path is taken).
+        # No same-provider gate: tiers may name different providers.
+        # JaatoSession.switch_tier swaps to a cached per-tier provider instance
+        # when the entered tier's provider differs from the active one (history
+        # is provider-neutral, so it flows across the swap).  Same-provider
+        # configs are unaffected — no swap path is taken.
 
     def model_for(self, tier_name: str) -> Tuple[str, TierEntry]:
         """Resolve a tier name to ``(actual_tier, entry)``.
@@ -304,10 +312,11 @@ class ModelTierConfig:
     ) -> Optional["ModelTierConfig"]:
         """Build from env vars, or return ``None`` if no tier vars set.
 
-        Env vars only support the simple shorthand (model name only) —
-        per-tier provider overrides have to come from a profile.  This
-        is fine for V1 where same-provider is the only mode; V2 may
-        extend with paired ``JAATO_TIER_<NAME>_PROVIDER`` env vars.
+        Env vars only support the simple shorthand (model name only), so
+        an env-built config is always single-provider — a cross-provider
+        tier set has to come from a profile's ``model_tiers``.  There is
+        also no ``JAATO_TIER_VISION``: the env path covers the three
+        cognitive tiers only (see :data:`ENV_TIER_MODEL_KEYS`).
 
         Args:
             env: Optional override for ``os.environ`` (test injection).
