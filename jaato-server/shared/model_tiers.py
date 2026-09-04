@@ -102,6 +102,17 @@ TIER_ORDER: Tuple[str, ...] = (
 # A profile that DOES declare one replaces the corresponding line — that is
 # the whole point of the key: the framework cannot know what a given
 # deployment means by "planner", only what the name suggests.
+#
+# NOTE these strings are NOT byte-identical to the pre-``description`` ones,
+# so the first turn of an existing tiered session after upgrading re-writes
+# the prompt-cache prefix once (the tool block sits in it).  Two sentences
+# moved rather than vanished: ``dispatcher`` lost "Default starting tier."
+# because the starting tier is now named once, accurately, on its own line
+# (hardcoding it in this bullet was simply wrong for a profile starting
+# anywhere else), and ``vision`` lost "Only useful when the session declares
+# a vision tier" because an undeclared tier is no longer advertised at all.
+# One cache re-write, once, per session — worth stating rather than leaving
+# a reader to infer the prefix was untouched.
 DEFAULT_TIER_DESCRIPTIONS: Dict[str, str] = {
     TIER_PLANNER: (
         "deep thought, multi-step reasoning, complex problem "

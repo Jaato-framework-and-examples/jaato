@@ -193,6 +193,40 @@ class TestBudgetOverlayPreservesRole:
         assert tiers["vision"].model == "cheap"
         assert tiers["vision"].inbound_modalities == frozenset({"image"})
 
+    def test_overlay_through_the_rung_parser_keeps_extra_roles(self):
+        """Regression: the overlay entry arrives with the name-implied role
+        already stamped, so an emptiness guard sees a non-empty set and drops
+        the base tier's OTHER roles.
+
+        Built through ``DegradeRung.from_dict`` deliberately.  The sibling
+        test above constructs ``TierEntry`` by hand, which skips
+        ``_normalize_tier_entry`` and therefore skips the implicit stamp —
+        so it cannot see this defect.  A fixture that does not mirror the
+        production caller is not covering the production path.
+        """
+        from shared.budget_control import BudgetControlConfig, overlay_tier_table
+
+        cfg = _cfg({
+            "executor": "e",
+            "vision": {"model": "vis", "modalities": ["image", "audio"]},
+            "initial": "executor", "fallback": "executor"})
+        bc = BudgetControlConfig.from_dict({
+            "limits": {"usd": 1.0},
+            "degrade": [{"at": 50, "model_tiers": {"vision": "cheapvis"}}]})
+
+        # The rung's entry is stamped with vision's implicit {image}...
+        assert bc.degrade[0].model_tiers["vision"].inbound_modalities == \
+            frozenset({"image"})
+
+        overlay_tier_table(cfg.tiers, bc.degrade[0].model_tiers)
+
+        assert cfg.tiers["vision"].model == "cheapvis"      # rebound
+        assert cfg.tiers["vision"].inbound_modalities == \
+            frozenset({"image", "audio"})                   # ...and audio kept
+        # The consequence the carry exists to prevent: mid-brownout the gate
+        # must still find a tier for audio.
+        assert cfg.tiers_for_modality("audio") == ("vision",)
+
 
 class TestDescribeTierAnnouncesTheRole:
     """A declared role the tier's NAME doesn't imply is announced in the
@@ -364,3 +398,57 @@ class TestOutboundDescribedButInert:
         )
         with pytest.raises(ModelTierConfigError, match="outbound"):
             s._validate_modality_tier_capabilities()
+
+
+class TestTierNameTableContract:
+    """The three tier-name tables must agree.
+
+    Same discipline this module already applies to `VALID_TIER_MODALITIES`
+    vs the provider layer, and it was missing here — an inconsistency with
+    the branch's own standard, and one that bites precisely when the name
+    set is opened up:
+
+    * a name in `TIER_ORDER` with no prose is a **KeyError** in
+      `lifecycle_tools._enter_tier_schema` (it does
+      `DEFAULT_TIER_DESCRIPTIONS[n] for n in TIER_ORDER` on the no-config
+      path); and
+    * a valid name missing from `TIER_ORDER` falls into
+      `ordered_tier_names()`'s alphabetical `rest` branch and reaches the
+      model with the bare "routes this session to <model>." fallback as
+      its bullet.
+
+    Neither is loud. Both are cheap to prevent.
+    """
+
+    def test_all_three_tables_agree(self):
+        from shared.model_tiers import (
+            DEFAULT_TIER_DESCRIPTIONS, TIER_ORDER, VALID_TIER_NAMES,
+        )
+        assert set(TIER_ORDER) == VALID_TIER_NAMES
+        assert set(DEFAULT_TIER_DESCRIPTIONS) == VALID_TIER_NAMES
+
+    def test_tier_order_has_no_duplicates(self):
+        from shared.model_tiers import TIER_ORDER
+        assert len(TIER_ORDER) == len(set(TIER_ORDER))
+
+    def test_implicit_roles_name_real_tiers_and_directions(self):
+        from shared.model_tiers import (
+            IMPLICIT_TIER_MODALITIES, VALID_MODALITY_DIRECTIONS,
+            VALID_TIER_MODALITIES, VALID_TIER_NAMES,
+        )
+        for name, by_direction in IMPLICIT_TIER_MODALITIES.items():
+            assert name in VALID_TIER_NAMES
+            for direction, kinds in by_direction.items():
+                assert direction in VALID_MODALITY_DIRECTIONS
+                assert set(kinds) <= VALID_TIER_MODALITIES
+
+    def test_no_config_schema_covers_every_name(self):
+        # The KeyError path above, exercised rather than reasoned about.
+        from types import SimpleNamespace
+        from shared.lifecycle_tools import LifecycleTools
+        from shared.model_tiers import VALID_TIER_NAMES
+        schema = LifecycleTools(SimpleNamespace(
+            _tier_config=None, _completion_payload_schema=None,
+            workspace_path=None, runtime=None))._enter_tier_schema()
+        assert set(schema.parameters["properties"]["name"]["enum"]) == \
+            VALID_TIER_NAMES

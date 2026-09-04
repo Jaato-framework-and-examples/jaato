@@ -710,26 +710,35 @@ def overlay_tier_table(
         was = current.model if current is not None else "(undeclared)"
         # Carry the base tier's ROLE forward — its prose and its modality
         # roles.  A rung cannot set either (DegradeRung.from_dict refuses
-        # them), so the overlay entry carries neither; replacing the entry
-        # wholesale would drop them, contradicting "only the model each tier
-        # points at changes".
+        # them), so the overlay entry carries nothing the base did not;
+        # replacing the entry wholesale would drop them, contradicting
+        # "only the model each tier points at changes".
         #
-        # For ``modalities`` this is load-bearing, not cosmetic: the content
-        # gate and the startup capability check both resolve the image tier
-        # BY ROLE, so a brownout that dropped it would leave the session
-        # with no tier to send images to — mid-run, exactly when budget is
-        # tight.  (``description`` is only read after the schema is built,
-        # so losing it would merely mislead diagnostics.)
+        # For the modality sets this is load-bearing, not cosmetic: the
+        # content gate and the startup capability check both resolve a tier
+        # BY ROLE, so a brownout that dropped one would leave the session
+        # with nowhere to send that content — mid-run, exactly when budget
+        # is tight.  (``description`` is only read after the tool schema is
+        # built, so losing it would merely mislead diagnostics.)
+        #
+        # UNION, not "carry only when the overlay entry has none".  The
+        # overlay entry is built by ``_normalize_tier_entry``, which stamps
+        # IMPLICIT_TIER_MODALITIES — so a rung naming the tier ``vision``
+        # arrives already carrying {image}, an emptiness guard sees a
+        # non-empty set, and the base tier's OTHER inbound roles are
+        # silently dropped (base [image, audio] -> [image]).  A rung can
+        # declare neither set, so the only thing in the overlay entry's
+        # sets is that name-implied role, which the base necessarily has
+        # too: unioning is both correct and simpler than guarding.
         if current is not None:
-            carried = {}
-            if current.description:
-                carried["description"] = current.description
-            if current.inbound_modalities and not entry.inbound_modalities:
-                carried["inbound_modalities"] = current.inbound_modalities
-            if current.outbound_modalities and not entry.outbound_modalities:
-                carried["outbound_modalities"] = current.outbound_modalities
-            if carried:
-                entry = _dc_replace(entry, **carried)
+            entry = _dc_replace(
+                entry,
+                description=entry.description or current.description,
+                inbound_modalities=(
+                    current.inbound_modalities | entry.inbound_modalities),
+                outbound_modalities=(
+                    current.outbound_modalities | entry.outbound_modalities),
+            )
         tiers[tier_name] = entry
         changes[tier_name] = f"{was} -> {entry.model}"
     return changes

@@ -7897,21 +7897,36 @@ NOTES
         model = self._model_name or "the current model"
         tier_config = self._tier_config
         target: Optional[str] = None
+        covered: List[str] = []
         if tier_config is not None:
+            from .model_tiers import DIRECTION_INBOUND
             # Sorted for determinism when several modalities were withheld
             # at once; first match in canonical tier order wins.
             for kind in sorted(withheld):
                 # INBOUND explicitly: the gate's question is "who can look
                 # at this?", never "who could emit one".
-                candidates = tier_config.tiers_for_modality(kind, "inbound")
-                if candidates:
+                candidates = tier_config.tiers_for_modality(
+                    kind, DIRECTION_INBOUND)
+                if candidates and target is None:
                     target = candidates[0]
-                    break
+                if target is not None and kind in tier_config.tiers[
+                        target].inbound_modalities:
+                    covered.append(kind)
         if target is not None:
+            # Name only what the suggested tier actually accepts.  Saying
+            # "can't view image, audio content — call enter_tier('x')" when
+            # x only takes images sends the agent to fetch content that will
+            # be withheld again.
+            covers = ", ".join(sorted(covered))
+            rest = sorted(set(withheld) - set(covered))
+            tail = (
+                f"  No tier accepts {', '.join(rest)} content."
+                if rest else ""
+            )
             return (
                 f"[Attachment withheld: the active model ({model}) can't "
-                f"view {kinds} content.  Call enter_tier(\"{target}\") first, "
-                f"then re-run this tool to view it.]"
+                f"view {kinds} content.  Call enter_tier(\"{target}\") first "
+                f"to view the {covers} content, then re-run this tool.{tail}]"
             )
         return (
             f"[Attachment withheld: the active model ({model}) can't view "
@@ -7941,6 +7956,9 @@ NOTES
         validated too — the defect this closes is that renaming ``vision``
         silently disabled the check.
 
+        Covers only tiers on the ACTIVE provider — see the comment in the
+        loop for why, and for what does (and does not) back up the rest.
+
         Inbound roles are checked against ``provider.supports_modality``.
         Outbound roles are checked only when the provider implements
         ``supports_output_modality``; none do yet, so an outbound role is
@@ -7963,10 +7981,17 @@ NOTES
                 continue
             # A tier on a DIFFERENT provider is NOT checked here — validating
             # it would eagerly create that provider (paying its init cost on
-            # turn 1 even if the tier is never entered).  Such tiers are
-            # validated lazily when first entered + by the content-boundary
-            # gate; only same-provider tiers (the active provider owns the
-            # model) are fail-fast checked at startup.
+            # turn 1 even if the tier is never entered).  Only same-provider
+            # tiers (the active provider owns the model) are fail-fast
+            # checked at startup.
+            #
+            # There is NO lazy check on entry to make up for it: switch_tier
+            # -> _connect_tier_entry -> provider.connect(model,
+            # skip_model_test=True) touches no modality.  The runtime
+            # content gate is the ONLY backstop for a cross-provider role,
+            # so such a misconfiguration surfaces at the first piece of
+            # content rather than at startup.  (An earlier comment here
+            # claimed a lazy check existed; it never did.)
             if entry.provider and entry.provider != self._active_provider_name:
                 continue
             provider_name = getattr(provider, "name", "the provider")

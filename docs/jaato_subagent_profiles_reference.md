@@ -562,11 +562,16 @@ no swap path is taken, so single-provider ladders behave exactly as before.
 - Tiers with `provider: null` mixed with unset providers: ✅ (treated as consistent)
 - Tiers naming **different** providers: ✅ (per-tier provider instances)
 
-**Caveat — cost of a cross-provider vision tier**: the startup capability
-check (`_validate_vision_tier_capability`) only fail-fast validates a `vision`
-tier that lives on the *active* provider. Validating one on another provider
-would eagerly create that provider on turn 1 even if vision is never entered,
-so such tiers are validated lazily on first entry, plus by the content gate.
+**Caveat — cost of a cross-provider modality tier**: the startup capability
+check (`_validate_modality_tier_capabilities`) only fail-fast validates tiers
+that live on the *active* provider. Validating one on another provider would
+eagerly create that provider on turn 1 even if the tier is never entered.
+
+There is **no lazy check on entry** to compensate: `switch_tier` →
+`_connect_tier_entry` → `provider.connect(model, skip_model_test=True)`
+touches no modality. So for a tier on another provider the runtime **content
+gate is the only backstop** — a role its model can't fill surfaces at the
+first piece of content, not at startup.
 
 ### 5.6 The `enter_tier` Lifecycle Tool
 
