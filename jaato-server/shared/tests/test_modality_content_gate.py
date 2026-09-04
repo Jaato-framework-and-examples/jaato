@@ -284,3 +284,68 @@ class TestModalityRoleByKey:
         # gate must not invent one — declaring the role is the contract.
         assert "enter_tier" not in out[0].model_suffix
         assert "no tier that can" in out[0].model_suffix.lower()
+
+
+class TestGateNeverPointsAtTheActiveTier:
+    """The gate must not name the tier the agent is already in.
+
+    Naming it is not merely a poor message, it is a LOOP: `enter_tier` on
+    the current tier is a documented no-op (`already_at_tier`), the agent
+    re-runs the tool, and the gate emits the identical note — terminating
+    only on the turn budget.
+
+    Reachable exactly where `_validate_modality_tier_capabilities` declines
+    to check (a tier on another provider, skipped so validating it doesn't
+    eagerly construct that provider), so the one gap in startup validation
+    was the one the runtime backstop handled worst.
+    """
+
+    _CROSS = {
+        "executor": {"model": "e", "provider": "zhipuai"},
+        "vision": {"model": "some/text-only-model", "provider": "openrouter"},
+        "initial": "executor", "fallback": "executor",
+    }
+
+    def _note(self, tiers, active, withheld=None):
+        s = JaatoSession.__new__(JaatoSession)
+        s._tier_config = ModelTierConfig.from_unified_dict(tiers)
+        s._model_name = "some/text-only-model"
+        s._active_tier = active
+        return s._build_withheld_attachment_note(withheld or {"image": 1})
+
+    def test_no_self_referential_enter_tier(self):
+        note = self._note(self._CROSS, active="vision")
+        assert 'enter_tier("vision")' not in note
+
+    def test_names_the_real_problem_instead(self):
+        note = self._note(self._CROSS, active="vision")
+        assert "already" in note and "'vision'" in note
+        assert "profile error" in note
+        # And must NOT claim nothing declares the role — one does.
+        assert "declares no tier that can" not in note
+
+    def test_still_names_a_switchable_tier_from_elsewhere(self):
+        note = self._note(self._CROSS, active="executor")
+        assert 'enter_tier("vision")' in note
+
+    def test_picks_the_other_tier_when_two_declare_the_role(self):
+        tiers = dict(self._CROSS)
+        tiers["planner"] = {"model": "p", "modalities": ["image"]}
+        note = self._note(tiers, active="vision")
+        assert 'enter_tier("planner")' in note
+
+    def test_absent_active_tier_attribute_is_tolerated(self):
+        # The gate's own fixtures build sessions via __new__ without
+        # _active_tier; a getattr miss must not raise.
+        s = JaatoSession.__new__(JaatoSession)
+        s._tier_config = ModelTierConfig.from_unified_dict(self._CROSS)
+        s._model_name = "m"
+        assert "withheld" in s._build_withheld_attachment_note({"image": 1})
+
+    def test_no_declaring_tier_still_says_so(self):
+        s = JaatoSession.__new__(JaatoSession)
+        s._tier_config = None
+        s._model_name = "m"
+        s._active_tier = None
+        note = s._build_withheld_attachment_note({"image": 1})
+        assert "declares no tier that can" in note

@@ -7878,12 +7878,74 @@ NOTES
         )
         return _dc_replace(result, attachments=(kept or None), model_suffix=combined)
 
+    def _resolve_withheld_target(
+        self, withheld: Dict[str, int]
+    ) -> Tuple[Optional[str], List[str], List[str]]:
+        """Pick a tier the agent could actually switch to for withheld content.
+
+        Args:
+            withheld: modality kind -> count, as gathered by
+                :meth:`_gate_one_tool_result`.
+
+        Returns:
+            ``(target, covered, stuck)``:
+
+            * ``target`` — a tier declaring one of the withheld roles
+              INBOUND that is **not** the tier the agent is already in, or
+              ``None``.
+            * ``covered`` — which withheld kinds that target actually
+              accepts (naming the rest would send the agent back for
+              content it still cannot see).
+            * ``stuck`` — kinds whose ONLY declaring tier is the active
+              one.  That is the self-referential case: the tier claims the
+              role but its model can't fill it, so there is nothing to
+              switch to and the note has to say something else entirely.
+
+        The active tier is excluded because naming it produces a LOOP, not
+        merely a poor message: ``enter_tier`` on the current tier is a
+        documented no-op (``already_at_tier``), the agent re-runs the tool,
+        and the gate emits the identical note — terminating only on the
+        turn budget.  It is reachable exactly where
+        :meth:`_validate_modality_tier_capabilities` declines to check (a
+        tier on another provider), so the one gap in startup validation is
+        the one the runtime backstop handled worst.
+        """
+        tier_config = self._tier_config
+        if tier_config is None:
+            return None, [], []
+        from .model_tiers import DIRECTION_INBOUND
+
+        active = getattr(self, "_active_tier", None)
+        target: Optional[str] = None
+        stuck: List[str] = []
+        for kind in sorted(withheld):
+            candidates = tier_config.tiers_for_modality(kind, DIRECTION_INBOUND)
+            usable = [c for c in candidates if c != active]
+            if candidates and not usable:
+                stuck.append(kind)
+            if usable and target is None:
+                target = usable[0]
+        covered = (
+            [k for k in sorted(withheld)
+             if k in tier_config.tiers[target].inbound_modalities]
+            if target is not None else []
+        )
+        return target, covered, stuck
+
     def _build_withheld_attachment_note(self, withheld: Dict[str, int]) -> str:
         """Build the actionable note appended to a gated tool result.
 
-        Names a tier the agent can enter to view the withheld content, when
-        the session declares one for that modality; otherwise explains that
-        the active model can't view it and no such tier exists.
+        Three outcomes, in order:
+
+        1. **A switchable tier exists** — name it, and name only the kinds
+           it actually accepts, saying separately when nothing accepts the
+           rest.
+        2. **The only tier declaring the role is the one the agent is in**
+           — its model can't fill the role it claims.  Say that, rather
+           than "no tier declares it" (false) or naming the active tier
+           (a loop).  This is a profile bug and the note should read like
+           one.
+        3. **Nothing declares it** — say so, and point at the two fixes.
 
         The tier is found by ROLE, not by name
         (``ModelTierConfig.tiers_for_modality``), so a profile whose image
@@ -7895,28 +7957,9 @@ NOTES
         """
         kinds = ", ".join(sorted(withheld))
         model = self._model_name or "the current model"
-        tier_config = self._tier_config
-        target: Optional[str] = None
-        covered: List[str] = []
-        if tier_config is not None:
-            from .model_tiers import DIRECTION_INBOUND
-            # Sorted for determinism when several modalities were withheld
-            # at once; first match in canonical tier order wins.
-            for kind in sorted(withheld):
-                # INBOUND explicitly: the gate's question is "who can look
-                # at this?", never "who could emit one".
-                candidates = tier_config.tiers_for_modality(
-                    kind, DIRECTION_INBOUND)
-                if candidates and target is None:
-                    target = candidates[0]
-                if target is not None and kind in tier_config.tiers[
-                        target].inbound_modalities:
-                    covered.append(kind)
+        target, covered, stuck = self._resolve_withheld_target(withheld)
+
         if target is not None:
-            # Name only what the suggested tier actually accepts.  Saying
-            # "can't view image, audio content — call enter_tier('x')" when
-            # x only takes images sends the agent to fetch content that will
-            # be withheld again.
             covers = ", ".join(sorted(covered))
             rest = sorted(set(withheld) - set(covered))
             tail = (
@@ -7928,6 +7971,19 @@ NOTES
                 f"view {kinds} content.  Call enter_tier(\"{target}\") first "
                 f"to view the {covers} content, then re-run this tool.{tail}]"
             )
+
+        if stuck:
+            active = getattr(self, "_active_tier", None)
+            return (
+                f"[Attachment withheld: the active model ({model}) can't "
+                f"view {kinds} content.  The only tier declaring "
+                f"{', '.join(stuck)} is {active!r}, which you are already "
+                f"in — its model does not accept that input, so switching "
+                f"cannot help.  This is a profile error: map that tier to a "
+                f"model accepting {', '.join(stuck)} input, or set "
+                f"plugin_configs.<provider>.modalities to assert it.]"
+            )
+
         return (
             f"[Attachment withheld: the active model ({model}) can't view "
             f"{kinds} content, and this session declares no tier that can.  "
