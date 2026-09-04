@@ -58,25 +58,48 @@ An audio stream is structurally the same object.
 > `StreamState.is_active()`. It is a hook to build flow control on, not
 > working flow control.
 
-### 2.2 The two "subscription" mechanisms are different things
+### 2.2 Three subscription surfaces, all already built
 
-This distinction drives the whole design, so it is worth being explicit:
+Subscription is a solved problem here, at every level. Nothing in this design
+needs a new one — this is the single most important thing to know before
+proposing machinery.
 
-- **`shared/event_bus.py` — the per-runtime `EventBus`.** In-process,
-  `subscribe(subscriber_name, filter, callback)` / `publish()`, thread-based.
-  Its subscribers are *plugins, subagents and reactor rules inside the server
-  process*. A remote client cannot subscribe to it.
-- **The client event protocol** (`jaato_sdk/events.py` over
-  `server/ipc.py` / `websocket.py`). Typed server→client events on a
-  `|4-byte BE length| UTF-8 payload|` frame, `MAX_MESSAGE_SIZE` 10 MB.
+**1. The SDK client subscribes** — `jaato_sdk/client/ipc.py:572-604`, backed
+by `client/_handler_registry.py` and mirrored on `IPCRecoveryClient`
+(`client/recovery.py:1087`):
 
-`server.emit()` is the single fan-out point that feeds both. `_SERVER_TO_BUS`
+```python
+client.subscribe(EventType.TOOL_OUTPUT, on_chunk)   # typed
+client.subscribe_once(EventType.SESSION_TERMINATED, on_done)
+client.subscribe_all(firehose)                      # catchall
+client.subscribe_many({...})                        # atomic multi-register
+```
+
+Each returns an idempotent `Unsubscribe`. Sync handlers run inline, async
+handlers are scheduled fire-and-forget. Dispatch snapshots each bucket first,
+so subscribe/unsubscribe during dispatch takes effect on the next event. **Any
+client — a TUI, an SDK orchestrator, a cascade driver — subscribes this way.**
+
+**2. The model subscribes** — `shared/event_bus_tools.py` registers
+`subscribeToEvents` / `getEvents` / `listSubscriptions` / `unsubscribe` as core
+tools, delivering matched events into the conversation via `inject_prompt()`.
+So an *agent* can wait on events too, which is how a cascade parent watches a
+child.
+
+**3. Plugins and reactor rules subscribe** — `shared/event_bus.py`, the
+per-runtime in-process `EventBus`: `subscribe(subscriber_name, filter,
+callback)` / `publish()`.
+
+`server.emit()` is the single fan-out point feeding all three. `_SERVER_TO_BUS`
 (`server/core.py:129`) decides which protocol events are *also* republished on
-the in-process bus; events absent from that map go only to clients.
+the in-process bus; events absent from that map still reach clients, they are
+just not visible to surface 3.
 
-**So "a client subscribes to a tool's binary output" spans both mechanisms.**
-The bus is not the delivery channel to a client; it is the in-process fan-out
-that a client-facing event is mirrored onto.
+**Consequence for this design.** A client that wants audio already has its
+subscription: `client.subscribe(EventType.TOOL_OUTPUT, handler)`. The only
+thing missing is that the event carries no bytes (§3.1). Widen the payload and
+the whole subscription path — client, agent and plugin — lights up at once,
+with no new API on any of the three surfaces.
 
 ### 2.3 The per-chunk client event
 
@@ -204,6 +227,16 @@ Default `MODEL` preserves current behaviour exactly. Audio from a TTS tool is
 This is also where the content gate stops destroying bytes: when a modality is
 withheld from the model, re-route that attachment as a `CLIENT` chunk instead
 of dropping it, and keep the existing self-correcting note for the model.
+
+**Cascades.** `Audience` is about *this* session's model, not about who may
+observe. A parent agent watching a child subscribes through surface 2
+(`subscribeToEvents` → `inject_prompt`), and a cascade driver through surface 1
+— both see a `CLIENT` chunk, because audience selects whether the bytes enter
+*this* conversation's history, not whether the event is published. That keeps
+one rule doing both jobs: a parent that wants to look at a child's screenshot
+must itself be in a tier declaring `image: inbound`, and if it is not, the same
+gate that protected the child protects the parent, with the same actionable
+note. No separate cascade path is needed.
 
 ### 5.3 The client-facing event
 
