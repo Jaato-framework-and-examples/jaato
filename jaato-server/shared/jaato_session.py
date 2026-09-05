@@ -2903,6 +2903,12 @@ class JaatoSession:
             # before any model work (the earliest point the provider
             # exists).
             self._validate_modality_tier_capabilities()
+            # A session that STARTS in a speaking tier must ask for audio
+            # too.  The initial tier never passes through
+            # ``_connect_tier_entry`` (that is the SWITCH path), so without
+            # this an outbound role only took effect after the first
+            # ``enter_tier`` — the one case most likely to be tested first.
+            self._request_active_tier_output_modalities()
             # Consume the stashed args — repeated calls become no-ops
             # (the fast-path above returns the cached provider).
             self._provider_lazy_pending = None
@@ -11386,6 +11392,53 @@ NOTES
             return False
         return entry.provider is None or entry.provider == self._active_provider_name
 
+    def _request_active_tier_output_modalities(self) -> None:
+        """Stamp the ACTIVE tier's outbound roles onto a freshly built provider.
+
+        The switch path (:meth:`_connect_tier_entry`) covers every later
+        tier change; this covers the first one, which is not a change at
+        all — the session simply starts there.
+        """
+        if self._tier_config is None or not self._active_tier:
+            return
+        entry = self._tier_config.tiers.get(self._active_tier)
+        if entry is not None:
+            self._request_tier_output_modalities(entry)
+
+    def _request_tier_output_modalities(self, entry) -> None:
+        """Ask the provider to emit what the entered tier declares.
+
+        This is what turns ``modalities: {audio: outbound}`` from a
+        declaration the startup check merely *validates* into a request
+        that reaches the wire.  Without it an outbound role is inert: the
+        tier says the model may speak, but nothing ever asks it to.
+
+        Called on EVERY tier entry, including entries that declare no
+        outbound role, because the empty set is the instruction that stops
+        requesting audio — leaving a speaking tier must not leave the
+        request stamped.
+
+        Best-effort by design.  A provider that cannot emit media inherits
+        a no-op :meth:`request_output_modalities`, so the common case costs
+        one call; and a provider that raises must not fail the tier switch,
+        which has already succeeded by this point.  A model that genuinely
+        cannot do the job is refused far earlier, by the startup
+        capability check.
+        """
+        provider = self._provider
+        if provider is None:
+            return
+        request = getattr(provider, "request_output_modalities", None)
+        if request is None:
+            return
+        kinds = getattr(entry, "outbound_modalities", frozenset()) or frozenset()
+        try:
+            request(kinds)
+        except Exception:  # noqa: BLE001 - never fail a completed switch
+            self._trace(
+                f"TIER_OUTPUT_MODALITIES: provider refused {sorted(kinds)!r}"
+            )
+
     def _connect_tier_entry(self, entry) -> None:
         """Point the session's provider at ``entry``'s (provider, model).
 
@@ -11427,6 +11480,11 @@ NOTES
         # about to update ``_model_name``.  None of it may raise, or a
         # switch lands half-applied — the provider re-pointed at the new
         # model while the session still believes it is on the old one.
+        #
+        # Asking the provider to emit the tier's outbound modalities is
+        # exactly such bookkeeping, which is why it sits below the connect
+        # rather than inside it.
+        self._request_tier_output_modalities(entry)
         #
         # Counted here rather than in ``switch_tier`` so BOTH routes into a
         # binding change are seen: the model-driven one and the

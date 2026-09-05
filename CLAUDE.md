@@ -478,12 +478,65 @@ construction (replaying the model's own audio into its history would be
 meaningless) and is delivered on the tool-output channel under the reserved
 `call_id` `"model-output"`.
 
-Providers declare emission with `output_modalities()` /
-`supports_output_modality(kind, model=)` — deliberately *not* named
-`modalities()`, which is framework-wide for **input**. The tier startup check
-probes `supports_output_modality` by name, so defining it turns outbound tier
-roles from unverified declarations into enforced ones. Text-only is the floor;
-`ProviderCapabilities.output_media` marks an adapter that actually delivers it.
+**The contract is universal; the wire format is not.** Four hooks live on
+`ModalityCapabilityMixin`, which every provider already has, so media support is
+*implemented or left unimplemented* per provider rather than assumed of all:
+
+| Hook | Default | Meaning |
+|------|---------|---------|
+| `output_modalities(model=)` | `{text}` floor, raised by `_output_modalities_knob` | what the model can EMIT |
+| `supports_output_modality(kind, model=)` | derived | probed by name by the tier startup check |
+| `emit_media_delta(delta, on_chunk, seq)` | no-op returning `seq` | decode model media from one streaming delta |
+| `request_output_modalities(kinds)` | no-op | ask the model to emit these on later turns |
+
+Deliberately *not* named `modalities()`, which is framework-wide for **input**.
+
+The **OpenAI wire decoder** lives in `model_provider/_media_deltas.py` — a plain
+module mirroring `_prose_tools.py`, imported rather than inherited. This matters:
+ten providers speak OpenAI's chat-completions format but only five inherit
+`_openai_compat.OpenAICompatProvider` (openrouter, lmstudio, vllm, tensorrt_llm
+and triton each own their streaming loop), so machinery parked on that base class
+is unavailable to half the fleet that speaks its format — which is exactly how
+model audio was unreachable through OpenRouter. `delta.audio.data` as base64
+pcm16 is one vendor's shape (Google delivers model media as `inlineData` on
+parts, Anthropic emits none), so it must not sit in the universal contract either.
+
+Wiring a provider is three touches: add `OpenAIMediaOutputMixin` to its bases,
+call `self.emit_media_delta(...)` in its streaming loop, and call
+`self.apply_requested_output_modalities(kwargs)` where it assembles the request.
+Done for `_openai_compat` (nim, nebius, ovhcloud, doubleword, zhipuai_openai) and
+`openrouter`; lmstudio, vllm, tensorrt_llm and triton are the same three touches
+when someone needs them.
+
+**A tier's outbound role reaches the wire.** `_connect_tier_entry` (every tier
+switch) and the initial-provider build (a session that *starts* in a speaking
+tier) both call `request_output_modalities(entry.outbound_modalities)`, which an
+OpenAI-shaped provider turns into `modalities: ["text","audio"]` +
+`audio: {voice, format}`. The empty set is an instruction, not an absence of one —
+it is how leaving a speaking tier stops requesting audio. The **tier says what**
+to emit, the **profile says how**: `api_params.audio` always wins, because the
+tier stamp uses `setdefault`.
+
+Since no catalog in this tree reports output modalities, an operator assertion is
+the only source of truth — hence the `output_modalities` knob (the counterpart of
+the input `modalities` knob). Without it the floor stays text-only and the startup
+check refuses any outbound role. `ProviderCapabilities.output_media` marks an
+adapter proven to deliver media on the wire.
+
+```yaml
+# a tier that speaks, on OpenRouter
+provider: openrouter
+plugin_configs:
+  openrouter:
+    framework_overrides:
+      output_modalities: [text, audio]   # assert the model can EMIT audio
+    api_params:
+      audio: {voice: cedar, format: pcm16}   # optional: pin the voice
+model_tiers:
+  planner:
+    model: openai/gpt-audio
+    modalities: {audio: outbound}
+```
 
 > **Naming collision.** OpenAI's request field `modalities` means **OUTPUT**
 > (`["text","audio"]` with `audio: {voice, format}`); a jaato tier's

@@ -338,9 +338,18 @@ class ModalityCapabilityMixin:
         key means INPUT.
 
         Text-only floor: every model emits text, and an adapter that does
-        not parse response media cannot honestly claim more.  A provider
-        whose adapter DOES deliver model-generated media overrides this.
+        not parse response media cannot honestly claim more.
+
+        A provider raises the floor either by setting
+        ``_output_modalities_knob`` (the profile-level assertion, mirroring
+        the input ``modalities`` knob -- the catalogs do not report output
+        modalities, so an operator naming an audio model is the only
+        source of truth available) or by overriding this method outright.
+        ``text`` is always included: a model that speaks still writes.
         """
+        knob = getattr(self, "_output_modalities_knob", None)
+        if knob:
+            return {str(m).strip().lower() for m in knob if m} | {MODALITY_TEXT}
         return {MODALITY_TEXT}
 
     def supports_output_modality(
@@ -357,6 +366,48 @@ class ModalityCapabilityMixin:
         first turn that tries to speak.
         """
         return kind.strip().lower() in self.output_modalities(model)
+
+    def emit_media_delta(self, delta: Any, on_chunk: Any, sequence: int) -> int:
+        """Decode model-generated media from ``delta`` and emit it.
+
+        The no-op default IS the contract: a streaming loop calls this
+        unconditionally, and a provider whose wire format carries no model
+        media simply never overrides it, paying one call that returns
+        ``sequence`` unchanged.  That is what lets media support be
+        implemented per provider rather than assumed of all of them.
+
+        A provider opts in either by adding
+        ``_media_deltas.OpenAIMediaOutputMixin`` to its bases (OpenAI-shaped
+        wire) or by overriding this with its own decoder.
+
+        Args:
+            delta: One streaming delta, in whatever shape the provider's
+                SDK produces.
+            on_chunk: The :data:`StreamingCallback`; receives a
+                ``MediaDelta``, never a ``str``.
+            sequence: Last media sequence issued for this turn.
+
+        Returns:
+            The new sequence -- unchanged when nothing was emitted.
+        """
+        return sequence
+
+    def request_output_modalities(self, kinds: Any) -> None:
+        """Ask the provider to make the model EMIT ``kinds`` on later turns.
+
+        Called on every tier entry with that tier's declared outbound
+        roles, which is what turns ``modalities: {audio: outbound}`` from a
+        declaration into a request.  An empty set is meaningful and must
+        be honoured: it is how leaving a speaking tier stops asking for
+        audio.
+
+        The no-op default is deliberate.  A provider that cannot emit media
+        ignores the request rather than failing -- the startup capability
+        check (against :meth:`supports_output_modality`) is what refuses a
+        tier whose model genuinely cannot do the job, and it runs long
+        before any request is built.
+        """
+        return None
 
     def capabilities(self) -> "ProviderCapabilities":
         """Declared wire-level capabilities (baseline default).

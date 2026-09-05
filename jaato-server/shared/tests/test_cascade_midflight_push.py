@@ -49,6 +49,7 @@ def _session(budget=None):
         _provider=SimpleNamespace(
             name="openrouter",
             connect=lambda m, skip_model_test=True: connects.append(m)),
+        _request_tier_output_modalities=lambda entry: None,
         _active_provider_name="openrouter", _provider_cache={},
         _budget_tracker=BudgetTracker(budget) if budget else None,
         _budget_terminal_action=None, _budget_exhausted_reason=None,

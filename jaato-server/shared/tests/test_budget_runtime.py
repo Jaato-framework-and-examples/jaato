@@ -121,6 +121,7 @@ def _session(active="planner", model="opus", budget=None):
         _provider=SimpleNamespace(
             name="openrouter",
             connect=lambda m, skip_model_test=True: connects.append(m)),
+        _request_tier_output_modalities=lambda entry: None,
         _active_provider_name="openrouter",
         _provider_cache={},
         # ``__init__`` always sets these; a double that omits them is a

@@ -110,6 +110,7 @@ from .converters import (
     system_message_with_cache,
     tool_schemas_to_openai,
 )
+from .._media_deltas import MEDIA_API_PARAMS, OpenAIMediaOutputMixin
 from .._prose_tools import (
     augment_system_with_tools,
     messages_to_prose_chat,
@@ -449,7 +450,7 @@ def _retry_after_from_body(exc: Exception) -> Optional[float]:
     return None
 
 
-class OpenRouterProvider(ModalityCapabilityMixin):
+class OpenRouterProvider(OpenAIMediaOutputMixin, ModalityCapabilityMixin):
     """OpenRouter model provider.
 
     Provides access to OpenRouter's catalog via the OpenAI-compatible
@@ -535,6 +536,10 @@ class OpenRouterProvider(ModalityCapabilityMixin):
         # catalog ``architecture.input_modalities`` auto-detect wins; this
         # is only consulted when the catalog has no entry for the model.
         self._modalities_knob: Optional[List[str]] = None
+        # Operator assertion that the model can EMIT these modalities.
+        self._output_modalities_knob: Optional[List[str]] = None
+        # OpenAI output-media body fields set explicitly by the profile.
+        self._media_api_params: Dict[str, Any] = {}
 
         # OpenRouter request-time routing controls.  ``provider`` is the
         # killer feature of OpenRouter — it constrains which upstream
@@ -709,6 +714,57 @@ class OpenRouterProvider(ModalityCapabilityMixin):
         return "openrouter"
 
     # ==================== Lifecycle ====================
+
+    def _read_media_output_config(
+        self, knob, framework_overrides: Dict[str, Any],
+        api_params: Dict[str, Any],
+    ) -> None:
+        """Read the model-media OUTPUT knobs from the profile.
+
+        Its own method rather than inline in :meth:`initialize` so that
+        already-oversized function does not grow further.
+
+        Two knobs, deliberately in different layers:
+
+        ``framework_overrides.output_modalities`` is the CAPABILITY
+        assertion — the counterpart of the input ``modalities`` knob, and
+        the only source of truth available, because the OpenRouter catalog
+        reports ``architecture.modality`` for input but says nothing about
+        what a model can EMIT.  Without it the floor stays text-only and
+        the startup check refuses any outbound tier role.
+
+        ``api_params.modalities`` / ``api_params.audio`` are the REQUEST
+        fields.  They are forwarded so a profile can pin the voice; a
+        tier's outbound role supplies them otherwise.
+        """
+        out_extra = knob("output_modalities", layer=framework_overrides)
+        if out_extra is not None:
+            if not isinstance(out_extra, (list, tuple)) or not all(
+                isinstance(m, str) for m in out_extra
+            ):
+                raise TypeError(
+                    "OpenRouter 'output_modalities' config must be a list of "
+                    f"strings (e.g. [\"text\", \"audio\"]), got "
+                    f"{type(out_extra).__name__}"
+                )
+            self._output_modalities_knob = list(out_extra)
+
+        for key in sorted(MEDIA_API_PARAMS):
+            value = knob(key, layer=api_params)
+            if value is not None:
+                self._media_api_params[key] = value
+
+    def _apply_media_output(self, kwargs: Dict[str, Any]) -> None:
+        """Stamp model-media OUTPUT fields onto the request body.
+
+        Profile values first, then the entered tier's role via
+        ``setdefault`` — so the TIER says what to emit and the PROFILE
+        says how (which voice, which format).  A provider never asked for
+        audio leaves ``kwargs`` untouched.
+        """
+        for key, value in self._media_api_params.items():
+            kwargs[key] = value
+        self.apply_requested_output_modalities(kwargs)
 
     def initialize(self, config: Optional[ProviderConfig] = None) -> None:
         """Initialize the provider with credentials.
@@ -935,6 +991,8 @@ class OpenRouterProvider(ModalityCapabilityMixin):
                     f"{type(modalities_extra).__name__}"
                 )
             self._modalities_knob = list(modalities_extra)
+
+        self._read_media_output_config(_knob, framework_overrides, api_params)
 
         # routing: OpenRouter's ``provider`` extension field (sort,
         # ignore, order, allow_fallbacks, ...).  Stored as a dict and
@@ -1555,6 +1613,11 @@ class OpenRouterProvider(ModalityCapabilityMixin):
             existing.update(extra_body)
             kwargs["extra_body"] = existing
 
+        # What the entered tier asked the model to EMIT.  Applied last and
+        # via setdefault, so an explicit ``api_params.audio`` still wins:
+        # the tier says what, the profile says how.
+        self._apply_media_output(kwargs)
+
         try:
             if on_chunk:
                 provider_response = self._stream_response(
@@ -1627,6 +1690,9 @@ class OpenRouterProvider(ModalityCapabilityMixin):
         kwargs["stream_options"] = {"include_usage": True}
 
         accumulated_text: List[str] = []
+        # Monotonic index over model-generated media chunks, so a
+        # consumer can spot a gap left by backpressure.
+        media_sequence = -1
         accumulated_thinking: List[str] = []
         parts: List[Part] = []
         finish_reason = FinishReason.UNKNOWN
@@ -1809,6 +1875,14 @@ class OpenRouterProvider(ModalityCapabilityMixin):
                         chunk_count += 1
                         accumulated_text.append(delta.content)
                         on_chunk(delta.content)
+
+                    # Model-generated audio.  OpenRouter is OpenAI-shaped on
+                    # the wire but does NOT inherit OpenAICompatProvider, so
+                    # the decoder is imported rather than inherited -- see
+                    # ``_media_deltas``.
+                    media_sequence = self.emit_media_delta(
+                        delta, on_chunk, media_sequence
+                    )
 
                     if delta.tool_calls:
                         for tc_delta in delta.tool_calls:

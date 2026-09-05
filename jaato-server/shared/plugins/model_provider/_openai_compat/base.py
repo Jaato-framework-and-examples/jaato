@@ -73,6 +73,12 @@ from .converters import (
     response_from_openai,
     tool_schemas_to_openai,
 )
+from .._media_deltas import (  # noqa: F401 - re-exported for callers
+    MEDIA_API_PARAMS,
+    STREAM_AUDIO_MIME,
+    OpenAIMediaOutputMixin,
+    extract_audio_delta as _extract_audio_delta,
+)
 from .._prose_tools import (
     augment_system_with_tools,
     messages_to_prose_chat,
@@ -84,51 +90,7 @@ from shared.tool_id_map import tool_choice_to_wire
 logger = logging.getLogger(__name__)
 
 
-def _extract_audio_delta(delta: Any) -> Optional[Tuple[bytes, str]]:
-    """Pull ``(raw_bytes, transcript)`` out of a streaming ``delta.audio``.
-
-    Returns ``None`` when the delta carries no audio -- the case for every
-    text-only provider and every text chunk, so this is the cheap common
-    path.
-
-    Defensive by necessity.  ``audio`` is absent from OpenAI's published
-    OpenAPI schema for the streaming delta, and so from the generated SDK
-    types too, meaning it may surface as an attribute, inside
-    ``model_extra``, or as a plain dict depending on the client.  It is
-    therefore probed rather than accessed, and a malformed or undecodable
-    payload yields ``None`` instead of raising: one bad audio chunk must
-    not abort a turn that is otherwise streaming fine.
-    """
-    audio = getattr(delta, "audio", None)
-    if audio is None and isinstance(delta, dict):
-        audio = delta.get("audio")
-    if audio is None:
-        extra = getattr(delta, "model_extra", None)
-        if isinstance(extra, dict):
-            audio = extra.get("audio")
-    if audio is None:
-        return None
-
-    if isinstance(audio, dict):
-        encoded = audio.get("data")
-        transcript = audio.get("transcript") or ""
-    else:
-        encoded = getattr(audio, "data", None)
-        transcript = getattr(audio, "transcript", None) or ""
-
-    if not encoded:
-        return None
-    try:
-        raw = _b64decode(encoded)
-    except (BinasciiError, ValueError, TypeError):
-        logger.warning("Discarding an undecodable audio delta")
-        return None
-    if not raw:
-        return None
-    return raw, transcript
-
-
-class OpenAICompatProvider(ModalityCapabilityMixin):
+class OpenAICompatProvider(OpenAIMediaOutputMixin, ModalityCapabilityMixin):
     """Base class for OpenAI-compatible chat-completions providers.
 
     See the module docstring for the hook contract.  Lifecycle:
@@ -160,18 +122,11 @@ class OpenAICompatProvider(ModalityCapabilityMixin):
     # (``{"voice": ..., "format": ...}``); OpenAI requires both together,
     # and both were previously dropped here with a warning, which made
     # audio output unrequestable through any OpenAI-compatible provider.
-    # OpenAI streams audio as headerless pcm16 -- 24 kHz mono signed
-    # 16-bit little-endian -- and ONLY pcm16: requesting wav/mp3 together
-    # with ``stream=true`` is rejected upstream.  Spelled out in the mime
-    # type because a headerless payload carries no way to recover the rate
-    # or channel count, and a consumer that guesses wrong plays noise.
-    STREAM_AUDIO_MIME = "audio/pcm;rate=24000;channels=1;encoding=s16le"
-
     _FORWARDED_API_PARAMS = frozenset({
         "temperature", "top_p", "max_tokens", "tool_choice",
         "parallel_tool_calls", "frequency_penalty", "presence_penalty",
-        "seed", "stop", "modalities", "audio",
-    })
+        "seed", "stop",
+    }) | MEDIA_API_PARAMS
 
     # Models known to expose reasoning/thinking via ``reasoning_content``.
     REASONING_CAPABLE_MODELS: List[str] = []
@@ -193,6 +148,8 @@ class OpenAICompatProvider(ModalityCapabilityMixin):
         # plugin_configs.<provider>.api_params (filtered to
         # _FORWARDED_API_PARAMS) + opaque extra_body, forwarded on each call.
         self._api_params: Dict[str, Any] = {}
+        # Operator assertion that this model can EMIT these modalities.
+        self._output_modalities_knob: Optional[List[str]] = None
         self._extra_body: Optional[Dict[str, Any]] = None
 
         # Quirk: prose_tool_calls (opt-in via profile.quirks).  When set,
@@ -341,6 +298,21 @@ class OpenAICompatProvider(ModalityCapabilityMixin):
                     "fields are %s",
                     self.name, sorted(dropped), sorted(self._FORWARDED_API_PARAMS),
                 )
+        # The OUTPUT counterpart of the input ``modalities`` knob.  No
+        # catalog in this tree reports output modalities, so an operator
+        # naming an audio-capable model is the only available source of
+        # truth -- without it the startup check refuses any outbound tier
+        # role, since the floor is text-only.
+        out_knob = config.extra.get("output_modalities")
+        if out_knob is not None:
+            if (not isinstance(out_knob, (list, tuple))
+                    or not all(isinstance(m, str) for m in out_knob)):
+                raise TypeError(
+                    f"{self.name} 'output_modalities' config must be a list "
+                    f"of strings, got {type(out_knob).__name__}"
+                )
+            self._output_modalities_knob = list(out_knob)
+
         extra_body = config.extra.get("extra_body")
         if extra_body is not None:
             if not isinstance(extra_body, dict):
@@ -430,6 +402,9 @@ class OpenAICompatProvider(ModalityCapabilityMixin):
         """
         for key, value in self._api_params.items():
             kwargs[key] = value
+        # After the profile's own params, so an explicit ``api_params.audio``
+        # wins: the TIER says what to emit, the PROFILE says how.
+        self.apply_requested_output_modalities(kwargs)
         if self._extra_body:
             kwargs["extra_body"] = self._extra_body
         if tool_choice is not None:
@@ -569,34 +544,6 @@ class OpenAICompatProvider(ModalityCapabilityMixin):
         # upstream sent as a string — or a test double left as a mock —
         # must read as "not reported" rather than reach the subtraction.
         return cached if isinstance(cached, int) and cached else None
-
-    def _emit_audio_delta(
-        self,
-        delta: Any,
-        on_chunk: StreamingCallback,
-        media_sequence: int,
-    ) -> int:
-        """Emit one model-generated audio chunk; return the new sequence.
-
-        Returns ``media_sequence`` unchanged when the delta carries no
-        audio -- the case for every text-only provider and every text
-        chunk, so the common path costs one call and a ``None`` check.
-
-        Extracted from the streaming loop rather than inlined so that
-        already-oversized function does not grow further.
-        """
-        audio_delta = _extract_audio_delta(delta)
-        if audio_delta is None:
-            return media_sequence
-        raw, transcript = audio_delta
-        media_sequence += 1
-        on_chunk(MediaDelta(
-            mime_type=self.STREAM_AUDIO_MIME,
-            data=raw,
-            sequence=media_sequence,
-            transcript=transcript,
-        ))
-        return media_sequence
 
     def _stream_response(
         self,
@@ -744,7 +691,7 @@ class OpenAICompatProvider(ModalityCapabilityMixin):
                     # pcm16 (24 kHz mono s16le, headerless), which is why
                     # the mime type spells the parameters out: the payload
                     # carries no header to recover them from.
-                    media_sequence = self._emit_audio_delta(
+                    media_sequence = self.emit_media_delta(
                         delta, on_chunk, media_sequence
                     )
 
