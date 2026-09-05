@@ -110,7 +110,13 @@ from .converters import (
     system_message_with_cache,
     tool_schemas_to_openai,
 )
-from .._media_deltas import MEDIA_API_PARAMS, OpenAIMediaOutputMixin
+from .._media_deltas import (
+    MEDIA_API_PARAMS,
+    NO_MEDIA_YET,
+    OpenAIMediaOutputMixin,
+    media_chunk_count,
+    stream_terminated,
+)
 from .._prose_tools import (
     augment_system_with_tools,
     messages_to_prose_chat,
@@ -1691,8 +1697,10 @@ class OpenRouterProvider(OpenAIMediaOutputMixin, ModalityCapabilityMixin):
 
         accumulated_text: List[str] = []
         # Monotonic index over model-generated media chunks, so a
-        # consumer can spot a gap left by backpressure.
-        media_sequence = -1
+        # consumer can spot a gap left by backpressure.  Also the
+        # termination signal for an audio-only stream -- see
+        # ``_media_deltas.media_arrived``.
+        media_sequence = NO_MEDIA_YET
         accumulated_thinking: List[str] = []
         parts: List[Part] = []
         finish_reason = FinishReason.UNKNOWN
@@ -1997,11 +2005,11 @@ class OpenRouterProvider(OpenAIMediaOutputMixin, ModalityCapabilityMixin):
                 raw=None,
                 thinking=thinking,
             ),
-            terminal_seen=terminal_seen,
+            terminal_seen=stream_terminated(terminal_seen, media_sequence),
             was_cancelled=was_cancelled,
             provider=self.name,
             model=self._model_name,
-            chunks=chunk_count,
+            chunks=chunk_count + media_chunk_count(media_sequence),
         )
 
     # ==================== Stream Teardown / Stall Handling ====================

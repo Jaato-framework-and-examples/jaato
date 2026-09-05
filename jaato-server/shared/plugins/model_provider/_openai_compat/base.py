@@ -75,9 +75,12 @@ from .converters import (
 )
 from .._media_deltas import (  # noqa: F401 - re-exported for callers
     MEDIA_API_PARAMS,
+    NO_MEDIA_YET,
     STREAM_AUDIO_MIME,
     OpenAIMediaOutputMixin,
     extract_audio_delta as _extract_audio_delta,
+    media_chunk_count,
+    stream_terminated,
 )
 from .._prose_tools import (
     augment_system_with_tools,
@@ -584,7 +587,7 @@ class OpenAICompatProvider(OpenAIMediaOutputMixin, ModalityCapabilityMixin):
         # Monotonic index over model-generated media chunks, so a consumer
         # can spot a gap left by backpressure.  Separate from the text
         # chunk counter: they are different streams.
-        media_sequence = -1
+        media_sequence = NO_MEDIA_YET
 
         def flush_text_block():
             """Flush accumulated text as a single Part."""
@@ -788,11 +791,11 @@ class OpenAICompatProvider(OpenAIMediaOutputMixin, ModalityCapabilityMixin):
                 raw=None,
                 thinking=thinking,
             ),
-            terminal_seen=terminal_seen,
+            terminal_seen=stream_terminated(terminal_seen, media_sequence),
             was_cancelled=was_cancelled,
             provider=self.name,
             model=self._model_name,
-            chunks=chunk_count,
+            chunks=chunk_count + media_chunk_count(media_sequence),
         )
 
     # ==================== Error Handling ====================

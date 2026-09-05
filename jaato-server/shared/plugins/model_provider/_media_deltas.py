@@ -61,6 +61,64 @@ DEFAULT_AUDIO_OPTIONS: Dict[str, Any] = {"voice": "alloy", "format": "pcm16"}
 MODALITY_AUDIO = "audio"
 
 
+#: Start value for a turn's media-sequence counter -- "nothing decoded yet".
+#: Named rather than a bare ``-1`` because two streaming loops initialise it
+#: and both ask :func:`media_arrived` about it.
+NO_MEDIA_YET = -1
+
+
+def media_arrived(media_sequence: int) -> bool:
+    """Whether any model media was decoded during this turn.
+
+    Used as a TERMINATION signal, which needs justifying.
+
+    ``require_terminated_stream`` (#687) rejects a stream that stopped
+    without saying why, because for a TEXT stream a missing
+    ``finish_reason`` means the upstream died mid-generation and the
+    fragment is not an answer.  Audio streams break that assumption:
+    verified live against ``openai/gpt-audio-mini`` via OpenRouter, the
+    whole stream carries **no** ``finish_reason`` and **no**
+    ``native_finish_reason`` -- only audio deltas, an empty-string
+    ``content``, and a closing ``usage`` block.  Applying the text
+    contract there rejects every complete audio response as a fragment,
+    and marks it retryable, so the turn fails and retries forever.
+
+    Reaching the check at all already means the chunk iteration ended
+    normally -- a dropped connection or stall raises earlier -- so
+    "media was decoded" plus "the stream closed cleanly" is positive
+    evidence the generation finished.
+
+    Deliberately NOT keyed on having *requested* audio: what matters is
+    what actually came back.  And deliberately narrow -- a text stream's
+    guard is untouched, because that is the case #687 exists for.
+    """
+    return media_sequence > NO_MEDIA_YET
+
+
+def media_chunk_count(media_sequence: int) -> int:
+    """How many media chunks were emitted, from the sequence counter.
+
+    The counter starts at :data:`NO_MEDIA_YET` and is post-incremented, so
+    it is already the count minus one -- no separate tally, and no branch
+    in the streaming loop to keep the two in step.
+
+    Audio IS content: counting only ``delta.content`` reported an
+    audio-only turn as "no content arrived" while 31KB of speech had in
+    fact been decoded, which made the stream diagnostics lie.
+    """
+    return media_sequence - NO_MEDIA_YET
+
+
+def stream_terminated(terminal_seen: bool, media_sequence: int) -> bool:
+    """Whether the stream ended for a reason, not by dying mid-generation.
+
+    Either the wire named a finish reason, or media was decoded and the
+    chunk iteration ended normally -- see :func:`media_arrived` for why
+    the second clause is sound and why it is scoped to media.
+    """
+    return terminal_seen or media_arrived(media_sequence)
+
+
 def extract_audio_delta(delta: Any) -> Optional[Tuple[bytes, str]]:
     """Pull ``(raw_bytes, transcript)`` out of a streaming ``delta.audio``.
 

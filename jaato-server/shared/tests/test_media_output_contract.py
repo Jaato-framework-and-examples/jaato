@@ -342,3 +342,71 @@ class TestSessionTierWiring:
         session._request_active_tier_output_modalities()
 
         assert provider.requested is None
+
+
+# ==================== Audio-only streams terminate ====================
+
+
+class TestAudioOnlyStreamTermination:
+    """An audio-only stream carries no ``finish_reason`` (verified live).
+
+    ``require_terminated_stream`` (#687) rejects a stream that stopped
+    without saying why — correct for TEXT, where a missing finish_reason
+    means the upstream died mid-generation.  Verified against
+    ``openai/gpt-audio-mini`` via OpenRouter: the whole stream sends no
+    ``finish_reason``, no ``native_finish_reason``, an empty-string
+    ``content``, and a closing ``usage`` block.  Without this, every
+    complete audio response was rejected as a fragment AND marked
+    retryable, so the turn failed and retried forever.
+    """
+
+    def test_no_media_sentinel_is_not_arrival(self):
+        assert _media_deltas.media_arrived(_media_deltas.NO_MEDIA_YET) is False
+
+    def test_first_chunk_counts_as_arrival(self):
+        """Sequence 0 is a real chunk — an off-by-one here would reject
+        a single-chunk audio answer."""
+        assert _media_deltas.media_arrived(0) is True
+        assert _media_deltas.media_arrived(7) is True
+
+    def test_sentinel_is_below_the_first_sequence(self):
+        assert _media_deltas.NO_MEDIA_YET < 0
+
+    def test_chunk_count_derives_from_the_sequence(self):
+        """No separate tally to drift out of step with the counter."""
+        assert _media_deltas.media_chunk_count(_media_deltas.NO_MEDIA_YET) == 0
+        assert _media_deltas.media_chunk_count(0) == 1
+        assert _media_deltas.media_chunk_count(4) == 5
+
+    def test_stream_terminated_accepts_either_signal(self):
+        no_media = _media_deltas.NO_MEDIA_YET
+        assert _media_deltas.stream_terminated(True, no_media) is True   # text
+        assert _media_deltas.stream_terminated(False, 0) is True         # audio
+        assert _media_deltas.stream_terminated(False, no_media) is False # neither
+
+    def test_emit_advances_past_the_sentinel(self):
+        """The counter both providers feed to ``media_arrived``."""
+        seq = _media_deltas.NO_MEDIA_YET
+        emitted = []
+        seq = emit_audio_delta({"content": "x"}, emitted.append, seq)
+        assert _media_deltas.media_arrived(seq) is False, "text must not terminate"
+        seq = emit_audio_delta(_audio_delta(b"\x01"), emitted.append, seq)
+        assert _media_deltas.media_arrived(seq) is True
+
+    @pytest.mark.parametrize("module_path", [
+        "shared.plugins.model_provider.openrouter.provider",
+        "shared.plugins.model_provider._openai_compat.base",
+    ])
+    def test_both_streaming_loops_use_the_signal(self, module_path):
+        """openrouter owns its loop and _openai_compat owns the other, so
+        the fix has to be in both or five providers keep the bug."""
+        import importlib, inspect
+
+        src = inspect.getsource(importlib.import_module(module_path))
+        assert "stream_terminated(terminal_seen, media_sequence)" in src, \
+            "termination signal missing"
+        assert "NO_MEDIA_YET" in src, "sentinel not used"
+        # audio counts as content — an audio-only turn reported
+        # "no content arrived" while 31KB of speech had been decoded.
+        assert "media_chunk_count(media_sequence)" in src, \
+            "media not counted into the chunk total"
