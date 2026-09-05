@@ -102,6 +102,15 @@ The framework uses a server-first architecture where the server runs as a daemon
 
 - **token_accounting.py**: `TokenLedger` - Token usage tracking with rate-limit retries
 
+- **cdp.py**: Minimal Chrome DevTools Protocol client — browser launch with
+  race-free port discovery, attach-to-running-browser, thread-safe
+  request/response plus an event pump. Provider-neutral (raises
+  `CDPConnectionError`), no new dependencies: the transport reuses the core
+  `websockets` package, discovery is stdlib. The `chrome_ai` provider is its
+  first consumer, not its owner — it lived under that provider until the
+  [WebMCP assessment](docs/design/webmcp.md) found that reaching a browser
+  required importing from a model provider.
+
 ### Plugin System (`jaato-server/shared/plugins/`)
 
 Four plugin types:
@@ -349,6 +358,24 @@ MCP servers are configured in `.mcp.json`:
 }
 ```
 
+**stdio is the only transport implemented.** `MCPClientManager` imports
+`mcp.client.stdio` and nothing else, and `ServerConfig` carries
+`command`/`args`/`env` with no URL field — so every server is launched as a
+subprocess. The `"type"` key above is accepted for compatibility but read by
+nothing. Remote servers (SSE / streamable HTTP) are **not** supported; a
+URL-based entry will not connect. (The `mcp` help text advertised an `sse`
+transport that never existed — corrected, since a user following it wrote
+config that could not work.)
+
+**A server's schema text is untrusted.** An MCP server authors its own tool
+names, descriptions, and parameter descriptions, and those land in the
+*trusted* region of the prompt — the schema block and the system
+instructions — where the model reads instructions as legitimate. The plugin
+therefore declares `TRAIT_UNTRUSTED_SCHEMA` and routes every schema through
+`sanitize_untrusted_schema()`, and fences its per-server listing in the
+system instructions with `wrap_untrusted_content()`. See the Tool Traits
+table above.
+
 ### Streaming & Cancellation
 
 Key types in `shared/plugins/model_provider/types.py`:
@@ -420,6 +447,8 @@ Tools can declare semantic **traits** on their `ToolSchema` via the `traits` fie
 |----------|-------|----------|
 | `TRAIT_FILE_WRITER` | `"file_writer"` | Tool writes/modifies files. Result must include `path` (str), `files_modified` (list), or `changes[].file`. Triggers full-JSON enrichment (LSP diagnostics, artifact tracking). |
 | `TRAIT_GREPPABLE_CONTENT` | `"greppable_content"` | Tool returns bulk content eligible for result-rewriting. Routes the tool's **full JSON result** through the same full-dict enrichment path as `TRAIT_FILE_WRITER`, so result-rewriter plugins (`result_grep`) can inspect/shrink structured payloads the text-field path never sees (e.g. `call_service.body`/`headers`). Marks eligibility only — filtering is performed by whichever rewriter is subscribed/active. |
+| `TRAIT_UNTRUSTED_CONTENT` | `"untrusted_content"` | Tool **result** carries content from the open internet or a third party (`web_fetch`, `web_search`, `subagent`, MCP servers). The session marks the result and the provider converter wraps the model-facing text in the `⟦UNTRUSTED-EXTERNAL-CONTENT⟧` boundary, so injected instructions in a payload read as data. Defense-in-depth, complementing egress allowlisting and permission gating. |
+| `TRAIT_UNTRUSTED_SCHEMA` | `"untrusted_schema"` | The tool's **own declaration** — name, description, and the `description` fields nested in `parameters` — was authored by a third party rather than the framework. Independent of the trait above: `web_fetch` returns untrusted content but its description is framework text, while an MCP server authors both. Matters because a description lands in the *trusted* region of the system prompt. A plugin declaring this **must** pass its schemas through `sanitize_untrusted_schema()` (wraps the description, defangs nested ones, forces the name onto `[A-Za-z0-9_-]{1,64}`). Enforced by `test_untrusted_schema_is_sanitized.py`. |
 
 **How it works:**
 1. Tool schemas declare traits: `traits=frozenset({TRAIT_FILE_WRITER})`

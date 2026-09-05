@@ -9,6 +9,9 @@ may be absent, still downloading, or gated on unsupported hardware).
 """
 
 
+from shared.cdp import CDPConnectionError
+
+
 class ChromeAIError(Exception):
     """Base class for all Chrome built-in AI provider errors."""
 
@@ -23,7 +26,7 @@ class ChromeAIBinaryNotFoundError(ChromeAIError):
     """
 
 
-class ChromeAIConnectionError(ChromeAIError):
+class ChromeAIConnectionError(ChromeAIError, CDPConnectionError):
     """The browser process or its DevTools (CDP) connection failed.
 
     Covers launch failures, the DevTools WebSocket dropping mid-turn,
@@ -31,6 +34,15 @@ class ChromeAIConnectionError(ChromeAIError):
     by ``ChromeAIProvider.classify_error`` so the framework's retry
     layer re-enters ``complete()``, where ``_ensure_connected()``
     relaunches the browser if the process died.
+
+    **Why it inherits twice.**  The CDP transport moved to
+    ``shared.cdp`` and raises the provider-neutral
+    :class:`~shared.cdp.CDPConnectionError`.  Inheriting from both means
+    one ``except CDPConnectionError`` in this package catches a failure
+    from either layer, while anything outside that still catches
+    ``ChromeAIConnectionError`` keeps working -- including
+    ``classify_error``, which matches on the shared base so a raise from
+    the transport is classified transient too.
     """
 
 

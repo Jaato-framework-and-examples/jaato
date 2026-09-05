@@ -1,11 +1,17 @@
 """Minimal Chrome DevTools Protocol (CDP) client.
 
-Just enough CDP to drive the built-in AI Prompt API from Python with no
-new dependencies: the WebSocket transport reuses ``websockets`` (already a
-core jaato dependency for the WS server) via its synchronous client, and
+Provider-neutral: no dependency on any model provider, so anything in the
+tree that needs to drive a Chromium browser from Python can use it.  The
+``chrome_ai`` provider (the built-in AI Prompt API) is its first consumer,
+not its owner -- it lived under that provider until the WebMCP assessment
+(``docs/design/webmcp.md``) found the layering backwards: reaching a
+browser required importing from a model provider.
+
+No new dependencies: the WebSocket transport reuses ``websockets`` (already
+a core jaato dependency for the WS server) via its synchronous client, and
 browser launch/discovery is stdlib (``subprocess`` + ``urllib``).
 
-Not a general CDP library — only what ``bridge.py`` needs:
+Deliberately small -- this is not a general CDP library, it is a transport:
 
 - :func:`launch_browser`: spawn Chrome with ``--remote-debugging-port=0``
   and read the browser WebSocket URL from the profile's
@@ -30,9 +36,24 @@ import urllib.error
 import urllib.request
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from .errors import ChromeAIConnectionError
 
 logger = logging.getLogger(__name__)
+
+
+class CDPError(Exception):
+    """Base class for every failure raised by this module."""
+
+
+class CDPConnectionError(CDPError):
+    """The browser process or its DevTools (CDP) connection failed.
+
+    Covers launch failures, a DevTools WebSocket that drops mid-use, and
+    per-request timeouts.  Consumers generally treat this as *transient
+    infra* -- the browser can be relaunched -- so a provider mapping this
+    onto its own hierarchy should classify it that way.  ``chrome_ai`` does
+    exactly that: ``CDPConnectionError`` subclasses this, so
+    ``except CDPConnectionError`` catches both.
+    """
 
 #: Generous frame cap — Prompt API payloads (history + chunks) are small,
 #: but screenshots/tracing-scale CDP frames exist; err on the large side.
@@ -56,7 +77,7 @@ class _Pending:
 class CDPConnection:
     """Thread-safe CDP request/response client over one WebSocket.
 
-    Lifecycle: constructed connected (raises :class:`ChromeAIConnectionError`
+    Lifecycle: constructed connected (raises :class:`CDPConnectionError`
     on failure) → ``send()``/``add_event_listener()`` while ``is_open`` →
     ``close()``.  When the socket drops, all in-flight ``send()`` calls are
     woken with an error and ``is_open`` flips False; the owner (the bridge)
@@ -68,8 +89,8 @@ class CDPConnection:
         try:
             from websockets.sync.client import connect as ws_connect
         except ImportError as exc:  # pragma: no cover - websockets is a core dep
-            raise ChromeAIConnectionError(
-                "the 'websockets' package is required for the chrome_ai "
+            raise CDPConnectionError(
+                "the 'websockets' package is required for the CDP "
                 "provider (it is a core jaato-server dependency; reinstall "
                 "jaato-server)"
             ) from exc
@@ -78,7 +99,7 @@ class CDPConnection:
             self._ws = ws_connect(ws_url, open_timeout=open_timeout,
                                   max_size=_MAX_FRAME)
         except Exception as exc:
-            raise ChromeAIConnectionError(
+            raise CDPConnectionError(
                 f"could not open CDP WebSocket {ws_url}: {exc}"
             ) from exc
         self._send_lock = threading.Lock()
@@ -88,7 +109,7 @@ class CDPConnection:
         self._listeners: List[Callable[[Dict[str, Any]], None]] = []
         self._closed = False
         self._reader = threading.Thread(
-            target=self._read_loop, name="chrome-ai-cdp-reader", daemon=True)
+            target=self._read_loop, name="cdp-reader", daemon=True)
         self._reader.start()
 
     @property
@@ -119,12 +140,12 @@ class CDPConnection:
             The ``result`` dict of the response frame.
 
         Raises:
-            ChromeAIConnectionError: on socket loss, timeout, or a CDP
+            CDPConnectionError: on socket loss, timeout, or a CDP
                 ``error`` response.
         """
         with self._state_lock:
             if self._closed:
-                raise ChromeAIConnectionError("CDP connection is closed")
+                raise CDPConnectionError("CDP connection is closed")
             self._next_id += 1
             msg_id = self._next_id
             pending = _Pending()
@@ -139,17 +160,17 @@ class CDPConnection:
         except Exception as exc:
             with self._state_lock:
                 self._pending.pop(msg_id, None)
-            raise ChromeAIConnectionError(
+            raise CDPConnectionError(
                 f"CDP send failed for {method}: {exc}") from exc
         if not pending.event.wait(timeout or self._default_timeout):
             with self._state_lock:
                 self._pending.pop(msg_id, None)
-            raise ChromeAIConnectionError(
+            raise CDPConnectionError(
                 f"timed out waiting for CDP response to {method}")
         response = pending.response or {}
         if "error" in response:
             err = response["error"]
-            raise ChromeAIConnectionError(
+            raise CDPConnectionError(
                 f"CDP {method} failed: {err.get('message', err)}")
         return response.get("result", {})
 
@@ -176,7 +197,7 @@ class CDPConnection:
             try:
                 frame = json.loads(raw)
             except (json.JSONDecodeError, TypeError):
-                logger.warning("chrome_ai: unparseable CDP frame dropped")
+                logger.warning("cdp: unparseable CDP frame dropped")
                 continue
             if "id" in frame:
                 with self._state_lock:
@@ -189,7 +210,7 @@ class CDPConnection:
                     try:
                         listener(frame)
                     except Exception:
-                        logger.exception("chrome_ai: CDP event listener failed")
+                        logger.exception("cdp: CDP event listener failed")
         # Socket gone: flip closed and wake all waiters with no response
         # (send() surfaces this as a timeout-free connection error).
         with self._state_lock:
@@ -221,7 +242,7 @@ def launch_browser(
         ``(process, browser_ws_url)``.
 
     Raises:
-        ChromeAIConnectionError: if the process exits or the port file
+        CDPConnectionError: if the process exits or the port file
             does not appear within ``timeout``.
     """
     os.makedirs(user_data_dir, exist_ok=True)
@@ -249,7 +270,7 @@ def launch_browser(
             stdin=subprocess.DEVNULL)
     except OSError as exc:
         stderr_fh.close()
-        raise ChromeAIConnectionError(
+        raise CDPConnectionError(
             f"failed to launch browser {binary!r}: {exc}") from exc
     finally:
         # Popen holds its own reference (or launch failed); either way the
@@ -260,7 +281,7 @@ def launch_browser(
     while time.monotonic() < deadline:
         if process.poll() is not None:
             tail = _tail(stderr_log)
-            raise ChromeAIConnectionError(
+            raise CDPConnectionError(
                 f"browser exited during startup (code {process.returncode})."
                 f" stderr tail:\n{tail}")
         try:
@@ -274,7 +295,7 @@ def launch_browser(
             pass
         time.sleep(0.1)
     process.terminate()
-    raise ChromeAIConnectionError(
+    raise CDPConnectionError(
         f"browser did not expose DevTools within {timeout:.0f}s "
         f"(no {port_file}). stderr tail:\n{_tail(stderr_log)}")
 
@@ -293,12 +314,12 @@ def discover_ws_url(cdp_url: str, *, timeout: float = 10.0) -> str:
         with urllib.request.urlopen(version_url, timeout=timeout) as resp:
             info = json.loads(resp.read().decode("utf-8"))
     except (urllib.error.URLError, OSError, ValueError) as exc:
-        raise ChromeAIConnectionError(
+        raise CDPConnectionError(
             f"could not query DevTools endpoint {version_url}: {exc}. "
             "Is the browser running with --remote-debugging-port?") from exc
     ws_url = info.get("webSocketDebuggerUrl")
     if not ws_url:
-        raise ChromeAIConnectionError(
+        raise CDPConnectionError(
             f"{version_url} returned no webSocketDebuggerUrl")
     return ws_url
 

@@ -35,7 +35,8 @@ import time
 import uuid
 from typing import Any, Callable, Dict, List, Optional
 
-from . import cdp
+from shared import cdp
+from shared.cdp import CDPConnectionError
 from .errors import ChromeAIConnectionError, ChromeAIUnavailableError
 
 logger = logging.getLogger(__name__)
@@ -254,13 +255,13 @@ class PromptApiBridge:
                 if self._target_id and self._owns_target:
                     self._conn.send("Target.closeTarget",
                                     {"targetId": self._target_id}, timeout=5)
-            except ChromeAIConnectionError:
+            except CDPConnectionError:
                 pass
             try:
                 if self._process is not None:
                     # We own the browser: ask it to exit cleanly.
                     self._conn.send("Browser.close", timeout=5)
-            except ChromeAIConnectionError:
+            except CDPConnectionError:
                 pass
             self._conn.close()
         self._conn = None
@@ -296,7 +297,7 @@ class PromptApiBridge:
         """
         try:
             result = self._eval("window.__jaato.probe()")
-        except (ChromeAIConnectionError, ChromeAIUnavailableError):
+        except (CDPConnectionError, ChromeAIUnavailableError):
             return None
         if isinstance(result, dict):
             quota = result.get("quota")
@@ -413,7 +414,7 @@ class PromptApiBridge:
         try:
             self._eval(f"window.__jaato.abort({json.dumps(run_id)})",
                        await_promise=False)
-        except ChromeAIConnectionError:
+        except CDPConnectionError:
             logger.debug("chrome_ai: abort(%s) after connection loss", run_id)
 
     def finish_turn(self, run_id: str) -> None:
@@ -439,7 +440,7 @@ class PromptApiBridge:
         """
         try:
             result = self._conn.send("Target.getTargets")
-        except ChromeAIConnectionError:
+        except CDPConnectionError:
             return None
         for info in (result or {}).get("targetInfos", []):
             if info.get("type") == "page" and info.get("url") == self._page_url:

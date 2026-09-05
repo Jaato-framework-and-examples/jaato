@@ -28,7 +28,10 @@ lines on top of both.
 
 ## Status & verification disclaimer
 
-Framework claims verified against `c232cb9` (2026-09-05).  WebMCP claims are
+Framework claims verified against `c232cb9` (2026-09-05).  **Steps 1-3 of §7
+have since landed on this branch**, so §2 and §5 describe defects that are now
+FIXED; each says so inline rather than being edited away, because the argument
+of this document is that reading the proposal is what found them.  WebMCP claims are
 from the `webmachinelearning/webmcp` explainer, its `implementation-status.md`,
 and the spec repo's issue tracker on the same date; the API surface has already
 moved twice (see §1), so **re-check the spec before writing code against it**,
@@ -119,8 +122,14 @@ Two consequences, one of which is a live defect:
 
    No SSE client is imported anywhere in the tree.  A user following that help
    writes an `.mcp.json` entry that cannot work.  This is unrelated to WebMCP
-   and should be fixed independently — either implement the HTTP transports or
-   delete the line.
+   and was fixed independently.
+
+   > **FIXED** (step 7.1).  The help text now states that stdio is the only
+   > transport implemented, that the `"type"` key is accepted but ignored, and
+   > that a URL-based entry will not connect.  Implementing the HTTP transports
+   > is a separate feature with its own egress, auth, and secret-handling
+   > questions; it deserves its own design rather than being smuggled in as a
+   > help-text fix.
 
 ---
 
@@ -149,7 +158,15 @@ A WebMCP client on top of that is close to mechanical:
 - **churn** — register a `toolchange` listener that pushes over the existing
   binding, exactly as `bridge.py` already routes Prompt API chunks
 
-**The one real cost is a refactor.**  `cdp.py` is deliberately scoped —
+> **DONE** (step 7.3).  `cdp.py` now lives at `jaato-server/shared/cdp.py`,
+> raising a provider-neutral `CDPConnectionError`.  `ChromeAIConnectionError`
+> inherits from both its own base and that one, so a single
+> `except CDPConnectionError` in the provider catches either layer and
+> `classify_error` — which now matches the shared base — keeps treating a
+> transport failure as transient infra.  `chrome_ai` is the first consumer
+> rather than the owner; its 61 tests pass unchanged.
+
+**The one real cost was a refactor.**  `cdp.py` is deliberately scoped —
 its own docstring says *"Not a general CDP library — only what `bridge.py`
 needs"* — and it raises `ChromeAIConnectionError` from
 `chrome_ai/errors.py`.  Lifting it to a shared module with provider-neutral
@@ -244,6 +261,36 @@ The fix is scoped and does not depend on WebMCP:
 Doing (1) and (2) improves the MCP path that ships today.  A WebMCP plugin built
 before them would be shipping a page-controlled prompt-injection surface.
 
+> **FIXED** (step 7.2), with one correction to the analysis above.
+>
+> `TRAIT_UNTRUSTED_SCHEMA` now marks a declaration as third-party-authored and
+> obliges its producer to call `sanitize_untrusted_schema()`, which wraps the
+> description in the boundary, defangs every nested `description`, and forces
+> the name onto `[A-Za-z0-9_-]{1,64}`.  A separate trait was necessary and this
+> document's first draft missed why: `web_fetch`, `web_search` and `subagent`
+> all carry `TRAIT_UNTRUSTED_CONTENT` but their descriptions are
+> **framework-authored**.  The existing trait means "my results are untrusted",
+> not "my declaration is untrusted"; wrapping all four would have fenced text
+> the operator wrote.  Only `mcp` is both.
+>
+> **Implementing it found a worse instance than the one argued above.**
+> `MCPPlugin.get_system_instructions()` interpolated each server's tool names
+> and descriptions straight into the SYSTEM INSTRUCTIONS —
+> `lines.append(f"  - {normalized_name}: {desc}")` — which is a more trusted
+> region than the schema block this section was about.  It is now rendered per
+> server by `_render_server_listing()`, wrapped with the server as the
+> boundary's `source`, with each description flattened to one line so a newline
+> cannot forge an extra bullet row.
+>
+> The guard is `jaato-server/shared/tests/test_untrusted_schema_is_sanitized.py`,
+> which declares four `REVERSIONS`, so
+> `test_every_guard_detects_its_own_reversion` puts each defect back on every
+> commit and asserts the named test notices.  That meta-guard earned its keep
+> immediately: the first draft of the guard asserted only that
+> `sanitize_untrusted_schema(` appeared *somewhere* in the plugin source, which
+> the import line satisfies — so deleting the actual call left it green.  The
+> anchors are now on the call sites.
+
 Two smaller doc defects noticed in passing, both in `CLAUDE.md`: the **Tool
 Traits** table lists only `TRAIT_FILE_WRITER` and `TRAIT_GREPPABLE_CONTENT` —
 `TRAIT_UNTRUSTED_CONTENT` is missing despite being the most security-relevant of
@@ -274,25 +321,32 @@ it should be argued on its own merits later rather than smuggled in on WebMCP's.
 
 ## 7. Recommended order
 
-1. **Fix the `sse` help line** (`mcp/plugin.py:840`).  Independent, small,
-   currently misleading users.  Either implement HTTP/SSE transports in
-   `mcp_context_manager.py` or delete the two lines.
-2. **Close the schema-text trust gap** (§5.1, §5.2).  Improves the shipping MCP
-   path.  Hard prerequisite for any page-origin tool source.
-3. **Lift `cdp.py`** out of `model_provider/chrome_ai/` into a shared CDP module
-   with provider-neutral errors, leaving `chrome_ai` as its first consumer.
-   Independently justified; unblocks everything browser-shaped.
+1. ~~**Fix the `sse` help line**~~ — **DONE.**  The help now states that stdio
+   is the only transport, that `"type"` is ignored, and that a URL entry will
+   not connect.  Implementing HTTP/SSE transports remains open as its own
+   feature (egress, auth, and secret-handling questions of its own).
+2. ~~**Close the schema-text trust gap**~~ — **DONE.**  `TRAIT_UNTRUSTED_SCHEMA`
+   + `sanitize_untrusted_schema()` + a fenced system-instruction listing,
+   guarded by `test_untrusted_schema_is_sanitized.py` with four reversions.
+   See §5 — including the worse instance the implementation turned up.
+3. ~~**Lift `cdp.py`**~~ — **DONE.**  Now `shared/cdp.py`, provider-neutral,
+   with `chrome_ai` as its first consumer.  See §3.
 4. **Spike a `webmcp` tool plugin** behind deferred discovery (§4), against the
    Chrome 149 origin trial and one of the `WebMCP-org/examples` pages.  Keep it
-   out of the default plugin set.
+   out of the default plugin set.  **Not started** — it needs a browser with the
+   origin trial enabled and a page that actually registers tools, so it cannot
+   be written or validated from the tree alone.  Steps 1-3 are its
+   prerequisites and are now in place.
 5. **Re-evaluate when a second engine ships non-trial support.**  Until Firefox
    or Safari implements, or a site jaato users actually care about registers
    tools, the client stays a spike.
 
-Steps 1-3 are worth doing on their own terms and would be the right call even if
-WebMCP were abandoned tomorrow.  That is the honest case for this survey: WebMCP
-is not yet worth building for, but reading it carefully found a live defect
-(step 1) and a real security gap (step 2) in what jaato ships today.
+Steps 1-3 were worth doing on their own terms and would have been the right call
+even if WebMCP were abandoned tomorrow — which is the honest case for this
+survey.  Reading the proposal carefully is what found a live defect (step 1) and
+a real injection surface (step 2, in two places, one of them worse than the one
+originally argued).  Neither is a WebMCP problem.  WebMCP would only have made
+the second one reachable without an operator's consent.
 
 ---
 
