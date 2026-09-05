@@ -39,7 +39,13 @@ jobs:
   # ---------------------------------------------------------------
   contract-guards:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # The guard set grows with every guard added — notably
+    # test_every_guard_detects_its_own_reversion, which runs a
+    # sabotage-plus-test cycle per declared reversion. At 10 the job was
+    # being killed in post-cleanup while its tests had already passed
+    # (9m44s of tests against a 10m ceiling on dde49dd9). 20 matches the
+    # `suite` legs below and leaves room for the next guard.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
