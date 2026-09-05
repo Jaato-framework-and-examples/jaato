@@ -179,7 +179,7 @@ Profiles are discovered from three sources in decreasing order of precedence:
 | `gc.pressure_percent` | Must be 0–100 |
 | `gc.preserve_recent_turns` | Must be non-negative integer |
 | `gc.max_turns` | Must be positive integer (if present) |
-| `model_tiers` | Must be object (if present). Tier keys must be in `{"planner", "dispatcher", "executor"}`. Reserved keys `"initial"` and `"fallback"` must be strings. At least one tier→model mapping required. All tiers must use the same provider (V1). |
+| `model_tiers` | Must be object (if present). Tier keys must be in `{"planner", "dispatcher", "executor", "vision"}`. Reserved keys `"initial"` and `"fallback"` must be strings. At least one tier→model mapping required. A tier entry's `provider` / `description` must be non-empty strings when set; tiers may name different providers. |
 
 ---
 
@@ -327,15 +327,34 @@ The `model_tiers` field enables **per-turn model switching** within a single ses
 
 > **Design motivation**: In a typical agent session, most turns are cheap tool calls that don't need the strongest model. Multi-tier switching lets you reserve the expensive model for the turns where it matters, reducing cost without sacrificing capability.
 
-### 5.1 Three Named Tiers
+### 5.1 The Four Named Tiers
+
+Three **cognitive** tiers, plus one **modality** role:
 
 | Tier | Role | Typical Use | Cost |
 |---|---|---|---|
 | `planner` | Deep thought, multi-step reasoning, complex decomposition | Architecture decisions, complex debugging, cross-file analysis | Highest |
 | `dispatcher` | Coordination, light reasoning, deciding which tools to call | Delegating tasks, reading results, deciding next steps | Medium |
 | `executor` | Mechanical tool calls and result interpretation | Running commands, editing files, formatting output | Lowest |
+| `vision` | Viewing image content (screenshots, diagrams) | Switched into before reading an image, and back out after | — |
 
-The names are **semantic conventions**, not capability levels. You can assign any model to any tier — the framework doesn't enforce that `planner` gets the strongest model. However, the `enter_tier` tool's description tells the model what each tier is *for*, so assigning models that match the semantics produces the best behavior.
+`vision` is a modality role rather than a cognitive one, but it shares the
+same single-active-tier machinery: the session is in exactly one tier at a
+time. Content of a modality the active model can't accept is **withheld**,
+with a tool-result note telling the model which tier to enter first. See
+[Multimodal Model Support](design/multimodal-model-support.md).
+
+Since the `modalities` key (see [§5.2](#tier-entry-forms)), that role is
+carried by the **key, not the name** — any tier can declare it, and the gate
+finds the tier by role. `vision` remains the only name with a built-in
+meaning: it implies `modalities: [image]` so profiles written before the key
+behave unchanged.
+
+The names are **semantic conventions**, not capability levels. You can assign
+any model to any tier — the framework doesn't enforce that `planner` gets the
+strongest model. What the model is told each tier is *for* comes from the
+`enter_tier` tool description, which you can override per tier (see
+[§5.2 Tier Entry Forms](#tier-entry-forms)).
 
 ### 5.2 Schema — Unified Dict
 
@@ -346,7 +365,11 @@ The names are **semantic conventions**, not capability levels. You can assign an
   "model_tiers": {
     "planner": "claude-opus-4-7",
     "dispatcher": {"model": "claude-sonnet-4-6", "provider": "anthropic"},
-    "executor": "claude-haiku-4-5",
+    "executor": {
+      "model": "claude-haiku-4-5",
+      "description": "apply the agreed migration plan file by file; do not re-plan"
+    },
+    "vision": {"model": "claude-sonnet-4-6", "modalities": ["image"]},
     "initial": "dispatcher",
     "fallback": "dispatcher"
   }
@@ -360,9 +383,96 @@ Each tier value can be either:
 | Form | Example | When to Use |
 |---|---|---|
 | **Shorthand** (string) | `"claude-opus-4-7"` | When the session's main provider handles this model |
-| **Rich** (dict) | `{"model": "claude-sonnet-4-6", "provider": "anthropic"}` | When you need to explicitly specify the provider |
+| **Rich** (dict) | `{"model": "claude-sonnet-4-6", "provider": "anthropic"}` | When you need a different provider, or your own tier prose |
 
-In V1, the `provider` field in the rich form is **forward-compat only** — the validator rejects configs where tiers declare different providers (see §5.5). In practice, use the shorthand form and let the session's provider handle the model switch.
+Rich-form keys:
+
+| Key | Type | Required | Description |
+|---|---|---|---|
+| `model` | `string` | yes | The model this tier selects. |
+| `provider` | `string` | no | Provider plugin for this tier. Tiers may name **different** providers (see §5.5). Unset = the session's main provider. |
+| `description` | `string` | no | What this tier is *for*, in the words the model reads. Becomes that tier's bullet in the `enter_tier` tool description, replacing the framework's default wording for the name. |
+| `modalities` | `string[]` or `map` | no | Non-text roles this tier fills, and in which direction. Map form `{image: inbound}`; list form `["image"]` is sugar for inbound. Kinds: `image`, `audio`, `video`, `file`. Directions: `inbound`, `outbound`, `bidirectional`. A tier named `vision` implies `image: inbound`. |
+
+##### `modalities` — declaring a role, not asserting a capability
+
+Two places used to branch on the literal tier name `vision`: the content
+gate (which withholds an attachment the active model can't view, and tells
+the agent which tier to enter) and the startup capability check (which fails
+loud when the image tier maps to a model that can't see). Both now resolve
+the tier **by role**:
+
+```yaml
+model_tiers:
+  executor: openai/gpt-5-mini
+  planner:
+    model: google/gemini-3-pro
+    modalities: {image: inbound}   # the planner doubles as the image tier
+  initial: executor
+  fallback: executor
+```
+
+An image read from the `executor` tier is now withheld with
+`Call enter_tier("planner") first` — before the key, the note said no vision
+tier existed, because the profile happened not to use that name.
+
+> **This DECLARES a role and is VERIFIED — the opposite direction from
+> `plugin_configs.<provider>.modalities`, which ASSERTS what a model supports
+> in order to correct catalog detection.** Declaring a role the tier's model
+> can't fill is a config error, and catching it is the point: session
+> creation fails loud at connect rather than at the first image. Use the
+> provider knob when the catalog is wrong about a model; use this key when
+> you're saying which tier plays which part.
+
+`text` is rejected: every model accepts text, so declaring it would assert
+nothing. The gate can withhold `image` / `audio` / `video` / `file`, and a
+tier can declare any of them — though only image *conversion* is implemented
+across providers today, so the others are declarable ahead of the converters
+that will fill them.
+
+##### Direction
+
+Each role carries a direction. The list form is sugar for the common case:
+
+```yaml
+modalities: [image]                 # ≡ {image: inbound}
+modalities: {image: inbound}        # the tier can ACCEPT images
+modalities: {audio: outbound}       # the tier can EMIT audio
+modalities: {audio: bidirectional}  # both
+```
+
+`bidirectional`, not `both` — "both" says nothing about what it is both *of*,
+and doesn't parallel `inbound`/`outbound`. Not `duplex` either: that connotes
+simultaneity, and a tier declares capability, not concurrency. Writing any of
+`both` / `duplex` / `inout` produces an error that names `bidirectional`.
+
+Internally a role is stored as **two sets** (`inbound_modalities` /
+`outbound_modalities`) rather than a map, because every consumer asks a
+directional question; `bidirectional` simply lands the role in both.
+
+> **Outbound roles parse but are INERT today.** No adapter parses
+> model-generated media and the streaming callback is text-only, so nothing
+> can deliver what an outbound role promises. `jaato-scaffold validate` emits
+> a **warning** (not an error) saying so — the declaration is accepted
+> deliberately, so a profile can be written ahead of that work landing. The
+> startup capability check verifies an outbound role only against a provider
+> implementing `supports_output_modality`; none do yet, so it is skipped
+> rather than failing falsely. See
+> [Binary Media Chunks](design/binary-media-chunks.md).
+
+##### Why override `description`
+
+The framework knows what a tier is *called*, not what your deployment means
+by it. Its default prose for `executor` says "mechanical tool calls … when
+the work doesn't need reasoning" — accurate as a generic gloss, useless if
+your `executor` tier is specifically "apply the migration plan verbatim,
+never re-plan". The `description` key is how a profile says so.
+
+It is read **once**, when the tool schema is built at session configure time.
+The tool block sits in the prompt-cache prefix, so this must be stable for
+the life of a session — which is why a `budget_control` degrade rung may
+**not** set one (a rung rebinds a tier's model, never its role; declaring a
+description in an overlay is a config error).
 
 #### Reserved Control Keys
 
@@ -371,7 +481,7 @@ In V1, the `provider` field in the rich form is **forward-compat only** — the 
 | `initial` | `string` | `"dispatcher"` | Which tier to start in when the session begins. Must be a declared tier name. |
 | `fallback` | `string` | `"dispatcher"` | Which tier to route to when `enter_tier` references a tier that isn't declared. Must be a declared tier name. |
 
-These keys are **unambiguous** because they are never valid tier names — the parser splits on `VALID_TIER_NAMES` membership (`planner`, `dispatcher`, `executor`).
+These keys are **unambiguous** because they are never valid tier names — the parser splits on `VALID_TIER_NAMES` membership (`planner`, `dispatcher`, `executor`, `vision`).
 
 ### 5.3 Resolution Order
 
@@ -418,31 +528,58 @@ per turn from 'model_tiers[<active_tier>]'.
 
 When `model_tiers` is empty (or absent), the session falls back to the standard model resolution chain: `model` → `SubagentConfig.default_model` → parent session's model.
 
-### 5.5 V1 Constraint: Same-Provider Only
+### 5.5 Cross-Provider Tiers
 
-In V1, all declared tiers **must use the same provider**. The `ModelTierConfig.__post_init__` validator checks this:
+Tiers may declare **different** providers. The historical V1 same-provider
+gate (`_validate_same_provider_v1`) is gone:
 
-```python
-# This is REJECTED in V1:
+```json
 {
   "model_tiers": {
-    "planner": {"model": "claude-opus", "provider": "anthropic"},
-    "dispatcher": {"model": "qwen", "provider": "ollama"}
+    "executor": {"model": "glm-4.6", "provider": "zhipuai"},
+    "vision":   {"model": "google/gemini-2.5-flash-lite", "provider": "openrouter"},
+    "initial": "executor",
+    "fallback": "executor"
   }
 }
-# Error: "V1 supports only same-provider tier switching;
-#         this config declares providers ['anthropic', 'ollama']."
 ```
 
-**Why**: The session currently switches models via `provider.connect(new_model, skip_model_test=True)` — a cheap operation that re-points the active provider without reconnecting. Cross-provider switching needs auth/connection-state/tool-schema-dialect handling that V1 doesn't implement.
+**How the swap works**: when the entered tier names a provider other than the
+active one, `JaatoSession.switch_tier` swaps `self._provider` to a per-tier
+instance cached by `_provider_for_tier`. Conversation history is
+provider-neutral, so it flows across the swap untouched, and switching back is
+a cache hit (O(1), no re-create). Each tier's provider reads its **own**
+`plugin_configs` section, so the OpenRouter tier above picks up
+`plugin_configs.openrouter.api_key`.
 
-**Forward-compat**: The schema already supports per-tier `provider` overrides. When V2 lifts this constraint, only `_validate_same_provider_v1()` needs to be deleted, and the session layer needs provider-swap logic.
+A tier that leaves `provider` unset uses the session's main provider, which
+switches model in place via `provider.connect(model, skip_model_test=True)` —
+no swap path is taken, so single-provider ladders behave exactly as before.
 
 **Allowed patterns**:
 - All tiers as shorthand (no provider): ✅ — session's provider handles all
-- Mix of shorthand and rich with same provider: ✅
-- All tiers rich with explicit provider, all same: ✅
+- Mix of shorthand and rich with the same provider: ✅
 - Tiers with `provider: null` mixed with unset providers: ✅ (treated as consistent)
+- Tiers naming **different** providers: ✅ (per-tier provider instances)
+
+**Caveat — cost of a cross-provider modality tier**: the startup capability
+check (`_validate_modality_tier_capabilities`) only fail-fast validates tiers
+that live on the *active* provider. Validating one on another provider would
+eagerly create that provider on turn 1 even if the tier is never entered.
+
+There is **no lazy check on entry** to compensate: `switch_tier` →
+`_connect_tier_entry` → `provider.connect(model, skip_model_test=True)`
+touches no modality. So for a tier on another provider the runtime **content
+gate is the only backstop** — a role its model can't fill surfaces at the
+first piece of content, not at startup.
+
+What the gate does in that case is report it as the profile error it is.
+Since the tier declaring the role is the one the agent is already in, there
+is nothing to switch to, so the note names the tier and says its model does
+not accept that input rather than suggesting `enter_tier` (which would be a
+no-op, and re-running the tool would produce the identical note — a loop the
+turn budget ends). It does **not** say no tier declares the role: one does,
+it just doesn't work.
 
 ### 5.6 The `enter_tier` Lifecycle Tool
 
@@ -453,13 +590,13 @@ When tier mode is active (a non-null `ModelTierConfig` is resolved), the framewo
 ```json
 {
   "name": "enter_tier",
-  "description": "Switch the session's active model tier. Three tiers are available...",
+  "description": "Switch the session's active model tier.  Pick the one that matches what you're about to do:\n\n* `planner` — ...\n* `executor` — ...\n\n  This session starts in `dispatcher`.\n...",
   "parameters": {
     "type": "object",
     "properties": {
       "name": {
         "type": "string",
-        "enum": ["planner", "dispatcher", "executor"]
+        "enum": ["planner", "executor"]
       }
     },
     "required": ["name"]
@@ -467,7 +604,17 @@ When tier mode is active (a non-null `ModelTierConfig` is resolved), the framewo
 }
 ```
 
-The `enum` constraint means providers that enforce tool params at sampling time (Anthropic, Google, OpenAI) reject invalid tier names before they reach the executor.
+Both the `enum` and the description bullets are built from the tiers **this
+profile declares** — not from `VALID_TIER_NAMES`. A profile declaring only
+`planner` and `executor` produces exactly the schema above: `dispatcher` and
+`vision` are never advertised, so the model can't ask for a tier that would
+silently route to `fallback`. Each bullet's prose is that tier's
+`description` when set, else the framework's default wording for the name.
+Tier order is canonical (`planner`, `dispatcher`, `executor`, `vision`), not
+set-iteration order, so the schema is byte-stable across processes — it lives
+in the prompt-cache prefix.
+
+The `enum` constraint means providers that enforce tool params at sampling time (Anthropic, Google, OpenAI) reject invalid tier names before they reach the executor. The executor still validates against the full `VALID_TIER_NAMES` as defence-in-depth for providers that don't enforce enums; a valid-but-undeclared name routes to `fallback` and reports `status: "fallback_used"`.
 
 #### Tool Properties
 
@@ -555,10 +702,9 @@ switch_tier("planner")
 
 | Limitation | Details |
 |---|---|
-| **Same-provider only (V1)** | Cross-provider tier switching is rejected by the validator. The schema is forward-compat. |
 | **Subagent tier wiring incomplete** | As of this writing, the subagent plugin's `create_session()` call in `plugin.py` does not pass `tier_config`. Tiers currently work for main sessions created via `core.py._build_profile_session_kwargs()`, but not for spawned subagents. |
-| **Not inherited across profiles** | `model_tiers` is not handled in `_merge_profiles()`. Child profiles must declare their own tiers. |
-| **Env vars support shorthand only** | Per-tier provider overrides via env vars (e.g., `JAATO_TIER_PLANNER_PROVIDER`) are not available in V1. |
+| **Inherited as a unit** | `model_tiers` IS handled in `_merge_profiles()` (scalar-override): a child declaring any tiers replaces the parent's whole ladder rather than merging entry by entry. A child declaring none inherits the parent's. |
+| **Env vars support shorthand only** | The `JAATO_TIER_*` vars take a model name only — no per-tier `provider` or `description`, and there is no `JAATO_TIER_VISION`. Anything past a single-provider three-tier ladder needs a profile. |
 
 ### 5.11 Full Examples
 
@@ -649,7 +795,10 @@ class ModelTierConfig:
 @dataclass(frozen=True)
 class TierEntry:
     model: str                  # e.g. "claude-opus-4-7"
-    provider: Optional[str]     # V1: must agree across all tiers (or be None)
+    provider: Optional[str]     # None = the session's main provider
+    description: Optional[str]  # this tier's bullet in the enter_tier tool
+    inbound_modalities: FrozenSet[str]   # roles the tier can ACCEPT
+    outbound_modalities: FrozenSet[str]  # roles the tier can EMIT (inert today)
 ```
 
 **Key methods**:
@@ -676,8 +825,12 @@ All validation runs at construction time (`__post_init__`). Invalid configs rais
 | `fallback` must be a string | `"model_tiers.'fallback' must be a string"` |
 | Tier model must be non-empty string | `"tier '...': 'model' must be a non-empty string"` |
 | Tier provider must be non-empty when set | `"tier '...': 'provider' must be a non-empty string"` |
+| Tier description must be non-empty when set | `"tier '...': 'description' must be a non-empty string"` |
+| Modality must be a known kind | `"tier '...': '...' is not a modality"` |
+| `text` may not be declared as a role | `"'modalities' may not list 'text'"` |
+| Direction must be known | `"tier '...': '...' is not a modality direction"` |
+| `modalities` must be a list or a map | `"'modalities' must be a list ... or a map"` |
 | Invalid tier value type | `"tier '...': expected str or dict, got ..."` |
-| V1 same-provider violation | `"V1 supports only same-provider tier switching"` |
 
 ---
 
@@ -1012,7 +1165,7 @@ References are catalog entries validated by `validateReference(path="...")`. See
 | File | Contents |
 |---|---|
 | `jaato-server/shared/plugins/subagent/config.py` | `SubagentProfile`, `GCProfileConfig`, `SubagentConfig`, `SubagentResult` dataclasses; `validate_profile()`, `discover_profiles()`, `resolve_profiles()`, `_merge_profiles()`, `expand_variables()`, `gc_profile_to_plugin_config()` |
-| `jaato-server/shared/model_tiers.py` | `ModelTierConfig`, `TierEntry`, `ModelTierConfigError`; `from_unified_dict()`, `from_env()`, `resolve()`, `model_for()`; V1 same-provider validation |
+| `jaato-server/shared/model_tiers.py` | `ModelTierConfig`, `TierEntry`, `ModelTierConfigError`; `from_unified_dict()`, `from_env()`, `resolve()`, `model_for()`, `ordered_tier_names()`, `describe_tier()`; `TIER_ORDER` / `DEFAULT_TIER_DESCRIPTIONS` |
 | `jaato-server/shared/plugins/subagent/plugin.py` | `_execute_spawn_subagent()`, `_execute_validate_profile()`, tool registration, UI hooks |
 | `jaato-server/shared/lifecycle_tools.py` | `LifecycleTools` — `enter_tier` tool schema/executor, `signal_completion` rewrite, `get_tool_schemas()`, `get_auto_approved_tools()` |
 | `jaato-server/shared/jaato_session.py` | `JaatoSession` — `configure(tier_config=...)`, `switch_tier()`, `_get_effective_system_instruction()` (dynamic tier line) |

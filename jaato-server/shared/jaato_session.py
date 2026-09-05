@@ -2885,11 +2885,13 @@ class JaatoSession:
             # Wire cache plugin now that the provider exists.  Pre-defer
             # this fired at the end of configure() unconditionally.
             self._wire_cache_plugin()
-            # Fail loud if a declared ``vision`` tier maps to a model the
-            # provider can't confirm accepts image input — runs once here,
-            # alongside the context-window resolution above, before any
-            # model work (the earliest point the provider exists).
-            self._validate_vision_tier_capability()
+            # Fail loud if a tier declaring a modality role (``vision``
+            # implies image; any tier may declare one explicitly) maps to a
+            # model the provider can't confirm accepts that input — runs
+            # once here, alongside the context-window resolution above,
+            # before any model work (the earliest point the provider
+            # exists).
+            self._validate_modality_tier_capabilities()
             # Consume the stashed args — repeated calls become no-ops
             # (the fast-path above returns the cached provider).
             self._provider_lazy_pending = None
@@ -7876,81 +7878,225 @@ NOTES
         )
         return _dc_replace(result, attachments=(kept or None), model_suffix=combined)
 
+    def _resolve_withheld_target(
+        self, withheld: Dict[str, int]
+    ) -> Tuple[Optional[str], List[str], List[str]]:
+        """Pick a tier the agent could actually switch to for withheld content.
+
+        Args:
+            withheld: modality kind -> count, as gathered by
+                :meth:`_gate_one_tool_result`.
+
+        Returns:
+            ``(target, covered, stuck)``:
+
+            * ``target`` — a tier declaring one of the withheld roles
+              INBOUND that is **not** the tier the agent is already in, or
+              ``None``.
+            * ``covered`` — which withheld kinds that target actually
+              accepts (naming the rest would send the agent back for
+              content it still cannot see).
+            * ``stuck`` — kinds whose ONLY declaring tier is the active
+              one.  That is the self-referential case: the tier claims the
+              role but its model can't fill it, so there is nothing to
+              switch to and the note has to say something else entirely.
+
+        The active tier is excluded because naming it produces a LOOP, not
+        merely a poor message: ``enter_tier`` on the current tier is a
+        documented no-op (``already_at_tier``), the agent re-runs the tool,
+        and the gate emits the identical note — terminating only on the
+        turn budget.  It is reachable exactly where
+        :meth:`_validate_modality_tier_capabilities` declines to check (a
+        tier on another provider), so the one gap in startup validation is
+        the one the runtime backstop handled worst.
+        """
+        tier_config = self._tier_config
+        if tier_config is None:
+            return None, [], []
+        from .model_tiers import DIRECTION_INBOUND
+
+        active = getattr(self, "_active_tier", None)
+        target: Optional[str] = None
+        stuck: List[str] = []
+        for kind in sorted(withheld):
+            candidates = tier_config.tiers_for_modality(kind, DIRECTION_INBOUND)
+            usable = [c for c in candidates if c != active]
+            if candidates and not usable:
+                stuck.append(kind)
+            if usable and target is None:
+                target = usable[0]
+        covered = (
+            [k for k in sorted(withheld)
+             if k in tier_config.tiers[target].inbound_modalities]
+            if target is not None else []
+        )
+        return target, covered, stuck
+
     def _build_withheld_attachment_note(self, withheld: Dict[str, int]) -> str:
         """Build the actionable note appended to a gated tool result.
 
-        Suggests ``enter_tier("vision")`` when the session declares a
-        vision tier and an image was withheld; otherwise explains the
-        active model can't view the content and no vision tier exists.
+        Three outcomes, in order:
+
+        1. **A switchable tier exists** — name it, and name only the kinds
+           it actually accepts.  What it does not cover is reported in two
+           separate clauses, because "nothing accepts this" and "the only
+           tier accepting this is the one you are in" are different facts
+           and merging them makes the first one false.
+        2. **The only tier declaring the role is the one the agent is in**
+           — its model can't fill the role it claims.  Say that, rather
+           than "no tier declares it" (false) or naming the active tier
+           (a loop).  This is a profile bug and the note should read like
+           one.
+        3. **Nothing declares it** — say so, and point at the two fixes.
+
+        The tier is found by ROLE, not by name
+        (``ModelTierConfig.tiers_for_modality``), so a profile whose image
+        tier is called something other than ``vision`` still produces an
+        actionable note — and so the note generalises to audio / video /
+        PDF the moment a tier declares those roles.  A tier literally named
+        ``vision`` that declares no ``modalities`` still implies ``image``,
+        so profiles written before the key behave unchanged.
         """
         kinds = ", ".join(sorted(withheld))
         model = self._model_name or "the current model"
-        tier_config = self._tier_config
-        vision_available = (
-            tier_config is not None and "vision" in tier_config.tiers
-        )
-        if vision_available and "image" in withheld:
+        active = getattr(self, "_active_tier", None)
+        target, covered, stuck = self._resolve_withheld_target(withheld)
+
+        if target is not None:
+            covers = ", ".join(sorted(covered))
+            # What the suggested tier does NOT cover splits two ways, and
+            # conflating them repeats the falsity the `stuck` branch below
+            # exists to avoid: a kind whose only declaring tier is the one
+            # the agent is in IS declared, so "no tier accepts it" is a lie
+            # — it just doesn't work.
+            rest = sorted(set(withheld) - set(covered))
+            undeclared = [k for k in rest if k not in stuck]
+            blocked = [k for k in rest if k in stuck]
+            clauses = []
+            if undeclared:
+                clauses.append(
+                    f"No tier accepts {', '.join(undeclared)} content.")
+            if blocked:
+                clauses.append(
+                    f"The only tier declaring {', '.join(blocked)} is "
+                    f"{active!r}, which you are already in — its model does "
+                    f"not accept that input."
+                )
+            tail = ("  " + "  ".join(clauses)) if clauses else ""
             return (
                 f"[Attachment withheld: the active model ({model}) can't "
-                f"view {kinds} content.  Call enter_tier(\"vision\") first, "
-                f"then re-run this tool to view it.]"
+                f"view {kinds} content.  Call enter_tier(\"{target}\") first "
+                f"to view the {covers} content, then re-run this tool.{tail}]"
             )
+
+        if stuck:
+            return (
+                f"[Attachment withheld: the active model ({model}) can't "
+                f"view {kinds} content.  The only tier declaring "
+                f"{', '.join(stuck)} is {active!r}, which you are already "
+                f"in — its model does not accept that input, so switching "
+                f"cannot help.  This is a profile error: map that tier to a "
+                f"model accepting {', '.join(stuck)} input, or set "
+                f"plugin_configs.<provider>.modalities to assert it.]"
+            )
+
         return (
             f"[Attachment withheld: the active model ({model}) can't view "
-            f"{kinds} content, and no vision tier is configured for this "
-            f"session.  Use a model that accepts {kinds} input, or declare "
-            f"a vision tier in the profile's model_tiers.]"
+            f"{kinds} content, and this session declares no tier that can.  "
+            f"Use a model that accepts {kinds} input, or declare a tier with "
+            f"`modalities: [{sorted(withheld)[0]}]` in the profile's "
+            f"model_tiers.]"
         )
 
-    def _validate_vision_tier_capability(self) -> None:
-        """Fail loud when a declared ``vision`` tier maps to a model the
-        provider can't confirm accepts image input.
+    def _validate_modality_tier_capabilities(self) -> None:
+        """Fail loud when a tier declaring a modality role maps to a model
+        the provider can't confirm accepts that input.
 
         Mirrors ``get_context_limit()``'s fail-fast at provider-resolution
         time: invoked once from :meth:`_ensure_provider` when the provider
         is first created, before any model work — the earliest point the
-        provider exists (it's lazy-created).  V1 tiers are same-provider,
-        so the ``vision`` tier's model lives on the just-created provider;
-        we ask it via the parameterized ``provider.modalities(model=...)``
-        without switching the active model.  No-op unless a ``vision`` tier
-        is declared.
+        provider exists (it's lazy-created).  No-op unless some tier
+        declares ``modalities`` (which a tier named ``vision`` does
+        implicitly).
 
         This is an earlier-warning over the content-boundary gate (which
         would otherwise surface the misconfiguration only at the first
-        image): a vision tier mapped to a text-only model is a config error
-        worth catching at startup, with an actionable message.
+        image): a tier claiming a role its model can't fill is a config
+        error worth catching at startup, with an actionable message.
+
+        Checks the role, not the name, so a differently-named image tier is
+        validated too — the defect this closes is that renaming ``vision``
+        silently disabled the check.
+
+        Covers only tiers on the ACTIVE provider — see the comment in the
+        loop for why, and for what does (and does not) back up the rest.
+
+        Inbound roles are checked against ``provider.supports_modality``.
+        Outbound roles are checked only when the provider implements
+        ``supports_output_modality``; none do yet, so an outbound role is
+        currently left unverified here rather than failing falsely — its
+        inertness is reported by ``jaato-scaffold validate`` instead.
 
         Raises:
-            ModelTierConfigError: the vision tier maps to a model that
-                doesn't declare image input and no ``modalities`` knob
-                asserts it.
+            ModelTierConfigError: A tier declares a modality its model
+                doesn't accept (or, where checkable, can't emit) and no
+                ``modalities`` knob asserts.
         """
         tier_config = self._tier_config
         provider = self._provider
         if tier_config is None or provider is None:
             return
-        from .model_tiers import TIER_VISION, ModelTierConfigError
-        vision_entry = tier_config.tiers.get(TIER_VISION)
-        if vision_entry is None:
-            return
-        # V2 cross-provider: a vision tier on a DIFFERENT provider is NOT checked
-        # here — validating it would eagerly create that provider (paying its
-        # init cost on turn 1 even if vision is never entered).  Such tiers are
-        # validated lazily when first entered + by the content-boundary gate;
-        # only same-provider vision tiers (the active provider owns the model)
-        # are fail-fast checked at startup.
-        if vision_entry.provider and vision_entry.provider != self._active_provider_name:
-            return
-        if provider.supports_modality("image", model=vision_entry.model):
-            return
-        provider_name = getattr(provider, "name", "the provider")
-        raise ModelTierConfigError(
-            f"The 'vision' tier maps to {vision_entry.model!r} "
-            f"({provider_name}), which does not declare image input.  Map "
-            f"the vision tier to a vision-capable model, or set "
-            f"plugin_configs.{provider_name}.modalities: "
-            f'["text", "image"] to assert it.'
-        )
+        from .model_tiers import ModelTierConfigError
+        for tier_name in tier_config.ordered_tier_names():
+            entry = tier_config.tiers[tier_name]
+            if not entry.declares_any_modality:
+                continue
+            # A tier on a DIFFERENT provider is NOT checked here — validating
+            # it would eagerly create that provider (paying its init cost on
+            # turn 1 even if the tier is never entered).  Only same-provider
+            # tiers (the active provider owns the model) are fail-fast
+            # checked at startup.
+            #
+            # There is NO lazy check on entry to make up for it: switch_tier
+            # -> _connect_tier_entry -> provider.connect(model,
+            # skip_model_test=True) touches no modality.  The runtime
+            # content gate is the ONLY backstop for a cross-provider role,
+            # so such a misconfiguration surfaces at the first piece of
+            # content rather than at startup.  (An earlier comment here
+            # claimed a lazy check existed; it never did.)
+            if entry.provider and entry.provider != self._active_provider_name:
+                continue
+            provider_name = getattr(provider, "name", "the provider")
+            for kind in sorted(entry.inbound_modalities):
+                if provider.supports_modality(kind, model=entry.model):
+                    continue
+                raise ModelTierConfigError(
+                    f"The {tier_name!r} tier declares the {kind!r} modality "
+                    f"inbound but maps to {entry.model!r} ({provider_name}), "
+                    f"which does not declare {kind} input.  Map the tier to a "
+                    f"{kind}-capable model, or set "
+                    f"plugin_configs.{provider_name}.modalities: "
+                    f'["text", "{kind}"] to assert it.'
+                )
+            # Outbound is verified only against a provider that can answer.
+            # No provider implements ``supports_output_modality`` yet (the
+            # output half of the catalog's ``architecture.modality`` is still
+            # discarded), so this is a forward hook: absent the method the
+            # role is left unverified rather than failing falsely.  The
+            # inertness itself is surfaced by ``jaato-scaffold validate``,
+            # not by refusing to start.  See docs/design/binary-media-chunks.md.
+            supports_out = getattr(provider, "supports_output_modality", None)
+            if supports_out is None:
+                continue
+            for kind in sorted(entry.outbound_modalities):
+                if supports_out(kind, model=entry.model):
+                    continue
+                raise ModelTierConfigError(
+                    f"The {tier_name!r} tier declares the {kind!r} modality "
+                    f"outbound but maps to {entry.model!r} ({provider_name}), "
+                    f"which does not declare {kind} output.  Map the tier to "
+                    f"a model that can emit {kind}, or drop the outbound role."
+                )
 
     def _sync_budget_after_truncation(
         self,

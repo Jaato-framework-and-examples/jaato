@@ -21,12 +21,17 @@ Resolution order:
    build the config from env.
 3. Neither set → ``None`` returned, single-model mode.
 
-**V1 constraint**: all tiers must use the same provider.  The schema
-already supports per-tier ``provider`` overrides (forward-compat for
-V2's cross-provider tiers) — but at construction time the config
-rejects any mix.  When V2 lifts this, drop the
-``_validate_same_provider_v1`` call and add cross-provider provider
-swap logic at the session layer.
+**Cross-provider tiers**: a tier may declare its own ``provider``, and
+tiers are free to disagree — the historical same-provider gate
+(``_validate_same_provider_v1``) is gone.  When the tier being entered
+names a provider other than the active one,
+``JaatoSession.switch_tier`` swaps to a per-tier provider instance
+cached by ``_provider_for_tier``; conversation history is
+provider-neutral, so it flows across the swap untouched.  A tier that
+leaves ``provider`` unset uses the session's main provider, which
+switches model in place via
+``provider.connect(model, skip_model_test=True)`` — no swap path is
+taken, so same-provider configs behave exactly as before.
 
 **Schema** — single-level dict mixing tier→model mappings (keys in
 :data:`VALID_TIER_NAMES`) and reserved control keys (``initial`` and
@@ -54,7 +59,7 @@ from __future__ import annotations
 
 import logging
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace as _dc_replace
 from typing import Any, Dict, FrozenSet, Optional, Tuple
 
 logger = logging.getLogger(__name__)
@@ -81,6 +86,103 @@ TIER_VISION = "vision"
 VALID_TIER_NAMES: FrozenSet[str] = frozenset(
     {TIER_PLANNER, TIER_DISPATCHER, TIER_EXECUTOR, TIER_VISION}
 )
+
+# Canonical presentation order for the ``enter_tier`` tool schema.  A set
+# has no order and ``sorted()`` would put ``dispatcher`` before ``planner``
+# — neither is wrong, but the order must be DETERMINISTIC: the tool block
+# sits in the prompt-cache prefix, so a tier list that reordered between
+# processes would invalidate the cache for no reason.  Names outside this
+# tuple sort alphabetically after it.
+TIER_ORDER: Tuple[str, ...] = (
+    TIER_PLANNER, TIER_DISPATCHER, TIER_EXECUTOR, TIER_VISION,
+)
+
+# Framework-supplied prose for each known tier, used by the ``enter_tier``
+# tool schema when a profile's tier entry declares no ``description``.
+# A profile that DOES declare one replaces the corresponding line — that is
+# the whole point of the key: the framework cannot know what a given
+# deployment means by "planner", only what the name suggests.
+#
+# NOTE these strings are NOT byte-identical to the pre-``description`` ones,
+# so the first turn of an existing tiered session after upgrading re-writes
+# the prompt-cache prefix once (the tool block sits in it).  Two sentences
+# moved rather than vanished: ``dispatcher`` lost "Default starting tier."
+# because the starting tier is now named once, accurately, on its own line
+# (hardcoding it in this bullet was simply wrong for a profile starting
+# anywhere else), and ``vision`` lost "Only useful when the session declares
+# a vision tier" because an undeclared tier is no longer advertised at all.
+# One cache re-write, once, per session — worth stating rather than leaving
+# a reader to infer the prefix was untouched.
+DEFAULT_TIER_DESCRIPTIONS: Dict[str, str] = {
+    TIER_PLANNER: (
+        "deep thought, multi-step reasoning, complex problem "
+        "decomposition.  Most expensive; use when you genuinely need the "
+        "strongest model."
+    ),
+    TIER_DISPATCHER: (
+        "coordination, light reasoning, deciding which tools to call."
+    ),
+    TIER_EXECUTOR: (
+        "mechanical tool calls and result interpretation when the plan is "
+        "clear.  Cheapest; use when the work doesn't need reasoning."
+    ),
+    TIER_VISION: (
+        "view image content (diagrams, screenshots).  Switch here BEFORE "
+        "reading an image with a tool (e.g. viewing a file that is an "
+        "image), then switch back when done.  If you try to read an image "
+        "while in a non-vision tier, the image is withheld and the tool "
+        "result tells you to switch here first."
+    ),
+}
+
+# Non-text input modalities a tier may declare a ROLE for.  Deliberately
+# duplicated from ``MODALITY_*`` in
+# ``shared/plugins/model_provider/base.py`` rather than imported: this
+# module costs ~14ms to import and sits on the profile-load path (it is
+# pulled in by ``budget_control`` and by every session bootstrap), while
+# the provider base costs ~196ms.  ``test_tier_modalities.py`` pins the two
+# sets equal, so the duplication cannot drift.
+#
+# ``text`` is deliberately ABSENT.  Every text-completion model accepts
+# text, so a tier declaring it would assert nothing; the parser rejects it
+# with that explanation rather than accepting a no-op.
+MODALITY_IMAGE = "image"
+MODALITY_AUDIO = "audio"
+MODALITY_VIDEO = "video"
+MODALITY_FILE = "file"  # PDFs / documents (OpenRouter's term)
+VALID_TIER_MODALITIES: FrozenSet[str] = frozenset(
+    {MODALITY_IMAGE, MODALITY_AUDIO, MODALITY_VIDEO, MODALITY_FILE}
+)
+
+# Directions a modality role can be declared in.
+#
+# ``bidirectional`` rather than ``both``: "both" says nothing about what it is
+# both OF, and does not parallel ``inbound``/``outbound`` grammatically.  Not
+# ``duplex`` either — that connotes SIMULTANEITY, and a tier declares
+# capability, not concurrency (a half-duplex voice loop is still a tier that
+# does audio in and out).  None of these three are YAML 1.1 booleans, unlike
+# ``on``/``off``/``yes``/``no``, so a profile can write them unquoted.
+DIRECTION_INBOUND = "inbound"
+DIRECTION_OUTBOUND = "outbound"
+DIRECTION_BIDIRECTIONAL = "bidirectional"
+VALID_MODALITY_DIRECTIONS: FrozenSet[str] = frozenset(
+    {DIRECTION_INBOUND, DIRECTION_OUTBOUND, DIRECTION_BIDIRECTIONAL}
+)
+
+# Modality roles implied by a tier's NAME when it declares none itself.
+#
+# This is what keeps every profile written before the ``modalities`` key
+# working unchanged: a tier called ``vision`` has always meant "the tier to
+# enter to look at an image", and the content gate and the startup
+# capability check both branched on that literal name.  They now read the
+# modality role instead, so the name has to keep implying the role.
+#
+# It is also the ONLY place a tier name carries built-in meaning.  Anything
+# else — including a differently-named image tier — must say so with the
+# key.
+IMPLICIT_TIER_MODALITIES: Dict[str, Dict[str, FrozenSet[str]]] = {
+    TIER_VISION: {DIRECTION_INBOUND: frozenset({MODALITY_IMAGE})},
+}
 
 # Framework defaults when neither profile nor env vars specify them.
 DEFAULT_INITIAL_TIER = TIER_DISPATCHER
@@ -117,23 +219,211 @@ class ModelTierConfigError(ValueError):
 class TierEntry:
     """One tier's model + optional provider.
 
-    The provider field is forward-compat for V2 (cross-provider tiers).
-    In V1 the same-provider check in
-    :meth:`ModelTierConfig._validate_same_provider_v1` rejects configs
-    where tiers declare different providers; when the constraint lifts,
-    drop that call and let the session layer handle provider swaps.
+    Tiers may name different providers; the session layer handles the
+    swap (see the module docstring's *Cross-provider tiers* note).
 
     Attributes:
         model: Model name (e.g. ``"claude-opus-4-7"``).  Required.
+        description: What this tier is FOR, in the second person, as the
+            model reads it.  Rendered verbatim as the tier's bullet in the
+            ``enter_tier`` tool description, replacing the framework's
+            default prose for that tier name
+            (:data:`DEFAULT_TIER_DESCRIPTIONS`).  ``None`` keeps the
+            default.  This is the only channel by which a profile tells
+            the model what its own tier ladder means — the framework knows
+            the names, not the deployment's intent behind them.
+
+            It lands in the tool block, which is part of the prompt-cache
+            prefix, so it must be stable for the life of a session: it is
+            read once when the tool schema is built.  A budget-control
+            degrade rung therefore cannot set it (see
+            :meth:`shared.budget_control.DegradeRung.from_dict`) — a
+            brownout rebinds a tier's model, never its role.
+        inbound_modalities: Non-text modalities this tier can ACCEPT as
+            input (a subset of :data:`VALID_TIER_MODALITIES`).  Declaring
+            ``{"image"}`` means "this is the tier to enter to look at an
+            image": the content gate names it when it withholds an image
+            from a model that can't see one, and the startup capability
+            check verifies the tier's model really does accept that input.
+
+            This DECLARES a role and is VERIFIED — the opposite direction
+            from ``plugin_configs.<provider>.modalities``, which ASSERTS
+            what a model supports in order to correct catalog detection.
+            Declaring a role the model can't fill is a config error, and
+            the whole point of the check.
+
+            Empty by default, except for a tier named ``vision``, which
+            implies ``{"image"}`` (:data:`IMPLICIT_TIER_MODALITIES`) so
+            profiles written before this key behave unchanged.
+        outbound_modalities: Non-text modalities this tier can EMIT.
+            Parsed and validated in full, but **the framework cannot yet
+            deliver model-generated media**: no adapter parses response
+            media and the streaming callback is text-only.  So an outbound
+            role is honest declaration ahead of delivery —
+            ``jaato-scaffold validate`` warns that it is inert, and the
+            startup check verifies it only against a provider that
+            implements ``supports_output_modality`` (none do today, so it
+            is skipped rather than failing falsely).  See
+            ``docs/design/binary-media-chunks.md``.
+
+            Two sets rather than one ``{kind: direction}`` map because
+            every consumer asks a DIRECTIONAL question ("which tier
+            accepts an image?", "which tier can emit audio?"); a map would
+            make each of them filter.
         provider: Provider plugin name (e.g. ``"anthropic"``).  When
-            ``None``, the session's main provider is used.  V1: if any
-            tier sets this, all tiers that set it must agree (and
-            usually you'd leave it ``None`` everywhere — the session's
-            provider then handles the model switch via
-            ``provider.connect(new_model_name, skip_model_test=True)``).
+            ``None``, the session's main provider is used and entering
+            the tier just re-points it via
+            ``provider.connect(new_model_name, skip_model_test=True)``.
+            When set to something other than the active provider,
+            entering the tier swaps to a cached per-tier provider
+            instance instead.  Tiers need not agree — leaving this
+            ``None`` everywhere keeps the whole session on one provider.
     """
     model: str
     provider: Optional[str] = None
+    description: Optional[str] = None
+    inbound_modalities: FrozenSet[str] = frozenset()
+    outbound_modalities: FrozenSet[str] = frozenset()
+
+    def modalities_for(self, direction: str) -> FrozenSet[str]:
+        """The roles this tier declares in ``direction``.
+
+        Args:
+            direction: :data:`DIRECTION_INBOUND` or
+                :data:`DIRECTION_OUTBOUND`.  ``bidirectional`` is a
+                DECLARATION spelling, not a query one — a bidirectional
+                role lands in both sets at parse time, so asking for it
+                here would be ambiguous and raises.
+
+        Raises:
+            ValueError: ``direction`` is not inbound or outbound.
+        """
+        if direction == DIRECTION_INBOUND:
+            return self.inbound_modalities
+        if direction == DIRECTION_OUTBOUND:
+            return self.outbound_modalities
+        raise ValueError(
+            f"direction must be {DIRECTION_INBOUND!r} or "
+            f"{DIRECTION_OUTBOUND!r}, got {direction!r}"
+        )
+
+    @property
+    def declares_any_modality(self) -> bool:
+        """Whether this tier claims any modality role, either direction."""
+        return bool(self.inbound_modalities or self.outbound_modalities)
+
+
+def _normalize_modality_token(name: str, raw: object) -> str:
+    """Validate one modality token (the KEY side of a role declaration).
+
+    Raises:
+        ModelTierConfigError: Not a non-empty string, ``"text"`` (which
+            would assert nothing — every model accepts text), or a token
+            outside :data:`VALID_TIER_MODALITIES`.
+    """
+    if not isinstance(raw, str) or not raw.strip():
+        raise ModelTierConfigError(
+            f"tier {name!r}: 'modalities' entries must be non-empty strings"
+        )
+    kind = raw.strip().lower()
+    valid = ", ".join(sorted(VALID_TIER_MODALITIES))
+    if kind == "text":
+        raise ModelTierConfigError(
+            f"tier {name!r}: 'modalities' may not list 'text' — every model "
+            f"accepts text, so declaring it asserts nothing.  List only the "
+            f"non-text roles this tier fills ({valid})"
+        )
+    if kind not in VALID_TIER_MODALITIES:
+        raise ModelTierConfigError(
+            f"tier {name!r}: '{kind}' is not a modality ({valid})"
+        )
+    return kind
+
+
+def _normalize_direction(name: str, kind: str, raw: object) -> str:
+    """Validate the DIRECTION side of a role declaration.
+
+    Raises:
+        ModelTierConfigError: Not a non-empty string, or outside
+            :data:`VALID_MODALITY_DIRECTIONS`.  The message calls out
+            ``both`` and ``duplex`` by name, because they are the two
+            spellings an author is most likely to reach for.
+    """
+    if not isinstance(raw, str) or not raw.strip():
+        raise ModelTierConfigError(
+            f"tier {name!r}: direction for modality '{kind}' must be a "
+            f"non-empty string ({', '.join(sorted(VALID_MODALITY_DIRECTIONS))})"
+        )
+    direction = raw.strip().lower()
+    if direction in VALID_MODALITY_DIRECTIONS:
+        return direction
+    hint = ""
+    if direction in ("both", "duplex", "inout", "in_out", "io"):
+        hint = f"  (use '{DIRECTION_BIDIRECTIONAL}')"
+    raise ModelTierConfigError(
+        f"tier {name!r}: '{direction}' is not a modality direction for "
+        f"'{kind}' ({', '.join(sorted(VALID_MODALITY_DIRECTIONS))}){hint}"
+    )
+
+
+def _normalize_tier_modalities(
+    name: str, raw: object
+) -> Tuple[FrozenSet[str], FrozenSet[str]]:
+    """Coerce a tier entry's ``modalities`` value into (inbound, outbound).
+
+    Two accepted spellings:
+
+    * **list sugar** — ``[image, file]`` means those roles INBOUND.  This
+      is the form every profile written before directions existed uses, so
+      it must keep meaning exactly what it meant.
+    * **direction map** — ``{image: inbound, audio: bidirectional}``.
+      ``bidirectional`` lands the role in BOTH returned sets, which is why
+      the stored form is two sets and not the map itself.
+
+    Either way the name's implicit role
+    (:data:`IMPLICIT_TIER_MODALITIES`) is unioned in, so a tier called
+    ``vision`` is an inbound image tier whatever else it declares.
+
+    Args:
+        name: Tier name — for error messages and the implicit-role lookup.
+        raw: The entry's raw ``modalities`` value, or ``None``.
+
+    Returns:
+        ``(inbound, outbound)`` frozensets.
+
+    Raises:
+        ModelTierConfigError: Not a list or map, or a malformed token or
+            direction within it.
+    """
+    implicit = IMPLICIT_TIER_MODALITIES.get(name, {})
+    inbound = set(implicit.get(DIRECTION_INBOUND, frozenset()))
+    outbound = set(implicit.get(DIRECTION_OUTBOUND, frozenset()))
+
+    if raw is None:
+        return frozenset(inbound), frozenset(outbound)
+
+    if isinstance(raw, dict):
+        for kind_raw, direction_raw in raw.items():
+            kind = _normalize_modality_token(name, kind_raw)
+            direction = _normalize_direction(name, kind, direction_raw)
+            if direction in (DIRECTION_INBOUND, DIRECTION_BIDIRECTIONAL):
+                inbound.add(kind)
+            if direction in (DIRECTION_OUTBOUND, DIRECTION_BIDIRECTIONAL):
+                outbound.add(kind)
+        return frozenset(inbound), frozenset(outbound)
+
+    # A bare string must NOT be walked as a sequence of characters.
+    if isinstance(raw, str) or not isinstance(raw, (list, tuple, set, frozenset)):
+        raise ModelTierConfigError(
+            f"tier {name!r}: 'modalities' must be a list of modality names "
+            f"({', '.join(sorted(VALID_TIER_MODALITIES))}) or a map of "
+            f"name -> direction "
+            f"({', '.join(sorted(VALID_MODALITY_DIRECTIONS))}), got "
+            f"{type(raw).__name__}"
+        )
+    for token in raw:
+        inbound.add(_normalize_modality_token(name, token))
+    return frozenset(inbound), frozenset(outbound)
 
 
 def _normalize_tier_entry(name: str, raw: object) -> TierEntry:
@@ -141,15 +431,27 @@ def _normalize_tier_entry(name: str, raw: object) -> TierEntry:
 
     Accepts:
         * ``str`` — shorthand for ``{"model": <str>}``
-        * ``dict`` with ``model`` (required) and optional ``provider``
+        * ``dict`` with ``model`` (required) and optional ``provider`` /
+          ``description`` / ``modalities``
+
+    Either form picks up the name's implicit modality role (a tier called
+    ``vision`` is the image tier unless it says otherwise) — see
+    :func:`_normalize_tier_modalities`.
 
     Raises:
-        ModelTierConfigError: Invalid shape or empty model.
+        ModelTierConfigError: Invalid shape, empty model, a ``provider`` /
+            ``description`` present but not a non-empty string, or a
+            malformed ``modalities`` list.
     """
     if isinstance(raw, str):
         if not raw.strip():
             raise ModelTierConfigError(f"tier {name!r} has empty model string")
-        return TierEntry(model=raw.strip())
+        inbound, outbound = _normalize_tier_modalities(name, None)
+        return TierEntry(
+            model=raw.strip(),
+            inbound_modalities=inbound,
+            outbound_modalities=outbound,
+        )
     if isinstance(raw, dict):
         model = raw.get("model")
         if not isinstance(model, str) or not model.strip():
@@ -163,9 +465,22 @@ def _normalize_tier_entry(name: str, raw: object) -> TierEntry:
             raise ModelTierConfigError(
                 f"tier {name!r}: 'provider' must be a non-empty string when set"
             )
+        description = raw.get("description")
+        if description is not None and (
+            not isinstance(description, str) or not description.strip()
+        ):
+            raise ModelTierConfigError(
+                f"tier {name!r}: 'description' must be a non-empty string "
+                f"when set"
+            )
+        inbound, outbound = _normalize_tier_modalities(
+            name, raw.get("modalities"))
         return TierEntry(
             model=model.strip(),
             provider=provider.strip() if provider else None,
+            description=description.strip() if description else None,
+            inbound_modalities=inbound,
+            outbound_modalities=outbound,
         )
     raise ModelTierConfigError(
         f"tier {name!r}: expected str or dict, got {type(raw).__name__}"
@@ -181,8 +496,12 @@ class ModelTierConfig:
     consulted by ``LifecycleTools`` (to decide whether to register
     ``enter_tier``), ``JaatoSession`` (to compute the initial model
     name and to switch the provider on tier transitions), and
-    ``get_system_instructions`` (to append the per-turn tier-identity
-    line).
+    ``get_system_instructions`` (to append the tier-mode line naming
+    :attr:`initial_tier`).  That line is deliberately *stable* — it
+    reports where the session started, never which tier is active now,
+    because the system block must stay byte-identical across tier
+    switches or every switch invalidates the prompt cache.  See
+    ``docs/design/model-tier-prompt-cache.md`` §5.1.
 
     Attributes:
         tiers: Map of tier name → :class:`TierEntry`.  Must be
@@ -224,11 +543,138 @@ class ModelTierConfig:
                 f"tier_fallback {self.tier_fallback!r} not in declared "
                 f"tiers {sorted(self.tiers)}"
             )
-        # V2 (cross-provider tiers): the V1 same-provider gate is lifted.  A
-        # tier may declare its own ``provider``; JaatoSession.switch_tier swaps
-        # to a cached per-tier provider instance when the active tier's provider
-        # differs (history is provider-neutral, so it flows across the swap).
-        # Same-provider configs are unaffected (no swap path is taken).
+        # Apply name-implied modality roles here, not only in
+        # _normalize_tier_entry, so a config built DIRECTLY (tests, premium
+        # code, anything not going through from_unified_dict) still gets
+        # them.  Without this a hand-built TierEntry("...") under the key
+        # "vision" carried no role, and the content gate + startup check —
+        # which now read the role rather than the name — silently went
+        # quiet.  Mutating in place is safe: the dataclass is frozen but
+        # its tiers mapping is not (overlay_tier_table relies on the same).
+        for _name, _entry in list(self.tiers.items()):
+            _implicit = IMPLICIT_TIER_MODALITIES.get(_name)
+            if not _implicit:
+                continue
+            _in = _implicit.get(DIRECTION_INBOUND, frozenset())
+            _out = _implicit.get(DIRECTION_OUTBOUND, frozenset())
+            if _in <= _entry.inbound_modalities and _out <= _entry.outbound_modalities:
+                continue
+            self.tiers[_name] = _dc_replace(
+                _entry,
+                inbound_modalities=_entry.inbound_modalities | _in,
+                outbound_modalities=_entry.outbound_modalities | _out,
+            )
+
+        # No same-provider gate: tiers may name different providers.
+        # JaatoSession.switch_tier swaps to a cached per-tier provider instance
+        # when the entered tier's provider differs from the active one (history
+        # is provider-neutral, so it flows across the swap).  Same-provider
+        # configs are unaffected — no swap path is taken.
+
+    def ordered_tier_names(self) -> Tuple[str, ...]:
+        """Declared tier names in canonical (cache-stable) order.
+
+        Known names come first in :data:`TIER_ORDER`; anything else sorts
+        alphabetically after them.  Deterministic because the result feeds
+        the ``enter_tier`` tool schema, which sits in the prompt-cache
+        prefix — an order that varied between processes would invalidate
+        the cache without changing meaning.
+        """
+        known = [n for n in TIER_ORDER if n in self.tiers]
+        rest = sorted(n for n in self.tiers if n not in TIER_ORDER)
+        return tuple(known + rest)
+
+    def tiers_for_modality(
+        self, kind: str, direction: str = DIRECTION_INBOUND
+    ) -> Tuple[str, ...]:
+        """Declared tiers that play the role for modality ``kind``.
+
+        The replacement for every ``"vision" in tier_config.tiers`` check.
+        Returns names in canonical order (:meth:`ordered_tier_names`), so a
+        caller that needs exactly one — the content gate naming a tier for
+        the agent to enter — can take the first deterministically.
+
+        Args:
+            kind: A modality token such as ``"image"``
+                (:data:`VALID_TIER_MODALITIES`).
+            direction: :data:`DIRECTION_INBOUND` (default — the content
+                gate's question, "who can look at this?") or
+                :data:`DIRECTION_OUTBOUND`.  Defaulted because inbound is
+                the only direction with machinery behind it today, so an
+                unqualified call is asking the question that can be
+                answered.
+
+        Returns:
+            Matching tier names, empty when this session has no tier for
+            that modality in that direction.
+
+        Raises:
+            ValueError: ``direction`` is not inbound or outbound (a
+                ``bidirectional`` tier appears under BOTH, so querying for
+                it would be ambiguous).
+        """
+        return tuple(
+            name for name in self.ordered_tier_names()
+            if kind in self.tiers[name].modalities_for(direction)
+        )
+
+    def describe_tier(self, tier_name: str) -> str:
+        """Prose for one tier, as the model should read it.
+
+        Resolution order for the base prose: the tier entry's own
+        ``description`` (set in the profile), then the framework default for
+        that name (:data:`DEFAULT_TIER_DESCRIPTIONS`), then a bare fallback
+        naming the model — which is all the framework can honestly say about
+        a tier nobody described.
+
+        A tier that declares modality roles its NAME doesn't already imply
+        gets a sentence appended saying so — one clause per direction, since
+        "can look at an image" and "can emit audio" are different
+        instructions to the model — unless the author wrote their own
+        description (in which case they own the whole bullet).  Without it a
+        ``planner`` tier declaring ``modalities: [image]`` read as pure
+        cognitive prose, so the model had no reason to switch there for an
+        image — it would only find out from the content gate after trying
+        and failing.  The ``vision`` tier is unaffected: image is its
+        implicit role and its default prose already covers it.
+
+        Returns:
+            A fragment with no leading bullet or tier name; the caller
+            formats it into the tool description.
+        """
+        entry = self.tiers.get(tier_name)
+        if entry is not None and entry.description:
+            return entry.description
+        base = DEFAULT_TIER_DESCRIPTIONS.get(tier_name)
+        if base is None:
+            model = entry.model if entry is not None else "an unspecified model"
+            base = f"routes this session to {model}."
+        if entry is None:
+            return base
+        implicit = IMPLICIT_TIER_MODALITIES.get(tier_name, {})
+        extra_in = entry.inbound_modalities - implicit.get(
+            DIRECTION_INBOUND, frozenset())
+        extra_out = entry.outbound_modalities - implicit.get(
+            DIRECTION_OUTBOUND, frozenset())
+        clauses = []
+        if extra_in:
+            kinds = ", ".join(sorted(extra_in))
+            # "accept ... input" rather than "view ...": the clause is
+            # generated for audio and file roles too, where "view" is wrong.
+            clauses.append(
+                f"This tier can accept {kinds} input — switch here BEFORE "
+                f"reading such content with a tool, then switch back when "
+                f"done."
+            )
+        if extra_out:
+            kinds = ", ".join(sorted(extra_out))
+            clauses.append(
+                f"This tier can produce {kinds} output — switch here before "
+                f"work that must emit it."
+            )
+        if not clauses:
+            return base
+        return f"{base}  " + "  ".join(clauses)
 
     def model_for(self, tier_name: str) -> Tuple[str, TierEntry]:
         """Resolve a tier name to ``(actual_tier, entry)``.
@@ -304,10 +750,11 @@ class ModelTierConfig:
     ) -> Optional["ModelTierConfig"]:
         """Build from env vars, or return ``None`` if no tier vars set.
 
-        Env vars only support the simple shorthand (model name only) —
-        per-tier provider overrides have to come from a profile.  This
-        is fine for V1 where same-provider is the only mode; V2 may
-        extend with paired ``JAATO_TIER_<NAME>_PROVIDER`` env vars.
+        Env vars only support the simple shorthand (model name only), so
+        an env-built config is always single-provider — a cross-provider
+        tier set has to come from a profile's ``model_tiers``.  There is
+        also no ``JAATO_TIER_VISION``: the env path covers the three
+        cognitive tiers only (see :data:`ENV_TIER_MODEL_KEYS`).
 
         Args:
             env: Optional override for ``os.environ`` (test injection).

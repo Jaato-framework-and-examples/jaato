@@ -108,28 +108,7 @@ def validate_profile(
                 "`jaato-scaffold explain plugins`)", where=f"plugins.{plug}")
 
     # --- model_tiers (V2: cross-provider tiers allowed) ------------------
-    # Catch tier-name typos + a (V2) cross-provider tier naming an uninstalled
-    # provider, statically — runtime ModelTierConfig would otherwise only raise
-    # at session create.  See `jaato-scaffold explain tiers`.  (model_tiers now
-    # survives the inherits/set merge — see config._merge_profiles.)
-    mt_cfg = getattr(profile, "model_tiers", None) or {}
-    if mt_cfg:
-        from shared.model_tiers import VALID_TIER_NAMES, RESERVED_KEYS
-        for key, entry in mt_cfg.items():
-            if key not in VALID_TIER_NAMES and key not in RESERVED_KEYS:
-                add("error", "unknown_tier",
-                    f"model_tiers key '{key}' is neither a tier name "
-                    f"({', '.join(sorted(VALID_TIER_NAMES))}) nor a control key "
-                    f"({', '.join(sorted(RESERVED_KEYS))})",
-                    where=f"model_tiers.{key}")
-                continue
-            tprov = entry.get("provider") if isinstance(entry, dict) else None
-            if tprov and introspect.resolve_provider(tprov) is None:
-                add("error", "unknown_provider",
-                    f"model_tiers.{key} provider '{tprov}' is not installed "
-                    "(V2 cross-provider tiers must name a real provider — see "
-                    "`jaato-scaffold explain providers`)",
-                    where=f"model_tiers.{key}.provider")
+    _check_model_tiers(getattr(profile, "model_tiers", None) or {}, add)
 
     # --- budget_control --------------------------------------------------
     # The block is already parsed + structurally validated at profile-load
@@ -295,6 +274,161 @@ def validate_profile(
                 f"gc type '{gc_type}' not among {gc_names}", where="gc.type")
 
     return out
+
+
+def _check_tier_modalities(key, raw, add):
+    """Validate one tier entry's ``modalities`` declaration statically.
+
+    Mirrors ``shared.model_tiers._normalize_tier_modalities`` so an author
+    sees the defect from ``jaato-scaffold validate`` rather than at session
+    create.  Kept separate from :func:`_check_model_tiers` so neither grows
+    past the complexity ceiling.
+
+    Accepts both spellings: the list sugar (``[image]``, meaning inbound)
+    and the direction map (``{image: bidirectional}``).
+
+    Emits a **warning**, not an error, for an outbound role: it parses and
+    is stored, but no adapter can deliver model-generated media yet, so the
+    declaration is inert.  Warning rather than error because a profile
+    should be writable ahead of the delivery work landing — see
+    ``docs/design/binary-media-chunks.md``.
+
+    Args:
+        key: Tier name, for the diagnostic's ``where``.
+        raw: The entry's raw ``modalities`` value, or ``None``.
+        add: ``validate_profile``'s diagnostic collector.
+    """
+    if raw is None:
+        return
+    from shared.model_tiers import (
+        DIRECTION_INBOUND, VALID_MODALITY_DIRECTIONS, VALID_TIER_MODALITIES,
+    )
+    where = f"model_tiers.{key}.modalities"
+    valid = ", ".join(sorted(VALID_TIER_MODALITIES))
+
+    if isinstance(raw, dict):
+        pairs = list(raw.items())
+    elif isinstance(raw, (list, tuple)):
+        pairs = [(tok, DIRECTION_INBOUND) for tok in raw]
+    else:
+        add("error", "invalid_tier_modalities",
+            f"model_tiers.{key} modalities must be a LIST of modality names "
+            f"({valid}) or a MAP of name -> direction "
+            f"({', '.join(sorted(VALID_MODALITY_DIRECTIONS))})", where=where)
+        return
+
+    for token, direction in pairs:
+        if not isinstance(token, str) or not token.strip():
+            add("error", "invalid_tier_modalities",
+                f"model_tiers.{key} modalities entries must be non-empty "
+                "strings", where=where)
+            continue
+        kind = token.strip().lower()
+        if kind == "text":
+            add("error", "invalid_tier_modalities",
+                f"model_tiers.{key} may not declare the 'text' modality — "
+                "every model accepts text, so it asserts nothing; list only "
+                f"the non-text roles this tier fills ({valid})", where=where)
+            continue
+        if kind not in VALID_TIER_MODALITIES:
+            add("error", "invalid_tier_modalities",
+                f"model_tiers.{key} modality '{kind}' is not a modality "
+                f"({valid})", where=where)
+            continue
+        _check_modality_direction(key, kind, direction, where, add)
+
+
+def _check_modality_direction(key, kind, direction, where, add):
+    """Validate the direction of one modality role, and flag inert outbound.
+
+    Split from :func:`_check_tier_modalities` to keep both under the
+    complexity ceiling.
+    """
+    from shared.model_tiers import (
+        DIRECTION_BIDIRECTIONAL, DIRECTION_OUTBOUND,
+        VALID_MODALITY_DIRECTIONS,
+    )
+    if not isinstance(direction, str) or not direction.strip():
+        add("error", "invalid_tier_modalities",
+            f"model_tiers.{key} direction for '{kind}' must be a string "
+            f"({', '.join(sorted(VALID_MODALITY_DIRECTIONS))})", where=where)
+        return
+    value = direction.strip().lower()
+    if value not in VALID_MODALITY_DIRECTIONS:
+        hint = (f"  (use '{DIRECTION_BIDIRECTIONAL}')"
+                if value in ("both", "duplex", "inout", "in_out", "io") else "")
+        add("error", "invalid_tier_modalities",
+            f"model_tiers.{key} direction '{value}' for '{kind}' is not a "
+            f"direction ({', '.join(sorted(VALID_MODALITY_DIRECTIONS))})"
+            f"{hint}", where=where)
+        return
+    if value in (DIRECTION_OUTBOUND, DIRECTION_BIDIRECTIONAL):
+        add("warning", "outbound_modality_not_deliverable",
+            f"model_tiers.{key} declares '{kind}' {value}, which parses but "
+            "is INERT: no adapter parses model-generated media and the "
+            "streaming callback is text-only, so nothing can deliver it "
+            "yet.  The declaration is kept so profiles can be written "
+            "ahead of that work — see docs/design/binary-media-chunks.md."
+            + ("  The inbound half of this role IS live."
+               if value == DIRECTION_BIDIRECTIONAL else ""),
+            where=where)
+
+
+def _check_model_tiers(mt_cfg, add):
+    """Static checks on a profile's ``model_tiers`` table.
+
+    Catches, before a session is ever created, what
+    :class:`~shared.model_tiers.ModelTierConfig` would only raise at
+    session-create time: tier-name typos, a cross-provider tier naming an
+    uninstalled provider, and a malformed ``description``.  See
+    ``jaato-scaffold explain tiers``.  (``model_tiers`` survives the
+    inherits/set merge — see ``config._merge_profiles``.)
+
+    Split out of :func:`validate_profile` to keep that function under the
+    complexity ceiling.
+
+    Args:
+        mt_cfg: The profile's raw ``model_tiers`` dict (possibly empty).
+        add: ``validate_profile``'s diagnostic collector,
+            ``add(severity, code, message, where=...)``.
+    """
+    if not mt_cfg:
+        return
+    from shared.model_tiers import VALID_TIER_NAMES, RESERVED_KEYS
+    for key, entry in mt_cfg.items():
+        if key not in VALID_TIER_NAMES and key not in RESERVED_KEYS:
+            add("error", "unknown_tier",
+                f"model_tiers key '{key}' is neither a tier name "
+                f"({', '.join(sorted(VALID_TIER_NAMES))}) nor a control key "
+                f"({', '.join(sorted(RESERVED_KEYS))})",
+                where=f"model_tiers.{key}")
+            continue
+        if not isinstance(entry, dict):
+            continue
+        tprov = entry.get("provider")
+        if tprov and introspect.resolve_provider(tprov) is None:
+            add("error", "unknown_provider",
+                f"model_tiers.{key} provider '{tprov}' is not installed "
+                "(V2 cross-provider tiers must name a real provider — see "
+                "`jaato-scaffold explain providers`)",
+                where=f"model_tiers.{key}.provider")
+        # ``description`` reaches the MODEL (it becomes this tier's bullet
+        # in the enter_tier tool schema), so a malformed one is worth
+        # catching before a session pays to discover it.
+        tdesc = entry.get("description")
+        if tdesc is not None and (
+            not isinstance(tdesc, str) or not tdesc.strip()
+        ):
+            add("error", "invalid_tier_description",
+                f"model_tiers.{key} description must be a non-empty string "
+                "— it is rendered verbatim as this tier's bullet in the "
+                "enter_tier tool description",
+                where=f"model_tiers.{key}.description")
+        # ``modalities`` declares which input roles this tier fills.  A typo
+        # here is silent at runtime in the worst way: the content gate finds
+        # no tier for an image and the agent is told none exists, while the
+        # profile plainly declares one.
+        _check_tier_modalities(key, entry.get("modalities"), add)
 
 
 def _validate_plugin_knobs(cfg_name, cfg, plugins, add):

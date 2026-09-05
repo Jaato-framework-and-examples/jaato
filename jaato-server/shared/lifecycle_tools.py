@@ -518,42 +518,64 @@ class LifecycleTools:
         )
 
     def _enter_tier_schema(self) -> ToolSchema:
-        """Build the ``enter_tier`` tool schema.
+        """Build the ``enter_tier`` tool schema from the session's DECLARED tiers.
 
-        Three named tiers (``planner`` / ``dispatcher`` / ``executor``)
-        constrain the parameter via ``oneOf`` so providers that enforce
-        tool params at sampling time reject invalid names before they
-        ever reach the executor.  The description block enumerates each
-        tier's role explicitly — that's the model's main protocol
-        reference once the system-prompt augmentation reminds it of
-        which tier it currently occupies.
+        Both the ``name`` enum and the per-tier bullets in the description
+        are derived from ``session._tier_config.tiers`` — not from the
+        framework's ``VALID_TIER_NAMES``.  Two consequences:
+
+        * The model is never offered a tier the profile didn't declare.
+          Previously all four names were advertised unconditionally, so a
+          profile declaring only ``planner`` / ``executor`` still invited
+          ``enter_tier("dispatcher")``; that call silently routed to
+          ``tier_fallback`` and the model only learned from the
+          ``status: "fallback_used"`` in the result, after the fact.
+        * Each bullet's prose comes from that tier's ``description`` key
+          when the profile set one, falling back to the framework default
+          for the name (``ModelTierConfig.describe_tier``).  The framework
+          knows what "planner" is called, not what a given deployment
+          means by it.
+
+        Tier order is :meth:`~shared.model_tiers.ModelTierConfig.ordered_tier_names`
+        (canonical, not set-iteration) because this schema sits in the
+        prompt-cache prefix and must be byte-stable across processes.
+
+        Falls back to advertising every known tier when the session has no
+        tier config — unreachable through :meth:`get_tool_schemas`, which
+        only appends this schema when ``_tier_config`` is set, but this
+        method is called directly by tests.
         """
         from .model_tiers import (
-            TIER_PLANNER,
-            TIER_DISPATCHER,
-            TIER_EXECUTOR,
-            TIER_VISION,
+            TIER_ORDER,
+            DEFAULT_TIER_DESCRIPTIONS,
+        )
+
+        cfg = getattr(self._session, '_tier_config', None)
+        if cfg is not None:
+            names = list(cfg.ordered_tier_names())
+            described = [(n, cfg.describe_tier(n)) for n in names]
+        else:
+            names = list(TIER_ORDER)
+            described = [(n, DEFAULT_TIER_DESCRIPTIONS[n]) for n in names]
+
+        bullets = "\n".join(
+            f"* `{name}` — {prose}" for name, prose in described
+        )
+        # Naming the starting tier is what makes the ladder legible as a
+        # ladder: without it "Default starting tier" had to be hardcoded
+        # into the dispatcher bullet, which was wrong for any profile that
+        # started somewhere else.
+        initial_note = (
+            f"This session starts in `{cfg.initial_tier}`.\n\n"
+            if cfg is not None else ""
         )
         return ToolSchema(
             name="enter_tier",
             description=(
                 "Switch the session's active model tier.  Pick the one "
                 "that matches what you're about to do:\n\n"
-                "* `planner` — deep thought, multi-step reasoning, "
-                "complex problem decomposition.  Most expensive; use "
-                "when you genuinely need the strongest model.\n"
-                "* `dispatcher` — coordination, light reasoning, "
-                "deciding which tools to call.  Default starting tier.\n"
-                "* `executor` — mechanical tool calls and result "
-                "interpretation when the plan is clear.  Cheapest; use "
-                "when the work doesn't need reasoning.\n"
-                "* `vision` — view image content (diagrams, screenshots).  "
-                "Switch here BEFORE reading an image with a tool (e.g. "
-                "viewing a file that is an image), then switch back when "
-                "done.  Only useful when the session declares a vision "
-                "tier; if you try to read an image while in a non-vision "
-                "tier, the image is withheld and the tool result tells "
-                "you to switch here first.\n\n"
+                f"{bullets}\n\n"
+                f"{initial_note}"
                 "Switching is cheap (no network round-trip; just "
                 "re-points the active provider).  After your work at "
                 "the new tier is done, switch back via another "
@@ -565,16 +587,11 @@ class LifecycleTools:
                 "properties": {
                     "name": {
                         "type": "string",
-                        "enum": [
-                            TIER_PLANNER,
-                            TIER_DISPATCHER,
-                            TIER_EXECUTOR,
-                            TIER_VISION,
-                        ],
+                        "enum": names,
                         "description": (
                             "Target tier name.  Must be one of "
-                            f"{TIER_PLANNER}/{TIER_DISPATCHER}/"
-                            f"{TIER_EXECUTOR}/{TIER_VISION}."
+                            + "/".join(names)
+                            + "."
                         ),
                     },
                 },
