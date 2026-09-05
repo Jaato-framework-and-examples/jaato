@@ -79,6 +79,7 @@ from .._media_deltas import (  # noqa: F401 - re-exported for callers
     STREAM_AUDIO_MIME,
     OpenAIMediaOutputMixin,
     extract_audio_delta as _extract_audio_delta,
+    ensure_spoken_part,
     media_chunk_count,
     stream_terminated,
 )
@@ -588,6 +589,11 @@ class OpenAICompatProvider(OpenAIMediaOutputMixin, ModalityCapabilityMixin):
         # can spot a gap left by backpressure.  Separate from the text
         # chunk counter: they are different streams.
         media_sequence = NO_MEDIA_YET
+        # What the model SAID.  A plain list because bytes and
+        # transcript arrive in SEPARATE deltas -- 7 data-only and 11
+        # transcript-only in one measured turn, zero carrying both -- so
+        # the words cannot be read off the emitted chunks.
+        media_transcript: List[str] = []
 
         def flush_text_block():
             """Flush accumulated text as a single Part."""
@@ -695,7 +701,7 @@ class OpenAICompatProvider(OpenAIMediaOutputMixin, ModalityCapabilityMixin):
                     # the mime type spells the parameters out: the payload
                     # carries no header to recover them from.
                     media_sequence = self.emit_media_delta(
-                        delta, on_chunk, media_sequence
+                        delta, on_chunk, media_sequence, media_transcript
                     )
 
                     # Accumulate tool calls (they come in pieces)
@@ -783,15 +789,20 @@ class OpenAICompatProvider(OpenAIMediaOutputMixin, ModalityCapabilityMixin):
 
         # A stream that stopped arriving is not a turn that finished
         # (#687).  Raises rather than returning the fragment.
+        # A turn that only spoke has no Part of its own — without this
+        # the session sees an empty response and nudges a good answer.
+        ensure_spoken_part(parts, "".join(media_transcript))
+
         return require_terminated_stream(
             ProviderResponse(
                 parts=parts,
+                media_chunks=media_chunk_count(media_sequence),
                 usage=usage,
                 finish_reason=finish_reason,
                 raw=None,
                 thinking=thinking,
             ),
-            terminal_seen=stream_terminated(terminal_seen, media_sequence),
+            terminal_seen=stream_terminated(terminal_seen, media_sequence, parts),
             was_cancelled=was_cancelled,
             provider=self.name,
             model=self._model_name,

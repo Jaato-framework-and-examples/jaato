@@ -114,6 +114,7 @@ from .._media_deltas import (
     MEDIA_API_PARAMS,
     NO_MEDIA_YET,
     OpenAIMediaOutputMixin,
+    ensure_spoken_part,
     media_chunk_count,
     stream_terminated,
 )
@@ -1701,6 +1702,11 @@ class OpenRouterProvider(OpenAIMediaOutputMixin, ModalityCapabilityMixin):
         # termination signal for an audio-only stream -- see
         # ``_media_deltas.media_arrived``.
         media_sequence = NO_MEDIA_YET
+        # What the model SAID.  A plain list because bytes and
+        # transcript arrive in SEPARATE deltas -- 7 data-only and 11
+        # transcript-only in one measured turn, zero carrying both -- so
+        # the words cannot be read off the emitted chunks.
+        media_transcript: List[str] = []
         accumulated_thinking: List[str] = []
         parts: List[Part] = []
         finish_reason = FinishReason.UNKNOWN
@@ -1889,7 +1895,7 @@ class OpenRouterProvider(OpenAIMediaOutputMixin, ModalityCapabilityMixin):
                     # the decoder is imported rather than inherited -- see
                     # ``_media_deltas``.
                     media_sequence = self.emit_media_delta(
-                        delta, on_chunk, media_sequence
+                        delta, on_chunk, media_sequence, media_transcript
                     )
 
                     if delta.tool_calls:
@@ -1997,15 +2003,20 @@ class OpenRouterProvider(OpenAIMediaOutputMixin, ModalityCapabilityMixin):
 
         # A stream that stopped arriving is not a turn that finished
         # (#687).  Raises rather than returning the fragment.
+        # A turn that only spoke has no Part of its own — without this
+        # the session sees an empty response and nudges a good answer.
+        ensure_spoken_part(parts, "".join(media_transcript))
+
         return require_terminated_stream(
             ProviderResponse(
                 parts=parts,
+                media_chunks=media_chunk_count(media_sequence),
                 usage=usage,
                 finish_reason=finish_reason,
                 raw=None,
                 thinking=thinking,
             ),
-            terminal_seen=stream_terminated(terminal_seen, media_sequence),
+            terminal_seen=stream_terminated(terminal_seen, media_sequence, parts),
             was_cancelled=was_cancelled,
             provider=self.name,
             model=self._model_name,

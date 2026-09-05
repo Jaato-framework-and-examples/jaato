@@ -367,7 +367,10 @@ class ModalityCapabilityMixin:
         """
         return kind.strip().lower() in self.output_modalities(model)
 
-    def emit_media_delta(self, delta: Any, on_chunk: Any, sequence: int) -> int:
+    def emit_media_delta(
+        self, delta: Any, on_chunk: Any, sequence: int,
+        transcript_sink: Optional[List[str]] = None,
+    ) -> int:
         """Decode model-generated media from ``delta`` and emit it.
 
         The no-op default IS the contract: a streaming loop calls this
@@ -386,6 +389,10 @@ class ModalityCapabilityMixin:
             on_chunk: The :data:`StreamingCallback`; receives a
                 ``MediaDelta``, never a ``str``.
             sequence: Last media sequence issued for this turn.
+            transcript_sink: Optional list the decoder appends what
+                the model SAID to.  Bytes and transcript arrive in
+                separate deltas, so a provider that wants the words
+                must pass one.
 
         Returns:
             The new sequence -- unchanged when nothing was emitted.

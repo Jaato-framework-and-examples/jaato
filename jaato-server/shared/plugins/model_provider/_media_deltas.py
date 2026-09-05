@@ -32,9 +32,9 @@ from __future__ import annotations
 import logging
 from base64 import b64decode as _b64decode
 from binascii import Error as BinasciiError
-from typing import Any, Dict, FrozenSet, Iterable, Optional, Tuple
+from typing import Any, Dict, FrozenSet, Iterable, List, Optional, Tuple
 
-from jaato_sdk.plugins.model_provider.types import MediaDelta
+from jaato_sdk.plugins.model_provider.types import MediaDelta, Part
 
 logger = logging.getLogger(__name__)
 
@@ -109,30 +109,96 @@ def media_chunk_count(media_sequence: int) -> int:
     return media_sequence - NO_MEDIA_YET
 
 
-def stream_terminated(terminal_seen: bool, media_sequence: int) -> bool:
+def completed_tool_call(parts: Iterable[Any]) -> bool:
+    """Whether a COMPLETE function call was decoded from the stream.
+
+    Complete means its arguments parsed.  A stream cut mid-generation
+    leaves ``unreadable_args`` set -- the JSON stops short -- so a call
+    whose arguments parsed is one the upstream finished sending, which
+    is the distinction the termination check needs.
+
+    Measured against openai/gpt-audio-mini via OpenRouter: a turn that
+    speaks and then calls a tool carries NO finish reason at all
+    (confirmed in OpenRouter's own billing export, where
+    ``finish_reason_raw`` is empty for every such generation).  Without
+    counting the call, that turn is discarded as a fragment, the tool
+    never runs, the assistant turn never enters history, and the
+    framework nudges the model to call the tool it already called.
+    """
+    for part in parts:
+        call = getattr(part, "function_call", None)
+        if call is not None and not getattr(call, "unreadable_args", None):
+            return True
+    return False
+
+
+def stream_terminated(
+    terminal_seen: bool,
+    media_sequence: int,
+    parts: Optional[Iterable[Any]] = None,
+) -> bool:
     """Whether the stream ended for a reason, not by dying mid-generation.
 
-    Either the wire named a finish reason, or media was decoded and the
-    chunk iteration ended normally -- see :func:`media_arrived` for why
-    the second clause is sound and why it is scoped to media.
+    Three signals, any of which means the upstream finished rather than
+    died: the wire named a finish reason; media was decoded; or a
+    complete tool call was decoded.  The last two exist because an
+    audio-modality request omits the finish reason entirely, so the
+    first signal -- the only one a TEXT stream ever needs -- is absent
+    for every such turn.
+
+    Deliberately NOT "any part at all": a truncated TEXT stream also
+    yields parts, and accepting those would retire the protection #687
+    exists for.  Each clause is evidence of COMPLETION, not merely of
+    output.
     """
-    return terminal_seen or media_arrived(media_sequence)
+    return (terminal_seen
+            or media_arrived(media_sequence)
+            or completed_tool_call(parts or ()))
 
 
-def extract_audio_delta(delta: Any) -> Optional[Tuple[bytes, str]]:
-    """Pull ``(raw_bytes, transcript)`` out of a streaming ``delta.audio``.
+def ensure_spoken_part(parts: List[Any], transcript: str) -> None:
+    """Give a spoken-but-wordless turn a text Part, in place.
 
-    Returns ``None`` when the delta carries no audio -- the case for every
-    text-only provider and every text chunk, so this is the cheap common
-    path.
+    Appends only when the model produced NO text of its own: a turn that
+    both wrote and spoke already has its words, and appending the
+    transcript too would duplicate them.
 
-    Defensive by necessity.  ``audio`` is absent from OpenAI's published
-    OpenAPI schema for the streaming delta, and so from the generated SDK
-    types too, meaning it may surface as an attribute, inside
-    ``model_extra``, or as a plain dict depending on the client.  It is
-    therefore probed rather than accessed, and a malformed or undecodable
-    payload yields ``None`` instead of raising: one bad audio chunk must
-    not abort a turn that is otherwise streaming fine.
+    A turn that spoke AND called a tool does get the part — the
+    function-call parts say what it DID, not what it said.
+
+    No-op when the provider sent no transcript; the caller's
+    media-arrival count is the backstop for that case.
+    """
+    if not transcript.strip():
+        return
+    if any(getattr(p, "text", None) for p in parts):
+        return
+    parts.append(Part.from_text(transcript))
+
+
+def extract_audio_delta(
+    delta: Any,
+) -> Optional[Tuple[Optional[bytes], str]]:
+    """Pull ``(raw_bytes_or_None, transcript)`` out of a streaming ``delta.audio``.
+
+    Returns ``None`` only when the delta carries no audio object at all,
+    or one with neither bytes nor transcript -- the cheap common path for
+    every text-only provider and every text chunk.
+
+    **Bytes and transcript arrive in SEPARATE deltas.**  Measured against
+    openai/gpt-audio-mini via OpenRouter: of 19 audio deltas in one turn,
+    7 carried data only, 11 carried transcript only, and ZERO carried
+    both.  An earlier version returned ``None`` whenever ``data`` was
+    absent, which silently discarded every transcript-bearing delta --
+    so a spoken turn produced no text, no Part, and no history entry,
+    and the framework nudged the model to finish work it had done.
+
+    Defensive by necessity about SHAPE, not about content: ``audio`` is
+    absent from OpenAI's published streaming-delta schema and so from
+    the generated SDK types, arriving as an attribute, inside
+    ``model_extra``, or as a plain dict depending on the client.  A
+    malformed payload yields ``None`` rather than raising -- one bad
+    chunk must not abort a turn that is otherwise streaming fine.
     """
     audio = getattr(delta, "audio", None)
     if audio is None and isinstance(delta, dict):
@@ -151,14 +217,15 @@ def extract_audio_delta(delta: Any) -> Optional[Tuple[bytes, str]]:
         encoded = getattr(audio, "data", None)
         transcript = getattr(audio, "transcript", None) or ""
 
-    if not encoded:
-        return None
-    try:
-        raw = _b64decode(encoded)
-    except (BinasciiError, ValueError, TypeError):
-        logger.warning("Discarding an undecodable audio delta")
-        return None
-    if not raw:
+    raw: Optional[bytes] = None
+    if encoded:
+        try:
+            raw = _b64decode(encoded) or None
+        except (BinasciiError, ValueError, TypeError):
+            logger.warning("Discarding an undecodable audio delta")
+            raw = None
+
+    if raw is None and not transcript:
         return None
     return raw, transcript
 
@@ -168,26 +235,33 @@ def emit_audio_delta(
     on_chunk: Any,
     sequence: int,
     mime_type: str = STREAM_AUDIO_MIME,
+    transcript_sink: Optional[List[str]] = None,
 ) -> int:
     """Emit one model-generated audio chunk; return the new sequence.
 
-    Returns ``sequence`` unchanged when the delta carries no audio, so a
-    streaming loop can call this unconditionally for the cost of one
-    function call and a ``None`` check.
+    Two facts ride on ``delta.audio`` and they arrive SEPARATELY, so they
+    are handled separately here:
 
-    Args:
-        delta: The streaming delta object from the provider's SDK.
-        on_chunk: The :data:`StreamingCallback`.  Receives a
-            :class:`MediaDelta`, never a ``str``.
-        sequence: Last media sequence issued; incremented on emit.
-        mime_type: Wire format of the payload.  Defaults to OpenAI's
-            streaming pcm16; a provider streaming something else passes
-            its own.
+    * a transcript is appended to ``transcript_sink`` whenever present,
+      and never produces a chunk of its own -- emitting an empty
+      ``MediaDelta`` would hand clients zero bytes to play;
+    * bytes advance ``sequence`` and are emitted to ``on_chunk``.
+
+    A transcript-only delta therefore returns ``sequence`` UNCHANGED: it
+    is not an audio chunk, and counting it would put gaps in the
+    sequence a client uses to detect dropped media.
+
+    Returns ``sequence`` unchanged when the delta carries no audio at
+    all, so a streaming loop can call this unconditionally.
     """
     found = extract_audio_delta(delta)
     if found is None:
         return sequence
     raw, transcript = found
+    if transcript and transcript_sink is not None:
+        transcript_sink.append(transcript)
+    if raw is None:
+        return sequence
     sequence += 1
     on_chunk(MediaDelta(
         mime_type=mime_type,
@@ -243,10 +317,13 @@ class OpenAIMediaOutputMixin:
     #: Overridable by a provider streaming a different audio format.
     STREAM_AUDIO_MIME: str = STREAM_AUDIO_MIME
 
-    def emit_media_delta(self, delta: Any, on_chunk: Any, sequence: int) -> int:
+    def emit_media_delta(
+        self, delta: Any, on_chunk: Any, sequence: int,
+        transcript_sink: Optional[List[str]] = None,
+    ) -> int:
         """Decode and emit OpenAI-shaped model audio; see :func:`emit_audio_delta`."""
         return emit_audio_delta(
-            delta, on_chunk, sequence, self.STREAM_AUDIO_MIME
+            delta, on_chunk, sequence, self.STREAM_AUDIO_MIME, transcript_sink
         )
 
     def request_output_modalities(self, kinds: Iterable[str]) -> None:

@@ -1350,6 +1350,7 @@ class ProviderResponse:
             This is populated when the model returns structured JSON output
             conforming to a requested schema.
         thinking: Extended thinking/reasoning content from the model.
+        media_chunks: Count of model-generated media chunks (see below).
             Populated when models expose their internal reasoning, e.g.
             Anthropic extended thinking or DeepSeek-R1 reasoning_content.
             OpenAI o-series models use reasoning internally but do not
@@ -1361,6 +1362,15 @@ class ProviderResponse:
     raw: Any = None
     structured_output: Optional[Dict[str, Any]] = None
     thinking: Optional[str] = None
+    #: How many MediaDelta chunks the model produced this turn.
+    #:
+    #: Model media is delivered OUT OF BAND, straight to clients via the
+    #: streaming callback, so it never becomes a Part.  Without this
+    #: count a turn that spoke for three seconds is indistinguishable
+    #: from one that said nothing, and the empty-response nudge fires on
+    #: a perfectly good answer -- observed against openai/gpt-audio-mini,
+    #: which returns audio and no text at all.
+    media_chunks: int = 0
 
     def get_text(self) -> str:
         """Extract concatenated text from all text parts."""

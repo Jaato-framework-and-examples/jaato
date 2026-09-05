@@ -26,6 +26,7 @@ from shared.plugins.model_provider._media_deltas import (
     OpenAIMediaOutputMixin,
     apply_output_modalities,
     emit_audio_delta,
+    ensure_spoken_part,
     extract_audio_delta,
 )
 from shared.plugins.model_provider.base import ModalityCapabilityMixin
@@ -403,10 +404,145 @@ class TestAudioOnlyStreamTermination:
         import importlib, inspect
 
         src = inspect.getsource(importlib.import_module(module_path))
-        assert "stream_terminated(terminal_seen, media_sequence)" in src, \
+        assert "stream_terminated(terminal_seen, media_sequence" in src, \
             "termination signal missing"
         assert "NO_MEDIA_YET" in src, "sentinel not used"
         # audio counts as content — an audio-only turn reported
         # "no content arrived" while 31KB of speech had been decoded.
         assert "media_chunk_count(media_sequence)" in src, \
             "media not counted into the chunk total"
+
+
+class TestToolCallTerminatesStream:
+    """A tool call is completion evidence when the wire names no reason.
+
+    An audio-modality request to OpenRouter carries NO finish reason —
+    confirmed both on the SSE wire and in OpenRouter's own billing
+    export, where `finish_reason_raw` is empty for every such
+    generation.  A turn that speaks and then calls `signal_completion`
+    was therefore discarded as a fragment: the tool never ran, the
+    assistant turn never reached history, and the framework nudged the
+    model to call the tool it had already called — nine generations
+    billed for no work.
+    """
+
+    def _call(self, unreadable=None):
+        from jaato_sdk.plugins.model_provider.types import FunctionCall, Part
+        return Part.from_function_call(FunctionCall(
+            id="1", name="signal_completion",
+            args={} if unreadable else {"spoken": "blue"},
+            unreadable_args=unreadable))
+
+    def test_complete_call_is_evidence(self):
+        assert _media_deltas.completed_tool_call([self._call()]) is True
+
+    def test_truncated_call_is_not(self):
+        """A stream cut mid-arguments leaves unreadable_args — that IS
+        the fragment #687 protects against."""
+        assert _media_deltas.completed_tool_call(
+            [self._call(unreadable='{"spo')]) is False
+
+    def test_text_is_not_a_tool_call(self):
+        from jaato_sdk.plugins.model_provider.types import Part
+        assert _media_deltas.completed_tool_call([Part.from_text("hi")]) is False
+
+    def test_speak_then_call_terminates(self):
+        """The exact shape that was failing."""
+        assert _media_deltas.stream_terminated(
+            False, 0, [self._call()]) is True
+
+    def test_tool_call_alone_terminates(self):
+        """A nudged turn answers with only the call — no audio, no text."""
+        assert _media_deltas.stream_terminated(
+            False, _media_deltas.NO_MEDIA_YET, [self._call()]) is True
+
+    def test_truncated_text_stream_still_guarded(self):
+        """The regression that would retire #687: parts alone must NOT
+        count, or a genuinely dead text stream reads as complete."""
+        from jaato_sdk.plugins.model_provider.types import Part
+        assert _media_deltas.stream_terminated(
+            False, _media_deltas.NO_MEDIA_YET,
+            [Part.from_text("half a sen")]) is False
+
+    def test_nothing_at_all_still_raises(self):
+        assert _media_deltas.stream_terminated(
+            False, _media_deltas.NO_MEDIA_YET, []) is False
+
+    @pytest.mark.parametrize("module_path", [
+        "shared.plugins.model_provider.openrouter.provider",
+        "shared.plugins.model_provider._openai_compat.base",
+    ])
+    def test_both_loops_pass_parts(self, module_path):
+        import importlib, inspect
+        src = inspect.getsource(importlib.import_module(module_path))
+        assert "stream_terminated(terminal_seen, media_sequence, parts)" in src
+
+
+class TestTranscriptArrivesSeparately:
+    """Bytes and transcript ride in DIFFERENT deltas.
+
+    Measured against openai/gpt-audio-mini via OpenRouter, one turn:
+    7 deltas carried data only, 11 carried transcript only, ZERO carried
+    both.  An extractor that required `data` therefore discarded every
+    word the model said — so a spoken turn produced no text, no Part and
+    no history entry, and the framework nudged the model to finish work
+    it had already done, costing a second generation every run.
+    """
+
+    def _b64(self, raw=b"\x01\x02"):
+        return base64.b64encode(raw).decode()
+
+    def test_transcript_only_delta_is_not_discarded(self):
+        assert extract_audio_delta({"audio": {"transcript": "On a clear "}}) \
+            == (None, "On a clear ")
+
+    def test_data_only_delta_has_empty_transcript(self):
+        assert extract_audio_delta({"audio": {"data": self._b64()}}) \
+            == (b"\x01\x02", "")
+
+    def test_audio_object_with_neither_is_nothing(self):
+        assert extract_audio_delta({"audio": {}}) is None
+
+    def test_transcript_only_does_not_consume_a_sequence(self):
+        """Counting it would put a hole in the sequence a client uses to
+        detect media dropped under backpressure."""
+        emitted, said = [], []
+        seq = _media_deltas.NO_MEDIA_YET
+        seq = emit_audio_delta({"audio": {"transcript": "hi "}},
+                               emitted.append, seq, transcript_sink=said)
+        assert seq == _media_deltas.NO_MEDIA_YET
+        assert emitted == []
+        assert said == ["hi "]
+
+    def test_transcript_only_emits_no_empty_chunk(self):
+        """An empty MediaDelta would hand a client zero bytes to play."""
+        emitted = []
+        emit_audio_delta({"audio": {"transcript": "x"}}, emitted.append,
+                         _media_deltas.NO_MEDIA_YET, transcript_sink=[])
+        assert emitted == []
+
+    def test_interleaved_stream_yields_words_and_contiguous_sequences(self):
+        """The real wire shape: transcript and data alternate."""
+        emitted, said = [], []
+        seq = _media_deltas.NO_MEDIA_YET
+        for delta in ({"audio": {"transcript": "On a clear day, "}},
+                      {"audio": {"data": self._b64()}},
+                      {"audio": {"transcript": "the sky is blue."}},
+                      {"audio": {"data": self._b64()}}):
+            seq = emit_audio_delta(delta, emitted.append, seq,
+                                   transcript_sink=said)
+        assert [m.sequence for m in emitted] == [0, 1]
+        assert "".join(said) == "On a clear day, the sky is blue."
+
+    def test_the_words_become_the_spoken_part(self):
+        """End of the chain: what makes a spoken turn visible in history."""
+        parts = []
+        ensure_spoken_part(parts, "On a clear day, the sky is blue.")
+        assert parts[0].text == "On a clear day, the sky is blue."
+
+    def test_sink_is_optional(self):
+        """A provider that does not want the words passes none."""
+        emitted = []
+        seq = emit_audio_delta({"audio": {"data": self._b64()}},
+                               emitted.append, _media_deltas.NO_MEDIA_YET)
+        assert seq == 0 and len(emitted) == 1

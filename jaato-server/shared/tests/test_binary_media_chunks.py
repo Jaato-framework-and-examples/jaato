@@ -555,7 +555,26 @@ class TestDeliverModelMedia:
         assert call["sequence"] == 4
         assert call["final"] is True
         assert call["chunk"] == "hey"
-        assert call["stream_id"] == "model:main"
+        # Per UTTERANCE, not per agent: a constant id collided every
+        # utterance of a session into one stream, so a retried turn's
+        # audio was spliced onto the first attempt's.
+        assert call["stream_id"] == "model:main:1"
+
+    def test_each_utterance_gets_its_own_stream_id(self):
+        """The provider restarts `sequence` at 0 per turn, and that
+        reset is the utterance boundary."""
+        hooks = _RecordingHooks()
+        session = self._session(hooks)
+        for seq in (0, 1):        # first utterance
+            session._deliver_model_media(
+                MediaDelta(mime_type="audio/pcm", data=b"\x01", sequence=seq))
+        for seq in (0, 1):        # second utterance, sequence restarts
+            session._deliver_model_media(
+                MediaDelta(mime_type="audio/pcm", data=b"\x02", sequence=seq))
+
+        ids = [c["stream_id"] for c in hooks.calls]
+        assert ids == ["model:main:1", "model:main:1",
+                       "model:main:2", "model:main:2"]
 
     def test_empty_payload_is_not_delivered(self):
         hooks = _RecordingHooks()

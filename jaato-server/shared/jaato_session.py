@@ -5693,9 +5693,16 @@ NOTES
         """
         for attempt in range(1, max_attempts + 1):
             has_fc = response.has_function_calls()
-            is_empty = not response.parts or all(
+            # Media the model produced is delivered out of band and never
+            # becomes a Part, so a turn that spoke has no parts at all.
+            # Counting it as content is what stops the nudge firing on a
+            # good spoken answer; the provider normally also gives such a
+            # turn a transcript Part, and this is the backstop for a
+            # provider that sends none.
+            spoke = response.media_chunks > 0
+            is_empty = not spoke and (not response.parts or all(
                 not p.text and not p.function_call for p in response.parts
-            )
+            ))
             needs_nudge = (
                 (not has_fc and response.finish_reason == FinishReason.TOOL_USE)
                 or (response.finish_reason == FinishReason.UNKNOWN and is_empty)
@@ -7968,6 +7975,23 @@ NOTES
         )
         return _dc_replace(result, attachments=(kept or None), model_suffix=combined)
 
+    def _model_media_stream_id(self, delta: 'MediaDelta') -> str:
+        """A distinct stream id per utterance, not per agent.
+
+        A constant id per agent collided every utterance in a session
+        into one stream: a client keying chunks by ``stream_id`` then
+        saw sequences restart at 0 mid-stream, so a retried turn's audio
+        was spliced onto the first attempt's and no gap check could tell
+        them apart.
+
+        The provider restarts ``sequence`` at 0 for each turn, so that
+        reset IS the utterance boundary — no extra plumbing needed.
+        """
+        if delta.sequence == 0:
+            self._model_media_utterance = (
+                getattr(self, "_model_media_utterance", 0) + 1)
+        return f"model:{self._agent_id}:{getattr(self, '_model_media_utterance', 1)}"
+
     def _deliver_model_media(self, delta: 'MediaDelta') -> None:
         """Deliver one chunk of MODEL-generated media to subscribed clients.
 
@@ -7994,7 +8018,7 @@ NOTES
                 agent_id=self._agent_id,
                 call_id=MODEL_MEDIA_CALL_ID,
                 chunk=delta.transcript or "",
-                stream_id=f"model:{self._agent_id}",
+                stream_id=self._model_media_stream_id(delta),
                 sequence=delta.sequence,
                 mime_type=delta.mime_type,
                 data_b64=_b64encode(delta.data).decode("ascii"),
