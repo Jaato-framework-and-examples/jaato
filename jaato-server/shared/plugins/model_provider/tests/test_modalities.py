@@ -197,6 +197,7 @@ def test_all_providers_expose_the_capability_contract():
         ("nebius", "NebiusProvider"),
         ("ovhcloud", "OVHcloudProvider"),
         ("doubleword", "DoublewordProvider"),
+        ("helmcode", "HelmcodeProvider"),
     ]
     for pkg, cls_name in provider_modules:
         mod = importlib.import_module(

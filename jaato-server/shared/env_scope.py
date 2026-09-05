@@ -444,6 +444,9 @@ CATALOG: Dict[str, EnvClass] = {
     "GOOGLE_GENAI_API_KEY": EnvClass(SESSION, None,
         "google_genai exposes no api_key knob (see the credential "
         "policy)"),
+    "HELMCODE_API_KEY": EnvClass(SESSION, "plugin_configs.helmcode.api_key",
+        "credential; helmcode exposes the knob, so a profile can carry a "
+        "pass:// URI instead of the env var"),
     "JAATO_ANTHROPIC_ENABLE_CACHING": EnvClass(SESSION, "plugin_configs.anthropic.enable_caching",
         "anthropic exposes the knob; the env var is its fallback"),
     "JAATO_ANTHROPIC_ENABLE_THINKING": EnvClass(SESSION, "plugin_configs.anthropic.api_params.enable_thinking",
@@ -498,6 +501,15 @@ CATALOG: Dict[str, EnvClass] = {
         "github_models exposes the knob; the env var is its fallback"),
     "JAATO_GOOGLE_AUTH_METHOD": EnvClass(SESSION, None,
         "auth-method selection with no google_genai knob"),
+    "JAATO_HELMCODE_API_KEY": EnvClass(SESSION, "plugin_configs.helmcode.api_key",
+        "credential; helmcode exposes the knob, so a profile can carry a "
+        "pass:// URI instead of the env var"),
+    "JAATO_HELMCODE_BASE_URL": EnvClass(SESSION, "plugin_configs.helmcode.base_url",
+        "endpoint override; helmcode exposes the knob"),
+    "JAATO_HELMCODE_CONTEXT_LENGTH": EnvClass(SESSION, "plugin_configs.helmcode.context_length",
+        "manual context-window override; helmcode exposes the knob"),
+    "JAATO_HELMCODE_MODEL": EnvClass(SESSION, "model",
+        "the profile's own `model` field selects the model"),
     "JAATO_GOOGLE_TARGET_SERVICE_ACCOUNT": EnvClass(SESSION, None,
         "impersonation target with no google_genai knob"),
     "JAATO_GOOGLE_USE_VERTEX": EnvClass(SESSION, None,

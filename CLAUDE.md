@@ -140,6 +140,7 @@ Four plugin types:
 - `model_provider/nebius/`: Nebius Token Factory (serverless open-model inference, OpenAI-compatible; `/v1/models` catalog auto-detects context window + input modalities)
 - `model_provider/ovhcloud/`: OVHcloud AI Endpoints (serverless open-model inference on OVHcloud's EU cloud, OpenAI-compatible unified gateway; catalog auto-detects context window when reported, manual knobs otherwise; opt-in keyless free tier)
 - `model_provider/doubleword/`: Doubleword (serverless open-model inference priced by delivery window, OpenAI-compatible; `api_params.service_tier: flex` opts into the discounted async tier — queued work, ~1 min to first token — on the same chat endpoint; `context_length` must be set — the catalog reports no per-model window)
+- `model_provider/helmcode/`: Helmcode (private EU inference, OpenAI-compatible; open-weight models on Helmcode's own EU hardware at a flat monthly rate, plus nine resold frontier models billed per token from prepaid credit — a `402 credits_exhausted` on those maps to a non-retryable `CreditsExhaustedError`)
 
 **Model Quirks** — per-model workarounds a profile opts into via `quirks:`
 (injected into `config.extra["quirks"]`; each provider declares the names it
@@ -1238,6 +1239,101 @@ plugin_configs:
 > different interaction shape (submit → poll → collect) and is not part of
 > this provider; background-job polling and batch-job support are a
 > follow-up.
+
+### Helmcode
+| Variable | Purpose |
+|----------|---------|
+| `JAATO_HELMCODE_API_KEY` | API key (jaato namespace, highest priority) |
+| `HELMCODE_API_KEY` | API key (the vendor's own documented variable; honored so users who already set it for Helmcode's OpenAI SDK examples work with no extra config) |
+| `JAATO_HELMCODE_BASE_URL` | Endpoint (default: `https://api.helmcode.com/v1`) |
+| `JAATO_HELMCODE_MODEL` | Default model name (e.g. `qwen3.6`, `deepseek-v4-flash`) |
+| `JAATO_HELMCODE_CONTEXT_LENGTH` | Context window override / supply (see the note below) |
+
+**Authentication (in priority order):**
+1. **Environment variable**: `JAATO_HELMCODE_API_KEY`, then the vendor's `HELMCODE_API_KEY`
+2. **Stored credentials**: `helmcode-auth` (validates against `GET /v1/models` and stores securely)
+
+Helmcode (https://helmcode.com) is **private AI inference for European
+teams**: open-weight models running on hardware Helmcode operates in the
+EU, with zero prompt retention, behind one OpenAI-compatible API
+(`https://api.helmcode.com/v1`).  Model IDs are bare catalog names, not
+vendor-prefixed — `glm-5.3`, `deepseek-v4-flash`, `qwen3.6`, `gemma4` —
+browse them at https://helmcode.com/docs/models or via `list_models()`.
+
+Two things make it unlike the other serverless providers in this fleet:
+
+- **Volume on Helmcode's own models is flat-rate, not metered.**  A
+  monthly plan per API key covers them; there is no per-token bill to
+  watch.  Limits are per key (RPM, concurrency, TPM) rather than a token
+  budget, so a fan-out is bounded by concurrency, not spend.  `glm-5.3`
+  sits outside the plan as a per-key add-on with its own allowance.
+- **The same endpoint and key also reach nine resold frontier models**
+  from Anthropic, OpenAI and Google (`claude-*`, `gpt-5.6-*`,
+  `gemini-*`).  These are a *separate offer*: they run on those
+  providers' own US infrastructure — so a request on one leaves the EU —
+  and they are billed per token from prepaid credit rather than covered
+  by any plan.  Only the `model` id distinguishes the two families, which
+  is why the provider maps their one distinctive failure explicitly (see
+  below).
+
+`list_models()` queries `GET /v1/models` (**authenticated** — the listing
+is account-scoped and reflects the key's entitlements, so the resold
+frontier models appear alongside Helmcode's own).
+
+> **Set a context window unless the catalog supplies one.**  Helmcode's
+> `/v1/models` requires a key, so its entry schema could not be verified
+> from outside an account.  `connect()` consults the catalog **first**
+> (tolerating the common key spellings `context_length` /
+> `max_model_len` / `max_context_length`) and falls through to
+> `plugin_configs.helmcode.context_length` / `JAATO_HELMCODE_CONTEXT_LENGTH`,
+> then fails loud rather than guessing.  If the catalog turns out to
+> serve bare OpenAI-shaped entries (as Doubleword's does), the knob is
+> effectively required.  The published windows are at
+> https://helmcode.com/docs/models — as of 2026-09: 1M for `glm-5.3` and
+> `deepseek-v4-flash`, 256K for `qwen3.6` and `gemma4`.  They are
+> deliberately not hardcoded (no-fallback rule): a *served* window is an
+> operational fact that moves — `glm-5.2` served 500K of a 1M model —
+> and a stale constant would silently mis-budget GC.
+
+Input modalities resolve catalog → `plugin_configs.helmcode.modalities`
+knob → text floor.  `qwen3.6` and `gemma4` take image input; `glm-5.3`
+and `deepseek-v4-flash` are text only.  Assert the vision ones through
+the knob if the catalog does not classify them.
+
+**`402 credits_exhausted` is its own error class.**  When prepaid credit
+runs out, *only* the resold frontier models refuse — everything the plan
+covers keeps answering, so it is not an outage.  The provider maps that
+402 to `CreditsExhaustedError` instead of leaving it an unmapped SDK
+error, and deliberately classifies it as **non-transient**: the balance
+does not refill on its own, so retrying burns the backoff budget and
+cannot succeed.  The turn fails fast naming the two remedies — top up, or
+switch to a plan-covered model.
+
+Profile knobs under `plugin_configs.helmcode`:
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `base_url` | str | Override `JAATO_HELMCODE_BASE_URL` — also how an **On-premise** deployment is reached (same API, customer's own hardware) |
+| `context_length` | int | Context window (used when the catalog doesn't report the model's window) |
+| `modalities` | list[str] | Assert/correct input modalities (e.g. `["text","image"]`) for a model the catalog doesn't classify |
+
+```yaml
+# profile example: a flat-rate agent on Helmcode's EU infrastructure
+provider: helmcode
+model: deepseek-v4-flash
+plugin_configs:
+  helmcode:
+    context_length: 1000000     # set unless the catalog reports one
+    api_params:
+      temperature: 0.0
+```
+
+> **Note (non-chat surfaces):** Helmcode also serves embeddings
+> (`qwen3-embedding`), reranking (`/v1/rerank`), speech
+> (`whisper-large-v3`, `kokoro`) and a web-search tool (`/v1/search`).
+> A model provider's contract covers chat completions only, so those are
+> out of scope here — they are reachable with the same key and base URL
+> from a plugin that wants them.
 
 ### Claude CLI Provider
 | Variable | Purpose |

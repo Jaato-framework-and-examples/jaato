@@ -63,6 +63,7 @@ def test_empty_config_reports_not_set():
     ("nebius", "shared.plugins.model_provider.nebius.env", {}),
     ("ovhcloud", "shared.plugins.model_provider.ovhcloud.env", {}),
     ("doubleword", "shared.plugins.model_provider.doubleword.env", {}),
+    ("helmcode", "shared.plugins.model_provider.helmcode.env", {}),
     ("nim", "shared.plugins.model_provider.nim.env", {}),
     # github_models' helper also takes an auth_method positional arg.
     ("github_models", "shared.plugins.model_provider.github_models.env",
