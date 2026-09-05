@@ -4,5 +4,10 @@
   "session_id": "",
   "agent_id": "",
   "call_id": "",
-  "chunk": ""
+  "chunk": "",
+  "stream_id": "",
+  "sequence": null,
+  "mime_type": null,
+  "data_b64": null,
+  "final": false
 }

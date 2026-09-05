@@ -688,11 +688,57 @@ class ToolCallEndEvent(Event):
 
 
 class ToolOutputEvent(Event):
-    """Live output chunk from a running tool (tail -f style)."""
+    """Live output chunk from a running tool (tail -f style).
+
+    Carries text, binary media, or both.  This event is widened rather
+    than joined by a rival media event because it already correlates by
+    ``call_id``, is already mapped onto the in-process bus, and clients
+    already subscribe to it -- so widening the payload lights up all
+    three subscription surfaces (SDK client, ``subscribeToEvents`` agent
+    tool, ``EventBus``) at once, with no new API on any of them.
+
+    A whole-blob delivery -- a tool returning one finished WAV -- is just
+    a single-chunk stream: ``sequence=0, final=True``.
+
+    Attributes:
+        agent_id: Which agent produced the chunk.
+        call_id: Correlates the chunk with a specific tool call.
+        chunk: Output text (may contain newlines).  Empty for a
+            pure-media chunk.
+        stream_id: Correlates chunks belonging to one media stream.
+            Empty for unstreamed text, preserving existing frames.
+        sequence: Ordering, passed through from
+            :attr:`StreamChunk.sequence` rather than re-counted here --
+            a second counter would be a second source of truth.
+        mime_type: Tags the ``data_b64`` payload (e.g. ``"audio/wav"``).
+        data_b64: Base64-encoded binary payload (+33% over the raw
+            bytes; the frame is UTF-8 JSON).
+        final: Last chunk of this stream, so a client can close its
+            playback buffer or finish writing the file without waiting
+            on a separate completion event.
+
+    Note:
+        When ``mime_type``/``data_b64`` are set the chunk MUST bypass the
+        text formatter pipeline -- see ``server/core.py`` ``on_tool_output``.
+        A formatter that reflows text corrupts bytes.
+    """
     type: EventType = Field(default=EventType.TOOL_OUTPUT)
     agent_id: str = ""
     call_id: str = ""  # Required to correlate with specific tool call
     chunk: str = ""  # Output text chunk (may contain newlines)
+    stream_id: str = ""  # Correlates chunks of one media stream
+    sequence: Optional[int] = None  # From StreamChunk.sequence
+    mime_type: Optional[str] = None  # Tags the data_b64 payload
+    data_b64: Optional[str] = None  # Base64 binary payload
+    final: bool = False  # Last chunk of this stream
+
+    def is_media(self) -> bool:
+        """Whether this event carries a binary payload.
+
+        The predicate routing code should use, so "has bytes" is defined
+        once rather than re-derived at each call site.
+        """
+        return bool(self.mime_type and self.data_b64)
 
 
 class PermissionResponseOption(BaseModel):
@@ -2272,6 +2318,11 @@ class PresentationContext(BaseModel):
         supports_expandable_content: Whether the client can collapse overflow
             behind an expand/click affordance (e.g. Telegram inline buttons,
             HTML details, TUI panels).
+        renderable_media: MIME types this client can present to a person,
+            e.g. ``["image/png", "audio/*"]``.  Wildcards of the form
+            ``type/*`` are honoured by :meth:`can_render_media`.  Empty
+            (the default) means the client can present none -- the honest
+            answer for a plain terminal.
         client_type: The kind of client (see ``ClientType`` enum).
     """
 
@@ -2289,6 +2340,19 @@ class PresentationContext(BaseModel):
     supports_mermaid: bool = False
     supports_expandable_content: bool = False
 
+    # ── Playable / renderable media ─────────────────────────────
+    # MIME types (or ``type/*`` wildcards) this client can present to a
+    # person.  A TUI declares none, a web client image+audio, a voice
+    # client audio only.  Empty is the honest default: a client that has
+    # not said it can play something cannot.
+    #
+    # This is the CLIENT axis and is kept strictly apart from the MODEL
+    # axis (``model_tiers.<tier>.modalities``, consumed by the content
+    # gate).  Conflating them is the easiest mistake here: they have
+    # different owners and different lifetimes -- what a model can consume
+    # is fixed by the tier, what a viewer can play changes per connection.
+    renderable_media: List[str] = Field(default_factory=list)
+
     # ── Client hint ─────────────────────────────────────────────
     client_type: ClientType = ClientType.TERMINAL
 
@@ -2298,6 +2362,29 @@ class PresentationContext(BaseModel):
     communication_style: Optional['CommunicationStyle'] = None
 
     # ──────────────────────────────────────────────────────────
+
+    def can_render_media(self, mime_type: Optional[str]) -> bool:
+        """Whether this client declares it can present ``mime_type``.
+
+        Matches an exact type first, then a ``type/*`` wildcard.  Any
+        parameters on the supplied type are ignored for matching, so a
+        client declaring ``"audio/pcm"`` still matches a payload tagged
+        ``"audio/pcm;rate=24000;channels=1"`` -- the parameters describe
+        how to play it, not whether it can be played.
+
+        A falsy ``mime_type`` is not renderable: absence of a type is not
+        a claim about one.
+        """
+        if not mime_type:
+            return False
+        base = mime_type.split(";", 1)[0].strip().lower()
+        if not base:
+            return False
+        declared = {m.strip().lower() for m in self.renderable_media if m}
+        if base in declared:
+            return True
+        top = base.split("/", 1)[0]
+        return f"{top}/*" in declared
 
     def to_system_instruction(self) -> str:
         """Generate a compact display-context block for system instructions.

@@ -564,6 +564,33 @@ def _extract_thinking_tokens(resp_usage: Any, response: Any, usage: TokenUsage) 
             usage.thinking_tokens = max(1, thinking_text_len // 4)
 
 
+def _block_as_dict(block: Any) -> Dict[str, Any]:
+    """Normalise an SDK content block to the dict ``content_block_to_part`` expects.
+
+    Response blocks arrive as SDK model objects while history blocks are
+    already dicts; converting here keeps one media decoder serving both
+    paths instead of a second, drifting copy.  Falls back to attribute
+    reads when the object exposes no dict conversion.
+    """
+    for attr in ("model_dump", "dict", "to_dict"):
+        converter = getattr(block, attr, None)
+        if callable(converter):
+            try:
+                converted = converter()
+                if isinstance(converted, dict):
+                    return converted
+            except Exception:  # noqa: BLE001 - fall through to attributes
+                pass
+    source = getattr(block, "source", None)
+    if source is not None and not isinstance(source, dict):
+        source = {
+            "type": getattr(source, "type", None),
+            "media_type": getattr(source, "media_type", None),
+            "data": getattr(source, "data", None),
+        }
+    return {"type": getattr(block, "type", None), "source": source or {}}
+
+
 def response_from_anthropic(response: Any) -> ProviderResponse:
     """Convert Anthropic response to internal ProviderResponse.
 
@@ -584,6 +611,16 @@ def response_from_anthropic(response: Any) -> ProviderResponse:
                         args=block.input if hasattr(block, "input") else {},
                     )
                     parts.append(Part.from_function_call(fc))
+                elif block.type == "image":
+                    # Media in a RESPONSE used to be dropped here, even
+                    # though ``content_block_to_part`` already knows how to
+                    # build a ``Part(inline_data=...)`` from an image block
+                    # -- it was wired only to history rehydration, never to
+                    # the response path.  Reuse it rather than duplicating
+                    # the decode, so both directions stay in step.
+                    media_part = content_block_to_part(_block_as_dict(block))
+                    if media_part is not None:
+                        parts.append(media_part)
                 # Thinking blocks are extracted separately
 
     return ProviderResponse(

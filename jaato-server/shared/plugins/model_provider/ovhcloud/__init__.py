@@ -35,6 +35,7 @@ PROVIDER_CAPABILITIES = ProviderCapabilities(
     prompt_caching=False,
     streaming=True,
     cancellation=True,
+    output_media=False,
 )
 
 # --- Provider config-knob contract (authored from provider.py read sites) ---

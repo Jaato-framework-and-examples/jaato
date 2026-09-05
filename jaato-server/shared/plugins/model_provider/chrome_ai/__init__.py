@@ -105,6 +105,7 @@ PROVIDER_CAPABILITIES = ProviderCapabilities(
     prompt_caching=False,
     streaming=True,                # promptStreaming -> on_chunk
     cancellation=True,             # cancel token -> page-side AbortController
+    output_media=False,
 )
 
 # --- Provider config-knob contract (authored from provider.py read sites) ---

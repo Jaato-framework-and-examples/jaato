@@ -203,6 +203,11 @@ CATALOG: Dict[str, EnvClass] = {
     "JAATO_RUNNER_DISABLE_CONFINE": EnvClass(HOST, None,
         "disables runner self-confinement host-wide; deliberately NOT per "
         "session"),
+    "JAATO_IPC_EVENT_QUEUE_MAX": EnvClass(HOST, None,
+        "how many events the daemon buffers per IPC client before it "
+        "starts dropping lossy chunks; one bound per daemon, and a "
+        "per-session value would be meaningless because the queue is "
+        "owned by the transport, not by a session"),
     "JAATO_RUNNER_LOG_PATH": EnvClass(INTERNAL, None,
         "daemon tells the runner subprocess where to log"),
     "JAATO_RUNNER_POOL_ENABLED": EnvClass(HOST, None,

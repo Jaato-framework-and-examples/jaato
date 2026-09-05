@@ -32,7 +32,9 @@ from __future__ import annotations
 import json
 import logging
 import re
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
+from base64 import b64decode as _b64decode
+from binascii import Error as BinasciiError
 
 from ._lazy import get_openai_client_class, get_openai_module
 
@@ -42,6 +44,7 @@ if TYPE_CHECKING:
 from ..base import (
     ModalityCapabilityMixin,
     FunctionCallDetectedCallback,
+    MediaDelta,
     ProviderConfig,
     StreamingCallback,
     ThinkingCallback,
@@ -81,6 +84,50 @@ from shared.tool_id_map import tool_choice_to_wire
 logger = logging.getLogger(__name__)
 
 
+def _extract_audio_delta(delta: Any) -> Optional[Tuple[bytes, str]]:
+    """Pull ``(raw_bytes, transcript)`` out of a streaming ``delta.audio``.
+
+    Returns ``None`` when the delta carries no audio -- the case for every
+    text-only provider and every text chunk, so this is the cheap common
+    path.
+
+    Defensive by necessity.  ``audio`` is absent from OpenAI's published
+    OpenAPI schema for the streaming delta, and so from the generated SDK
+    types too, meaning it may surface as an attribute, inside
+    ``model_extra``, or as a plain dict depending on the client.  It is
+    therefore probed rather than accessed, and a malformed or undecodable
+    payload yields ``None`` instead of raising: one bad audio chunk must
+    not abort a turn that is otherwise streaming fine.
+    """
+    audio = getattr(delta, "audio", None)
+    if audio is None and isinstance(delta, dict):
+        audio = delta.get("audio")
+    if audio is None:
+        extra = getattr(delta, "model_extra", None)
+        if isinstance(extra, dict):
+            audio = extra.get("audio")
+    if audio is None:
+        return None
+
+    if isinstance(audio, dict):
+        encoded = audio.get("data")
+        transcript = audio.get("transcript") or ""
+    else:
+        encoded = getattr(audio, "data", None)
+        transcript = getattr(audio, "transcript", None) or ""
+
+    if not encoded:
+        return None
+    try:
+        raw = _b64decode(encoded)
+    except (BinasciiError, ValueError, TypeError):
+        logger.warning("Discarding an undecodable audio delta")
+        return None
+    if not raw:
+        return None
+    return raw, transcript
+
+
 class OpenAICompatProvider(ModalityCapabilityMixin):
     """Base class for OpenAI-compatible chat-completions providers.
 
@@ -105,10 +152,25 @@ class OpenAICompatProvider(ModalityCapabilityMixin):
     # ``plugin_configs.<provider>.api_params``.  Allowlisted (not blind
     # passthrough) so a typo'd / unsupported key surfaces as a profile warning
     # rather than an opaque OpenAI 400.  Subclasses may override.
+    # ``modalities`` here is OpenAI's OUTPUT selector (``["text","audio"]``)
+    # and is NOT the jaato tier key of the same name, which declares INPUT
+    # roles.  They coexist in one profile -- ``api_params.modalities`` vs
+    # ``model_tiers.<tier>.modalities`` -- so the layer a key sits under is
+    # what disambiguates them.  ``audio`` is its companion
+    # (``{"voice": ..., "format": ...}``); OpenAI requires both together,
+    # and both were previously dropped here with a warning, which made
+    # audio output unrequestable through any OpenAI-compatible provider.
+    # OpenAI streams audio as headerless pcm16 -- 24 kHz mono signed
+    # 16-bit little-endian -- and ONLY pcm16: requesting wav/mp3 together
+    # with ``stream=true`` is rejected upstream.  Spelled out in the mime
+    # type because a headerless payload carries no way to recover the rate
+    # or channel count, and a consumer that guesses wrong plays noise.
+    STREAM_AUDIO_MIME = "audio/pcm;rate=24000;channels=1;encoding=s16le"
+
     _FORWARDED_API_PARAMS = frozenset({
         "temperature", "top_p", "max_tokens", "tool_choice",
         "parallel_tool_calls", "frequency_penalty", "presence_penalty",
-        "seed", "stop",
+        "seed", "stop", "modalities", "audio",
     })
 
     # Models known to expose reasoning/thinking via ``reasoning_content``.
@@ -508,6 +570,34 @@ class OpenAICompatProvider(ModalityCapabilityMixin):
         # must read as "not reported" rather than reach the subtraction.
         return cached if isinstance(cached, int) and cached else None
 
+    def _emit_audio_delta(
+        self,
+        delta: Any,
+        on_chunk: StreamingCallback,
+        media_sequence: int,
+    ) -> int:
+        """Emit one model-generated audio chunk; return the new sequence.
+
+        Returns ``media_sequence`` unchanged when the delta carries no
+        audio -- the case for every text-only provider and every text
+        chunk, so the common path costs one call and a ``None`` check.
+
+        Extracted from the streaming loop rather than inlined so that
+        already-oversized function does not grow further.
+        """
+        audio_delta = _extract_audio_delta(delta)
+        if audio_delta is None:
+            return media_sequence
+        raw, transcript = audio_delta
+        media_sequence += 1
+        on_chunk(MediaDelta(
+            mime_type=self.STREAM_AUDIO_MIME,
+            data=raw,
+            sequence=media_sequence,
+            transcript=transcript,
+        ))
+        return media_sequence
+
     def _stream_response(
         self,
         messages: List[Dict[str, Any]],
@@ -543,6 +633,11 @@ class OpenAICompatProvider(ModalityCapabilityMixin):
 
         # Track tool call accumulation (streaming sends tool calls in pieces)
         tool_call_accumulators: Dict[int, Dict[str, Any]] = {}
+
+        # Monotonic index over model-generated media chunks, so a consumer
+        # can spot a gap left by backpressure.  Separate from the text
+        # chunk counter: they are different streams.
+        media_sequence = -1
 
         def flush_text_block():
             """Flush accumulated text as a single Part."""
@@ -638,6 +733,20 @@ class OpenAICompatProvider(ModalityCapabilityMixin):
                         chunk_count += 1
                         accumulated_text.append(delta.content)
                         on_chunk(delta.content)
+
+                    # Model-generated audio.  The OpenAI streaming shape is
+                    # ``delta.audio.data`` (base64) with an optional running
+                    # ``transcript``.  It is NOT in the published OpenAPI
+                    # schema for the streaming delta -- and so not in the
+                    # generated SDK types either -- so it arrives as an
+                    # untyped extra and is read defensively rather than by
+                    # attribute access.  While streaming, OpenAI emits only
+                    # pcm16 (24 kHz mono s16le, headerless), which is why
+                    # the mime type spells the parameters out: the payload
+                    # carries no header to recover them from.
+                    media_sequence = self._emit_audio_delta(
+                        delta, on_chunk, media_sequence
+                    )
 
                     # Accumulate tool calls (they come in pieces)
                     if delta.tool_calls:

@@ -24,6 +24,7 @@ from typing import (
     Protocol,
     Set,
     Tuple,
+    Union,
     runtime_checkable,
 )
 
@@ -31,6 +32,7 @@ from jaato_sdk.plugins.model_provider.types import (
     CancelledException,
     CancelToken,
     FunctionCall,
+    MediaDelta,
     Message,
     Part,
     ProviderResponse,
@@ -49,9 +51,22 @@ from jaato_sdk.plugins.model_provider.types import (
 #   mode: "write" for new block, "append" to continue
 OutputCallback = Callable[[str, str, str], None]
 
-# Streaming callback type for token-level streaming
-# Parameters: (chunk: str) - the text chunk received from the model
-StreamingCallback = Callable[[str], None]
+# Streaming callback type for token-level streaming.
+# Parameters: (chunk: str | MediaDelta) - one delta from the model.
+#
+# ``str`` is a text token chunk, as it always was.  ``MediaDelta`` is a
+# chunk of model-GENERATED binary output (an audio-capable model speaking
+# its answer); it is delivered on the same callback rather than a parallel
+# one so that ordering between a model's text and its audio is preserved
+# by construction -- two callbacks would have to be re-interleaved by
+# every consumer.
+#
+# A consumer MUST branch on the type.  ``MediaDelta`` is not text: adding
+# it to a transcript, taking ``len()`` of it, or coercing it with ``str()``
+# corrupts both the audio and the transcript.  Every in-tree consumer
+# branches explicitly; text-only providers are unaffected, since a
+# provider that never emits media never passes anything but ``str``.
+StreamingCallback = Callable[[Union[str, MediaDelta]], None]
 
 # Thinking callback type for extended thinking content
 # Parameters: (thinking: str) - accumulated thinking content from the model
@@ -311,6 +326,38 @@ class ModalityCapabilityMixin:
         """Whether ``model`` (or the active model) accepts ``kind`` as input."""
         return kind.strip().lower() in self.modalities(model)
 
+    def output_modalities(self, model: Optional[str] = None) -> Set[str]:
+        """OUTPUT modalities ``model`` (or the active model) can EMIT.
+
+        Deliberately NOT named ``modalities``: that name is framework-wide
+        for *input* (see :meth:`modalities` and :meth:`supports_modality`),
+        and reusing it for the opposite direction is the single easiest
+        way to introduce a silent capability bug.  The naming collision is
+        real and external too -- OpenAI's Chat Completions request field
+        ``modalities`` means OUTPUT, while a jaato tier's ``modalities``
+        key means INPUT.
+
+        Text-only floor: every model emits text, and an adapter that does
+        not parse response media cannot honestly claim more.  A provider
+        whose adapter DOES deliver model-generated media overrides this.
+        """
+        return {MODALITY_TEXT}
+
+    def supports_output_modality(
+        self, kind: str, model: Optional[str] = None
+    ) -> bool:
+        """Whether ``model`` (or the active model) can EMIT ``kind``.
+
+        The startup tier check probes this method by name via ``getattr``
+        and skips the check when it is absent, so defining it here turns
+        outbound tier roles from unverified declarations into enforced
+        ones.  That is the intended activation: a tier declaring
+        ``audio: outbound`` against a provider that cannot emit audio is a
+        configuration error worth catching at startup rather than at the
+        first turn that tries to speak.
+        """
+        return kind.strip().lower() in self.output_modalities(model)
+
     def capabilities(self) -> "ProviderCapabilities":
         """Declared wire-level capabilities (baseline default).
 
@@ -334,6 +381,7 @@ CAPABILITY_FIELDS = (
     "prompt_caching",
     "streaming",
     "cancellation",
+    "output_media",
 )
 
 
@@ -364,6 +412,7 @@ class ProviderCapabilities:
     prompt_caching: bool = False        # cache_control breakpoints emitted on the wire
     streaming: bool = True              # on_chunk token streaming
     cancellation: bool = True           # cancel_token actually halts generation
+    output_media: bool = False          # model-generated media -> MediaDelta on on_chunk
 
     def as_dict(self) -> Dict[str, bool]:
         return {f: bool(getattr(self, f)) for f in CAPABILITY_FIELDS}

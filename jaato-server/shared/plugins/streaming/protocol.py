@@ -9,6 +9,7 @@ the tool continues producing more.
 """
 
 import asyncio
+import base64
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
@@ -34,32 +35,133 @@ class StreamStatus(Enum):
     DISMISSED = "dismissed"   # Model dismissed the stream
 
 
+class Audience(str, Enum):
+    """Who a chunk is *for*.
+
+    Audience selects whether a chunk's payload enters THIS session's
+    conversation history -- not whether the event is published.  Every
+    chunk is published to all three subscription surfaces (SDK client,
+    ``subscribeToEvents`` agent tool, in-process ``EventBus``) regardless;
+    a parent agent watching a child therefore sees a ``CLIENT`` chunk, and
+    is subject to its own modality gate if it wants to consume the bytes.
+
+    ``str`` mixin so the value serializes as a plain string in JSON frames
+    and compares equal to its wire form.
+
+    Attributes:
+        MODEL: Into the conversation.  The historical behaviour of tool
+            streaming (wrapped in ``<hidden>`` so the model reads it and
+            the user does not).  Default, so existing producers are
+            unchanged.
+        CLIENT: To subscribed clients only; never enters history.  What
+            model-unconsumable media becomes -- a TTS tool's audio, or an
+            attachment the modality gate withheld.
+        BOTH: Into the conversation *and* to clients.  A screenshot a
+            vision tier can read and a person may also want to look at.
+    """
+    MODEL = "model"
+    CLIENT = "client"
+    BOTH = "both"
+
+    def reaches_model(self) -> bool:
+        """Whether a chunk with this audience enters the conversation."""
+        return self in (Audience.MODEL, Audience.BOTH)
+
+    def reaches_client(self) -> bool:
+        """Whether a chunk with this audience is rendered for a viewer."""
+        return self in (Audience.CLIENT, Audience.BOTH)
+
+
 @dataclass
 class StreamChunk:
     """A single chunk of incremental output from a streaming tool.
 
+    A chunk carries text, binary content, or both.  ``inline_data``
+    deliberately mirrors :attr:`Part.inline_data` so one ``{mime_type,
+    data}`` shape is used on every path -- inbound message parts, tool
+    result attachments, and chunks -- rather than a parallel media type.
+
+    New fields are appended, so positional construction
+    (``StreamChunk("text", "match", 5)``) is unchanged, as is every
+    existing producer: a text-only chunk leaves ``inline_data`` ``None``
+    and takes the default ``MODEL`` audience.
+
     Attributes:
-        content: The actual content of this chunk.
+        content: The actual content of this chunk.  Defaults to ``""`` so
+            a pure-media chunk need not pass an empty string; for a media
+            chunk this is an optional human-readable label, not the payload.
         chunk_type: Type hint for the chunk (e.g., "match", "progress", "result").
         sequence: Sequence number for ordering (auto-assigned if not provided).
         timestamp: When this chunk was produced.
         metadata: Optional additional metadata about this chunk.
+        inline_data: Optional binary payload as ``{"mime_type": str,
+            "data": bytes}``.  When set, consumers MUST route the chunk
+            around any text formatter -- a formatter that reflows text
+            corrupts bytes (see ``server/core.py`` ``on_tool_output``).
+        audience: Who the chunk is for; see :class:`Audience`.  Defaults
+            to ``MODEL``, preserving the historical behaviour exactly.
     """
-    content: str
+    content: str = ""
     chunk_type: str = "result"
     sequence: int = 0
     timestamp: datetime = field(default_factory=datetime.now)
     metadata: Optional[Dict[str, Any]] = None
+    inline_data: Optional[Dict[str, Any]] = None
+    audience: Audience = Audience.MODEL
+
+    def is_media(self) -> bool:
+        """Whether this chunk carries a binary payload.
+
+        The single predicate every routing decision should use, so
+        "has bytes" is defined in one place rather than re-derived as
+        ``chunk.inline_data and chunk.inline_data.get("data")`` at each
+        call site.
+        """
+        return bool(self.inline_data and self.inline_data.get("data"))
+
+    @property
+    def mime_type(self) -> Optional[str]:
+        """MIME type of the binary payload, or ``None`` for a text chunk."""
+        if not self.inline_data:
+            return None
+        return self.inline_data.get("mime_type")
+
+    def data_b64(self) -> Optional[str]:
+        """Binary payload base64-encoded for a UTF-8 JSON frame.
+
+        Returns ``None`` when the chunk carries no bytes.  Accepts ``str``
+        in ``inline_data["data"]`` as already-encoded base64 and passes it
+        through, so a producer that encoded upstream is not double-encoded.
+        """
+        if not self.is_media():
+            return None
+        data = self.inline_data["data"]
+        if isinstance(data, str):
+            return data
+        return base64.b64encode(data).decode("ascii")
 
     def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary for JSON serialization."""
-        return {
+        """Convert to dictionary for JSON serialization.
+
+        Binary payloads are base64-encoded (+33% size) because the frame is
+        UTF-8 JSON.  ``inline_data`` is omitted entirely for a text-only
+        chunk rather than serialized as ``None``, keeping the common frame
+        byte-identical to before this field existed.
+        """
+        out: Dict[str, Any] = {
             "content": self.content,
             "chunk_type": self.chunk_type,
             "sequence": self.sequence,
             "timestamp": self.timestamp.isoformat(),
             "metadata": self.metadata,
+            "audience": self.audience.value,
         }
+        if self.is_media():
+            out["inline_data"] = {
+                "mime_type": self.mime_type,
+                "data": self.data_b64(),
+            }
+        return out
 
 
 @dataclass
