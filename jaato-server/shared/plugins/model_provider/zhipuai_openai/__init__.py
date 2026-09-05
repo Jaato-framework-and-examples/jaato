@@ -80,6 +80,10 @@ PROVIDER_KNOBS = ProviderKnobs(layers=(
         KnobSpec("context_length", "int"),
         KnobSpec("enable_thinking", "bool"),
         KnobSpec("thinking_budget", "int"),
+        KnobSpec("output_modalities", "list", None,
+                 "assert what the model can EMIT; no catalog reports output "
+                 "modalities, so without this the floor is text and the "
+                 "startup check refuses an outbound tier role"),
     ), description="connection / generation"),
 ))
 PROVIDER_QUIRKS = frozenset({

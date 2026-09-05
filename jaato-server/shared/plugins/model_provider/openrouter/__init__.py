@@ -58,6 +58,13 @@ PROVIDER_KNOBS = ProviderKnobs(layers=(
         KnobSpec("thinking_level", "str", None, "low|medium|high → reasoning.effort"),
         KnobSpec("cache_prompt", "str", "auto", "auto|true|false"),
         KnobSpec("cache_ttl", "str", "5m", "5m|1h"),
+        KnobSpec("modalities", "list", None,
+                 "OUTPUT selector [\"text\",\"audio\"] — OpenAI's field, the "
+                 "opposite direction from the tier key of the same name; a "
+                 "tier's outbound role supplies it otherwise"),
+        KnobSpec("audio", "dict", None,
+                 "voice/format companion of api_params.modalities; wins over "
+                 "the tier default"),
     ), description="OpenAI Chat Completions request-body fields"),
     KnobLayer("routing", opaque=True,
               description="OpenRouter provider-routing extension — any key "
@@ -66,7 +73,11 @@ PROVIDER_KNOBS = ProviderKnobs(layers=(
     KnobLayer("framework_overrides", (
         KnobSpec("context_length", "int"),
         KnobSpec("base_url", "str"),
-        KnobSpec("modalities", "list"),
+        KnobSpec("modalities", "list", None, "assert INPUT modalities"),
+        KnobSpec("output_modalities", "list", None,
+                 "assert what the model can EMIT; the catalog reports input "
+                 "modalities only, so without this the floor is text and the "
+                 "startup check refuses an outbound tier role"),
         KnobSpec("connect_timeout", "float", 15.0,
                  "TCP + TLS handshake deadline, seconds"),
         KnobSpec("request_timeout", "float", 600.0,

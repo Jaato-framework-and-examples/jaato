@@ -43,6 +43,10 @@ PROVIDER_KNOBS = ProviderKnobs(layers=(
         KnobSpec("extra_body", "dict", None,
                  "opaque passthrough to OpenAI create() extra_body "
                  "(guided_json/guided_choice, cache_salt, ...)"),
+        KnobSpec("output_modalities", "list", None,
+                 "assert what the model can EMIT; no catalog reports output "
+                 "modalities, so without this the floor is text and the "
+                 "startup check refuses an outbound tier role"),
     ), description="connection / identity"),
     KnobLayer("api_params", (
         KnobSpec("temperature", "float"),
@@ -54,6 +58,11 @@ PROVIDER_KNOBS = ProviderKnobs(layers=(
         KnobSpec("presence_penalty", "float"),
         KnobSpec("seed", "int"),
         KnobSpec("stop", "list"),
+        KnobSpec("modalities", "list", None,
+                 "OUTPUT selector [\"text\",\"audio\"] — OpenAI's field, the "
+                 "opposite direction from the tier key of the same name"),
+        KnobSpec("audio", "dict", None,
+                 "voice/format companion of api_params.modalities"),
     ), description="OpenAI Chat Completions params (filtered allow-list)"),
 ))
 PROVIDER_QUIRKS = frozenset({

@@ -38,6 +38,10 @@ PROVIDER_KNOBS = ProviderKnobs(layers=(
         KnobSpec("base_url", "str", None,
                  "JAATO_NIM_BASE_URL (self-hosted endpoint)"),
         KnobSpec("context_length", "int"),
+        KnobSpec("output_modalities", "list", None,
+                 "assert what the model can EMIT; no catalog reports output "
+                 "modalities, so without this the floor is text and the "
+                 "startup check refuses an outbound tier role"),
     ), description="connection / identity"),
 ))
 PROVIDER_QUIRKS = frozenset({
