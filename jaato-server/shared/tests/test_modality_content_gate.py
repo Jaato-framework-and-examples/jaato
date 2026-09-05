@@ -349,3 +349,57 @@ class TestGateNeverPointsAtTheActiveTier:
         s._active_tier = None
         note = s._build_withheld_attachment_note({"image": 1})
         assert "declares no tier that can" in note
+
+
+class TestMixedWithheldKindsAreReportedTruthfully:
+    """When the suggested tier covers some withheld kinds but not others,
+    what it misses splits two ways and must not be merged.
+
+    A kind whose ONLY declaring tier is the one the agent is in IS
+    declared — saying "no tier accepts it" is the same falsity the stuck
+    branch was written to avoid, one branch over. Narrow (needs two or
+    more withheld kinds split across switchable and stuck) but the same
+    defect class.
+    """
+
+    _SPLIT = {
+        "executor": "e",
+        "planner": {"model": "p", "modalities": ["image"]},
+        "vision": {"model": "v", "modalities": ["audio"]},
+        "initial": "executor", "fallback": "executor",
+    }
+
+    def _note(self, tiers, active, withheld):
+        s = JaatoSession.__new__(JaatoSession)
+        s._tier_config = ModelTierConfig.from_unified_dict(tiers)
+        s._model_name = "v"
+        s._active_tier = active
+        return s._build_withheld_attachment_note(withheld)
+
+    def test_stuck_kind_is_not_called_undeclared(self):
+        note = self._note(self._SPLIT, "vision", {"image": 1, "audio": 1})
+        assert 'enter_tier("planner")' in note      # the switchable half
+        assert "No tier accepts audio" not in note  # would be false
+        assert "only tier declaring audio is 'vision'" in note
+        assert "already in" in note
+
+    def test_genuinely_undeclared_kind_still_says_so(self):
+        tiers = {k: v for k, v in self._SPLIT.items() if k != "vision"}
+        note = self._note(tiers, "executor", {"image": 1, "audio": 1})
+        assert 'enter_tier("planner")' in note
+        assert "No tier accepts audio content" in note
+        assert "already in" not in note
+
+    def test_both_clauses_can_appear_together(self):
+        tiers = dict(self._SPLIT)
+        note = self._note(tiers, "vision", {"image": 1, "audio": 1, "video": 1})
+        assert "No tier accepts video content" in note      # undeclared
+        assert "only tier declaring audio is 'vision'" in note  # stuck
+
+    def test_no_tail_when_the_target_covers_everything(self):
+        tiers = {"executor": "e",
+                 "planner": {"model": "p", "modalities": ["image", "audio"]},
+                 "initial": "executor", "fallback": "executor"}
+        note = self._note(tiers, "executor", {"image": 1, "audio": 1})
+        assert "No tier accepts" not in note
+        assert "already in" not in note

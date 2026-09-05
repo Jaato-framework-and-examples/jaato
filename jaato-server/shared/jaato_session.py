@@ -7938,8 +7938,10 @@ NOTES
         Three outcomes, in order:
 
         1. **A switchable tier exists** — name it, and name only the kinds
-           it actually accepts, saying separately when nothing accepts the
-           rest.
+           it actually accepts.  What it does not cover is reported in two
+           separate clauses, because "nothing accepts this" and "the only
+           tier accepting this is the one you are in" are different facts
+           and merging them makes the first one false.
         2. **The only tier declaring the role is the one the agent is in**
            — its model can't fill the role it claims.  Say that, rather
            than "no tier declares it" (false) or naming the active tier
@@ -7957,15 +7959,30 @@ NOTES
         """
         kinds = ", ".join(sorted(withheld))
         model = self._model_name or "the current model"
+        active = getattr(self, "_active_tier", None)
         target, covered, stuck = self._resolve_withheld_target(withheld)
 
         if target is not None:
             covers = ", ".join(sorted(covered))
+            # What the suggested tier does NOT cover splits two ways, and
+            # conflating them repeats the falsity the `stuck` branch below
+            # exists to avoid: a kind whose only declaring tier is the one
+            # the agent is in IS declared, so "no tier accepts it" is a lie
+            # — it just doesn't work.
             rest = sorted(set(withheld) - set(covered))
-            tail = (
-                f"  No tier accepts {', '.join(rest)} content."
-                if rest else ""
-            )
+            undeclared = [k for k in rest if k not in stuck]
+            blocked = [k for k in rest if k in stuck]
+            clauses = []
+            if undeclared:
+                clauses.append(
+                    f"No tier accepts {', '.join(undeclared)} content.")
+            if blocked:
+                clauses.append(
+                    f"The only tier declaring {', '.join(blocked)} is "
+                    f"{active!r}, which you are already in — its model does "
+                    f"not accept that input."
+                )
+            tail = ("  " + "  ".join(clauses)) if clauses else ""
             return (
                 f"[Attachment withheld: the active model ({model}) can't "
                 f"view {kinds} content.  Call enter_tier(\"{target}\") first "
@@ -7973,7 +7990,6 @@ NOTES
             )
 
         if stuck:
-            active = getattr(self, "_active_tier", None)
             return (
                 f"[Attachment withheld: the active model ({model}) can't "
                 f"view {kinds} content.  The only tier declaring "
