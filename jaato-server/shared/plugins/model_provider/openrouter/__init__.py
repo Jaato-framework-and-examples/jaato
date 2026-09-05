@@ -24,12 +24,13 @@ PROVIDER_CAPABILITIES = ProviderCapabilities(
     user_message_images=True,
     tool_result_images=True,
     pdf_input=True,
-    tool_choice_forwarding=False,
+    tool_choice_forwarding=True,
     thinking=True,
     prompt_caching=True,
     streaming=True,
     cancellation=True,
-    output_media=False,
+    output_media=True,   # verified end to end: a spoken answer reaches a client as
+#   ToolOutputEvent media chunks and plays.
 )
 
 # --- Provider config-knob contract (authored from provider.py read sites) ---
@@ -49,6 +50,8 @@ PROVIDER_KNOBS = ProviderKnobs(layers=(
         KnobSpec("top_k", "int"),
         KnobSpec("max_tokens", "int"),
         KnobSpec("parallel_tool_calls", "bool"),
+        KnobSpec("tool_choice", "str", None,
+                 "auto|required|none, or a dict naming one tool"),
         KnobSpec("service_tier", "str", None,
                  "auto|default|flex|priority|scale — OpenAI-style "
                  "processing tier forwarded to tier-supporting upstreams"),

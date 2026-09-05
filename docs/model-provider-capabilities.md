@@ -10,19 +10,19 @@ Each cell is a **wire-level** behavior the CI conformance guard asserts, not a l
 | `antigravity` | ✅ | — | — | — | ✅ | — | ✅ | ✅ | — |
 | `chrome_ai` | — | — | — | — | — | — | ✅ | ✅ | — |
 | `claude_cli` | — | — | — | — | ✅ | — | ✅ | — | — |
-| `doubleword` | ✅ | ✅ | — | ✅ | ✅ | — | ✅ | ✅ | — |
+| `doubleword` | ✅ | ✅ | — | ✅ | ✅ | — | ✅ | ✅ | ✅ |
 | `github_models` | — | — | — | — | ✅ | — | ✅ | ✅ | — |
 | `google_genai` | ✅ | ✅ | ✅ | — | — | ✅ | ✅ | ✅ | — |
 | `lmstudio` | ✅ | ✅ | — | — | — | — | ✅ | ✅ | — |
-| `nebius` | ✅ | ✅ | — | ✅ | ✅ | — | ✅ | ✅ | — |
-| `nim` | ✅ | ✅ | — | — | ✅ | — | ✅ | ✅ | — |
+| `nebius` | ✅ | ✅ | — | ✅ | ✅ | — | ✅ | ✅ | ✅ |
+| `nim` | ✅ | ✅ | — | — | ✅ | — | ✅ | ✅ | ✅ |
 | `ollama` | ✅ | ✅ | — | — | — | — | ✅ | ✅ | — |
-| `openrouter` | ✅ | ✅ | ✅ | — | ✅ | ✅ | ✅ | ✅ | — |
-| `ovhcloud` | ✅ | ✅ | — | ✅ | ✅ | — | ✅ | ✅ | — |
+| `openrouter` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `ovhcloud` | ✅ | ✅ | — | ✅ | ✅ | — | ✅ | ✅ | ✅ |
 | `tensorrt_llm` | ✅ | ✅ | — | — | — | — | ✅ | ✅ | — |
 | `triton` | ✅ | ✅ | — | — | — | — | ✅ | ✅ | — |
 | `vllm` | ✅ | ✅ | — | ✅ | — | — | ✅ | ✅ | — |
 | `zhipuai` | ✅ | ✅ | — | — | ✅ | — | ✅ | ✅ | — |
-| `zhipuai_openai` | ✅ | ✅ | — | — | ✅ | — | ✅ | ✅ | — |
+| `zhipuai_openai` | ✅ | ✅ | — | — | ✅ | — | ✅ | ✅ | ✅ |
 
 **Legend:** ✅ = implemented & verified on the wire by the conformance guard · — = not implemented (text-only / not forwarded).

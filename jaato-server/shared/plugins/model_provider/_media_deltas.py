@@ -109,51 +109,44 @@ def media_chunk_count(media_sequence: int) -> int:
     return media_sequence - NO_MEDIA_YET
 
 
-def completed_tool_call(parts: Iterable[Any]) -> bool:
-    """Whether a COMPLETE function call was decoded from the stream.
-
-    Complete means its arguments parsed.  A stream cut mid-generation
-    leaves ``unreadable_args`` set -- the JSON stops short -- so a call
-    whose arguments parsed is one the upstream finished sending, which
-    is the distinction the termination check needs.
-
-    Measured against openai/gpt-audio-mini via OpenRouter: a turn that
-    speaks and then calls a tool carries NO finish reason at all
-    (confirmed in OpenRouter's own billing export, where
-    ``finish_reason_raw`` is empty for every such generation).  Without
-    counting the call, that turn is discarded as a fragment, the tool
-    never runs, the assistant turn never enters history, and the
-    framework nudges the model to call the tool it already called.
-    """
-    for part in parts:
-        call = getattr(part, "function_call", None)
-        if call is not None and not getattr(call, "unreadable_args", None):
-            return True
-    return False
-
-
 def stream_terminated(
     terminal_seen: bool,
     media_sequence: int,
-    parts: Optional[Iterable[Any]] = None,
+    usage_reported: bool = False,
 ) -> bool:
     """Whether the stream ended for a reason, not by dying mid-generation.
 
-    Three signals, any of which means the upstream finished rather than
-    died: the wire named a finish reason; media was decoded; or a
-    complete tool call was decoded.  The last two exist because an
-    audio-modality request omits the finish reason entirely, so the
-    first signal -- the only one a TEXT stream ever needs -- is absent
-    for every such turn.
+    Three signals, each evidence that the upstream REACHED THE END:
 
-    Deliberately NOT "any part at all": a truncated TEXT stream also
-    yields parts, and accepting those would retire the protection #687
-    exists for.  Each clause is evidence of COMPLETION, not merely of
-    output.
+    - the wire named a finish reason;
+    - media was decoded (a severed stream cannot retroactively have
+      delivered bytes that already played);
+    - a usage frame arrived.
+
+    The last exists because some upstreams name no finish reason at all.
+    Measured against openai/gpt-audio-mini through OpenRouter, across 19
+    consecutive streams -- speaking turns and tool-call-only turns alike
+    -- every one reported ``terminal_seen=False``, and OpenRouter's own
+    generation record confirms it at the source::
+
+        "finish_reason": null,  "native_finish_reason": null,
+        "cancelled": false,     "status": 200,
+        "tokens_completion": 27
+
+    A completed, billed generation that names no reason.  Usage is what
+    distinguishes it: the request sets ``stream_options.include_usage``,
+    and the usage frame is the LAST frame of a finished stream, so a
+    connection cut mid-generation never delivers one.  All 19 carried
+    usage (1891-2002 tokens).
+
+    Deliberately NOT "any part at all", and specifically NOT "a complete
+    tool call arrived".  Accumulated calls are exactly what a stream
+    severed mid-``arguments`` also leaves behind -- the same bytes on the
+    wire -- and reading them as completion is how a severed turn becomes
+    an executed one.  That is what #687 protects, and every clause here
+    keeps it: absent all three signals the guard still fires.
     """
-    return (terminal_seen
-            or media_arrived(media_sequence)
-            or completed_tool_call(parts or ()))
+    return terminal_seen or media_arrived(media_sequence) or usage_reported
 
 
 def ensure_spoken_part(parts: List[Any], transcript: str) -> None:
@@ -212,10 +205,22 @@ def extract_audio_delta(
 
     if isinstance(audio, dict):
         encoded = audio.get("data")
-        transcript = audio.get("transcript") or ""
+        transcript = audio.get("transcript")
     else:
         encoded = getattr(audio, "data", None)
-        transcript = getattr(audio, "transcript", None) or ""
+        transcript = getattr(audio, "transcript", None)
+
+    # Hold the wire contract: `data` is base64 TEXT and `transcript` is a
+    # STRING.  Probing by attribute name means anything answering to
+    # `.audio.transcript` gets this far -- a stand-in object in a test, a
+    # future SDK field of another shape -- and a non-string joined into
+    # the transcript raises far from here, inside the turn's final
+    # assembly.  A value of the wrong type is not the field it is named
+    # after, so it is dropped where it is read.
+    if not isinstance(encoded, (str, bytes)):
+        encoded = None
+    if not isinstance(transcript, str):
+        transcript = ""
 
     raw: Optional[bytes] = None
     if encoded:

@@ -348,6 +348,22 @@ class TestSessionTierWiring:
 # ==================== Audio-only streams terminate ====================
 
 
+def _termination_call(module_path: str) -> str:
+    """Return the ``stream_terminated(...)`` call as one whitespace-normalised line.
+
+    These assertions pin SOURCE TEXT because the regressions they guard
+    are argument changes that would still typecheck -- passing `parts`
+    back in, or dropping the usage signal.  Normalising whitespace keeps
+    them honest about arguments while indifferent to line wrapping,
+    which has broken them twice for no reason.
+    """
+    import importlib, inspect, re
+    src = inspect.getsource(importlib.import_module(module_path))
+    match = re.search(r"stream_terminated\((?:[^()]|\([^()]*\))*\)", src)
+    assert match, f"{module_path} does not call stream_terminated at all"
+    return re.sub(r"\s+", " ", match.group(0))
+
+
 class TestAudioOnlyStreamTermination:
     """An audio-only stream carries no ``finish_reason`` (verified live).
 
@@ -404,7 +420,7 @@ class TestAudioOnlyStreamTermination:
         import importlib, inspect
 
         src = inspect.getsource(importlib.import_module(module_path))
-        assert "stream_terminated(terminal_seen, media_sequence" in src, \
+        assert "terminal_seen, media_sequence" in _termination_call(module_path), \
             "termination signal missing"
         assert "NO_MEDIA_YET" in src, "sentinel not used"
         # audio counts as content — an audio-only turn reported
@@ -413,69 +429,73 @@ class TestAudioOnlyStreamTermination:
             "media not counted into the chunk total"
 
 
-class TestToolCallTerminatesStream:
-    """A tool call is completion evidence when the wire names no reason.
+class TestMediaTerminatesStreamButToolCallsDoNot:
+    """Decoded media is completion evidence; accumulated tool calls are not.
 
-    An audio-modality request to OpenRouter carries NO finish reason —
-    confirmed both on the SSE wire and in OpenRouter's own billing
-    export, where `finish_reason_raw` is empty for every such
-    generation.  A turn that speaks and then calls `signal_completion`
-    was therefore discarded as a fragment: the tool never ran, the
-    assistant turn never reached history, and the framework nudged the
-    model to call the tool it had already called — nine generations
-    billed for no work.
+    An audio-modality request to OpenRouter carries NO finish reason --
+    confirmed on the SSE wire and in OpenRouter's own billing export,
+    where `finish_reason_raw` is empty for every such generation.  So a
+    spoken turn needs a second signal, and decoded media is a sound one:
+    a stream that died mid-generation cannot retroactively have
+    delivered bytes that were already played.
+
+    A completed tool call is NOT a sound one, and an earlier version of
+    this branch wrongly accepted it.  Accumulated calls are precisely
+    what a connection severed mid-``arguments`` leaves behind too -- the
+    same bytes on the wire -- so treating them as completion is how a
+    severed turn becomes an executed one.  That is what #687 exists to
+    prevent, and it is a different problem from the missing finish
+    reason on audio turns.
     """
 
-    def _call(self, unreadable=None):
-        from jaato_sdk.plugins.model_provider.types import FunctionCall, Part
-        return Part.from_function_call(FunctionCall(
-            id="1", name="signal_completion",
-            args={} if unreadable else {"spoken": "blue"},
-            unreadable_args=unreadable))
+    def test_a_usage_frame_terminates(self):
+        """The only completion signal this upstream gives on some turns.
 
-    def test_complete_call_is_evidence(self):
-        assert _media_deltas.completed_tool_call([self._call()]) is True
-
-    def test_truncated_call_is_not(self):
-        """A stream cut mid-arguments leaves unreadable_args — that IS
-        the fragment #687 protects against."""
-        assert _media_deltas.completed_tool_call(
-            [self._call(unreadable='{"spo')]) is False
-
-    def test_text_is_not_a_tool_call(self):
-        from jaato_sdk.plugins.model_provider.types import Part
-        assert _media_deltas.completed_tool_call([Part.from_text("hi")]) is False
-
-    def test_speak_then_call_terminates(self):
-        """The exact shape that was failing."""
+        OpenRouter's generation record for a turn that raised here:
+        `finish_reason: null`, `native_finish_reason: null`,
+        `cancelled: false`, `status: 200`, `tokens_completion: 27` -- a
+        completed, billed generation naming no reason.  The request sets
+        `stream_options.include_usage`, and that frame is the LAST of a
+        finished stream, so its arrival is evidence of the end.
+        """
         assert _media_deltas.stream_terminated(
-            False, 0, [self._call()]) is True
+            False, _media_deltas.NO_MEDIA_YET, usage_reported=True) is True
 
-    def test_tool_call_alone_terminates(self):
-        """A nudged turn answers with only the call — no audio, no text."""
+    def test_a_cut_stream_reports_no_usage_and_still_raises(self):
+        """Fails closed: no finish reason, no media, no usage frame."""
         assert _media_deltas.stream_terminated(
-            False, _media_deltas.NO_MEDIA_YET, [self._call()]) is True
+            False, _media_deltas.NO_MEDIA_YET, usage_reported=False) is False
 
-    def test_truncated_text_stream_still_guarded(self):
-        """The regression that would retire #687: parts alone must NOT
-        count, or a genuinely dead text stream reads as complete."""
-        from jaato_sdk.plugins.model_provider.types import Part
-        assert _media_deltas.stream_terminated(
-            False, _media_deltas.NO_MEDIA_YET,
-            [Part.from_text("half a sen")]) is False
+    def test_media_terminates(self):
+        assert _media_deltas.stream_terminated(False, 0) is True
 
-    def test_nothing_at_all_still_raises(self):
+    def test_a_named_finish_reason_terminates(self):
         assert _media_deltas.stream_terminated(
-            False, _media_deltas.NO_MEDIA_YET, []) is False
+            True, _media_deltas.NO_MEDIA_YET) is True
+
+    def test_no_media_and_no_finish_reason_does_not(self):
+        """The #687 guard, intact: nothing here says the turn ENDED."""
+        assert _media_deltas.stream_terminated(
+            False, _media_deltas.NO_MEDIA_YET) is False
 
     @pytest.mark.parametrize("module_path", [
         "shared.plugins.model_provider.openrouter.provider",
         "shared.plugins.model_provider._openai_compat.base",
     ])
-    def test_both_loops_pass_parts(self, module_path):
-        import importlib, inspect
-        src = inspect.getsource(importlib.import_module(module_path))
-        assert "stream_terminated(terminal_seen, media_sequence, parts)" in src
+    def test_neither_loop_passes_parts(self, module_path):
+        """Both streaming loops must ask the narrow question.
+
+        Pinned as source text because the regression this guards is a
+        widening of the call itself -- passing `parts` back in would
+        restore the behaviour #687 forbids, and would still typecheck.
+        """
+        call = _termination_call(module_path)
+        assert "parts" not in call, (
+            "a completed tool call is not evidence the stream ended -- "
+            "that is #687's whole point")
+        assert "usage_reported=usage.total_tokens > 0" in call, (
+            "the usage frame is the only completion signal this upstream "
+            "gives on an audio-modality request")
 
 
 class TestTranscriptArrivesSeparately:

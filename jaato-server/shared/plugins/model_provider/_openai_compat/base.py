@@ -802,7 +802,9 @@ class OpenAICompatProvider(OpenAIMediaOutputMixin, ModalityCapabilityMixin):
                 raw=None,
                 thinking=thinking,
             ),
-            terminal_seen=stream_terminated(terminal_seen, media_sequence, parts),
+            terminal_seen=stream_terminated(
+                terminal_seen, media_sequence,
+                usage_reported=usage.total_tokens > 0),
             was_cancelled=was_cancelled,
             provider=self.name,
             model=self._model_name,

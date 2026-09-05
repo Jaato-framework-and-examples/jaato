@@ -61,7 +61,16 @@ from pydantic import BaseModel, ConfigDict, Field
 # the target will ACT on the message rather than only that it was accepted
 # into a queue.  Older clients that send no ``request_id`` get the previous
 # fire-and-forget behaviour unchanged.
-PROTOCOL_VERSION = "1.3"
+# 1.4 (2026-09-05): additive optional ``stream_id`` / ``sequence`` /
+# ``mime_type`` / ``data_b64`` / ``final`` on ToolOutputEvent, carrying
+# BINARY media -- a tool's attachments and the model's own speech -- on
+# the existing tool-output channel rather than a rival event.  Older
+# clients ignore the fields and see the text stream exactly as before,
+# so the compat rule holds.  A client that needs to RECEIVE media must
+# declare ``min_protocol_version="1.4"``: against a 1.3 daemon the
+# fields are simply never sent, which is indistinguishable from a model
+# that chose not to speak.
+PROTOCOL_VERSION = "1.4"
 
 
 # =============================================================================

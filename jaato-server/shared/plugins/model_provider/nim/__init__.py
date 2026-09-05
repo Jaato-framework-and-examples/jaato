@@ -28,7 +28,7 @@ PROVIDER_CAPABILITIES = ProviderCapabilities(
     prompt_caching=False,
     streaming=True,
     cancellation=True,
-    output_media=False,
+    output_media=True,   # shares _openai_compat's wired streaming loop.
 )
 
 # --- Provider config-knob contract (authored from provider.py read sites) ---

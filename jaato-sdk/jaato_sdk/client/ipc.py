@@ -112,7 +112,16 @@ def _parse_protocol_version(v: str) -> Tuple[int, int]:
 
     Lenient — extra components ("1.0.5") are tolerated; the trailing
     parts are dropped.  Non-numeric tokens yield ``ValueError``.
+
+    A non-string is a ``ValueError`` too, not an ``AttributeError``.
+    The distinction matters because this is called from inside
+    :class:`IncompatibleServerError`'s constructor to build its own
+    message: an exception type the caller does not expect there turns a
+    clear "your daemon is too old" into an unrelated crash during error
+    reporting.  A reporter must survive the worst input it describes.
     """
+    if not isinstance(v, str):
+        raise ValueError(f"Protocol version must be MAJOR.MINOR, got {v!r}")
     parts = v.split(".")
     if len(parts) < 2:
         raise ValueError(f"Protocol version must be MAJOR.MINOR, got {v!r}")
@@ -802,11 +811,19 @@ class IPCClient:
                         self._server_protocol_version,
                         self._min_protocol_version,
                     ):
+                        # Read what the daemon told us BEFORE tearing the
+                        # connection down: ``disconnect()`` clears both
+                        # fields, so building the error from instance
+                        # state afterwards reported ``None`` for the two
+                        # versions the message exists to name -- and
+                        # ``None`` then crashed the constructor itself.
+                        server_protocol = self._server_protocol_version
+                        server_version = self._server_version
                         await self.disconnect()
                         raise IncompatibleServerError(
-                            server_protocol=self._server_protocol_version,
+                            server_protocol=server_protocol,
                             min_protocol=self._min_protocol_version,
-                            server_version=self._server_version,
+                            server_version=server_version,
                         )
 
                     # Send our working directory to the server
