@@ -226,6 +226,42 @@ class TestBackpressure:
 # ==================== Model-generated media ====================
 
 
+    def test_the_head_shortcut_keeps_the_policy(self):
+        """The fast path must pick what the full search would have picked.
+
+        ``_evict_one_lossy`` checks the HEAD before draining, because an
+        audio flood is mostly media and the head is then already the
+        preferred victim -- 1549us of drain-and-refill at the 2048 bound
+        becomes ~18us.  A shortcut that changed WHICH event goes would be
+        a policy change wearing a performance change's clothes, so this
+        pins both arms: head-is-media takes the head, head-is-not falls
+        through to the same search as before.
+        """
+        import asyncio
+        from jaato_sdk.events import AgentOutputEvent, ToolOutputEvent
+
+        def media(tag):
+            return ToolOutputEvent(call_id="model-output", chunk=tag,
+                                   mime_type="audio/pcm", data_b64="AA==")
+
+        # head IS the victim -> shortcut
+        queue = asyncio.Queue()
+        for ev in (media("m1"), media("m2"), ToolOutputEvent(call_id="c", chunk="t")):
+            queue.put_nowait(ev)
+        assert ipc._evict_one_lossy(queue) is True
+        assert [e.chunk for e in
+                (queue.get_nowait() for _ in range(queue.qsize()))] == ["m2", "t"]
+
+        # head is ESSENTIAL -> full search, media still preferred over text
+        queue = asyncio.Queue()
+        for ev in (AgentOutputEvent(text="e"), ToolOutputEvent(call_id="c", chunk="t1"),
+                   media("m2")):
+            queue.put_nowait(ev)
+        assert ipc._evict_one_lossy(queue) is True
+        left = [queue.get_nowait() for _ in range(queue.qsize())]
+        assert isinstance(left[0], AgentOutputEvent), "an essential event was evicted"
+        assert [getattr(e, "chunk", None) for e in left[1:]] == ["t1"]
+
 class TestAudioDeltaExtraction:
     """``delta.audio`` is undocumented in the OpenAPI schema; read it defensively."""
 
@@ -627,3 +663,111 @@ class TestModelFacingText:
             audience=Audience.CLIENT,
         )
         assert _model_facing_text([media]) == ""
+
+
+class TestTheAudienceBoundaryHoldsAtEverySite:
+    """A CLIENT chunk must reach no surface the model reads back.
+
+    Four places aggregate stream chunks for the model, and until this
+    class existed exactly ONE of them was guarded.  Removing the filter
+    from each in turn and running every media test left three of the four
+    green -- including the history append, which is where a CLIENT chunk
+    would become something the model was actually told.
+
+    The commit that introduced the boundary asserted the property as
+    established.  These are the assertions that make that true, so each
+    test names the site it pins:
+
+      * ``manager.py`` ``_model_facing_text``     -> the tool RESULT
+      * ``_format_streaming_updates``             -> ``<streaming_updates>``
+      * ``_execute_streaming_tool``'s ``on_chunk`` -> the ``on_output`` route
+      * ``_execute_streaming_tool``'s initial loop -> ``initial_results``
+    """
+
+    def _updates(self):
+        from shared.plugins.streaming.manager import StreamUpdate
+        return [StreamUpdate(
+            stream_id="s1", tool_name="speak", is_complete=False,
+            new_chunks=[StreamChunk("model sees this"),
+                        StreamChunk("VIEWERS ONLY", audience=Audience.CLIENT)],
+            total_chunks=2, final_result=None)]
+
+    def test_streaming_updates_block_excludes_client_chunks(self):
+        from shared.jaato_session import JaatoSession
+        session = JaatoSession.__new__(JaatoSession)
+        rendered = JaatoSession._format_streaming_updates(session, self._updates())
+        assert "model sees this" in rendered
+        assert "VIEWERS ONLY" not in rendered, (
+            "a CLIENT chunk reached the <streaming_updates> block, which is "
+            "wrapped in <hidden> and handed to the model")
+
+    def _drive_stream(self, chunks):
+        """Run ``_execute_streaming_tool`` over ``chunks``; return what escaped.
+
+        Doubles the collaborators rather than the method: the point is to
+        exercise the REAL routing code, which is where the filters live.
+        """
+        from unittest.mock import MagicMock
+        from shared.jaato_session import JaatoSession
+        from jaato_sdk.plugins.model_provider.types import FunctionCall
+
+        session = JaatoSession.__new__(JaatoSession)
+        session._agent_id = "agent-1"
+        session._ui_hooks = MagicMock()
+        session._runtime = MagicMock()
+        session._runtime.registry.get_base_tool_name.return_value = "speak"
+        session._runtime.registry.get_streaming_plugin.return_value = MagicMock()
+
+        handle = MagicMock(stream_id="s1", initial_chunks=chunks)
+        handle.status.value = "running"
+
+        def _start_stream(**kwargs):
+            for chunk in chunks:                 # replay through the live callback
+                kwargs["on_ui_chunk"](chunk)
+            return handle
+
+        session._stream_manager = MagicMock()
+        session._stream_manager.start_stream.side_effect = _start_stream
+
+        to_model = []
+        ok, result = JaatoSession._execute_streaming_tool(
+            session, FunctionCall(id="call_1", name="speak-stream", args={}),
+            lambda source, text, mode: to_model.append(text))
+        assert ok, result
+        return to_model, result, session._ui_hooks
+
+    def test_client_chunks_never_reach_on_output(self):
+        """``on_output`` is the model's text channel and becomes history."""
+        to_model, _, _ = self._drive_stream([
+            StreamChunk("model sees this"),
+            StreamChunk("VIEWERS ONLY", audience=Audience.CLIENT),
+        ])
+        joined = "".join(to_model)
+        assert "model sees this" in joined
+        assert "VIEWERS ONLY" not in joined
+
+    def test_client_chunks_never_reach_initial_results(self):
+        """``initial_results`` is returned in the tool result -> history."""
+        _, result, _ = self._drive_stream([
+            StreamChunk("model sees this"),
+            StreamChunk("VIEWERS ONLY", audience=Audience.CLIENT),
+        ])
+        assert result["initial_results"] == ["model sees this"]
+
+    def test_client_chunks_DO_reach_the_client(self):
+        """The other half of the contract: withholding from the model is
+        not discarding.  A boundary that dropped the chunk entirely would
+        pass every test above and still be wrong."""
+        _, _, hooks = self._drive_stream([
+            StreamChunk("VIEWERS ONLY", audience=Audience.CLIENT),
+        ])
+        assert hooks.on_tool_output.called
+        assert hooks.on_tool_output.call_args.kwargs["chunk"] == "VIEWERS ONLY"
+
+    def test_both_audience_reaches_model_and_client(self):
+        to_model, result, hooks = self._drive_stream([
+            StreamChunk("shared", audience=Audience.BOTH),
+        ])
+        assert "shared" in "".join(to_model)
+        assert result["initial_results"] == ["shared"]
+        assert hooks.on_tool_output.call_args.kwargs["chunk"] == "shared"

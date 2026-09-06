@@ -87,6 +87,22 @@ the **model's own speech**, delivered under the reserved `call_id`
 Additive and backward compatible in the ordinary sense: a pre-1.4 client
 ignores the fields and reads the text stream exactly as before.
 
+**The generated TypeScript surface is not purely additive**, and the
+regeneration is not as mechanical as it looks. `ToolOutputEvent.sequence`
+is `Optional[int]`, and the codegen names types by first use, so it took
+the unqualified name and renamed the existing one:
+
+```ts
+// before          export type Sequence  = number;        // PlanStepUpdatedEvent
+// after           export type Sequence  = number | null; // ToolOutputEvent
+//                 export type Sequence1 = number;        // PlanStepUpdatedEvent
+```
+
+A consumer importing `Sequence` therefore gets a widened, nullable type
+under a stable name, and the type it was actually using is now called
+`Sequence1`. The wire is additive; this name is not. Anything importing
+these aliases by name should be checked on upgrade.
+
 The asymmetry worth stating is on the other side. A client that needs to
 **receive** media must declare `min_protocol_version="1.4"`, because a
 1.3 daemon does not send those fields at all — and "no media fields" is

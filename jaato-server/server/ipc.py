@@ -1085,9 +1085,18 @@ class JaatoIPCServer:
     def dropped_chunk_count(self, client_id: str) -> int:
         """How many chunks were dropped for ``client_id`` under backpressure.
 
-        Lets a client be told its stream was lossy rather than silently
-        receiving a gap -- the count is the honest answer to "did I get
-        every chunk?".  Returns 0 for an unknown client.
+        An accessor AWAITING A CONSUMER.  Nothing in the tree calls it,
+        so the gap it counts is currently silent: a client whose media
+        stream was thinned receives fewer chunks and is told nothing,
+        and only notices as a jump in ``sequence``.  This said it "lets
+        a client be told", which described an intention the code does
+        not carry out -- the counter exists and is maintained, but no
+        path reports it.
+
+        Wiring it means choosing a surface (a field on a lifecycle
+        event, or a reply to an explicit query) and is a protocol
+        decision, not an oversight to patch here.  Returns 0 for an
+        unknown client.
         """
         return self._dropped_chunks.get(client_id, 0)
 
