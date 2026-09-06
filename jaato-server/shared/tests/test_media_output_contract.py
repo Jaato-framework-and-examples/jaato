@@ -566,3 +566,93 @@ class TestTranscriptArrivesSeparately:
         seq = emit_audio_delta({"audio": {"data": self._b64()}},
                                emitted.append, _media_deltas.NO_MEDIA_YET)
         assert seq == 0 and len(emitted) == 1
+
+
+class TestFinalMarksTheLastChunk:
+    """`final` is a FACT the upstream sends, not an inference.
+
+    OpenAI closes an audio stream with a `delta.audio` carrying neither
+    bytes nor transcript -- `{"expires_at": ...}` on the wire, a value it
+    can only know once the audio object is complete.  Observed for
+    openai/gpt-audio-mini through OpenRouter, frame 16 of 20:
+
+        15  audio keys=['data']        6400B   <- last audio bytes
+        16  audio keys=['expires_at']     0B   <- the marker
+        19  [DONE]
+
+    The decoder used to drop that frame -- `extract_audio_delta` returns
+    None when a delta has neither bytes nor transcript -- so `final` was
+    never set on model speech and every client had to GUESS where an
+    utterance ended.  Each guess tried in this tree was wrong somewhere:
+    "the turn ended" closed a player mid-utterance and started a second
+    one over the first, heard as two answers at once.
+    """
+
+    def _frames(self):
+        return [
+            {"audio": {"transcript": "Sure"}},
+            {"audio": {"data": base64.b64encode(b"one").decode()}},
+            {"audio": {"data": base64.b64encode(b"two").decode()}},
+            {"audio": {"data": base64.b64encode(b"three").decode()}},
+            {"audio": {"expires_at": 1788}},
+        ]
+
+    def _run(self, frames, flush=True):
+        got, seq, pending, sink = [], 0, [], []
+        for f in frames:
+            seq = _media_deltas.emit_audio_delta(
+                f, got.append, seq, transcript_sink=sink, pending=pending)
+        if flush:
+            _media_deltas.flush_audio_stream(got.append, pending)
+        return got, sink
+
+    def test_the_marker_is_recognised(self):
+        assert _media_deltas.is_end_of_audio({"audio": {"expires_at": 1}}) is True
+        assert _media_deltas.is_end_of_audio({"audio": {"data": "AA=="}}) is False
+        assert _media_deltas.is_end_of_audio({"audio": {"transcript": "x"}}) is False
+        assert _media_deltas.is_end_of_audio({"content": "hi"}) is False
+
+    def test_final_lands_on_the_last_chunk_only(self):
+        got, _ = self._run(self._frames())
+        assert [(c.data, c.final) for c in got] == [
+            (b"one", False), (b"two", False), (b"three", True)]
+
+    def test_sequence_is_unbroken(self):
+        """A held chunk must not renumber: a client uses `sequence` to
+        detect dropped media, so a gap would read as backpressure loss."""
+        got, _ = self._run(self._frames())
+        assert [c.sequence for c in got] == [1, 2, 3]
+
+    def test_the_transcript_still_lands(self):
+        _, sink = self._run(self._frames())
+        assert sink == ["Sure"]
+
+    def test_a_stream_with_no_marker_still_terminates(self):
+        """Some upstream may send none; the stream ending is conclusive."""
+        got, _ = self._run(self._frames()[:-1])
+        assert [c.final for c in got] == [False, False, True]
+
+    def test_without_flush_the_last_chunk_is_held(self):
+        """Proves the flush is load-bearing rather than decorative: drop
+        it and the final chunk is never delivered at all."""
+        got, _ = self._run(self._frames()[:-1], flush=False)
+        assert [c.data for c in got] == [b"one", b"two"]
+
+    def test_opting_out_is_unchanged_behaviour(self):
+        """A caller that passes no buffer gets exactly the old shape."""
+        got, seq = [], 0
+        for f in self._frames():
+            seq = _media_deltas.emit_audio_delta(f, got.append, seq)
+        assert [(c.data, c.final) for c in got] == [
+            (b"one", False), (b"two", False), (b"three", False)]
+
+    @pytest.mark.parametrize("module_path", [
+        "shared.plugins.model_provider.openrouter.provider",
+        "shared.plugins.model_provider._openai_compat.base",
+    ])
+    def test_both_loops_hold_and_flush(self, module_path):
+        """Both streaming loops, or half the fleet never marks `final`."""
+        import importlib, inspect
+        src = inspect.getsource(importlib.import_module(module_path))
+        assert "media_pending" in src, "no one-slot buffer in this loop"
+        assert "flush_media_stream" in src, "a held chunk would never be delivered"

@@ -1758,6 +1758,10 @@ class OpenRouterProvider(OpenAIMediaOutputMixin, ModalityCapabilityMixin):
         # termination signal for an audio-only stream -- see
         # ``_media_deltas.media_arrived``.
         media_sequence = NO_MEDIA_YET
+        # One-slot buffer: a chunk is held until the next thing
+        # arrives, so the end-of-audio marker can flag the one
+        # before it as `final`.  Costs 144ms on the last chunk.
+        media_pending: List[Any] = []
         # What the model SAID.  A plain list because bytes and
         # transcript arrive in SEPARATE deltas -- 7 data-only and 11
         # transcript-only in one measured turn, zero carrying both -- so
@@ -1951,7 +1955,8 @@ class OpenRouterProvider(OpenAIMediaOutputMixin, ModalityCapabilityMixin):
                     # the decoder is imported rather than inherited -- see
                     # ``_media_deltas``.
                     media_sequence = self.emit_media_delta(
-                        delta, on_chunk, media_sequence, media_transcript
+                        delta, on_chunk, media_sequence, media_transcript,
+                        media_pending,
                     )
 
                     if delta.tool_calls:
@@ -2000,6 +2005,11 @@ class OpenRouterProvider(OpenAIMediaOutputMixin, ModalityCapabilityMixin):
             # named nothing or named something unrecognised.  Those are
             # opposite diagnoses: the first is a stream that may have
             # been cut (#687), the second a turn that plainly ended.
+            # The upstream's end-of-audio marker normally released the
+            # last chunk already; this covers a provider that sends none,
+            # where the stream ending is the only evidence the utterance
+            # is over -- and is conclusive.
+            self.flush_media_stream(on_chunk, media_pending)
             self._trace(
                 f"{trace_prefix}_END chunks={chunk_count} "
                 f"finish_reason={finish_reason} "
