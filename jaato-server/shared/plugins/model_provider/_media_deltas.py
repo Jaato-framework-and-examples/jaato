@@ -59,6 +59,7 @@ DEFAULT_AUDIO_OPTIONS: Dict[str, Any] = {"voice": "alloy", "format": "pcm16"}
 
 #: The modality token a tier declares to ask for spoken output.
 MODALITY_AUDIO = "audio"
+MODALITY_TEXT = "text"
 
 
 #: Start value for a turn's media-sequence counter -- "nothing decoded yet".
@@ -297,6 +298,31 @@ def apply_output_modalities(
         return
     kwargs.setdefault("modalities", ["text", MODALITY_AUDIO])
     kwargs.setdefault("audio", dict(DEFAULT_AUDIO_OPTIONS))
+
+
+def drop_unrequested_audio_options(kwargs: Dict[str, Any]) -> None:
+    """Remove ``audio`` when nothing in this request is asking for media.
+
+    ``api_params`` is PROVIDER-scoped; an outbound role is TIER-scoped.
+    In a mixed profile -- a text planner and an audio speaker on one
+    provider, which share a single provider instance -- the profile's
+    ``audio: {voice, format}`` was stamped on every request, including
+    the text tier's after the session had switched away.  ``modalities``
+    was correctly dropped there and ``audio`` was not, leaving a body
+    that says "no audio, and here is how to render it".
+
+    Measured tolerated on one route (OpenRouter -> Azure, gpt-4o-mini:
+    HTTP 200, ignored), which is a reason not to panic and not a reason
+    to keep sending it -- nothing promises the next upstream agrees.
+
+    A profile that sets ``modalities`` ITSELF still keeps its ``audio``,
+    because that profile is asking directly with no tier involved: the
+    tier-less speaking profile must keep working unchanged.
+    """
+    requested = kwargs.get("modalities") or ()
+    if any(str(kind).strip().lower() != MODALITY_TEXT for kind in requested):
+        return
+    kwargs.pop("audio", None)
 
 
 class OpenAIMediaOutputMixin:

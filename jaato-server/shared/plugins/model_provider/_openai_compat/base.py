@@ -75,6 +75,7 @@ from .converters import (
 )
 from .._media_deltas import (  # noqa: F401 - re-exported for callers
     MEDIA_API_PARAMS,
+    drop_unrequested_audio_options,
     NO_MEDIA_YET,
     STREAM_AUDIO_MIME,
     OpenAIMediaOutputMixin,
@@ -409,6 +410,10 @@ class OpenAICompatProvider(OpenAIMediaOutputMixin, ModalityCapabilityMixin):
         # After the profile's own params, so an explicit ``api_params.audio``
         # wins: the TIER says what to emit, the PROFILE says how.
         self.apply_requested_output_modalities(kwargs)
+        # ...and the PROFILE's "how" is dropped when nothing is asking for
+        # media, so leaving a speaking tier does not leave `audio` stamped
+        # on a text tier's request.  See the rule's own docstring.
+        drop_unrequested_audio_options(kwargs)
         if self._extra_body:
             kwargs["extra_body"] = self._extra_body
         if tool_choice is not None:
