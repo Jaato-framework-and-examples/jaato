@@ -32,6 +32,11 @@ from jaato_sdk.plugins.model_provider.types import (
 
 from shared.tool_id_map import id_to_name, name_to_id
 
+from shared.plugins.model_provider._attachments import (
+    tool_result_followup_message,
+    user_message_with_attachments,
+)
+
 
 # ==================== Tool Name Mapping ====================
 
@@ -97,25 +102,6 @@ def tool_schemas_to_openai(schemas: Optional[List[ToolSchema]]) -> Optional[List
 
 # ==================== Message Conversion ====================
 
-def _tool_result_image_blocks(attachments: Any) -> List[Dict[str, Any]]:
-    """OpenAI ``image_url`` content blocks for image attachments on a tool result.
-
-    OpenAI-compat ``tool`` messages cannot carry image content — images live
-    only in ``user`` messages — so a tool that returns an image (e.g.
-    ``readFile`` on a PNG) must surface it via a follow-up user message.
-    """
-    blocks: List[Dict[str, Any]] = []
-    for att in attachments or []:
-        mime = getattr(att, "mime_type", "") or ""
-        if mime.startswith("image/"):
-            b64 = base64.b64encode(att.data).decode("utf-8")
-            blocks.append({
-                "type": "image_url",
-                "image_url": {"url": f"data:{mime};base64,{b64}"},
-            })
-    return blocks
-
-
 def message_to_openai(message: Message) -> List[Dict[str, Any]]:
     """Convert internal Message to OpenAI message dict(s).
 
@@ -159,19 +145,14 @@ def message_to_openai(message: Message) -> List[Dict[str, Any]]:
             })
             # tool messages can't carry images — surface image attachments as a
             # follow-up user message so a vision model actually SEES them.
-            blocks = _tool_result_image_blocks(getattr(fr, "attachments", None))
-            if blocks:
-                names = ", ".join(
-                    a.display_name or a.mime_type
-                    for a in fr.attachments
-                    if (getattr(a, "mime_type", "") or "").startswith("image/")
-                )
-                image_followups.append({
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": f"[Image returned by tool call: {names}]"}
-                    ] + blocks,
-                })
+            # Nebius declares ``pdf_input=False``, so an attachment this wire
+            # cannot carry is withheld and SAID so, never re-labelled as an
+            # image (#829).
+            followup = tool_result_followup_message(
+                getattr(fr, "attachments", None), label="Image"
+            )
+            if followup is not None:
+                image_followups.append(followup)
         # All tool messages first (each keyed to its tool_call_id), then any
         # image follow-ups, then the model generates its next turn.
         return tool_msgs + image_followups
@@ -206,29 +187,11 @@ def message_to_openai(message: Message) -> List[Dict[str, Any]]:
     # silently dropped and only the text reached the wire ("no image
     # attached").  Text-only turns keep a plain-string ``content`` (unchanged
     # wire shape).
-    inline_images = [p.inline_data for p in message.parts if p.inline_data is not None]
-    if inline_images:
-        blocks: List[Dict[str, Any]] = []
-        if content:
-            blocks.append({"type": "text", "text": content})
-        for img in inline_images:
-            mime = img.get("mime_type", "image/png")
-            data = img.get("data", b"")
-            b64 = (
-                base64.b64encode(data).decode("utf-8")
-                if isinstance(data, (bytes, bytearray))
-                else data  # already-encoded base64/string payload
-            )
-            blocks.append({
-                "type": "image_url",
-                "image_url": {"url": f"data:{mime};base64,{b64}"},
-            })
-        return [{"role": "user", "content": blocks}]
-
-    return [{
-        "role": "user",
-        "content": content,
-    }]
+    #
+    # The marshalling DISPATCHES ON MIME (#829): a PDF or audio part is not
+    # an image and is not sent as one.  Nebius declares ``pdf_input=False``,
+    # so anything but ``image/*`` is withheld with a stated note.
+    return user_message_with_attachments(content, message.parts)
 
 
 def message_from_openai(msg: Dict[str, Any]) -> Message:

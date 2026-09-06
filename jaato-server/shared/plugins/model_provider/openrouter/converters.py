@@ -33,6 +33,11 @@ from jaato_sdk.plugins.model_provider.types import (
 
 from shared.tool_id_map import id_to_name, name_to_id
 
+from shared.plugins.model_provider._attachments import (
+    tool_result_followup_message,
+    user_message_with_attachments,
+)
+
 
 # ==================== Tool Name Mapping ====================
 
@@ -209,54 +214,6 @@ def system_message_with_cache(
 
 # ==================== Message Conversion ====================
 
-def _attachment_content_block(
-    mime: str, data: Any, filename: Optional[str] = None
-) -> Optional[Dict[str, Any]]:
-    """OpenAI/OpenRouter content block for a binary attachment.
-
-    ``image/*`` -> an ``image_url`` data-URL block; ``application/pdf`` -> a
-    ``file`` block (OpenRouter's PDF-input extension — the model, or the
-    optional ``file-parser`` plugin, parses it).  Returns ``None`` for a mime
-    this wire doesn't carry.
-    """
-    mime = mime or ""
-    b64 = (
-        base64.b64encode(data).decode("utf-8")
-        if isinstance(data, (bytes, bytearray))
-        else data  # already-encoded base64/string payload
-    )
-    if mime.startswith("image/"):
-        return {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}}
-    if mime == "application/pdf":
-        return {
-            "type": "file",
-            "file": {
-                "filename": filename or "document.pdf",
-                "file_data": f"data:application/pdf;base64,{b64}",
-            },
-        }
-    return None
-
-
-def _tool_result_attachment_blocks(attachments: Any) -> List[Dict[str, Any]]:
-    """Content blocks for image/PDF attachments on a tool result.
-
-    OpenAI/OpenRouter ``tool`` messages cannot carry image/file content — they
-    live only in ``user`` messages — so a tool that returns one (``readFile`` on
-    a PNG or a PDF) must surface it via a follow-up user message.
-    """
-    blocks: List[Dict[str, Any]] = []
-    for att in attachments or []:
-        block = _attachment_content_block(
-            getattr(att, "mime_type", "") or "",
-            att.data,
-            getattr(att, "display_name", None),
-        )
-        if block:
-            blocks.append(block)
-    return blocks
-
-
 def message_to_openai(message: Message) -> List[Dict[str, Any]]:
     """Convert an internal ``Message`` to OpenAI chat-message dict(s).
 
@@ -293,21 +250,13 @@ def message_to_openai(message: Message) -> List[Dict[str, Any]]:
             })
             # tool messages can't carry image/file content — surface such
             # attachments as a follow-up user message so the model SEES them.
-            blocks = _tool_result_attachment_blocks(getattr(fr, "attachments", None))
-            if blocks:
-                names = ", ".join(
-                    a.display_name or a.mime_type
-                    for a in fr.attachments
-                    if _attachment_content_block(
-                        getattr(a, "mime_type", "") or "", a.data,
-                    ) is not None
-                )
-                image_followups.append({
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": f"[Attachment returned by tool call: {names}]"}
-                    ] + blocks,
-                })
+            # A mime this wire doesn't carry (audio, video, no declared mime)
+            # is withheld and SAID so, rather than dropped into silence (#829).
+            followup = tool_result_followup_message(
+                getattr(fr, "attachments", None), pdf_as_file=True
+            )
+            if followup is not None:
+                image_followups.append(followup)
         # All tool messages first (each keyed to its tool_call_id), then any
         # attachment follow-ups, then the model generates its next turn.
         return tool_msgs + image_followups
@@ -338,27 +287,11 @@ def message_to_openai(message: Message) -> List[Dict[str, Any]]:
     # (resolve_modalities catalog-detect), but this wire converter only emitted
     # text — the binary part was silently dropped and the model confabulated.
     # Text-only turns keep a plain-string ``content`` (unchanged wire shape).
-    inline_parts = [p.inline_data for p in message.parts if p.inline_data is not None]
-    media_blocks = [
-        b for b in (
-            _attachment_content_block(
-                p.get("mime_type", "image/png"), p.get("data", b""),
-                p.get("display_name"),
-            )
-            for p in inline_parts
-        ) if b
-    ]
-    if media_blocks:
-        blocks: List[Dict[str, Any]] = []
-        if content:
-            blocks.append({"type": "text", "text": content})
-        blocks.extend(media_blocks)
-        return [{"role": "user", "content": blocks}]
-
-    return [{
-        "role": "user",
-        "content": content,
-    }]
+    #
+    # A part whose mime this wire doesn't carry — audio, video, or one with no
+    # declared mime — is withheld rather than asserted to be a PNG (#829); the
+    # note states it so the model doesn't confabulate over the gap.
+    return user_message_with_attachments(content, message.parts, pdf_as_file=True)
 
 
 def message_from_openai(msg: Dict[str, Any]) -> Message:

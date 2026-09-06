@@ -443,6 +443,28 @@ consume is exactly what a viewer may want, so those attachments are now emitted
 as `CLIENT` media (correlated by the result's `call_id`) before being stripped
 from the model's copy. The model-facing withheld-note is unchanged.
 
+**Inbound attachments dispatch on mime (they are not all images).**
+`model_provider/_attachments.py` is the inbound counterpart of
+`_media_deltas.py` — a plain module, imported rather than inherited, for the
+same reason: the providers speaking OpenAI's format are not the set that
+inherits `_openai_compat`. It owns the one question every OpenAI-shaped
+converter must answer for an `inline_data` part or a tool-result
+`Attachment`: *does this wire carry this mime?* `image/*` becomes an
+`image_url` block; `application/pdf` becomes a `file` block **only** where
+the wire declares it (`pdf_as_file=True`, i.e. `openrouter`, which declares
+`pdf_input=True`); everything else — audio, video, and a part with **no**
+declared mime — is withheld, logged at WARNING, and reported to the model
+with the same `[Attachment withheld: ...]` note the modality gate uses.
+
+> `_openai_compat/converters.py` previously sent *every* `inline_data` part
+> as `image_url` and defaulted a missing mime to `image/png` (#829), so a PDF
+> reached the wire as `data:application/pdf;base64,...` inside an image block
+> and an audio part as `data:audio/wav;...` — for nim, vllm, lmstudio,
+> tensorrt_llm, zhipuai_openai, triton, nebius, ovhcloud and doubleword, every
+> one of which declares `pdf_input=False`. The capability declaration and the
+> converter now agree. Silently mislabelling was the one outcome worse than
+> either carrying the bytes or declining them.
+
 **Delivery.** `ToolOutputEvent` gains `stream_id`, `sequence`, `mime_type`,
 `data_b64`, `final` — widened rather than joined by a rival event, so the SDK
 client, the `subscribeToEvents` agent tool and the `EventBus` all light up with
