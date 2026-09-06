@@ -11519,7 +11519,13 @@ NOTES
         target is cleared either way, so a tier cannot be armed to return
         twice.
         """
-        target = self._pending_tier_return
+        # ``getattr`` rather than attribute access: 28 test files build a
+        # bare ``JaatoSession`` via ``__new__`` to exercise one method
+        # without a runtime, and this runs on the tool-continuation path
+        # that several of them drive.  The session already accommodates
+        # that idiom for ``_ui_hooks`` in three places; a session with no
+        # tier state has nothing pending, which is what None means here.
+        target = getattr(self, "_pending_tier_return", None)
         if target is None or response is None:
             return
         if response.has_function_calls():
