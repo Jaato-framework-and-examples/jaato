@@ -59,6 +59,7 @@ DEFAULT_AUDIO_OPTIONS: Dict[str, Any] = {"voice": "alloy", "format": "pcm16"}
 
 #: The modality token a tier declares to ask for spoken output.
 MODALITY_AUDIO = "audio"
+MODALITY_TEXT = "text"
 
 
 #: Start value for a turn's media-sequence counter -- "nothing decoded yet".
@@ -169,6 +170,62 @@ def ensure_spoken_part(parts: List[Any], transcript: str) -> None:
     parts.append(Part.from_text(transcript))
 
 
+def _audio_object(delta: Any) -> Any:
+    """Find the ``audio`` object on a streaming delta, or None.
+
+    ``audio`` is absent from OpenAI's published streaming-delta schema
+    and so from the generated SDK types, arriving as an attribute,
+    inside ``model_extra``, or as a plain dict depending on the client.
+    Probed in one place because two questions are asked of it -- what
+    does it carry, and has the audio ENDED -- and a second copy of this
+    walk would be a second thing to keep in step.
+    """
+    audio = getattr(delta, "audio", None)
+    if audio is None and isinstance(delta, dict):
+        audio = delta.get("audio")
+    if audio is None:
+        extra = getattr(delta, "model_extra", None)
+        if isinstance(extra, dict):
+            audio = extra.get("audio")
+    return audio
+
+
+def is_end_of_audio(delta: Any) -> bool:
+    """Whether this delta is the upstream's END-OF-AUDIO marker.
+
+    OpenAI closes an audio stream with a ``delta.audio`` carrying
+    neither bytes nor transcript -- in practice ``{"expires_at": ...}``,
+    a value it can only know once the audio object is complete.
+    Observed on the wire for openai/gpt-audio-mini through OpenRouter,
+    frame 16 of 20::
+
+        15  audio keys=['data']        6400B   <- last audio bytes
+        16  audio keys=['expires_at']     0B   <- this
+        17  audio keys=-                        (empty delta)
+        18  audio keys=-                        (carries usage)
+        19  [DONE]
+
+    The marker is what lets ``final`` be a FACT rather than a guess.
+    Without it a client cannot know an utterance ended and must infer --
+    and every inference tried in this tree was wrong in some case: "the
+    turn ended" closed a player mid-utterance and started a second one
+    over it.
+
+    Matched by ABSENCE rather than by the ``expires_at`` key, because
+    the key is one vendor's spelling of "the audio object is finished"
+    and the absence is the thing that actually means it.
+    """
+    audio = _audio_object(delta)
+    if audio is None:
+        return False
+    if isinstance(audio, dict):
+        data, transcript = audio.get("data"), audio.get("transcript")
+    else:
+        data = getattr(audio, "data", None)
+        transcript = getattr(audio, "transcript", None)
+    return not data and not transcript
+
+
 def extract_audio_delta(
     delta: Any,
 ) -> Optional[Tuple[Optional[bytes], str]]:
@@ -193,13 +250,7 @@ def extract_audio_delta(
     malformed payload yields ``None`` rather than raising -- one bad
     chunk must not abort a turn that is otherwise streaming fine.
     """
-    audio = getattr(delta, "audio", None)
-    if audio is None and isinstance(delta, dict):
-        audio = delta.get("audio")
-    if audio is None:
-        extra = getattr(delta, "model_extra", None)
-        if isinstance(extra, dict):
-            audio = extra.get("audio")
+    audio = _audio_object(delta)
     if audio is None:
         return None
 
@@ -241,6 +292,7 @@ def emit_audio_delta(
     sequence: int,
     mime_type: str = STREAM_AUDIO_MIME,
     transcript_sink: Optional[List[str]] = None,
+    pending: Optional[List[Any]] = None,
 ) -> int:
     """Emit one model-generated audio chunk; return the new sequence.
 
@@ -258,7 +310,22 @@ def emit_audio_delta(
 
     Returns ``sequence`` unchanged when the delta carries no audio at
     all, so a streaming loop can call this unconditionally.
+
+    ``pending`` opts into marking the last chunk ``final``.  It is a
+    one-slot buffer the caller owns: a chunk is held until the NEXT
+    thing arrives, so the upstream's end-of-audio marker
+    (:func:`is_end_of_audio`) can flag the chunk before it as the last
+    one.  Measured cost on openai/gpt-audio-mini, last-bytes frame to
+    marker: **144 ms**, once per utterance, on a chunk already queued
+    behind seconds of buffered playback.
+
+    Without ``pending`` the behaviour is exactly as before -- chunks go
+    out immediately and ``final`` is never set -- so a caller that has
+    not opted in is unaffected.
     """
+    if pending is not None and is_end_of_audio(delta):
+        _release(on_chunk, pending, final=True)
+        return sequence
     found = extract_audio_delta(delta)
     if found is None:
         return sequence
@@ -268,13 +335,40 @@ def emit_audio_delta(
     if raw is None:
         return sequence
     sequence += 1
-    on_chunk(MediaDelta(
+    chunk = MediaDelta(
         mime_type=mime_type,
         data=raw,
         sequence=sequence,
         transcript=transcript,
-    ))
+    )
+    if pending is None:
+        on_chunk(chunk)
+        return sequence
+    _release(on_chunk, pending, final=False)   # the one before this was not last
+    pending.append(chunk)
     return sequence
+
+
+def _release(on_chunk: Any, pending: List[Any], final: bool) -> None:
+    """Emit the held chunk, if any, marking it ``final`` or not."""
+    if not pending:
+        return
+    chunk = pending.pop()
+    chunk.final = final
+    on_chunk(chunk)
+
+
+def flush_audio_stream(on_chunk: Any, pending: Optional[List[Any]]) -> None:
+    """Emit whatever is still held, marking it the last of its stream.
+
+    Called when a streaming loop ends.  The upstream marker normally
+    releases the final chunk, so this is the path for a provider that
+    sends none -- the stream ending is then the only evidence the
+    utterance is over, and it is conclusive.  Without it a held chunk
+    would simply never be delivered, which is worse than an unmarked
+    one.
+    """
+    _release(on_chunk, pending or [], final=True)
 
 
 def apply_output_modalities(
@@ -297,6 +391,31 @@ def apply_output_modalities(
         return
     kwargs.setdefault("modalities", ["text", MODALITY_AUDIO])
     kwargs.setdefault("audio", dict(DEFAULT_AUDIO_OPTIONS))
+
+
+def drop_unrequested_audio_options(kwargs: Dict[str, Any]) -> None:
+    """Remove ``audio`` when nothing in this request is asking for media.
+
+    ``api_params`` is PROVIDER-scoped; an outbound role is TIER-scoped.
+    In a mixed profile -- a text planner and an audio speaker on one
+    provider, which share a single provider instance -- the profile's
+    ``audio: {voice, format}`` was stamped on every request, including
+    the text tier's after the session had switched away.  ``modalities``
+    was correctly dropped there and ``audio`` was not, leaving a body
+    that says "no audio, and here is how to render it".
+
+    Measured tolerated on one route (OpenRouter -> Azure, gpt-4o-mini:
+    HTTP 200, ignored), which is a reason not to panic and not a reason
+    to keep sending it -- nothing promises the next upstream agrees.
+
+    A profile that sets ``modalities`` ITSELF still keeps its ``audio``,
+    because that profile is asking directly with no tier involved: the
+    tier-less speaking profile must keep working unchanged.
+    """
+    requested = kwargs.get("modalities") or ()
+    if any(str(kind).strip().lower() != MODALITY_TEXT for kind in requested):
+        return
+    kwargs.pop("audio", None)
 
 
 class OpenAIMediaOutputMixin:
@@ -325,11 +444,17 @@ class OpenAIMediaOutputMixin:
     def emit_media_delta(
         self, delta: Any, on_chunk: Any, sequence: int,
         transcript_sink: Optional[List[str]] = None,
+        pending: Optional[List[Any]] = None,
     ) -> int:
         """Decode and emit OpenAI-shaped model audio; see :func:`emit_audio_delta`."""
         return emit_audio_delta(
-            delta, on_chunk, sequence, self.STREAM_AUDIO_MIME, transcript_sink
+            delta, on_chunk, sequence, self.STREAM_AUDIO_MIME, transcript_sink,
+            pending,
         )
+
+    def flush_media_stream(self, on_chunk: Any, pending: Optional[List[Any]]) -> None:
+        """Release a held final chunk; see :func:`flush_audio_stream`."""
+        flush_audio_stream(on_chunk, pending)
 
     def request_output_modalities(self, kinds: Iterable[str]) -> None:
         """Record which modalities subsequent turns should ask the model to EMIT.

@@ -193,6 +193,30 @@ DEFAULT_TIER_FALLBACK = TIER_DISPATCHER
 # every other key in the dict must be a member of VALID_TIER_NAMES.
 RESERVED_INITIAL_KEY = "initial"
 RESERVED_FALLBACK_KEY = "fallback"
+#: What ends a tier's turn at the wheel.  Both values name a TRIGGER, so
+#: the key reads as one question with two answers: what exits this tier?
+#:
+#: ``switch`` is today's behaviour and the default -- the tier stays until
+#: something switches it, whether that is another ``enter_tier`` or a
+#: budget-control rebind.
+#:
+#: ``completion`` is the delegation shape: the tier is entered, does one
+#: completion, and is left again without the model doing anything.  That
+#: matters because the model in a specialist tier is often the one LEAST
+#: able to hand back -- measured against openai/gpt-audio-mini, a speaking
+#: tier never returned on its own in four runs; it said its sentence and
+#: stopped, and only the completion nudge (a safety net for an agent that
+#: forgot to finish) ever unblocked the return.  A hand-off that depends
+#: on the weakest link in the chain is not a hand-off.
+#:
+#: "Completion", not "turn", deliberately: a turn boundary is NOT a
+#: session's terminus (#767) -- a gated agent that ends a turn in prose is
+#: re-prompted and keeps working.  The exit fires when the completion
+#: SETTLES, which is the rule ``Session.complete`` already uses.
+EXIT_ON_SWITCH: str = "switch"
+EXIT_ON_COMPLETION: str = "completion"
+VALID_TIER_EXITS: FrozenSet[str] = frozenset({EXIT_ON_SWITCH, EXIT_ON_COMPLETION})
+
 RESERVED_KEYS: FrozenSet[str] = frozenset(
     {RESERVED_INITIAL_KEY, RESERVED_FALLBACK_KEY}
 )
@@ -278,12 +302,17 @@ class TierEntry:
             entering the tier swaps to a cached per-tier provider
             instance instead.  Tiers need not agree — leaving this
             ``None`` everywhere keeps the whole session on one provider.
+        exit_on: What ends this tier's turn at the wheel —
+            :data:`EXIT_ON_SWITCH` (the default: it stays until something
+            switches it) or :data:`EXIT_ON_COMPLETION` (entered, one
+            completion, left again, with no cooperation from the model).
     """
     model: str
     provider: Optional[str] = None
     description: Optional[str] = None
     inbound_modalities: FrozenSet[str] = frozenset()
     outbound_modalities: FrozenSet[str] = frozenset()
+    exit_on: str = EXIT_ON_SWITCH
 
     def modalities_for(self, direction: str) -> FrozenSet[str]:
         """The roles this tier declares in ``direction``.
@@ -364,6 +393,40 @@ def _normalize_direction(name: str, kind: str, raw: object) -> str:
         f"tier {name!r}: '{direction}' is not a modality direction for "
         f"'{kind}' ({', '.join(sorted(VALID_MODALITY_DIRECTIONS))}){hint}"
     )
+
+
+def _normalize_tier_exit(name: str, raw: object) -> str:
+    """Coerce a tier entry's ``exit_on`` value, defaulting to ``switch``.
+
+    Absent means :data:`EXIT_ON_SWITCH`, so every profile written before
+    this key existed keeps its behaviour exactly.
+
+    Rejects an unknown value rather than falling back to the default: a
+    misspelled ``exit_on`` silently meaning "stays forever" is the failure
+    this key exists to remove, and it would show up as a session wedged in
+    a specialist tier -- the hardest kind of bug to attribute, because
+    nothing errors and the model simply stops.
+
+    Raises:
+        ModelTierConfigError: Not a string, or not a known trigger.
+    """
+    if raw is None:
+        return EXIT_ON_SWITCH
+    if not isinstance(raw, str) or not raw.strip():
+        raise ModelTierConfigError(
+            f"tier {name!r}: 'exit_on' must be a non-empty string "
+            f"({', '.join(sorted(VALID_TIER_EXITS))})"
+        )
+    value = raw.strip().lower()
+    if value not in VALID_TIER_EXITS:
+        hint = ""
+        if value in ("once", "single", "turn", "per_request", "switch_back"):
+            hint = f"  (did you mean '{EXIT_ON_COMPLETION}'?)"
+        raise ModelTierConfigError(
+            f"tier {name!r}: 'exit_on' {value!r} is not a known exit trigger "
+            f"({', '.join(sorted(VALID_TIER_EXITS))}){hint}"
+        )
+    return value
 
 
 def _normalize_tier_modalities(
@@ -475,12 +538,14 @@ def _normalize_tier_entry(name: str, raw: object) -> TierEntry:
             )
         inbound, outbound = _normalize_tier_modalities(
             name, raw.get("modalities"))
+        exit_on = _normalize_tier_exit(name, raw.get("exit_on"))
         return TierEntry(
             model=model.strip(),
             provider=provider.strip() if provider else None,
             description=description.strip() if description else None,
             inbound_modalities=inbound,
             outbound_modalities=outbound,
+            exit_on=exit_on,
         )
     raise ModelTierConfigError(
         f"tier {name!r}: expected str or dict, got {type(raw).__name__}"

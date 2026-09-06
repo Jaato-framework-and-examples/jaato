@@ -414,6 +414,21 @@ class JaatoSession:
         # is replaced with a typed ``payload: <schema>``. None = legacy untyped.
         self._completion_payload_schema: Optional[Any] = None
 
+        # Tier to return to when the tier currently at the wheel finishes
+        # its completion.  Armed by ``switch_tier`` when the entered tier
+        # declares ``exit_on: completion``; consumed by
+        # :meth:`_exit_completion_tier_if_settled`.  ``None`` = nothing
+        # pending, which is every session using no such tier.
+        #
+        # Deferred rather than nested: the exit is state a lifecycle tool
+        # stamps and the next settled completion consumes -- the same
+        # shape as the Path-1 tool_choice retry above.  Running the tier's
+        # completion INSIDE the ``enter_tier`` executor would mean a
+        # provider call from a tool executor, which can run in a worker
+        # thread under JAATO_PARALLEL_TOOLS with no lock over history, and
+        # nothing in this session has ever done that.
+        self._pending_tier_return: Optional[str] = None
+
         # Path 1 quirk state (server 0.6.195+).  When
         # ``LifecycleTools._execute_signal_completion`` returns a
         # ``validation_failed`` error, ``_execute_tools_and_continue``
@@ -5930,6 +5945,11 @@ NOTES
             response, use_streaming, on_output, wrapped_usage_callback,
             turn_data, context=context,
         )
+
+        # A delegated tier hands back HERE: the continuation has landed
+        # and asks for nothing more, the earliest point the framework can
+        # know its completion settled.
+        self._exit_completion_tier_if_settled(response)
 
         # 7. Optionally check mid-turn prompts
         if check_mid_turn and not response.has_function_calls():
@@ -11485,6 +11505,88 @@ NOTES
                 f"TIER_OUTPUT_MODALITIES: provider refused {sorted(kinds)!r}"
             )
 
+    def _exit_completion_tier_if_settled(self, response) -> None:
+        """Leave an ``exit_on: completion`` tier once its work is done.
+
+        "Settled" means the tier's response asks for nothing more: no
+        function calls.  Deliberately not "one provider call" -- a
+        delegated tier that legitimately calls a tool would be evicted
+        mid-task -- and deliberately not "one turn", because a turn
+        boundary is not a terminus (#767).
+
+        Best-effort in the same way as the entry: a failed return must not
+        fail a turn that has already produced its answer.  The pending
+        target is cleared either way, so a tier cannot be armed to return
+        twice.
+        """
+        # ``getattr`` rather than attribute access: 28 test files build a
+        # bare ``JaatoSession`` via ``__new__`` to exercise one method
+        # without a runtime, and this runs on the tool-continuation path
+        # that several of them drive.  The session already accommodates
+        # that idiom for ``_ui_hooks`` in three places; a session with no
+        # tier state has nothing pending, which is what None means here.
+        target = getattr(self, "_pending_tier_return", None)
+        if target is None or response is None:
+            return
+        if response.has_function_calls():
+            return                      # still working; it has not settled
+        self._pending_tier_return = None
+        if target == self._active_tier:
+            return
+        delegated_from = self._active_tier
+        produced = "".join(p.text for p in response.parts if p.text).strip()
+        spoke = getattr(response, "media_chunks", 0) or 0
+        try:
+            self.switch_tier(target)
+            self._trace(f"TIER_EXIT_ON_COMPLETION: returned to {target}")
+        except Exception as exc:  # noqa: BLE001 - never fail a finished turn
+            self._trace(
+                f"TIER_EXIT_ON_COMPLETION: return to {target} failed: {exc}")
+            return
+        self._report_delegated_tier(delegated_from, produced, spoke)
+
+    def _report_delegated_tier(
+        self, tier: str, produced: str, media_chunks: int,
+    ) -> None:
+        """Hand the delegated tier's outcome back as a mid-turn message.
+
+        Returning the BINDING is not returning CONTROL.  The delegated
+        tier's completion settling is what ENDS the turn, so switching
+        back alone hands the wheel to a tier that no longer has a turn to
+        steer -- and measurement showed exactly that: the model's manual
+        `enter_tier` back disappeared, and the completion nudge was still
+        the only thing that woke the caller to finish.
+
+        Queuing the outcome as a mid-turn message resumes the caller
+        through the path the framework already has for "something arrived
+        while you were working", which the loop drains immediately after
+        this returns.  It is not a nudge: a nudge tells an agent it forgot
+        to finish, this tells it what its delegate produced.
+
+        That also closes the other half.  Model media never enters history
+        -- it is CLIENT-audience by construction -- so the caller could
+        otherwise only learn what was said if the provider happened to
+        send a transcript.  Here the report is written whether or not it
+        did, and says so when it did not, which turns a silent hole into a
+        stated one.
+        """
+        from .message_queue import SourceType
+        if produced:
+            body = f'The {tier} tier produced: "{produced}"'
+        else:
+            body = (
+                f"The {tier} tier produced no text"
+                + (f", though it emitted {media_chunks} media chunk(s)"
+                   if media_chunks else "")
+                + "."
+            )
+        if media_chunks:
+            body += f"  ({media_chunks} media chunk(s) were delivered to the client.)"
+        body += "  You are back in control; continue."
+        self._message_queue.put(
+            f"<hidden>{body}</hidden>", "tier-delegation", SourceType.SYSTEM)
+        self._trace(f"TIER_DELEGATION_REPORT: queued outcome from {tier}")
+
     def _connect_tier_entry(self, entry) -> None:
         """Point the session's provider at ``entry``'s (provider, model).
 
@@ -11648,6 +11750,20 @@ NOTES
         previous_tier = self._active_tier
         self._active_tier = actual_tier
         self._model_name = entry.model
+
+        # A tier that exits on completion is a DELEGATION: entered, one
+        # completion, left again, with the model doing nothing to return.
+        # That matters because the model in a specialist tier is routinely
+        # the one LEAST able to hand back -- a speaking tier measured over
+        # four runs never returned on its own; it said its sentence and
+        # stopped, and only the completion nudge ever unblocked it.
+        from .model_tiers import EXIT_ON_COMPLETION
+        if entry.exit_on == EXIT_ON_COMPLETION and previous_tier != actual_tier:
+            self._pending_tier_return = previous_tier
+            self._trace(
+                f"TIER_EXIT_ARMED: {actual_tier} exits on completion, "
+                f"returning to {previous_tier}"
+            )
 
         logger.info(
             "Tier switch: %s → %s (model %s)",

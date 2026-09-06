@@ -277,6 +277,42 @@ def validate_profile(
     return out
 
 
+def _check_tier_exit(key, raw, add):
+    """Check a tier's ``exit_on`` trigger before a session ever runs.
+
+    An unknown value is an ERROR, not a warning, because the runtime
+    refuses it too -- and because the shape of the failure it prevents is
+    the worst kind: a misspelled trigger means the tier is never left,
+    which surfaces as a session wedged in a specialist tier with nothing
+    logged and the model simply stopping.  Catching it here turns a
+    silent hang into a line of lint.
+
+    The names considered and rejected during design (``once``,
+    ``switch_back``, ``per_request``, ``turn``) are pointed at the real
+    one rather than merely refused -- they are the spellings a reader
+    reaches for first, and ``turn`` in particular is the plausible-
+    sounding wrong answer, since a turn boundary is NOT a terminus (#767).
+    """
+    if raw is None:
+        return
+    from shared.model_tiers import EXIT_ON_COMPLETION, VALID_TIER_EXITS
+    where = f"model_tiers.{key}.exit_on"
+    if not isinstance(raw, str) or not raw.strip():
+        add("error", "invalid_tier_exit",
+            f"model_tiers.{key} 'exit_on' must be a non-empty string "
+            f"({', '.join(sorted(VALID_TIER_EXITS))})", where=where)
+        return
+    value = raw.strip().lower()
+    if value in VALID_TIER_EXITS:
+        return
+    hint = ""
+    if value in ("once", "single", "turn", "per_request", "switch_back"):
+        hint = f"  (did you mean '{EXIT_ON_COMPLETION}'?)"
+    add("error", "invalid_tier_exit",
+        f"model_tiers.{key} 'exit_on' {value!r} is not a known exit trigger "
+        f"({', '.join(sorted(VALID_TIER_EXITS))}){hint}", where=where)
+
+
 def _check_tier_modalities(key, raw, add, provider_name=None):
     """Validate one tier entry's ``modalities`` declaration statically.
 
@@ -457,6 +493,7 @@ def _check_model_tiers(mt_cfg, add, provider_name=None):
         # here is silent at runtime in the worst way: the content gate finds
         # no tier for an image and the agent is told none exists, while the
         # profile plainly declares one.
+        _check_tier_exit(key, entry.get("exit_on"), add)
         _check_tier_modalities(key, entry.get("modalities"), add,
                                entry.get("provider") or provider_name)
 
