@@ -32,7 +32,9 @@ from __future__ import annotations
 import json
 import logging
 import re
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
+from base64 import b64decode as _b64decode
+from binascii import Error as BinasciiError
 
 from ._lazy import get_openai_client_class, get_openai_module
 
@@ -42,6 +44,7 @@ if TYPE_CHECKING:
 from ..base import (
     ModalityCapabilityMixin,
     FunctionCallDetectedCallback,
+    MediaDelta,
     ProviderConfig,
     StreamingCallback,
     ThinkingCallback,
@@ -70,6 +73,16 @@ from .converters import (
     response_from_openai,
     tool_schemas_to_openai,
 )
+from .._media_deltas import (  # noqa: F401 - re-exported for callers
+    MEDIA_API_PARAMS,
+    NO_MEDIA_YET,
+    STREAM_AUDIO_MIME,
+    OpenAIMediaOutputMixin,
+    extract_audio_delta as _extract_audio_delta,
+    ensure_spoken_part,
+    media_chunk_count,
+    stream_terminated,
+)
 from .._prose_tools import (
     augment_system_with_tools,
     messages_to_prose_chat,
@@ -81,7 +94,7 @@ from shared.tool_id_map import tool_choice_to_wire
 logger = logging.getLogger(__name__)
 
 
-class OpenAICompatProvider(ModalityCapabilityMixin):
+class OpenAICompatProvider(OpenAIMediaOutputMixin, ModalityCapabilityMixin):
     """Base class for OpenAI-compatible chat-completions providers.
 
     See the module docstring for the hook contract.  Lifecycle:
@@ -105,11 +118,19 @@ class OpenAICompatProvider(ModalityCapabilityMixin):
     # ``plugin_configs.<provider>.api_params``.  Allowlisted (not blind
     # passthrough) so a typo'd / unsupported key surfaces as a profile warning
     # rather than an opaque OpenAI 400.  Subclasses may override.
+    # ``modalities`` here is OpenAI's OUTPUT selector (``["text","audio"]``)
+    # and is NOT the jaato tier key of the same name, which declares INPUT
+    # roles.  They coexist in one profile -- ``api_params.modalities`` vs
+    # ``model_tiers.<tier>.modalities`` -- so the layer a key sits under is
+    # what disambiguates them.  ``audio`` is its companion
+    # (``{"voice": ..., "format": ...}``); OpenAI requires both together,
+    # and both were previously dropped here with a warning, which made
+    # audio output unrequestable through any OpenAI-compatible provider.
     _FORWARDED_API_PARAMS = frozenset({
         "temperature", "top_p", "max_tokens", "tool_choice",
         "parallel_tool_calls", "frequency_penalty", "presence_penalty",
         "seed", "stop",
-    })
+    }) | MEDIA_API_PARAMS
 
     # Models known to expose reasoning/thinking via ``reasoning_content``.
     REASONING_CAPABLE_MODELS: List[str] = []
@@ -131,6 +152,8 @@ class OpenAICompatProvider(ModalityCapabilityMixin):
         # plugin_configs.<provider>.api_params (filtered to
         # _FORWARDED_API_PARAMS) + opaque extra_body, forwarded on each call.
         self._api_params: Dict[str, Any] = {}
+        # Operator assertion that this model can EMIT these modalities.
+        self._output_modalities_knob: Optional[List[str]] = None
         self._extra_body: Optional[Dict[str, Any]] = None
 
         # Quirk: prose_tool_calls (opt-in via profile.quirks).  When set,
@@ -279,6 +302,21 @@ class OpenAICompatProvider(ModalityCapabilityMixin):
                     "fields are %s",
                     self.name, sorted(dropped), sorted(self._FORWARDED_API_PARAMS),
                 )
+        # The OUTPUT counterpart of the input ``modalities`` knob.  No
+        # catalog in this tree reports output modalities, so an operator
+        # naming an audio-capable model is the only available source of
+        # truth -- without it the startup check refuses any outbound tier
+        # role, since the floor is text-only.
+        out_knob = config.extra.get("output_modalities")
+        if out_knob is not None:
+            if (not isinstance(out_knob, (list, tuple))
+                    or not all(isinstance(m, str) for m in out_knob)):
+                raise TypeError(
+                    f"{self.name} 'output_modalities' config must be a list "
+                    f"of strings, got {type(out_knob).__name__}"
+                )
+            self._output_modalities_knob = list(out_knob)
+
         extra_body = config.extra.get("extra_body")
         if extra_body is not None:
             if not isinstance(extra_body, dict):
@@ -368,6 +406,9 @@ class OpenAICompatProvider(ModalityCapabilityMixin):
         """
         for key, value in self._api_params.items():
             kwargs[key] = value
+        # After the profile's own params, so an explicit ``api_params.audio``
+        # wins: the TIER says what to emit, the PROFILE says how.
+        self.apply_requested_output_modalities(kwargs)
         if self._extra_body:
             kwargs["extra_body"] = self._extra_body
         if tool_choice is not None:
@@ -544,6 +585,16 @@ class OpenAICompatProvider(ModalityCapabilityMixin):
         # Track tool call accumulation (streaming sends tool calls in pieces)
         tool_call_accumulators: Dict[int, Dict[str, Any]] = {}
 
+        # Monotonic index over model-generated media chunks, so a consumer
+        # can spot a gap left by backpressure.  Separate from the text
+        # chunk counter: they are different streams.
+        media_sequence = NO_MEDIA_YET
+        # What the model SAID.  A plain list because bytes and
+        # transcript arrive in SEPARATE deltas -- 7 data-only and 11
+        # transcript-only in one measured turn, zero carrying both -- so
+        # the words cannot be read off the emitted chunks.
+        media_transcript: List[str] = []
+
         def flush_text_block():
             """Flush accumulated text as a single Part."""
             nonlocal accumulated_text
@@ -639,6 +690,20 @@ class OpenAICompatProvider(ModalityCapabilityMixin):
                         accumulated_text.append(delta.content)
                         on_chunk(delta.content)
 
+                    # Model-generated audio.  The OpenAI streaming shape is
+                    # ``delta.audio.data`` (base64) with an optional running
+                    # ``transcript``.  It is NOT in the published OpenAPI
+                    # schema for the streaming delta -- and so not in the
+                    # generated SDK types either -- so it arrives as an
+                    # untyped extra and is read defensively rather than by
+                    # attribute access.  While streaming, OpenAI emits only
+                    # pcm16 (24 kHz mono s16le, headerless), which is why
+                    # the mime type spells the parameters out: the payload
+                    # carries no header to recover them from.
+                    media_sequence = self.emit_media_delta(
+                        delta, on_chunk, media_sequence, media_transcript
+                    )
+
                     # Accumulate tool calls (they come in pieces)
                     if delta.tool_calls:
                         for tc_delta in delta.tool_calls:
@@ -724,19 +789,26 @@ class OpenAICompatProvider(ModalityCapabilityMixin):
 
         # A stream that stopped arriving is not a turn that finished
         # (#687).  Raises rather than returning the fragment.
+        # A turn that only spoke has no Part of its own — without this
+        # the session sees an empty response and nudges a good answer.
+        ensure_spoken_part(parts, "".join(media_transcript))
+
         return require_terminated_stream(
             ProviderResponse(
                 parts=parts,
+                media_chunks=media_chunk_count(media_sequence),
                 usage=usage,
                 finish_reason=finish_reason,
                 raw=None,
                 thinking=thinking,
             ),
-            terminal_seen=terminal_seen,
+            terminal_seen=stream_terminated(
+                terminal_seen, media_sequence,
+                usage_reported=usage.total_tokens > 0),
             was_cancelled=was_cancelled,
             provider=self.name,
             model=self._model_name,
-            chunks=chunk_count,
+            chunks=chunk_count + media_chunk_count(media_sequence),
         )
 
     # ==================== Error Handling ====================

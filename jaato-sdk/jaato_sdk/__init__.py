@@ -40,6 +40,7 @@ from jaato_sdk.events import (
     EventType,
     ClientType,
     CommunicationStyle,
+    MODEL_MEDIA_CALL_ID,
     PresentationContext,
     serialize_event,
     deserialize_event,
@@ -86,6 +87,7 @@ __all__ = [
     # Events
     "Event",
     "EventType",
+    "MODEL_MEDIA_CALL_ID",
     "ClientType",
     "CommunicationStyle",
     "PresentationContext",

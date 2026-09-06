@@ -110,6 +110,14 @@ from .converters import (
     system_message_with_cache,
     tool_schemas_to_openai,
 )
+from .._media_deltas import (
+    MEDIA_API_PARAMS,
+    NO_MEDIA_YET,
+    OpenAIMediaOutputMixin,
+    ensure_spoken_part,
+    media_chunk_count,
+    stream_terminated,
+)
 from .._prose_tools import (
     augment_system_with_tools,
     messages_to_prose_chat,
@@ -117,6 +125,7 @@ from .._prose_tools import (
     rewrite_prose_tool_calls,
 )
 from shared.app_identity import AppIdentity, resolve_app_identity
+from shared.tool_id_map import tool_choice_to_wire
 
 from .env import (
     DEFAULT_BASE_URL,
@@ -449,7 +458,7 @@ def _retry_after_from_body(exc: Exception) -> Optional[float]:
     return None
 
 
-class OpenRouterProvider(ModalityCapabilityMixin):
+class OpenRouterProvider(OpenAIMediaOutputMixin, ModalityCapabilityMixin):
     """OpenRouter model provider.
 
     Provides access to OpenRouter's catalog via the OpenAI-compatible
@@ -535,6 +544,15 @@ class OpenRouterProvider(ModalityCapabilityMixin):
         # catalog ``architecture.input_modalities`` auto-detect wins; this
         # is only consulted when the catalog has no entry for the model.
         self._modalities_knob: Optional[List[str]] = None
+        # Operator assertion that the model can EMIT these modalities.
+        self._output_modalities_knob: Optional[List[str]] = None
+        # OpenAI output-media body fields set explicitly by the profile.
+        self._media_api_params: Dict[str, Any] = {}
+        # ``api_params.tool_choice`` — OpenAI's tool-selection control
+        # ("auto" / "required" / "none", or a dict naming one tool).
+        # Applies to every call; a per-call ``complete(tool_choice=...)``
+        # overrides it.
+        self._tool_choice: Optional[Any] = None
 
         # OpenRouter request-time routing controls.  ``provider`` is the
         # killer feature of OpenRouter — it constrains which upstream
@@ -709,6 +727,81 @@ class OpenRouterProvider(ModalityCapabilityMixin):
         return "openrouter"
 
     # ==================== Lifecycle ====================
+
+    def _read_media_output_config(
+        self, knob, framework_overrides: Dict[str, Any],
+        api_params: Dict[str, Any],
+    ) -> None:
+        """Read the model-media OUTPUT knobs from the profile.
+
+        Its own method rather than inline in :meth:`initialize` so that
+        already-oversized function does not grow further.
+
+        Two knobs, deliberately in different layers:
+
+        ``framework_overrides.output_modalities`` is the CAPABILITY
+        assertion — the counterpart of the input ``modalities`` knob, and
+        the only source of truth available, because the OpenRouter catalog
+        reports ``architecture.modality`` for input but says nothing about
+        what a model can EMIT.  Without it the floor stays text-only and
+        the startup check refuses any outbound tier role.
+
+        ``api_params.modalities`` / ``api_params.audio`` are the REQUEST
+        fields.  They are forwarded so a profile can pin the voice; a
+        tier's outbound role supplies them otherwise.
+        """
+        out_extra = knob("output_modalities", layer=framework_overrides)
+        if out_extra is not None:
+            if not isinstance(out_extra, (list, tuple)) or not all(
+                isinstance(m, str) for m in out_extra
+            ):
+                raise TypeError(
+                    "OpenRouter 'output_modalities' config must be a list of "
+                    f"strings (e.g. [\"text\", \"audio\"]), got "
+                    f"{type(out_extra).__name__}"
+                )
+            self._output_modalities_knob = list(out_extra)
+
+        for key in sorted(MEDIA_API_PARAMS):
+            value = knob(key, layer=api_params)
+            if value is not None:
+                self._media_api_params[key] = value
+
+    def _apply_tool_choice(
+        self, kwargs: Dict[str, Any], tool_choice: Optional[Any],
+    ) -> None:
+        """Stamp the tool-selection control onto the request body.
+
+        The profile's ``api_params.tool_choice`` applies to every call; a
+        per-call value overrides it, because a caller forcing one tool
+        this turn is more specific than a standing preference.
+
+        Two rules the upstream imposes, both borrowed from
+        ``_openai_compat`` where they were already written:
+
+        - ``tool_choice`` without ``tools`` is rejected, so it is dropped
+          on a turn that sends no tools -- which includes prose-tool-call
+          mode, where the array is withheld deliberately.
+        - tool names are hashed to opaque wire ids, so a choice NAMING a
+          tool must be mapped through :func:`tool_choice_to_wire` or the
+          upstream cannot find it.  String forms pass through untouched.
+        """
+        chosen = tool_choice if tool_choice is not None else self._tool_choice
+        if chosen is None or "tools" not in kwargs:
+            return
+        kwargs["tool_choice"] = tool_choice_to_wire(chosen)
+
+    def _apply_media_output(self, kwargs: Dict[str, Any]) -> None:
+        """Stamp model-media OUTPUT fields onto the request body.
+
+        Profile values first, then the entered tier's role via
+        ``setdefault`` — so the TIER says what to emit and the PROFILE
+        says how (which voice, which format).  A provider never asked for
+        audio leaves ``kwargs`` untouched.
+        """
+        for key, value in self._media_api_params.items():
+            kwargs[key] = value
+        self.apply_requested_output_modalities(kwargs)
 
     def initialize(self, config: Optional[ProviderConfig] = None) -> None:
         """Initialize the provider with credentials.
@@ -936,6 +1029,8 @@ class OpenRouterProvider(ModalityCapabilityMixin):
                 )
             self._modalities_knob = list(modalities_extra)
 
+        self._read_media_output_config(_knob, framework_overrides, api_params)
+
         # routing: OpenRouter's ``provider`` extension field (sort,
         # ignore, order, allow_fallbacks, ...).  Stored as a dict and
         # passed through verbatim via ``extra_body`` on each request.
@@ -1005,6 +1100,12 @@ class OpenRouterProvider(ModalityCapabilityMixin):
         max_tokens_extra = _knob("max_tokens", layer=api_params)
         if max_tokens_extra is not None:
             self._max_tokens = int(max_tokens_extra)
+
+        # Plain assignment, not a guarded one: the knob reader already
+        # answers None when the key is absent, which is this field's
+        # own default -- so the guard would only add a branch to a
+        # function the complexity ratchet has frozen.
+        self._tool_choice = _knob("tool_choice", layer=api_params)
 
         parallel_extra = _knob("parallel_tool_calls", layer=api_params)
         if parallel_extra is not None:
@@ -1486,6 +1587,7 @@ class OpenRouterProvider(ModalityCapabilityMixin):
         on_usage_update: Optional[UsageUpdateCallback] = None,
         on_function_call: Optional[FunctionCallDetectedCallback] = None,
         on_thinking: Optional[ThinkingCallback] = None,
+        tool_choice: Optional[Any] = None,
     ) -> TurnResult:
         """Stateless completion: convert messages, call OpenRouter, return.
 
@@ -1545,6 +1647,7 @@ class OpenRouterProvider(ModalityCapabilityMixin):
             kwargs["parallel_tool_calls"] = self._parallel_tool_calls
         if self._service_tier is not None:
             kwargs["service_tier"] = self._service_tier
+        self._apply_tool_choice(kwargs, tool_choice)
 
         # OpenRouter request-body extras (e.g. ``provider`` routing).  The
         # OpenAI SDK has no typed parameter for these, so we pass them
@@ -1554,6 +1657,11 @@ class OpenRouterProvider(ModalityCapabilityMixin):
             existing = kwargs.get("extra_body", {})
             existing.update(extra_body)
             kwargs["extra_body"] = existing
+
+        # What the entered tier asked the model to EMIT.  Applied last and
+        # via setdefault, so an explicit ``api_params.audio`` still wins:
+        # the tier says what, the profile says how.
+        self._apply_media_output(kwargs)
 
         try:
             if on_chunk:
@@ -1627,6 +1735,16 @@ class OpenRouterProvider(ModalityCapabilityMixin):
         kwargs["stream_options"] = {"include_usage": True}
 
         accumulated_text: List[str] = []
+        # Monotonic index over model-generated media chunks, so a
+        # consumer can spot a gap left by backpressure.  Also the
+        # termination signal for an audio-only stream -- see
+        # ``_media_deltas.media_arrived``.
+        media_sequence = NO_MEDIA_YET
+        # What the model SAID.  A plain list because bytes and
+        # transcript arrive in SEPARATE deltas -- 7 data-only and 11
+        # transcript-only in one measured turn, zero carrying both -- so
+        # the words cannot be read off the emitted chunks.
+        media_transcript: List[str] = []
         accumulated_thinking: List[str] = []
         parts: List[Part] = []
         finish_reason = FinishReason.UNKNOWN
@@ -1810,6 +1928,14 @@ class OpenRouterProvider(ModalityCapabilityMixin):
                         accumulated_text.append(delta.content)
                         on_chunk(delta.content)
 
+                    # Model-generated audio.  OpenRouter is OpenAI-shaped on
+                    # the wire but does NOT inherit OpenAICompatProvider, so
+                    # the decoder is imported rather than inherited -- see
+                    # ``_media_deltas``.
+                    media_sequence = self.emit_media_delta(
+                        delta, on_chunk, media_sequence, media_transcript
+                    )
+
                     if delta.tool_calls:
                         for tc_delta in delta.tool_calls:
                             idx = tc_delta.index
@@ -1848,9 +1974,20 @@ class OpenRouterProvider(ModalityCapabilityMixin):
                     if on_usage_update and usage.total_tokens > 0:
                         on_usage_update(usage)
 
+            # ``terminal_seen`` is traced beside the reason because the
+            # reason ALONE cannot answer the question a reader of this
+            # line is asking.  ``finish_reason`` starts at UNKNOWN, and
+            # the normaliser also answers UNKNOWN for a label it does
+            # not map -- so "UNKNOWN" reads identically whether the wire
+            # named nothing or named something unrecognised.  Those are
+            # opposite diagnoses: the first is a stream that may have
+            # been cut (#687), the second a turn that plainly ended.
             self._trace(
                 f"{trace_prefix}_END chunks={chunk_count} "
-                f"finish_reason={finish_reason}"
+                f"finish_reason={finish_reason} "
+                f"terminal_seen={terminal_seen} "
+                f"media_chunks={media_chunk_count(media_sequence)} "
+                f"usage_tokens={usage.total_tokens}"
             )
 
             # Shape 2 of OpenRouter's mid-stream error (#766): the
@@ -1915,19 +2052,26 @@ class OpenRouterProvider(ModalityCapabilityMixin):
 
         # A stream that stopped arriving is not a turn that finished
         # (#687).  Raises rather than returning the fragment.
+        # A turn that only spoke has no Part of its own — without this
+        # the session sees an empty response and nudges a good answer.
+        ensure_spoken_part(parts, "".join(media_transcript))
+
         return require_terminated_stream(
             ProviderResponse(
                 parts=parts,
+                media_chunks=media_chunk_count(media_sequence),
                 usage=usage,
                 finish_reason=finish_reason,
                 raw=None,
                 thinking=thinking,
             ),
-            terminal_seen=terminal_seen,
+            terminal_seen=stream_terminated(
+                terminal_seen, media_sequence,
+                usage_reported=usage.total_tokens > 0),
             was_cancelled=was_cancelled,
             provider=self.name,
             model=self._model_name,
-            chunks=chunk_count,
+            chunks=chunk_count + media_chunk_count(media_sequence),
         )
 
     # ==================== Stream Teardown / Stall Handling ====================

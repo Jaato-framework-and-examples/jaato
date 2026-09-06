@@ -10,6 +10,7 @@ import os
 import re
 import tempfile
 import threading
+from base64 import b64encode as _b64encode
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from dataclasses import dataclass, replace as _dc_replace
@@ -61,6 +62,17 @@ from .session_telemetry import (
 
 logger = logging.getLogger(__name__)
 
+# Reserved ``call_id`` for media the MODEL generated (as opposed to media a
+# tool produced).  Model output belongs to no tool call, but reuses the
+# tool-output delivery channel so that clients need no second subscription;
+# this id is how they tell the two apart.
+#
+# Imported rather than defined here: the daemon writes this value once and
+# every CLIENT compares against it, so the client-side package is where it
+# belongs.  Defining it on both sides makes it a shared constant with no
+# owner, which is how the two drift.
+from jaato_sdk.events import MODEL_MEDIA_CALL_ID       # noqa: F401  (re-export)
+
 from .ai_tool_runner import ToolExecutor
 from .session_context import set_current_session
 from .tool_id_map import StreamScrubber
@@ -90,6 +102,7 @@ from .plugins.streaming import StreamManager, StreamingCapable, StreamChunk, Str
 from .plugins.model_provider.base import UsageUpdateCallback, GCThresholdCallback
 from jaato_sdk.plugins.model_provider.types import (
     Attachment,
+    MediaDelta,
     CancelledException,
     CancelToken,
     DISCOVERABILITY_EAGER,
@@ -1710,7 +1723,10 @@ class JaatoSession:
             if update.new_chunks:
                 parts.append(f"New results ({len(update.new_chunks)} items):")
                 for chunk in update.new_chunks:
-                    parts.append(f"  - {chunk.content}")
+                    # CLIENT-audience chunks are for viewers only and must
+                    # not enter the conversation.
+                    if chunk.audience.reaches_model() and chunk.content:
+                        parts.append(f"  - {chunk.content}")
             if update.is_complete:
                 parts.append(f"Stream completed. Total results: {update.total_chunks}")
                 if update.final_result:
@@ -2892,6 +2908,12 @@ class JaatoSession:
             # before any model work (the earliest point the provider
             # exists).
             self._validate_modality_tier_capabilities()
+            # A session that STARTS in a speaking tier must ask for audio
+            # too.  The initial tier never passes through
+            # ``_connect_tier_entry`` (that is the SWITCH path), so without
+            # this an outbound role only took effect after the first
+            # ``enter_tier`` — the one case most likely to be tested first.
+            self._request_active_tier_output_modalities()
             # Consume the stashed args — repeated calls become no-ops
             # (the fast-path above returns the cached provider).
             self._provider_lazy_pending = None
@@ -5676,9 +5698,16 @@ NOTES
         """
         for attempt in range(1, max_attempts + 1):
             has_fc = response.has_function_calls()
-            is_empty = not response.parts or all(
+            # Media the model produced is delivered out of band and never
+            # becomes a Part, so a turn that spoke has no parts at all.
+            # Counting it as content is what stops the nudge firing on a
+            # good spoken answer; the provider normally also gives such a
+            # turn a transcript Part, and this is the backstop for a
+            # provider that sends none.
+            spoke = response.media_chunks > 0
+            is_empty = not spoke and (not response.parts or all(
                 not p.text and not p.function_call for p in response.parts
-            )
+            ))
             needs_nudge = (
                 (not has_fc and response.finish_reason == FinishReason.TOOL_USE)
                 or (response.finish_reason == FinishReason.UNKNOWN and is_empty)
@@ -6129,8 +6158,15 @@ NOTES
                     accumulated_streaming_text: List[str] = []
 
                     # Streaming callback that routes to on_output and forwards to parent
-                    def streaming_callback(chunk: str) -> None:
+                    def streaming_callback(chunk) -> None:
                         nonlocal first_chunk_sent
+                        # Model-generated media is not text: it goes to
+                        # clients and never into the transcript, the
+                        # reliability plugin's text scanner, or the
+                        # interrupt-preservation buffer.
+                        if isinstance(chunk, MediaDelta):
+                            self._deliver_model_media(chunk)
+                            return
                         # Accumulate text for potential mid-turn interrupt preservation
                         accumulated_streaming_text.append(chunk)
 
@@ -6979,12 +7015,78 @@ NOTES
         if plugin:
             plugin_name = getattr(plugin, 'name', type(plugin).__name__)
 
-        # Create chunk callback for UI - wrapped in hidden tags so only model sees content
+        # ``stream_id`` is only known once ``start_stream`` returns, but
+        # chunks can fire before then, so it is read from a mutable cell
+        # rather than closed over.  A chunk that beats the assignment
+        # carries "" and is still correlated by ``call_id`` -- which is
+        # the key clients actually join on.
+        _stream_cell = {"id": ""}
+        _call_id = fc.id or ""
+
         def on_chunk(chunk: StreamChunk) -> None:
-            if on_output:
+            """Route one streaming-tool chunk by its audience.
+
+            Audience is data on the chunk, not a fixed policy of this
+            callback.  Historically this wrapped every chunk in
+            ``<hidden>`` -- "for the model, hidden from the user" -- which
+            media inverts: a TTS tool's audio is for the user and may
+            never reach the model at all.
+
+            - MODEL (the default, so existing producers are unchanged):
+              into the conversation via ``on_output``, wrapped in
+              ``<hidden>`` exactly as before.
+            - CLIENT: to subscribed clients only, via ``on_tool_output``;
+              never passed to ``on_output``, so it never enters history.
+            - BOTH: both of the above.
+
+            Binary payloads go out base64-encoded and are never handed to
+            ``on_output`` -- that path is text and would corrupt them.
+            """
+            if chunk.audience.reaches_model() and on_output:
                 # Wrap in <hidden> so the hidden_content_filter strips it from user view
-                # but the model still receives the streaming results
-                on_output("streaming", f"<hidden>[{base_name}] {chunk.content}</hidden>", "append")
+                # but the model still receives the streaming results.  Media
+                # is skipped here: this is a text channel.
+                if chunk.content:
+                    on_output(
+                        "streaming",
+                        f"<hidden>[{base_name}] {chunk.content}</hidden>",
+                        "append",
+                    )
+
+            if chunk.audience.reaches_client() and self._ui_hooks and _call_id:
+                # sequence/chunk_type/metadata used to be discarded here;
+                # pass the sequence through rather than re-counting.
+                if chunk.is_media():
+                    self._ui_hooks.on_tool_output(
+                        agent_id=self._agent_id,
+                        call_id=_call_id,
+                        chunk=chunk.content,
+                        stream_id=_stream_cell["id"],
+                        sequence=chunk.sequence,
+                        mime_type=chunk.mime_type,
+                        data_b64=chunk.data_b64(),
+                        # A tool's media stream has NO per-chunk terminal
+                        # signal.  This read `chunk.chunk_type == "final"`,
+                        # a category error: chunk_type is a CONTENT-kind
+                        # hint (match / progress / result / stdout /
+                        # stderr / display / file / input / summary /
+                        # error), never a lifecycle marker, so the
+                        # comparison could not be true and a client
+                        # waiting on `final` for a tool's audio waited
+                        # forever.  Saying False plainly is honest;
+                        # inventing a terminal-chunk protocol is a design
+                        # change.  Model speech is unaffected -- it
+                        # carries `delta.final`.
+                        final=False,
+                    )
+                elif chunk.content:
+                    self._ui_hooks.on_tool_output(
+                        agent_id=self._agent_id,
+                        call_id=_call_id,
+                        chunk=chunk.content,
+                        stream_id=_stream_cell["id"],
+                        sequence=chunk.sequence,
+                    )
 
         try:
             # Start the streaming execution
@@ -6996,20 +7098,29 @@ NOTES
                 call_id=fc.id or "",
                 on_ui_chunk=on_chunk,
             )
+            _stream_cell["id"] = handle.stream_id
 
-            # Format initial chunks for model
+            # Format initial chunks for model.  CLIENT-audience chunks
+            # are excluded -- this list is returned in the tool result and
+            # so becomes conversation history.
             initial_content = []
             for chunk in handle.initial_chunks:
-                initial_content.append(chunk.content)
+                if chunk.audience.reaches_model():
+                    initial_content.append(chunk.content)
 
             return (True, {
                 "stream_id": handle.stream_id,
                 "tool_name": base_name,
                 "status": handle.status.value,
                 "initial_results": initial_content,
-                "initial_count": len(handle.initial_chunks),
+                # Counts what the model can SEE, not what arrived.
+                # These were the same set until CLIENT-audience chunks
+                # could be filtered out of the content, after which the
+                # model was told "Received N initial results" over a
+                # shorter list -- the count-vs-content divergence class.
+                "initial_count": len(initial_content),
                 "message": (
-                    f"Streaming started. Received {len(handle.initial_chunks)} initial results. "
+                    f"Streaming started. Received {len(initial_content)} initial results. "
                     f"More results will be automatically provided as they become available. "
                     f"Call dismiss_stream(stream_id='{handle.stream_id}') when you have enough results."
                 ),
@@ -7856,6 +7967,7 @@ NOTES
             return result
         kept: List[Any] = []
         withheld: Dict[str, int] = {}
+        rerouted: List[Any] = []
         for att in result.attachments:
             modality = self._mime_to_modality(getattr(att, "mime_type", None))
             # None = unclassifiable; keep (don't over-strip).  Otherwise
@@ -7864,8 +7976,15 @@ NOTES
                 kept.append(att)
             else:
                 withheld[modality] = withheld.get(modality, 0) + 1
+                rerouted.append(att)
         if not withheld:
             return result
+        # The gate is a ROUTER, not a filter.  Content the model cannot
+        # consume is exactly the content a viewer might want, so the
+        # withheld attachments are emitted to subscribed clients before
+        # being stripped from the model's copy.  Delivery is best-effort:
+        # a failure here must not fail the tool result.
+        self._emit_withheld_attachments_to_clients(result, rerouted)
         note = self._build_withheld_attachment_note(withheld)
         self._trace(
             f"MODALITY_GATE: withheld {dict(withheld)} from tool "
@@ -7878,6 +7997,116 @@ NOTES
         )
         return _dc_replace(result, attachments=(kept or None), model_suffix=combined)
 
+    def _model_media_stream_id(self, delta: 'MediaDelta') -> str:
+        """A distinct stream id per utterance, not per agent.
+
+        A constant id per agent collided every utterance in a session
+        into one stream: a client keying chunks by ``stream_id`` then
+        saw sequences restart at 0 mid-stream, so a retried turn's audio
+        was spliced onto the first attempt's and no gap check could tell
+        them apart.
+
+        The provider restarts ``sequence`` at 0 for each turn, so that
+        reset IS the utterance boundary — no extra plumbing needed.
+        """
+        if delta.sequence == 0:
+            self._model_media_utterance = (
+                getattr(self, "_model_media_utterance", 0) + 1)
+        return f"model:{self._agent_id}:{getattr(self, '_model_media_utterance', 1)}"
+
+    def _deliver_model_media(self, delta: 'MediaDelta') -> None:
+        """Deliver one chunk of MODEL-generated media to subscribed clients.
+
+        Model-emitted audio reuses the tool-output media channel rather
+        than introducing a rival event, so all three existing subscription
+        surfaces (SDK client, ``subscribeToEvents``, ``EventBus``) carry it
+        with no new API.  Because that channel is keyed by ``call_id`` and
+        this content belongs to no tool call, the reserved id
+        :data:`MODEL_MEDIA_CALL_ID` is used; clients distinguish
+        model-generated media from tool-produced media by that id.
+
+        Model media is CLIENT-audience by construction: the model produced
+        it, so replaying it back into the model's own history would be
+        both redundant and, for audio, meaningless.  It therefore never
+        touches ``on_output`` or the accumulated text buffer.
+
+        Never raises -- a delivery failure must not abort generation.
+        """
+        hooks = getattr(self, "_ui_hooks", None)
+        if hooks is None or not delta.data:
+            return
+        try:
+            hooks.on_tool_output(
+                agent_id=self._agent_id,
+                call_id=MODEL_MEDIA_CALL_ID,
+                chunk=delta.transcript or "",
+                stream_id=self._model_media_stream_id(delta),
+                sequence=delta.sequence,
+                mime_type=delta.mime_type,
+                data_b64=_b64encode(delta.data).decode("ascii"),
+                final=delta.final,
+            )
+        except Exception:  # noqa: BLE001
+            self._trace(
+                f"MODEL_MEDIA: client delivery failed for a "
+                f"{delta.mime_type!r} chunk"
+            )
+
+    def _emit_withheld_attachments_to_clients(
+        self, result: ToolResult, attachments: List[Any]
+    ) -> None:
+        """Deliver model-unconsumable attachments to subscribed clients.
+
+        The counterpart to :meth:`_gate_one_tool_result` stripping them:
+        rather than destroying the bytes, publish them as CLIENT-audience
+        media on the tool-output channel, correlated by the result's
+        ``call_id``.  Each attachment is one single-chunk stream
+        (``sequence=0``), and ``final`` is set on the last one so a client
+        knows when to stop waiting.
+
+        Never raises: a client-delivery problem must not turn a successful
+        tool call into a failed one.  A failure is traced, not surfaced.
+
+        Args:
+            result: The tool result being gated; supplies ``call_id``.
+            attachments: The attachments withheld from the model.
+        """
+        # ``getattr``: the gate also runs on sessions constructed without
+        # the UI-hooks attribute at all (bare/unit-test construction), and
+        # a missing sink is "nobody to deliver to", not an error.
+        hooks = getattr(self, "_ui_hooks", None)
+        if not attachments or hooks is None:
+            return
+        call_id = getattr(result, "call_id", "") or ""
+        if not call_id:
+            return
+        stream_id = f"gated:{call_id}"
+        last = len(attachments) - 1
+        for index, att in enumerate(attachments):
+            data = getattr(att, "data", None)
+            mime_type = getattr(att, "mime_type", None)
+            if not data or not mime_type:
+                continue
+            try:
+                payload = (
+                    data if isinstance(data, str)
+                    else _b64encode(data).decode("ascii")
+                )
+                hooks.on_tool_output(
+                    agent_id=self._agent_id,
+                    call_id=call_id,
+                    chunk=getattr(att, "display_name", "") or "",
+                    stream_id=stream_id,
+                    sequence=index,
+                    mime_type=mime_type,
+                    data_b64=payload,
+                    final=(index == last),
+                )
+            except Exception:  # noqa: BLE001
+                self._trace(
+                    f"MODALITY_GATE: client delivery failed for a "
+                    f"{mime_type!r} attachment on tool {result.name!r}"
+                )
     def _resolve_withheld_target(
         self, withheld: Dict[str, int]
     ) -> Tuple[Optional[str], List[str], List[str]]:
@@ -8217,7 +8446,10 @@ NOTES
                 # Track first chunk to use "write" for new block, "append" for continuation
                 first_chunk_after_tools = [False]  # Use list to allow mutation in closure
 
-                def streaming_callback(chunk: str) -> None:
+                def streaming_callback(chunk) -> None:
+                    if isinstance(chunk, MediaDelta):
+                        self._deliver_model_media(chunk)
+                        return
                     # Check for pending mid-turn prompts during tool result streaming
                     # This mirrors the interrupt detection in the initial streaming callback
                     if self._message_queue.has_parent_messages():
@@ -8397,7 +8629,10 @@ NOTES
             if use_streaming:
                 first_chunk_sent = [False]
 
-                def streaming_callback(chunk: str) -> None:
+                def streaming_callback(chunk) -> None:
+                    if isinstance(chunk, MediaDelta):
+                        self._deliver_model_media(chunk)
+                        return
                     if on_output:
                         mode = "append" if first_chunk_sent[0] else "write"
                         self._trace(f"MID_TURN_RESPONSE mode={mode} len={len(chunk)}")
@@ -11203,6 +11438,53 @@ NOTES
             return False
         return entry.provider is None or entry.provider == self._active_provider_name
 
+    def _request_active_tier_output_modalities(self) -> None:
+        """Stamp the ACTIVE tier's outbound roles onto a freshly built provider.
+
+        The switch path (:meth:`_connect_tier_entry`) covers every later
+        tier change; this covers the first one, which is not a change at
+        all — the session simply starts there.
+        """
+        if self._tier_config is None or not self._active_tier:
+            return
+        entry = self._tier_config.tiers.get(self._active_tier)
+        if entry is not None:
+            self._request_tier_output_modalities(entry)
+
+    def _request_tier_output_modalities(self, entry) -> None:
+        """Ask the provider to emit what the entered tier declares.
+
+        This is what turns ``modalities: {audio: outbound}`` from a
+        declaration the startup check merely *validates* into a request
+        that reaches the wire.  Without it an outbound role is inert: the
+        tier says the model may speak, but nothing ever asks it to.
+
+        Called on EVERY tier entry, including entries that declare no
+        outbound role, because the empty set is the instruction that stops
+        requesting audio — leaving a speaking tier must not leave the
+        request stamped.
+
+        Best-effort by design.  A provider that cannot emit media inherits
+        a no-op :meth:`request_output_modalities`, so the common case costs
+        one call; and a provider that raises must not fail the tier switch,
+        which has already succeeded by this point.  A model that genuinely
+        cannot do the job is refused far earlier, by the startup
+        capability check.
+        """
+        provider = self._provider
+        if provider is None:
+            return
+        request = getattr(provider, "request_output_modalities", None)
+        if request is None:
+            return
+        kinds = getattr(entry, "outbound_modalities", frozenset()) or frozenset()
+        try:
+            request(kinds)
+        except Exception:  # noqa: BLE001 - never fail a completed switch
+            self._trace(
+                f"TIER_OUTPUT_MODALITIES: provider refused {sorted(kinds)!r}"
+            )
+
     def _connect_tier_entry(self, entry) -> None:
         """Point the session's provider at ``entry``'s (provider, model).
 
@@ -11244,6 +11526,11 @@ NOTES
         # about to update ``_model_name``.  None of it may raise, or a
         # switch lands half-applied — the provider re-pointed at the new
         # model while the session still believes it is on the old one.
+        #
+        # Asking the provider to emit the tier's outbound modalities is
+        # exactly such bookkeeping, which is why it sits below the connect
+        # rather than inside it.
+        self._request_tier_output_modalities(entry)
         #
         # Counted here rather than in ``switch_tier`` so BOTH routes into a
         # binding change are seen: the model-driven one and the

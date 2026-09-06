@@ -346,6 +346,11 @@ async def run_headless_mode(
                         agent_id=event.agent_id,
                         call_id=event.call_id,
                         chunk=event.chunk,
+                        stream_id=event.stream_id,
+                        sequence=event.sequence,
+                        mime_type=event.mime_type,
+                        data_b64=event.data_b64,
+                        final=event.final,
                     )
 
             # ==================== Permission Events ====================

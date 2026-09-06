@@ -70,6 +70,7 @@ PROVIDER_CAPABILITIES = ProviderCapabilities(
     prompt_caching=False,
     streaming=True,
     cancellation=True,
+    output_media=True,   # shares _openai_compat's wired streaming loop.
 )
 
 # --- Provider config-knob contract (authored from provider.py read sites) ---
@@ -79,6 +80,10 @@ PROVIDER_KNOBS = ProviderKnobs(layers=(
         KnobSpec("context_length", "int"),
         KnobSpec("enable_thinking", "bool"),
         KnobSpec("thinking_budget", "int"),
+        KnobSpec("output_modalities", "list", None,
+                 "assert what the model can EMIT; no catalog reports output "
+                 "modalities, so without this the floor is text and the "
+                 "startup check refuses an outbound tier role"),
     ), description="connection / generation"),
 ))
 PROVIDER_QUIRKS = frozenset({

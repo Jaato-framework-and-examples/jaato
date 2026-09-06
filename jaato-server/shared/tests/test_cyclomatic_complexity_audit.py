@@ -102,7 +102,7 @@ BASELINE: Dict[str, int] = {
     "jaato-server/server/command_router.py::CommandRouter._handle_session_new": 18,
     "jaato-server/server/command_router.py::CommandRouter.get_command_list": 52,
     "jaato-server/server/core.py::JaatoServer._build_profile_session_kwargs": 17,
-    "jaato-server/server/core.py::JaatoServer._build_send_message_notification_handler._handle": 93,
+    "jaato-server/server/core.py::JaatoServer._build_send_message_notification_handler._handle": 92,
     "jaato-server/server/core.py::JaatoServer._check_auth_completion": 17,
     "jaato-server/server/core.py::JaatoServer._emit_conversation_replay": 19,
     "jaato-server/server/core.py::JaatoServer._setup_permission_hooks.on_permission_requested": 35,

@@ -75,7 +75,8 @@ def test_tools_array_never_leaks_human_tool_names(provider):
 # --------------------------------------------- surface 2: tool_choice (structural)
 
 # Providers whose provider.py forwards a tool_choice to the wire.
-_TOOL_CHOICE_FORWARDERS = {"nebius", "vllm", "tensorrt_llm", "triton", "anthropic"}
+_TOOL_CHOICE_FORWARDERS = {"nebius", "openrouter", "vllm", "tensorrt_llm",
+                           "triton", "anthropic"}
 
 # Of those, the ones not YET routing through tool_choice_to_wire.  nebius +
 # tensorrt_llm are migrated onto the OpenAICompat base (which maps); the rest

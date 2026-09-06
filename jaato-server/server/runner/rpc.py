@@ -5053,16 +5053,39 @@ class _AgentUIHooksNotificationShim:
         agent_id: str,
         call_id: str,
         chunk: str,
+        stream_id: str = "",
+        sequence: Optional[int] = None,
+        mime_type: Optional[str] = None,
+        data_b64: Optional[str] = None,
+        final: bool = False,
     ) -> None:
+        """Forward a tool-output chunk from the runner to the daemon.
+
+        Media keys are added to the RPC payload only when bytes are
+        actually present, so a text chunk's frame is byte-identical to
+        before media existed -- this is the hottest notification on the
+        runner boundary and text is the overwhelmingly common case.
+
+        ``data_b64`` is already base64 (the caller encodes at the
+        ``StreamChunk`` boundary), so no bytes cross this JSON frame raw.
+        """
         try:
+            payload = {
+                "agent_id": str(agent_id or ""),
+                "call_id": str(call_id or ""),
+                "chunk": str(chunk or ""),
+            }
+            if mime_type and data_b64:
+                payload["mime_type"] = str(mime_type)
+                payload["data_b64"] = str(data_b64)
+                payload["stream_id"] = str(stream_id or "")
+                payload["final"] = bool(final)
+                if sequence is not None:
+                    payload["sequence"] = int(sequence)
             self._rpc.emit_notification(
                 request_id=self._request_id,
                 event_type=self._rpc._NOTIF_TOOL_OUTPUT,
-                payload={
-                    "agent_id": str(agent_id or ""),
-                    "call_id": str(call_id or ""),
-                    "chunk": str(chunk or ""),
-                },
+                payload=payload,
             )
         except Exception:  # noqa: BLE001
             logger.exception("tool_output notify raised")

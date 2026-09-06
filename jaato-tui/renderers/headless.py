@@ -350,7 +350,17 @@ class HeadlessFileRenderer(Renderer):
         console.print()
         self._flush(agent_id)
 
-    def on_tool_output(self, agent_id: str, call_id: str, chunk: str) -> None:
+    def on_tool_output(
+        self,
+        agent_id: str,
+        call_id: str,
+        chunk: str,
+        stream_id: str = "",
+        sequence: Optional[int] = None,
+        mime_type: Optional[str] = None,
+        data_b64: Optional[str] = None,
+        final: bool = False,
+    ) -> None:
         """Handle live tool output chunk.
 
         Uses a pyte-based TerminalEmulator to interpret ANSI escape sequences
@@ -360,8 +370,22 @@ class HeadlessFileRenderer(Renderer):
 
         The emulator accumulates all output for a tool call and we print the
         latest line(s) as they arrive.
+
+        A media chunk is summarised rather than emulated: a headless log is
+        a text artifact, and feeding a binary payload to a terminal
+        emulator would corrupt both the payload and the emulator's screen
+        state for the surrounding text stream.
         """
         console = self._get_console(agent_id)
+
+        if mime_type and data_b64:
+            marker = f" seq={sequence}" if sequence is not None else ""
+            done = " (final)" if final else ""
+            console.print(
+                f"[dim]│ <media {mime_type} "
+                f"{len(data_b64)}B base64{marker}{done}>[/dim]"
+            )
+            return
 
         # Get or create terminal emulator for this tool call
         emulator = self._tool_emulators.get(call_id)

@@ -24,11 +24,13 @@ PROVIDER_CAPABILITIES = ProviderCapabilities(
     user_message_images=True,
     tool_result_images=True,
     pdf_input=True,
-    tool_choice_forwarding=False,
+    tool_choice_forwarding=True,
     thinking=True,
     prompt_caching=True,
     streaming=True,
     cancellation=True,
+    output_media=True,   # verified end to end: a spoken answer reaches a client as
+#   ToolOutputEvent media chunks and plays.
 )
 
 # --- Provider config-knob contract (authored from provider.py read sites) ---
@@ -48,6 +50,8 @@ PROVIDER_KNOBS = ProviderKnobs(layers=(
         KnobSpec("top_k", "int"),
         KnobSpec("max_tokens", "int"),
         KnobSpec("parallel_tool_calls", "bool"),
+        KnobSpec("tool_choice", "str", None,
+                 "auto|required|none, or a dict naming one tool"),
         KnobSpec("service_tier", "str", None,
                  "auto|default|flex|priority|scale — OpenAI-style "
                  "processing tier forwarded to tier-supporting upstreams"),
@@ -57,6 +61,13 @@ PROVIDER_KNOBS = ProviderKnobs(layers=(
         KnobSpec("thinking_level", "str", None, "low|medium|high → reasoning.effort"),
         KnobSpec("cache_prompt", "str", "auto", "auto|true|false"),
         KnobSpec("cache_ttl", "str", "5m", "5m|1h"),
+        KnobSpec("modalities", "list", None,
+                 "OUTPUT selector [\"text\",\"audio\"] — OpenAI's field, the "
+                 "opposite direction from the tier key of the same name; a "
+                 "tier's outbound role supplies it otherwise"),
+        KnobSpec("audio", "dict", None,
+                 "voice/format companion of api_params.modalities; wins over "
+                 "the tier default"),
     ), description="OpenAI Chat Completions request-body fields"),
     KnobLayer("routing", opaque=True,
               description="OpenRouter provider-routing extension — any key "
@@ -65,7 +76,11 @@ PROVIDER_KNOBS = ProviderKnobs(layers=(
     KnobLayer("framework_overrides", (
         KnobSpec("context_length", "int"),
         KnobSpec("base_url", "str"),
-        KnobSpec("modalities", "list"),
+        KnobSpec("modalities", "list", None, "assert INPUT modalities"),
+        KnobSpec("output_modalities", "list", None,
+                 "assert what the model can EMIT; the catalog reports input "
+                 "modalities only, so without this the floor is text and the "
+                 "startup check refuses an outbound tier role"),
         KnobSpec("connect_timeout", "float", 15.0,
                  "TCP + TLS handshake deadline, seconds"),
         KnobSpec("request_timeout", "float", 600.0,

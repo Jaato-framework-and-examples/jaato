@@ -244,6 +244,15 @@ class ToolOutputPayload(TypedDict):
     agent_id: str
     call_id: str
     chunk: str
+    # Binary media (see docs/design/binary-media-chunks.md).  All
+    # NotRequired: a text chunk omits them entirely, keeping the common
+    # frame identical to before media existed.  ``data_b64`` is base64
+    # because the frame is UTF-8 JSON.
+    stream_id: NotRequired[str]
+    sequence: NotRequired[Optional[int]]
+    mime_type: NotRequired[Optional[str]]
+    data_b64: NotRequired[Optional[str]]
+    final: NotRequired[bool]
     # Which session this event is about (protocol 1.2+).  Mirrors the
     # base ``Event.session_id``, stamped centrally as the daemon routes;
     # NotRequired because a hand-built payload need not supply it.

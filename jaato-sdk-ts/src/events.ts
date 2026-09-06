@@ -1630,6 +1630,11 @@ export type SessionId11 = string;
 export type AgentId9 = string;
 export type CallId2 = string;
 export type Chunk = string;
+export type StreamId = string;
+export type Sequence = number | null;
+export type MimeType = string | null;
+export type DataB64 = string | null;
+export type Final = boolean;
 /**
  * All event types in the protocol.
  */
@@ -4140,7 +4145,7 @@ export type Timestamp31 = string;
 export type SessionId31 = string;
 export type AgentId21 = string;
 export type StepId = string;
-export type Sequence = number;
+export type Sequence1 = number;
 export type Content = string;
 export type Status1 = string;
 export type Result = string | null;
@@ -14549,6 +14554,38 @@ export interface ToolCallEndEvent {
 }
 /**
  * Live output chunk from a running tool (tail -f style).
+ *
+ * Carries text, binary media, or both.  This event is widened rather
+ * than joined by a rival media event because it already correlates by
+ * ``call_id``, is already mapped onto the in-process bus, and clients
+ * already subscribe to it -- so widening the payload lights up all
+ * three subscription surfaces (SDK client, ``subscribeToEvents`` agent
+ * tool, ``EventBus``) at once, with no new API on any of them.
+ *
+ * A whole-blob delivery -- a tool returning one finished WAV -- is just
+ * a single-chunk stream: ``sequence=0, final=True``.
+ *
+ * Attributes:
+ *     agent_id: Which agent produced the chunk.
+ *     call_id: Correlates the chunk with a specific tool call.
+ *     chunk: Output text (may contain newlines).  Empty for a
+ *         pure-media chunk.
+ *     stream_id: Correlates chunks belonging to one media stream.
+ *         Empty for unstreamed text, preserving existing frames.
+ *     sequence: Ordering, passed through from
+ *         :attr:`StreamChunk.sequence` rather than re-counted here --
+ *         a second counter would be a second source of truth.
+ *     mime_type: Tags the ``data_b64`` payload (e.g. ``"audio/wav"``).
+ *     data_b64: Base64-encoded binary payload (+33% over the raw
+ *         bytes; the frame is UTF-8 JSON).
+ *     final: Last chunk of this stream, so a client can close its
+ *         playback buffer or finish writing the file without waiting
+ *         on a separate completion event.
+ *
+ * Note:
+ *     When ``mime_type``/``data_b64`` are set the chunk MUST bypass the
+ *     text formatter pipeline -- see ``server/core.py`` ``on_tool_output``.
+ *     A formatter that reflows text corrupts bytes.
  */
 export interface ToolOutputEvent {
   type?: EventType11;
@@ -14557,6 +14594,11 @@ export interface ToolOutputEvent {
   agent_id?: AgentId9;
   call_id?: CallId2;
   chunk?: Chunk;
+  stream_id?: StreamId;
+  sequence?: Sequence;
+  mime_type?: MimeType;
+  data_b64?: DataB64;
+  final?: Final;
 }
 /**
  * Permission is requested for a tool execution.
@@ -14866,7 +14908,7 @@ export interface PlanStepUpdatedEvent {
   session_id?: SessionId31;
   agent_id?: AgentId21;
   step_id?: StepId;
-  sequence?: Sequence;
+  sequence?: Sequence1;
   content?: Content;
   status?: Status1;
   result?: Result;

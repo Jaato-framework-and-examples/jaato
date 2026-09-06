@@ -287,6 +287,39 @@ def _profile_binds_a_model(profile: Any) -> bool:
     return bound_model_for_profile(profile) is not None
 
 
+def _dispatch_tool_output(hooks, payload, default_agent_id: str) -> None:
+    """Forward a runner ``tool_output`` notification to the UI hooks.
+
+    Media keys ride in the payload only when the runner actually sent
+    bytes, and they are forwarded only then -- so a text chunk calls
+    exactly the arity it always did, and a hooks implementation predating
+    media keeps working untouched.
+
+    Extracted from the notification dispatcher rather than inlined so that
+    already-oversized function does not grow further.
+    """
+    agent_id = payload.get("agent_id") or default_agent_id
+    call_id = payload.get("call_id", "")
+    chunk = payload.get("chunk", "")
+
+    mime_type = payload.get("mime_type")
+    data_b64 = payload.get("data_b64")
+    if not (mime_type and data_b64):
+        hooks.on_tool_output(agent_id=agent_id, call_id=call_id, chunk=chunk)
+        return
+
+    hooks.on_tool_output(
+        agent_id=agent_id,
+        call_id=call_id,
+        chunk=chunk,
+        stream_id=payload.get("stream_id", ""),
+        sequence=payload.get("sequence"),
+        mime_type=mime_type,
+        data_b64=data_b64,
+        final=bool(payload.get("final", False)),
+    )
+
+
 class JaatoServer:
     """Core server logic for Jaato - UI-agnostic.
 
@@ -3623,12 +3656,27 @@ class JaatoServer:
                             services=svc_plugin.get_service_metadata(),
                         ))
 
-            def on_tool_output(self, agent_id, call_id, chunk):
-                # Process tool output through formatter pipeline for syntax highlighting
-                # and marker transformation (e.g., <notebook-cell> → <nb-row>)
+            def on_tool_output(self, agent_id, call_id, chunk,
+                               stream_id="", sequence=None, mime_type=None,
+                               data_b64=None, final=False):
+                """Emit a tool-output chunk, formatting text but never bytes.
+
+                The formatter pipeline does syntax highlighting and marker
+                transformation (e.g. ``<notebook-cell>`` -> ``<nb-row>``)
+                on TEXT.  A binary payload must bypass it entirely: it
+                reflows and rewrites its input, which corrupts bytes.  The
+                bypass is on the payload, not the event -- a media chunk
+                may still carry a text label in ``chunk``, and that label
+                is deliberately left unformatted too, because the pipeline
+                is stateful across chunks and feeding it a media chunk's
+                stray label would corrupt the formatting state of the
+                surrounding text stream.
+                """
+                is_media = bool(mime_type and data_b64)
+
                 # Use agent-specific pipeline to prevent cross-contamination
                 agent_pipeline = server._get_agent_pipeline(agent_id)
-                if agent_pipeline:
+                if agent_pipeline and not is_media:
                     formatted_parts = []
                     for output in agent_pipeline.process_chunk(chunk):
                         formatted_parts.append(output)
@@ -3641,6 +3689,11 @@ class JaatoServer:
                     agent_id=agent_id,
                     call_id=call_id,
                     chunk=chunk,
+                    stream_id=stream_id,
+                    sequence=sequence,
+                    mime_type=mime_type,
+                    data_b64=data_b64,
+                    final=final,
                 ))
 
             def on_agent_instruction_budget_updated(self, agent_id, budget_snapshot):
@@ -4844,10 +4897,8 @@ class JaatoServer:
                 if event_type == "tool_output":
                     hooks = server._get_ui_hooks()
                     if hooks is not None:
-                        hooks.on_tool_output(
-                            agent_id=payload.get("agent_id") or server._main_agent_id,
-                            call_id=payload.get("call_id", ""),
-                            chunk=payload.get("chunk", ""),
+                        _dispatch_tool_output(
+                            hooks, payload, server._main_agent_id
                         )
                     return
 

@@ -108,7 +108,8 @@ def validate_profile(
                 "`jaato-scaffold explain plugins`)", where=f"plugins.{plug}")
 
     # --- model_tiers (V2: cross-provider tiers allowed) ------------------
-    _check_model_tiers(getattr(profile, "model_tiers", None) or {}, add)
+    _check_model_tiers(getattr(profile, "model_tiers", None) or {}, add,
+                       getattr(profile, "provider", None))
 
     # --- budget_control --------------------------------------------------
     # The block is already parsed + structurally validated at profile-load
@@ -276,7 +277,7 @@ def validate_profile(
     return out
 
 
-def _check_tier_modalities(key, raw, add):
+def _check_tier_modalities(key, raw, add, provider_name=None):
     """Validate one tier entry's ``modalities`` declaration statically.
 
     Mirrors ``shared.model_tiers._normalize_tier_modalities`` so an author
@@ -335,10 +336,30 @@ def _check_tier_modalities(key, raw, add):
                 f"model_tiers.{key} modality '{kind}' is not a modality "
                 f"({valid})", where=where)
             continue
-        _check_modality_direction(key, kind, direction, where, add)
+        _check_modality_direction(key, kind, direction, where, add,
+                                  provider_name)
 
 
-def _check_modality_direction(key, kind, direction, where, add):
+def _delivers_output_media(provider_name) -> bool:
+    """Whether this provider's adapter can deliver model-generated media.
+
+    Reads ``ProviderCapabilities.output_media`` -- the adapter's own
+    declaration that its streaming loop decodes model media and hands it
+    to ``on_chunk`` as a ``MediaDelta``.  An unknown or unnamed provider
+    answers False, so the caller warns rather than blessing a tier it
+    cannot check.
+    """
+    if not provider_name:
+        return False
+    from .introspect import resolve_provider
+    info = resolve_provider(str(provider_name))
+    if info is None or info.capabilities is None:
+        return False
+    return bool(getattr(info.capabilities, "output_media", False))
+
+
+def _check_modality_direction(key, kind, direction, where, add,
+                              provider_name=None):
     """Validate the direction of one modality role, and flag inert outbound.
 
     Split from :func:`_check_tier_modalities` to keep both under the
@@ -362,19 +383,27 @@ def _check_modality_direction(key, kind, direction, where, add):
             f"direction ({', '.join(sorted(VALID_MODALITY_DIRECTIONS))})"
             f"{hint}", where=where)
         return
-    if value in (DIRECTION_OUTBOUND, DIRECTION_BIDIRECTIONAL):
+    if value in (DIRECTION_OUTBOUND, DIRECTION_BIDIRECTIONAL) \
+            and not _delivers_output_media(provider_name):
+        # Warn only when the adapter cannot actually deliver.  This used
+        # to fire unconditionally, saying no adapter existed -- true when
+        # written, and false the moment one did, at which point it told
+        # every author of a WORKING speaking tier that their profile was
+        # inert.  The provider's own `output_media` capability is the
+        # thing that changes, so it is the thing to ask.
         add("warning", "outbound_modality_not_deliverable",
             f"model_tiers.{key} declares '{kind}' {value}, which parses but "
-            "is INERT: no adapter parses model-generated media and the "
-            "streaming callback is text-only, so nothing can deliver it "
-            "yet.  The declaration is kept so profiles can be written "
-            "ahead of that work — see docs/design/binary-media-chunks.md."
+            f"is INERT: provider '{provider_name or '<unset>'}' does not "
+            "declare `output_media`, so its adapter does not decode "
+            "model-generated media — nothing can deliver it.  See "
+            "docs/design/binary-media-chunks.md for the three touches that "
+            "wire a provider."
             + ("  The inbound half of this role IS live."
                if value == DIRECTION_BIDIRECTIONAL else ""),
             where=where)
 
 
-def _check_model_tiers(mt_cfg, add):
+def _check_model_tiers(mt_cfg, add, provider_name=None):
     """Static checks on a profile's ``model_tiers`` table.
 
     Catches, before a session is ever created, what
@@ -428,7 +457,8 @@ def _check_model_tiers(mt_cfg, add):
         # here is silent at runtime in the worst way: the content gate finds
         # no tier for an image and the agent is told none exists, while the
         # profile plainly declares one.
-        _check_tier_modalities(key, entry.get("modalities"), add)
+        _check_tier_modalities(key, entry.get("modalities"), add,
+                               entry.get("provider") or provider_name)
 
 
 def _validate_plugin_knobs(cfg_name, cfg, plugins, add):

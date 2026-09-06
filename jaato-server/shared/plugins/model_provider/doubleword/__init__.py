@@ -40,6 +40,7 @@ PROVIDER_CAPABILITIES = ProviderCapabilities(
     prompt_caching=False,
     streaming=True,
     cancellation=True,
+    output_media=True,   # shares _openai_compat's wired streaming loop.
 )
 
 # --- Provider config-knob contract (authored from provider.py read sites) ---
@@ -51,6 +52,10 @@ PROVIDER_KNOBS = ProviderKnobs(layers=(
         KnobSpec("modalities", "list"),
         KnobSpec("extra_body", "dict", None,
                  "opaque passthrough to OpenAI create() extra_body"),
+        KnobSpec("output_modalities", "list", None,
+                 "assert what the model can EMIT; no catalog reports output "
+                 "modalities, so without this the floor is text and the "
+                 "startup check refuses an outbound tier role"),
     ), description="connection / identity"),
     KnobLayer("api_params", (
         KnobSpec("temperature", "float"),
@@ -66,6 +71,11 @@ PROVIDER_KNOBS = ProviderKnobs(layers=(
                  "inference tier: \"flex\" = discounted async (minutes-level "
                  "latency, ~1 min to first token), \"priority\" = realtime; "
                  "JAATO_DOUBLEWORD_SERVICE_TIER is the env fallback"),
+        KnobSpec("modalities", "list", None,
+                 "OUTPUT selector [\"text\",\"audio\"] — OpenAI's field, the "
+                 "opposite direction from the tier key of the same name"),
+        KnobSpec("audio", "dict", None,
+                 "voice/format companion of api_params.modalities"),
     ), description="OpenAI Chat Completions params (filtered allow-list)"),
 ))
 PROVIDER_QUIRKS = frozenset({
