@@ -696,6 +696,15 @@ class ToolCallEndEvent(Event):
     show_popup: Optional[bool] = None  # Whether to track/update the tool output popup (None = default True)
 
 
+#: Reserved ``ToolOutputEvent.call_id`` for media the MODEL produced, as
+#: opposed to media a tool returned under its own call id.  Defined here,
+#: on the CLIENT side of the wire, because it is the clients that must
+#: read it: the daemon writes one value, every consumer compares against
+#: it, and a literal copied into each consumer is a shared constant with
+#: no single owner.
+MODEL_MEDIA_CALL_ID = "model-output"
+
+
 class ToolOutputEvent(Event):
     """Live output chunk from a running tool (tail -f style).
 
@@ -748,6 +757,17 @@ class ToolOutputEvent(Event):
         once rather than re-derived at each call site.
         """
         return bool(self.mime_type and self.data_b64)
+
+    def is_model_speech(self) -> bool:
+        """Whether these bytes are the MODEL's own output, not a tool's.
+
+        Both travel on this event; :data:`MODEL_MEDIA_CALL_ID` is what
+        separates them.  Offered here because every client needs the
+        distinction — audio the model produced is played, a tool's
+        attachment is saved or shown — and without it each one
+        rediscovers the literal ``"model-output"``.
+        """
+        return self.is_media() and self.call_id == MODEL_MEDIA_CALL_ID
 
 
 class PermissionResponseOption(BaseModel):

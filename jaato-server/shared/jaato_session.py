@@ -66,7 +66,12 @@ logger = logging.getLogger(__name__)
 # tool produced).  Model output belongs to no tool call, but reuses the
 # tool-output delivery channel so that clients need no second subscription;
 # this id is how they tell the two apart.
-MODEL_MEDIA_CALL_ID = "model-output"
+#
+# Imported rather than defined here: the daemon writes this value once and
+# every CLIENT compares against it, so the client-side package is where it
+# belongs.  Defining it on both sides makes it a shared constant with no
+# owner, which is how the two drift.
+from jaato_sdk.events import MODEL_MEDIA_CALL_ID       # noqa: F401  (re-export)
 
 from .ai_tool_runner import ToolExecutor
 from .session_context import set_current_session

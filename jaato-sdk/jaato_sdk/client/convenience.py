@@ -45,7 +45,8 @@ See ``docs/design/sdk-convenience-layer.md`` and
 from __future__ import annotations
 
 import asyncio
-from typing import Any, AsyncIterator, Collection, Dict, Optional
+from typing import (Any, AsyncIterator, Callable, Collection, Dict,
+                    Optional)
 
 from ..events import ClientType, EventType
 
@@ -179,10 +180,37 @@ class Session:
         if getattr(ev, "error_summary", None):
             box["error_summary"] = ev.error_summary
 
+    def _subscribe_media(self, on_media) -> Any:
+        """Route this session's MODEL SPEECH to ``on_media``; return unsubscribe.
+
+        Symmetric with the text these methods already hand back: ``ask``
+        returns what the model wrote, ``on_media`` delivers what it said.
+        Audio gets a sink rather than a return value because it streams --
+        accumulating a whole utterance before returning would defeat
+        playing it as it arrives, and would hold an unbounded buffer.
+
+        MODEL speech only.  A tool's attachments ride the same event but
+        belong to that tool call, and a caller after those is not asking
+        about this session's answer; ``client.subscribe`` on
+        ``TOOL_OUTPUT`` still reaches them.
+
+        Returns a no-op unsubscribe when ``on_media`` is None, so callers
+        wanting no media pay nothing and the three call sites stay flat.
+        """
+        if on_media is None:
+            return lambda: None
+
+        def _fan(ev: Any) -> None:
+            if ev.is_model_speech():
+                on_media(ev)
+
+        return self._client.subscribe(EventType.TOOL_OUTPUT, _fan)
+
     async def ask(self, prompt: str, *,
                   sources: Optional[Collection[str]] = ("model",),
                   parallel_tools: Optional[bool] = None,
-                  attachments: Optional[list] = None) -> str:
+                  attachments: Optional[list] = None,
+                  on_media: Optional[Callable[[Any], None]] = None) -> str:
         """Send ``prompt``, wait for the turn to finish, return collected text.
 
         Waits on first-of ``{TURN_COMPLETED, SESSION_TERMINATED}`` so a plain
@@ -190,7 +218,9 @@ class Session:
         ``AGENT_OUTPUT`` chunks to keep by ``.source`` — default ``("model",)``
         (a clean answer); ``None`` collects everything.  Raises
         :class:`AgentError` on an error terminal, :class:`PermissionUnhandled`
-        if a gated tool went unanswered.
+        if a gated tool went unanswered.  ``on_media`` receives the model's
+        own SPEECH as it streams (see :meth:`_subscribe_media`) — the text
+        comes back, the audio is handed over.
         """
         chunks: list[str] = []
         box: Dict[str, Any] = {}
@@ -207,6 +237,7 @@ class Session:
             done.set()
 
         unsub_out = self._client.subscribe(EventType.AGENT_OUTPUT, on_output)
+        unsub_media = self._subscribe_media(on_media)
         unsub_term = self._client.subscribe_once(EventType.SESSION_TERMINATED, on_terminal)
         unsub_turn = self._client.subscribe_once(EventType.TURN_COMPLETED, on_terminal)
         try:
@@ -215,6 +246,7 @@ class Session:
             await done.wait()
         finally:
             unsub_out()
+            unsub_media()
             unsub_term()
             unsub_turn()
         self._raise_if_needed(box)
@@ -222,14 +254,18 @@ class Session:
 
     async def complete(self, prompt: str, *,
                        parallel_tools: Optional[bool] = None,
-                       attachments: Optional[list] = None) -> Optional[Dict[str, Any]]:
+                       attachments: Optional[list] = None,
+                       on_media: Optional[Callable[[Any], None]] = None,
+                       ) -> Optional[Dict[str, Any]]:
         """Send ``prompt`` and return the typed completion ``payload``.
 
         For completion-gated profiles: captures ``AGENT_COMPLETED.payload``
         (emitted before the terminal), and returns when the SESSION settles --
         not when its first turn ends.  Returns the payload (``None`` if the
         profile declared no schema or the model didn't complete).  Raises
-        :class:`AgentError` on an error terminal.
+        :class:`AgentError` on an error terminal.  ``on_media`` receives the
+        model's own SPEECH as it streams — a completion-gated stage that
+        answers OUT LOUD returns its payload here and its audio there.
 
         WHY A TURN BOUNDARY IS NOT THE SESSION'S TERMINUS.
 
@@ -327,6 +363,7 @@ class Session:
             else:
                 settle(ev)                  # the agent settled on that turn
 
+        unsub_media = self._subscribe_media(on_media)
         unsub_comp = self._client.subscribe_once(EventType.AGENT_COMPLETED, on_completed)
         unsub_term = self._client.subscribe_once(EventType.SESSION_TERMINATED, settle)
         # NOT ``subscribe_once``: a nudged session runs several turns and the
@@ -356,6 +393,7 @@ class Session:
                     if state["proposal"] is proposal and not done.is_set():
                         settle(proposal)
         finally:
+            unsub_media()
             unsub_comp()
             unsub_term()
             unsub_turn()
@@ -366,7 +404,8 @@ class Session:
     async def stream(self, prompt: str, *,
                      sources: Optional[Collection[str]] = ("model",),
                      parallel_tools: Optional[bool] = None,
-                     attachments: Optional[list] = None
+                     attachments: Optional[list] = None,
+                     on_media: Optional[Callable[[Any], None]] = None,
                      ) -> AsyncIterator[str]:
         """Send ``prompt`` and yield text chunks live as they arrive.
 
@@ -376,7 +415,9 @@ class Session:
         ``{TURN_COMPLETED, SESSION_TERMINATED}``).  ``TURN_COMPLETED`` fires
         after all of the turn's output, so no chunk is dropped.  Raises
         :class:`AgentError` on an error terminal / :class:`PermissionUnhandled`
-        on an unanswered gated tool, after the stream drains::
+        on an unanswered gated tool, after the stream drains.  ``on_media``
+        receives the model's own SPEECH as it streams, alongside the text
+        this yields::
 
             async with IPCClient.session(profile=...) as s:
                 async for chunk in s.stream("Tell me a story."):
@@ -397,6 +438,7 @@ class Session:
             queue.put_nowait(sentinel)
 
         unsub_out = self._client.subscribe(EventType.AGENT_OUTPUT, on_output)
+        unsub_media = self._subscribe_media(on_media)
         unsub_term = self._client.subscribe_once(EventType.SESSION_TERMINATED, on_terminal)
         unsub_turn = self._client.subscribe_once(EventType.TURN_COMPLETED, on_terminal)
         try:
@@ -409,6 +451,7 @@ class Session:
                 yield item
         finally:
             unsub_out()
+            unsub_media()
             unsub_term()
             unsub_turn()
         self._raise_if_needed(box)
@@ -475,7 +518,8 @@ def open_session(client_cls, *, profile=None, agent=None, agent_params=None,
                  client_type: ClientType = ClientType.API,
                  connect_timeout: float = 120.0,
                  config_root=None, apparmor=None,
-                 on_status_change=None, presentation=None) -> _SessionContext:
+                 on_status_change=None, presentation=None,
+                 min_protocol_version=None) -> _SessionContext:
     """Build a client of ``client_cls`` and return a session context manager.
 
     Backs :meth:`IPCClient.session` and :meth:`IPCRecoveryClient.session`.
@@ -491,7 +535,10 @@ def open_session(client_cls, *, profile=None, agent=None, agent_params=None,
     record that as deliberate — it was not.  ``on_status_change`` is the only
     genuinely asymmetric arg: it is an ``IPCRecoveryClient``-only
     reconnection-status callback, meaningless on a plain ``IPCClient``.
-    Each is forwarded to the constructor only when set.
+    Each is forwarded to the constructor only when set — including
+    ``min_protocol_version``, the wire protocol this caller requires, so
+    adopting the facade never quietly drops a compatibility guarantee the
+    plain constructor offers.
     """
     ctor_kwargs = dict(client_type=client_type, auto_start=auto_start,
                        env_file=env_file, workspace_path=workspace_path,
@@ -511,6 +558,14 @@ def open_session(client_cls, *, profile=None, agent=None, agent_params=None,
         ctor_kwargs["apparmor"] = apparmor
     if on_status_change is not None:
         ctor_kwargs["on_status_change"] = on_status_change
+    # The wire protocol this caller REQUIRES.  Without it the facade was a
+    # silent downgrade: a client that adopted the sugar could no longer say
+    # which protocol it depends on, so an older daemon simply never sent the
+    # newer fields and the caller saw an empty result rather than a refusal
+    # naming the version.  A convenience layer must not cost a guarantee the
+    # low-level constructor offers.
+    if min_protocol_version is not None:
+        ctor_kwargs["min_protocol_version"] = min_protocol_version
     client = (client_cls(socket_path, **ctor_kwargs) if socket_path is not None
               else client_cls(**ctor_kwargs))
     create_kwargs = dict(profile=profile, agent=agent, agent_params=agent_params,
