@@ -7065,7 +7065,19 @@ NOTES
                         sequence=chunk.sequence,
                         mime_type=chunk.mime_type,
                         data_b64=chunk.data_b64(),
-                        final=(chunk.chunk_type == "final"),
+                        # A tool's media stream has NO per-chunk terminal
+                        # signal.  This read `chunk.chunk_type == "final"`,
+                        # a category error: chunk_type is a CONTENT-kind
+                        # hint (match / progress / result / stdout /
+                        # stderr / display / file / input / summary /
+                        # error), never a lifecycle marker, so the
+                        # comparison could not be true and a client
+                        # waiting on `final` for a tool's audio waited
+                        # forever.  Saying False plainly is honest;
+                        # inventing a terminal-chunk protocol is a design
+                        # change.  Model speech is unaffected -- it
+                        # carries `delta.final`.
+                        final=False,
                     )
                 elif chunk.content:
                     self._ui_hooks.on_tool_output(
@@ -7101,9 +7113,14 @@ NOTES
                 "tool_name": base_name,
                 "status": handle.status.value,
                 "initial_results": initial_content,
-                "initial_count": len(handle.initial_chunks),
+                # Counts what the model can SEE, not what arrived.
+                # These were the same set until CLIENT-audience chunks
+                # could be filtered out of the content, after which the
+                # model was told "Received N initial results" over a
+                # shorter list -- the count-vs-content divergence class.
+                "initial_count": len(initial_content),
                 "message": (
-                    f"Streaming started. Received {len(handle.initial_chunks)} initial results. "
+                    f"Streaming started. Received {len(initial_content)} initial results. "
                     f"More results will be automatically provided as they become available. "
                     f"Call dismiss_stream(stream_id='{handle.stream_id}') when you have enough results."
                 ),

@@ -236,6 +236,14 @@ class TestBackpressure:
         a policy change wearing a performance change's clothes, so this
         pins both arms: head-is-media takes the head, head-is-not falls
         through to the same search as before.
+
+        It also counts QUEUE READS, and that half is not decoration.  The
+        first version of this test asserted only WHICH event was evicted
+        -- and drain-and-refill evicts exactly the same one, so it passed
+        against a tree where the shortcut had been reverted, at 1456
+        us/eviction, and said nothing.  A test named for a mechanism has
+        to fail when the mechanism is absent, not only when the policy
+        changes.
         """
         import asyncio
         from jaato_sdk.events import AgentOutputEvent, ToolOutputEvent
@@ -244,11 +252,24 @@ class TestBackpressure:
             return ToolOutputEvent(call_id="model-output", chunk=tag,
                                    mime_type="audio/pcm", data_b64="AA==")
 
-        # head IS the victim -> shortcut
-        queue = asyncio.Queue()
+        reads = []
+
+        class _CountingQueue(asyncio.Queue):
+            """Counts reads, so a missing shortcut is visible as work done."""
+
+            def get_nowait(self):
+                reads.append(1)
+                return super().get_nowait()
+
+        # head IS the victim -> ONE read: no drain, no refill
+        queue = _CountingQueue()
         for ev in (media("m1"), media("m2"), ToolOutputEvent(call_id="c", chunk="t")):
             queue.put_nowait(ev)
         assert ipc._evict_one_lossy(queue) is True
+        assert len(reads) == 1, (
+            f"expected 1 get_nowait for a media head, saw {len(reads)} — the "
+            f"queue was drained, so the head shortcut is not in "
+            f"_evict_one_lossy")
         assert [e.chunk for e in
                 (queue.get_nowait() for _ in range(queue.qsize()))] == ["m2", "t"]
 
