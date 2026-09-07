@@ -77,7 +77,11 @@ def test_new_host_tools_registers_client_tools(tmp_path):
                          provider="nebius", model="m"))
     assert rc == 0
     src = (tmp_path / "run_host-tools.py").read_text()
-    assert "register_client_tools" in src       # the agent-callable host tool
+    # The facade registers host tools between connect and create_session (the
+    # ordering the runner-tier model needs), so the template declares them and
+    # hands them over as ``client_tools=`` rather than calling
+    # register_client_tools itself.
+    assert "client_tools=HOST_TOOLS" in src     # the agent-callable host tool
     assert '"handler": _send_to_user' in src    # executed locally by the client
 
 
@@ -89,7 +93,10 @@ def test_new_client_recoverable_emits_recovery_client(tmp_path, arch):
                          model="m", recoverable=True))
     assert rc == 0
     src = (ws / f"run_{arch}.py").read_text()
-    assert "IPCRecoveryClient(" in src           # the recoverable client
+    # ``.session(`` for the archetypes that open one, plain construction for
+    # the read-only observer — either way the CLASS is the recoverable one.
+    assert ("IPCRecoveryClient.session(" in src
+            or "IPCRecoveryClient(" in src)     # the recoverable client
     assert "on_status_change=_on_status" in src  # wired the status callback
     assert "def _on_status" in src               # and defined it
     py_compile.compile(str(ws / f"run_{arch}.py"), doraise=True)
@@ -100,7 +107,7 @@ def test_new_client_default_is_plain_ipcclient(tmp_path):
     build.run(_args(archetype="client", workspace=str(ws), provider="nebius",
                     model="m"))
     src = (ws / "run_client.py").read_text()
-    assert "IPCClient(" in src and "IPCRecoveryClient" not in src
+    assert "IPCClient.session(" in src and "IPCRecoveryClient" not in src
     assert "_on_status" not in src
 
 

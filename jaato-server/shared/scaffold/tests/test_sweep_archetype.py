@@ -13,33 +13,36 @@ carry.  The requirements come from the consumer who hit each of them.
 
 from __future__ import annotations
 
+import argparse
 import ast
 
 import pytest
 
+from shared.scaffold import build, introspect
 from shared.scaffold._client_templates import TEMPLATES
 
 
 @pytest.fixture(scope="module")
-def rendered() -> str:
-    """The template with the builder's placeholders filled.
+def rendered(tmp_path_factory) -> str:
+    """The script a real ``jaato-scaffold new sweep`` writes.
 
-    Rendered, not raw: a template that only compiles WITH placeholders left
-    in is a template that never compiles for a reader.
+    Rendered by the BUILDER, not by a copy of what it does: a template that
+    only compiles WITH placeholders left in is a template that never compiles
+    for a reader, and a hand-maintained substitution table here is one more
+    second statement of a contract to rot.  It also makes
+    ``test_no_unsubstituted_placeholder_survives`` mean what it says — it now
+    reads real output rather than output this file filled in itself.
     """
-    _, tmpl, _ = TEMPLATES["sweep"]
-    return (tmpl
-            .replace("__TITLE__", "Sweep driver")
-            .replace("__PROVENANCE__", "jaato-scaffold new sweep")
-            .replace("__WORKSPACE__", "/ws")
-            .replace("__ENV_FILE__", ".env")
-            .replace("__MODEL__", "echo")
-            .replace("__PROVIDER__", "echo")
-            .replace("__CLIENT_IMPORT__",
-                     "from jaato_sdk import IPCClient, ClientType, EventType")
-            .replace("__CONN_CONSTANTS__", "SOCKET = '/tmp/j.sock'")
-            .replace("__ON_STATUS_DEF__", "")
-            .replace("__NEW_CLIENT_CALL__", "IPCClient(socket_path=SOCKET)"))
+    ws = tmp_path_factory.mktemp("sweep_ws")
+    providers = sorted(introspect.providers())
+    assert providers, "no providers installed — cannot scaffold a client"
+    rc = build.run(argparse.Namespace(
+        archetype="sweep", workspace=str(ws), provider=providers[0],
+        model="test-model", set=None, agents=None, force=True,
+        recoverable=False, json=False,
+    ))
+    assert rc == 0, f"build.run(sweep) returned {rc}"
+    return (ws / "run_sweep.py").read_text(encoding="utf-8")
 
 
 def test_the_archetype_is_registered():
@@ -56,13 +59,21 @@ def test_the_generated_script_compiles(rendered):
     ast.parse(rendered)
 
 
-def test_it_subscribes_before_creating_the_session(rendered):
-    """Requirement 2, and the one with the least forgiving failure mode.
+def test_it_subscribes_before_taking_the_turn(rendered):
+    """Requirement 2, restated for the facade — and narrowed, not dropped.
 
-    A refusal is announced WHILE the create is in flight, so a handler
-    installed afterwards never sees it.  Current daemons raise, but a
-    generated driver ships to whatever daemon the reader has — and without
-    this the failure is a 30s timeout naming nothing.
+    It used to say "subscribe before create_session", because a refusal is
+    announced WHILE the create is in flight and a handler installed
+    afterwards never sees it.  The facade closed that hole at the source:
+    ``create_session`` correlates its own answer and RAISES ``SessionRefused``
+    on any ErrorEvent, so the template's hand-rolled ``refusals`` list was
+    both unnecessary and — as shipped — never read.
+
+    What still holds, and is what this now checks, is the same ordering one
+    step later: the per-job listeners must be installed before the TURN is
+    sent, or the turn's own events reach no handler.  ``complete()`` installs
+    its own; these are the two facts it does not return (``finish_reason``
+    and the terminal ``reason``), read off the same connection.
     """
     tree = ast.parse(rendered)
     fn = next(n for n in ast.walk(tree)
@@ -72,17 +83,16 @@ def test_it_subscribes_before_creating_the_session(rendered):
         return min((n.lineno for n in ast.walk(fn)
                     if isinstance(n, ast.Call) and pred(n)), default=None)
 
-    subscribe = _first_line(
-        lambda n: isinstance(n.func, ast.Attribute) and n.func.attr == "subscribe")
-    create = _first_line(
-        lambda n: isinstance(n.func, ast.Attribute)
-        and n.func.attr == "create_session")
+    watch = _first_line(lambda n: isinstance(n.func, ast.Name)
+                        and n.func.id == "_watch")
+    turn = _first_line(lambda n: isinstance(n.func, ast.Attribute)
+                       and n.func.attr in ("complete", "ask", "stream"))
 
-    assert subscribe is not None, "the job never subscribes to errors"
-    assert create is not None, "the job never creates a session"
-    assert subscribe < create, (
-        "create_session is called before the error subscription; a refusal "
-        "announced during the create would reach no handler"
+    assert watch is not None, "the job installs no listeners of its own"
+    assert turn is not None, "the job never takes a turn"
+    assert watch < turn, (
+        "the turn is sent before the listeners are installed; the turn's own "
+        "events would reach no handler"
     )
 
 
@@ -412,7 +422,7 @@ def test_the_driver_owns_its_wall_clock(rendered):
     sixteen minutes.  The pool is coherent; it is simply not a timeout.
     """
     code = "\n".join(line.split("#", 1)[0] for line in rendered.splitlines())
-    assert "asyncio.wait_for(" in code, (
+    assert "timeout=JOB_TIMEOUT_S" in code or "asyncio.wait_for(" in code, (
         "the generated driver has no wall clock of its own; the first slow "
         "model it meets will hang it, and no pool ceiling will stop that"
     )

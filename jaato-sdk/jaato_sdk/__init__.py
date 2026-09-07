@@ -17,6 +17,7 @@ from jaato_sdk.client.convenience import (
     Session,
     AgentError,
     PermissionUnhandled,
+    TurnTimeout,
     ask,
 )
 # Exported from the package root ON PURPOSE.  The SDK's existing connection
@@ -76,6 +77,7 @@ __all__ = [
     "Session",
     "AgentError",
     "PermissionUnhandled",
+    "TurnTimeout",
     "truncation_reason",
     "SessionCreateFailed",
     "SessionNotConfirmed",

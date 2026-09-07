@@ -456,8 +456,12 @@ def build_session_envelope(
       → ``session_env["MODEL_NAME"]``.
       Empty if neither declares; runner-side ``_validate_envelope``
       raises ``BootstrapError(stage="validate")`` audibly.
-    - ``provider_name``: profile.provider → ``session_env["JAATO_PROVIDER"]``.
-      Same empty-stays-empty rule.
+    - ``provider_name``: profile.provider → ``model_tiers[initial].provider``
+      → ``session_env["JAATO_PROVIDER"]``.
+      Same empty-stays-empty rule.  The tier step is what lets a profile whose
+      tiers fully declare model AND provider drop both top-level keys, which
+      is what the profile loader's own both-declared warning tells authors is
+      fine (jaato #822).
 
     Args:
         server: The :class:`JaatoServer` instance — has ``_profile``
@@ -496,14 +500,24 @@ def build_session_envelope(
     budget_control_dict: Optional[Dict[str, Any]] = None
 
     if profile is not None:
-        provider_name = getattr(profile, "provider", None) or ""
         # Same source the bootstrap gate uses (core._profile_binds_a_model):
         # flat ``model``, else ``model_tiers[initial].model``.  Reading
         # ``profile.model`` alone made the gate and the envelope disagree --
         # a tiers-only profile passed the gate, then the runner rejected the
         # envelope with "envelope.model_name is empty" and the caller saw a
         # dropped connection rather than a config error.
-        from shared.model_tiers import bound_model_for_profile
+        #
+        # ``provider`` follows the SAME rule, and did not until #822: it read
+        # the flat key alone, so a profile whose tiers declared model AND
+        # provider per tier -- and which therefore dropped both top-level
+        # keys, exactly as the profile loader's own warning advises -- was
+        # refused with "envelope.provider_name is empty".  Client-side that is
+        # a 60-second create_session timeout, which reads as a hung daemon
+        # rather than a config error.  The initial tier is what the session
+        # uses on turn 1, so deriving from it is what makes that advice true.
+        from shared.model_tiers import (bound_model_for_profile,
+                                        bound_provider_for_profile)
+        provider_name = bound_provider_for_profile(profile) or ""
         model_name = bound_model_for_profile(profile) or ""
         # A profile is present, so its answer is explicit -- even the
         # empty one.  Materialise here rather than at the first append:

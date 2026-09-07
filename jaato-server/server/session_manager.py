@@ -109,6 +109,7 @@ from jaato_sdk.events import (
     AgentStatusChangedEvent,
     WorkspaceFilesChangedEvent,
     WorkspaceFilesSnapshotEvent,
+    describe_event_type_problems,
 )
 from .workspace_monitor import WorkspaceMonitor
 
@@ -340,10 +341,15 @@ class CascadeClientEntry:
             ``_lock`` (avoid deadlock).  Phase 2 will add an
             IPC-RPC variant where callback dispatches to the
             connected client's event channel.
-        event_types: Set of event-type names this entry subscribes
-            to.  ``None`` = subscribe to all.  Decision 3 (subscriber-
-            defined filter).  Type name comparison via
-            ``type(event).__name__`` for cheap dispatch.
+        event_types: Set of event CLASS names this entry subscribes
+            to (``"SessionTerminatedEvent"``, not the ``EventType``
+            wire value ``"session.terminated"``).  ``None`` =
+            subscribe to all.  Decision 3 (subscriber-defined
+            filter).  Type name comparison via
+            ``type(event).__name__`` for cheap dispatch -- which is
+            also why a wire value here matches nothing at all;
+            :meth:`register_in_process_client` warns when one is
+            passed (jaato #821).
         registered_at: Wall-clock monotonic timestamp at registration.
         last_event_ts: Monotonic timestamp of the most recent event
             dispatched to this entry.  ``None`` until the first event.
@@ -374,7 +380,11 @@ class CascadeClientEntry:
 
     def event_type_match(self, event: Any) -> bool:
         """Return True iff this entry's event-type filter matches
-        the given event.  ``event_types=None`` matches all."""
+        the given event.  ``event_types=None`` matches all.
+
+        Matching is on the event's Python CLASS name, so a filter
+        written in ``EventType`` wire values matches nothing.
+        """
         if self.event_types is None:
             return True
         return type(event).__name__ in self.event_types
@@ -2389,11 +2399,15 @@ class SessionManager:
         """
         from shared.session_envelope import SessionInitEnvelope
 
-        provider_name = getattr(profile, "provider", None) or ""
         # Second envelope builder (isolated subagents have no daemon-side
-        # JaatoServer).  Same binder as runner_spawn's, so a tiers-only
-        # profile does not produce "envelope.model_name is empty" here either.
-        from shared.model_tiers import bound_model_for_profile
+        # JaatoServer).  Same binders as runner_spawn's, so a tiers-only
+        # profile does not produce "envelope.model_name is empty" here
+        # either -- nor, since #822, a subagent silently routed to the
+        # hardcoded default below because its provider lived in the tier
+        # rather than at the top level.
+        from shared.model_tiers import (bound_model_for_profile,
+                                        bound_provider_for_profile)
+        provider_name = bound_provider_for_profile(profile) or ""
         model_name = bound_model_for_profile(profile) or ""
         plugins_list = list(getattr(profile, "plugins", []) or [])
         preloaded = set(
@@ -2440,6 +2454,20 @@ class SessionManager:
         env_overrides = dict(getattr(profile, "env", {}) or {})
 
         if not provider_name:
+            # A hardcoded default on the isolated-subagent path only.  It
+            # predates the tier binder above and is deliberately left in
+            # place rather than removed here: this builder has no
+            # session_env to fall back to, and turning a mis-configured
+            # subagent into a hard spawn failure is a behaviour change
+            # wider than #822.  What #822 removes is the case where a
+            # profile DID name a provider -- in its initial tier -- and
+            # this line quietly overrode it with a different vendor.
+            logger.warning(
+                "isolated subagent envelope: profile binds no provider by "
+                "either route (flat or initial tier); defaulting to "
+                "'anthropic'.  Declare `provider:` or a tier provider to "
+                "route this subagent deliberately."
+            )
             provider_name = "anthropic"
 
         try:
@@ -3593,9 +3621,13 @@ class SessionManager:
                 ``"observer"`` (multiple per cid; read-only).
                 Default ``"observer"`` for the common observe-only
                 case.
-            event_types: Set of event type-names to subscribe to
-                (e.g., ``{"SessionTerminatedEvent", "AgentCompletedEvent"}``).
-                ``None`` (default) subscribes to all event types.
+            event_types: Set of event CLASS names to subscribe to
+                (e.g., ``{"SessionTerminatedEvent", "AgentCompletedEvent"}``)
+                -- NOT ``EventType`` wire values such as
+                ``"session.terminated"``, which match nothing.  An
+                entry that can never match is logged at WARNING
+                rather than silently accepted.  ``None`` (default)
+                subscribes to all event types.
 
         Idempotency (PR #182, 2026-05-21):
             Re-registration with the SAME ``client_id`` is idempotent —
@@ -3622,6 +3654,22 @@ class SessionManager:
         if role not in ("owner", "observer"):
             raise ValueError(
                 f"role must be 'owner' or 'observer'; got {role!r}"
+            )
+        # A FILTER THAT CANNOT MATCH IS ANNOUNCED, NOT ACCEPTED IN SILENCE.
+        #
+        # ``event_type_match`` compares ``type(event).__name__``, so an
+        # ``EventType`` WIRE VALUE ("session.terminated") matches nothing --
+        # while registration succeeds and the log line below reports a
+        # perfectly healthy entry.  The subscriber then receives nothing for
+        # the life of the cascade and cannot tell that from a cascade that
+        # produced no events (jaato #821).  Warn rather than refuse: this
+        # daemon and its client can be different checkouts, so a class name
+        # this build does not know may still be real on the other end.
+        problem = describe_event_type_problems(event_types)
+        if problem:
+            logger.warning(
+                "register_in_process_client: %s (client_id=%r cid=%r)",
+                problem, client_id, cascade_driver_id,
             )
         entry = CascadeClientEntry(
             client_id=client_id,

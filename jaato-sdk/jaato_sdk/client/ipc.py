@@ -88,6 +88,7 @@ from jaato_sdk.events import (
     PermissionClearRequest,
     PermissionSetDefaultRequest,
     PermissionPolicySnapshotRequest,
+    describe_event_type_problems,
 )
 
 
@@ -2624,11 +2625,18 @@ class IPCClient:
             cascade_driver_id: The cid this iterator observes.
                 Sessions stamped with this cid will route their
                 events to the iterator.
-            event_types: Optional list of event type-names to
+            event_types: Optional list of event CLASS names to
                 filter for (e.g., ``["SessionTerminatedEvent",
-                "AgentCompletedEvent"]``).  ``None`` (default)
-                subscribes to all event types.  Empty list also
-                subscribes to all (no filter).
+                "AgentCompletedEvent"]``).  These are the names
+                ``type(event).__name__`` produces -- NOT the
+                ``EventType`` wire values (``"session.terminated"``),
+                which match nothing on either side of the
+                connection.  A name that can never match is logged
+                at WARNING when the iterator starts, because a deaf
+                observer is otherwise indistinguishable from a
+                cascade that produced no events (jaato #821).
+                ``None`` (default) subscribes to all event types.
+                Empty list also subscribes to all (no filter).
             role: ``"owner"`` (lifecycle authority; single per cid)
                 or ``"observer"`` (read-only; multiple allowed).
                 Default ``"observer"`` for the common observe-only
@@ -2680,6 +2688,23 @@ class IPCClient:
             "cascade_events(): subscribing cid=%s role=%s event_types=%s",
             cascade_driver_id, role, event_types,
         )
+        # A FILTER THAT CANNOT MATCH IS ANNOUNCED, NOT OBEYED IN SILENCE.
+        #
+        # Both filters below -- the daemon's and this iterator's own -- compare
+        # ``type(event).__name__``, so an ``EventType`` WIRE VALUE
+        # ("session.terminated") matches nothing while registration succeeds
+        # and the daemon logs a healthy entry.  The result is an observer that
+        # yields nothing for the life of the cascade and is indistinguishable
+        # from a cascade that produced no events (jaato #821).
+        #
+        # Warned rather than raised: this SDK and the daemon can be different
+        # checkouts (#823), so a class name this build has never heard of may
+        # still be real on the other end.  A warning names the mistake without
+        # refusing a subscription that might be correct; logging's last-resort
+        # handler puts it on stderr even in a script that configures nothing.
+        problem = describe_event_type_problems(event_types)
+        if problem:
+            logger.warning("cascade_events(): %s", problem)
         # Build CommandRequest args: [cid, role, *event_types].
         # Server-side _handle_cascade_register parses this shape.
         args = [cascade_driver_id, role]

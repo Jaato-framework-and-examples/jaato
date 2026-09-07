@@ -1239,7 +1239,13 @@ def events(filter_: str = None) -> Rendered:
             + (f"; {shown} match '{filter_}'" if filter_ else ""))
     lines = [head,
              "  (S→C server→client, C→S client→server, S↔C bidirectional; "
-             "wire value is the on-the-wire `type`. `explain event <NAME>` for detail)"]
+             "wire value is the on-the-wire `type`. `explain event <NAME>` for detail)",
+             "  NOTE a cascade/observer subscription filters on the CLASS name "
+             "(SessionTerminatedEvent),",
+             "       not on the member or the wire value — "
+             "`cascade_events(event_types=[...])` and the daemon both",
+             "       compare type(event).__name__, so a wire value there "
+             "matches nothing at all (#821)."]
     for dom in sorted(groups):
         lines.append(f"\n  [{dom}]")
         w = max((len(e.name) for e in groups[dom]), default=0)
@@ -1287,6 +1293,12 @@ def event(name: str) -> Rendered:
              f"  domain    : {e.domain or '(ungrouped)'}"]
     if e.event_class:
         lines.append(f"  class     : {e.event_class}")
+        # The one place the distinction bites.  A reader who has just been
+        # shown a member name and a wire value reasonably reaches for either
+        # when writing a filter; only this third string works, and the wrong
+        # one fails silently for the life of the subscription (#821).
+        lines.append(f"  subscribe : event_types=[\"{e.event_class}\"]   "
+                     "(cascade_events / observer filters match the CLASS name)")
     else:
         lines.append("  class     : (none — a wire marker / command, no payload class)")
     if e.note:

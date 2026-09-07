@@ -4,37 +4,66 @@ Each template bakes in the verified known-good recipe (the hard-won lessons
 from the LORA-specialist transcript), so a generated client doesn't repeat the
 hour of trial-and-error:
 
-- ``IPCClient(client_type=ClientType.API)`` — **load-bearing**: the daemon
-  keeps ``signal_completion`` for API clients (strips it for TERMINAL/WEB/CHAT
+- ``client_type=ClientType.API`` — **load-bearing**: the daemon keeps
+  ``signal_completion`` for API clients (strips it for TERMINAL/WEB/CHAT
   roots), so headless completion works.
-- ``connect(timeout=120.0)`` — a COLD daemon autostart takes ~30-60s; the SDK
+- ``connect_timeout=120.0`` — a COLD daemon autostart takes ~30-60s; the SDK
   default (5s) is too low.
 - ``env_file`` is always a real path — ``env_file=None`` crashes the IPC
   handshake with an opaque ``os.PathLike`` TypeError.
-- completion via first-of ``{TURN_COMPLETED, SESSION_TERMINATED}`` then wait —
-  a completion-gated session (its persona calls ``signal_completion``) emits
-  ``SESSION_TERMINATED`` carrying the rich ``reason`` (``natural``/``error``;
-  ``error_summary`` / ``error_type`` on error).  A PLAIN turn that just answers
-  emits only ``TURN_COMPLETED`` and the session then goes IDLE — a headless
-  session does NOT self-terminate after its prompt, so ``SESSION_TERMINATED``
-  never fires on that happy path.  Waiting on ``SESSION_TERMINATED`` alone
-  would block forever; subscribing to BOTH (mirrors the framework's own
-  ``run_ephemeral`` terminal detection — jaato PR #316) fixes the plain-turn
-  hang while still surfacing errors via ``SESSION_TERMINATED(reason="error")``.
-  NOT ``set_event_callback`` (which does not exist — the phantom method that
-  ate the peer's tracing).
 
-  THE RECIPE IS SCOPED TO THE NON-GATED CLIENT, and the scoping is the part
-  that bites when a template gets adapted.  ``client`` / ``host-tools`` ship
-  an inline, schema-less profile spec, so their single turn IS the terminus
-  and first-of is right.  Point either at a profile carrying a
-  ``completion_payload_schema`` and it stops being right: an agent that ends
-  a turn without ``signal_completion`` is RE-PROMPTED by the daemon and keeps
-  working, so ``TURN_COMPLETED`` fires with its work still ahead of it and
-  the client reports an outcome for a session that is still running (jaato
-  #767).  For that shape use ``Session.complete()``, which owns the settle
-  rule, or wait on ``SESSION_TERMINATED`` only — which is exactly what the
-  ``cascade`` template does, and why its stages are required to be gated.
+WHAT CHANGED, AND WHY IT IS THE POINT OF THIS MODULE
+====================================================
+
+These templates used to hand-roll the send-and-wait event loop::
+
+    done = asyncio.Event()
+    client.subscribe_once(EventType.SESSION_TERMINATED, on_done)
+    client.subscribe_once(EventType.TURN_COMPLETED, on_done)
+    await client.send_message(prompt)
+    await done.wait()
+
+That recipe is exactly what ``jaato_sdk.client.convenience`` exists to own —
+its own docstring names this pattern as the thing it was created to prevent,
+and cites the infinite hang the canonical template once shipped from writing
+it by hand (PR #399).  A scaffold is the one form of documentation that gets
+executed, so every hand-rolled copy was a place that bug class could reappear
+and a place that silently missed whatever the facade learned next.  It already
+had: ``Session.complete`` gained the settle-on-status rule of #767 and no
+scaffolded client benefited (jaato #825 / #826 / #827).
+
+So the templates now open a session with the facade and take their turn from
+it.  ``__CLIENT_CLASS__.session(...)`` is transport-complete — ``IPCClient`` /
+``IPCRecoveryClient`` route through ``open_session``; ``WSClient`` /
+``WSRecoveryClient`` have their own overrides wiring ``url`` / ``token`` /
+``ssl`` / ``ca``; ``InProcessClient.session`` yields the same ``Session`` —
+so the only per-transport difference is the CALL, which is a substitution
+(``__OPEN_SESSION_CALL__``) exactly like ``__NEW_CLIENT_CALL__`` was.
+
+WHICH TURN METHOD, AND WHY IT IS NOT A STYLE CHOICE
+---------------------------------------------------
+
+The facade offers three, and the archetypes divide on the one question that
+matters: **is the turn the terminus?**
+
+``ask`` / ``stream`` — for a NON-GATED session, whose single turn IS the
+terminus.  They wait on first-of ``{TURN_COMPLETED, SESSION_TERMINATED}``: a
+completion-gated session emits ``SESSION_TERMINATED`` with the rich reason, a
+PLAIN turn emits only ``TURN_COMPLETED`` and then goes IDLE (a headless
+session does NOT self-terminate), so waiting on ``SESSION_TERMINATED`` alone
+would block forever.  ``client`` / ``fire`` / ``host-tools`` ship an inline,
+schema-less profile spec, so this is right for them.
+
+``complete`` — for a COMPLETION-GATED session, whose terminus is
+``signal_completion``.  Point a session at a profile carrying a
+``completion_payload_schema`` and the turn stops being the terminus: an agent
+that ends a turn without ``signal_completion`` is RE-PROMPTED by the daemon
+and keeps working, so ``TURN_COMPLETED`` fires with its work still ahead of it
+(#767).  ``complete`` owns that settle rule AND returns the typed
+``AGENT_COMPLETED.payload`` — which is what ``cascade`` and ``sweep`` are for,
+and what their hand-rolled loops threw away: a cascade that declared a
+completion schema printed the terminal reason (``natural``) while the model's
+own answer sat unread in the payload (#827).
 
 Templates use ``__TOKEN__`` placeholders filled by ``str.replace`` so the
 embedded Python (dict literals, async braces) needs no escaping.
@@ -59,16 +88,40 @@ Preflight first:
 """
 import asyncio
 __CLIENT_IMPORT__
-from jaato_sdk import SessionCreateFailed
 
 ENV_FILE = "__ENV_FILE__"
 WORKSPACE = "__WORKSPACE__"
-MODEL = "__MODEL__"
-PROVIDER = "__PROVIDER__"
-__CONN_CONSTANTS__
+__CONSTANTS__
 
 
-__ON_STATUS_DEF__def _new_client():
+__ON_STATUS_DEF____CLIENT_FACTORY__'''
+
+
+#: The session-opening factory — emitted into any archetype whose body calls
+#: ``_open_session``.  One place holds the connection knobs, so a reader edits
+#: them once and every turn in the script inherits the change; ``**spec``
+#: carries the per-session half (``profile`` / ``agent`` / ``agent_params`` /
+#: ``cascade_driver_id`` / ``client_tools``) that differs per call site.
+SESSION_FACTORY = '''def _open_session(**spec):
+    """Open a session with the known-good connection knobs.
+
+    Returns the facade's async context manager, so the caller writes
+    ``async with _open_session(profile=...) as s:`` and gets a
+    ``Session`` that owns the send-and-wait recipe — ``ask`` (collected
+    text), ``stream`` (live text), ``complete`` (the typed payload of a
+    completion-gated session).  It connects on entry and disconnects on
+    exit; a creation failure raises ``SessionCreateFailed`` rather than
+    yielding a dead session.
+    """
+    return __OPEN_SESSION_CALL__
+'''
+
+
+#: The raw-client factory — emitted into any archetype whose body calls
+#: ``_new_client``.  Needed where there is no session to open: an observer
+#: only ATTACHES to someone else's cascade, and a sweep's owner connection
+#: declares the budget pool and outlives every job.
+RAW_CLIENT_FACTORY = '''def _new_client():
     """Construct the API client with the known-good knobs."""
     return __NEW_CLIENT_CALL__
 '''
@@ -76,71 +129,49 @@ __ON_STATUS_DEF__def _new_client():
 
 CLIENT_TEMPLATE = _COMMON_HEADER + '''
 
+PROMPT = "Who are you? Reply in one sentence."
+
+
 async def main() -> int:
-    client = _new_client()
-    if not await client.connect(timeout=120.0):   # cold autostart ~30-60s
-        print("could not connect/autostart the daemon — run the doctor")
-        return 1
-
-    done = asyncio.Event()
-    outcome = {}
-
-    def on_done(ev):
-        # Wake on whichever terminal lands first.  A completion-gated session
-        # (profile/persona calls signal_completion) emits SESSION_TERMINATED
-        # with a rich reason/error.  A PLAIN turn that just answers emits only
-        # TURN_COMPLETED and the session then goes IDLE — it never self-
-        # terminates, so SESSION_TERMINATED never fires on that happy path.
-        # Subscribing to BOTH means a plain turn doesn't hang here; setdefault
-        # lets a real SESSION_TERMINATED error reason win even if TURN_COMPLETED
-        # raced in first.  (Mirrors run_ephemeral terminal detection, PR #316.)
-        #
-        # THIS IS RIGHT BECAUSE THE PROFILE BELOW IS NOT COMPLETION-GATED.
-        # Give it a completion_payload_schema and the turn stops being the
-        # terminus: an agent that ends a turn without signal_completion gets
-        # RE-PROMPTED and keeps working, so this fires mid-flight and the
-        # outcome describes a session still running (jaato #767).  Switch to
-        # Session.complete() there — it owns that rule — or wait on
-        # SESSION_TERMINATED only, as the cascade archetype does.
-        outcome.setdefault("reason", getattr(ev, "reason", None) or "natural")
-        if getattr(ev, "error_type", None):
-            outcome["error_type"] = ev.error_type
-        if getattr(ev, "error_summary", None):
-            outcome["error_summary"] = ev.error_summary
-        done.set()
-
-    def on_output(ev):
-        text = getattr(ev, "text", "") or getattr(ev, "content", "")
-        if text:
-            print(text, end="", flush=True)
-
-    client.subscribe(EventType.AGENT_OUTPUT, on_output)
-    client.subscribe_once(EventType.SESSION_TERMINATED, on_done)
-    client.subscribe_once(EventType.TURN_COMPLETED, on_done)
-
     # Inline spec so this runs before you have a profile.  Swap for
     # profile="<name>", agent="<name>" to use a profile set: profile is
     # WHAT IT CAN DO (model, plugins, ceilings), agent is WHO IT IS.
     try:
-        sid = await client.create_session(
-            profile={"model": MODEL, "provider": PROVIDER}, timeout=60.0)
+        async with _open_session(
+                profile={"model": MODEL, "provider": PROVIDER}) as s:
+            # stream() yields the model's text as it arrives; s.ask(PROMPT)
+            # is the same turn collected into one string.  Either way the
+            # FACADE owns the wait — first-of {TURN_COMPLETED,
+            # SESSION_TERMINATED}, because a PLAIN turn emits only
+            # TURN_COMPLETED and then goes IDLE (a headless session does not
+            # self-terminate), so waiting on SESSION_TERMINATED alone hangs.
+            #
+            # THAT IS RIGHT BECAUSE THE PROFILE ABOVE IS NOT COMPLETION-GATED.
+            # Give it a completion_payload_schema and the turn stops being the
+            # terminus: an agent that ends a turn without signal_completion is
+            # RE-PROMPTED and keeps working (jaato #767).  Switch to
+            # ``await s.complete(PROMPT)`` there — same session, one method —
+            # and you get the typed payload instead of loose text.
+            async for chunk in s.stream(PROMPT):
+                print(chunk, end="", flush=True)
+            print()
+    except ConnectionError as exc:
+        # The facade RAISES rather than returning a dead session.
+        print(f"could not connect/autostart the daemon — run the doctor: {exc}")
+        return 1
     except SessionCreateFailed as exc:
         # create_session RAISES; it does not return None.  The exception
         # states the cause — do not guess one.  ``may_exist`` is True when
         # the request was sent and the answer lost, in which case a blind
         # retry creates a SECOND session.
         print(f"session.new failed: {exc}")
-        await client.disconnect()
         return 1
-
-    await client.send_message("Who are you? Reply in one sentence.")
-    await done.wait()
-    print()
-    if outcome.get("reason") == "error":
-        print(f"error: {outcome.get('error_type')}: {outcome.get('error_summary')}")
-        await client.disconnect()
+    except AgentError as exc:
+        # An error terminal is an EXCEPTION here, not a reason string to
+        # inspect: SESSION_TERMINATED(reason="error") carries error_type +
+        # error_summary and the facade re-raises them typed.
+        print(f"error: {exc.error_type}: {exc.error_summary}")
         return 1
-    await client.disconnect()
     return 0
 
 
@@ -151,26 +182,31 @@ if __name__ == "__main__":
 
 FIRE_TEMPLATE = _COMMON_HEADER + '''
 
+PROMPT = "Kick off the long-running task."
+
+
 async def main() -> int:
     """Fire-and-forget: send one message, do NOT wait for completion."""
-    client = _new_client()
-    if not await client.connect(timeout=120.0):
-        print("could not connect/autostart the daemon — run the doctor")
-        return 1
     # Inline spec so this runs before you have a profile.  Swap for
     # profile="<name>", agent="<name>" to use a profile set: profile is
     # WHAT IT CAN DO (model, plugins, ceilings), agent is WHO IT IS.
     try:
-        sid = await client.create_session(
-            profile={"model": MODEL, "provider": PROVIDER}, timeout=60.0)
+        async with _open_session(
+                profile={"model": MODEL, "provider": PROVIDER}) as s:
+            # NOT s.ask()/s.complete() — those WAIT for a terminus, which is
+            # the one thing this archetype must not do.  send_message on the
+            # underlying client dispatches and returns; the facade's context
+            # manager then disconnects, and the session keeps running
+            # daemon-side.  (Reattach later with another client, or use the
+            # observer archetype.)
+            await s.client.send_message(PROMPT)
+            sid = s.session_id
+    except ConnectionError as exc:
+        print(f"could not connect/autostart the daemon — run the doctor: {exc}")
+        return 1
     except SessionCreateFailed as exc:
         print(f"session.new failed: {exc}")
-        await client.disconnect()
         return 1
-    await client.send_message("Kick off the long-running task.")
-    # Fire-and-forget: the session keeps running daemon-side after we leave.
-    # (Reattach later with another client, or use the observer archetype.)
-    await client.disconnect()
     print(f"dispatched to session {sid}; not waiting.")
     return 0
 
@@ -186,59 +222,60 @@ import uuid
 # Each stage: (profile_name_or_spec, agent_or_None, trigger_prompt).
 # Edit this worklist; a real cascade reads it from your orchestration.
 WORKLIST = [
-    ({"model": MODEL, "provider": PROVIDER}, None, "Stage 1: do the first thing."),
-    ({"model": MODEL, "provider": PROVIDER}, None, "Stage 2: do the next thing."),
+    (__STAGE_PROFILE__, None, "Stage 1: do the first thing."),
+    (__STAGE_PROFILE__, None, "Stage 2: do the next thing."),
 ]
 
 
-async def _run_stage(client, cascade_id, profile, agent, prompt) -> str:
-    """Run one stage to terminal completion; return its reason.
+async def _run_stage(cascade_id, profile, agent, prompt):
+    """Run one stage to its terminus; return the stage's typed PAYLOAD.
 
     Each stage MUST be completion-gated — its persona calls
-    ``signal_completion`` as its last action.  That is what emits
-    ``SESSION_TERMINATED`` (the signal we wait on here) AND releases the
-    shared warm slot so the NEXT stage can reuse it.  A non-gated stage
-    would emit only ``TURN_COMPLETED``, never terminate, and stall the
-    cascade — so unlike the single-shot ``client`` archetype, this stage
-    intentionally waits on ``SESSION_TERMINATED`` only.
+    ``signal_completion`` as its last action.  That is what produces the
+    payload returned here AND releases the shared warm slot so the NEXT
+    stage can reuse it.
+
+    ``Session.complete()`` is the method for exactly that shape, and the
+    reason is worth stating: a completion-gated session's terminus is NOT
+    its first turn.  An agent that ends a turn without ``signal_completion``
+    is RE-PROMPTED by the daemon and keeps working, so ``TURN_COMPLETED``
+    fires with the stage's work still ahead of it (jaato #767).
+    ``complete`` settles when the SESSION settles, raises ``AgentError`` on
+    an error terminal, and returns ``AGENT_COMPLETED.payload`` — the thing
+    the stage's own ``completion_payload_schema`` exists to produce.  A
+    driver that waits on the terminal event alone learns only THAT a stage
+    ended, never WHAT it produced (jaato #827).
+
+    ``cascade_driver_id`` tenants every stage of one run: it shares the warm
+    slot (the slot is server-side, released on termination and reused by the
+    next stage regardless of the client reconnecting in between) and is the
+    id an observer attaches to.
     """
-    done = asyncio.Event()
-    outcome = {}
-
-    def on_done(ev):
-        outcome["reason"] = getattr(ev, "reason", None)
-        outcome["error_summary"] = getattr(ev, "error_summary", None)
-        done.set()
-
-    client.subscribe_once(EventType.SESSION_TERMINATED, on_done)
-    try:
-        sid = await client.create_session(
-            profile=profile, agent=agent,
-            cascade_driver_id=cascade_id,   # shared slot → warm imports
-            timeout=60.0)
-    except SessionCreateFailed as exc:
-        # A refused stage is a TYPED outcome, not a timeout: an exhausted
-        # cascade ceiling means the budget did its job and nothing ran.
-        return f"spawn_refused: {exc}"
-    await client.send_message(prompt)
-    await done.wait()
-    return outcome.get("reason") or "unknown"
+    async with _open_session(profile=profile, agent=agent,
+                             cascade_driver_id=cascade_id) as stage:
+        return await stage.complete(prompt)
 
 
 async def main() -> int:
     """Multi-session cascade driver — sequential stages sharing one warm slot."""
-    client = _new_client()
-    if not await client.connect(timeout=120.0):
-        print("could not connect/autostart the daemon — run the doctor")
-        return 1
     cascade_id = uuid.uuid4().hex   # one ID per cascade; stages reuse the slot
     for i, (profile, agent, prompt) in enumerate(WORKLIST, 1):
-        reason = await _run_stage(client, cascade_id, profile, agent, prompt)
-        print(f"stage {i}: {reason}")
-        if reason == "error":
-            await client.disconnect()
+        try:
+            payload = await _run_stage(cascade_id, profile, agent, prompt)
+        except ConnectionError as exc:
+            print(f"stage {i}: could not connect — run the doctor: {exc}")
             return 1
-    await client.disconnect()
+        except SessionCreateFailed as exc:
+            # A refused stage is a TYPED outcome, not a timeout: an exhausted
+            # cascade ceiling means the budget did its job and nothing ran.
+            print(f"stage {i}: spawn_refused: {exc}")
+            return 1
+        except AgentError as exc:
+            print(f"stage {i}: error: {exc.error_type}: {exc.error_summary}")
+            return 1
+        # ``None`` means the stage's profile declared no completion schema —
+        # it ran and ended, it just had no typed answer to give.
+        print(f"stage {i}: {payload if payload is not None else 'completed'}")
     return 0
 
 
@@ -252,6 +289,22 @@ OBSERVER_TEMPLATE = _COMMON_HEADER + '''
 # The cascade tenant ID to observe — pass the SAME id the cascade driver used.
 CASCADE_ID = "__CASCADE_ID__"
 
+# WHAT TO LISTEN FOR: event CLASS names, NOT EventType wire values.
+#
+# Both filters between here and the daemon compare ``type(event).__name__``,
+# so "session.terminated" (the EventType VALUE) matches nothing — and does so
+# silently: registration succeeds, the daemon logs a healthy entry, and this
+# iterator simply never yields.  That is indistinguishable from a cascade that
+# produced no events, which is why this template once shipped an observer that
+# was deaf for the entire life of every run it watched (jaato #821).  The SDK
+# now warns when a filter entry can never match; the names below are correct.
+EVENT_TYPES = [
+    "ToolCallStartEvent",
+    "TurnCompletedEvent",
+    "AgentCompletedEvent",
+    "SessionTerminatedEvent",
+]
+
 
 async def main() -> int:
     """Attach to a running cascade and live-trace its events (read-only)."""
@@ -260,11 +313,10 @@ async def main() -> int:
         print("could not connect/autostart the daemon — run the doctor")
         return 1
     print(f"observing cascade {CASCADE_ID} — Ctrl-C to stop")
-    # cascade_events filters to the listed type-names; None = everything.
+    # cascade_events filters to the listed CLASS names; None = everything.
     async for ev in client.cascade_events(
         CASCADE_ID,
-        event_types=["tool.call_start", "turn.completed",
-                     "agent.completed", "session.terminated"],
+        event_types=EVENT_TYPES,
         role="observer",
     ):
         et = getattr(ev, "type", "?")
@@ -291,9 +343,11 @@ if __name__ == "__main__":
 
 HOST_TOOLS_TEMPLATE = _COMMON_HEADER + '''
 
+PROMPT = "Use the send_to_user tool to greet the user."
+
+
 # A client-provided ("host") tool: the AGENT calls it; YOUR client executes it
-# locally and returns the result.  Register it BEFORE create_session so its
-# schema reaches the runner-tier model (mid-session registration isn't seen yet).
+# locally and returns the result.
 def _send_to_user(args):
     """Tool body — runs in THIS process when the agent invokes the tool."""
     text = args.get("text", "")
@@ -301,60 +355,44 @@ def _send_to_user(args):
     return {"delivered": True, "text": text}
 
 
+HOST_TOOLS = [{
+    "name": "send_to_user",
+    "description": "Send a text message to the user.",
+    "parameters": {
+        "type": "object",
+        "properties": {"text": {"type": "string"}},
+        "required": ["text"],
+    },
+    "handler": _send_to_user,   # runs locally when the agent calls the tool
+}]
+
+
 async def main() -> int:
-    client = _new_client()
-    if not await client.connect(timeout=120.0):   # cold autostart ~30-60s
-        print("could not connect/autostart the daemon — run the doctor")
-        return 1
-
-    # Register host tools BEFORE the session so the runner-tier model sees them.
-    await client.register_client_tools([{
-        "name": "send_to_user",
-        "description": "Send a text message to the user.",
-        "parameters": {
-            "type": "object",
-            "properties": {"text": {"type": "string"}},
-            "required": ["text"],
-        },
-        "handler": _send_to_user,   # runs locally when the agent calls the tool
-    }])
-
-    done = asyncio.Event()
-
-    def on_done(ev):
-        # Wake on whichever terminal lands first — a plain turn emits only
-        # TURN_COMPLETED (then goes IDLE), a completion-gated one emits
-        # SESSION_TERMINATED.  Subscribing to both avoids a hang on the plain
-        # path.  (Mirrors run_ephemeral terminal detection, jaato PR #316.)
-        # Right because the profile below is NOT completion-gated — under a
-        # completion_payload_schema the turn fires while the agent is still
-        # being re-prompted, so use Session.complete() instead (jaato #767).
-        done.set()
-
-    def on_output(ev):
-        text = getattr(ev, "text", "") or getattr(ev, "content", "")
-        if text:
-            print(text, end="", flush=True)
-
-    client.subscribe(EventType.AGENT_OUTPUT, on_output)
-    client.subscribe_once(EventType.SESSION_TERMINATED, on_done)
-    client.subscribe_once(EventType.TURN_COMPLETED, on_done)
-
     # Inline spec so this runs before you have a profile.  Swap for
     # profile="<name>", agent="<name>" to use a profile set: profile is
     # WHAT IT CAN DO (model, plugins, ceilings), agent is WHO IT IS.
+    #
+    # client_tools= is why this archetype can use the facade at all: the
+    # facade registers them AFTER connect but BEFORE create_session, which is
+    # the ordering the runner-tier model needs (a tool registered mid-session
+    # is not seen until a later turn).  Doing it by hand is the low-level
+    # connect/register/create dance this exists to replace.
     try:
-        sid = await client.create_session(
-            profile={"model": MODEL, "provider": PROVIDER}, timeout=60.0)
+        async with _open_session(
+                profile={"model": MODEL, "provider": PROVIDER},
+                client_tools=HOST_TOOLS) as s:
+            # ask() collects the turn's text; the tool call happens mid-turn
+            # and prints from _send_to_user above as it fires.
+            print(await s.ask(PROMPT))
+    except ConnectionError as exc:
+        print(f"could not connect/autostart the daemon — run the doctor: {exc}")
+        return 1
     except SessionCreateFailed as exc:
         print(f"session.new failed: {exc}")
-        await client.disconnect()
         return 1
-
-    await client.send_message("Use the send_to_user tool to greet the user.")
-    await done.wait()
-    print()
-    await client.disconnect()
+    except AgentError as exc:
+        print(f"error: {exc.error_type}: {exc.error_summary}")
+        return 1
     return 0
 
 
@@ -365,8 +403,6 @@ if __name__ == "__main__":
 
 SWEEP_TEMPLATE = _COMMON_HEADER + '''
 import uuid
-
-from jaato_sdk import SessionCreateFailed, truncation_reason
 
 # The matrix.  N INDEPENDENT jobs — none feeds another, each fully isolated,
 # results collected per-job.  An eval sweep is one instance; so is any batch
@@ -408,7 +444,8 @@ from jaato_sdk import SessionCreateFailed, truncation_reason
 #: This lives here, visible, because the driver owns it.  A cascade task
 #: pool's ``seconds`` ceiling cannot do this job: a pool reconciles when a
 #: session ENDS, so it never charges for a job that has not finished, and a
-#: runaway job is exactly the one that has not finished.
+#: runaway job is exactly the one that has not finished.  It is passed to
+#: ``complete(timeout=...)``, which raises ``TurnTimeout`` on expiry.
 JOB_TIMEOUT_S = 600.0
 
 JOBS = [
@@ -420,14 +457,14 @@ JOBS = [
 # to vary the model and have no profile for it.  ``model`` is required in
 # that form and the daemon rejects a spec without one:
 #
-#     ("cheap", {"model": MODEL, "provider": PROVIDER}, None, "Do the thing."),
+#     ("cheap", __INLINE_SPEC__, None, "Do the thing."),
 #
 # Prefer named profiles: an inline spec cannot carry plugins, GC strategy,
 # instructions or a completion schema, so a sweep built from specs can only
 # vary the thinnest part of what an agent is.
 #
 # An agent with ``{{param}}`` placeholders takes ``agent_params={...}`` on
-# create_session; add a fifth column if you need to sweep those too.
+# the session spec; add a fifth column if you need to sweep those too.
 
 # Aggregate ceiling for the whole sweep, or None for no pool.
 #
@@ -448,53 +485,29 @@ async def _run_job(owner_cid, name, profile, agent, prompt) -> dict:
     """Run ONE job to its terminus and return a result row.
 
     Never raises: a sweep whose jobs can kill each other is not a sweep.
+    Every failure mode below is caught and returned as a BLOCKED row.
     """
-    client = _new_client()
-    if not await client.connect(timeout=120.0):
-        return {"job": name, "outcome": "BLOCKED",
-                "detail": "could not connect/autostart the daemon"}
-
-    # SUBSCRIBE BEFORE create_session, NOT AFTER.
-    #
-    # A refusal is announced WHILE the create is in flight, so a handler
-    # installed afterwards never sees it.  Current daemons raise
-    # SessionCreateFailed and you could rely on that — but a generated
-    # driver ships to whatever daemon the reader has, and against an older
-    # one the failure mode without this is a 30s timeout naming nothing.
-    refusals = []
-    client.subscribe(EventType.ERROR, lambda ev: refusals.append(ev))
-    client.subscribe(EventType.AGENT_ERROR, lambda ev: refusals.append(ev))
-
+    # The two facts ``complete()`` does not return, read off the SAME
+    # connection.  ``s.client`` is the low-level client the facade wraps, and
+    # listeners added there persist across turns and are independent of the
+    # ones ``complete`` installs and removes for itself.
     state = {}
-    done = asyncio.Event()
 
-    def on_turn(ev):
+    def _on_turn(ev):
         state["finish_reason"] = getattr(ev, "finish_reason", None)
 
-    def on_terminated(ev):
+    def _on_terminated(ev):
         state["termination_reason"] = getattr(ev, "reason", None)
         state["termination_detail"] = getattr(ev, "error", None)
-        done.set()
 
-    client.subscribe(EventType.TURN_COMPLETED, on_turn)
-    client.subscribe(EventType.SESSION_TERMINATED, on_terminated)
+    def _watch(s):
+        s.client.subscribe(EventType.TURN_COMPLETED, _on_turn)
+        s.client.subscribe(EventType.SESSION_TERMINATED, _on_terminated)
 
     try:
-        try:
-            await client.create_session(
-                profile=profile, agent=agent,
-                cascade_driver_id=owner_cid, timeout=60.0)
-        except SessionCreateFailed as exc:
-            # A REFUSAL IS A TYPED OUTCOME, NOT A TIMEOUT.  An exhausted pool
-            # means the ceiling did its job and nothing ran — a different
-            # call to action from "the daemon is broken", and a driver that
-            # conflates them reports infrastructure failures as budget stops.
-            return {"job": name, "outcome": "BLOCKED",
-                    "detail": f"{type(exc).__name__}: {exc}",
-                    "may_exist": exc.may_exist}
-
-        await client.send_message(prompt)
-        try:
+        async with _open_session(profile=profile, agent=agent,
+                                 cascade_driver_id=owner_cid) as s:
+            _watch(s)
             # THE DRIVER OWNS ITS OWN WALL CLOCK.  It is tempting to delegate
             # this to a cascade task pool's ``seconds`` ceiling, and that does
             # not work: a pool is an aggregate over COMPLETED work, reconciled
@@ -502,54 +515,71 @@ async def _run_job(owner_cid, name, profile, agent, prompt) -> dict:
             # never reconciles -- observed as ``cascade_remaining=578.4``
             # unchanged across two spawns while a job ran past sixteen
             # minutes.  The pool is coherent; it is simply not a timeout.
-            await asyncio.wait_for(done.wait(), timeout=JOB_TIMEOUT_S)
-        except asyncio.TimeoutError:
-            return {"job": name, "outcome": "BLOCKED",
-                    "detail": f"no terminal event within {JOB_TIMEOUT_S}s"}
+            payload = await s.complete(prompt, timeout=JOB_TIMEOUT_S)
+    except ConnectionError as exc:
+        return {"job": name, "outcome": "BLOCKED",
+                "detail": f"could not connect/autostart the daemon: {exc}"}
+    except SessionCreateFailed as exc:
+        # A REFUSAL IS A TYPED OUTCOME, NOT A TIMEOUT.  An exhausted pool
+        # means the ceiling did its job and nothing ran — a different
+        # call to action from "the daemon is broken", and a driver that
+        # conflates them reports infrastructure failures as budget stops.
+        return {"job": name, "outcome": "BLOCKED",
+                "detail": f"{type(exc).__name__}: {exc}",
+                "may_exist": exc.may_exist}
+    except TurnTimeout as exc:
+        return {"job": name, "outcome": "BLOCKED", "detail": str(exc)}
+    except AgentError as exc:
+        return {"job": name, "outcome": "BLOCKED",
+                "detail": f"{exc.error_type}: {exc.error_summary}"}
 
-        # COMPLETENESS IS NOT ``finish_reason != "stop"``.  A schema-driven
-        # profile ends INSIDE a tool-use turn, so a finished job reports
-        # "tool_use" and never "stop".  The SDK owns this rule.
-        why = truncation_reason(
-            finish_reason=state.get("finish_reason"),
-            payload=state.get("payload"),
-            termination_reason=state.get("termination_reason"),
-            termination_detail=state.get("termination_detail"),
-        )
-        if why is not None:
-            return {"job": name, "outcome": "BLOCKED", "detail": why}
+    # COMPLETENESS IS NOT ``finish_reason != "stop"``.  A schema-driven
+    # profile ends INSIDE a tool-use turn, so a finished job reports
+    # "tool_use" and never "stop".  The SDK owns this rule.
+    why = truncation_reason(
+        finish_reason=state.get("finish_reason"),
+        payload=payload,
+        termination_reason=state.get("termination_reason"),
+        termination_detail=state.get("termination_detail"),
+    )
+    if why is not None:
+        return {"job": name, "outcome": "BLOCKED", "detail": why}
 
-        # A JOB THAT COULD NOT DO ITS WORK IS NOT A RESULT.
-        #
-        # The completion-schema convention gives every payload an ``errors[]``
-        # escape hatch precisely so a job can say "I could not answer" instead
-        # of inventing an answer.  Reading a payload that reports errors as a
-        # normal outcome turns an unusable measurement into a data point, and
-        # a sweep then compares one job's real answer against another job's
-        # failure to produce one.
-        #
-        # This is not hypothetical.  A downstream eval reported "the cheaper
-        # model failed and the better one scored 1.000" off a two-job sample;
-        # a four-job rerun showed BOTH models scoring 1.0 on one repeat and
-        # 0.0 on another, because the grader intermittently could not read the
-        # file it was grading.  Its payload said so in ``errors[]`` the whole
-        # time.  BLOCKED and FAIL are different verdicts and only one of them
-        # is evidence about the job.
-        payload = state.get("payload") or {}
-        errors = payload.get("errors") or []
-        if errors:
-            return {"job": name, "outcome": "BLOCKED",
-                    "detail": "; ".join(str(e) for e in errors),
-                    "payload": payload}
+    # A JOB THAT COULD NOT DO ITS WORK IS NOT A RESULT.
+    #
+    # The completion-schema convention gives every payload an ``errors[]``
+    # escape hatch precisely so a job can say "I could not answer" instead
+    # of inventing an answer.  Reading a payload that reports errors as a
+    # normal outcome turns an unusable measurement into a data point, and
+    # a sweep then compares one job's real answer against another job's
+    # failure to produce one.
+    #
+    # This is not hypothetical.  A downstream eval reported "the cheaper
+    # model failed and the better one scored 1.000" off a two-job sample;
+    # a four-job rerun showed BOTH models scoring 1.0 on one repeat and
+    # 0.0 on another, because the grader intermittently could not read the
+    # file it was grading.  Its payload said so in ``errors[]`` the whole
+    # time.  BLOCKED and FAIL are different verdicts and only one of them
+    # is evidence about the job.
+    #
+    # Reaching the payload at all is what ``complete()`` buys: it captures
+    # AGENT_COMPLETED.payload, which a driver waiting on the terminal event
+    # alone never sees — so this check used to read an empty dict and could
+    # not fire (jaato #827).
+    payload = payload or {}
+    errors = payload.get("errors") or []
+    if errors:
+        return {"job": name, "outcome": "BLOCKED",
+                "detail": "; ".join(str(e) for e in errors),
+                "payload": payload}
 
-        # ``warnings[]`` deliberately does NOT block: it is the channel for
-        # "answered, with caveats", and treating it as failure would push
-        # authors to stop reporting caveats at all.
-        return {"job": name, "outcome": "OK",
-                "warnings": payload.get("warnings") or [],
-                "finish_reason": state.get("finish_reason")}
-    finally:
-        await client.disconnect()
+    # ``warnings[]`` deliberately does NOT block: it is the channel for
+    # "answered, with caveats", and treating it as failure would push
+    # authors to stop reporting caveats at all.
+    return {"job": name, "outcome": "OK",
+            "warnings": payload.get("warnings") or [],
+            "payload": payload,
+            "finish_reason": state.get("finish_reason")}
 
 
 async def main() -> int:
@@ -557,7 +587,9 @@ async def main() -> int:
     #
     # A pool belongs to the connection that declared it: an owner opened and
     # closed around a single job takes the pool with it.  One client can
-    # declare N cids, so N pools do not need N connections.
+    # declare N cids, so N pools do not need N connections.  This is the one
+    # place the sweep still holds a RAW client — it opens no session of its
+    # own, it only declares the ceiling the jobs draw on.
     owner = _new_client()
     if not await owner.connect(timeout=120.0):
         print("could not connect/autostart the daemon — run the doctor")
@@ -576,6 +608,10 @@ async def main() -> int:
         import jaato_sdk
         print(f"# sdk={jaato_sdk.__file__}")
 
+        # Each job opens its OWN session (its own connection, by
+        # construction — the facade connects on entry and disconnects on
+        # exit).  Measured at ~0.01s against a warm daemon, so N connections
+        # for N jobs is not a throughput argument; isolation is the point.
         rows = await asyncio.gather(
             *(_run_job(cid, name, profile, agent, prompt)
               for name, profile, agent, prompt in JOBS)
@@ -607,3 +643,25 @@ TEMPLATES = {
     "sweep": ("SWEEP_TEMPLATE", SWEEP_TEMPLATE,
               "Sweep/matrix driver — N INDEPENDENT jobs, none feeding another."),
 }
+
+
+#: Archetypes that never bind a provider or a model themselves.
+#:
+#: ``--provider`` / ``--model`` name what CREATES a session, and a profile is
+#: what carries them.  These three archetypes either take their binding from
+#: the profile a stage/job names (``cascade`` / ``sweep``) or have no provider
+#: relationship at all (``observer``, which is read-only and attaches to a
+#: cascade someone else is running).  Requiring the flags forced an arbitrary
+#: choice that the profile then overrode, and baked a misleading default into
+#: the placeholder and ``.env`` (jaato #820).
+#:
+#: The flags stay ACCEPTED for all three — supplying them keeps the
+#: inline-spec placeholder, which is what makes a generated cascade runnable
+#: before any profile exists.
+PROVIDER_OPTIONAL = ("cascade", "observer", "sweep")
+
+
+#: Archetypes that never reference ``MODEL`` / ``PROVIDER`` in their body, so
+#: emitting those constants would emit dead code.  ``observer`` is the whole
+#: list: it neither creates a session nor sends a message.
+NO_MODEL_CONSTANTS = ("observer",)
