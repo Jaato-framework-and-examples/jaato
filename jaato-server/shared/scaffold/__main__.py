@@ -309,6 +309,17 @@ def main(argv=None) -> int:
                                    "module stem under "
                                    ".jaato/scripts/processors/ and the "
                                    "`name:` of its profile entry")
+    pn.add_argument("--no-gate", action="store_true", dest="no_gate",
+                    help="for `new sweep`: do NOT emit the completion gate "
+                         "(acceptance.sh + the processor + the profile wiring "
+                         "it needs). The gate is emitted by default because a "
+                         "sweep's arms are graded — 'did this arm meet the "
+                         "criteria' is the measurement, not a nicety. Pass "
+                         "this for a sweep that grades nothing.")
+    pn.add_argument("--gate-name", metavar="NAME", dest="gate_name",
+                    help="stem shared by the gate's four files (default "
+                         "'acceptance'): the processor module, the completion "
+                         "schema, the profile, and the profile entry's `name:`.")
     pn.add_argument("--force", action="store_true", help="overwrite existing")
     pn.add_argument("--secrets", metavar="MODE",
                     help="how profiles reference the provider credential: "

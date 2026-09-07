@@ -458,7 +458,7 @@ BASELINE: Dict[str, int] = {
     "jaato-server/shared/rewind.py::detect_truncated_tool_call": 16,
     "jaato-server/shared/runtime_limits.py::RuntimeLimits.__post_init__": 18,
     "jaato-server/shared/scaffold/__main__.py::_cmd_validate": 16,
-    "jaato-server/shared/scaffold/build.py::_new_client_archetype": 20,
+    "jaato-server/shared/scaffold/build.py::_new_client_archetype": 18,
     "jaato-server/shared/scaffold/build.py::_new_profile_set": 26,
     "jaato-server/shared/scaffold/explain.py::event": 21,
     "jaato-server/shared/scaffold/explain.py::events": 17,

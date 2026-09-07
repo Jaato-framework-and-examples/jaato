@@ -448,9 +448,9 @@ import uuid
 #: ``complete(timeout=...)``, which raises ``TurnTimeout`` on expiry.
 JOB_TIMEOUT_S = 600.0
 
-JOBS = [
-    ("baseline", "your-profile", "your-baseline-agent", "Do the thing."),
-    ("variant",  "your-profile", "your-variant-agent",  "Do the thing."),
+__GATE_NOTE__JOBS = [
+    ("baseline", __JOBS_PROFILE__, "your-baseline-agent", "Do the thing."),
+    ("variant",  __JOBS_PROFILE__, "your-variant-agent",  "Do the thing."),
 ]
 
 # ``profile`` also accepts an inline spec dict, for when you genuinely want

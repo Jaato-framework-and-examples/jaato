@@ -38,6 +38,8 @@ Placeholders are ``__TOKEN__``-style, filled by ``str.replace``, so the
 embedded Python needs no escaping.
 """
 
+from typing import Optional
+
 #: The generated processor module.
 PROCESSOR_TEMPLATE = '''"""__NAME__ — a completion processor (gates signal_completion).
 
@@ -249,7 +251,9 @@ WIRING_TEMPLATE = """completion_processors:
                                 #   none), `fail` = keep blocking."""
 
 
-def render(name: str, provenance: str) -> str:
+def render(name: str, provenance: str,
+           checks_command: Optional[str] = None,
+           wiring: Optional[str] = None) -> str:
     """The processor module for *name*, with its own wiring embedded.
 
     Args:
@@ -257,18 +261,36 @@ def render(name: str, provenance: str) -> str:
             ``name:``.
         provenance: The command that generated it, reproduced in the
             module docstring.
+        checks_command: Pre-fill ``CHECKS_COMMAND`` with this instead of
+            leaving it ``None``.  ``new processor`` emits the blank,
+            because it has no idea what you intend to check; ``new sweep``
+            passes the ``acceptance.sh`` it emits in the same breath, so
+            the gate arrives wired rather than merely wireable (jaato
+            #772) — a blank the reader must notice is a missing file one
+            indirection further in.
+        wiring: Override the ``completion_processors:`` block reproduced in
+            the module docstring.  ``new sweep`` passes the wiring it
+            actually WROTE into a profile, so the module documents the live
+            wiring instead of a block to paste somewhere.
 
     Returns:
         The complete module source.
     """
-    wiring = "\n".join(
+    block = wiring if wiring is not None else wiring_for(name)
+    indented = "\n".join(
         "    " + line if line else ""
-        for line in wiring_for(name).splitlines()
+        for line in block.splitlines()
     )
-    return (PROCESSOR_TEMPLATE
-            .replace("__WIRING__", wiring)
-            .replace("__PROVENANCE__", provenance)
-            .replace("__NAME__", name))
+    rendered = (PROCESSOR_TEMPLATE
+                .replace("__WIRING__", indented)
+                .replace("__PROVENANCE__", provenance)
+                .replace("__NAME__", name))
+    if checks_command is not None:
+        rendered = rendered.replace(
+            "CHECKS_COMMAND: str | None = None",
+            f"CHECKS_COMMAND: str | None = {checks_command!r}",
+        )
+    return rendered
 
 
 def wiring_for(name: str) -> str:

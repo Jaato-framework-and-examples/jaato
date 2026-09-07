@@ -19,6 +19,8 @@ guess.  Emitted base profiles carry ``plugins: []`` + a pointer to
 
 from __future__ import annotations
 
+import json
+import logging
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -281,11 +283,25 @@ class _Plan:
         self.dry_run = dry_run
         self.entries: List[tuple] = []
 
-    def write(self, path: Path, text: str, action: str = "create") -> None:
-        """Record (and unless rehearsing, perform) one write."""
+    def write(self, path: Path, text: str, action: str = "create", *,
+              executable: bool = False) -> None:
+        """Record (and unless rehearsing, perform) one write.
+
+        Args:
+            path: Absolute target, under :attr:`ws`.
+            text: File contents.
+            action: ``"create"`` or ``"update"`` — what the label says.
+            executable: Set the owner/group/other execute bits.  Needed by
+                ``acceptance.sh``: the gate invokes it as ``./acceptance.sh``,
+                so a checks script emitted non-executable is an environment
+                fault on every arm of the sweep — and one that reports as the
+                gate being broken rather than as the generator being wrong.
+        """
         if not self.dry_run:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(text, encoding="utf-8")
+            if executable:
+                path.chmod(path.stat().st_mode | 0o111)
         self.entries.append((str(path.relative_to(self.ws)), action))
 
     @property
@@ -742,6 +758,13 @@ def _new_client_archetype(args, archetype: str) -> int:
                           subs["__CONN_CONSTANTS__"]) if part)
     subs["__PROVENANCE__"] = _provenance(args, archetype, transport,
                                          provider, model)
+    # The JOBS matrix names the gate profile we are about to write, rather
+    # than the "your-profile" placeholder, so the emitted client and the
+    # emitted profile refer to each other on the first run.  With --no-gate
+    # there is no profile to name and the placeholder stands.
+    gate_name = _gate_name(args)
+    gated = _gate_wanted(args, archetype)
+    subs.update(_gate_substitutions(gated, gate_name))
 
     def _fill(text: str) -> str:
         """Substitute to a FIXED POINT, not once.
@@ -783,15 +806,25 @@ def _new_client_archetype(args, archetype: str) -> int:
         plan.write(env_file, _compose_env(provider, active),
                    action="update" if env_file.exists() else "create")
 
+    # The completion gate, for the archetypes whose arms are graded.  Written
+    # in the same pass as the client so the two agree about the profile name
+    # on the first run (jaato #772).
+    gate_skipped: List[Path] = []
+    if gated:
+        gate_skipped = _emit_sweep_gate(plan, ws, gate_name,
+                                        subs["__PROVENANCE__"],
+                                        provider, model, bool(args.force))
+
     if dry_run:
         print(f"`jaato-scaffold new {archetype}` would write into {ws}:\n")
         print(plan.render())
-        _dry_run_footer(doc, "the compile check")
+        _dry_run_footer(doc, _rehearsal_skips(gated))
         return 0
 
     print(f"scaffolded {archetype} client in {ws}:")
     for w in plan.labels:
         print(f"  + {w}")
+    _report_kept(ws, gate_skipped)
 
     # emit-then-check: the generated client must at least compile.
     print("\ncompile-checking the generated client …")
@@ -801,10 +834,66 @@ def _new_client_archetype(args, archetype: str) -> int:
         print(f"✘ generated client does not compile — generator bug:\n{e}")
         return 1
     print("✓ generated client compiles.")
-    # Next-steps hint, matched to how the credential is referenced.  With no
-    # provider bound there is no credential to name — the profile each stage
-    # points at owns it — so the hint says nothing rather than naming a
-    # variable this workspace does not use.
+
+    rc = _check_generated_gate(ws, gate_name, gated, gate_skipped)
+    if rc is not None:
+        return rc
+
+    _print_next_steps(args, ws, env_file, py_file, provider, gated, gate_name)
+    return 0
+
+
+def _rehearsal_skips(gated: bool) -> str:
+    """What ``--dry-run`` did NOT run, named so the rehearsal is not oversold."""
+    return ("the compile check and the gate probe" if gated
+            else "the compile check")
+
+
+def _report_kept(ws: Path, skipped: List[Path]) -> None:
+    """Name every gate file left as it was.
+
+    A silent skip is indistinguishable from a rewrite, and these are files the
+    author is expected to have edited — so the one thing worse than not
+    overwriting them is not saying so.
+    """
+    for path in skipped:
+        print(f"  · {path.relative_to(ws)} (kept — pass --force to overwrite)")
+
+
+def _check_generated_gate(ws: Path, gate_name: str, gated: bool,
+                          skipped: List[Path]) -> Optional[int]:
+    """Emit-then-check for the gate; an exit code on failure, else ``None``.
+
+    Checked far harder than the client, which only has to compile: the gate is
+    loaded through the framework's own loader and DRIVEN, because the failure
+    that matters here is not a syntax error but a gate that ACCEPTS what it
+    should refuse — and that failure is invisible until a graded run reports a
+    clean board it never earned.
+
+    Skipped entirely when files were kept: what is on disk is then the
+    author's, and vouching for it would be vouching for something this
+    generator did not write.
+    """
+    if not gated or skipped:
+        return None
+    print("\ndriving the generated completion gate …")
+    reason = _probe_generated_gate(ws, gate_name)
+    if reason:
+        print(f"✘ generated gate is not usable — generator bug: {reason}")
+        return 1
+    print("✓ it loads, and refuses a completion while acceptance.sh has no "
+          "checks configured.")
+    return None
+
+
+def _print_next_steps(args, ws: Path, env_file: Path, py_file: Path,
+                      provider, gated: bool, gate_name: str) -> None:
+    """The closing hint, matched to how the credential is referenced.
+
+    With no provider bound there is no credential to name — the profile each
+    stage points at owns it — so the hint says nothing rather than naming a
+    variable this workspace does not use.
+    """
     ckind, cscheme = _resolve_secrets_mode(getattr(args, "secrets", None)
                                            or _read_ws_secrets(ws))
     csecret_path = getattr(args, "secret_path", None) or _SECRET_PATH_DEFAULT
@@ -818,11 +907,270 @@ def _new_client_archetype(args, archetype: str) -> int:
                            f"{csecret_path.format(provider=provider)}")
         else:
             cred_note = f"  # first set {key_env_var}=... in {env_file}\n"
-    print(f"\nnext:\n{cred_note}"
+    print(f"\nnext:\n{_gate_next_step(ws, gated, gate_name)}{cred_note}"
           f"  python -m jaato_sdk.doctor --workspace {ws} "
           f"--env-file {env_file}{secret_hint}\n"
           f"  python {py_file}")
-    return 0
+
+
+def _gate_next_step(ws: Path, gated: bool, gate_name: str) -> str:
+    """The gate's line in the next-steps hint, first because its omission is
+    the one that fails silently: the sweep runs, every arm is refused by an
+    unconfigured gate, and the run reads as a model failure rather than as a
+    missing edit."""
+    if not gated:
+        return ""
+    profile = ws / ".jaato" / "profiles" / f"{gate_name}.yaml"
+    return (f"  # put this sweep's acceptance criteria in "
+            f"{ws / 'acceptance.sh'}\n"
+            f"  #   (run_checks is empty as emitted, so every arm is refused "
+            f"until you fill it)\n"
+            f"  # then choose plugins: [] in {profile}\n")
+
+
+# ------------------------------------------------------------ the sweep gate
+
+#: The archetype whose emitted set includes a completion gate.
+#:
+#: One archetype rather than a general flag because the gate is not a generic
+#: nicety: a sweep's arms are GRADED, so "did this arm meet the criteria" is
+#: the measurement itself.  A `client` or `fire` script has no scoreboard for a
+#: gate to agree with (jaato #772).
+GATED_ARCHETYPES = ("sweep",)
+
+
+def _gate_wanted(args, archetype: str) -> bool:
+    """Whether this invocation emits a completion gate.
+
+    On by default for :data:`GATED_ARCHETYPES` — the point of #772 is that the
+    gate ARRIVES wired, and an opt-in flag reproduces one level up the very
+    discovery problem it exists to remove (the author who does not know a gate
+    is the missing piece does not know to ask for one).  ``--no-gate`` is the
+    escape hatch for a sweep that genuinely grades nothing.
+    """
+    return archetype in GATED_ARCHETYPES and not getattr(args, "no_gate", False)
+
+
+def _gate_name(args) -> str:
+    """The stem shared by all four files of the gate set.
+
+    One name across the set — module, schema, profile and the entry's
+    ``name:`` — so the four files are visibly one thing rather than four
+    that happen to be related.
+    """
+    from . import _gate_templates as _gate
+
+    return str(getattr(args, "gate_name", None)
+               or _gate.DEFAULT_GATE_NAME).strip()
+
+
+def _gate_substitutions(gated: bool, name: str) -> Dict[str, str]:
+    """Fill the sweep template's gate-dependent tokens.
+
+    Both are emitted for every client archetype (only ``sweep`` contains
+    them), because ``_fill`` substitutes whatever it is given and a token
+    with no entry survives into the generated file as literal
+    ``__JOBS_PROFILE__``.
+    """
+    if not gated:
+        return {"__JOBS_PROFILE__": '"your-profile"', "__GATE_NOTE__": ""}
+    return {
+        "__JOBS_PROFILE__": f'"{name}"',
+        "__GATE_NOTE__": (
+            "# THE ARMS ARE GATED.  The profile named below was written beside\n"
+            "# this script and carries a completion gate: an arm cannot signal\n"
+            f"# completion until ./acceptance.sh passes, which is where you put\n"
+            f"# this sweep's acceptance criteria.  As emitted that script has no\n"
+            "# checks in it and every arm is refused, deliberately — a gate with\n"
+            "# nothing configured must not read as a gate that passed.\n"
+            "#\n"
+            "# The same script is what should grade the sweep afterwards, so the\n"
+            "# gate and the scoreboard cannot end up measuring different things.\n"
+            f"#   the checks       ./acceptance.sh\n"
+            f"#   the gate         .jaato/scripts/processors/{name}.py\n"
+            f"#   the wiring       .jaato/profiles/{name}.yaml\n"
+            "#   what it all does  jaato-scaffold explain completion\n"
+        ),
+    }
+
+
+def _gate_paths(ws: Path, name: str) -> Dict[str, Path]:
+    """Where each file of the gate set lands.
+
+    The two ``.jaato/`` paths are not free choices: ``script:`` and
+    ``completion_payload_schema:`` in the emitted profile are resolved by
+    ``script_loader.resolve_script_path`` and
+    ``completion_schema_loader._resolve_schema_path``, whose workspace tier is
+    ``<ws>/.jaato/<path>``.  A file written anywhere else is a profile that
+    parses and a gate that never loads.
+    """
+    return {
+        "checks": ws / "acceptance.sh",
+        "processor": ws / ".jaato" / "scripts" / "processors" / f"{name}.py",
+        "schema": ws / ".jaato" / "completion_schemas" / f"{name}.json",
+        "profile": ws / ".jaato" / "profiles" / f"{name}.yaml",
+    }
+
+
+def _emit_sweep_gate(plan: "_Plan", ws: Path, name: str, provenance: str,
+                     provider, model, force: bool) -> List[Path]:
+    """Write the gate set; return the paths that were skipped as existing.
+
+    The four files are written as ONE unit deliberately.  Each is inert alone:
+    a processor with no checks script faults on every arm, a checks script no
+    processor runs grades nothing, and the profile's two keys are what make
+    ``signal_completion`` exist for the processor to gate at all.  Emitting
+    them separately is what left an author holding three files and the
+    relationship between them (jaato #772).
+
+    An existing file is never clobbered without ``--force``: these are files an
+    author is expected to EDIT (the checks above all), and a re-run of ``new``
+    that silently reverted them to the template would be worse than one that
+    refuses.  Skips are reported by the caller rather than being silent.
+    """
+    from . import _gate_templates as _gate
+    from . import _processor_template as _tpl
+
+    paths = _gate_paths(ws, name)
+    skipped: List[Path] = []
+
+    wiring = _gate_profile_wiring(name)
+    contents = {
+        "checks": _gate.render_acceptance_sh(name, provenance),
+        "processor": _tpl.render(name, provenance,
+                                 checks_command=_gate.CHECKS_COMMAND,
+                                 wiring=wiring),
+        "schema": _gate.render_schema(name),
+        "profile": _gate.render_profile(name, provenance, provider, model),
+    }
+    for key in ("checks", "processor", "schema", "profile"):
+        target = paths[key]
+        if target.exists() and not force:
+            skipped.append(target)
+            continue
+        plan.write(target, contents[key],
+                   "update" if target.exists() else "create",
+                   executable=(key == "checks"))
+    return skipped
+
+
+def _gate_profile_wiring(name: str) -> str:
+    """The ``completion_processors:`` block as the emitted PROFILE carries it.
+
+    Read back out of the rendered profile rather than re-templated, so the
+    block reproduced in the processor's docstring is the wiring that was
+    actually written and not a second copy free to drift from it.  Comment
+    lines are dropped: the docstring wants the shape, and the profile's
+    commentary is already there for anyone reading the profile.
+    """
+    from . import _gate_templates as _gate
+
+    lines = _gate.render_profile(name, "").splitlines()
+    start = lines.index("completion_processors:")
+    kept = [ln for ln in lines[start:] if not ln.lstrip().startswith("#")]
+    return "\n".join(kept).rstrip() + "\n"
+
+
+def _probe_generated_gate(ws: Path, name: str) -> Optional[str]:
+    """Drive the emitted gate the way the daemon will; report why it is unusable.
+
+    Stronger than the clients' ``py_compile`` and than ``new processor``'s
+    probe, because the thing under test here is a SET: the profile has to parse
+    into a processor entry whose ``script:`` resolves to the module that was
+    written, the module has to load, and running it has to invoke the
+    ``acceptance.sh`` that was written beside it.
+
+    The assertion that matters is the LAST one.  Fresh from the generator,
+    ``acceptance.sh`` has no checks configured, and the tempting behaviour —
+    a script with nothing to check exiting 0 — would have the gate report "no
+    failures" and wave every arm through.  So the probe requires the
+    unconfigured gate to BLOCK, and to block as a ``faults[]`` entry rather
+    than an ``errors[]`` one: it is an environment fault the author must clear,
+    not a wrong answer costing the agent a retry.  A generated set that would
+    accept a completion on checks that never ran fails here, at scaffold time,
+    rather than silently in a graded run.
+
+    Args:
+        ws: The workspace the set was written into.
+        name: The gate name (the shared stem of all four files).
+
+    Returns:
+        A one-line reason the set is not usable, or ``None`` when it is.
+    """
+    import yaml
+
+    from shared.completion_processors import invoke_processors, load_processors
+    from shared.plugins.subagent.config import build_inline_profile
+
+    paths = _gate_paths(ws, name)
+
+    # 1. The profile parses, and its processor entry is the one we wrote.
+    try:
+        raw = yaml.safe_load(paths["profile"].read_text(encoding="utf-8"))
+        profile = build_inline_profile(raw, name=name)
+    except Exception as exc:                        # noqa: BLE001
+        return f"the emitted profile does not parse: {type(exc).__name__}: {exc}"
+    if not profile.completion_processors:
+        return "the emitted profile declares no completion_processors"
+    entry = profile.completion_processors[0]
+    if entry.max_refusals is None:
+        return ("the emitted processor entry carries no max_refusals — an "
+                "unbounded gate does not terminate on its own (jaato #768)")
+
+    # 2. The schema the profile points at exists and is loadable JSON.  Without
+    #    it signal_completion is hidden outright, so there is nothing to gate.
+    if not paths["schema"].is_file():
+        return f"completion_payload_schema points at a missing {paths['schema']}"
+    try:
+        json.loads(paths["schema"].read_text(encoding="utf-8"))
+    except Exception as exc:                        # noqa: BLE001
+        return f"the emitted completion schema is not valid JSON: {exc}"
+
+    # 3. The module loads through the framework's own loader, addressed exactly
+    #    as the profile addresses it.
+    loaded = load_processors([entry], workspace_path=str(ws), config_root=None)
+    if loaded and loaded[0].load_error:
+        return f"the emitted processor does not load: {loaded[0].load_error}"
+
+    # 4. And driving it runs the emitted acceptance.sh, which is unconfigured,
+    #    which must BLOCK as a fault.
+    class _Ctx:
+        tool_calls: list = []
+        agent_params: dict = {}
+        workspace_path = str(ws)
+        config_root = None
+        env: dict = {}
+        session_id = "scaffold-probe"
+        logger = logging.getLogger(__name__)
+
+    honest = {"summary": "done", "errors": [], "warnings": []}
+    first = invoke_processors(loaded, payload=honest, context=_Ctx(),
+                              phase_filter="finalization")
+    if not first.has_fatal:
+        return ("the emitted gate ACCEPTED a completion although "
+                "acceptance.sh has no checks configured — a gate that is not "
+                "running must never read as a gate that passed (jaato #768 "
+                "rule 5)")
+
+    # It blocked.  WHICH CHANNEL it blocked on is not readable off the result
+    # — a fault and an error both land in ``failed`` for the round-trip they
+    # block — so the discrimination is behavioural, which is the stronger
+    # test anyway: a fault costs no refusal and blocks exactly once, an error
+    # costs one and blocks every time.  Invoking a second time separates them
+    # without depending on how a message happens to be worded.
+    second = invoke_processors(loaded, payload=honest, context=_Ctx(),
+                               phase_filter="finalization")
+    if loaded[0].refusals:
+        return (f"the emitted gate spent {loaded[0].refusals} refusal(s) on "
+                f"an unconfigured acceptance.sh — an environment fault the "
+                f"agent cannot clear must not consume its retry budget "
+                f"(jaato #768 rule 6)")
+    if second.has_fatal:
+        return ("the emitted gate blocked twice on an unconfigured "
+                "acceptance.sh — a fault blocks for the one round-trip the "
+                "agent needs to record it, and blocking on a condition no "
+                "retry can clear is the loop the budget exists to prevent")
+    return None
 
 
 # ----------------------------------------------------- completion processor

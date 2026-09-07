@@ -158,6 +158,49 @@ end up grading different things; one script can only be right or wrong. A two-ti
 (generic checks plus a per-case script) keeps the harness case-agnostic while the gate
 stays specific.
 
+## 9. The three pieces only work as a set
+
+Rules 1-8 describe the processor. The processor alone is not a gate. Three things have
+to be present, and each is inert without the others:
+
+| file | what it is | what its absence looks like |
+|---|---|---|
+| `acceptance.sh` | the checks, shared with the post-hoc graders (rule 8) | the gate faults on every arm |
+| `.jaato/scripts/processors/<n>.py` | the in-session gate | the checks grade nothing in-session |
+| the profile's `completion_processors:` **and** `completion_payload_schema:` | what connects them to the session | see below |
+
+The schema is the one that surprises people, because its absence does not look like an
+absence. `LifecycleTools._should_hide_signal_completion` hides `signal_completion`
+outright when a profile declares no `completion_payload_schema` — gate 1, applying to
+root and subagent sessions alike. So a profile carrying `completion_processors:` and no
+schema does not have a lenient gate. It has **no gate and no `signal_completion`**: the
+agent cannot signal, the processor never runs, and a driver calling `complete()` waits
+for a payload that cannot arrive. Deleting the schema does not loosen the gate, it
+removes it.
+
+That is why `jaato-scaffold new sweep` emits all four files together (jaato #772) rather
+than emitting the processor and printing the wiring for someone to paste. The sweep
+archetype specifically, because a sweep's arms are graded: "did this arm meet the
+criteria" is the measurement, not a nicety. `--no-gate` opts out; the flag is the opt-out
+rather than the opt-in because an author who does not know the gate is the missing piece
+does not know to ask for one.
+
+### The unconfigured state is the interesting one
+
+The generator cannot know your acceptance criteria, so the emitted `acceptance.sh` ships
+with an empty `run_checks`. The tempting behaviour for a script with nothing to check is
+to exit 0 — and that is rule 5 wearing overalls: a gate that is not configured would read
+as a gate that passed, and every arm of a graded sweep would signal completion having
+been checked against nothing.
+
+So it exits 78 (`EX_CONFIG`) with an **empty stdout**, which is exactly the shape the
+processor's broken-gate discrimination recognises (non-zero exit, no failure lines → the
+checker never got as far as checking). That routes to `faults[]`: it blocks, and it
+spends no refusal, because no fix the agent makes will configure your criteria for you.
+The generated set fails **closed**, loudly, at the author — and the emit-then-check
+asserts precisely that, so a generator change that made it fail open is caught at
+scaffold time.
+
 ---
 
 ## Why a generator and not only documentation
@@ -185,7 +228,8 @@ So the claims above are enforced by tests that read the framework:
 | `shared/tests/test_completion_processor_refusal_budget.py` | the ceiling not bounding, a broken gate being waved through, a fault spending a refusal, the load-once caching going away |
 | `shared/tests/test_scaffold_completion_contract.py` | `explain completion` drifting from `CompletionProcessor`, `ProcessorResult` or the parser's vocabularies; the generator regressing to a hand-rolled counter; the generated processor not actually terminating |
 | `shared/tests/test_scaffold_archetype_docs.py` | the `processor` archetype's declared output drifting from what `new` writes |
+| `shared/tests/test_scaffold_sweep_gate_contract.py` | §9 going stale: the schema gate being relaxed, `max_refusals` no longer reaching the framework as a parsed field, the emitted paths no longer resolving through the real loaders, the emitted `acceptance.sh` breaking the `--all` contract, and — the assertion the module exists for — the unconfigured gate accepting a completion instead of refusing it |
 
-Each of the first two also declares a `REVERSIONS` entry, so
+Each of these except the archetype-docs guard also declares a `REVERSIONS` entry, so
 `test_every_guard_detects_its_own_reversion` puts the defect back and checks the guard
 goes red.
