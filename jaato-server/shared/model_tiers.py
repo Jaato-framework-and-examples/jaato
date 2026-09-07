@@ -747,6 +747,14 @@ class ModelTierConfig:
             # tier — which is the only thing the bullet is for.  Requiring
             # the key is what makes a free name as legible to the model as
             # a canonical one, rather than a placeholder in its prompt.
+            #
+            # The control-key hint rides along for the same reason it does
+            # in ``jaato-scaffold validate``: a MISSPELLED control key
+            # (``initail: executor``) is a legal free name, so it lands
+            # here, and "needs a description" alone would be a true
+            # statement about the wrong problem.  It belongs on BOTH
+            # surfaces — validate is the one an author runs first, this is
+            # the one an author who skipped it actually hits.
             if not is_canonical_tier_name(name) and not entry.description:
                 raise ModelTierConfigError(
                     f"tier {name!r}: 'description' is required for a tier "
@@ -755,7 +763,9 @@ class ModelTierConfig:
                     f"their own prose).  The model reads this as the tier's "
                     f"bullet in the enter_tier tool; without it all the "
                     f"framework can say is which model the tier routes to, "
-                    f"which is not a reason to enter it"
+                    f"which is not a reason to enter it.  (If {name!r} was "
+                    f"meant to be a control key, those are "
+                    f"{', '.join(sorted(RESERVED_KEYS))}.)"
                 )
         if self.initial_tier not in self.tiers:
             raise ModelTierConfigError(

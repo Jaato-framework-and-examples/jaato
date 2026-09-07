@@ -130,6 +130,17 @@ class TestTheGateOpens:
             _cfg({"coder": {"model": "m"}, "initial": "coder",
                   "fallback": "coder"})
 
+    def test_a_misspelled_control_key_is_told_so(self):
+        # `initail: executor` is a legal free name, so it lands in the
+        # description branch.  "Needs a description" alone is true about the
+        # wrong problem, so the message names the control keys.  Pinned on
+        # BOTH surfaces (see TestScaffoldValidate) because validate is the
+        # one an author runs first and this is the one they hit if they skip
+        # it.
+        with pytest.raises(ModelTierConfigError) as exc:
+            _cfg({"executor": "e", "initail": "executor"})
+        assert "initial" in str(exc.value) and "fallback" in str(exc.value)
+
     def test_a_canonical_name_still_needs_no_description(self):
         cfg = _cfg({"executor": "e", "initial": "executor",
                     "fallback": "executor"})
@@ -348,11 +359,14 @@ class TestScaffoldValidate:
     """Site 5 — the surface an author runs BEFORE paying for a session."""
 
     def _diags(self, model_tiers):
+        return [(sev, code) for sev, code, _ in self._raw(model_tiers)]
+
+    def _raw(self, model_tiers):
         from shared.scaffold import validate
         out = []
         validate._check_model_tiers(
             model_tiers,
-            lambda sev, code, msg, where=None: out.append((sev, code)))
+            lambda sev, code, msg, where=None: out.append((sev, code, msg)))
         return out
 
     def test_a_described_free_tier_is_clean(self):
@@ -361,6 +375,12 @@ class TestScaffoldValidate:
     def test_an_undescribed_free_tier_is_an_error(self):
         assert ("error", "tier_description_required") in self._diags(
             {"coder": {"model": "m"}})
+
+    def test_a_misspelled_control_key_is_told_so(self):
+        # The static half of the pair in TestTheGateOpens.
+        msgs = [m for _sev, _code, m in self._raw({"executor": "e",
+                                                   "initail": "executor"})]
+        assert any("initial" in m and "fallback" in m for m in msgs)
 
     def test_the_shorthand_cannot_satisfy_a_free_tier(self):
         assert ("error", "tier_description_required") in self._diags(
