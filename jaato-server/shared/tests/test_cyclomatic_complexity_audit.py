@@ -196,8 +196,15 @@ BASELINE: Dict[str, int] = {
     "jaato-server/shared/jaato_session.py::JaatoSession._execute_tools_and_continue": 22,
     "jaato-server/shared/jaato_session.py::JaatoSession._get_framework_enrichments": 16,
     "jaato-server/shared/jaato_session.py::JaatoSession._handle_cancellation": 18,
-    "jaato-server/shared/jaato_session.py::JaatoSession._run_chat_loop": 89,
-    "jaato-server/shared/jaato_session.py::JaatoSession._run_chat_loop_with_parts": 36,
+    # Both fell in #837, which stopped "the message carries an attachment"
+    # from meaning "do not stream".  _run_chat_loop gave up its inline
+    # streaming decision to _resolve_use_streaming (89 -> 86); the parts
+    # loop gained that decision but handed both of its provider calls to
+    # _complete_parts_turn and its two text emissions to
+    # _emit_batched_response_text, so it came down rather than up
+    # (36 -> 31).
+    "jaato-server/shared/jaato_session.py::JaatoSession._run_chat_loop": 86,
+    "jaato-server/shared/jaato_session.py::JaatoSession._run_chat_loop_with_parts": 31,
     "jaato-server/shared/jaato_session.py::JaatoSession._send_tool_results_and_continue": 27,
     "jaato-server/shared/jaato_session.py::JaatoSession._track_activated_tools_in_budget": 20,
     "jaato-server/shared/jaato_session.py::JaatoSession._update_conversation_budget": 37,

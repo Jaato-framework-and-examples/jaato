@@ -412,3 +412,49 @@ response path); an outbound media column in `ProviderCapabilities`; and the
    delivery? Generating TTS audio no client can play is waste, but the
    capability is known only per-connected-client and a session may have
    several.
+
+---
+
+## 8. Ears and voice in the same turn (#837)
+
+The two halves above were built independently and, once both landed, could
+not be used together. A user message carrying an attachment leaves
+`JaatoSession.send_message` for `send_message_with_parts`, and the loop it
+lands in — `_run_chat_loop_with_parts` — called the **batched**
+`provider.complete()` unconditionally. `_use_streaming` was never consulted
+there; the `streaming=False` telemetry label was accurate, not a mislabel.
+
+Measured on one daemon, one model (`openai/gpt-audio-mini` on openrouter),
+one `modalities: {audio: bidirectional}` tier:
+
+| Request | Result |
+|---|---|
+| prompt, **no** attachment | works — 30 media chunks, a spoken answer |
+| prompt + `audio/wav` attachment | `400 {'message': 'Audio output requires stream: true'}` |
+
+The upstream is right to refuse: OpenAI emits audio **only** while streaming
+(which is why `STREAM_AUDIO_MIME` spells out the pcm16 parameters), so a
+batched request that also asks for audio output cannot be satisfied. Each
+half validated cleanly on its own — `jaato-scaffold validate` reported no
+findings and the session started — and the first turn that used both
+directions failed.
+
+It went unnoticed because the parts path predates media output and was built
+for **images**, where a batched vision turn is perfectly reasonable. Audio
+input is the first attachment kind whose *reply* may itself be audio, which
+is what makes the two paths mutually exclusive.
+
+The decision now lives in one place, `JaatoSession._resolve_use_streaming`,
+which both chat loops call; the parts loop dispatches both of its provider
+calls through `_complete_parts_turn`, so the two sites cannot drift apart
+again. On the streaming branch a `MediaDelta` goes to
+`_deliver_model_media` and text goes to `on_output` chunk by chunk — so the
+assembled-response emission that followed each provider call is suppressed
+(via `_emit_batched_response_text`), because doing both renders every answer
+twice. A provider reporting `supports_streaming() == False` still gets the
+batched call, and still emits its text: the vision turns this path was built
+for are unchanged.
+
+Guarded by `shared/tests/test_an_attachment_does_not_silence_the_model.py`,
+which asserts on the dispatch and on audio reaching a subscribed client, and
+declares both reversions to the meta-suite.
