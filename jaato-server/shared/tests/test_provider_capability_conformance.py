@@ -149,6 +149,98 @@ def test_declared_pdf_input_tool_result_is_marshalled(provider):
     )
 
 
+# Providers whose converter puts a PDF on the wire even though the provider
+# declares ``pdf_input=False`` — the declaration and the code disagree, which
+# is exactly the defect class of #829.
+#
+# A RATCHET, not a permission list: an entry may only be REMOVED (by fixing
+# the provider), never added.  A listed provider that stops violating fails as
+# stale, so the set shrinks to empty and cannot quietly grow.  Adding a new
+# provider here instead of fixing it is the thing this guard exists to stop.
+#
+# Both current entries share one cause: ``ollama`` and ``zhipuai`` reuse
+# ``anthropic/converters.py``, whose ``_anthropic_media_block`` emits a
+# ``document`` block for ``application/pdf`` unconditionally.  That is correct
+# for ``anthropic`` (which declares ``pdf_input=True``) and wrong for these
+# two, which declare ``False``.  Fixing it means threading wire capability
+# through the Anthropic converter the way ``pdf_as_file`` threads it through
+# ``model_provider/_attachments`` — out of scope for #829, which fixed the
+# OpenAI-shaped family.
+_PDF_DECLARATION_VIOLATIONS = {
+    "ollama": "shares anthropic/converters.py; emits a `document` block "
+              "for PDFs though ollama declares pdf_input=False",
+    "zhipuai": "shares anthropic/converters.py; emits a `document` block "
+               "for PDFs though zhipuai declares pdf_input=False",
+}
+
+
+def _assert_undeclared_pdf_absent(provider, wire, what):
+    """Assert the PDF stayed off the wire — or that a listed violator still violates.
+
+    The two branches keep the ratchet honest in both directions: an unlisted
+    provider must not marshal a PDF it never declared, and a listed one must
+    still be marshalling it, so a fix surfaces as a stale entry instead of
+    lingering as permanent permission.
+    """
+    on_wire = _PDF_B64 in json.dumps(wire, default=str)
+    if provider in _PDF_DECLARATION_VIOLATIONS:
+        assert on_wire, (
+            f"{provider} is listed in _PDF_DECLARATION_VIOLATIONS but no longer "
+            f"puts the {what} PDF on the wire — the entry is stale, remove it."
+        )
+        return
+    assert not on_wire, (
+        f"{provider} declares pdf_input=False but its converter put the {what} "
+        f"PDF on the wire anyway — the declaration and the code disagree "
+        f"(#829). Withhold it, or set pdf_input=True if the wire really "
+        f"carries it."
+    )
+
+
+@pytest.mark.parametrize("provider", sorted(_CONVERTERS))
+def test_undeclared_pdf_input_user_message_is_not_marshalled(provider):
+    """The negative half of the pdf_input contract.
+
+    #829 was nine providers declaring ``pdf_input=False`` whose converter sent
+    PDFs regardless — mislabelled as ``image_url``, at that.  The positive test
+    above could not see it: it skips every provider declaring ``False``, which
+    was all of them.  A capability registry that only checks one direction
+    cannot catch a converter doing MORE than it declared.
+    """
+    if _read_declaration(provider).get("pdf_input"):
+        pytest.skip(f"{provider} declares pdf_input — covered by the positive test")
+    relpath, fn = _CONVERTERS[provider]
+    convert = _load_converter(relpath, fn)
+    _assert_undeclared_pdf_absent(provider, convert(_user_pdf_msg()), "user-message")
+
+
+@pytest.mark.parametrize("provider", sorted(_CONVERTERS))
+def test_undeclared_pdf_input_tool_result_is_not_marshalled(provider):
+    """Same contract on the tool-result path, which has its own marshalling."""
+    if _read_declaration(provider).get("pdf_input"):
+        pytest.skip(f"{provider} declares pdf_input — covered by the positive test")
+    relpath, fn = _CONVERTERS[provider]
+    convert = _load_converter(relpath, fn)
+    _assert_undeclared_pdf_absent(provider, convert(_tool_pdf_msg()), "tool-result")
+
+
+def test_pdf_violation_ratchet_names_only_non_declaring_providers():
+    """A provider that DECLARES pdf_input has nothing to be excused from.
+
+    Without this, parking a ``pdf_input=True`` provider in the ratchet would
+    silently disable the positive test's counterpart for it.
+    """
+    for provider in _PDF_DECLARATION_VIOLATIONS:
+        assert provider in _CONVERTERS, (
+            f"{provider} is in _PDF_DECLARATION_VIOLATIONS but not in the "
+            f"converter registry — remove the stale entry."
+        )
+        assert not _read_declaration(provider).get("pdf_input"), (
+            f"{provider} declares pdf_input=True, so it is not violating "
+            f"anything — remove it from _PDF_DECLARATION_VIOLATIONS."
+        )
+
+
 @pytest.mark.parametrize("provider", sorted(_CONVERTERS))
 def test_declared_user_image_is_marshalled(provider):
     if not _read_declaration(provider).get("user_message_images"):
