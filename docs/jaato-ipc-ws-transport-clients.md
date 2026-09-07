@@ -933,4 +933,4 @@ The `<jaato-task>` web component can ship files inline in the WS `session.new` e
 | `docs/ipc-recovery.md` | IPC connection recovery design |
 | `docs/design/websocket-client-plugin.md` | Outbound WebSocket client plugin (agent → external services) |
 | `docs/design/websocket-workspace-isolation.md` | WS workspace provisioning and AppArmor isolation |
-| `docs/web-client-design.md` | Web client design document |
+| `docs/web-client-design.md` | Browser client (`jaato-web/`) design document |

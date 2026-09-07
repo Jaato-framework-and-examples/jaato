@@ -689,7 +689,7 @@ def check_secret_scrub(workspace: str, config_root: Optional[str]) -> List[Check
 # WebSocket transport (daemon-side preflight)
 #
 # The Python SDK is IPC-only; WebSocket clients use the TypeScript SDK
-# (``jaato-sdk-ts``) / the browser web-client.  The doctor can't preflight a
+# (``jaato-sdk-ts``) / the browser client (``jaato-web``).  The doctor can't preflight a
 # TS client, but it CAN verify the daemon side those clients depend on — which
 # is exactly the part that's easy to get wrong (port not up, missing/loose
 # bearer token, auth accidentally disabled).

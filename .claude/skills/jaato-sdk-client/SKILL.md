@@ -75,9 +75,9 @@ Add `--json` to any verb for machine consumption.
 
 **This skill and the Python SDK (`jaato_sdk.IPCClient`) are IPC-only** — a local
 Unix socket, unauthenticated (`--socket-mode`, default 660). **WebSocket clients
-are authored with the TypeScript SDK (`jaato-sdk-ts`) / the browser web-client,
+are authored with the TypeScript SDK (`jaato-sdk-ts`) / the browser client (`jaato-web/`),
 NOT the Python SDK** — so `jaato-scaffold new client` scaffolds the Python IPC
-client; for a WS client start from the web-client.
+client; for a WS client start from `jaato-web/` (React) or `@jaato/sdk` directly.
 
 What you still own from here, even for a TS client, is the **daemon's WS side**:
 
