@@ -9643,6 +9643,79 @@ class SessionManager:
 
         return result
 
+    def _close_contentless_message(
+        self,
+        event: 'SendMessageRequest',
+        message_text: str,
+        client_id: Optional[str],
+    ) -> bool:
+        """Answer a send that carries nothing; report whether it did.
+
+        Called between help interception and model dispatch.  Returns
+        ``True`` when the message has been fully answered here and the
+        caller must return WITHOUT a model turn, ``False`` when there is
+        content to send.
+
+        AN ATTACHMENT IS CONTENT (#838).  This branch used to read the
+        message TEXT and nothing else, while ``event.attachments`` sat on
+        the same object, read twenty lines further down the path this
+        branch had already returned from.  For an image, blank text is
+        unusual -- there is normally a question about the picture.  For
+        AUDIO it is the normal case: the attachment IS the message, and
+        ``session.complete("", attachments=[utterance])`` is the natural
+        voice turn.  Every layer below already handled it
+        (``JaatoSession._parts_from_user_message`` documents the
+        no-text parts list; the standalone-WS handler dispatches such a
+        send with no emptiness check at all), so this site was where the
+        SDK path diverged and a voice turn was dropped before the wire.
+
+        TWO WAYS TO ARRIVE WITH NOTHING, and only one of them served the
+        caller:
+
+        * *Help interception consumed it* -- the message arrived as
+          ``%name --help``, the help already reached the client as a
+          :class:`HelpTextEvent`, and the caller got what it asked for.
+          Closing quietly is correct; naming an error would report a
+          failure that did not happen.  This is the case the branch was
+          built for.
+        * *It arrived with nothing* -- no text, no attachments.  Nothing
+          was asked, so a bare ``TurnCompletedEvent`` is indistinguishable
+          from a turn that RAN and produced nothing, which is what cost a
+          debugging round in #838.  Name the reason.
+
+        Either way the turn lifecycle is closed with a synthetic
+        ``TurnCompletedEvent``: a client that waits for a per-message
+        completion signal (WS / chat renderers) would otherwise see zero
+        further events and trip its stall detector, killing the session --
+        the observed ``%name --help`` stall.  It is targeted at the
+        requesting client only, because no model turn exists to fan out to
+        the whole session.
+
+        Args:
+            event: The originating :class:`SendMessageRequest` -- read for
+                ``attachments`` and for the PRE-interception ``text``,
+                which is what distinguishes the two cases above.
+            message_text: The text left after help interception.
+            client_id: The requesting client, or ``None`` during offline
+                replay (nothing is emitted, but the send is still dropped).
+
+        Returns:
+            ``True`` if the message was answered here and no model turn
+            should run; ``False`` if it carries content to dispatch.
+        """
+        if (message_text and message_text.strip()) or event.attachments:
+            return False
+
+        if client_id is not None:
+            if not (event.text and event.text.strip()):
+                self._emit_to_client(client_id, ErrorEvent(
+                    error="Empty message: no text and no attachments — "
+                          "nothing was sent to the model.",
+                    error_type="EmptyMessageError",
+                ))
+            self._emit_to_client(client_id, TurnCompletedEvent())
+        return True
+
     def _expand_prompt_references(self, text: str, server: 'JaatoServer') -> str:
         """Expand ``%prompt-name`` references in a message.
 
@@ -10523,22 +10596,14 @@ class SessionManager:
                 event.text, server, client_id
             )
 
-            # If the message was purely help requests, the user just
-            # wanted documentation — don't dispatch anything to the
-            # model.  The help was already delivered as a HelpTextEvent by
-            # ``_intercept_prompt_help_refs``; persist the (already-appended)
-            # user input and return early WITHOUT a model turn.
-            if not (message_text and message_text.strip()):
-                # Close the turn lifecycle even though no model turn ran.  A
-                # client that waits for a per-message completion signal (WS /
-                # chat renderers) would otherwise see zero further events and
-                # trip its stall detector, killing the session — the observed
-                # ``%name --help`` stall.  A synthetic TurnCompletedEvent
-                # (finish_reason="stop") resets that timer and closes the turn;
-                # it is targeted at the requesting client only (no model turn
-                # exists to fan out to the whole session).
-                if client_id is not None:
-                    self._emit_to_client(client_id, TurnCompletedEvent())
+            # A message with nothing to send is answered by the helper and
+            # never reaches the model: a solely-``%name --help`` message
+            # (already served, so closed quietly) or one that arrived with no
+            # text AND no attachments (refused by name).  An ATTACHMENT IS
+            # CONTENT, so a blank-text voice turn is NOT one of them and
+            # dispatches below — see the helper for why this site used to
+            # drop it (#838).
+            if self._close_contentless_message(event, message_text, client_id):
                 self._save_session(session)
                 return
 
