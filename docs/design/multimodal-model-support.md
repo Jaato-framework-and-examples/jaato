@@ -185,8 +185,8 @@ confirmed (modalities unresolved / no `image`), session creation **fails loud**:
 
 The correctness of the whole feature hinges here. When a turn carries
 `Part.inline_data` of an image and the **active** tier's provider lacks `image`
-in `modalities()`, the framework returns a **clear, actionable error** instead
-of sending bytes a model can't see:
+in `modalities()`, the framework withholds those bytes and puts a **clear,
+actionable note** in their place instead of sending content a model can't see:
 
 > This message contains an image, but the active `executor` model
 > (`<model>`) can't view images. Call `enter_tier("vision")` first, then retry.
@@ -196,6 +196,28 @@ from a silent failure into a loud, self-correcting signal — same philosophy as
 the recovery-event work. Gate location: the session's send path, right before
 history→provider conversion (where the active provider + the outgoing `Part`s
 are both in scope).
+
+**Both halves are implemented, and they landed apart.** The tool-result half
+(`_gate_tool_results_for_active_modalities`) shipped with this design; the
+send-path half described above did not, and stayed missing until #847 — where
+it surfaced not as an unviewable image but as a **404**, because an `audio/*`
+part the session had legitimately accepted was replayed to a text model whose
+upstream refuses input audio outright. `_gate_history_for_active_modalities`
+fills it, at exactly the location named above.
+
+Two properties are load-bearing there and are not obvious from the paragraph
+above:
+
+* **Per-request, not destructive.** The gate filters a *copy*; stored history
+  keeps the bytes. Content withheld from a text tier must still be there when
+  the agent switches back, or the first text turn permanently costs the
+  session a modality.
+* **A note, not an error.** A hard error was the v1 sketch and is wrong for
+  history replay: it would refuse every subsequent turn rather than the one
+  offending part. The turn continues, minus the content, plus a note saying
+  what went missing — which is also what lets the agent act on it.
+
+See [Binary Media Chunks §10](binary-media-chunks.md).
 
 ## Agent guidance
 

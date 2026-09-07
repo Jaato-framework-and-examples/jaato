@@ -520,3 +520,85 @@ keeps a client's stall detector from killing the session.
 
 Guarded by `server/tests/test_an_attachment_is_content.py`, which
 declares both reversions to the meta-suite.
+
+## 10. What a model was given is replayed to whatever model comes next (#847)
+
+A session that has **heard** audio could not switch to a tier whose model
+has no audio input. The caller's utterance stays in history — it must; the
+audio tier needs it on the next turn — and history is replayed on *every*
+later request, including the ones made while a text tier is active. The
+upstream refused those:
+
+```
+ModelNotFoundError: Model not found: openai/gpt-4o-mini
+404 {'error': {'message': 'No endpoints found that support input audio',
+     'metadata': {'failed_routing_step': 'Filter by Input Audio Support'}}}
+```
+
+Not a missing model. The model exists; the *request* carried input audio.
+
+**The gate existed and covered one direction.**
+`_gate_tool_results_for_active_modalities` withholds attachments the active
+model cannot consume and appends a note — for **tool results only**.
+`ensure_spoken_part` substitutes a transcript for the model's own *outbound*
+speech. Neither says anything about audio the model was *given*, so
+`duet`-style profiles (audio outbound only, model media never entering
+history) were fine and the failure appeared only once a session accepted
+inbound audio, which §*The ears* made possible.
+
+`JaatoSession._gate_history_for_active_modalities` is the missing half, and
+it sits where `docs/design/multimodal-model-support.md` always said the gate
+belonged: *the session's send path, right before history→provider
+conversion*, where the active provider and the outgoing `Part`s are both in
+scope. Every `provider.complete()` call site now reads its message list from
+`_history_for_provider()` rather than `SessionHistory.messages`.
+
+**Per-request, never destructive.** This is the sharp requirement, and the
+reason the fix is not "strip audio from history". The filter returns a
+*copy*; the stored history keeps the bytes, so `enter_tier("voice")` finds
+them again. A fix that mutated history would repair the planner by
+permanently deafening the session — the text tier's first turn would cost
+the audio tier every turn after it. `message_id` survives the copy, because
+GC's history-budget sync keys on it, and when nothing is withheld the caller
+gets the stored `Message` objects themselves, so a text-only session
+allocates nothing.
+
+**A note, not a silent drop**, for the same reason it is one on the tool
+path: a planner handed a user turn whose audio quietly vanished answers as
+though the caller said nothing, and a contentless turn is indistinguishable
+from a caller who was silent. `_build_withheld_attachment_note` produces it,
+now taking a `retry_action` so the history gate does not tell the agent to
+"re-run this tool" — nothing needs re-running, the bytes are still in
+history and the voice tier's next request carries them again.
+
+**It covers tool results in history too**, which have the same problem one
+step removed: `_gate_one_tool_result` runs when a result is produced,
+against the model active *then*, so an image a vision tier legitimately kept
+is still in history when the agent switches to a text tier.
+
+**The narrower fix was available and is the wrong layer.**
+`openrouter/converters.py` hardcodes `audio_as_input_audio=True` at two
+sites, applying OpenRouter's `ProviderCapabilities.audio_input` — true of
+*some* of its models — to every model on the provider; asking
+`self.modalities()` instead would have fixed this 404 in two lines. It would
+also have dropped the content silently, and only for `openrouter`, while the
+same latent hardcode (a wire capability standing in for a model check) lives
+in every OpenAI-shaped converter: `_openai_compat` emits `image_url` for an
+`inline_data` image whatever the model declares. Gating above the converter
+answers all of them with the framework's one answer to "can this model
+consume this", `provider.supports_modality()` — the same answer the
+tool-result gate and the startup tier check already read.
+
+**Consequence worth stating.** That uniformity is a behaviour change for the
+providers that inherit the text-only floor from `ModalityCapabilityMixin`
+(nim, vllm, lmstudio, tensorrt_llm, triton, zhipuai_openai, …): a
+user-message image now meets the same withhold their *tool-result* images
+have always met. The two paths contradicting each other was the older bug;
+the note names it out loud rather than letting bytes reach a model the
+framework has already declared cannot see them. A provider serving a vision
+model with no `modalities` knob to assert it is a separate gap, in that
+provider.
+
+Guarded by `shared/tests/test_history_modality_gate.py`, which checks the
+stored history in every case — a test asserting only "the text tier sent no
+audio" passes for the destructive fix too.
