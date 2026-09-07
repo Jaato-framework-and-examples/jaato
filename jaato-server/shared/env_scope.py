@@ -685,7 +685,7 @@ AWAITING_TYPED_KEY: Dict[str, Awaiting] = {
         "A", "tools.deferred",
     ),
     "JAATO_PARALLEL_TOOLS": Awaiting(
-        "A", "plugin_configs.no_such_plugin.parallel",
+        "A", "tools.parallel",
     ),
     "JAATO_TELEMETRY_BACKEND": Awaiting(
         "A", "plugin_configs.telemetry.backend",
