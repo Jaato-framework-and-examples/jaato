@@ -458,3 +458,65 @@ for are unchanged.
 Guarded by `shared/tests/test_an_attachment_does_not_silence_the_model.py`,
 which asserts on the dispatch and on audio reaching a subscribed client, and
 declares both reversions to the meta-suite.
+
+---
+
+## 9. A message whose payload is not text (#838)
+
+With #837 fixed, the voice turn still did nothing — one step earlier, and in
+the failure mode that is hardest to read.
+
+The daemon decides whether a `SendMessageRequest` becomes a model turn in
+`SessionManager.handle_request`, and that decision consulted the message
+**text** and nothing else:
+
+```python
+if not (message_text and message_text.strip()):
+    self._emit_to_client(client_id, TurnCompletedEvent())
+    return                                   # no model turn, ever
+```
+
+`event.attachments` sat on the same object, read twenty lines later to be
+handed to `server.send_message` — on the path this branch had already
+returned from. Measured, one daemon, one session profile, the same 88 KB
+`audio/wav` attachment, only the text differing:
+
+| `text` | Events observed | Reached the provider? |
+|---|---|---|
+| `"Answer what you hear."` | provider `400`, surfaced as `AgentError` | yes |
+| `""` | one `TURN_COMPLETED`, nothing else | **no** |
+
+The first row is the diagnostic one: the same attachment *with* text got far
+enough to be refused by the upstream, so the empty-text form was dropped
+**before** the wire rather than failing at it.
+
+**Why this shape matters.** For an image, blank text is unusual — there is
+normally a question about the picture. For **audio it is the normal case**:
+the attachment *is* the message. A voice turn is "here is what I said", and
+supplying text alongside asks a second question the persona then has to
+choose between. So `session.complete("", attachments=[utterance])`, the
+natural voice request, was exactly the one that silently did nothing.
+
+**Every layer below already handled it**, which is why nothing else had to
+change: `JaatoSession._parts_from_user_message` says so in its own docstring
+("an empty `message` (image-only turn) yields parts with no text"), the
+runner RPC accepts `""` as a valid `str` prompt, and the standalone-WS
+handler dispatches an attachment-only send with **no emptiness check at
+all**. That asymmetry — the same message working over WS-standalone and
+dropped over IPC/SDK — is what identifies this one site as the defect rather
+than the policy.
+
+**And the failure mode was the bad kind.** Not an exception, not a refusal
+naming a reason — a completed turn. A caller reads an empty payload and
+cannot tell "the model had nothing to say" from "nothing was ever asked"; it
+cost a debugging round precisely because the first symptom (`payload=None`)
+looked like a model that declined to answer. So the branch that remains,
+`SessionManager._close_contentless_message`, distinguishes its two arrivals:
+a solely-`%name --help` message closes quietly, because the help *was* the
+answer, while a request that arrives with no text and no attachments is
+refused by name (`ErrorEvent(error_type="EmptyMessageError")`) before its
+turn is closed. Both still emit the synthetic `TurnCompletedEvent` that
+keeps a client's stall detector from killing the session.
+
+Guarded by `server/tests/test_an_attachment_is_content.py`, which
+declares both reversions to the meta-suite.

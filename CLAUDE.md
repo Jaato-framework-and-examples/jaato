@@ -508,6 +508,30 @@ delivered. A provider that reports `supports_streaming() == False` still gets
 the batched call it always got. See
 [Binary Media Chunks §8](docs/design/binary-media-chunks.md).
 
+**An attachment IS content (#838).** One step earlier, the voice turn still
+did nothing. `SessionManager.handle_request` decided whether a
+`SendMessageRequest` becomes a model turn by reading the message **text** and
+nothing else, so a blank-text send returned with a synthetic
+`TurnCompletedEvent` and never called `server.send_message` — while
+`event.attachments` sat on the same object, read twenty lines later on the
+path that branch had already returned from. The same 88 KB `audio/wav`
+attachment *with* text reached the provider (and was refused by it, per #837);
+with `text=""` it was dropped **before** the wire, and the caller was told the
+turn completed. For an image, blank text is unusual — there is normally a
+question about the picture; for **audio it is the normal case**, since the
+attachment *is* the message, so `session.complete("", attachments=[utterance])`
+was exactly the request that silently did nothing. Every layer below already
+handled it (`_parts_from_user_message` documents the no-text parts list, the
+runner RPC accepts `""` as a valid `str` prompt, and the standalone-WS handler
+dispatches such a send with no emptiness check at all), which is what
+identifies this one site as the defect. The remaining blank branch —
+`SessionManager._close_contentless_message` — now distinguishes its two
+arrivals: a solely-`%name --help` message closes quietly because the help
+*was* the answer, and a request with no text and no attachments is refused by
+name (`ErrorEvent(error_type="EmptyMessageError")`), because a bare
+`TurnCompletedEvent` is indistinguishable from a turn that ran and produced
+nothing. See [Binary Media Chunks §9](docs/design/binary-media-chunks.md).
+
 Two shapes were available for #830 and only one is implemented here: audio as
 an **input modality** (above), not **transcription as a step**. A transcriber
 is a different animal — `microsoft/mai-transcribe-2` is served on

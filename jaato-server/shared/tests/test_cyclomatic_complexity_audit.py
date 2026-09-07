@@ -156,7 +156,7 @@ BASELINE: Dict[str, int] = {
     "jaato-server/server/session_manager.py::SessionManager.attach_session": 16,
     "jaato-server/server/session_manager.py::SessionManager.build_sibling_roster": 18,
     "jaato-server/server/session_manager.py::SessionManager.deliver_sibling_message": 17,
-    "jaato-server/server/session_manager.py::SessionManager.handle_request": 103,
+    "jaato-server/server/session_manager.py::SessionManager.handle_request": 101,
     "jaato-server/server/session_manager.py::SessionManager.wake_session": 17,
     "jaato-server/server/test_client.py::format_event": 29,
     "jaato-server/server/tests/test_runner_cgroup_attach_7d.py::test_websocket_pre_init_hook_provisions_cgroup_before_spawn": 23,
