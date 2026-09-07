@@ -421,11 +421,24 @@ class TestTierNameTableContract:
     """
 
     def test_all_three_tables_agree(self):
+        # Since #831 the relation is CANONICAL-set equality, not
+        # "every usable name": a deployment-named tier is in none of these
+        # three tables by construction — that is what makes it free, and
+        # what makes its ``description`` mandatory.  What must still hold
+        # exactly is that the framework can speak for every name it claims
+        # to know: an ordered name with no prose is the KeyError above, and
+        # a canonical name missing from the order tuple would sort into the
+        # free-name branch alongside the deployment's own.
         from shared.model_tiers import (
-            DEFAULT_TIER_DESCRIPTIONS, TIER_ORDER, VALID_TIER_NAMES,
+            CANONICAL_TIER_NAMES, DEFAULT_TIER_DESCRIPTIONS, TIER_ORDER,
         )
-        assert set(TIER_ORDER) == VALID_TIER_NAMES
-        assert set(DEFAULT_TIER_DESCRIPTIONS) == VALID_TIER_NAMES
+        assert set(TIER_ORDER) == CANONICAL_TIER_NAMES
+        assert set(DEFAULT_TIER_DESCRIPTIONS) == CANONICAL_TIER_NAMES
+
+    def test_valid_tier_names_still_aliases_the_canonical_set(self):
+        # The old name is load-bearing for out-of-tree callers and docs.
+        from shared.model_tiers import CANONICAL_TIER_NAMES, VALID_TIER_NAMES
+        assert VALID_TIER_NAMES == CANONICAL_TIER_NAMES
 
     def test_tier_order_has_no_duplicates(self):
         from shared.model_tiers import TIER_ORDER
@@ -433,11 +446,11 @@ class TestTierNameTableContract:
 
     def test_implicit_roles_name_real_tiers_and_directions(self):
         from shared.model_tiers import (
-            IMPLICIT_TIER_MODALITIES, VALID_MODALITY_DIRECTIONS,
-            VALID_TIER_MODALITIES, VALID_TIER_NAMES,
+            CANONICAL_TIER_NAMES, IMPLICIT_TIER_MODALITIES,
+            VALID_MODALITY_DIRECTIONS, VALID_TIER_MODALITIES,
         )
         for name, by_direction in IMPLICIT_TIER_MODALITIES.items():
-            assert name in VALID_TIER_NAMES
+            assert name in CANONICAL_TIER_NAMES
             for direction, kinds in by_direction.items():
                 assert direction in VALID_MODALITY_DIRECTIONS
                 assert set(kinds) <= VALID_TIER_MODALITIES
@@ -446,9 +459,27 @@ class TestTierNameTableContract:
         # The KeyError path above, exercised rather than reasoned about.
         from types import SimpleNamespace
         from shared.lifecycle_tools import LifecycleTools
-        from shared.model_tiers import VALID_TIER_NAMES
+        from shared.model_tiers import CANONICAL_TIER_NAMES
         schema = LifecycleTools(SimpleNamespace(
             _tier_config=None, _completion_payload_schema=None,
             workspace_path=None, runtime=None))._enter_tier_schema()
         assert set(schema.parameters["properties"]["name"]["enum"]) == \
-            VALID_TIER_NAMES
+            CANONICAL_TIER_NAMES
+
+    def test_no_config_schema_survives_an_undescribed_ordered_name(self,
+                                                                   monkeypatch):
+        # Gap 1 of #831: the no-config path used to subscript
+        # DEFAULT_TIER_DESCRIPTIONS with every TIER_ORDER entry, so a name
+        # in the order tuple with no prose was a KeyError rather than a
+        # tier the schema quietly cannot describe.  The tables-agree test
+        # above stops that drift; this one stops it being a CRASH if it
+        # ever happens anyway.
+        from types import SimpleNamespace
+        from shared import model_tiers as mt
+        from shared.lifecycle_tools import LifecycleTools
+        monkeypatch.setattr(
+            mt, "TIER_ORDER", mt.TIER_ORDER + ("coder",))
+        schema = LifecycleTools(SimpleNamespace(
+            _tier_config=None, _completion_payload_schema=None,
+            workspace_path=None, runtime=None))._enter_tier_schema()
+        assert "coder" not in schema.parameters["properties"]["name"]["enum"]

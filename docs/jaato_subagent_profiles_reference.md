@@ -327,9 +327,10 @@ The `model_tiers` field enables **per-turn model switching** within a single ses
 
 > **Design motivation**: In a typical agent session, most turns are cheap tool calls that don't need the strongest model. Multi-tier switching lets you reserve the expensive model for the turns where it matters, reducing cost without sacrificing capability.
 
-### 5.1 The Four Named Tiers
+### 5.1 Tier Names
 
-Three **cognitive** tiers, plus one **modality** role:
+Four names are **canonical** — the framework supplies their meaning. Three
+are **cognitive** tiers, one is a **modality** role:
 
 | Tier | Role | Typical Use | Cost |
 |---|---|---|---|
@@ -355,6 +356,47 @@ any model to any tier — the framework doesn't enforce that `planner` gets the
 strongest model. What the model is told each tier is *for* comes from the
 `enter_tier` tool description, which you can override per tier (see
 [§5.2 Tier Entry Forms](#tier-entry-forms)).
+
+#### Naming your own tiers
+
+The four canonical names are not the names you are limited to. A deployment
+that thinks in terms of `coder`, `reviewer` and `researcher` declares tiers
+under exactly those names:
+
+```yaml
+model_tiers:
+  planner:
+    model: anthropic/claude-opus-4-7
+    description: >
+      Decide WHAT to do and in what order.  Produce a plan, do not implement it.
+  coder:
+    model: anthropic/claude-sonnet-4-6
+    description: >
+      THE CODER.  Write and edit code to an agreed plan: implement, refactor,
+      fix tests.  Do not re-plan here.
+  reviewer:
+    model: anthropic/claude-sonnet-4-6
+    description: >
+      Read a finished diff adversarially and report what is wrong with it.
+      Do not edit.
+  initial: planner
+  fallback: planner
+```
+
+The rules:
+
+| Rule | Why |
+|---|---|
+| A name must match `^[a-z][a-z0-9_]{1,31}$` | The name is a JSON-schema `enum` value the model types back verbatim, a key in logs and traces, and part of the prompt-cache prefix. Lowercase-only removes case-only collisions (`Coder` vs `coder` reads as one tier to the model and two to the config); no whitespace or punctuation keeps all three surfaces unquoted; nothing a YAML 1.1 parser turns into a boolean. |
+| A non-canonical name **requires** `description` | A canonical name comes with framework prose. For a name the framework has never heard of, all it can honestly say is *"routes this session to `<model>`."* — which tells the model nothing about **when** to enter the tier, and the bullet exists for nothing else. |
+| At most **8** tiers per session | Every declared tier is a bullet **and** an enum entry in the `enter_tier` tool block, which sits in the prompt-cache prefix — so it is paid for on every request, not once. A ladder longer than this wants subagents, not tiers. |
+| Only `vision` carries a built-in role | A deployment-named tier gets no implicit `modalities`. That is the point: before this, a fourth binding had to overload `vision` and inherited an `image: inbound` role it never asked for, which the startup capability check then failed the session on. An image tier may be called anything as long as it declares `modalities`. |
+| No `JAATO_TIER_*` env spelling | The env path (§5.3) covers the three cognitive tiers only. A deployment-named tier needs a `description` — a paragraph of second-person prose, which belongs in a profile, not a shell export. A half-env path (bind the model here, describe it there) would produce a config that only half-exists. |
+
+Ordering is canonical names first (in `planner`, `dispatcher`, `executor`,
+`vision` order), then your own names alphabetically. Adding a tier of your own
+therefore never reorders the canonical ones ahead of it — the `enter_tier`
+block stays byte-stable in the prompt-cache prefix.
 
 ### 5.2 Schema — Unified Dict
 
@@ -481,7 +523,7 @@ description in an overlay is a config error).
 | `initial` | `string` | `"dispatcher"` | Which tier to start in when the session begins. Must be a declared tier name. |
 | `fallback` | `string` | `"dispatcher"` | Which tier to route to when `enter_tier` references a tier that isn't declared. Must be a declared tier name. |
 
-These keys are **unambiguous** because they are never valid tier names — the parser splits on `VALID_TIER_NAMES` membership (`planner`, `dispatcher`, `executor`, `vision`).
+These keys are **unambiguous** because they are never valid tier names — the parser splits on `RESERVED_KEYS` membership, and a tier named `initial` or `fallback` is refused by name for exactly that reason (it would be unaddressable, not merely confusing).
 
 ### 5.3 Resolution Order
 
@@ -605,16 +647,17 @@ When tier mode is active (a non-null `ModelTierConfig` is resolved), the framewo
 ```
 
 Both the `enum` and the description bullets are built from the tiers **this
-profile declares** — not from `VALID_TIER_NAMES`. A profile declaring only
+profile declares** — not from the framework's canonical name table. A profile declaring only
 `planner` and `executor` produces exactly the schema above: `dispatcher` and
 `vision` are never advertised, so the model can't ask for a tier that would
 silently route to `fallback`. Each bullet's prose is that tier's
 `description` when set, else the framework's default wording for the name.
-Tier order is canonical (`planner`, `dispatcher`, `executor`, `vision`), not
-set-iteration order, so the schema is byte-stable across processes — it lives
-in the prompt-cache prefix.
+Tier order is canonical names first (`planner`, `dispatcher`, `executor`,
+`vision`) then any deployment-named tiers alphabetically, not set-iteration
+order, so the schema is byte-stable across processes — it lives in the
+prompt-cache prefix.
 
-The `enum` constraint means providers that enforce tool params at sampling time (Anthropic, Google, OpenAI) reject invalid tier names before they reach the executor. The executor still validates against the full `VALID_TIER_NAMES` as defence-in-depth for providers that don't enforce enums; a valid-but-undeclared name routes to `fallback` and reports `status: "fallback_used"`.
+The `enum` constraint means providers that enforce tool params at sampling time (Anthropic, Google, OpenAI) reject invalid tier names before they reach the executor. The executor still validates as defence-in-depth for providers that don't enforce enums, against the canonical names **union** whatever this session declared: a canonical-but-undeclared name routes to `fallback` and reports `status: "fallback_used"`, a declared tier of your own is accepted (the schema advertises it, so refusing it here would contradict the schema), and anything else is a hallucination and is refused.
 
 #### Tool Properties
 
@@ -809,6 +852,8 @@ class TierEntry:
 | `ModelTierConfig.from_env(env=None)` | Build from env vars; returns `None` if no tier vars set |
 | `ModelTierConfig.resolve(profile_model_tiers, env=None)` | Priority: profile → env → None |
 | `config.model_for(tier_name)` | Resolve to `(actual_tier, TierEntry)` with fallback routing |
+| `tier_name_error(name)` | The one name predicate — returns *why* a name is unusable, or `None`. Shared by the config gate, `model_for`, the `enter_tier` executor, budget-control overlays and `jaato-scaffold validate`, so the message an author reads is written once |
+| `is_canonical_tier_name(name)` | Whether the framework has prose / order / env / implicit-role for this name — **not** whether a profile may use it |
 
 ### 5.13 Validation Reference
 
@@ -818,7 +863,10 @@ All validation runs at construction time (`__post_init__`). Invalid configs rais
 |---|---|
 | At least one tier mapping required | `"at least one tier mapping"` |
 | Reserved keys alone aren't enough | `"at least one tier mapping"` |
-| Unknown tier names | `"unknown tier names: [...]"` |
+| Unusable tier name | `"'...' is not a usable tier name"` |
+| Reserved control key used as a tier name | `"'...' is a reserved control key"` |
+| A deployment-named tier with no prose | `"tier '...': 'description' is required"` |
+| More than 8 tiers declared | `"... tiers declared ...; at most 8 are allowed"` |
 | `initial` must be in declared tiers | `"initial_tier '...' not in declared"` |
 | `fallback` must be in declared tiers | `"tier_fallback '...' not in declared"` |
 | `initial` must be a string | `"model_tiers.'initial' must be a string"` |
@@ -1165,7 +1213,7 @@ References are catalog entries validated by `validateReference(path="...")`. See
 | File | Contents |
 |---|---|
 | `jaato-server/shared/plugins/subagent/config.py` | `SubagentProfile`, `GCProfileConfig`, `SubagentConfig`, `SubagentResult` dataclasses; `validate_profile()`, `discover_profiles()`, `resolve_profiles()`, `_merge_profiles()`, `expand_variables()`, `gc_profile_to_plugin_config()` |
-| `jaato-server/shared/model_tiers.py` | `ModelTierConfig`, `TierEntry`, `ModelTierConfigError`; `from_unified_dict()`, `from_env()`, `resolve()`, `model_for()`, `ordered_tier_names()`, `describe_tier()`; `TIER_ORDER` / `DEFAULT_TIER_DESCRIPTIONS` |
+| `jaato-server/shared/model_tiers.py` | `ModelTierConfig`, `TierEntry`, `ModelTierConfigError`; `from_unified_dict()`, `from_env()`, `resolve()`, `model_for()`, `ordered_tier_names()`, `describe_tier()`; `tier_name_error()` / `is_canonical_tier_name()`; `CANONICAL_TIER_NAMES` / `TIER_NAME_PATTERN` / `MAX_DECLARED_TIERS` / `TIER_ORDER` / `DEFAULT_TIER_DESCRIPTIONS` |
 | `jaato-server/shared/plugins/subagent/plugin.py` | `_execute_spawn_subagent()`, `_execute_validate_profile()`, tool registration, UI hooks |
 | `jaato-server/shared/lifecycle_tools.py` | `LifecycleTools` — `enter_tier` tool schema/executor, `signal_completion` rewrite, `get_tool_schemas()`, `get_auto_approved_tools()` |
 | `jaato-server/shared/jaato_session.py` | `JaatoSession` — `configure(tier_config=...)`, `switch_tier()`, `_get_effective_system_instruction()` (dynamic tier line) |

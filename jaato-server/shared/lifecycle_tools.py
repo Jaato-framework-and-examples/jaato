@@ -522,7 +522,7 @@ class LifecycleTools:
 
         Both the ``name`` enum and the per-tier bullets in the description
         are derived from ``session._tier_config.tiers`` — not from the
-        framework's ``VALID_TIER_NAMES``.  Two consequences:
+        framework's canonical name table.  Two consequences:
 
         * The model is never offered a tier the profile didn't declare.
           Previously all four names were advertised unconditionally, so a
@@ -540,10 +540,15 @@ class LifecycleTools:
         (canonical, not set-iteration) because this schema sits in the
         prompt-cache prefix and must be byte-stable across processes.
 
-        Falls back to advertising every known tier when the session has no
-        tier config — unreachable through :meth:`get_tool_schemas`, which
-        only appends this schema when ``_tier_config`` is set, but this
-        method is called directly by tests.
+        Falls back to advertising every CANONICAL tier when the session has
+        no tier config — unreachable through :meth:`get_tool_schemas`,
+        which only appends this schema when ``_tier_config`` is set, but
+        this method is called directly by tests.  That path can only offer
+        names the framework has prose for, which is why it filters
+        ``TIER_ORDER`` through ``DEFAULT_TIER_DESCRIPTIONS`` rather than
+        subscripting it: a canonical name added to the order tuple without
+        prose used to raise ``KeyError`` here, turning a table
+        inconsistency into a crash on a path with no config to blame.
         """
         from .model_tiers import (
             TIER_ORDER,
@@ -555,7 +560,7 @@ class LifecycleTools:
             names = list(cfg.ordered_tier_names())
             described = [(n, cfg.describe_tier(n)) for n in names]
         else:
-            names = list(TIER_ORDER)
+            names = [n for n in TIER_ORDER if n in DEFAULT_TIER_DESCRIPTIONS]
             described = [(n, DEFAULT_TIER_DESCRIPTIONS[n]) for n in names]
 
         bullets = "\n".join(
@@ -623,15 +628,25 @@ class LifecycleTools:
     def _execute_enter_tier(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Switch the session's active tier per the model's request.
 
-        Validates the ``name`` argument against the three valid tier
-        identifiers (the schema's ``enum`` already constrains compliant
-        providers, but defence-in-depth — providers without enum
-        enforcement could leak through), then delegates to
+        Validates the ``name`` argument (the schema's ``enum`` already
+        constrains compliant providers, but defence-in-depth — providers
+        without enum enforcement could leak through), then delegates to
         ``JaatoSession.switch_tier`` for the actual provider mutation.
         Tool errors are returned as ``error`` fields the model can
         read and self-correct from.
+
+        The addressable set is the canonical names UNION whatever this
+        session declared.  Both halves matter: dropping the canonical
+        names would break the documented "a valid-but-undeclared tier
+        routes to ``fallback`` and reports ``fallback_used``" behaviour,
+        and dropping the declared ones would have this executor reject a
+        deployment-named tier its own schema advertises (#831) — the
+        schema is built from ``ordered_tier_names()``, so validating
+        against a fixed table here would contradict it.  A name in
+        neither is a hallucination and is refused, which is the signal
+        this check exists to preserve.
         """
-        from .model_tiers import VALID_TIER_NAMES
+        from .model_tiers import CANONICAL_TIER_NAMES
 
         requested = args.get("name")
         if not isinstance(requested, str) or not requested.strip():
@@ -640,12 +655,16 @@ class LifecycleTools:
                 "message": "enter_tier requires 'name' to be a non-empty string.",
             }
         requested = requested.strip()
-        if requested not in VALID_TIER_NAMES:
+        cfg = getattr(self._session, '_tier_config', None)
+        addressable = set(CANONICAL_TIER_NAMES)
+        if cfg is not None:
+            addressable |= set(cfg.tiers)
+        if requested not in addressable:
             return {
                 "error": "invalid_tier",
                 "message": (
                     f"unknown tier {requested!r}; "
-                    f"must be one of {sorted(VALID_TIER_NAMES)}."
+                    f"must be one of {sorted(addressable)}."
                 ),
             }
         try:

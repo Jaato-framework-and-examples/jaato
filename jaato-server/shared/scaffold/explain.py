@@ -467,16 +467,34 @@ def runtime() -> Rendered:
 def tiers() -> Rendered:
     """Model tiers — multi-model sessions: cognitive roles + modality (vision)
     roles, switched mid-session via ``enter_tier``.  V2 (#354): tiers may span
-    PROVIDERS.  Introspects ``shared.model_tiers`` (VALID_TIER_NAMES /
-    RESERVED_KEYS) so it tracks the installed framework.
+    PROVIDERS.  #831: a deployment may NAME its own tiers.  Introspects
+    ``shared.model_tiers`` (CANONICAL_TIER_NAMES / TIER_NAME_PATTERN /
+    MAX_DECLARED_TIERS / RESERVED_KEYS) so it tracks the installed framework.
     """
     from shared import model_tiers as mt
-    valid = sorted(mt.VALID_TIER_NAMES)
+    valid = sorted(mt.CANONICAL_TIER_NAMES)
     reserved = sorted(mt.RESERVED_KEYS)
     modalities = sorted(mt.VALID_TIER_MODALITIES)
     directions = sorted(mt.VALID_MODALITY_DIRECTIONS)
     data = {
+        "canonical_tier_names": valid,
+        # Kept under the old key too: this dict is a machine-readable
+        # surface other tools read, and dropping a key is a breaking change
+        # where adding one is not.
         "tier_names": valid,
+        "free_tier_names": (
+            "a profile may declare tiers under names of its OWN — 'coder', "
+            "'reviewer', 'researcher' — matching "
+            + mt.TIER_NAME_PATTERN + " (lowercase, digits, underscores, "
+            "starting with a letter, 2-32 chars).  a free name MUST carry a "
+            "'description': the four canonical names come with framework "
+            "prose, a name the framework has never heard of does not, and "
+            "'routes this session to <model>' is not a reason for the model "
+            "to enter a tier.  free names sort after the canonical ones in "
+            "the enter_tier schema, so adding one never reorders the "
+            "prompt-cache prefix ahead of them."
+        ),
+        "max_tiers": mt.MAX_DECLARED_TIERS,
         "reserved_keys": reserved,
         "modalities": modalities,
         "modality_directions": directions,
@@ -546,7 +564,15 @@ def tiers() -> Rendered:
     text = (
         "jaato model tiers — multi-model sessions (cognitive + modality roles)\n"
         "  ----------------------------------------------------------------\n"
-        f"TIER NAMES   {', '.join(valid)}\n"
+        f"CANONICAL     {', '.join(valid)}\n"
+        f"              (the names the FRAMEWORK has prose for; 'vision' also\n"
+        f"               implies modalities {{image: inbound}})\n"
+        f"YOUR OWN      any name matching {mt.TIER_NAME_PATTERN} -- 'coder',\n"
+        f"              'reviewer', 'researcher'.  a free name REQUIRES a\n"
+        f"              'description' (the framework has none for it) and has\n"
+        f"              no JAATO_TIER_* env spelling.  at most {mt.MAX_DECLARED_TIERS}\n"
+        f"              tiers per session -- each one is a bullet + an enum entry\n"
+        f"              in the prompt-cache prefix, paid on EVERY request.\n"
         f"CONTROL KEYS {', '.join(reserved)}  (reserved: initial tier + fallback)\n\n"
         "SHAPE  (in a profile)\n"
         "  model_tiers:\n"
@@ -571,7 +597,9 @@ def tiers() -> Rendered:
         "  the enter_tier tool advertises ONLY the tiers this profile declares,\n"
         "  each with a bullet.  the bullet is the tier's 'description' when set,\n"
         "  else the framework's own wording for that name — so a ladder whose\n"
-        "  'executor' means something specific to your deployment can say so.\n"
+        "  'executor' means something specific to your deployment can say so,\n"
+        "  and a ladder that would rather call it 'coder' can do THAT instead\n"
+        "  (a deployment-named tier must carry the description).\n"
         "  it is read once, when the tool schema is built: the tool block sits in\n"
         "  the prompt-cache prefix, so a budget degrade rung may NOT set one.\n\n"
         "MODALITY ROLES  (which tier can SEE what)\n"

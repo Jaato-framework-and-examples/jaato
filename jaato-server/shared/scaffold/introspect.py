@@ -311,16 +311,21 @@ def _profile_field_constraints() -> Dict[str, str]:
     sees the ACTUAL allowed values, not a source symbol to chase.
 
     e.g. ``model_tiers`` keys are constrained by
-    ``shared.model_tiers.VALID_TIER_NAMES``; surfaced here as the real tier
-    names (the same "introspect the installed code" principle as the rest of
-    ``explain``).  Soft — a field with no resolvable constraint is simply absent.
+    ``shared.model_tiers`` (the canonical names, the free-name pattern and the
+    arity ceiling); surfaced here as the real values (the same "introspect the
+    installed code" principle as the rest of ``explain``).  Soft — a field with
+    no resolvable constraint is simply absent.
     """
     out: Dict[str, str] = {}
     try:
         from shared import model_tiers as mt
-        tiers = ", ".join(sorted(mt.VALID_TIER_NAMES))
+        tiers = ", ".join(sorted(mt.CANONICAL_TIER_NAMES))
         reserved = ", ".join(sorted(mt.RESERVED_KEYS))
-        out["model_tiers"] = f"tier keys: {tiers}  |  reserved control keys: {reserved}"
+        out["model_tiers"] = (
+            f"canonical tier keys: {tiers}  |  or any name matching "
+            f"{mt.TIER_NAME_PATTERN} (a 'description' is then required)  |  "
+            f"at most {mt.MAX_DECLARED_TIERS} tiers  |  "
+            f"reserved control keys: {reserved}")
     except Exception:
         pass
     try:

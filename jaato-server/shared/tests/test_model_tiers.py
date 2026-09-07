@@ -136,9 +136,17 @@ class TestModelTierConfigValidation:
                 RESERVED_FALLBACK_KEY: "dispatcher",
             })
 
-    def test_unknown_tier_name_rejected(self):
-        with pytest.raises(ModelTierConfigError, match="unknown tier names"):
+    def test_undescribed_free_tier_name_rejected(self):
+        # Since #831 a name the framework does not know is not rejected for
+        # being unknown -- it is rejected for arriving without the prose the
+        # framework would otherwise have supplied.  See test_tier_names.py.
+        with pytest.raises(ModelTierConfigError, match="description"):
             ModelTierConfig.from_unified_dict({"unknown_tier": "x"})
+
+    def test_unusable_tier_name_rejected(self):
+        with pytest.raises(ModelTierConfigError,
+                           match="not a usable tier name"):
+            ModelTierConfig.from_unified_dict({"Unknown-Tier": "x"})
 
     def test_initial_must_be_in_tiers(self):
         with pytest.raises(ModelTierConfigError, match="initial_tier"):
@@ -214,8 +222,12 @@ class TestModelTierConfigModelFor:
         assert entry.model == "d"
 
     def test_invalid_tier_name_raises(self):
+        # "not-a-tier" is unusable as a NAME (hyphen), which is what
+        # model_for still refuses; a merely-undeclared usable name routes to
+        # fallback instead (test_tier_names.py pins both).
         cfg = self._cfg()
-        with pytest.raises(ModelTierConfigError, match="unknown tier"):
+        with pytest.raises(ModelTierConfigError,
+                           match="not a usable tier name"):
             cfg.model_for("not-a-tier")
 
 

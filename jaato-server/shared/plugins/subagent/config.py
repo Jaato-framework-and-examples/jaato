@@ -1445,9 +1445,12 @@ class SubagentProfile:
     # warning at load time) because the active model is selected per
     # turn from ``model_tiers[<active_tier>]``.
     #
-    # Single-level dict mixing tier→model entries (keys in
-    # ``VALID_TIER_NAMES``) with reserved control keys (``initial`` /
-    # ``fallback``).  Each tier entry is either a model-name string or a
+    # Single-level dict mixing tier→model entries with the reserved
+    # control keys (``initial`` / ``fallback``).  A tier key is either one
+    # of the four canonical names (``CANONICAL_TIER_NAMES``) or a name the
+    # deployment chooses — ``coder``, ``reviewer`` — in which case
+    # ``description`` becomes REQUIRED, since the framework has no prose
+    # for a name it does not know (#831).  Each tier entry is either a model-name string or a
     # dict with ``model`` (required) plus optional ``provider`` (tiers may
     # name different ones), ``description`` (prose the MODEL reads as that
     # tier's bullet in the ``enter_tier`` tool) and ``modalities`` (the
@@ -1468,6 +1471,12 @@ class SubagentProfile:
         "a tier named vision implies image inbound, and outbound roles parse "
         "but are inert until media delivery lands)}), plus the reserved "
         "control keys initial / fallback. "
+        "Tier keys are the four canonical names (planner / dispatcher / "
+        "executor / vision) or any name the deployment picks matching "
+        "^[a-z][a-z0-9_]{1,31}$ — a deployment-named tier REQUIRES a "
+        "description, and there is no JAATO_TIER_* env spelling for one. "
+        "At most 8 tiers per session (each costs a bullet and an enum "
+        "entry in the prompt-cache prefix, on every request). "
         "The enter_tier tool advertises ONLY the declared tiers. "
         "Non-empty silently ignores `model` (warns at load) — the active model "
         "is picked per turn from model_tiers[<active_tier>]. Empty = "
