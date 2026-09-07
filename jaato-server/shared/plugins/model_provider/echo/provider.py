@@ -19,6 +19,14 @@ Behaviour (fully deterministic — zero variance across runs):
   - the configured ``response`` string if set, else
   - the last USER message's concatenated text (echo the prompt verbatim).
 
+* **Retrying tool-call mode.**  With ``retry_tool_call: true`` the tool-result
+  check is skipped and the same call is emitted EVERY time.  This exists to
+  model an agent that re-claims something after being refused — the shape of
+  the non-terminating completion loop in jaato #768 — which the default cannot
+  express, because calling once and then answering in prose makes a refused
+  tool call indistinguishable from a satisfied one.  Nothing in echo stops
+  such a loop: whatever is under test has to.
+
 Configuration arrives via ``ProviderConfig.extra`` — the runtime merges the
 profile's ``plugin_configs.echo`` block into ``extra`` (same path ollama /
 lmstudio read ``extra.get("host")`` etc.):
@@ -29,6 +37,9 @@ lmstudio read ``extra.get("host")`` etc.):
         tool_call:                          # optional dict
           name: spawn_subagent
           args: {profile: researcher, prompt: "go"}
+        retry_tool_call: true               # optional bool — re-emit it
+                                            # every time, never falling back
+                                            # to text (see above)
         usage:                              # optional dict — a SIMULATED spend
           prompt_tokens: 1000               # reported identically every turn
           output_tokens: 200
@@ -151,6 +162,7 @@ class EchoProvider(ModalityCapabilityMixin):
         self._connected: bool = False
         # Config knobs, populated in initialize().
         self._tool_call: Optional[Dict[str, Any]] = None
+        self._retry_tool_call: bool = False
         self._response: Optional[str] = None
         # Usage from the last complete() call.  Zero unless the profile
         # configures ``plugin_configs.echo.usage`` -- echo costs nothing, but
@@ -181,6 +193,7 @@ class EchoProvider(ModalityCapabilityMixin):
         if config is None:
             config = ProviderConfig()
         self._tool_call = config.extra.get("tool_call")
+        self._retry_tool_call = bool(config.extra.get("retry_tool_call"))
         self._response = config.extra.get("response")
         self._usage = self._build_usage(config.extra.get("usage"))
 
@@ -334,6 +347,14 @@ class EchoProvider(ModalityCapabilityMixin):
         Otherwise text mode → ``response`` or the echoed last-user-text with
         ``STOP``.
 
+        Under ``retry_tool_call`` the tool-result check is skipped, so the same
+        call is emitted every time.  That is the only way to model an agent
+        that RE-CLAIMS something after being refused — the shape of jaato
+        #768's non-terminating completion loop — because the default behaviour
+        (call once, then answer in prose) makes a refused tool call look like
+        a satisfied one.  A caller that sets it is asserting that something
+        else terminates the loop; nothing in echo does.
+
         The provider is stateless: it inspects ``messages`` but mutates nothing.
         """
         # The configured spend, reported IDENTICALLY on every turn.  A budget
@@ -342,8 +363,9 @@ class EchoProvider(ModalityCapabilityMixin):
         # observation.
         self._last_usage = self._usage
 
-        if self._tool_call is not None and not self._has_tool_result(messages):
-            # First-turn tool-call mode: emit the configured call VERBATIM.
+        if self._tool_call is not None and (
+                self._retry_tool_call or not self._has_tool_result(messages)):
+            # Tool-call mode: emit the configured call VERBATIM.
             call = FunctionCall(
                 id="echo-call-0",
                 name=self._tool_call["name"],

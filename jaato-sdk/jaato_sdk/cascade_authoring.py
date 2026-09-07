@@ -11,7 +11,8 @@ Currently exposed (server 0.6.160+ / SDK 0.14.2+):
 
 - :class:`ProcessorResult`: return type for
   ``completion_processors[*].validate()`` — separates fatal errors
-  from advisory warnings (this module).
+  from advisory warnings, semantic "not done yet" signals, and
+  environment faults (this module).
 - :class:`ToolCallEntry`: per-entry shape of
   ``context.tool_calls`` handed to completion processors
   (re-exported from :mod:`jaato_sdk.completion_processors`).
@@ -139,11 +140,48 @@ class ProcessorResult(TypedDict, total=False):
                     "surface — keep setting api.endpoints[*]."
                 )
             return {"errors": [], "warnings": [], "incomplete": incomplete}
+
+    Fault channel (issue #768):
+        faults: ENVIRONMENT faults — conditions the agent's next
+            attempt cannot clear.  A missing acceptance script, an
+            absent ``agent_params`` key, a checks harness that timed
+            out: none of these is a wrong answer, and phrasing one as a
+            retryable error burns the whole retry budget without ever
+            producing a verdict (issue #768 rule 6).  A fault:
+
+            - BLOCKS completion exactly ONCE per session (per
+              processor), which is the single round-trip the agent
+              needs to record it in the payload's own ``errors[]``, and
+              is advisory from then on — blocking repeatedly on
+              something no retry can clear is the non-terminating loop
+              that ``max_refusals`` exists to prevent;
+            - never consumes a refusal, so the ``max_refusals`` budget
+              stays available for genuine check failures.
+
+            Write a fault as an instruction, like an error: say what is
+            broken, that retrying will not fix it, and what to do
+            instead (typically: record it in the payload and signal
+            again).
+
+    Example with the fault split::
+
+        def validate(payload, context) -> ProcessorResult:
+            script = Path(context.workspace_path) / "acceptance.sh"
+            if not script.is_file():
+                return {"faults": [
+                    "acceptance.sh is missing from the workspace — this is "
+                    "an environment fault, not something your fix can "
+                    "address. Record it in errors[] and signal completion "
+                    "again; do not retry the checks."
+                ]}
+            failures = run_checks(script)          # one line per failure
+            return {"errors": failures}
     """
 
     errors: List[str]
     warnings: List[str]
     incomplete: List[str]
+    faults: List[str]
 
 
 __all__ = ["ProcessorResult", "ToolCallEntry"]

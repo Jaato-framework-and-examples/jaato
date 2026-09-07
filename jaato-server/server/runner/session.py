@@ -1107,22 +1107,16 @@ def _processors_from_envelope(
     ``completion_validators`` envelope fields, both of which used
     the same wire-dict-reconstruction pattern.
     """
-    from shared.plugins.subagent.config import CompletionProcessor
-    out: List[Any] = []
-    for entry in envelope.completion_processors or []:
-        if not isinstance(entry, dict):
-            continue
-        script = entry.get("script")
-        if not isinstance(script, str) or not script.strip():
-            continue
-        out.append(CompletionProcessor(
-            script=script.strip(),
-            output=entry.get("output"),
-            on_error=entry.get("on_error", "fail_completion"),
-            description=entry.get("description"),
-            phase=entry.get("phase", "finalization"),
-        ))
-    return out
+    from shared.plugins.subagent.config import (
+        completion_processors_from_wire,
+    )
+
+    # The SAME parser a profile file's completion_processors: block goes
+    # through, so the wire and the profile cannot disagree about what an
+    # entry means.  The hand-rolled reconstruction this replaces named five
+    # fields and defaulted the rest, so `max_refusals` was discarded on
+    # arrival even once the daemon started sending it (jaato #770).
+    return completion_processors_from_wire(envelope.completion_processors)
 
 
 def _extract_plugin_specs(

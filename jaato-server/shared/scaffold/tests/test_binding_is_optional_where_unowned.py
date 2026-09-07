@@ -103,14 +103,28 @@ def test_without_a_binding_the_placeholder_is_a_profile_name(tmp_path, arch):
 
     With a binding it stays an inline spec (runnable before any profile
     exists); without one it must not invent a provider — that default reads
-    as guidance rather than the throwaway it is.
+    as guidance rather than the throwaway it is.  The ``"model": MODEL``
+    assertion is the one carrying that intent, and it holds for every
+    archetype either way.
+
+    What the profile column may SAY widened with jaato #772: an archetype
+    that emits a profile of its own (``sweep``, whose gate profile is
+    written by the same run) names THAT, which teaches the shape better than
+    a placeholder does — the reader can open the file. So a real profile the
+    run wrote is accepted alongside the two placeholder spellings, and a
+    name matching neither still fails: naming a profile that does not exist
+    is the drift this half is for.
     """
     ws = tmp_path / arch
     assert build.run(_args(archetype=arch, workspace=str(ws))) == 0
     src = (ws / f"run_{arch}.py").read_text()
     code = "\n".join(line.split("#", 1)[0] for line in src.splitlines())
     assert '"model": MODEL' not in code
-    assert "<profile-name>" in code or '"your-profile"' in code
+    emitted = {p.stem for p in (ws / ".jaato" / "profiles").glob("*.yaml")}
+    assert ("<profile-name>" in code or '"your-profile"' in code
+            or any(f'"{name}"' in code for name in emitted)), (
+        f"the generated {arch} names no profile: not a placeholder, and not "
+        f"any of the profiles this run wrote ({sorted(emitted) or 'none'})")
 
 
 def test_without_a_binding_the_env_has_no_provider_stanza(tmp_path):

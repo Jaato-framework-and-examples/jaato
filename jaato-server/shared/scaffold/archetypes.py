@@ -46,6 +46,13 @@ PROFILE_SET_ALIASES = ("profile-set", "set")
 #: The canonical name for the profile-set archetype.
 PROFILE_SET = "profile-set"
 
+#: The completion-processor archetype — neither a client nor a profile-set.
+#: It emits kb Python for the OUTPUT-side script hook (jaato #769); the
+#: input-side hook has no generator because a prefetch script's body is
+#: entirely the author's, while a processor's hard part is the contract
+#: around the body.
+PROCESSOR = "processor"
+
 #: Client archetypes, derived from the template registry so a new template is
 #: automatically an accepted archetype (and, via the guard, must be documented).
 CLIENT_ARCHETYPES: Tuple[str, ...] = tuple(sorted(TEMPLATES))
@@ -57,9 +64,12 @@ class EmittedFile:
 
     Attributes:
         path: Workspace-relative path.  May carry the ``{archetype}``,
-            ``{set}`` and ``{agent}`` placeholders, which the renderer fills
-            from the invocation (and which the guard expands into a glob when
-            it checks a real run's output against this declaration).
+            ``{set}``, ``{agent}`` and ``{name}`` placeholders, which the
+            renderer fills from the invocation (and which the guard expands
+            into a glob when it checks a real run's output against this
+            declaration).  ``{name}`` is the ``--name`` argument, distinct
+            from ``{agent}``: a processor's module is named after the
+            processor, not after any agent.
         what: One line — what the file is.
         status: Who owns the contents afterwards.  One of:
             ``generated`` (correct as emitted; edit only to customise),
@@ -78,7 +88,8 @@ class EmittedFile:
     when: Optional[str] = None
 
     def render_path(self, **subs) -> str:
-        """The path with ``{archetype}`` / ``{set}`` / ``{agent}`` filled in."""
+        """The path with ``{archetype}`` / ``{set}`` / ``{agent}`` / ``{name}``
+        filled in."""
         out = self.path
         for k, v in subs.items():
             out = out.replace("{" + k + "}", str(v))
@@ -87,7 +98,7 @@ class EmittedFile:
     def glob(self) -> str:
         """The path as an fnmatch pattern (placeholders → ``*``)."""
         out = self.path
-        for token in ("{archetype}", "{set}", "{agent}"):
+        for token in ("{archetype}", "{set}", "{agent}", "{name}"):
             out = out.replace(token, "*")
         return out
 
@@ -228,8 +239,132 @@ _CLIENT_NEXT = (
 )
 
 
+# ----------------------------------------------------------------- the gate
+#
+# The completion gate `new sweep` emits alongside its client (jaato #772).
+# Four files, declared as one block because they only work as one: the checks,
+# the processor that runs them, the schema without which there is nothing to
+# gate, and the profile carrying the two keys that connect them.
+
+_GATE_WHEN = "unless --no-gate"
+
+_GATE_FILES: Tuple[EmittedFile, ...] = (
+    EmittedFile(
+        path="acceptance.sh",
+        what="the acceptance checks — run BOTH by the in-session gate and by "
+             "whatever grades the sweep afterwards",
+        status="fill-in",
+        detail=(
+            "`run_checks` is EMPTY as emitted — the generator does not guess "
+            "your acceptance criteria any more than profile-set guesses a "
+            "plugin set.  One `check \"<message>\" <command...>` per criterion",
+            "the --all contract the gate depends on: one line per FAILING "
+            "check on stdout, nothing at all on success, exit 0/1",
+            "unconfigured it exits 78 (EX_CONFIG) with an EMPTY stdout, which "
+            "the processor reads as 'the checker did not run' — a script with "
+            "nothing to check that exited 0 would have the gate wave every job "
+            "through, which is the error-path-returns-success defect the gate "
+            "exists to prevent",
+            "a per-case tier: acceptance/<CASE_ID>.sh is sourced when it "
+            "exists, so the file stays task-agnostic while the gate stays "
+            "specific",
+            "emitted executable — the gate invokes it as ./acceptance.sh",
+        ),
+        when=_GATE_WHEN,
+    ),
+    EmittedFile(
+        path=".jaato/scripts/processors/{name}.py",
+        what="the in-session gate — the same module `new processor` emits, "
+             "with CHECKS_COMMAND already pointing at acceptance.sh",
+        status="edit",
+        detail=(
+            "CHECKS_COMMAND is FILLED IN here, unlike `new processor`'s blank: "
+            "the checks script was written in the same breath, so the gate "
+            "arrives wired rather than merely wireable",
+            "no refusal counter of its own — the ceiling is max_refusals: on "
+            "the profile entry and the framework counts it",
+            "the four-channel return, the environment-fault split, and the "
+            "broken-gate discrimination — see `explain archetype processor`",
+        ),
+        when=_GATE_WHEN,
+    ),
+    EmittedFile(
+        path=".jaato/completion_schemas/{name}.json",
+        what="the typed contract for what one job produces — and the reason "
+             "signal_completion exists at all",
+        status="edit",
+        detail=(
+            "summary + errors[] + warnings[], all required, "
+            "additionalProperties: false (the shape strict-mode tool sampling "
+            "needs)",
+            "errors[] is not decoration: the emitted driver reads it to "
+            "separate a job that FAILED from one that could not RUN, and "
+            "those are different verdicts",
+            "WITHOUT this file the profile's completion_processors are inert — "
+            "_should_hide_signal_completion hides the tool outright when no "
+            "schema is declared, so the agent cannot signal and the gate never "
+            "runs",
+        ),
+        when=_GATE_WHEN,
+    ),
+    EmittedFile(
+        path=".jaato/profiles/{name}.yaml",
+        what="the profile the JOBS matrix names — carries the two keys that "
+             "connect the checks to the session",
+        status="edit",
+        detail=(
+            "completion_processors: pointing at the emitted module, with "
+            "max_refusals: 3 / on_exhausted: allow",
+            "completion_payload_schema: pointing at the emitted schema",
+            "plugins: [] — yours to choose, as in a profile-set base",
+            "model + provider when --provider/--model were given; otherwise "
+            "neither, to be inherited from a profile set",
+        ),
+        when=_GATE_WHEN,
+    ),
+)
+
+_GATE_FLAGS: Tuple[Tuple[str, str], ...] = (
+    ("--no-gate",
+     "emit the client and .env ONLY.  The gate is on by default because a "
+     "sweep's jobs are graded — whether a job met the criteria IS the "
+     "measurement — and an opt-in flag reproduces the discovery problem the "
+     "gate exists to remove"),
+    ("--gate-name NAME",
+     "the stem shared by all four gate files (default 'acceptance'): the "
+     "processor module, the schema, the profile, and the entry's `name:`"),
+)
+
+_GATE_EDIT = (
+    "run_checks in acceptance.sh — EMPTY as emitted, so every job is refused "
+    "until you fill it.  That refusal is deliberate, but it is not a working "
+    "sweep",
+    "plugins: [] in the emitted profile — a job that has to CHANGE something "
+    "needs at least file_edit and cli",
+    "the agent names in the JOBS matrix; the profile column already points at "
+    "the emitted gate profile",
+    "max_refusals / on_exhausted — 3 and `allow` are a starting point, not a "
+    "recommendation",
+)
+
+_GATE_GENERATED_CORRECT = (
+    "the two profile keys as a UNIT: completion_processors runs the gate and "
+    "completion_payload_schema is what makes signal_completion exist for it "
+    "to gate.  Deleting the schema does not loosen the gate, it removes it",
+    "one acceptance.sh for the in-session gate AND the post-hoc graders, so "
+    "the gate and the scoreboard cannot grade different things",
+    "the unconfigured script failing CLOSED (exit 78, empty stdout → a "
+    "budget-exempt fault) rather than exiting 0 and passing every job",
+    "max_refusals on the entry rather than a counter in the module — the "
+    "framework owns the budget, and a hand-rolled one is a global whose "
+    "survival depends on a caching detail (jaato #768)",
+    "the JOBS matrix naming the profile that was written beside it, so the "
+    "client and the gate refer to each other on the first run",
+)
+
+
 def _client(name: str, *, detail: Tuple[str, ...],
-            edit: Tuple[str, ...] = ()) -> ArchetypeDoc:
+            edit: Tuple[str, ...] = (), gated: bool = False) -> ArchetypeDoc:
     """One client archetype: the shared contract + this script's specifics.
 
     ``requires`` is derived from :data:`_client_templates.PROVIDER_OPTIONAL`
@@ -237,20 +372,48 @@ def _client(name: str, *, detail: Tuple[str, ...],
     provider/model binding cannot keep advertising the flags as mandatory
     (or the reverse).  ``--provider`` / ``--model`` remain ACCEPTED for the
     optional three — see ``_CLIENT_FLAGS`` for what supplying them changes.
+
+    Args:
+        name: The archetype as typed after ``new``.
+        detail: Bullet lines for the emitted script.
+        edit: Parts of the output the reader must edit.
+        gated: This archetype also emits a completion gate (jaato #772).
+            Folds in :data:`_GATE_FILES` and its flags, edits and
+            guarantees — and upgrades the ``check`` line, because a gate is
+            checked far harder than a client: ``py_compile`` proves a script
+            parses, while the gate is LOADED through the framework and DRIVEN,
+            since the failure that matters is not a syntax error but a gate
+            that accepts what it should refuse.  Keyed off this flag rather
+            than off the archetype name so ``build.GATED_ARCHETYPES`` and the
+            docs cannot disagree about which archetypes are gated — the guard
+            in ``tests/test_scaffold_sweep_gate_contract.py`` compares them.
     """
+    check = ("py_compile of the generated script — the client analogue of "
+             "profile-set's emit-then-validate")
+    next_steps = _CLIENT_NEXT
+    if gated:
+        check += (", then the emitted gate is loaded through the framework's "
+                  "own load_processors and DRIVEN through invoke_processors: "
+                  "a generated set that would accept a completion while "
+                  "acceptance.sh has no checks configured fails here, at "
+                  "scaffold time, rather than silently in a graded run")
+        next_steps = (("put your acceptance criteria in acceptance.sh — every "
+                       "job is refused until you do",
+                       "jaato-scaffold validate <ws>") + _CLIENT_NEXT)
     return ArchetypeDoc(
         name=name,
         kind="client",
         summary=TEMPLATES[name][2],
         requires=(("--workspace",) if name in PROVIDER_OPTIONAL
                   else ("--workspace", "--provider", "--model")),
-        writes=(_client_script(detail), _CLIENT_ENV),
-        flags=_CLIENT_FLAGS,
-        edit_before_running=edit,
-        generated_correct=_CLIENT_GENERATED_CORRECT,
-        check="py_compile of the generated script — the client analogue of "
-              "profile-set's emit-then-validate",
-        next_steps=_CLIENT_NEXT,
+        writes=((_client_script(detail), _CLIENT_ENV)
+                + (_GATE_FILES if gated else ())),
+        flags=_CLIENT_FLAGS + (_GATE_FLAGS if gated else ()),
+        edit_before_running=edit + (_GATE_EDIT if gated else ()),
+        generated_correct=(_CLIENT_GENERATED_CORRECT
+                           + (_GATE_GENERATED_CORRECT if gated else ())),
+        check=check,
+        next_steps=next_steps,
     )
 
 
@@ -468,9 +631,86 @@ ARCHETYPES: Dict[str, ArchetypeDoc] = {
             "gets the typed payload, so the errors[] check can actually fire",
             "the owner connection holds the budget pool and outlives the jobs; "
             "it is the one place a raw client remains",
+            "the JOBS matrix names the GATE PROFILE emitted beside it (unless "
+            "--no-gate), so the jobs are graded against acceptance.sh rather "
+            "than against whether the model said it was finished",
         ),
         edit=("the JOBS matrix — the example varies the persona with "
               "capabilities held fixed; vary profile, agent, or both",),
+        gated=True,
+    ),
+
+    PROCESSOR: ArchetypeDoc(
+        name=PROCESSOR,
+        kind="processor",
+        summary="A completion processor — kb Python that gates "
+                "signal_completion, with the bounded-refusal contract "
+                "already right.",
+        requires=("--workspace", "--name"),
+        writes=(
+            EmittedFile(
+                path=".jaato/scripts/processors/{name}.py",
+                what="the processor module — a working `validate` with the "
+                     "parts that are easy to get wrong already right",
+                status="edit",
+                detail=(
+                    "validate(payload, context) -> ProcessorResult over the "
+                    "four channels: errors (blocks, spends a refusal), "
+                    "faults (blocks once, spends nothing), warnings, "
+                    "incomplete",
+                    "NO refusal counter of its own — the ceiling is "
+                    "`max_refusals:` on the profile entry and the framework "
+                    "counts it, so the module cannot carry a second budget "
+                    "or a global that depends on a caching detail",
+                    "a subprocess gate that reads a non-zero exit with EMPTY "
+                    "output as 'the checker broke' (a fault) rather than as "
+                    "'no failures' — the error-path-returns-success defect "
+                    "this hook attracts",
+                    "an environment-fault split so a missing script or a "
+                    "timeout does not consume the agent's retries",
+                    "a worked ledger check: a payload claiming a clean run "
+                    "over failed tool calls is caught against "
+                    "context.tool_calls",
+                    "CHECKS_COMMAND at the top — the one blank to fill",
+                ),
+            ),
+        ),
+        flags=(
+            ("--name NAME", "REQUIRED — the module stem, the entry's `name:`, "
+                            "and what the printed wiring refers to"),
+            ("--force", "overwrite a processor of that name that already "
+                        "exists"),
+        ),
+        edit_before_running=(
+            "CHECKS_COMMAND — None as emitted, so the subprocess gate is "
+            "skipped; set it to a command printing one line per failure",
+            "_check_claims_against_the_ledger — the worked check is the "
+            "cheapest useful one; replace it with what your completion "
+            "schema actually promises",
+            "max_refusals / on_exhausted in the printed wiring — 3 and "
+            "`allow` are a starting point, not a recommendation",
+        ),
+        generated_correct=(
+            "the four-channel return, and which of them spends a refusal",
+            "the broken-gate discrimination: a check that did not RUN must "
+            "never read as a check that PASSED",
+            "the absence of a module-level refusal counter — that is the "
+            "framework's job now, and emitting one would codify the folklore "
+            "jaato #768 retired",
+            "return strings written as instructions for the retry; the "
+            "framework appends the attempts remaining",
+        ),
+        check="py_compile, then the module is loaded through the framework's "
+              "own `load_processors` and driven through `invoke_processors` — "
+              "so a generated processor that would not load, or that would "
+              "wave a completion through, fails at scaffold time",
+        next_steps=(
+            "paste the printed completion_processors: block into the profile "
+            "whose completions it should gate",
+            "set CHECKS_COMMAND, or delete _run_checks if the ledger check is "
+            "all you want",
+            "jaato-scaffold explain completion",
+        ),
     ),
 
     "host-tools": _client(

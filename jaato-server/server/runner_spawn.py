@@ -743,18 +743,17 @@ def build_session_envelope(
         profile_completion_schema = getattr(
             profile, "completion_payload_schema", None,
         )
-        raw_processors = getattr(profile, "completion_processors", []) or []
-        for entry in raw_processors:
-            if hasattr(entry, "script"):
-                profile_completion_processors.append({
-                    "script": getattr(entry, "script", None),
-                    "output": getattr(entry, "output", None),
-                    "on_error": getattr(entry, "on_error", "fail_completion"),
-                    "description": getattr(entry, "description", None),
-                    "phase": getattr(entry, "phase", "finalization"),
-                })
-            elif isinstance(entry, dict):
-                profile_completion_processors.append(dict(entry))
+        # Serialised from the dataclass, never field-by-field: this list
+        # named five of CompletionProcessor's eight fields, so `name`,
+        # `max_refusals` and `on_exhausted` were dropped crossing into the
+        # runner and a declared refusal ceiling had no effect on the session
+        # that ran (jaato #770).
+        from shared.plugins.subagent.config import (
+            completion_processors_to_wire,
+        )
+        profile_completion_processors = completion_processors_to_wire(
+            getattr(profile, "completion_processors", []) or []
+        )
 
     # PR #91 Y fix: ship the FULLY-RESOLVED per-session env to the
     # runner.  ``server._session_env`` is populated by the daemon's
