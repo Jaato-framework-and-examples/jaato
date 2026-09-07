@@ -272,7 +272,8 @@ class AgentState:
         self.pending_formatter_feedback: Optional[str] = None
 
 
-from shared.model_tiers import bound_model_for_profile
+from shared.model_tiers import (bound_model_for_profile,
+                                bound_provider_for_profile)
 
 
 def _profile_binds_a_model(profile: Any) -> bool:
@@ -2158,18 +2159,37 @@ class JaatoServer:
             provider_to_use = session_provider or self._provider
 
             # Apply agent profile overrides for model and provider.
-            # Use the SAME binder the gate above used: reading
-            # ``profile.model`` alone left ``self._model_name`` None for a
-            # tiers-only profile, so ``SessionInfoEvent(model_name=None)``
+            # Use the SAME binder the gate above used, FOR BOTH HALVES:
+            # reading ``profile.model`` alone left ``self._model_name`` None
+            # for a tiers-only profile, so ``SessionInfoEvent(model_name=None)``
             # failed pydantic validation inside _create_session_impl and the
             # caller saw a dropped IPC connection -- the third time this
             # mismatch surfaced as "spawn refused".
+            #
+            # ``provider`` was still read from the flat key when #822 fixed
+            # the other two producers of this binding (``runner_spawn`` and
+            # the isolated-subagent envelope), and this site is the one where
+            # the mismatch does NOT fail loudly.  There, an unbound provider
+            # is refused by the runner with "envelope.provider_name is empty".
+            # Here it simply falls through to ``JAATO_PROVIDER`` from the
+            # workspace .env, so a profile whose initial tier declares
+            # ``openai/gpt-audio-mini`` on ``openrouter`` builds a JaatoRuntime
+            # bound to whatever the .env named -- the tier's model handed to a
+            # different vendor's provider, with nothing said.  Silence is the
+            # worse outcome of the two, which is why the halves must not
+            # diverge again.
+            #
+            # Precedence is unchanged: the binder returns the flat key first
+            # and consults the initial tier only when there is none, so a
+            # profile-level ``provider:`` still wins over the tier exactly as
+            # it did, and both still win over the session env.
             if self._profile:
                 _bound = bound_model_for_profile(self._profile)
                 if _bound:
                     model_name = _bound
-                if self._profile.provider:
-                    provider_to_use = self._profile.provider
+                _bound_provider = bound_provider_for_profile(self._profile)
+                if _bound_provider:
+                    provider_to_use = _bound_provider
 
             # Get provider-specific settings (may be None for non-Google providers)
             project_id = get_config("PROJECT_ID")
