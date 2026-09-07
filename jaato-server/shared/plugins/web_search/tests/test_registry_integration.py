@@ -245,3 +245,82 @@ class TestRegistryShutdownCleanup:
         registry.unexpose_tool("web_search")
 
         assert plugin._initialized is False
+
+
+class TestWebSearchCategory:
+    """Tests that ``web_search`` is filed under the ``web`` category (#843).
+
+    ``search`` is the CODEBASE search category (grep / AST / LSP —
+    "Search files, content, patterns across the codebase"); ``web`` is
+    the one whose description advertises "Fetch URLs, web search,
+    external API access".  Because a deferred tool is discovered by
+    browsing categories, filing web search under ``search`` made it
+    invisible to a model looking where the description points.
+    """
+
+    def test_tool_schema_category_is_web(self):
+        """The tool declares category ``web``, not ``search``."""
+        plugin = create_plugin()
+        plugin.initialize()
+
+        schema = plugin.get_tool_schemas()[0]
+
+        assert schema.name == "web_search"
+        assert schema.category == "web"
+
+    def test_web_category_described_without_web_fetch(self):
+        """Exposing web_search alone still yields a described ``web`` category.
+
+        ``web_fetch`` registers the same category, but a session may
+        enable web search without it — the summary must not show a bare,
+        undescribed category name.
+        """
+        registry = PluginRegistry()
+        registry.discover()
+
+        registry.expose_tool("web_search")
+        try:
+            descriptions = registry.get_category_descriptions()
+            assert descriptions.get("web")
+        finally:
+            registry.unexpose_tool("web_search")
+
+    def test_web_category_description_matches_web_fetch(self):
+        """Both web plugins register the SAME description.
+
+        ``register_category`` is last-writer-wins, so a divergent string
+        would make the rendered description depend on exposure order.
+        """
+        search_only = PluginRegistry()
+        search_only.discover()
+        search_only.expose_tool("web_search")
+
+        both = PluginRegistry()
+        both.discover()
+        both.expose_tool("web_fetch")
+        both.expose_tool("web_search")
+
+        try:
+            assert (
+                search_only.get_category_descriptions()["web"]
+                == both.get_category_descriptions()["web"]
+            )
+        finally:
+            search_only.unexpose_tool("web_search")
+            both.unexpose_all()
+
+    def test_search_category_is_codebase_only(self):
+        """``web_search`` no longer appears among the codebase-search tools."""
+        registry = PluginRegistry()
+        registry.discover()
+
+        registry.expose_tool("web_search")
+        try:
+            search_tools = [
+                s.name
+                for s in registry.get_exposed_tool_schemas()
+                if s.category == "search"
+            ]
+            assert "web_search" not in search_tools
+        finally:
+            registry.unexpose_tool("web_search")

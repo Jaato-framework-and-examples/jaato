@@ -254,10 +254,10 @@ The introspection mechanism bridges core and discoverable tools:
 Model needs web_search
         │
         ▼
-list_tools(category="search")
+list_tools(category="web")
         │
         ▼
-Returns: ["grep_content", "web_search", "ast_search"]
+Returns: ["web_fetch", "web_search"]
         │
         ▼
 get_tool_schemas(names=["web_search"])
