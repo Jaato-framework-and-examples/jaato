@@ -294,7 +294,7 @@ class _Plan:
             executable: Set the owner/group/other execute bits.  Needed by
                 ``acceptance.sh``: the gate invokes it as ``./acceptance.sh``,
                 so a checks script emitted non-executable is an environment
-                fault on every arm of the sweep — and one that reports as the
+                fault on every job of the sweep — and one that reports as the
                 gate being broken rather than as the generator being wrong.
         """
         if not self.dry_run:
@@ -806,7 +806,7 @@ def _new_client_archetype(args, archetype: str) -> int:
         plan.write(env_file, _compose_env(provider, active),
                    action="update" if env_file.exists() else "create")
 
-    # The completion gate, for the archetypes whose arms are graded.  Written
+    # The completion gate, for the archetypes whose jobs are graded.  Written
     # in the same pass as the client so the two agree about the profile name
     # on the first run (jaato #772).
     gate_skipped: List[Path] = []
@@ -915,7 +915,7 @@ def _print_next_steps(args, ws: Path, env_file: Path, py_file: Path,
 
 def _gate_next_step(ws: Path, gated: bool, gate_name: str) -> str:
     """The gate's line in the next-steps hint, first because its omission is
-    the one that fails silently: the sweep runs, every arm is refused by an
+    the one that fails silently: the sweep runs, every job is refused by an
     unconfigured gate, and the run reads as a model failure rather than as a
     missing edit."""
     if not gated:
@@ -923,7 +923,7 @@ def _gate_next_step(ws: Path, gated: bool, gate_name: str) -> str:
     profile = ws / ".jaato" / "profiles" / f"{gate_name}.yaml"
     return (f"  # put this sweep's acceptance criteria in "
             f"{ws / 'acceptance.sh'}\n"
-            f"  #   (run_checks is empty as emitted, so every arm is refused "
+            f"  #   (run_checks is empty as emitted, so every job is refused "
             f"until you fill it)\n"
             f"  # then choose plugins: [] in {profile}\n")
 
@@ -933,7 +933,7 @@ def _gate_next_step(ws: Path, gated: bool, gate_name: str) -> str:
 #: The archetype whose emitted set includes a completion gate.
 #:
 #: One archetype rather than a general flag because the gate is not a generic
-#: nicety: a sweep's arms are GRADED, so "did this arm meet the criteria" is
+#: nicety: a sweep's jobs are GRADED, so "did this job meet the criteria" is
 #: the measurement itself.  A `client` or `fire` script has no scoreboard for a
 #: gate to agree with (jaato #772).
 GATED_ARCHETYPES = ("sweep",)
@@ -977,11 +977,11 @@ def _gate_substitutions(gated: bool, name: str) -> Dict[str, str]:
     return {
         "__JOBS_PROFILE__": f'"{name}"',
         "__GATE_NOTE__": (
-            "# THE ARMS ARE GATED.  The profile named below was written beside\n"
-            "# this script and carries a completion gate: an arm cannot signal\n"
+            "# THE JOBS ARE GATED.  The profile named below was written beside\n"
+            "# this script and carries a completion gate: a job cannot signal\n"
             f"# completion until ./acceptance.sh passes, which is where you put\n"
             f"# this sweep's acceptance criteria.  As emitted that script has no\n"
-            "# checks in it and every arm is refused, deliberately — a gate with\n"
+            "# checks in it and every job is refused, deliberately — a gate with\n"
             "# nothing configured must not read as a gate that passed.\n"
             "#\n"
             "# The same script is what should grade the sweep afterwards, so the\n"
@@ -1017,7 +1017,7 @@ def _emit_sweep_gate(plan: "_Plan", ws: Path, name: str, provenance: str,
     """Write the gate set; return the paths that were skipped as existing.
 
     The four files are written as ONE unit deliberately.  Each is inert alone:
-    a processor with no checks script faults on every arm, a checks script no
+    a processor with no checks script faults on every job, a checks script no
     processor runs grades nothing, and the profile's two keys are what make
     ``signal_completion`` exist for the processor to gate at all.  Emitting
     them separately is what left an author holding three files and the
@@ -1083,7 +1083,7 @@ def _probe_generated_gate(ws: Path, name: str) -> Optional[str]:
     The assertion that matters is the LAST one.  Fresh from the generator,
     ``acceptance.sh`` has no checks configured, and the tempting behaviour —
     a script with nothing to check exiting 0 — would have the gate report "no
-    failures" and wave every arm through.  So the probe requires the
+    failures" and wave every job through.  So the probe requires the
     unconfigured gate to BLOCK, and to block as a ``faults[]`` entry rather
     than an ``errors[]`` one: it is an environment fault the author must clear,
     not a wrong answer costing the agent a retry.  A generated set that would

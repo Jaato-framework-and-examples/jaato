@@ -262,7 +262,7 @@ _GATE_FILES: Tuple[EmittedFile, ...] = (
             "check on stdout, nothing at all on success, exit 0/1",
             "unconfigured it exits 78 (EX_CONFIG) with an EMPTY stdout, which "
             "the processor reads as 'the checker did not run' — a script with "
-            "nothing to check that exited 0 would have the gate wave every arm "
+            "nothing to check that exited 0 would have the gate wave every job "
             "through, which is the error-path-returns-success defect the gate "
             "exists to prevent",
             "a per-case tier: acceptance/<CASE_ID>.sh is sourced when it "
@@ -290,7 +290,7 @@ _GATE_FILES: Tuple[EmittedFile, ...] = (
     ),
     EmittedFile(
         path=".jaato/completion_schemas/{name}.json",
-        what="the typed contract for what one arm produces — and the reason "
+        what="the typed contract for what one job produces — and the reason "
              "signal_completion exists at all",
         status="edit",
         detail=(
@@ -298,7 +298,7 @@ _GATE_FILES: Tuple[EmittedFile, ...] = (
             "additionalProperties: false (the shape strict-mode tool sampling "
             "needs)",
             "errors[] is not decoration: the emitted driver reads it to "
-            "separate an arm that FAILED from one that could not RUN, and "
+            "separate a job that FAILED from one that could not RUN, and "
             "those are different verdicts",
             "WITHOUT this file the profile's completion_processors are inert — "
             "_should_hide_signal_completion hides the tool outright when no "
@@ -327,7 +327,7 @@ _GATE_FILES: Tuple[EmittedFile, ...] = (
 _GATE_FLAGS: Tuple[Tuple[str, str], ...] = (
     ("--no-gate",
      "emit the client and .env ONLY.  The gate is on by default because a "
-     "sweep's arms are graded — whether an arm met the criteria IS the "
+     "sweep's jobs are graded — whether a job met the criteria IS the "
      "measurement — and an opt-in flag reproduces the discovery problem the "
      "gate exists to remove"),
     ("--gate-name NAME",
@@ -336,10 +336,10 @@ _GATE_FLAGS: Tuple[Tuple[str, str], ...] = (
 )
 
 _GATE_EDIT = (
-    "run_checks in acceptance.sh — EMPTY as emitted, so every arm is refused "
+    "run_checks in acceptance.sh — EMPTY as emitted, so every job is refused "
     "until you fill it.  That refusal is deliberate, but it is not a working "
     "sweep",
-    "plugins: [] in the emitted profile — an arm that has to CHANGE something "
+    "plugins: [] in the emitted profile — a job that has to CHANGE something "
     "needs at least file_edit and cli",
     "the agent names in the JOBS matrix; the profile column already points at "
     "the emitted gate profile",
@@ -354,7 +354,7 @@ _GATE_GENERATED_CORRECT = (
     "one acceptance.sh for the in-session gate AND the post-hoc graders, so "
     "the gate and the scoreboard cannot grade different things",
     "the unconfigured script failing CLOSED (exit 78, empty stdout → a "
-    "budget-exempt fault) rather than exiting 0 and passing every arm",
+    "budget-exempt fault) rather than exiting 0 and passing every job",
     "max_refusals on the entry rather than a counter in the module — the "
     "framework owns the budget, and a hand-rolled one is a global whose "
     "survival depends on a caching detail (jaato #768)",
@@ -398,7 +398,7 @@ def _client(name: str, *, detail: Tuple[str, ...],
                   "acceptance.sh has no checks configured fails here, at "
                   "scaffold time, rather than silently in a graded run")
         next_steps = (("put your acceptance criteria in acceptance.sh — every "
-                       "arm is refused until you do",
+                       "job is refused until you do",
                        "jaato-scaffold validate <ws>") + _CLIENT_NEXT)
     return ArchetypeDoc(
         name=name,
@@ -632,7 +632,7 @@ ARCHETYPES: Dict[str, ArchetypeDoc] = {
             "the owner connection holds the budget pool and outlives the jobs; "
             "it is the one place a raw client remains",
             "the JOBS matrix names the GATE PROFILE emitted beside it (unless "
-            "--no-gate), so the arms are graded against acceptance.sh rather "
+            "--no-gate), so the jobs are graded against acceptance.sh rather "
             "than against whether the model said it was finished",
         ),
         edit=("the JOBS matrix — the example varies the persona with "
