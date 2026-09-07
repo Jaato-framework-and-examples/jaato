@@ -1242,6 +1242,65 @@ class CompletionProcessor:
             Its ``incomplete[]`` entries gate ``is_complete`` to False
             and surface to the model as neutral "still needed" guidance
             (no retry penalty); its ``errors[]`` still reject as usual.
+        max_refusals: How many times this processor may BLOCK completion
+            before the framework stops letting it (issue #768).  ``None`` (the default) is unbounded, which is
+            what every processor did before this field existed — and
+            which does not terminate on its own: the processor refuses,
+            the agent re-claims completion, forever.  An observed run
+            spent seven refusals in 156 seconds on the same two errors
+            and ended BLOCKED with its whole budget gone.  Set an
+            integer and the framework counts the refusals per session
+            and applies ``on_exhausted`` at the ceiling.
+
+            **What counts as one refusal:** ONE invocation of this
+            processor in which its ``validate`` returned at least one
+            ``errors[]`` entry, however many entries that was.  What
+            does NOT count: ``warnings[]``, ``incomplete[]``, the
+            budget-exempt ``faults[]`` channel (see
+            :class:`jaato_sdk.cascade_authoring.ProcessorResult`), and
+            every broken-gate condition — a load failure, a raise, a
+            malformed return, a failed write.  Those are not the agent
+            getting the answer wrong, so spending its retries on them
+            would burn the budget without ever producing a verdict.
+            The counter lives on the framework's per-session
+            ``LoadedProcessor`` (see
+            :mod:`shared.completion_processors`), which is what makes
+            it a declared home rather than a module-level global
+            resting on an undocumented caching guarantee (#765).
+
+            **Per processor, per session** — not one budget shared
+            across the profile (#770's open question).  Two gates on
+            one profile hold independent ceilings and the longer one
+            governs while the shorter goes advisory.  It is the only
+            answer that composes: processors are merged along a
+            profile's inheritance chain (#791), so a shared budget
+            would let a base profile's gate spend a child's, and
+            adding an unrelated gate would silently tighten every
+            existing one.
+
+            The value has to REACH the runner to do anything, and for
+            a while it did not — three hand-written serialisers
+            between the daemon and the runner named five of this
+            dataclass's fields and dropped the rest, so a declared
+            ceiling was ``None`` by the time it was enforced (a live
+            daemon refused 494 times under ``max_refusals: 2``).  Both
+            directions now go through
+            ``completion_processors_to_wire`` /
+            ``completion_processors_from_wire``, neither of which
+            names a field.  Guard:
+            ``shared/tests/test_processor_wiring_survives_the_runner_boundary.py``.
+        on_exhausted: What happens on the invocation AFTER
+            ``max_refusals`` is spent.  ``"allow"`` (default) downgrades
+            this processor's errors to warnings and lets the completion
+            stand unfinished — the checks still failed and whatever
+            grades the run afterwards will say so, on the reasoning that
+            **a FAIL verdict carries information and a BLOCKED arm
+            carries none**.  ``"fail"`` keeps blocking forever, which is
+            right when an unfinished completion is worse than no
+            completion (a run that writes to a shared store, say).  Both
+            are real choices; the default is the one that keeps a
+            harness producing verdicts.  Ignored when ``max_refusals``
+            is ``None``.
     """
     script: str
     output: Optional[str] = None
@@ -1249,6 +1308,8 @@ class CompletionProcessor:
     description: Optional[str] = None
     phase: str = "finalization"
     name: Optional[str] = None
+    max_refusals: Optional[int] = None
+    on_exhausted: str = "allow"
 
     @property
     def identity(self) -> str:
@@ -1844,6 +1905,50 @@ def _processor_enum(
     return value
 
 
+#: The closed vocabularies of a ``completion_processors`` entry.  Named
+#: constants rather than literals at the call site because they are read
+#: back by ``jaato-scaffold explain completion`` (via
+#: ``shared.scaffold.introspect.processor_schema``): a doc that quotes the
+#: framework's own vocabulary cannot drift from it, and a doc that spells
+#: it out silently can — which is the whole of jaato #769.
+PROCESSOR_ON_ERROR: Tuple[str, ...] = ("fail_completion", "warn")
+PROCESSOR_PHASES: Tuple[str, ...] = ("finalization", "completeness")
+PROCESSOR_ON_EXHAUSTED: Tuple[str, ...] = ("allow", "fail")
+
+
+def _processor_opt_int(
+    entry: Dict[str, Any], key: str, script: str,
+) -> Optional[int]:
+    """Read an optional non-negative integer key off one processor entry.
+
+    Used for ``max_refusals``.  Rejects non-integers (including ``bool``,
+    which ``isinstance(True, int)`` would otherwise wave through as 1) and
+    negatives, warning and returning ``None`` — i.e. degrading to the
+    unbounded pre-#768 behaviour rather than inventing a ceiling the author
+    did not write.  Consistent with every other key here: a typo'd
+    annotation must not take the whole profile down with it.
+
+    Args:
+        entry: One raw ``completion_processors`` list item.
+        key: The key to read (``"max_refusals"``).
+        script: The entry's script path, for the warning message.
+
+    Returns:
+        The integer, or ``None`` when absent or invalid.
+    """
+    value = entry.get(key)
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        logger.warning(
+            "completion_processors: %r must be a non-negative integer for "
+            "script=%r (got %r); ignoring — this processor stays unbounded",
+            key, script, value,
+        )
+        return None
+    return value
+
+
 def _parse_completion_processors(value: Any) -> List[CompletionProcessor]:
     """Parse a profile's ``completion_processors`` list from raw JSON/YAML.
 
@@ -1856,6 +1961,8 @@ def _parse_completion_processors(value: Any) -> List[CompletionProcessor]:
          "on_error": "fail_completion",      # default
          "phase": "finalization",            # default
          "name": "acceptance",               # optional
+         "max_refusals": 3,                  # optional; None = unbounded
+         "on_exhausted": "allow",            # default; "allow" | "fail"
          "description": "..."}               # optional
 
     ``output`` is optional — when omitted, the processor runs for
@@ -1906,17 +2013,103 @@ def _parse_completion_processors(value: Any) -> List[CompletionProcessor]:
             script=script.strip(),
             output=normalized_output,
             on_error=_processor_enum(
-                entry, "on_error", ("fail_completion", "warn"),
+                entry, "on_error", PROCESSOR_ON_ERROR,
                 "fail_completion", script,
             ),
             description=_processor_opt_str(entry, "description", script),
             phase=_processor_enum(
-                entry, "phase", ("finalization", "completeness"),
+                entry, "phase", PROCESSOR_PHASES,
                 "finalization", script,
             ),
             name=_processor_opt_str(entry, "name", script),
+            max_refusals=_processor_opt_int(entry, "max_refusals", script),
+            on_exhausted=_processor_enum(
+                entry, "on_exhausted", PROCESSOR_ON_EXHAUSTED,
+                "allow", script,
+            ),
         ))
     return out
+
+
+def completion_processors_to_wire(
+    processors: Any,
+) -> List[Dict[str, Any]]:
+    """Serialise ``completion_processors`` for the daemon -> runner envelope.
+
+    Uses ``dataclasses.asdict`` rather than naming the fields, which is the
+    whole point of it existing.  Three separate call sites used to build this
+    dict by hand — two daemon-side envelope builders and the runner-side
+    reconstruction — and every one of them listed ``script`` / ``output`` /
+    ``on_error`` / ``description`` / ``phase`` and stopped there.  So
+    ``name``, ``max_refusals`` and ``on_exhausted`` were dropped in transit:
+    the profile parsed them, ``profile_to_snapshot`` persisted them, and the
+    session that actually ran never saw them.
+
+    What that cost: a declared refusal ceiling had NO EFFECT on a real
+    session.  Measured against a live daemon, a gate with ``max_refusals: 2``
+    refused 494 times without exhausting — the unbounded loop of jaato #768,
+    reintroduced by a serialiser, with the profile still saying the ceiling
+    was there.  ``suppress_inherited_processors`` (#791) lost the same way,
+    since it matches on ``name``.
+
+    Entries that are already plain dicts pass through unchanged: subagent
+    spawn specs may carry raw wire dicts that never became dataclasses.  An
+    object that merely LOOKS like a processor (anything exposing ``script``)
+    is accepted too, because the hand-written path this replaces duck-typed
+    on exactly that and callers rely on it; its fields are read through
+    ``CompletionProcessor`` so the dataclass stays the single source of both
+    the field set and the defaults.
+
+    Anything else is dropped WITH A WARNING rather than silently, since a
+    processor that vanishes on the way to the runner is a gate that stops
+    gating and says nothing — the failure this function exists to end.
+
+    Args:
+        processors: ``CompletionProcessor`` instances, raw dicts, duck-typed
+            stand-ins, or a mix.
+
+    Returns:
+        One JSON-safe dict per entry, carrying EVERY field of the dataclass.
+    """
+    import dataclasses as _dc
+
+    out: List[Dict[str, Any]] = []
+    for entry in processors or []:
+        if isinstance(entry, dict):
+            out.append(dict(entry))
+        elif _dc.is_dataclass(entry) and not isinstance(entry, type):
+            out.append(_dc.asdict(entry))
+        elif hasattr(entry, "script"):
+            out.append(_dc.asdict(CompletionProcessor(**{
+                f.name: getattr(entry, f.name)
+                for f in _dc.fields(CompletionProcessor)
+                if hasattr(entry, f.name)
+            })))
+        else:
+            logger.warning(
+                "completion_processors: dropping unusable entry on the way "
+                "to the runner (no 'script'): %r", entry,
+            )
+    return out
+
+
+def completion_processors_from_wire(
+    entries: Any,
+) -> List[CompletionProcessor]:
+    """Rebuild ``completion_processors`` runner-side from the envelope.
+
+    A thin alias of :func:`_parse_completion_processors`, deliberately: the
+    wire dict and a profile file's ``completion_processors:`` block are the
+    same shape, so parsing them with the same function is what stops the two
+    from disagreeing about what an entry means.  The hand-rolled
+    reconstruction it replaces had already drifted — it silently defaulted
+    every field it did not know about, so a ceiling that crossed the wire
+    would still have been discarded on arrival.
+
+    Malformed entries are skipped with a warning rather than raising, exactly
+    as they are when a profile declares them.
+    """
+    return _parse_completion_processors(entries)
 
 
 #: The ``cache.ttl`` vocabulary.  Deliberately the Anthropic/OpenRouter

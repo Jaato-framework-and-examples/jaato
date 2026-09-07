@@ -50,14 +50,38 @@ SIGNAL_COMPLETION_CALL = {
 }
 
 
+#: The ceiling ``conformance-refused`` declares.  Small, because what the
+#: invariant measures is that the loop STOPS, and each refusal is a real
+#: round-trip through the daemon.
+MAX_REFUSALS = 2
+
+#: A gate that can never be satisfied.
+#:
+#: Paired with ``retry_tool_call``, this is the whole of jaato #768's incident
+#: expressed as a profile: the agent claims completion, the gate refuses, the
+#: agent claims completion again.  Nothing in echo or in the processor ends
+#: that; only ``max_refusals`` does, which is what the invariant asserts.
+ALWAYS_REFUSES = (
+    "def validate(payload, context):\n"
+    "    return ['the acceptance checks still fail']\n"
+)
+
+
 @pytest.fixture(scope="module")
 def daemon():
-    """A daemon serving THREE profiles, one per ending a session can have.
+    """A daemon serving FOUR profiles, one per ending a session can have.
 
     The first two are needed and neither substitutes for the other -- the
     defects that hide behind a prose ending are exactly the ones the terminus
     exposes, and a suite carrying only the second could not tell a general
     breakage from a terminus-specific one.
+
+    ``conformance-refused`` is the fourth, and the only one whose session ends
+    because a BUDGET ran out rather than because the work finished: a gate
+    that always refuses, driven by an echo that always re-claims. Without
+    ``max_refusals`` that pair does not terminate at all, which is the state
+    jaato #768 measured in production (seven refusals in 156 seconds) and
+    #770 asked to be guarded at the loop rather than at the invocation.
 
     ``conformance-nudged`` is the third ending, and it is a COMBINATION rather
     than a variant: a completion schema (so ``signal_completion`` is in the
@@ -78,6 +102,15 @@ def daemon():
     echo_workspace(root, usage=TURN_USAGE, response="conformance ok",
                    completion_schema=COMPLETION_SCHEMA,
                    name="conformance-nudged")
+    echo_workspace(root, usage=TURN_USAGE,
+                   tool_call=SIGNAL_COMPLETION_CALL,
+                   completion_schema=COMPLETION_SCHEMA,
+                   retry_tool_call=True,
+                   processor=ALWAYS_REFUSES,
+                   processor_entry={"on_error": "fail_completion",
+                                    "max_refusals": MAX_REFUSALS,
+                                    "on_exhausted": "allow"},
+                   name="conformance-refused")
     d = ConformanceDaemon(root)
     try:
         yield d.start()

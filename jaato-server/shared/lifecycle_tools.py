@@ -247,6 +247,20 @@ class LifecycleTools:
         # ``CompletionProcessor`` entry plus probed ``render`` /
         # ``validate`` callables; ``load_error`` surfaces typos /
         # missing symbols to the agent at signal time.
+        #
+        # LOAD-ONCE-PER-SESSION IS A CONTRACT, NOT AN OPTIMISATION
+        # (issues #765, #768).  Because the same ``LoadedProcessor``
+        # instances are handed to every ``signal_completion`` /
+        # ``prepare_completion`` call of this session, they are the
+        # framework's declared home for per-session processor state —
+        # the ``max_refusals`` counter lives there.  Before that was
+        # stated, authors relied on the same caching from the outside,
+        # by keeping their refusal counter in a module-level global; a
+        # change to per-call loading would have left those processors
+        # working while their ceiling silently stopped existing.  Do
+        # not reload per call.
+        # Guard: shared/tests/test_completion_processor_refusal_budget.py
+        # ::test_processors_are_loaded_once_per_session.
         self._processors_loaded: Optional[List[Any]] = None
 
         # Accumulated payload state (server 0.6.198+, 2026-06-09) for the
