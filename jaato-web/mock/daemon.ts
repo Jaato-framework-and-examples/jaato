@@ -27,6 +27,7 @@ import { WebSocketServer, type WebSocket } from "ws";
 import { randomUUID } from "node:crypto";
 
 const PORT = Number(process.env.MOCK_PORT ?? 8090);
+const HOST = process.env.MOCK_HOST ?? "127.0.0.1";
 const TOKEN = process.env.MOCK_TOKEN ?? "";
 const WORKSPACES = process.env.MOCK_WORKSPACES === "1";
 const SPEED = Number(process.env.MOCK_SPEED ?? 1); // multiplier; 0 = no delays
@@ -154,7 +155,7 @@ async function turn(c: Client, text: string, agentId = "main"): Promise<void> {
   send(c, { type: "agent.status_changed", agent_id: agentId, status: "idle" });
 }
 
-const wss = new WebSocketServer({ port: PORT });
+const wss = new WebSocketServer({ host: HOST, port: PORT });
 wss.on("connection", (ws, req) => {
   const url = new URL(req.url ?? "/", "http://x");
   const auth = req.headers.authorization ?? "";
@@ -241,4 +242,4 @@ wss.on("connection", (ws, req) => {
   });
 });
 
-console.log(`mock jaato daemon listening on ws://127.0.0.1:${PORT}${TOKEN ? " (token required)" : ""}${WORKSPACES ? " [workspace mode]" : ""}`);
+console.log(`mock jaato daemon listening on ws://${HOST}:${PORT}${TOKEN ? " (token required)" : ""}${WORKSPACES ? " [workspace mode]" : ""}`);
