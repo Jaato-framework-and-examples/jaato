@@ -146,11 +146,34 @@ class WebSearchPlugin(RunnerForwardingMixin):
                 },
                 "required": ["query"]
             },
-            category="search",
+            # "web", not "search": the ``search`` category is the CODEBASE
+            # one ("Search files, content, patterns across the codebase" —
+            # grep / AST / LSP), while ``web`` is described as "Fetch URLs,
+            # web search, external API access".  A deferred tool is found by
+            # browsing categories, so filing web search under the codebase
+            # category left the category that ADVERTISES web search without
+            # it — models enumerated ``web``, missed this tool, and reported
+            # they could not search the web (#843).
+            category="web",
             # Search results are untrusted external content — wrapped in the
             # untrusted-content boundary to defang injected instructions.
             traits=frozenset({TRAIT_UNTRUSTED_CONTENT}),
         )]
+
+    def set_plugin_registry(self, registry) -> None:
+        """Called during ``expose_tool()``.  Registers the web category.
+
+        ``web_fetch`` registers the same category with the same
+        description, and registration is last-writer-wins with an
+        identical string, so the two are order-independent.  Declaring it
+        here too means a session that enables ``web_search`` WITHOUT
+        ``web_fetch`` still gets a described ``web`` category in the
+        ``list_tools`` summary rather than a bare, undescribed name.
+
+        Args:
+            registry: The PluginRegistry instance.
+        """
+        registry.register_category("web", "Fetch URLs, web search, external API access")
 
     def get_executors(self) -> Dict[str, Callable[[Dict[str, Any]], Any]]:
         """Return the executor mapping.
