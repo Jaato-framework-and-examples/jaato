@@ -599,6 +599,16 @@ framework has already declared cannot see them. A provider serving a vision
 model with no `modalities` knob to assert it is a separate gap, in that
 provider.
 
+**The span follows the request, not the store.**
+`_record_input_messages_telemetry` built its OpenInference
+`llm.input_messages.*` from `_history.messages`, which was the same list as
+the request's until this gate existed. It now reads `_history_for_provider()`
+for the same reason the request does: a span showing a text tier receiving
+audio it was specifically not sent is the one reading that makes this 404
+look impossible. Every call site already sits inside the `llm_span` wrapping
+`complete()` and after the turn's history append, so it resolves against the
+same active model the request will use.
+
 Guarded by `shared/tests/test_history_modality_gate.py`, which checks the
 stored history in every case — a test asserting only "the text tier sent no
 audio" passes for the destructive fix too.

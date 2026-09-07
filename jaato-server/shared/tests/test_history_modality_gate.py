@@ -255,6 +255,43 @@ class TestToolResultsInHistory:
         assert _untouched(s._history_for_provider(), s)
 
 
+class TestTelemetryDescribesWhatWasSent:
+    """A span describing the model's input must describe the real input.
+
+    ``_record_input_messages_telemetry`` read the *stored* history, which
+    was the same list as the request's until the gate existed.  Left alone
+    it would report a text tier receiving the audio it was specifically not
+    sent — the one reading that makes the 404 the gate prevents look
+    impossible.
+    """
+
+    def _span_messages(self, session):
+        captured = []
+
+        class _Span:
+            def set_input_messages(self, msgs):
+                captured.append(msgs)
+
+        session._system_instruction = "you are a helpdesk"
+        session._record_input_messages_telemetry(_Span())
+        return captured[0] if captured else []
+
+    def test_span_reports_the_gated_turn(self):
+        s = _session(_FakeProvider({"text"}), _heard_one_utterance())
+        msgs = self._span_messages(s)
+        user = [m for m in msgs if m.get("role") == "user"]
+        assert user and "withheld" in str(user[0]["content"]).lower()
+
+    def test_span_still_reports_audio_to_a_model_that_gets_it(self):
+        """Guards the test above from passing for the wrong reason."""
+        s = _session(_FakeProvider({"text", "audio"}),
+                     _heard_one_utterance(), model="openai/gpt-audio-mini",
+                     active_tier="voice")
+        msgs = self._span_messages(s)
+        assert not any("withheld" in str(m.get("content", "")).lower()
+                       for m in msgs)
+
+
 class TestOpenRouterWireHasNoInputAudio:
     """The 404's proximate cause, checked at the wire.
 

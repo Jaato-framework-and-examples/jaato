@@ -10102,9 +10102,20 @@ NOTES
     def _record_input_messages_telemetry(self, span) -> None:
         """Record OpenInference input messages on a telemetry span.
 
-        Converts the current session history (messages being sent to the
-        provider) into OpenInference ``llm.input_messages.*`` indexed
-        attributes on the LLM span, prepended with the system instruction.
+        Converts the messages being sent to the provider into OpenInference
+        ``llm.input_messages.*`` indexed attributes on the LLM span,
+        prepended with the system instruction.
+
+        The list comes from :meth:`_history_for_provider`, not from
+        ``_history.messages``, because since #847 those are not the same
+        list: the modality gate withholds, per request, content the active
+        model cannot consume.  A span reporting the stored history would
+        show a text tier receiving the audio it was specifically not sent —
+        the one reading that makes the 404 this gate exists to prevent look
+        impossible.  Every call site sits inside the ``llm_span`` wrapping
+        the ``complete()`` call and after the turn's history append, so the
+        gate here resolves against the same active model the request will
+        use.
 
         The system prompt is NOT part of ``_history.messages`` — it reaches the
         provider as the API's separate top-level ``system`` parameter — so
@@ -10121,7 +10132,7 @@ NOTES
             span: The LLM span context to set attributes on.
         """
         input_msgs = build_input_messages(
-            self._system_instruction, self._history.messages
+            self._system_instruction, self._history_for_provider()
         )
         if input_msgs:
             span.set_input_messages(input_msgs)
