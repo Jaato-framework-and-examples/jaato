@@ -1048,6 +1048,59 @@ class ModelTierConfig:
         return cls.from_env(env=env)
 
 
+def bound_provider_for_profile(profile: object) -> Optional[str]:
+    """The provider a profile binds for session START, by EITHER route.
+
+    The provider counterpart of :func:`bound_model_for_profile`, and it
+    exists for the same reason that one does: two surfaces disagreed about
+    what "bound" means, and the disagreement surfaced as an unexplained
+    60-second timeout.
+
+    ``build_session_envelope`` read ``profile.provider`` alone, so a profile
+    whose ``model_tiers`` fully declared model AND provider per tier — and
+    which therefore omitted both top-level keys — bootstrapped with an empty
+    ``provider_name`` and was refused by the runner with
+    ``envelope.provider_name is empty``.  Client-side that is a create_session
+    timeout, which reads as a hung daemon rather than a config error.  Worse,
+    the profile loader ADVISES dropping those keys ("removing it is also fine
+    — the session bootstraps from the initial tier"), so following the
+    framework's own advice produced a profile that validated cleanly and could
+    not start (jaato #822).
+
+    The initial tier is the right source because it is what the session
+    actually uses on turn 1: ``JaatoSession`` assigns
+    ``tier_config.tiers[initial_tier]``'s model and, for a tier naming its own
+    provider, swaps to that provider.  Deriving the envelope from it makes the
+    two agree instead of making the advice false.
+
+    Returns:
+        The bound provider name, or ``None`` when the profile binds none by
+        either route (a tier may legitimately leave ``provider`` unset, which
+        means "the session's main provider" — and if there is no top-level one
+        either, nothing is bound and the caller's own fallback applies).  A
+        malformed tier entry yields ``None`` rather than raising, matching
+        :func:`bound_model_for_profile`.
+    """
+    if profile is None:
+        return None
+
+    flat = getattr(profile, "provider", None)
+    if flat:
+        return flat
+
+    tiers = getattr(profile, "model_tiers", None) or {}
+    if not tiers:
+        return None
+
+    initial = tiers.get(RESERVED_INITIAL_KEY) or DEFAULT_INITIAL_TIER
+    if initial not in tiers:
+        return None
+    try:
+        return _normalize_tier_entry(initial, tiers[initial]).provider or None
+    except ModelTierConfigError:
+        return None
+
+
 def bound_model_for_profile(profile: object) -> Optional[str]:
     """The model a profile binds for session START, by EITHER route.
 

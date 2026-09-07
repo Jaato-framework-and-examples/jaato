@@ -169,9 +169,41 @@ turn blocks forever — the same hang class as #399. The facade keeps the
 | `create_session` returns no id | `RuntimeError` from `__aenter__` |
 | turn ends `reason="error"` | `AgentError(error_type, error_summary)` from `ask`/`complete` |
 | gated tool, no `on_permission` | `PermissionUnhandled(tool_name)` from `ask`/`complete` |
+| a `timeout=` expires | `TurnTimeout(timeout, waiting_for)` from `ask`/`complete`/`stream` |
 
 Raising (vs returning a status object) makes failures impossible to ignore
 and mirrors LangChain's `.invoke` contract.
+
+### `timeout=` on `ask` / `complete` / `stream`
+
+Optional, default `None` = wait as long as the turn takes. On expiry the call
+raises `TurnTimeout` (a `TimeoutError` subclass, so `except
+asyncio.TimeoutError` still catches it).
+
+**A timeout does not stop the session; it stops waiting.** The session keeps
+running daemon-side — call `s.client.stop()` or end the session if the work
+should stop too.
+
+**Why the facade needs a clock at all.** A fan-out driver runs N independent
+jobs and must be able to give up on one. The obvious place for that bound is a
+cascade task pool's `seconds` ceiling, and it does not work: a pool is an
+aggregate over COMPLETED work, reconciled when a session ENDS, so it never
+charges for a job that has not finished — and the runaway job is precisely the
+one that has not finished. (Observed as `cascade_remaining` unchanged across
+two spawns while a job ran past sixteen minutes.) So the scaffolded `sweep`
+driver wrapped the facade in `asyncio.wait_for`, which is the plumbing this
+module exists to own; the parameter is what let it stop (jaato #826).
+
+**Not `SETTLE_GRACE`.** Two clocks, and they mean different things.
+`SETTLE_GRACE` bounds ONE proposal's confirmation inside `complete` and
+*settles* on it — a daemon that goes quiet between a turn and its status event
+costs accuracy, never a wait with no end (#767). The caller's `timeout` bounds
+the whole call and *raises*. `complete` sleeps for the smaller of the two and
+re-reads the deadline afterwards to decide which one actually expired.
+
+For `stream` the bound is over the WHOLE stream rather than per chunk — a model
+emitting one token a minute forever is the case a per-chunk bound would miss.
+Chunks already yielded stay yielded.
 
 ## Phase 2 (shipped)
 

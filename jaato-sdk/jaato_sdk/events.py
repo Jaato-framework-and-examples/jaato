@@ -3028,3 +3028,84 @@ def create_event(event_type: EventType, **kwargs) -> Event:
         raise ValueError(f"Unknown event type: {event_type}")
 
     return event_class(**kwargs)
+
+
+# =============================================================================
+# Event-type-name filters (cascade observers)
+# =============================================================================
+#
+# ``cascade_events(event_types=[...])`` and the daemon's
+# ``register_in_process_client(event_types=...)`` filter on the Python CLASS
+# name (``type(event).__name__``), not on the wire value of ``EventType``.
+# The two vocabularies look interchangeable — ``"SessionTerminatedEvent"``
+# versus ``"session.terminated"`` — and a filter written in the wrong one
+# matches NOTHING while every other signal (registration succeeds, the daemon
+# logs a healthy entry) says the subscription is live.  jaato #821: the
+# scaffolded observer template shipped wire values and was silently deaf for
+# the entire life of every cascade it observed.
+#
+# These helpers exist so both sides can SAY SO instead of going quiet.
+
+
+def known_event_class_names() -> frozenset:
+    """Every event CLASS name a type-name filter can legitimately match.
+
+    This is the vocabulary of ``event_types``: the names
+    ``type(event).__name__`` produces.  Built from the wire registry plus
+    every ``Event`` subclass this module defines, so a class that has not
+    (yet) been given a wire entry is still recognised as a real name rather
+    than reported as a typo.
+    """
+    names = {cls.__name__ for cls in _EVENT_CLASSES.values()}
+    for obj in globals().values():
+        if isinstance(obj, type) and issubclass(obj, Event):
+            names.add(obj.__name__)
+    return frozenset(names)
+
+
+def check_event_type_names(names) -> "Dict[str, Optional[str]]":
+    """Report which of *names* can never match, and what was probably meant.
+
+    Returns a mapping ``{given_name: suggestion_or_None}`` containing ONLY
+    the entries that match no event class.  The suggestion is the class name
+    for the wire value that was passed — ``{"session.terminated":
+    "SessionTerminatedEvent"}`` — which is by far the most common way to get
+    this wrong, and ``None`` when the string corresponds to nothing at all.
+
+    An empty mapping means every name is a real event class.  It does NOT
+    mean the filter will match anything: a real class that this session never
+    emits is a legitimate (if idle) subscription, and this function
+    deliberately does not guess at that.
+    """
+    known = known_event_class_names()
+    bad: Dict[str, Optional[str]] = {}
+    for name in names or ():
+        if name in known:
+            continue
+        wire = _EVENT_CLASSES.get(name)
+        bad[name] = wire.__name__ if wire is not None else None
+    return bad
+
+
+def describe_event_type_problems(names) -> Optional[str]:
+    """One-line human-readable summary of :func:`check_event_type_names`.
+
+    ``None`` when every name is valid — so callers can ``if msg:`` rather
+    than re-deriving emptiness.  Used verbatim in the SDK's warning and in
+    the daemon's, so the two surfaces cannot describe the same defect
+    differently.
+    """
+    bad = check_event_type_names(names)
+    if not bad:
+        return None
+    parts = []
+    for given, suggestion in sorted(bad.items()):
+        if suggestion:
+            parts.append(f"{given!r} (a wire value — use {suggestion!r})")
+        else:
+            parts.append(f"{given!r} (matches no event class)")
+    return (
+        "event-type filter can never match: " + "; ".join(parts)
+        + ".  Filters compare against the event CLASS name "
+          "(type(event).__name__), not the EventType wire value."
+    )

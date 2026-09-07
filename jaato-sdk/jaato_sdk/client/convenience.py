@@ -77,6 +77,32 @@ class AgentError(Exception):
         super().__init__(f"{error_type or 'AgentError'}: {error_summary or ''}".rstrip(": "))
 
 
+class TurnTimeout(TimeoutError):
+    """A turn did not reach a terminus within the caller's ``timeout``.
+
+    Raised by :meth:`Session.ask` / :meth:`Session.complete` /
+    :meth:`Session.stream` when one is given a ``timeout=`` and the wait
+    outlives it.  The session is NOT stopped -- it keeps running daemon-side
+    and this exception says only that the caller stopped waiting; call
+    ``s.client.stop()`` (or end the session) if the work should stop too.
+
+    A WALL CLOCK IS THE CALLER'S, NOT THE CEILING'S.  It is tempting to
+    delegate this to a cascade task pool's ``seconds`` limit, and that does
+    not work: a pool is an aggregate over COMPLETED work, reconciled when a
+    session ENDS, so a job that runs away never reconciles and never charges.
+    The pool is coherent; it is simply not a timeout (jaato #826).
+
+    Subclasses :class:`TimeoutError` (which ``asyncio.TimeoutError`` aliases
+    from 3.11), so code already written around ``asyncio.wait_for`` keeps
+    catching it.
+    """
+
+    def __init__(self, timeout: float, waiting_for: str = "a terminal event"):
+        self.timeout = timeout
+        self.waiting_for = waiting_for
+        super().__init__(f"no {waiting_for} within {timeout}s")
+
+
 class PermissionUnhandled(Exception):
     """A gated tool requested permission but no ``on_permission`` callback was
     supplied to :meth:`IPCClient.session`.  The facade auto-denied (to unstick
@@ -180,6 +206,26 @@ class Session:
         if getattr(ev, "error_summary", None):
             box["error_summary"] = ev.error_summary
 
+    @staticmethod
+    async def _wait_bounded(waiter, timeout: Optional[float],
+                            waiting_for: str) -> None:
+        """``await waiter``, bounded by *timeout* seconds when one is given.
+
+        The one place the facade's optional wall clock is enforced, so
+        ``ask`` and ``stream`` cannot drift apart on what a ``timeout=``
+        means.  ``None`` waits exactly as before -- an unbounded wait is
+        still the default, because a turn's natural length is the model's to
+        decide and guessing a ceiling for every caller would break long
+        agentic work.
+        """
+        if timeout is None:
+            await waiter
+            return
+        try:
+            await asyncio.wait_for(waiter, timeout=timeout)
+        except asyncio.TimeoutError:
+            raise TurnTimeout(timeout, waiting_for) from None
+
     def _subscribe_media(self, on_media) -> Any:
         """Route this session's MODEL SPEECH to ``on_media``; return unsubscribe.
 
@@ -210,6 +256,7 @@ class Session:
                   sources: Optional[Collection[str]] = ("model",),
                   parallel_tools: Optional[bool] = None,
                   attachments: Optional[list] = None,
+                  timeout: Optional[float] = None,
                   on_media: Optional[Callable[[Any], None]] = None) -> str:
         """Send ``prompt``, wait for the turn to finish, return collected text.
 
@@ -221,6 +268,14 @@ class Session:
         if a gated tool went unanswered.  ``on_media`` receives the model's
         own SPEECH as it streams (see :meth:`_subscribe_media`) — the text
         comes back, the audio is handed over.
+
+        ``timeout`` (seconds, default ``None`` = wait as long as the turn
+        takes) bounds the wait and raises :class:`TurnTimeout` on expiry.
+        It exists because a fan-out driver needs a per-job wall clock and a
+        cascade ceiling cannot be one — a pool reconciles when a session
+        ENDS, so the runaway job is exactly the one it never charges for
+        (jaato #826).  A timeout does NOT stop the session; it stops
+        waiting.
         """
         chunks: list[str] = []
         box: Dict[str, Any] = {}
@@ -243,7 +298,8 @@ class Session:
         try:
             await self._client.send_message(
                 prompt, parallel_tools=parallel_tools, attachments=attachments)
-            await done.wait()
+            await self._wait_bounded(done.wait(), timeout,
+                                     "terminal event")
         finally:
             unsub_out()
             unsub_media()
@@ -255,6 +311,7 @@ class Session:
     async def complete(self, prompt: str, *,
                        parallel_tools: Optional[bool] = None,
                        attachments: Optional[list] = None,
+                       timeout: Optional[float] = None,
                        on_media: Optional[Callable[[Any], None]] = None,
                        ) -> Optional[Dict[str, Any]]:
         """Send ``prompt`` and return the typed completion ``payload``.
@@ -318,6 +375,15 @@ class Session:
         ``ask``/``stream`` keep turn semantics deliberately: their contract is
         one turn's output, and an interactive session must hand back each turn
         as it lands.
+
+        ``timeout`` (seconds, default ``None`` = unbounded) is the CALLER's
+        wall clock over the whole settle sequence, raising
+        :class:`TurnTimeout` on expiry.  It is deliberately separate from
+        ``SETTLE_GRACE``, which bounds only one proposal's confirmation and
+        settles rather than raises: a nudged session legitimately runs many
+        turns, so "the daemon went quiet after this turn" and "this job has
+        taken too long" are different questions with different answers.  A
+        timeout does NOT stop the session; it stops waiting (jaato #826).
         """
         box: Dict[str, Any] = {}
         done = asyncio.Event()
@@ -371,6 +437,8 @@ class Session:
         unsub_turn = self._client.subscribe(EventType.TURN_COMPLETED, on_turn)
         unsub_status = self._client.subscribe(
             EventType.AGENT_STATUS_CHANGED, on_status)
+        loop = asyncio.get_running_loop()
+        deadline = None if timeout is None else loop.time() + timeout
         try:
             await self._client.send_message(
                 prompt, parallel_tools=parallel_tools, attachments=attachments)
@@ -381,16 +449,31 @@ class Session:
                 # recorded is visible here, and anything later re-sets ``wake``.
                 wake.clear()
                 proposal = state["proposal"]
-                if proposal is None:
+                # TWO CLOCKS, AND THE SMALLER ONE DECIDES HOW LONG TO SLEEP --
+                # not what expiry MEANS.  ``SETTLE_GRACE`` bounds one
+                # proposal's confirmation and settles on it; the caller's
+                # ``timeout`` bounds the whole call and raises.  Sleeping for
+                # the minimum keeps both honest; the deadline is re-read after
+                # the wait to decide which of them actually expired.
+                budget = SETTLE_GRACE if proposal is not None else None
+                if deadline is not None:
+                    remaining = deadline - loop.time()
+                    if remaining <= 0:
+                        raise TurnTimeout(timeout, "terminal event")
+                    budget = remaining if budget is None else min(budget, remaining)
+                if budget is None:
                     await wake.wait()       # nothing proposed: wait as before
                     continue
                 try:
-                    await asyncio.wait_for(wake.wait(), timeout=SETTLE_GRACE)
+                    await asyncio.wait_for(wake.wait(), timeout=budget)
                 except asyncio.TimeoutError:
+                    if deadline is not None and loop.time() >= deadline:
+                        raise TurnTimeout(timeout, "terminal event") from None
                     # The confirmation never came.  Settle on what the turn
                     # proposed rather than wait on a daemon that has stopped
                     # talking.
-                    if state["proposal"] is proposal and not done.is_set():
+                    if proposal is not None and \
+                            state["proposal"] is proposal and not done.is_set():
                         settle(proposal)
         finally:
             unsub_media()
@@ -405,6 +488,7 @@ class Session:
                      sources: Optional[Collection[str]] = ("model",),
                      parallel_tools: Optional[bool] = None,
                      attachments: Optional[list] = None,
+                     timeout: Optional[float] = None,
                      on_media: Optional[Callable[[Any], None]] = None,
                      ) -> AsyncIterator[str]:
         """Send ``prompt`` and yield text chunks live as they arrive.
@@ -422,6 +506,12 @@ class Session:
             async with IPCClient.session(profile=...) as s:
                 async for chunk in s.stream("Tell me a story."):
                     print(chunk, end="", flush=True)
+
+        ``timeout`` (seconds, default ``None`` = unbounded) bounds the WHOLE
+        stream, not each chunk -- a model that emits one token a minute
+        forever is the case a per-chunk bound would miss -- and raises
+        :class:`TurnTimeout` from the iterator on expiry.  Chunks already
+        yielded stay yielded; a timeout does NOT stop the session.
         """
         queue: "asyncio.Queue[Any]" = asyncio.Queue()
         box: Dict[str, Any] = {}
@@ -442,10 +532,22 @@ class Session:
         unsub_term = self._client.subscribe_once(EventType.SESSION_TERMINATED, on_terminal)
         unsub_turn = self._client.subscribe_once(EventType.TURN_COMPLETED, on_terminal)
         try:
+            loop = asyncio.get_running_loop()
+            deadline = None if timeout is None else loop.time() + timeout
             await self._client.send_message(
                 prompt, parallel_tools=parallel_tools, attachments=attachments)
             while True:
-                item = await queue.get()
+                if deadline is None:
+                    item = await queue.get()
+                else:
+                    remaining = deadline - loop.time()
+                    if remaining <= 0:
+                        raise TurnTimeout(timeout, "terminal event")
+                    try:
+                        item = await asyncio.wait_for(queue.get(),
+                                                      timeout=remaining)
+                    except asyncio.TimeoutError:
+                        raise TurnTimeout(timeout, "terminal event") from None
                 if item is sentinel:
                     break
                 yield item

@@ -37,7 +37,7 @@ import fnmatch
 from dataclasses import dataclass
 from typing import Dict, Optional, Tuple
 
-from ._client_templates import TEMPLATES
+from ._client_templates import PROVIDER_OPTIONAL, TEMPLATES
 
 # Archetype names ``new`` treats as "scaffold a profile-set".  ``None`` (no
 # archetype at all) is the same thing — profile-set is the default verb.
@@ -149,9 +149,13 @@ _CLIENT_ENV = EmittedFile(
          "commented out with its default",
     status="fill-in",
     detail=(
-        "JAATO_PROVIDER=<provider> and MODEL_NAME=<model> — active, from the flags",
+        "JAATO_PROVIDER=<provider> and MODEL_NAME=<model> — active, from the "
+        "flags.  Absent entirely when no binding was supplied (cascade / "
+        "sweep / observer without --provider/--model): the profile each "
+        "stage names owns them, and a provider nobody chose would read as "
+        "guidance rather than the throwaway it is",
         "the chosen provider's env vars, commented out (all of them — they are "
-        "your provider config)",
+        "your provider config); no provider stanza at all when none is bound",
         "every OTHER framework knob that has a meaningful default, commented out "
         "and grouped by category — discovered from the installed code, so it "
         "cannot drift from what the daemon reads",
@@ -175,6 +179,14 @@ _CLIENT_FLAGS: Tuple[Tuple[str, str], ...] = (
      "upgrades a daemon transport to its auto-reconnect client "
      "(IPCRecoveryClient / WSRecoveryClient) and adds an on_status_change "
      "callback that prints the connection lifecycle"),
+    ("--provider P --model M",
+     "REQUIRED for the archetypes that CREATE a session from an inline spec "
+     "(client / fire / host-tools), and for --transport in_process on ANY "
+     "archetype (the embedded client IS the binding).  OPTIONAL for cascade / "
+     "sweep / observer: omit both and the stage/job placeholder is a profile "
+     "NAME instead of an inline spec, no MODEL/PROVIDER constants are "
+     "emitted, and .env gets no provider stanza.  Supplying one without the "
+     "other is refused — half a binding reads as a working spec and is not"),
     ("--force", "overwrite an existing run_<archetype>.py / .env"),
     ("--secrets / --secret-path",
      "no effect on the emitted files — only on the credential hint printed "
@@ -182,21 +194,32 @@ _CLIENT_FLAGS: Tuple[Tuple[str, str], ...] = (
 )
 
 _CLIENT_GENERATED_CORRECT = (
+    "the turn goes through the SDK's convenience facade "
+    "(<Client>.session(...) -> Session.ask / .stream / .complete), not a "
+    "hand-rolled asyncio.Event + subscribe + done.wait() loop.  That recipe "
+    "is what convenience.py exists to own, it is subtle enough that the "
+    "canonical template once shipped an infinite hang (PR #399), and a "
+    "hand-rolled copy silently misses whatever the facade learns next — as "
+    "it already had, with the settle rule of #767 (jaato #825/#826/#827)",
     "client_type=ClientType.API — load-bearing: the daemon keeps "
     "signal_completion for API clients and strips it for TERMINAL/WEB/CHAT",
-    "connect(timeout=120.0) — a cold daemon autostart takes ~30-60s; the SDK "
+    "connect_timeout=120.0 — a cold daemon autostart takes ~30-60s; the SDK "
     "default of 5s is too short",
     "env_file is always a real path — env_file=None crashes the IPC handshake "
     "with an opaque os.PathLike TypeError",
-    "this NON-GATED client waits on the FIRST of {TURN_COMPLETED, "
-    "SESSION_TERMINATED} — its turn IS its terminus, and a plain turn never "
-    "self-terminates, so waiting on SESSION_TERMINATED alone hangs forever",
-    "point it at a COMPLETION-GATED profile and first-of stops being the "
-    "terminus: an agent that ends a turn without signal_completion is "
-    "re-prompted and keeps working, so the turn event fires mid-flight "
-    "(jaato #767). Use Session.complete(), which owns that settle rule, or "
-    "wait on SESSION_TERMINATED only as the cascade archetype does",
-    "create_session RAISES SessionCreateFailed; it does not return None",
+    "WHICH turn method: ask/stream for a NON-GATED session (its turn IS the "
+    "terminus; they wait on first-of {TURN_COMPLETED, SESSION_TERMINATED} "
+    "because a plain turn never self-terminates), complete() for a "
+    "COMPLETION-GATED one (an agent that ends a turn without "
+    "signal_completion is re-prompted and keeps working, so the turn event "
+    "fires mid-flight — jaato #767).  complete() also RETURNS the typed "
+    "AGENT_COMPLETED payload; waiting on the terminal event alone tells you "
+    "that a session ended and nothing about what it produced",
+    "create_session RAISES SessionCreateFailed; it does not return None, and "
+    "the facade lets it out of the context manager rather than yielding a "
+    "dead session",
+    "an error terminal arrives as a typed AgentError (error_type + "
+    "error_summary), not as a reason string to compare against",
 )
 
 _CLIENT_NEXT = (
@@ -207,12 +230,20 @@ _CLIENT_NEXT = (
 
 def _client(name: str, *, detail: Tuple[str, ...],
             edit: Tuple[str, ...] = ()) -> ArchetypeDoc:
-    """One client archetype: the shared contract + this script's specifics."""
+    """One client archetype: the shared contract + this script's specifics.
+
+    ``requires`` is derived from :data:`_client_templates.PROVIDER_OPTIONAL`
+    rather than restated, so an archetype that stops owning the
+    provider/model binding cannot keep advertising the flags as mandatory
+    (or the reverse).  ``--provider`` / ``--model`` remain ACCEPTED for the
+    optional three — see ``_CLIENT_FLAGS`` for what supplying them changes.
+    """
     return ArchetypeDoc(
         name=name,
         kind="client",
         summary=TEMPLATES[name][2],
-        requires=("--workspace", "--provider", "--model"),
+        requires=(("--workspace",) if name in PROVIDER_OPTIONAL
+                  else ("--workspace", "--provider", "--model")),
         writes=(_client_script(detail), _CLIENT_ENV),
         flags=_CLIENT_FLAGS,
         edit_before_running=edit,
@@ -358,20 +389,25 @@ ARCHETYPES: Dict[str, ArchetypeDoc] = {
     "client": _client(
         "client",
         detail=(
-            "connect → create_session → send one message → wait for the turn → "
-            "print the streamed output → disconnect",
+            "one facade session: `async with _open_session(...) as s` then "
+            "`async for chunk in s.stream(PROMPT)` — the SDK owns the "
+            "send-and-wait, this script owns what to print",
             "an INLINE profile spec ({model, provider}) so it runs before you "
             "have a profile set; swap for profile=\"<name>\", agent=\"<name>\"",
-            "SessionCreateFailed is caught and reported, not swallowed",
+            "ConnectionError / SessionCreateFailed / AgentError are each "
+            "caught and reported by name, not swallowed",
         ),
-        edit=('the prompt ("Who are you? Reply in one sentence.")',
-              "the inline profile spec, once you have a profile set"),
+        edit=('the PROMPT constant ("Who are you? Reply in one sentence.")',
+              "the inline profile spec, once you have a profile set",
+              "s.stream(...) -> s.ask(...) for the same turn as one string, "
+              "or -> s.complete(...) once the profile is completion-gated"),
     ),
 
     "fire": _client(
         "fire",
         detail=(
-            "connect → create_session → send → disconnect WITHOUT waiting",
+            "open a facade session, `s.client.send_message(...)`, leave the "
+            "context — deliberately NOT s.ask()/s.complete(), which wait",
             "the session keeps running daemon-side after the script exits; "
             "reattach later with another client or the observer archetype",
             "prints the session id it dispatched to",
@@ -385,20 +421,31 @@ ARCHETYPES: Dict[str, ArchetypeDoc] = {
         detail=(
             "a linear CHAIN: a WORKLIST of (profile, agent, prompt) stages run "
             "one at a time, each to terminal completion before the next starts",
+            "each stage is `await stage.complete(prompt)` and RETURNS the "
+            "stage's typed payload — a driver that waits on the terminal event "
+            "alone learns that a stage ended and nothing about what it "
+            "produced (jaato #827)",
             "one cascade id (uuid) tenants every stage, so an observer can "
-            "attach to the whole run",
+            "attach to the whole run and the stages share one warm slot",
             "for INDEPENDENT jobs that do not feed forward, use `sweep` instead",
         ),
         edit=("the WORKLIST — two placeholder stages "
               '("Stage 1: do the first thing.") a real cascade reads from your '
-              "orchestration",),
+              "orchestration.  With --provider/--model the stage placeholder "
+              "is an inline spec so it runs immediately; without them it is a "
+              '"<profile-name>" to replace',),
     ),
 
     "observer": _client(
         "observer",
         detail=(
             "read-only: attaches to a RUNNING cascade by id and live-traces its "
-            "events; it never sends a message",
+            "events; it never sends a message, never creates a session, and "
+            "therefore emits no MODEL/PROVIDER constants (jaato #820)",
+            "EVENT_TYPES holds event CLASS names (\"SessionTerminatedEvent\"), "
+            "NOT EventType wire values (\"session.terminated\") — both filters "
+            "between here and the daemon compare type(event).__name__, so a "
+            "wire value matches nothing and does so silently (jaato #821)",
             "reads ev.session_id as a plain attribute — the getattr(…, \"\") "
             "idiom cannot tell an unrouted event from a pre-1.2 server",
         ),
@@ -415,7 +462,12 @@ ARCHETYPES: Dict[str, ArchetypeDoc] = {
             "stop its siblings",
             "the JOBS matrix carries (name, profile, agent, prompt): profile is "
             "CAPABILITIES, agent is WHO IT IS, and they are orthogonal axes",
-            "subscribes before creating each session, so no early event is lost",
+            "each job is `await s.complete(prompt, timeout=JOB_TIMEOUT_S)` — "
+            "the driver owns its own wall clock (a cascade pool reconciles "
+            "when a session ENDS, so it never charges for the runaway job) and "
+            "gets the typed payload, so the errors[] check can actually fire",
+            "the owner connection holds the budget pool and outlives the jobs; "
+            "it is the one place a raw client remains",
         ),
         edit=("the JOBS matrix — the example varies the persona with "
               "capabilities held fixed; vary profile, agent, or both",),
