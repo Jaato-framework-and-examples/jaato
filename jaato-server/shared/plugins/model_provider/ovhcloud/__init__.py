@@ -30,6 +30,7 @@ PROVIDER_CAPABILITIES = ProviderCapabilities(
     user_message_images=True,
     tool_result_images=True,
     pdf_input=False,
+    audio_input=False,
     tool_choice_forwarding=True,
     thinking=True,
     prompt_caching=False,

@@ -129,8 +129,22 @@ and already declares renderability: `supports_images`, `supports_tables`,
 
 `Part.inline_data {mime_type, data}` is marshalled to the wire by anthropic,
 google_genai, antigravity, openrouter and nebius. Capability columns
-`user_message_images`, `tool_result_images`, `pdf_input`
-(`model_provider/base.py:359`).
+`user_message_images`, `tool_result_images`, `pdf_input`, `audio_input`
+(`model_provider/base.py`).
+
+`audio_input` is the newest and the one this document's own subject created
+the need for. Outbound audio landed first (§4 below); the inbound direction
+had no wire format at all — `input_audio`, OpenAI's content-block form for
+audio input, appeared nowhere in the tree, so a model whose catalog entry
+declared `audio` as an input modality was handed nothing and the framework
+could speak but not be spoken to (#830). The dispatch lives with its siblings
+in `model_provider/_attachments.py`, opted into per wire
+(`audio_as_input_audio=True` for `openrouter`), and refuses any container
+outside the wire's closed `format` vocabulary rather than renaming it to one
+inside — the #829 lesson applied before it could be relearned. Google's
+`inline_data` path always carried audio; what blocked Gemini was its own
+`MODEL_INPUT_MODALITIES` table omitting `audio`, so the gate refused content
+the wire underneath would have delivered.
 
 ---
 

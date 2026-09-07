@@ -248,12 +248,16 @@ def message_to_openai(message: Message) -> List[Dict[str, Any]]:
                 "tool_call_id": fr.call_id,
                 "content": result_str,
             })
-            # tool messages can't carry image/file content — surface such
-            # attachments as a follow-up user message so the model SEES them.
-            # A mime this wire doesn't carry (audio, video, no declared mime)
-            # is withheld and SAID so, rather than dropped into silence (#829).
+            # tool messages can't carry image/file/audio content — surface
+            # such attachments as a follow-up user message so the model SEES
+            # (or HEARS) them.  A mime this wire doesn't carry (video, an
+            # audio container outside the ``format`` vocabulary, no declared
+            # mime) is withheld and SAID so, rather than dropped into
+            # silence (#829, #830).
             followup = tool_result_followup_message(
-                getattr(fr, "attachments", None), pdf_as_file=True
+                getattr(fr, "attachments", None),
+                pdf_as_file=True,
+                audio_as_input_audio=True,
             )
             if followup is not None:
                 image_followups.append(followup)
@@ -281,17 +285,24 @@ def message_to_openai(message: Message) -> List[Dict[str, Any]]:
                 msg["content"] = None
         return [msg]
 
-    # User message.  Marshal any inline_data (image / PDF) parts into OpenAI
-    # multimodal content blocks so a vision/file-declared model actually
-    # RECEIVES them.  OpenRouter declares these via the catalog
+    # User message.  Marshal any inline_data (image / PDF / audio) parts into
+    # OpenAI multimodal content blocks so a vision/file/audio-declared model
+    # actually RECEIVES them.  OpenRouter declares these via the catalog
     # (resolve_modalities catalog-detect), but this wire converter only emitted
     # text — the binary part was silently dropped and the model confabulated.
     # Text-only turns keep a plain-string ``content`` (unchanged wire shape).
     #
-    # A part whose mime this wire doesn't carry — audio, video, or one with no
-    # declared mime — is withheld rather than asserted to be a PNG (#829); the
-    # note states it so the model doesn't confabulate over the gap.
-    return user_message_with_attachments(content, message.parts, pdf_as_file=True)
+    # Audio rides as ``input_audio`` (#830), the inbound counterpart of the
+    # model-emitted audio #824/#828 made deliverable; before it the framework
+    # could speak but could not be spoken to.
+    #
+    # A part whose mime this wire doesn't carry — video, an audio container
+    # outside the wire's ``format`` vocabulary, or one with no declared mime —
+    # is withheld rather than asserted to be a PNG (#829); the note states it
+    # so the model doesn't confabulate over the gap.
+    return user_message_with_attachments(
+        content, message.parts, pdf_as_file=True, audio_as_input_audio=True
+    )
 
 
 def message_from_openai(msg: Dict[str, Any]) -> Message:

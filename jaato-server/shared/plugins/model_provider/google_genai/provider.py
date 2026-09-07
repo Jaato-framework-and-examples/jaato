@@ -115,13 +115,21 @@ MODEL_CONTEXT_LIMITS: Dict[str, int] = {
 }
 
 # INPUT modalities per Gemini model family.  Gemini 1.5 / 2.x / 3.x are
-# multimodal (accept image input); legacy Gemini 1.0 / "gemini-pro" were
-# text-only and are absent here (-> text-only floor in modalities()).
-# Prefix-matched like MODEL_CONTEXT_LIMITS.
+# multimodal (accept image, document AND audio input); legacy Gemini 1.0 /
+# "gemini-pro" were text-only and are absent here (-> text-only floor in
+# modalities()).  Prefix-matched like MODEL_CONTEXT_LIMITS.
+#
+# ``audio`` was missing until #830 even though the converter always carried
+# it: ``_part_to_google`` marshals ANY ``inline_data`` into a ``Blob`` with
+# the part's own mime, so an audio Blob has always reached Gemini intact.
+# The table was the whole blockage — the tool-result gate
+# (``_gate_one_tool_result``) stripped ``audio/*`` before it got there and
+# the tier validator refused an ``audio: inbound`` tier, so the framework
+# declined content the wire underneath it would have carried.
 MODEL_INPUT_MODALITIES: Dict[str, FrozenSet[str]] = {
-    "gemini-1.5": frozenset({"text", "image", "file"}),
-    "gemini-2": frozenset({"text", "image", "file"}),
-    "gemini-3": frozenset({"text", "image", "file"}),
+    "gemini-1.5": frozenset({"text", "image", "file", "audio"}),
+    "gemini-2": frozenset({"text", "image", "file", "audio"}),
+    "gemini-3": frozenset({"text", "image", "file", "audio"}),
 }
 
 

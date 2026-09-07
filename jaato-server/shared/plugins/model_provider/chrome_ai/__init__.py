@@ -100,6 +100,7 @@ PROVIDER_CAPABILITIES = ProviderCapabilities(
     user_message_images=False,   # Prompt API has image input; adapter is text-only (v1)
     tool_result_images=False,
     pdf_input=False,
+    audio_input=False,
     tool_choice_forwarding=False,  # no such control in the Prompt API
     thinking=False,
     prompt_caching=False,

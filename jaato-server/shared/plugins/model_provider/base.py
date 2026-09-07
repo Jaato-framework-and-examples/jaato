@@ -434,6 +434,7 @@ CAPABILITY_FIELDS = (
     "user_message_images",
     "tool_result_images",
     "pdf_input",
+    "audio_input",
     "tool_choice_forwarding",
     "thinking",
     "prompt_caching",
@@ -465,6 +466,7 @@ class ProviderCapabilities:
     user_message_images: bool = False   # Part.inline_data image -> wire image block
     tool_result_images: bool = False    # tool-result image attachment -> the model
     pdf_input: bool = False             # application/pdf attachment -> wire file/document block
+    audio_input: bool = False           # audio/* attachment -> wire audio-input block (#830)
     tool_choice_forwarding: bool = False  # complete(tool_choice=...) reaches the wire
     thinking: bool = False              # extended-reasoning request and/or extraction
     prompt_caching: bool = False        # cache_control breakpoints emitted on the wire

@@ -394,15 +394,70 @@ def _delivers_output_media(provider_name) -> bool:
     return bool(getattr(info.capabilities, "output_media", False))
 
 
+#: INBOUND modality role -> the ``ProviderCapabilities`` field that says
+#: whether the adapter puts that content on the wire.  A role with no entry
+#: is unchecked rather than assumed inert: ``video`` has no capability
+#: column, and warning about it would be inventing a verdict.
+_INBOUND_CAPABILITY_FOR = {
+    "image": "user_message_images",
+    "file": "pdf_input",
+    "audio": "audio_input",
+}
+
+
+def _carries_inbound_modality(provider_name, kind) -> bool:
+    """Whether this provider's converter marshals ``kind`` onto the wire.
+
+    The inbound mirror of :func:`_delivers_output_media`, and it exists for
+    the same reason: a tier role is a declaration, and a declaration the
+    adapter cannot honour is inert.  An unknown provider, or a kind with no
+    capability column, answers ``True`` — the caller must not warn about a
+    role it cannot actually check, because a false INERT is what made the
+    outbound warning tell working profiles they were broken.
+    """
+    field = _INBOUND_CAPABILITY_FOR.get(kind)
+    if field is None or not provider_name:
+        return True
+    from .introspect import resolve_provider
+    info = resolve_provider(str(provider_name))
+    if info is None or info.capabilities is None:
+        return True
+    return bool(getattr(info.capabilities, field, False))
+
+
+def _warn_inert_inbound(key, kind, value, where, add, provider_name):
+    """Flag an inbound role whose converter would drop the content.
+
+    #830's shape exactly: OpenRouter's catalog reported ``audio`` input for
+    an audio model, a profile could declare ``audio: inbound`` against it,
+    the session-time modality check passed — and the converter had no
+    branch to put the bytes on the wire, so every clip was withheld at the
+    last step with nothing upstream saying why.
+    """
+    if _carries_inbound_modality(provider_name, kind):
+        return
+    add("warning", "inbound_modality_not_marshalled",
+        f"model_tiers.{key} declares '{kind}' {value}, which parses but is "
+        f"INERT: provider '{provider_name or '<unset>'}' does not declare "
+        f"`{_INBOUND_CAPABILITY_FOR[kind]}`, so its message converter does "
+        f"not put {kind} content on the wire — it is withheld with a note "
+        f"instead.  See docs/design/provider-capability-contract.md.",
+        where=where)
+
+
 def _check_modality_direction(key, kind, direction, where, add,
                               provider_name=None):
-    """Validate the direction of one modality role, and flag inert outbound.
+    """Validate the direction of one modality role, and flag it if inert.
+
+    Both directions are checked, and a bidirectional role can be inert in
+    one and live in the other — which is why the outbound warning's "the
+    inbound half IS live" clause is itself conditional.
 
     Split from :func:`_check_tier_modalities` to keep both under the
     complexity ceiling.
     """
     from shared.model_tiers import (
-        DIRECTION_BIDIRECTIONAL, DIRECTION_OUTBOUND,
+        DIRECTION_BIDIRECTIONAL, DIRECTION_INBOUND, DIRECTION_OUTBOUND,
         VALID_MODALITY_DIRECTIONS,
     )
     if not isinstance(direction, str) or not direction.strip():
@@ -419,6 +474,8 @@ def _check_modality_direction(key, kind, direction, where, add,
             f"direction ({', '.join(sorted(VALID_MODALITY_DIRECTIONS))})"
             f"{hint}", where=where)
         return
+    if value in (DIRECTION_INBOUND, DIRECTION_BIDIRECTIONAL):
+        _warn_inert_inbound(key, kind, value, where, add, provider_name)
     if value in (DIRECTION_OUTBOUND, DIRECTION_BIDIRECTIONAL) \
             and not _delivers_output_media(provider_name):
         # Warn only when the adapter cannot actually deliver.  This used
@@ -435,7 +492,8 @@ def _check_modality_direction(key, kind, direction, where, add,
             "docs/design/binary-media-chunks.md for the three touches that "
             "wire a provider."
             + ("  The inbound half of this role IS live."
-               if value == DIRECTION_BIDIRECTIONAL else ""),
+               if value == DIRECTION_BIDIRECTIONAL
+               and _carries_inbound_modality(provider_name, kind) else ""),
             where=where)
 
 

@@ -24,6 +24,7 @@ PROVIDER_CAPABILITIES = ProviderCapabilities(
     user_message_images=True,
     tool_result_images=True,
     pdf_input=True,
+    audio_input=True,   # audio/* -> `input_audio` blocks (#830)
     tool_choice_forwarding=True,
     thinking=True,
     prompt_caching=True,

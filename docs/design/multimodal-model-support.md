@@ -226,6 +226,15 @@ backstop when the agent forgets.
   render it. Separate scope (Scope B). The detect tier here is its foundation.
 - **Modality breadth** — PDF/audio/video converters in whichever providers fill
   those roles. (`modalities()` already generalizes; the *converters* don't.)
+  *Partly closed since:* PDF landed with `pdf_input` and audio with
+  `audio_input` (#829, #830) — both as per-wire opt-ins in
+  `model_provider/_attachments.py`, both guarded in each direction by
+  `test_provider_capability_conformance`. Video remains open, and remains
+  deliberately unchecked by `jaato-scaffold validate`: with no capability
+  column there is nothing to check, and a warning would be inventing a
+  verdict. The prediction in this section held — the gate, the validator and
+  the tier machinery needed no new methods for either; the converters were
+  the whole of the work.
 - **Ingestion UX** — paste/URL/drag-drop is client-side, downstream of this.
 - **Backfilling image conversion to all 13 providers** — unnecessary under
   composition; only the providers chosen to *fill* a modality role need it.
