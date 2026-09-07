@@ -114,10 +114,15 @@ budget_control:
   same path. `provider` is the plugin name (`openrouter`, `anthropic`,
   `ollama`, …); for OpenRouter the `vendor/model` form lives inside
   `model`.
-- Overlays may **only** reference the officially declared tier names
-  (`VALID_TIER_NAMES` = `planner` / `dispatcher` / `executor` /
-  `vision`). They introduce no ad-hoc labels, so no widening of the tier
-  vocabulary or the `enter_tier` tool schema is required.
+- Overlays reference tier names, and since #831 that means the four
+  canonical ones (`planner` / `dispatcher` / `executor` / `vision`) **or**
+  whatever names the profile's own `model_tiers` declares. What an overlay
+  still cannot do is widen the vocabulary the MODEL sees: the `enter_tier`
+  schema is built once at configure time from the base table, so a rung
+  naming a tier that table does not declare rebinds something the agent can
+  never enter. The parser cannot see the base table, so
+  `jaato-scaffold validate` — which sees both halves — is what catches it,
+  as `budget_overlay_undeclared_tier`.
 
 ### 3.0 Authoring a budgeted profile — four traps
 

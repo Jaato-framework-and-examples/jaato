@@ -24,13 +24,18 @@ def test_validate_flags_bad_model_tiers(tmp_path):
         "name: t\ninherits: [_base_t]\nplugins: []\n"
         "model_tiers:\n"
         "  executor: {model: m, provider: nebius}\n"
-        "  visionn: {model: v, provider: openrouter}\n"     # tier-name typo
+        "  vision-n: {model: v, provider: openrouter}\n"    # unusable name
+        "  visionn: {model: v2, provider: openrouter}\n"    # usable, undescribed
         "  planner: {model: p, provider: notaprovider}\n"   # unknown provider
         "  initial: executor\n  fallback: executor\n")
     diags = V.validate_workspace(str(tmp_path), profile_set="setT", only="t")
     codes = {d.code for d in diags}
-    assert "unknown_tier" in codes        # visionn
-    assert "unknown_provider" in codes    # notaprovider
+    assert "unknown_tier" in codes                 # vision-n (unusable name)
+    # Since #831 "visionn" is a name a deployment may legitimately choose, so
+    # it is no longer a typo to the validator -- but a name the framework has
+    # no prose for must bring its own, and that is what catches it.
+    assert "tier_description_required" in codes    # visionn
+    assert "unknown_provider" in codes             # notaprovider
 
 
 def test_validate_accepts_cross_provider_tiers(tmp_path):

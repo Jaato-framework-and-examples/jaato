@@ -56,9 +56,9 @@ from typing import Any, Dict, Mapping, NamedTuple, Optional, Tuple
 # Re-implementing it here would let the two grammars drift apart.
 from .model_tiers import (
     RESERVED_KEYS,
-    VALID_TIER_NAMES,
     TierEntry,
     _normalize_tier_entry,
+    tier_name_error,
 )
 
 logger = logging.getLogger(__name__)
@@ -223,7 +223,7 @@ def _parse_degrade_overlay(
 
     Raises:
         BudgetControlConfigError: Not an object; a reserved control key; a
-            name outside :data:`~shared.model_tiers.VALID_TIER_NAMES`; a
+            name :func:`~shared.model_tiers.tier_name_error` refuses; a
             ``description`` (a rung rebinds a tier's model, not its role);
             or an entry the shared tier-entry normalizer rejects.
     """
@@ -246,10 +246,10 @@ def _parse_degrade_overlay(
                 f"not valid in an overlay (an overlay rebinds tier→model "
                 f"only; set initial/fallback on the base model_tiers)"
             )
-        if key not in VALID_TIER_NAMES:
+        reason = tier_name_error(key)
+        if reason is not None:
             raise BudgetControlConfigError(
-                f"degrade[{index}].model_tiers: '{key}' is not a tier name "
-                f"({', '.join(sorted(VALID_TIER_NAMES))})"
+                f"degrade[{index}].model_tiers: {reason}"
             )
         # A rung rebinds a tier's MODEL; the tier's ROLE — the prose
         # describing it and the modalities it fills — is untouched by a
@@ -285,8 +285,9 @@ class DegradeRung:
             declared dimension's usage reaches this percentage of its
             limit ("first dimension wins" — see the design note §5.1).
         model_tiers: Sparse overlay onto the session's tier table, keyed
-            by tier name (a subset of
-            :data:`~shared.model_tiers.VALID_TIER_NAMES`).  Tiers absent
+            by tier name — canonical or deployment-named, whatever the base
+            table declared (validated by
+            :func:`~shared.model_tiers.tier_name_error`).  Tiers absent
             from the overlay keep their current binding.  Empty when the
             rung only carries an ``action``.
         action: Optional terminal action from :data:`VALID_ACTIONS`.

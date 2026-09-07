@@ -1,10 +1,14 @@
 """Model-tier configuration for per-turn model switching.
 
 Named tiers the agent transitions between via the ``enter_tier(name)``
-lifecycle tool: three *cognitive* tiers (``planner`` / ``dispatcher`` /
-``executor``) plus the optional *modality* role ``vision`` (a tier whose
-model accepts image input — multimodal-by-composition, see
-docs/design/multimodal-model-support.md).  The tier set is opt-in:
+lifecycle tool.  Four names are *canonical* — the framework supplies their
+meaning: three *cognitive* tiers (``planner`` / ``dispatcher`` /
+``executor``) plus the *modality* role ``vision`` (a tier whose model
+accepts image input — multimodal-by-composition, see
+docs/design/multimodal-model-support.md).  A deployment may also declare
+tiers under names of its own (``coder``, ``reviewer``, ``researcher``);
+those must carry a ``description``, since the framework has no prose to
+offer for a name it has never heard of (#831).  The tier set is opt-in:
 profiles that don't declare tiers (and aren't backed by tier env vars)
 run in single-model mode unchanged — no ``enter_tier`` tool registered,
 no system-prompt augmentation, no provider model switching.
@@ -33,10 +37,10 @@ switches model in place via
 ``provider.connect(model, skip_model_test=True)`` — no swap path is
 taken, so same-provider configs behave exactly as before.
 
-**Schema** — single-level dict mixing tier→model mappings (keys in
-:data:`VALID_TIER_NAMES`) and reserved control keys (``initial`` and
-``fallback``).  Each tier value can be either the simple shorthand
-(model name string) or the rich form (``{"model": ..., "provider": ...}``).
+**Schema** — single-level dict mixing tier→model mappings and the
+reserved control keys (``initial`` and ``fallback``).  Each tier value can
+be either the simple shorthand (model name string) or the rich form
+(``{"model": ..., "provider": ...}``).
 
 .. code-block:: json
 
@@ -50,7 +54,8 @@ taken, so same-provider configs behave exactly as before.
 
 The reserved keys (``initial`` / ``fallback``) are unambiguous because
 they're never valid tier names — the parser splits on
-:data:`VALID_TIER_NAMES` membership.
+:data:`RESERVED_KEYS` membership, and :func:`tier_name_error` refuses
+either spelling as a tier name so the two can never collide.
 
 See ``project_backlog_per_turn_model.md`` for the full design.
 """
@@ -59,40 +64,91 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from dataclasses import dataclass, field, replace as _dc_replace
 from typing import Any, Dict, FrozenSet, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
 
-# Valid tier names.  The first three (planner / dispatcher / executor)
-# are *cognitive* tiers — order is conceptual (cheapest → most capable)
-# but doesn't enforce ordering on the model assignments; operators are
-# free to wire them however the provider's pricing makes sense.
+# The canonical tier names.  The first three (planner / dispatcher /
+# executor) are *cognitive* tiers — order is conceptual (cheapest → most
+# capable) but doesn't enforce ordering on the model assignments; operators
+# are free to wire them however the provider's pricing makes sense.
 #
 # ``vision`` is a *modality* role (multimodal-by-composition — see
 # docs/design/multimodal-model-support.md): a tier whose model accepts
 # image input, switched into via ``enter_tier("vision")`` to view an
 # image and back out when done.  It shares the single-``_active_tier``
 # machinery with the cognitive tiers (mutually exclusive), so it's listed
-# here rather than as a separate axis.  All names are exposed verbatim in
-# the ``enter_tier`` tool's schema so the model sees them as the protocol
-# vocabulary; whether a given tier is *declared* in a profile is separate
-# (an undeclared tier routes to ``tier_fallback`` via ``model_for``).
+# here rather than as a separate axis.
+#
+# These four are the names the FRAMEWORK knows; they are not the names a
+# profile is limited to (see :func:`tier_name_error`).  Only *declared*
+# tiers are exposed in the ``enter_tier`` tool's schema — an undeclared
+# tier routes to ``tier_fallback`` via ``model_for``.
 TIER_PLANNER = "planner"
 TIER_DISPATCHER = "dispatcher"
 TIER_EXECUTOR = "executor"
 TIER_VISION = "vision"
-VALID_TIER_NAMES: FrozenSet[str] = frozenset(
+
+#: Tier names the FRAMEWORK supplies meaning for.  Membership buys four
+#: things and nothing else: default prose
+#: (:data:`DEFAULT_TIER_DESCRIPTIONS`), a fixed position in
+#: :data:`TIER_ORDER`, a ``JAATO_TIER_*`` env spelling (three of the four —
+#: see :data:`ENV_TIER_MODEL_KEYS`), and for ``vision`` an implicit modality
+#: role (:data:`IMPLICIT_TIER_MODALITIES`).
+#:
+#: It is NOT the set of names a profile may use.  A deployment names its own
+#: tiers — ``coder``, ``reviewer``, ``researcher`` — subject to
+#: :func:`tier_name_error`; what a canonical name gets for free, a free name
+#: must supply, which is why a free name MUST carry a ``description`` (#831).
+CANONICAL_TIER_NAMES: FrozenSet[str] = frozenset(
     {TIER_PLANNER, TIER_DISPATCHER, TIER_EXECUTOR, TIER_VISION}
 )
+
+#: Deprecated alias for :data:`CANONICAL_TIER_NAMES`.
+#:
+#: Kept because the name is referenced by out-of-tree code and by docs, but
+#: it now MISNAMES what it holds: since #831 these are the names with
+#: framework-supplied meaning, not the names that validate.  Ask
+#: :func:`tier_name_error` whether a name is usable; ask
+#: :data:`CANONICAL_TIER_NAMES` whether the framework has anything to say
+#: about it.
+VALID_TIER_NAMES: FrozenSet[str] = CANONICAL_TIER_NAMES
+
+#: What a free (non-canonical) tier name may look like.
+#:
+#: Deliberately narrow.  A tier name is not a label — it is a JSON-schema
+#: ``enum`` value the model types back verbatim, a key in log/trace lines,
+#: and part of the prompt-cache prefix.  Lowercase ASCII with underscores
+#: keeps all three unambiguous: no case-only collisions (``Coder`` vs
+#: ``coder`` would read as one tier to the model and two to the config), no
+#: whitespace or punctuation to quote, nothing a YAML 1.1 parser coerces to
+#: a bool, and nothing that needs escaping in the prose bullet.
+TIER_NAME_PATTERN = r"^[a-z][a-z0-9_]{1,31}$"
+_TIER_NAME_RE = re.compile(TIER_NAME_PATTERN)
+
+#: How many tiers one session may declare.
+#:
+#: An arity ceiling exists because every declared tier costs tokens on
+#: EVERY request, not once: it is a bullet in the ``enter_tier`` description
+#: plus an entry in that tool's ``enum``, and the tool block sits in the
+#: prompt-cache prefix.  Eight is chosen as roughly twice the largest ladder
+#: anyone has articulated a need for (planner / coder / reviewer /
+#: researcher, plus a modality tier or two), which leaves headroom without
+#: making "declare a tier per task" look like a supported shape.  A config
+#: that wants more wants subagents, not tiers.
+MAX_DECLARED_TIERS = 8
 
 # Canonical presentation order for the ``enter_tier`` tool schema.  A set
 # has no order and ``sorted()`` would put ``dispatcher`` before ``planner``
 # — neither is wrong, but the order must be DETERMINISTIC: the tool block
 # sits in the prompt-cache prefix, so a tier list that reordered between
-# processes would invalidate the cache for no reason.  Names outside this
-# tuple sort alphabetically after it.
+# processes would invalidate the cache for no reason.  Deployment-named
+# tiers are outside this tuple and sort alphabetically after it — same
+# reason, and it means adding a free tier never reorders the canonical
+# ones ahead of it.
 TIER_ORDER: Tuple[str, ...] = (
     TIER_PLANNER, TIER_DISPATCHER, TIER_EXECUTOR, TIER_VISION,
 )
@@ -190,7 +246,8 @@ DEFAULT_TIER_FALLBACK = TIER_DISPATCHER
 
 # Reserved keys inside the unified ``model_tiers`` dict.  These are
 # control knobs (which tier to start in / which to use as fallback);
-# every other key in the dict must be a member of VALID_TIER_NAMES.
+# every other key in the dict names a tier and must satisfy
+# ``tier_name_error``.
 RESERVED_INITIAL_KEY = "initial"
 RESERVED_FALLBACK_KEY = "fallback"
 #: What ends a tier's turn at the wheel.  Both values name a TRIGGER, so
@@ -226,6 +283,15 @@ RESERVED_KEYS: FrozenSet[str] = frozenset(
 # model_tiers — the env-var prefix is already in a tier-specific
 # namespace and the verbosity tradeoff isn't worth it for one-off
 # operator experimentation.)
+#
+# There is deliberately NO env spelling for a free tier name, and none is
+# planned.  A free name requires a ``description`` (the framework has no
+# prose for it), and a description is a paragraph of second-person prose
+# that belongs in a profile, not in a shell export.  A partial env path —
+# bind the model here, describe it over there — would be worse than the
+# absence: it would produce a config that half-exists.  Free tiers come
+# from ``model_tiers`` in a profile, and the env path stays what it always
+# was: a one-off knob for the three cognitive tiers.
 ENV_TIER_MODEL_KEYS: Dict[str, str] = {
     TIER_PLANNER: "JAATO_TIER_PLANNER",
     TIER_DISPATCHER: "JAATO_TIER_DISPATCHER",
@@ -237,6 +303,68 @@ ENV_TIER_FALLBACK = "JAATO_TIER_FALLBACK"
 
 class ModelTierConfigError(ValueError):
     """Raised when tier config can't be parsed or is internally inconsistent."""
+
+
+def is_canonical_tier_name(name: str) -> bool:
+    """Whether the framework supplies meaning for ``name``.
+
+    True for the four names in :data:`CANONICAL_TIER_NAMES`.  A caller asks
+    this to decide whether the framework can speak for a tier — whether it
+    has default prose, an order position, an env spelling, an implicit
+    modality role.  It is NOT the question "may a profile use this name?";
+    that is :func:`tier_name_error`.
+    """
+    return name in CANONICAL_TIER_NAMES
+
+
+def tier_name_error(name: object) -> Optional[str]:
+    """Why ``name`` cannot be a tier name, or ``None`` if it can.
+
+    The ONE predicate behind every site that used to test membership of
+    ``VALID_TIER_NAMES``: the config gate, ``model_for``, the
+    ``enter_tier`` executor, budget-control's degrade overlay and
+    ``jaato-scaffold validate``.  It returns a reason rather than raising
+    so each of those can wrap it in its own error type and location
+    prefix, and so the message a profile author reads is written once.
+
+    A canonical name always passes.  Anything else must match
+    :data:`TIER_NAME_PATTERN` and must not collide with a reserved control
+    key (``initial`` / ``fallback``), which the unified-dict parser splits
+    on before it ever gets here — a tier called ``initial`` would be
+    unaddressable, not merely confusing.
+
+    Note this says nothing about ``description``: a free name additionally
+    REQUIRES one, but that is a property of the tier ENTRY, checked where
+    the entry is known (:meth:`ModelTierConfig.__post_init__`).
+
+    Args:
+        name: The candidate, of any type — a non-string is a reason, not a
+            crash, because raw profile dicts reach here unvalidated.
+
+    Returns:
+        A human-readable reason, or ``None`` when the name is usable.
+    """
+    if not isinstance(name, str) or not name:
+        return (
+            f"tier names must be non-empty strings, got "
+            f"{type(name).__name__}"
+        )
+    if name in CANONICAL_TIER_NAMES:
+        return None
+    if name in RESERVED_KEYS:
+        return (
+            f"'{name}' is a reserved control key "
+            f"({', '.join(sorted(RESERVED_KEYS))}), not a tier name"
+        )
+    if not _TIER_NAME_RE.match(name):
+        return (
+            f"'{name}' is not a usable tier name — a tier the framework "
+            f"does not know ({', '.join(sorted(CANONICAL_TIER_NAMES))}) "
+            f"may be named anything matching {TIER_NAME_PATTERN} "
+            f"(lowercase letters, digits and underscores, starting with a "
+            f"letter, 2-32 characters)"
+        )
+    return None
 
 
 @dataclass(frozen=True)
@@ -256,6 +384,11 @@ class TierEntry:
             default.  This is the only channel by which a profile tells
             the model what its own tier ladder means — the framework knows
             the names, not the deployment's intent behind them.
+
+            Optional for a canonical name, **required** for one the
+            deployment chose (:data:`CANONICAL_TIER_NAMES`): there is no
+            default to keep, and the honest stand-in ("routes this session
+            to <model>.") says nothing about when to enter the tier.
 
             It lands in the tool block, which is part of the prompt-cache
             prefix, so it must be stable for the life of a session: it is
@@ -570,8 +703,11 @@ class ModelTierConfig:
 
     Attributes:
         tiers: Map of tier name → :class:`TierEntry`.  Must be
-            non-empty.  Tier names must be a subset of
-            :data:`VALID_TIER_NAMES`.
+            non-empty and no larger than :data:`MAX_DECLARED_TIERS`.
+            Names are either canonical (:data:`CANONICAL_TIER_NAMES`) or
+            free-form subject to :func:`tier_name_error`; a free name must
+            carry a ``description``, because the framework has no prose of
+            its own to offer the model for a tier it has never heard of.
         initial_tier: Tier name to use at session start.  Must be a
             key in ``tiers``.
         tier_fallback: Tier name to route to when ``enter_tier(name)``
@@ -587,16 +723,39 @@ class ModelTierConfig:
             raise ModelTierConfigError(
                 "ModelTierConfig requires at least one tier mapping"
             )
-        unknown = set(self.tiers) - VALID_TIER_NAMES
-        if unknown:
+        if len(self.tiers) > MAX_DECLARED_TIERS:
             raise ModelTierConfigError(
-                f"unknown tier names: {sorted(unknown)} "
-                f"(must be subset of {sorted(VALID_TIER_NAMES)})"
+                f"{len(self.tiers)} tiers declared "
+                f"({', '.join(sorted(self.tiers))}); at most "
+                f"{MAX_DECLARED_TIERS} are allowed.  Every declared tier is "
+                f"a bullet and an enum entry in the enter_tier tool schema, "
+                f"which sits in the prompt-cache prefix and is therefore "
+                f"paid for on every request — a ladder longer than this "
+                f"wants subagents, not tiers"
             )
         for name, entry in self.tiers.items():
+            reason = tier_name_error(name)
+            if reason is not None:
+                raise ModelTierConfigError(f"model_tiers: {reason}")
             if not isinstance(entry, TierEntry):
                 raise ModelTierConfigError(
                     f"tier {name!r}: expected TierEntry, got {type(entry).__name__}"
+                )
+            # A canonical name comes with framework prose; a free name has
+            # none, and the honest fallback ("routes this session to
+            # <model>.") tells the model nothing about WHEN to enter the
+            # tier — which is the only thing the bullet is for.  Requiring
+            # the key is what makes a free name as legible to the model as
+            # a canonical one, rather than a placeholder in its prompt.
+            if not is_canonical_tier_name(name) and not entry.description:
+                raise ModelTierConfigError(
+                    f"tier {name!r}: 'description' is required for a tier "
+                    f"name the framework does not know "
+                    f"({', '.join(sorted(CANONICAL_TIER_NAMES))} come with "
+                    f"their own prose).  The model reads this as the tier's "
+                    f"bullet in the enter_tier tool; without it all the "
+                    f"framework can say is which model the tier routes to, "
+                    f"which is not a reason to enter it"
                 )
         if self.initial_tier not in self.tiers:
             raise ModelTierConfigError(
@@ -639,11 +798,11 @@ class ModelTierConfig:
     def ordered_tier_names(self) -> Tuple[str, ...]:
         """Declared tier names in canonical (cache-stable) order.
 
-        Known names come first in :data:`TIER_ORDER`; anything else sorts
-        alphabetically after them.  Deterministic because the result feeds
-        the ``enter_tier`` tool schema, which sits in the prompt-cache
-        prefix — an order that varied between processes would invalidate
-        the cache without changing meaning.
+        Canonical names come first in :data:`TIER_ORDER`; deployment-named
+        tiers sort alphabetically after them.  Deterministic because the
+        result feeds the ``enter_tier`` tool schema, which sits in the
+        prompt-cache prefix — an order that varied between processes would
+        invalidate the cache without changing meaning.
         """
         known = [n for n in TIER_ORDER if n in self.tiers]
         rest = sorted(n for n in self.tiers if n not in TIER_ORDER)
@@ -691,6 +850,12 @@ class ModelTierConfig:
         that name (:data:`DEFAULT_TIER_DESCRIPTIONS`), then a bare fallback
         naming the model — which is all the framework can honestly say about
         a tier nobody described.
+
+        That last rung is a backstop, not a supported outcome: a declared
+        tier reaches it only if it is BOTH non-canonical and undescribed,
+        which :meth:`__post_init__` refuses (#831).  It still fires for a
+        name that was never declared at all — ``describe_tier`` accepts
+        one, since callers pass names in from outside.
 
         A tier that declares modality roles its NAME doesn't already imply
         gets a sentence appended saying so — one clause per direction, since
@@ -753,23 +918,28 @@ class ModelTierConfig:
         Raises:
             ModelTierConfigError: If ``tier_name`` is not even a valid
                 tier identifier (callers should validate before getting
-                here; this is a defence-in-depth guard).
+                here; this is a defence-in-depth guard).  Since #831 that
+                means syntactically unusable (:func:`tier_name_error`)
+                rather than merely non-canonical — a tier the deployment
+                named itself resolves here like any other.
         """
-        if tier_name not in VALID_TIER_NAMES:
-            raise ModelTierConfigError(
-                f"unknown tier {tier_name!r}; valid: {sorted(VALID_TIER_NAMES)}"
-            )
         if tier_name in self.tiers:
             return tier_name, self.tiers[tier_name]
+        reason = tier_name_error(tier_name)
+        if reason is not None:
+            raise ModelTierConfigError(reason)
         return self.tier_fallback, self.tiers[self.tier_fallback]
 
     @classmethod
     def from_unified_dict(cls, raw: Dict[str, Any]) -> "ModelTierConfig":
         """Build from the unified JSON-profile dict shape.
 
-        Splits a single dict mixing tier→model mappings (keys in
-        :data:`VALID_TIER_NAMES`) and reserved control keys
-        (``initial`` / ``fallback``).  This is the public ingress
+        Splits a single dict mixing tier→model mappings and the
+        reserved control keys (``initial`` / ``fallback``).  Every key
+        that is not reserved is taken to name a tier; whether the name is
+        usable is settled by :meth:`__post_init__` via
+        :func:`tier_name_error`, so a typo is reported against the tier
+        vocabulary rather than swallowed.  This is the public ingress
         point for parsed profile JSON — it does the split, normalises
         each tier value via :func:`_normalize_tier_entry`, and hands
         off to ``__post_init__`` for the rest of validation.
@@ -818,8 +988,9 @@ class ModelTierConfig:
         Env vars only support the simple shorthand (model name only), so
         an env-built config is always single-provider — a cross-provider
         tier set has to come from a profile's ``model_tiers``.  There is
-        also no ``JAATO_TIER_VISION``: the env path covers the three
-        cognitive tiers only (see :data:`ENV_TIER_MODEL_KEYS`).
+        also no ``JAATO_TIER_VISION`` and no spelling at all for a
+        deployment-named tier: the env path covers the three cognitive
+        tiers only (see :data:`ENV_TIER_MODEL_KEYS` for why).
 
         Args:
             env: Optional override for ``os.environ`` (test injection).

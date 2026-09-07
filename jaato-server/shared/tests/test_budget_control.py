@@ -102,11 +102,17 @@ def test_unknown_action_rejected():
             "limits": {"usd": 1}, "degrade": [{"at": 50, "action": "downgrade"}]})
 
 
-def test_overlay_tier_typo_rejected():
-    with pytest.raises(BudgetControlConfigError, match="not a tier name"):
+def test_overlay_unusable_tier_name_rejected():
+    # Since #831 a rung may name a deployment-named tier, so the parser can
+    # no longer read "visionn" as a typo -- it is a legal name this profile
+    # may well declare, and only the profile knows.  A name that is unusable
+    # as a name at all is still refused here; catching "visionn" against the
+    # profile's OWN table is `jaato-scaffold validate`'s
+    # budget_overlay_undeclared_tier warning, which sees both halves.
+    with pytest.raises(BudgetControlConfigError, match="not a usable tier name"):
         BudgetControlConfig.from_dict({
             "limits": {"usd": 1},
-            "degrade": [{"at": 50, "model_tiers": {"visionn": "m"}}]})
+            "degrade": [{"at": 50, "model_tiers": {"vision-n": "m"}}]})
 
 
 def test_overlay_rejects_control_keys():

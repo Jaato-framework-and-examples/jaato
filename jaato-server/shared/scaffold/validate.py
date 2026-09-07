@@ -502,8 +502,10 @@ def _check_model_tiers(mt_cfg, add, provider_name=None):
 
     Catches, before a session is ever created, what
     :class:`~shared.model_tiers.ModelTierConfig` would only raise at
-    session-create time: tier-name typos, a cross-provider tier naming an
-    uninstalled provider, and a malformed ``description``.  See
+    session-create time: tier-name typos, a deployment-named tier with no
+    ``description`` to stand in for the prose the framework cannot supply,
+    a cross-provider tier naming an uninstalled provider, and a malformed
+    ``description``.  See
     ``jaato-scaffold explain tiers``.  (``model_tiers`` survives the
     inherits/set merge — see ``config._merge_profiles``.)
 
@@ -517,15 +519,43 @@ def _check_model_tiers(mt_cfg, add, provider_name=None):
     """
     if not mt_cfg:
         return
-    from shared.model_tiers import VALID_TIER_NAMES, RESERVED_KEYS
+    from shared.model_tiers import (
+        CANONICAL_TIER_NAMES, RESERVED_KEYS, is_canonical_tier_name,
+        tier_name_error,
+    )
     for key, entry in mt_cfg.items():
-        if key not in VALID_TIER_NAMES and key not in RESERVED_KEYS:
+        if key in RESERVED_KEYS:
+            continue
+        reason = tier_name_error(key)
+        if reason is not None:
             add("error", "unknown_tier",
-                f"model_tiers key '{key}' is neither a tier name "
-                f"({', '.join(sorted(VALID_TIER_NAMES))}) nor a control key "
-                f"({', '.join(sorted(RESERVED_KEYS))})",
+                f"model_tiers key {reason}",
                 where=f"model_tiers.{key}")
             continue
+        # A deployment-named tier has no framework prose behind it, so
+        # ``description`` is required rather than optional — caught here as
+        # well as at session-create time, because this is the surface an
+        # author runs BEFORE paying for a session.  The shorthand
+        # (``coder: some-model``) can never satisfy it, hence the check
+        # sitting above the dict guard.
+        #
+        # The control-key hint rides along because a MISSPELLED control key
+        # (``initail: executor``) now reads as a perfectly legal tier name
+        # the framework has never heard of, and lands here rather than in
+        # the branch above.  "needs a description" alone would be a true
+        # statement about the wrong problem.
+        if not is_canonical_tier_name(key):
+            described = isinstance(entry, dict) and entry.get("description")
+            if not described:
+                add("error", "tier_description_required",
+                    f"model_tiers.{key} needs a 'description' — the "
+                    f"framework only has prose for "
+                    f"{', '.join(sorted(CANONICAL_TIER_NAMES))}, so without "
+                    f"one the model is told only which model this tier "
+                    f"routes to, which is not a reason to enter it.  (If "
+                    f"'{key}' was meant to be a control key, those are "
+                    f"{', '.join(sorted(RESERVED_KEYS))}.)",
+                    where=f"model_tiers.{key}")
         if not isinstance(entry, dict):
             continue
         tprov = entry.get("provider")
