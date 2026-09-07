@@ -492,6 +492,22 @@ any `inline_data` into a `Blob` with the part's own mime. Its
 the tool-result gate and the tier validator read — so the framework declined
 content the wire beneath it would have delivered.
 
+**An attachment no longer means "do not stream" (#837).** The ears and the
+voice could not be used in the same turn. A user message carrying an
+attachment is routed to `_run_chat_loop_with_parts`, which called the
+**batched** `provider.complete()` unconditionally — `_use_streaming` was
+never consulted there — and OpenAI emits audio only while streaming, so a
+`modalities: {audio: bidirectional}` tier answered the first turn that used
+both directions with `400 Audio output requires stream: true`. The path
+predates media output and was built for images, where a batched vision turn
+is perfectly reasonable; audio input is the first attachment kind whose
+*reply* may itself be audio. Both chat loops now take the streaming decision
+from `JaatoSession._resolve_use_streaming`, and a streamed parts turn stops
+emitting each response's assembled text on top of the chunks it already
+delivered. A provider that reports `supports_streaming() == False` still gets
+the batched call it always got. See
+[Binary Media Chunks §8](docs/design/binary-media-chunks.md).
+
 Two shapes were available for #830 and only one is implemented here: audio as
 an **input modality** (above), not **transcription as a step**. A transcriber
 is a different animal — `microsoft/mai-transcribe-2` is served on

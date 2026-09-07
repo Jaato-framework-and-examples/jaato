@@ -6037,6 +6037,32 @@ NOTES
         self._session_quiescent_emitted = False
         self._truncation_recovery_count = 0
 
+    def _resolve_use_streaming(self) -> bool:
+        """Decide whether THIS turn streams.
+
+        The session's ``_use_streaming`` preference is only half of it: a
+        provider that cannot stream must be called batched however the
+        session is configured.  Both are consulted here so the answer is
+        the same one wherever a turn is dispatched.
+
+        It lives in a helper because it did not used to be:
+        :meth:`_run_chat_loop` computed it inline and
+        :meth:`_run_chat_loop_with_parts` never asked at all -- it called
+        the batched provider method unconditionally.  That made "the
+        message carries an attachment" silently mean "do not stream",
+        which is a contradiction on a tier that answers with audio, since
+        OpenAI-shaped wires emit media only while streaming (#837).
+
+        Returns:
+            True when the turn should be dispatched with ``on_chunk``.
+        """
+        return bool(
+            self._use_streaming and
+            self._provider and
+            hasattr(self._provider, 'supports_streaming') and
+            self._provider.supports_streaming()
+        )
+
     def _run_chat_loop(
         self,
         message: str,
@@ -6122,12 +6148,7 @@ NOTES
         wrapped_usage_callback = usage_callback_with_turn_tracking
 
         # Determine if we should use streaming
-        use_streaming = (
-            self._use_streaming and
-            self._provider and
-            hasattr(self._provider, 'supports_streaming') and
-            self._provider.supports_streaming()
-        )
+        use_streaming = self._resolve_use_streaming()
 
         try:
             # Check for cancellation before starting (including parent)
@@ -10628,16 +10649,171 @@ NOTES
 
         return self._run_chat_loop_with_parts(parts, on_output)
 
+    def _emit_batched_response_text(
+        self,
+        response: ProviderResponse,
+        on_output: Optional[OutputCallback],
+        use_streaming: bool,
+    ) -> str:
+        """Return a response's text, emitting it only if the turn was batched.
+
+        A streaming turn has already delivered that text to ``on_output``
+        chunk by chunk, so emitting the assembled response as well would
+        render the answer twice.  A batched turn has emitted nothing yet,
+        and this is where its text reaches the caller.
+
+        The distinction is new to the multimodal parts loop, which until
+        #837 could not stream at all and so emitted unconditionally.
+
+        Args:
+            response: The provider response to read text from.
+            on_output: Turn output callback, or ``None``.
+            use_streaming: Whether this turn was dispatched with ``on_chunk``.
+
+        Returns:
+            The response's text, or ``''`` when it carried none.
+        """
+        text = response.get_text() or ''
+        if text and on_output and not use_streaming:
+            on_output("model", text, "write")
+        return text
+
+    def _complete_parts_turn(
+        self,
+        on_output: Optional[OutputCallback],
+        use_streaming: bool,
+        on_usage_update: Optional[UsageUpdateCallback],
+        context: str,
+    ) -> 'TurnResult':
+        """Dispatch one provider call for the multimodal parts loop.
+
+        Both of that loop's provider calls -- the one answering the user's
+        multi-part message and the one answering tool results -- go through
+        here, so the streaming decision is made once and cannot drift
+        between them.
+
+        On the streaming branch, model text reaches ``on_output`` chunk by
+        chunk (``"write"`` for the first, ``"append"`` after) and thinking
+        is emitted ahead of it, matching the text loop.  A
+        :class:`MediaDelta` is *not* text: it is model-generated media,
+        CLIENT-audience by construction, and is handed to
+        :meth:`_deliver_model_media` rather than the transcript.  Reaching
+        this branch at all is the point of #837 -- an OpenAI-shaped wire
+        emits audio only while streaming, so a batched call on a speaking
+        tier is refused upstream.
+
+        On the batched branch this is the call the loop always made.
+
+        Args:
+            on_output: Turn output callback, or ``None``.
+            use_streaming: Result of :meth:`_resolve_use_streaming`.
+            on_usage_update: Streaming usage-chunk sink (ignored when batched).
+            context: Retry-loop label, used in logs and traces.
+
+        Returns:
+            The provider's turn result, still wrapped -- callers unwrap it
+            with :meth:`_unwrap_turn_result`.
+        """
+        if not use_streaming:
+            with self._provider_access():
+                turn_result, _retry_stats = with_retry(
+                    lambda: self._provider.complete(
+                        self._history.messages,
+                        system_instruction=self._get_effective_system_instruction(),
+                        tools=self._get_tools_for_provider(),
+                    ),
+                    context=context,
+                    on_retry=self._on_retry,
+                    cancel_token=self._cancel_token,
+                    provider=self._provider,
+                )
+            return turn_result
+
+        # Mutable box rather than ``nonlocal``: the callback is redefined
+        # per provider call, and each call starts a fresh output block.
+        first_chunk_sent = [False]
+
+        def streaming_callback(chunk) -> None:
+            if isinstance(chunk, MediaDelta):
+                self._deliver_model_media(chunk)
+                return
+            if self._runtime.reliability_plugin:
+                self._runtime.reliability_plugin.on_model_text(chunk)
+            if on_output:
+                mode = "append" if first_chunk_sent[0] else "write"
+                self._trace(
+                    f"SESSION_PARTS_OUTPUT mode={mode} len={len(chunk)} "
+                    f"preview={repr(chunk[:50])}"
+                )
+                on_output("model", chunk, mode)
+                first_chunk_sent[0] = True
+            self._forward_to_parent("MODEL_OUTPUT", chunk)
+
+        def thinking_callback(thinking: str) -> None:
+            if on_output:
+                self._trace(f"SESSION_PARTS_THINKING len={len(thinking)}")
+                on_output("thinking", thinking, "write")
+
+        with self._provider_access():
+            turn_result, _retry_stats = with_retry(
+                lambda: self._provider.complete(
+                    self._history.messages,
+                    system_instruction=self._get_effective_system_instruction(),
+                    tools=self._get_tools_for_provider(),
+                    on_chunk=streaming_callback,
+                    cancel_token=self._cancel_token,
+                    on_usage_update=on_usage_update,
+                    on_thinking=thinking_callback,
+                ),
+                context=f"{context}_streaming",
+                on_retry=self._on_retry,
+                cancel_token=self._cancel_token,
+                provider=self._provider,
+            )
+        return turn_result
+
     def _run_chat_loop_with_parts(
         self,
         parts: List[Part],
         on_output: OutputCallback
     ) -> str:
-        """Internal function calling loop for multi-part messages."""
+        """Internal function calling loop for multi-part messages.
+
+        The multimodal sibling of :meth:`_run_chat_loop`: reached whenever
+        the user message carries attachments (images, PDFs, audio), which
+        :meth:`send_message` turns into a ``Part`` list.
+
+        **Streaming is decided, not assumed.**  This loop used to call the
+        batched ``provider.complete()`` unconditionally, so an attachment
+        in the message meant the turn did not stream -- fine for the vision
+        turns the path was built for, fatal for audio: an OpenAI-shaped
+        wire emits model audio only while streaming, so "hear a question,
+        answer aloud" on a ``modalities: {audio: bidirectional}`` tier was
+        refused upstream with *Audio output requires stream: true* (#837).
+        Both provider calls below now branch on
+        :meth:`_resolve_use_streaming`, exactly as the text loop does, and
+        the telemetry label reports what actually happened.
+
+        When streaming, text reaches the caller through the chunk callback
+        as it arrives, so the whole-response emissions that follow each
+        provider call are suppressed -- they would render the answer twice.
+        Model-generated media is not text: it goes to clients via
+        :meth:`_deliver_model_media` and never into history or ``on_output``.
+        """
         self._begin_turn_completion_state()
 
         if self._executor:
             self._executor.set_output_callback(on_output)
+
+        # Fresh cancellation token for this turn.  Previously this loop
+        # reused whatever ``_run_chat_loop`` last left behind -- already
+        # cancelled, in the common case -- and handed it to every
+        # ``executor.execute`` call.  Now it also reaches the provider on
+        # the streaming path, where a stale cancelled token would abort
+        # generation before the first chunk.
+        self._cancel_token = CancelToken()
+
+        use_streaming = self._resolve_use_streaming()
 
         turn_start = datetime.now()
         turn_data = {
@@ -10661,6 +10837,13 @@ NOTES
         }
         response: Optional[ProviderResponse] = None
 
+        # Streaming usage chunks carry the turn's token levels; capture
+        # them onto ``turn_data`` so accounting survives a turn that is
+        # cut short mid-stream.  Level readings only -- the ``spend_``
+        # keys stay owned by ``_accumulate_turn_tokens``.
+        def wrapped_usage_callback(usage: TokenUsage) -> None:
+            self._track_streaming_usage(turn_data, usage)
+
         try:
             # Proactive rate limiting: wait if needed before request
             self._pacer.pace()
@@ -10671,21 +10854,16 @@ NOTES
             with self._telemetry.llm_span(
                 model=self._model_name or "unknown",
                 provider=self._provider.name if self._provider else "unknown",
-                streaming=False,
+                streaming=use_streaming,
                 attributes=self._build_llm_span_attributes(),
             ) as llm_telemetry:
                 self._record_input_messages_telemetry(llm_telemetry)
-                with self._provider_access():
-                    turn_result, _retry_stats = with_retry(
-                        lambda: self._provider.complete(
-                            self._history.messages,
-                            system_instruction=self._get_effective_system_instruction(),
-                            tools=self._get_tools_for_provider(),
-                        ),
-                        context="complete_with_parts",
-                        on_retry=self._on_retry,
-                        provider=self._provider
-                    )
+                turn_result = self._complete_parts_turn(
+                    on_output=on_output,
+                    use_streaming=use_streaming,
+                    on_usage_update=wrapped_usage_callback,
+                    context="complete_with_parts",
+                )
                 response = self._unwrap_turn_result(turn_result)
 
                 # Record model response in session history
@@ -10709,7 +10887,8 @@ NOTES
                 # -- a fix applied only to the main loop holds exactly
                 # until an attachment is in the message.
                 continued = self._recover_truncated_turn(
-                    response, False, on_output, None, turn_data,
+                    response, use_streaming, on_output,
+                    wrapped_usage_callback, turn_data,
                     context="parts loop initial response",
                 )
                 if continued is None:
@@ -10718,9 +10897,9 @@ NOTES
 
             function_calls = list(response.get_function_calls())
             while function_calls:
-                response_text = response.get_text()
-                if response_text and on_output:
-                    on_output("model", response_text, "write")
+                self._emit_batched_response_text(
+                    response, on_output, use_streaming,
+                )
 
                 tool_results: List[ToolResult] = []
 
@@ -10844,21 +11023,16 @@ NOTES
                 with self._telemetry.llm_span(
                     model=self._model_name or "unknown",
                     provider=self._provider.name if self._provider else "unknown",
-                    streaming=False,
+                    streaming=use_streaming,
                     attributes=self._build_llm_span_attributes(),
                 ) as llm_telemetry:
                     self._record_input_messages_telemetry(llm_telemetry)
-                    with self._provider_access():
-                        turn_result, _retry_stats = with_retry(
-                            lambda: self._provider.complete(
-                                self._history.messages,
-                                system_instruction=self._get_effective_system_instruction(),
-                                tools=self._get_tools_for_provider(),
-                            ),
-                            context="complete_tool_results_parts",
-                            on_retry=self._on_retry,
-                            provider=self._provider
-                        )
+                    turn_result = self._complete_parts_turn(
+                        on_output=on_output,
+                        use_streaming=use_streaming,
+                        on_usage_update=wrapped_usage_callback,
+                        context="complete_tool_results_parts",
+                    )
                     response = self._unwrap_turn_result(turn_result)
 
                     # Record model response in session history
@@ -10870,11 +11044,9 @@ NOTES
                     self._record_token_telemetry(llm_telemetry, response)
                 function_calls = list(response.get_function_calls())
 
-            final_text = response.get_text()
-            if final_text and on_output:
-                on_output("model", final_text, "write")
-
-            return final_text or ''
+            return self._emit_batched_response_text(
+                response, on_output, use_streaming,
+            )
 
         except Exception as exc:
             # Route provider errors through output callback before re-raising
