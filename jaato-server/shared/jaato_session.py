@@ -6253,7 +6253,7 @@ NOTES
                     with self._provider_access():
                         turn_result, _retry_stats = with_retry(
                             lambda: self._provider.complete(
-                                self._history.messages,
+                                self._history_for_provider(),
                                 system_instruction=self._get_effective_system_instruction(),
                                 tools=self._get_tools_for_provider(),
                                 on_chunk=streaming_callback,
@@ -6274,7 +6274,7 @@ NOTES
                     with self._provider_access():
                         turn_result, _retry_stats = with_retry(
                             lambda: self._provider.complete(
-                                self._history.messages,
+                                self._history_for_provider(),
                                 system_instruction=self._get_effective_system_instruction(),
                                 tools=self._get_tools_for_provider(),
                             ),
@@ -8045,6 +8045,165 @@ NOTES
         )
         return _dc_replace(result, attachments=(kept or None), model_suffix=combined)
 
+    # ==================== History modality gate (per-request) ====================
+
+    def _history_for_provider(self) -> List['Message']:
+        """The history list as **this** request should carry it.
+
+        Every ``provider.complete()`` call site reads its message list from
+        here rather than straight from :attr:`SessionHistory.messages`,
+        because what the session *remembers* and what the *active model* may
+        be handed are not the same list once a session is multimodal.
+
+        The difference is :meth:`_gate_history_for_active_modalities`: binary
+        content the active model cannot consume is withheld from the copy
+        handed to the provider, with a note in its place.  The stored history
+        is untouched, so switching back to a tier that can consume the
+        content restores it (#847).
+        """
+        return self._gate_history_for_active_modalities(self._history.messages)
+
+    def _gate_history_for_active_modalities(
+        self, messages: List['Message']
+    ) -> List['Message']:
+        """Withhold, **for this request only**, content the model can't consume.
+
+        The inbound counterpart of
+        :meth:`_gate_tool_results_for_active_modalities`, and the gate the
+        multimodal design always specified: *the session's send path, right
+        before history->provider conversion*, where the active provider and
+        the outgoing ``Part``s are both in scope.  Until #847 only the
+        tool-result half existed, so a user utterance the session had *heard*
+        was replayed verbatim on every later request — including the ones made
+        after ``enter_tier`` moved to a text-only model, whose upstream
+        answered ``404 No endpoints found that support input audio``.
+
+        **Per-request, never destructive.**  This returns a filtered *copy*;
+        ``self._history`` keeps the bytes.  That distinction is the whole
+        requirement — stripping audio from stored history would fix the text
+        tier by permanently deafening the session, so a later
+        ``enter_tier("voice")`` would find nothing to hear.  ``message_id``,
+        ``model`` and ``provider`` survive the copy (``dataclasses.replace``),
+        because GC's history-budget sync keys on them.
+
+        Object identity is the cheap-path signal: when nothing is withheld
+        every ``Message`` in the returned list is the *stored* object, not a
+        copy, so a text-only session pays one ``any()`` scan per message and
+        allocates nothing beyond the list ``SessionHistory.messages`` already
+        hands out.
+
+        Args:
+            messages: The stored history, newest last.
+
+        Returns:
+            ``messages`` itself when nothing is withheld, else a new list with
+            the affected messages replaced by gated copies.
+        """
+        provider = self._provider
+        if provider is None:
+            return messages
+        gated = [self._gate_one_history_message(m, provider) for m in messages]
+        return gated if any(
+            g is not m for g, m in zip(gated, messages)
+        ) else messages
+
+    def _gate_one_history_message(
+        self, msg: 'Message', provider: 'ModelProviderPlugin'
+    ) -> 'Message':
+        """Apply the inbound modality gate to one stored message.
+
+        Returns ``msg`` **unchanged** (same object) when it carries no binary
+        content or when the active model declares every modality it carries —
+        the caller uses that identity to decide whether it can hand the
+        original list to the provider.
+
+        Otherwise returns a copy in which the unconsumable
+        ``Part.inline_data`` parts are dropped, the unconsumable
+        ``ToolResult.attachments`` are stripped, and a single
+        :meth:`_build_withheld_attachment_note` is appended as a trailing text
+        part.  The note is what makes this different from a filter: a model
+        handed a user turn whose audio silently vanished answers as though the
+        caller said nothing, which is indistinguishable from the caller
+        actually having said nothing.
+
+        The note goes on the *message*, not into ``ToolResult.model_suffix``
+        as :meth:`_gate_one_tool_result` does, because a history message can
+        carry both kinds of withheld content at once and one note describing
+        both reads better than two describing halves.
+        """
+        parts = msg.parts or []
+        if not any(self._part_carries_binary(p) for p in parts):
+            return msg
+        withheld: Dict[str, int] = {}
+        new_parts = [self._gate_one_part(p, provider, withheld) for p in parts]
+        if not withheld:
+            return msg
+        self._trace(
+            f"HISTORY_MODALITY_GATE: withheld {dict(withheld)} from a "
+            f"{msg.role} message for this request (active model "
+            f"{self._model_name!r} lacks them); history is unchanged"
+        )
+        note = self._build_withheld_attachment_note(
+            withheld,
+            retry_action="continue (the content stays in this session's "
+                         "history and is sent again from that tier)",
+        )
+        kept = [p for p in new_parts if p is not None]
+        return _dc_replace(msg, parts=kept + [Part.from_text(note)])
+
+    @staticmethod
+    def _part_carries_binary(part: 'Part') -> bool:
+        """Whether ``part`` carries bytes the modality gate could withhold.
+
+        The cheap pre-check that keeps a text-only session out of the gate
+        entirely: ``inline_data`` is the user-message form, a
+        ``function_response`` with ``attachments`` the tool-result form.
+        """
+        if part.inline_data:
+            return True
+        response = part.function_response
+        return bool(response is not None
+                    and getattr(response, "attachments", None))
+
+    def _gate_one_part(
+        self,
+        part: 'Part',
+        provider: 'ModelProviderPlugin',
+        withheld: Dict[str, int],
+    ) -> Optional['Part']:
+        """Gate one part, tallying what it lost into ``withheld``.
+
+        Returns the part unchanged when it carries nothing the active model
+        refuses, a copy with the refused attachments stripped when it is a
+        tool result, and ``None`` when the part *is* the refused content (an
+        ``inline_data`` part has nothing left once its bytes are withheld).
+
+        An attachment whose mime does not classify
+        (:meth:`_mime_to_modality` returns ``None``) is kept: the gate never
+        over-strips content it cannot name.
+        """
+        if part.inline_data:
+            kind = self._mime_to_modality(part.inline_data.get("mime_type"))
+            if kind is None or provider.supports_modality(kind):
+                return part
+            withheld[kind] = withheld.get(kind, 0) + 1
+            return None
+        response = part.function_response
+        if response is None or not getattr(response, "attachments", None):
+            return part
+        kept = []
+        for att in response.attachments:
+            kind = self._mime_to_modality(getattr(att, "mime_type", None))
+            if kind is None or provider.supports_modality(kind):
+                kept.append(att)
+            else:
+                withheld[kind] = withheld.get(kind, 0) + 1
+        if len(kept) == len(response.attachments):
+            return part
+        return Part.from_function_response(
+            _dc_replace(response, attachments=(kept or None))
+        )
+
     def _model_media_stream_id(self, delta: 'MediaDelta') -> str:
         """A distinct stream id per utterance, not per agent.
 
@@ -8209,8 +8368,13 @@ NOTES
         )
         return target, covered, stuck
 
-    def _build_withheld_attachment_note(self, withheld: Dict[str, int]) -> str:
-        """Build the actionable note appended to a gated tool result.
+    def _build_withheld_attachment_note(
+        self,
+        withheld: Dict[str, int],
+        *,
+        retry_action: str = "re-run this tool",
+    ) -> str:
+        """Build the actionable note that stands in for withheld content.
 
         Three outcomes, in order:
 
@@ -8233,6 +8397,18 @@ NOTES
         PDF the moment a tier declares those roles.  A tier literally named
         ``vision`` that declares no ``modalities`` still implies ``image``,
         so profiles written before the key behave unchanged.
+
+        Args:
+            withheld: modality kind -> count of attachments withheld.
+            retry_action: What the agent should do *after* switching tiers,
+                phrased as the tail of "...then <retry_action>."  The default
+                suits the tool-result gate, where the content is regenerated
+                by re-running the tool.  The history gate
+                (:meth:`_gate_one_history_message`) overrides it, because
+                nothing needs re-running there -- the bytes are still in
+                history and the next request made from the other tier carries
+                them again, so telling the agent to re-run a tool it may never
+                have called would be an instruction it cannot follow.
         """
         kinds = ", ".join(sorted(withheld))
         model = self._model_name or "the current model"
@@ -8263,7 +8439,7 @@ NOTES
             return (
                 f"[Attachment withheld: the active model ({model}) can't "
                 f"view {kinds} content.  Call enter_tier(\"{target}\") first "
-                f"to view the {covers} content, then re-run this tool.{tail}]"
+                f"to view the {covers} content, then {retry_action}.{tail}]"
             )
 
         if stuck:
@@ -8540,7 +8716,7 @@ NOTES
                 with self._provider_access():
                     turn_result, _retry_stats = with_retry(
                         lambda: self._provider.complete(
-                            self._history.messages,
+                            self._history_for_provider(),
                             system_instruction=self._get_effective_system_instruction(),
                             tools=self._get_tools_for_provider(),
                             on_chunk=streaming_callback,
@@ -8562,7 +8738,7 @@ NOTES
                 with self._provider_access():
                     turn_result, _retry_stats = with_retry(
                         lambda: self._provider.complete(
-                            self._history.messages,
+                            self._history_for_provider(),
                             system_instruction=self._get_effective_system_instruction(),
                             tools=self._get_tools_for_provider(),
                             **_extra_complete_kwargs,
@@ -8697,7 +8873,7 @@ NOTES
                 with self._provider_access():
                     turn_result, _retry_stats = with_retry(
                         lambda: self._provider.complete(
-                            self._history.messages,
+                            self._history_for_provider(),
                             system_instruction=self._get_effective_system_instruction(),
                             tools=self._get_tools_for_provider(),
                             on_chunk=streaming_callback,
@@ -8716,7 +8892,7 @@ NOTES
                 with self._provider_access():
                     turn_result, _retry_stats = with_retry(
                         lambda: self._provider.complete(
-                            self._history.messages,
+                            self._history_for_provider(),
                             system_instruction=self._get_effective_system_instruction(),
                             tools=self._get_tools_for_provider(),
                         ),
@@ -9926,9 +10102,20 @@ NOTES
     def _record_input_messages_telemetry(self, span) -> None:
         """Record OpenInference input messages on a telemetry span.
 
-        Converts the current session history (messages being sent to the
-        provider) into OpenInference ``llm.input_messages.*`` indexed
-        attributes on the LLM span, prepended with the system instruction.
+        Converts the messages being sent to the provider into OpenInference
+        ``llm.input_messages.*`` indexed attributes on the LLM span,
+        prepended with the system instruction.
+
+        The list comes from :meth:`_history_for_provider`, not from
+        ``_history.messages``, because since #847 those are not the same
+        list: the modality gate withholds, per request, content the active
+        model cannot consume.  A span reporting the stored history would
+        show a text tier receiving the audio it was specifically not sent —
+        the one reading that makes the 404 this gate exists to prevent look
+        impossible.  Every call site sits inside the ``llm_span`` wrapping
+        the ``complete()`` call and after the turn's history append, so the
+        gate here resolves against the same active model the request will
+        use.
 
         The system prompt is NOT part of ``_history.messages`` — it reaches the
         provider as the API's separate top-level ``system`` parameter — so
@@ -9945,7 +10132,7 @@ NOTES
             span: The LLM span context to set attributes on.
         """
         input_msgs = build_input_messages(
-            self._system_instruction, self._history.messages
+            self._system_instruction, self._history_for_provider()
         )
         if input_msgs:
             span.set_input_messages(input_msgs)
@@ -10718,7 +10905,7 @@ NOTES
             with self._provider_access():
                 turn_result, _retry_stats = with_retry(
                     lambda: self._provider.complete(
-                        self._history.messages,
+                        self._history_for_provider(),
                         system_instruction=self._get_effective_system_instruction(),
                         tools=self._get_tools_for_provider(),
                     ),
@@ -10757,7 +10944,7 @@ NOTES
         with self._provider_access():
             turn_result, _retry_stats = with_retry(
                 lambda: self._provider.complete(
-                    self._history.messages,
+                    self._history_for_provider(),
                     system_instruction=self._get_effective_system_instruction(),
                     tools=self._get_tools_for_provider(),
                     on_chunk=streaming_callback,

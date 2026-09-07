@@ -532,6 +532,38 @@ name (`ErrorEvent(error_type="EmptyMessageError")`), because a bare
 `TurnCompletedEvent` is indistinguishable from a turn that ran and produced
 nothing. See [Binary Media Chunks §9](docs/design/binary-media-chunks.md).
 
+**What a model was GIVEN is replayed to whatever model comes next (#847).**
+A session that had *heard* audio could not `enter_tier` into a text model.
+The utterance stays in history — the audio tier needs it next turn — and
+history is replayed on every later request, so the text tier's first
+request carried `input_audio` and OpenRouter answered `404 No endpoints
+found that support input audio`. Not a missing model: a refused request.
+The modality gate existed and covered one direction only
+(`_gate_tool_results_for_active_modalities`, tool results), so
+`duet`-style outbound-audio profiles were fine and the failure appeared
+only once #830 made *inbound* audio possible.
+`JaatoSession._gate_history_for_active_modalities` is the other half, and
+sits where `docs/design/multimodal-model-support.md` always said the gate
+belonged — the send path, right before history→provider conversion — so
+every `provider.complete()` call site now reads
+`_history_for_provider()` instead of `SessionHistory.messages`. It is
+**per-request, never destructive**: it filters a copy, the stored bytes
+stay, and switching back restores them; a fix that stripped history would
+repair the planner by permanently deafening the session. Withheld content
+leaves a note (`_build_withheld_attachment_note`, now taking a
+`retry_action` because "re-run this tool" is not the remedy when nothing
+needs re-running), since a planner handed a silently-emptied user turn
+answers as though the caller said nothing. Tool results already in history
+are gated too — `_gate_one_tool_result` ran against the model active when
+the result was produced. Gating above the converter rather than teaching
+`openrouter/converters.py` to ask `self.modalities()` answers the same
+latent hardcode in every OpenAI-shaped converter (`_openai_compat` emits
+`image_url` whatever the model declares) with the framework's one answer,
+`provider.supports_modality()`. Consequence: for the providers inheriting
+the text-only floor from `ModalityCapabilityMixin`, a user-message image
+now meets the same withhold their tool-result images always have. See
+[Binary Media Chunks §10](docs/design/binary-media-chunks.md).
+
 Two shapes were available for #830 and only one is implemented here: audio as
 an **input modality** (above), not **transcription as a step**. A transcriber
 is a different animal — `microsoft/mai-transcribe-2` is served on
