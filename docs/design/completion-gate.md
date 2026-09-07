@@ -201,6 +201,42 @@ The generated set fails **closed**, loudly, at the author — and the emit-then-
 asserts precisely that, so a generator change that made it fail open is caught at
 scaffold time.
 
+## 10. Whose budget is it, and where it nearly went missing
+
+**Per processor, per session.** The counter lives on each `LoadedProcessor`, so
+two gates on one profile have independent ceilings and the longer one governs
+while the shorter goes advisory. That is the only answer that composes:
+processors are merged along a profile's inheritance chain (#791), so a shared
+budget would let a base profile's gate spend a child's, and adding an unrelated
+gate would silently tighten every existing one.
+
+**The ceiling has to reach the session, and for a while it did not.** The
+profile is parsed daemon-side; the session runs in the runner subprocess. Three
+places serialised `completion_processors` across that boundary by hand — two
+envelope builders and the runner-side reconstruction — and all three named
+`script` / `output` / `on_error` / `description` / `phase`. The dataclass has
+eight fields. `name`, `max_refusals` and `on_exhausted` were dropped in transit.
+
+Measured against a live daemon: a profile declaring `max_refusals: 2` refused
+**494 times** without exhausting, because the entry that reached
+`invoke_processors` had `max_refusals=None`. The enforcement was correct; it was
+never given a ceiling to enforce. `suppress_inherited_processors` was lost the
+same way, since it matches on `name`.
+
+Both directions now go through one pair of functions
+(`completion_processors_to_wire` / `completion_processors_from_wire`), the
+second being a thin alias of the profile parser so the wire and a profile file
+cannot disagree about what an entry means. Neither names a field:
+`dataclasses.asdict` out, the parser in.
+
+Worth stating plainly, because it is the lesson rather than the bug: **every
+guard on this feature was green throughout.** The unit guard builds its own
+`LoadedProcessor`; the loop guard builds its own `LifecycleTools`. Neither
+crosses a process boundary, so neither could see a boundary that dropped
+fields. #770 asked for the ceiling to be watched *at the session loop* rather
+than at the invocation, and that instruction is what turned up a defect instead
+of confirming a working feature.
+
 ---
 
 ## Why a generator and not only documentation
@@ -228,6 +264,9 @@ So the claims above are enforced by tests that read the framework:
 | `shared/tests/test_completion_processor_refusal_budget.py` | the ceiling not bounding, a broken gate being waved through, a fault spending a refusal, the load-once caching going away |
 | `shared/tests/test_scaffold_completion_contract.py` | `explain completion` drifting from `CompletionProcessor`, `ProcessorResult` or the parser's vocabularies; the generator regressing to a hand-rolled counter; the generated processor not actually terminating |
 | `shared/tests/test_scaffold_archetype_docs.py` | the `processor` archetype's declared output drifting from what `new` writes |
+| `shared/tests/test_the_refusal_ceiling_bounds_the_session_loop.py` | the ceiling failing to bound the LOOP: an always-refusing gate never accepted, an unbounded one acquiring a ceiling it should not have, `on_exhausted: fail` letting a completion through, a broken gate being waved through by exhaustion, and the load-once caching the counter lives on going away |
+| `shared/tests/test_processor_wiring_survives_the_runner_boundary.py` | §10's defect: any `CompletionProcessor` field that stops crossing into the runner, driven from `dataclasses.fields` so a newly added field is covered without anyone remembering to add it |
+| `jaato-sdk/jaato_sdk/conformance/test_invariants.py` (`-m conformance`) | the same claim against a REAL daemon and the real chat loop — the only level at which §10's defect was visible |
 | `shared/tests/test_scaffold_sweep_gate_contract.py` | §9 going stale: the schema gate being relaxed, `max_refusals` no longer reaching the framework as a parsed field, the emitted paths no longer resolving through the real loaders, the emitted `acceptance.sh` breaking the `--all` contract, and — the assertion the module exists for — the unconfigured gate accepting a completion instead of refusing it |
 
 Each of these except the archetype-docs guard also declares a `REVERSIONS` entry, so

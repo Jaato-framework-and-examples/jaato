@@ -69,12 +69,25 @@ def echo_workspace(root: Path, *, usage: Optional[dict] = None,
                    tool_call: Optional[dict] = None,
                    response: Optional[str] = None,
                    completion_schema: Optional[dict] = None,
+                   retry_tool_call: bool = False,
+                   processor: Optional[str] = None,
+                   processor_entry: Optional[dict] = None,
                    name: str = "conformance") -> Path:
     """Write a workspace with one echo-backed profile and return its path.
 
     ``usage`` is what makes budget invariants possible: echo reports the spend
     it is told to, identically every turn, so "how many turns to the ceiling"
     is arithmetic rather than observation.
+
+    ``retry_tool_call`` + ``processor`` together are what let a profile model
+    a REFUSED agent rather than a satisfied one.  Echo normally calls its tool
+    once and then answers in prose, which is indistinguishable from the tool
+    having succeeded; with the flag it re-claims completion every time, so a
+    gate that refuses forms the loop jaato #768 is about and something else
+    has to end it.  ``processor`` is the module body, written under
+    ``.jaato/scripts/processors/<name>.py``, and ``processor_entry`` carries
+    the ``completion_processors`` keys (``max_refusals``, ``on_exhausted``, …)
+    the profile declares for it.
 
     ``completion_schema`` matters more than it looks.  A profile carrying one
     ends its run by calling ``signal_completion``, which terminates the
@@ -102,10 +115,19 @@ def echo_workspace(root: Path, *, usage: Optional[dict] = None,
         "provider": "echo",
         "plugins": [],
     }
+    if retry_tool_call:
+        echo_cfg["retry_tool_call"] = True
     if echo_cfg:
         profile["plugin_configs"] = {"echo": echo_cfg}
     if completion_schema is not None:
         profile["completion_payload_schema"] = completion_schema
+    if processor is not None:
+        script = root / ".jaato" / "scripts" / "processors" / f"{name}.py"
+        script.parent.mkdir(parents=True, exist_ok=True)
+        script.write_text(processor, encoding="utf-8")
+        entry = {"script": f"scripts/processors/{name}.py", "name": name}
+        entry.update(processor_entry or {})
+        profile["completion_processors"] = [entry]
 
     (profiles / f"{name}.json").write_text(
         json.dumps(profile, indent=2), encoding="utf-8")

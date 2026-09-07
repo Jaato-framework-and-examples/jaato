@@ -2481,6 +2481,10 @@ class SessionManager:
         # envelope does not carry ``model_tiers`` (pre-existing gap), so an
         # isolated subagent gets action rungs (abort) but NOT tier-overlay
         # rungs — an overlay needs a tier table to patch.
+        from shared.plugins.subagent.config import (
+            completion_processors_to_wire,
+        )
+
         _iso_budget = getattr(profile, "budget_control", None)
         return SessionInitEnvelope(
             session_id=isolated_session_id,
@@ -2507,17 +2511,12 @@ class SessionManager:
             completion_payload_schema=getattr(
                 profile, "completion_payload_schema", None,
             ),
-            completion_processors=[
-                {
-                    "script": getattr(p, "script", None),
-                    "output": getattr(p, "output", None),
-                    "on_error": getattr(p, "on_error", "fail_completion"),
-                    "description": getattr(p, "description", None),
-                    "phase": getattr(p, "phase", "finalization"),
-                }
-                for p in (getattr(profile, "completion_processors", []) or [])
-                if hasattr(p, "script")
-            ],
+            # From the dataclass, not field-by-field — see
+            # ``completion_processors_to_wire``: the hand-written list this
+            # replaces dropped the refusal ceiling on the way to the runner.
+            completion_processors=completion_processors_to_wire(
+                getattr(profile, "completion_processors", []) or []
+            ),
         )
 
     def _dispatch_isolated_session_bootstrap(

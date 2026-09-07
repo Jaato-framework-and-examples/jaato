@@ -1216,6 +1216,28 @@ class CompletionProcessor:
             :mod:`shared.completion_processors`), which is what makes
             it a declared home rather than a module-level global
             resting on an undocumented caching guarantee (#765).
+
+            **Per processor, per session** — not one budget shared
+            across the profile (#770's open question).  Two gates on
+            one profile hold independent ceilings and the longer one
+            governs while the shorter goes advisory.  It is the only
+            answer that composes: processors are merged along a
+            profile's inheritance chain (#791), so a shared budget
+            would let a base profile's gate spend a child's, and
+            adding an unrelated gate would silently tighten every
+            existing one.
+
+            The value has to REACH the runner to do anything, and for
+            a while it did not — three hand-written serialisers
+            between the daemon and the runner named five of this
+            dataclass's fields and dropped the rest, so a declared
+            ceiling was ``None`` by the time it was enforced (a live
+            daemon refused 494 times under ``max_refusals: 2``).  Both
+            directions now go through
+            ``completion_processors_to_wire`` /
+            ``completion_processors_from_wire``, neither of which
+            names a field.  Guard:
+            ``shared/tests/test_processor_wiring_survives_the_runner_boundary.py``.
         on_exhausted: What happens on the invocation AFTER
             ``max_refusals`` is spent.  ``"allow"`` (default) downgrades
             this processor's errors to warnings and lets the completion
@@ -1956,6 +1978,87 @@ def _parse_completion_processors(value: Any) -> List[CompletionProcessor]:
             ),
         ))
     return out
+
+
+def completion_processors_to_wire(
+    processors: Any,
+) -> List[Dict[str, Any]]:
+    """Serialise ``completion_processors`` for the daemon -> runner envelope.
+
+    Uses ``dataclasses.asdict`` rather than naming the fields, which is the
+    whole point of it existing.  Three separate call sites used to build this
+    dict by hand — two daemon-side envelope builders and the runner-side
+    reconstruction — and every one of them listed ``script`` / ``output`` /
+    ``on_error`` / ``description`` / ``phase`` and stopped there.  So
+    ``name``, ``max_refusals`` and ``on_exhausted`` were dropped in transit:
+    the profile parsed them, ``profile_to_snapshot`` persisted them, and the
+    session that actually ran never saw them.
+
+    What that cost: a declared refusal ceiling had NO EFFECT on a real
+    session.  Measured against a live daemon, a gate with ``max_refusals: 2``
+    refused 494 times without exhausting — the unbounded loop of jaato #768,
+    reintroduced by a serialiser, with the profile still saying the ceiling
+    was there.  ``suppress_inherited_processors`` (#791) lost the same way,
+    since it matches on ``name``.
+
+    Entries that are already plain dicts pass through unchanged: subagent
+    spawn specs may carry raw wire dicts that never became dataclasses.  An
+    object that merely LOOKS like a processor (anything exposing ``script``)
+    is accepted too, because the hand-written path this replaces duck-typed
+    on exactly that and callers rely on it; its fields are read through
+    ``CompletionProcessor`` so the dataclass stays the single source of both
+    the field set and the defaults.
+
+    Anything else is dropped WITH A WARNING rather than silently, since a
+    processor that vanishes on the way to the runner is a gate that stops
+    gating and says nothing — the failure this function exists to end.
+
+    Args:
+        processors: ``CompletionProcessor`` instances, raw dicts, duck-typed
+            stand-ins, or a mix.
+
+    Returns:
+        One JSON-safe dict per entry, carrying EVERY field of the dataclass.
+    """
+    import dataclasses as _dc
+
+    out: List[Dict[str, Any]] = []
+    for entry in processors or []:
+        if isinstance(entry, dict):
+            out.append(dict(entry))
+        elif _dc.is_dataclass(entry) and not isinstance(entry, type):
+            out.append(_dc.asdict(entry))
+        elif hasattr(entry, "script"):
+            out.append(_dc.asdict(CompletionProcessor(**{
+                f.name: getattr(entry, f.name)
+                for f in _dc.fields(CompletionProcessor)
+                if hasattr(entry, f.name)
+            })))
+        else:
+            logger.warning(
+                "completion_processors: dropping unusable entry on the way "
+                "to the runner (no 'script'): %r", entry,
+            )
+    return out
+
+
+def completion_processors_from_wire(
+    entries: Any,
+) -> List[CompletionProcessor]:
+    """Rebuild ``completion_processors`` runner-side from the envelope.
+
+    A thin alias of :func:`_parse_completion_processors`, deliberately: the
+    wire dict and a profile file's ``completion_processors:`` block are the
+    same shape, so parsing them with the same function is what stops the two
+    from disagreeing about what an entry means.  The hand-rolled
+    reconstruction it replaces had already drifted — it silently defaulted
+    every field it did not know about, so a ceiling that crossed the wire
+    would still have been discarded on arrival.
+
+    Malformed entries are skipped with a warning rather than raising, exactly
+    as they are when a profile declares them.
+    """
+    return _parse_completion_processors(entries)
 
 
 #: The ``cache.ttl`` vocabulary.  Deliberately the Anthropic/OpenRouter
