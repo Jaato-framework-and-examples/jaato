@@ -9166,7 +9166,6 @@ NOTES
         last = messages[-1]
         if last.role != Role.MODEL:
             return 0
-        return 0
         fcs = [p.function_call for p in last.parts if p.function_call]
         if not fcs:
             return 0
