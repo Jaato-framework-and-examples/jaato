@@ -4398,6 +4398,12 @@ NOTES
         JSON-safe).  ``data`` is base64-decoded to the ``bytes`` that
         ``Part.inline_data`` expects.  The text part precedes the inline-data
         parts; an empty ``message`` (image-only turn) yields parts with no text.
+
+        ``display_name`` is carried onto the part: the OpenAI-shaped
+        converters read it back off ``inline_data``
+        (``_attachments.attachment_entries_from_parts``) for the PDF ``file``
+        block's ``filename``, so dropping it here renamed every attached
+        document to ``document.pdf`` on the wire.
         """
         import base64
         parts: List[Part] = []
@@ -4410,6 +4416,7 @@ NOTES
             parts.append(Part(inline_data={
                 "mime_type": att.get("mime_type"),
                 "data": data,
+                "display_name": att.get("display_name"),
             }))
         return parts
 

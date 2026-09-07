@@ -123,17 +123,24 @@ class TestImageCapableProviderTables:
         p._model_name = "claude-2.1"  # legacy, text-only, absent from table
         assert p.modalities() == {"text"}
 
-    def test_google_gemini_modern_is_vision_legacy_is_text(self):
+    def test_google_gemini_modern_is_vision_and_audio_legacy_is_text(self):
         from ..google_genai.provider import GoogleGenAIProvider
 
+        # ``audio`` joined the table in #830.  It was always true of the
+        # models and always true of the converter (any ``inline_data`` rides
+        # as a ``Blob`` with its own mime); only the table said otherwise,
+        # and the table is what the tool-result gate and the tier validator
+        # read — so Gemini refused audio it would have understood.
         p = self._bare(GoogleGenAIProvider)
         for m in ("gemini-2.5-pro", "gemini-1.5-flash-latest",
                   "gemini-3-pro-preview", "gemini-2.0-flash"):
             p._model_name = m
-            assert p.modalities() == {"text", "image", "file"}, m
+            assert p.modalities() == {"text", "image", "file", "audio"}, m
+            assert p.supports_modality("audio"), m
         for m in ("gemini-1.0-pro", "gemini-pro"):
             p._model_name = m
             assert p.modalities() == {"text"}, m
+            assert not p.supports_modality("audio"), m
 
     def test_antigravity_served_models_are_vision(self):
         from ..antigravity.provider import AntigravityProvider

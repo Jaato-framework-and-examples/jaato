@@ -28,17 +28,24 @@ that supports one, you implement the listed mechanism; if you don't, declare it
 | `user_message_images` | Message-→-wire converter turns a `Part.inline_data` image into the provider's image block (OpenAI `image_url` data-URL, Anthropic `image` `source.base64`, …). | Behavioral: feed an image Message through the converter; the image's base64 must appear on the wire. |
 | `tool_result_images` | A tool result's image `Attachment` reaches the model. OpenAI-compat `tool` messages can't carry images, so surface them as a **follow-up `user` message** with `image_url`; Anthropic embeds an image block in `tool_result`. | Behavioral: feed a `ToolResult` with an image attachment; base64 must reach the wire. |
 | `pdf_input` | An `application/pdf` attachment (user message OR tool result) reaches the model as the provider's PDF block — OpenRouter `{"type":"file","file":{"filename","file_data":"data:application/pdf;base64,…"}}`, Anthropic `document`, Google `inline_data` (`application/pdf`). Producer: `readFile` on a `.pdf` emits a `_multimodal_type:"file"` attachment. | Behavioral: feed a PDF attachment (user + tool-result); the PDF base64 must reach the wire. |
+| `audio_input` | An `audio/*` attachment (user message OR tool result) reaches the model as the provider's audio-input block — OpenRouter/OpenAI `{"type":"input_audio","input_audio":{"data":"<base64>","format":"wav"}}`, Google `inline_data` with the audio mime. The `format` vocabulary is closed (`wav`/`mp3`/`aiff`/`aac`/`ogg`/`flac`/`m4a`/`pcm16`), so a container outside it is **withheld with a note**, not renamed to one that is. | Behavioral, both directions: the audio base64 must reach the wire when declared, must NOT when not declared, and must never appear inside an image block. |
 | `tool_choice_forwarding` | `complete(tool_choice=…)` is forwarded to the request body (e.g. `api_params.tool_choice` → wire). Accept-and-ignore counts as **`False`**. | (v1: declaration; behavioral follow-up.) |
 | `thinking` | `supports_thinking()` consistent with behavior; extended-reasoning requested and/or `reasoning_content` extracted. | (v1: declaration.) |
 | `prompt_caching` | Emits `cache_control` breakpoints on the wire (directly or via the cache plugin). Parsing cached-token *accounting* without emitting breakpoints is **`False`**. | (v1: declaration.) |
 | `streaming` | `complete(on_chunk=…)` streams tokens. | (v1: declaration; `supports_streaming()`.) |
 | `cancellation` | A `cancel_token` **actually halts** generation. Advertising `supports_stop()==True` while ignoring the token is a **lie → declare `False`**. | (v1: declaration; behavioral follow-up.) |
+| `output_media` | Model-GENERATED media is decoded off the stream and delivered as a `MediaDelta` on the `on_chunk` callback (`emit_media_delta`). The opposite direction from `audio_input`: this is the mouth, that is the ears. | (declaration; verified end to end for `openrouter` — a spoken answer reaches a separate client process and plays.) |
 
 > Modality detection (`modalities()`) and context-window detection
 > (`resolve_context_window`) remain their own richer primitives (a *set* / an
 > *int*, not a bool) and are not in this bool matrix. **Cross-rule:** if a
 > provider's `modalities()` can return `image` for any model, it MUST declare
-> `user_message_images=True` — otherwise it's vision-declared-but-broken.
+> `user_message_images=True` — otherwise it's vision-declared-but-broken.  The same
+> cross-rule holds for audio: a `modalities()` that can return `audio` against a
+> converter declaring `audio_input=False` is a model the framework says can
+> listen and a wire that drops what it is given. That was the whole of #830 —
+> OpenRouter's catalog reported `audio` input for `gpt-audio` and the converter
+> had no branch to put it on.
 
 ## Adding a provider
 

@@ -166,3 +166,89 @@ def test_validate_flags_a_bad_direction_and_suggests_bidirectional(tmp_path):
     bad = [d for d in diags if d.code == "invalid_tier_modalities"]
     assert len(bad) == 1
     assert "bidirectional" in bad[0].message
+
+
+def _write_tier_profile(tmp_path, tag, body):
+    """One profile-set with a single non-base profile carrying ``body``."""
+    pdir = tmp_path / ".jaato" / "profiles" / f"set{tag}"
+    pdir.mkdir(parents=True)
+    (tmp_path / ".jaato" / "profiles" / f"_base_{tag}.yaml").write_text(
+        f"name: _base_{tag}\ndescription: b\nplugins: []\n")
+    (pdir / f"{tag}.yaml").write_text(
+        f"name: {tag}\ninherits: [_base_{tag}]\nplugins: []\n" + body)
+    return V.validate_workspace(
+        str(tmp_path), profile_set=f"set{tag}", only=tag)
+
+
+def test_validate_warns_that_an_unmarshalled_inbound_role_is_inert(tmp_path):
+    """#830's shape, caught before a session exists.
+
+    A profile could declare ``audio: inbound`` against a provider whose
+    converter has no audio branch: it parses, it is stored, the session-time
+    modality check passes (the CATALOG says the model listens), and every
+    clip is then withheld at the last step with nothing upstream having said
+    why.  The outbound half has warned about its own inertness since #824;
+    the inbound half was silent.
+    """
+    diags = _write_tier_profile(tmp_path, "IA", (
+        "provider: nim\n"
+        "model_tiers:\n"
+        "  executor: {model: e}\n"
+        "  planner: {model: p, modalities: {audio: inbound}}\n"
+        "  initial: executor\n  fallback: executor\n"))
+    warns = [d for d in diags if d.code == "inbound_modality_not_marshalled"]
+    assert len(warns) == 1
+    assert warns[0].severity == "warning"
+    assert "audio_input" in warns[0].message
+    # Inert is not invalid: the profile must stay writable.
+    assert not [d for d in diags if d.code == "invalid_tier_modalities"]
+
+
+def test_validate_is_silent_when_the_wire_really_carries_the_modality(tmp_path):
+    diags = _write_tier_profile(tmp_path, "IB", (
+        "provider: openrouter\n"
+        "model_tiers:\n"
+        "  executor: {model: e}\n"
+        "  planner: {model: p, modalities: {audio: inbound}}\n"
+        "  initial: executor\n  fallback: executor\n"))
+    assert not [d for d in diags
+                if d.code == "inbound_modality_not_marshalled"]
+
+
+def test_validate_does_not_invent_a_verdict_for_an_uncheckable_role(tmp_path):
+    """``video`` has no capability column, so nothing is known about it.
+
+    A false INERT is the failure mode this whole warning family already
+    learned once: the outbound version fired unconditionally and told every
+    author of a working speaking tier that their profile did nothing.
+    """
+    diags = _write_tier_profile(tmp_path, "IC", (
+        "provider: nim\n"
+        "model_tiers:\n"
+        "  executor: {model: e}\n"
+        "  planner: {model: p, modalities: {video: inbound}}\n"
+        "  initial: executor\n  fallback: executor\n"))
+    assert not [d for d in diags
+                if d.code == "inbound_modality_not_marshalled"]
+
+
+def test_bidirectional_audio_warns_on_both_halves_separately(tmp_path):
+    """A tier can be inert in one direction and live in the other.
+
+    ``google_genai`` carries audio INPUT (any inline_data rides as a Blob)
+    and declares no ``output_media``, so the outbound warning must fire, the
+    inbound one must not, and the outbound message must say the inbound half
+    is live rather than condemning the whole role.
+    """
+    diags = _write_tier_profile(tmp_path, "ID", (
+        "provider: google_genai\n"
+        "model_tiers:\n"
+        "  executor: {model: e}\n"
+        "  planner: {model: gemini-2.5-pro, modalities: {audio: bidirectional}}\n"
+        "  initial: executor\n  fallback: executor\n"))
+    assert not [d for d in diags
+                if d.code == "inbound_modality_not_marshalled"]
+    out = [d for d in diags if d.code == "outbound_modality_not_deliverable"]
+    assert len(out) == 1
+    assert "inbound half of this role IS live" in out[0].message
+

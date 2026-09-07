@@ -452,9 +452,53 @@ converter must answer for an `inline_data` part or a tool-result
 `Attachment`: *does this wire carry this mime?* `image/*` becomes an
 `image_url` block; `application/pdf` becomes a `file` block **only** where
 the wire declares it (`pdf_as_file=True`, i.e. `openrouter`, which declares
-`pdf_input=True`); everything else — audio, video, and a part with **no**
-declared mime — is withheld, logged at WARNING, and reported to the model
-with the same `[Attachment withheld: ...]` note the modality gate uses.
+`pdf_input=True`); `audio/*` becomes an `input_audio` block **only** where
+the wire declares it (`audio_as_input_audio=True`, likewise `openrouter`,
+which declares `audio_input=True`); everything else — video, and a part with
+**no** declared mime — is withheld, logged at WARNING, and reported to the
+model with the same `[Attachment withheld: ...]` note the modality gate uses.
+That note now also names what *this* wire accepts, because telling a model
+refused audio to retry as "text, or an image" on a wire that carries PDFs
+and audio wastes a turn on advice that was never true.
+
+**The ears (#830).** Outbound audio was complete — #824 delivers
+model-emitted media to a client, #828 sources `final` from the provider's own
+end-of-audio marker — and there was no inbound path at all: `input_audio`
+appeared **nowhere** in the tree, so an `audio/*` part was withheld by the
+clause that (correctly) withholds video, however loudly a model's catalog
+entry declared `audio` as an input modality. The gates deciding whether audio
+*may* be sent already existed on both the tier path
+(`_validate_modality_tier_capabilities`) and the tool-result path
+(`_gate_one_tool_result`); what was missing was somewhere to send the bytes.
+
+| Wire | Shape | Vocabulary |
+|------|-------|-----------|
+| `openrouter` (and any OpenAI-shaped wire that opts in) | `{"type":"input_audio","input_audio":{"data":"<b64>","format":"wav"}}` | closed: `wav`, `mp3`, `aiff`, `aac`, `ogg`, `flac`, `m4a`, `pcm16` |
+| `google_genai` | `Blob(mime_type=..., data=...)` — already carried any mime | the model's own |
+
+The `format` field is the wire's vocabulary, not ours, so a container it does
+not name (`audio/opus`, `audio/webm`) is **withheld with a note**, never
+relabelled to one it does name — that would be #829 in new clothes. Raw PCM
+is the one mime whose whole shape lives in its parameters, and `pcm16` is an
+assertion about them (s16le / mono / 24 kHz): a parameter that *contradicts*
+it withholds, an absent one is agreement, and `audio/L16` is refused outright
+because RFC 2586 makes it big-endian and relabelled big-endian samples are
+noise. The framework's own `STREAM_AUDIO_MIME` — what a speaking model emits
+— maps to `pcm16`, so the ears accept what the mouth produces.
+
+Gemini needed no wire work at all: `_part_to_google` has always marshalled
+any `inline_data` into a `Blob` with the part's own mime. Its
+`MODEL_INPUT_MODALITIES` table simply omitted `audio`, and that table is what
+the tool-result gate and the tier validator read — so the framework declined
+content the wire beneath it would have delivered.
+
+Two shapes were available for #830 and only one is implemented here: audio as
+an **input modality** (above), not **transcription as a step**. A transcriber
+is a different animal — `microsoft/mai-transcribe-2` is served on
+`/api/v1/audio/transcriptions` (multipart), not chat-completions, and every
+provider in this tree is a chat provider — so whether it is a tool plugin or a
+new provider kind stays an open design question rather than something settled
+in passing.
 
 > `_openai_compat/converters.py` previously sent *every* `inline_data` part
 > as `image_url` and defaulted a missing mime to `image/png` (#829), so a PDF

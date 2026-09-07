@@ -267,9 +267,11 @@ class TestOpenRouterKeepsItsPdfExtension:
         wire = openrouter_to_openai(_user_msg("image/png", _PNG))
         assert _image_urls(wire) == [f"data:image/png;base64,{_PNG_B64}"]
 
-    def test_audio_is_withheld_and_reported_rather_than_dropped(self):
+    def test_uncarriable_audio_is_withheld_and_reported_rather_than_dropped(self):
         # OpenRouter already declined non-carriable mimes, but silently.
-        msg, = openrouter_to_openai(_user_msg("audio/wav", _WAV, text="hear"))
+        # #830 gave it ears for the containers the wire names; one it does
+        # NOT name still has to be refused out loud rather than dropped.
+        msg, = openrouter_to_openai(_user_msg("audio/opus", _WAV, text="hear"))
         assert isinstance(msg["content"], str)
         assert "Attachment withheld" in msg["content"]
 
@@ -313,3 +315,149 @@ class TestSharedAssemblers:
         )
         assert msg["content"][0]["text"] == \
             "[Image returned by tool call: x.png]"
+
+
+# ------------------------------------------------------------ #830: the ears
+
+class TestAudioInputBlocks:
+    """#830 — ``audio/*`` reaches an audio-declaring wire as ``input_audio``.
+
+    The framework grew a mouth in #824/#828 and had no ears: ``input_audio``
+    appeared nowhere in the tree, so audio was withheld by the same clause
+    that (correctly) withholds video, no matter what the model's catalog
+    entry said it could hear.  These pin the three things that had to become
+    true — the block shape, the closed ``format`` vocabulary, and the fact
+    that a wire which does NOT opt in is completely unchanged.
+    """
+
+    def test_wav_becomes_an_input_audio_block(self):
+        block = attachment_content_block(
+            "audio/wav", _WAV, audio_as_input_audio=True)
+        assert block == {
+            "type": "input_audio",
+            "input_audio": {"data": _WAV_B64, "format": "wav"},
+        }
+
+    def test_audio_is_still_withheld_where_the_wire_does_not_declare_it(self):
+        # The default is off, so every _openai_compat sharer is untouched.
+        assert attachment_content_block("audio/wav", _WAV) is None
+        assert attachment_content_block(
+            "audio/wav", _WAV, pdf_as_file=True) is None
+
+    @pytest.mark.parametrize("mime,fmt", [
+        ("audio/wav", "wav"),
+        ("audio/x-wav", "wav"),          # what mimetypes.guess_type gives .wav
+        ("audio/wave", "wav"),
+        ("audio/mpeg", "mp3"),           # ... and .mp3
+        ("audio/mp3", "mp3"),
+        ("audio/aiff", "aiff"),
+        ("audio/aac", "aac"),
+        ("audio/ogg", "ogg"),
+        ("audio/flac", "flac"),
+        ("audio/x-m4a", "m4a"),          # ... and .m4a
+        ("audio/mp4", "m4a"),
+        ("audio/WAV", "wav"),            # case is not part of the type
+        ("audio/wav; codecs=1", "wav"),  # nor are parameters
+    ])
+    def test_container_mimes_map_to_the_wire_vocabulary(self, mime, fmt):
+        assert _attachments.audio_wire_format(mime) == fmt
+
+    @pytest.mark.parametrize("mime", [
+        "audio/opus",       # a real codec the ``format`` vocabulary omits
+        "audio/webm",
+        "audio/basic",
+        "audio/l16",        # RFC 2586: BIG-endian. pcm16 is little-endian.
+        "audio/L16;rate=24000",
+    ])
+    def test_unnameable_containers_are_refused_not_guessed(self, mime):
+        assert _attachments.audio_wire_format(mime) is None
+        assert attachment_content_block(
+            mime, _WAV, audio_as_input_audio=True) is None
+
+    def test_the_framework_s_own_output_mime_is_accepted_as_input(self):
+        # What the mouth emits (_media_deltas.STREAM_AUDIO_MIME) the ears
+        # must accept — otherwise a spoken turn cannot be replayed to a
+        # model, which is the whole shape of the asymmetry #830 records.
+        from shared.plugins.model_provider._media_deltas import (
+            STREAM_AUDIO_MIME,
+        )
+        assert _attachments.audio_wire_format(STREAM_AUDIO_MIME) == "pcm16"
+
+    @pytest.mark.parametrize("mime", [
+        "audio/pcm",                                    # bare = agreement
+        "audio/pcm;rate=24000",
+        "audio/pcm;rate=24000;channels=1;encoding=s16le",
+    ])
+    def test_raw_pcm_matching_the_pcm16_assertion_is_carried(self, mime):
+        assert _attachments.audio_wire_format(mime) == "pcm16"
+
+    @pytest.mark.parametrize("mime", [
+        "audio/pcm;rate=16000",          # not the rate pcm16 means
+        "audio/pcm;channels=2",          # not mono
+        "audio/pcm;encoding=f32le",      # not 16-bit signed
+    ])
+    def test_raw_pcm_contradicting_the_assertion_is_refused(self, mime):
+        # Relabelling 16 kHz stereo float as ``pcm16`` produces noise, and
+        # noise the model describes confidently is worse than a stated gap.
+        assert _attachments.audio_wire_format(mime) is None
+
+    def test_openrouter_user_message_carries_audio(self):
+        msg, = openrouter_to_openai(_user_msg("audio/wav", _WAV, text="hear"))
+        assert [b["type"] for b in msg["content"]] == ["text", "input_audio"]
+        assert msg["content"][1]["input_audio"] == {
+            "data": _WAV_B64, "format": "wav"}
+
+    def test_openrouter_tool_result_audio_surfaces_as_a_followup(self):
+        wire = openrouter_to_openai(_tool_msg(
+            Attachment(mime_type="audio/mpeg", data=_WAV,
+                       display_name="clip.mp3")))
+        assert wire[0]["role"] == "tool"
+        assert wire[-1]["role"] == "user"
+        blocks = [b for b in wire[-1]["content"] if b["type"] == "input_audio"]
+        assert blocks[0]["input_audio"]["format"] == "mp3"
+
+    def test_audio_never_rides_inside_an_image_url(self):
+        # The #829 invariant has to survive the #830 addition.
+        wire = openrouter_to_openai(_user_msg("audio/wav", _WAV))
+        assert _image_urls(wire) == []
+
+    @pytest.mark.parametrize("convert", IMAGE_ONLY_CONVERTERS)
+    def test_image_only_wires_are_byte_identical_after_830(self, convert):
+        msg, = convert(_user_msg("audio/wav", _WAV, text="hear"))
+        assert isinstance(msg["content"], str)
+        assert "Attachment withheld" in msg["content"]
+        assert _WAV_B64 not in json.dumps(msg)
+
+
+class TestWithheldNoteNamesWhatThisWireAccepts:
+    """The remedy the note suggests has to be available on THIS wire.
+
+    The note said "text, or an image" on every wire, which was already
+    wrong for OpenRouter (it carries PDFs) and would send a model that
+    just had audio refused looking for a form the wire also refuses.
+    """
+
+    @staticmethod
+    def _offered(note):
+        """The parenthesised accepted-forms clause, isolated from the rest."""
+        return note.split("wire accepts (", 1)[1].split(")", 1)[0]
+
+    def test_image_only_wire_offers_text_and_images_only(self):
+        offered = self._offered(withheld_attachment_note(["audio/wav"]))
+        assert offered == "text, or images"
+
+    def test_pdf_wire_offers_pdfs(self):
+        offered = self._offered(
+            withheld_attachment_note(["video/mp4"], pdf_as_file=True))
+        assert offered == "text, images, or PDF documents"
+
+    def test_audio_wire_offers_audio_and_names_the_formats(self):
+        offered = self._offered(withheld_attachment_note(
+            ["audio/opus"], pdf_as_file=True, audio_as_input_audio=True))
+        assert offered.startswith("text, images, PDF documents, or audio (")
+        for fmt in ("wav", "mp3", "pcm16", "flac"):
+            assert fmt in offered
+
+    def test_counts_survive_the_new_clause(self):
+        note = withheld_attachment_note(["video/mp4", "video/mp4"])
+        assert "video/mp4 (x2)" in note

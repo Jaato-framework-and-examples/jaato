@@ -46,6 +46,9 @@ from shared.tests.test_provider_capabilities import (  # noqa: E402
     _provider_dirs,
     _read_declaration,
 )
+from shared.tests.test_every_guard_detects_its_own_reversion import (  # noqa: E402
+    Reversion,
+)
 
 # provider -> (converter file relative to model_provider/, message-conversion fn).
 # Providers without their own converters.py inherit another's (the value points
@@ -75,6 +78,8 @@ _PNG = b"\x89PNG\r\n\x1a\nCONFORMANCE-IMAGE-PAYLOAD-1234567890"
 _B64 = base64.b64encode(_PNG).decode("utf-8")
 _PDF = b"%PDF-1.4 CONFORMANCE-PDF-PAYLOAD-1234567890 %%EOF"
 _PDF_B64 = base64.b64encode(_PDF).decode("utf-8")
+_WAV = b"RIFF\x00\x00\x00\x00WAVEfmt CONFORMANCE-AUDIO-PAYLOAD-1234567890"
+_WAV_B64 = base64.b64encode(_WAV).decode("utf-8")
 
 
 def _load_converter(relpath: str, fn: str) -> Callable:
@@ -120,6 +125,23 @@ def _tool_pdf_msg() -> Message:
         result={"path": "doc.pdf", "type": "file"},
         attachments=[Attachment(mime_type="application/pdf", data=_PDF,
                                 display_name="doc.pdf")],
+    ))])
+
+
+def _user_audio_msg() -> Message:
+    return Message(role=Role.USER, parts=[
+        Part(text="what did I say?"),
+        Part(inline_data={"mime_type": "audio/wav", "data": _WAV,
+                          "display_name": "clip.wav"}),
+    ])
+
+
+def _tool_audio_msg() -> Message:
+    return Message(role=Role.TOOL, parts=[Part(function_response=ToolResult(
+        call_id="c1", name="readFile",
+        result={"path": "clip.wav", "type": "audio"},
+        attachments=[Attachment(mime_type="audio/wav", data=_WAV,
+                                display_name="clip.wav")],
     ))])
 
 
@@ -267,6 +289,157 @@ def test_declared_tool_result_image_is_marshalled(provider):
         f"the tool-result image to the model. Either fix the converter or set "
         f"tool_result_images=False."
     )
+
+
+# ------------------------------------------------------------- audio_input
+#
+# #830: the framework could speak (#824/#828 deliver model-emitted audio to a
+# client) and could not be spoken to — ``input_audio``, the content-block form
+# for audio INPUT, appeared nowhere in the tree.  Both directions of the
+# contract are guarded from the start, because the pdf_input experience was
+# that a one-directional guard cannot see a converter doing MORE than it
+# declared, which is the defect that actually shipped (#829).
+
+
+@pytest.mark.parametrize("provider", sorted(_CONVERTERS))
+def test_declared_audio_input_user_message_is_marshalled(provider):
+    if not _read_declaration(provider).get("audio_input"):
+        pytest.skip(f"{provider} does not declare audio_input")
+    relpath, fn = _CONVERTERS[provider]
+    convert = _load_converter(relpath, fn)
+    wire = convert(_user_audio_msg())
+    assert _WAV_B64 in json.dumps(wire, default=str), (
+        f"{provider} declares audio_input=True but {fn} did NOT put the audio "
+        f"on the wire. Fix the converter or set audio_input=False."
+    )
+
+
+@pytest.mark.parametrize("provider", sorted(_CONVERTERS))
+def test_declared_audio_input_tool_result_is_marshalled(provider):
+    if not _read_declaration(provider).get("audio_input"):
+        pytest.skip(f"{provider} does not declare audio_input")
+    relpath, fn = _CONVERTERS[provider]
+    convert = _load_converter(relpath, fn)
+    wire = convert(_tool_audio_msg())
+    assert _WAV_B64 in json.dumps(wire, default=str), (
+        f"{provider} declares audio_input=True but {fn} did NOT surface the "
+        f"tool-result audio to the model. Fix the converter or set "
+        f"audio_input=False."
+    )
+
+
+@pytest.mark.parametrize("provider", sorted(_CONVERTERS))
+@pytest.mark.parametrize("build,what", [
+    (_user_audio_msg, "user-message"),
+    (_tool_audio_msg, "tool-result"),
+])
+def test_undeclared_audio_input_is_not_marshalled(provider, build, what):
+    """The negative half: a wire that never declared audio must not send it.
+
+    There is no ratchet here and there must never need to be one — the audio
+    path was built with the declaration and the converter agreeing, rather
+    than reconciled afterwards the way ``pdf_input`` had to be.
+    """
+    if _read_declaration(provider).get("audio_input"):
+        pytest.skip(f"{provider} declares audio_input — covered by the positive test")
+    relpath, fn = _CONVERTERS[provider]
+    convert = _load_converter(relpath, fn)
+    assert _WAV_B64 not in json.dumps(convert(build()), default=str), (
+        f"{provider} declares audio_input=False but its converter put the "
+        f"{what} audio on the wire anyway — the declaration and the code "
+        f"disagree. Withhold it, or set audio_input=True if the wire really "
+        f"carries it."
+    )
+
+
+def _audio_mislabelled_as_image(node) -> bool:
+    """Is audio riding inside an IMAGE block anywhere in ``node``?
+
+    Walks the converted wire structure rather than one known shape, because
+    the two block families that could hide it look nothing alike: OpenAI's
+    ``image_url`` carries the mime inside a data URL, Anthropic's ``image``
+    carries it as ``source.media_type``.  Both are checked; a converter that
+    grows a third shape is caught the same way.
+    """
+    if isinstance(node, dict):
+        if node.get("type") == "image_url":
+            url = (node.get("image_url") or {}).get("url", "")
+            if isinstance(url, str) and url.startswith("data:audio/"):
+                return True
+        if node.get("type") == "image":
+            media = (node.get("source") or {}).get("media_type", "")
+            if isinstance(media, str) and media.startswith("audio/"):
+                return True
+        return any(_audio_mislabelled_as_image(v) for v in node.values())
+    if isinstance(node, (list, tuple)):
+        return any(_audio_mislabelled_as_image(v) for v in node)
+    return False
+
+
+@pytest.mark.parametrize("provider", sorted(_CONVERTERS))
+def test_audio_never_travels_inside_an_image_block(provider):
+    """#829's invariant, re-asserted for the mime family #830 added.
+
+    Carrying audio and mislabelling audio are different things, and the
+    second is the one that shipped last time: an ``image_url`` whose data URL
+    said ``audio/wav``.  A provider that now genuinely carries audio must do
+    it in an audio-shaped block, not by widening the image branch.
+    """
+    relpath, fn = _CONVERTERS[provider]
+    convert = _load_converter(relpath, fn)
+    for build in (_user_audio_msg, _tool_audio_msg):
+        assert not _audio_mislabelled_as_image(convert(build())), (
+            f"{provider}: audio reached the wire inside an image block — "
+            f"that is #829, not audio support."
+        )
+
+
+OPENROUTER_FIXED = (
+    "    return user_message_with_attachments(\n"
+    "        content, message.parts, pdf_as_file=True, audio_as_input_audio=True\n"
+    "    )"
+)
+OPENROUTER_BROKEN = (
+    "    return user_message_with_attachments(\n"
+    "        content, message.parts, pdf_as_file=True\n"
+    "    )"
+)
+DISPATCH_FIXED = (
+    '    mime = mime or ""\n'
+    '    if mime.startswith("image/"):'
+)
+DISPATCH_BROKEN = (
+    '    mime = mime or ""\n'
+    '    if mime.startswith("image/") or mime.startswith("audio/"):'
+)
+
+
+#: The defect, put back.
+#
+# The audio guards are the ones declared here because they are the ones
+# written from scratch (#830); the image / PDF guards predate the
+# meta-guard and their reversions belong with whoever revisits them.  Both
+# halves of the audio contract are covered, because they fail differently:
+# the first is the wire staying silent, the second is the wire lying.
+REVERSIONS = [
+    Reversion(
+        target="jaato-server/shared/plugins/model_provider/openrouter/converters.py",
+        find=OPENROUTER_FIXED,
+        replace=OPENROUTER_BROKEN,
+        test="test_declared_audio_input_user_message_is_marshalled",
+        because="a provider declaring audio_input=True whose converter "
+                "withholds the audio anyway -- the model is told it can "
+                "listen and then hears nothing",
+    ),
+    Reversion(
+        target="jaato-server/shared/plugins/model_provider/_attachments.py",
+        find=DISPATCH_FIXED,
+        replace=DISPATCH_BROKEN,
+        test="test_audio_never_travels_inside_an_image_block",
+        because="audio reaching the wire inside an image_url block, which "
+                "is #829 wearing #830's clothes: carried, but mislabelled",
+    ),
+]
 
 
 def test_every_provider_is_either_conformance_tested_or_explicitly_pending():
