@@ -1871,35 +1871,45 @@ class IPCClient:
     @staticmethod
     def _normalize_attachments(attachments: Optional[list]) -> List[Dict[str, Any]]:
         """Normalize user-message attachments to the canonical wire shape
-        ``{mime_type, data: base64-str, display_name}`` (client-expanded — the
-        daemon/runner can't read client-side paths, esp. cross-host WS).
+        ``{mime_type, data: base64-str, display_name, attachment_id}``
+        (client-expanded — the daemon/runner can't read client-side paths,
+        esp. cross-host WS).
 
         Accepts, per item:
           - a file-path ``str`` → read bytes, base64-encode, guess mime from ext
           - a ``dict`` with ``bytes`` ``data`` → base64-encode it
-          - a ``dict`` with base64-``str`` ``data`` → pass through unchanged
+          - a ``dict`` with base64-``str`` ``data`` → payload passed through
         Unknown shapes are skipped (no fabricated content).
+
+        ``attachment_id`` is minted here (#850) rather than only daemon-side
+        so the SENDER learns the id of what it sent — it is the side holding
+        the file, and therefore the side that archives it and needs the id to
+        file the recording under.  It is a digest of the payload
+        (:func:`jaato_sdk.media_identity.mint_attachment_id`), so the daemon
+        back-filling it for a client that does not send one produces the same
+        value; and an id the caller supplied itself is left alone.
         """
         import base64
         import mimetypes
         import os
+        from jaato_sdk.media_identity import ensure_attachment_id
         out: List[Dict[str, Any]] = []
         for a in attachments or []:
             if isinstance(a, str):
                 with open(a, "rb") as fh:
                     raw = fh.read()
-                out.append({
+                out.append(ensure_attachment_id({
                     "mime_type": mimetypes.guess_type(a)[0]
                                  or "application/octet-stream",
                     "data": base64.b64encode(raw).decode("ascii"),
                     "display_name": os.path.basename(a),
-                })
+                }))
             elif isinstance(a, dict):
                 d = dict(a)
                 data = d.get("data")
                 if isinstance(data, (bytes, bytearray)):
                     d["data"] = base64.b64encode(bytes(data)).decode("ascii")
-                out.append(d)
+                out.append(ensure_attachment_id(d))
         return out
 
     async def send_message(

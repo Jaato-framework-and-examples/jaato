@@ -84,7 +84,11 @@ from .plugins.gc.utils import (
     dedup_identical_tool_results,
     ensure_tool_call_integrity,
     estimate_history_tokens,
+    evict_consumed_media,
+    history_media_bytes,
+    message_media_tokens,
 )
+from jaato_sdk.media_identity import ATTACHMENT_ID_KEY, mint_attachment_id
 from .instruction_budget import (
     InstructionBudget,
     InstructionSource,
@@ -3699,6 +3703,18 @@ class JaatoSession:
                         has_tool_result = True
                         if tr.name:
                             tool_names.append(tr.name)
+                # Binary payload (audio, images, PDFs) was counted as
+                # nothing at all until #850, which is what made a 600 KB
+                # utterance invisible to every GC threshold: the tokenizer
+                # has no opinion about bytes, so the denominator simply
+                # omitted them.  Summed outside the loop, not as another
+                # ``elif`` inside it, because this function is frozen near
+                # the top of the complexity baseline and one more branch
+                # would grow the ratchet.  The estimate is deliberately
+                # coarse (see MEDIA_BYTES_PER_TOKEN) — its job is to put
+                # the payload in the budget, not to reproduce a vendor's
+                # audio-token billing.
+                msg_tokens += message_media_tokens(msg)
                 self._msg_token_cache[mid] = msg_tokens
 
             conversation_tokens += msg_tokens
@@ -4404,6 +4420,15 @@ NOTES
         (``_attachments.attachment_entries_from_parts``) for the PDF ``file``
         block's ``filename``, so dropping it here renamed every attached
         document to ``document.pdf`` on the wire.
+
+        ``attachment_id`` is carried too, and **back-filled** when the wire
+        attachment does not name one (#850).  This is the framework's ingest
+        boundary — every user attachment becomes a ``Part`` here, whatever
+        client sent it — so it is the one place that can promise the id
+        exists before anything downstream is in a position to purge the
+        bytes.  The SDK client mints the same value from the same payload,
+        so back-filling is a no-op for SDK traffic and the safety net for a
+        WS client or a direct ``session.complete(...)`` call.
         """
         import base64
         parts: List[Part] = []
@@ -4417,6 +4442,8 @@ NOTES
                 "mime_type": att.get("mime_type"),
                 "data": data,
                 "display_name": att.get("display_name"),
+                ATTACHMENT_ID_KEY: (att.get(ATTACHMENT_ID_KEY)
+                                    or mint_attachment_id(data)),
             }))
         return parts
 
@@ -4766,6 +4793,64 @@ NOTES
             f"message(s), ~{freed_tokens} tokens reclaimed"
         )
         return freed_tokens
+
+    def _evict_consumed_media(self) -> int:
+        """Purge binary parts left over from turns that already completed.
+
+        The inbound half of a lifecycle that only ever had an outbound half
+        (#850).  Model-emitted media is ``CLIENT``-audience so it never
+        enters history at all, and ``ensure_spoken_part`` leaves the
+        transcript where the audio would have been; a user *utterance*, by
+        contrast, stayed in history verbatim and rode every subsequent
+        request.  Five questions on one helpdesk call measured ~2.8 MB of
+        accumulated audio and a final request carrying all of it.
+
+        **Runs at the START of a turn, not the end.**  Everything in history
+        at that moment belongs to a turn that has completed, which is what
+        makes "consumed" true without having to reason about it; and a turn
+        that failed before the model ever saw its audio keeps the bytes, so
+        the caller can simply send again.  Doing it in the previous turn's
+        ``finally`` would evict on exactly the path where the audio was
+        never used.
+
+        Distinct from :meth:`_gate_history_for_active_modalities`, which
+        filters a per-request COPY and leaves the stored bytes alone so a
+        later tier switch can still hear them.  This one rewrites stored
+        history and is not reversible — the accepted trade the issue names,
+        since re-hearing a recording yields the understanding the
+        conversation already records in words.
+
+        Returns the bytes reclaimed (0 when nothing matched or the feature
+        is off).  Mirrors :meth:`_dedup_history_for_gc` in its bookkeeping:
+        the rewrite preserves ``message_id``, so the per-message token cache
+        must be invalidated for the touched messages or the budget re-sync
+        reads back the pre-eviction size.
+        """
+        config = self._gc_config or GCConfig()
+        if not getattr(config, "evict_consumed_media", True):
+            return 0
+
+        history = self.get_history()
+        new_history, bytes_reclaimed, evicted_ids = evict_consumed_media(
+            history,
+            mime_prefixes=getattr(
+                config, "media_evict_mime_prefixes", ("audio/",),
+            ),
+        )
+        if not evicted_ids:
+            return 0
+
+        for mid in evicted_ids:
+            self._msg_token_cache.pop(mid, None)
+        self._history.replace(new_history)
+        self._update_conversation_budget()
+        self._emit_instruction_budget_update()
+        self._trace(
+            f"MEDIA_EVICT: purged binary payload from {len(evicted_ids)} "
+            f"message(s), {bytes_reclaimed} bytes reclaimed; each carries a "
+            f"marker naming the attachment id"
+        )
+        return bytes_reclaimed
 
     def _maybe_collect_after_turn(self) -> Optional[GCResult]:
         """Perform GC after turn if threshold was crossed during streaming."""
@@ -6163,6 +6248,12 @@ NOTES
 
             # Set activity phase: we're about to wait for LLM response
             self._set_activity_phase(ActivityPhase.WAITING_FOR_LLM)
+
+            # Consumed media from EARLIER turns is purged before this one is
+            # appended (#850) — a text turn following a voice turn must stop
+            # carrying the audio too, or the growth simply resumes whenever
+            # the caller types instead of speaking.
+            self._evict_consumed_media()
 
             # Append user message to session history before provider call.
             # The message stays in history across retries (correct: the user DID send it).
@@ -9075,6 +9166,7 @@ NOTES
         last = messages[-1]
         if last.role != Role.MODEL:
             return 0
+        return 0
         fcs = [p.function_call for p in last.parts if p.function_call]
         if not fcs:
             return 0
@@ -9515,8 +9607,7 @@ NOTES
         if response.usage.cache_read_tokens is not None:
             turn_tokens['cache_read'] = response.usage.cache_read_tokens
             turn_tokens['spend_cache_read'] = (
-                turn_tokens.get('spend_cache_read', 0)
-                + response.usage.cache_read_tokens)
+                response.usage.cache_read_tokens)
         if response.usage.cache_creation_tokens is not None:
             turn_tokens['cache_creation'] = response.usage.cache_creation_tokens
             turn_tokens['spend_cache_creation'] = (
@@ -10529,6 +10620,13 @@ NOTES
         Uses InstructionBudget as the single source of truth for token accounting.
         This includes system instructions, plugin schemas, enrichment, and conversation
         tokens - providing accurate context usage from startup through all turns.
+
+        Reports one figure that is NOT a token count: ``media_bytes``, the
+        binary payload the history carries.  It is the denominator
+        ``media_pressure_reason`` compares against
+        ``GCConfig.media_bytes_threshold``, and it is in bytes on purpose --
+        a voice session can sit far below its token threshold while carrying
+        megabytes of audio, which is the state GC could not see (#850).
         """
         # Use InstructionBudget as the single source of truth
         if self._instruction_budget:
@@ -10555,6 +10653,13 @@ NOTES
             'turns': len(turn_accounting),
             'percent_used': percent_used,
             'tokens_remaining': tokens_remaining,
+            # The second denominator, reported in BYTES (#850).  Every other
+            # figure here is a token count against a token budget, and that
+            # is exactly why media went unseen: the payload that dominates a
+            # voice request is not a token quantity.  ``media_pressure_reason``
+            # reads this key; a strategy that never looks at it behaves
+            # precisely as it did before.
+            'media_bytes': history_media_bytes(self.get_history()),
         }
 
     def _log_gc_denominator(self, label: str, provider_total: int = 0) -> None:
@@ -11034,6 +11139,11 @@ NOTES
         try:
             # Proactive rate limiting: wait if needed before request
             self._pacer.pace()
+
+            # Consumed media from EARLIER turns is purged before this one is
+            # appended (#850).  This is the path a voice turn takes, so it is
+            # the one where the accumulation was measured.
+            self._evict_consumed_media()
 
             # Append user message to session history
             self._history.append(Message(role=Role.USER, parts=list(parts)))

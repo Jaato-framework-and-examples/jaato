@@ -8,6 +8,7 @@ import base64
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
+from jaato_sdk.media_identity import ATTACHMENT_ID_KEY, mint_attachment_id
 from jaato_sdk.plugins.model_provider.types import (
     Message,
     Part,
@@ -72,14 +73,21 @@ def serialize_part(part: Part) -> Dict[str, Any]:
             'untrusted_source': fr.untrusted_source,
         }
 
-    # Inline data (images, etc.)
+    # Inline data (images, audio, PDFs)
     if part.inline_data is not None:
         inline = part.inline_data
         data_bytes = inline.get('data')
         return {
             'type': 'inline_data',
             'mime_type': inline.get('mime_type'),
-            'data': base64.b64encode(data_bytes).decode('utf-8') if data_bytes else None
+            'data': base64.b64encode(data_bytes).decode('utf-8') if data_bytes else None,
+            # Both of these were dropped on the way to disk, so a revived
+            # session lost them: the PDF ``file`` block's filename (the
+            # converters read ``display_name`` back off ``inline_data``) and
+            # the attachment id (#850), without which whatever replaces
+            # purged bytes cannot name the archived recording.
+            'display_name': inline.get('display_name'),
+            ATTACHMENT_ID_KEY: inline.get(ATTACHMENT_ID_KEY),
         }
 
     # Unknown part type - try to capture what we can
@@ -133,7 +141,16 @@ def deserialize_part(data: Dict[str, Any]) -> Part:
             raw_data = base64.b64decode(data['data'])
         return Part(inline_data={
             'mime_type': data.get('mime_type'),
-            'data': raw_data
+            'data': raw_data,
+            # ``.get`` with a safe default, like the tool-result keys above:
+            # a record written before these were persisted restores without
+            # them rather than failing.  The id is RE-MINTED in that case
+            # because it is a digest of the payload, so an older record
+            # regains the identity it was written without -- the same value
+            # ingest would have given it.
+            'display_name': data.get('display_name'),
+            ATTACHMENT_ID_KEY: (data.get(ATTACHMENT_ID_KEY)
+                                or mint_attachment_id(raw_data)),
         })
 
     if part_type == 'unknown':

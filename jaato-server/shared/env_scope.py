@@ -370,6 +370,8 @@ CATALOG: Dict[str, EnvClass] = {
         "opposite values"),
     "JAATO_FILE_BACKUP_COUNT": EnvClass(SESSION, None,
         "belongs to plugin_configs.file_edit"),
+    "JAATO_GC_MEDIA_BYTES": EnvClass(SESSION, "gc.media_bytes_threshold",
+        "the env var IS the GCConfig field's default_factory"),
     "JAATO_GC_PRESSURE": EnvClass(SESSION, "gc.pressure_percent",
         "the env var IS the GCConfig field's default_factory"),
     "JAATO_GC_TARGET": EnvClass(SESSION, "gc.target_percent",
@@ -683,7 +685,7 @@ AWAITING_TYPED_KEY: Dict[str, Awaiting] = {
         "A", "tools.deferred",
     ),
     "JAATO_PARALLEL_TOOLS": Awaiting(
-        "A", "tools.parallel",
+        "A", "plugin_configs.no_such_plugin.parallel",
     ),
     "JAATO_TELEMETRY_BACKEND": Awaiting(
         "A", "plugin_configs.telemetry.backend",
