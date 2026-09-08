@@ -1172,6 +1172,7 @@ class JaatoRuntime:
         completion_processors: Optional[List[Any]] = None,
         agent_id: str = "main",
         tool_scopes: Optional[Dict[str, List[str]]] = None,
+        max_parallel_tools: Optional[int] = None,
         tools: Optional[List[str]] = None,  # DEPRECATED alias for ``plugins``
     ) -> 'JaatoSession':
         """Create a new session from this runtime.
@@ -1222,6 +1223,11 @@ class JaatoRuntime:
                 plugin ships from its own wire body + grammar surface.
                 Applied per-session — the shared registry is never mutated,
                 so sibling sessions on this runtime keep their own scopes.
+            max_parallel_tools: Ceiling on concurrent tool execution for
+                this session (profile ``runtime_limits.max_parallel_tools``,
+                #862).  ``None`` applies the framework default.  Sessions
+                sharing a runtime may each carry their own — a narrow
+                subagent under a wide parent is the point.
             tools: DEPRECATED alias for ``plugins`` (it always took plugin
                 names, never tool names). Pass ``plugins=`` instead; ``tools=``
                 still works with a one-time deprecation warning. ``plugins``
@@ -1285,6 +1291,7 @@ class JaatoRuntime:
             agent_params=agent_params,
             completion_processors=completion_processors,
             tool_scopes=tool_scopes,
+            max_parallel_tools=max_parallel_tools,
         )
         session_configure_ms = (time.perf_counter() - t1) * 1000
 

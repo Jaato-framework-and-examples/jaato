@@ -236,7 +236,7 @@ Setting `pressure_percent` to `0` or `null` enables continuous mode — GC runs 
 
 Per-session resource consumption caps, orthogonal to GC (which manages context window size). Answers "how much can this session *consume*?" vs sandboxing/AppArmor which answers "what can it *touch*?".
 
-The field is an object with five optional keys. All fields default to `null` (no limit / inherit host default):
+The field is an object with six optional keys. All fields default to `null` (no limit / inherit host default):
 
 ```json
 {
@@ -245,7 +245,8 @@ The field is an object with five optional keys. All fields default to `null` (no
     "pids_max": 1024,
     "cpu_weight": 200,
     "tool_timeout_seconds": 600,
-    "max_output_bytes": 1048576
+    "max_output_bytes": 1048576,
+    "max_parallel_tools": 4
   }
 }
 ```
@@ -259,13 +260,14 @@ The field is an object with five optional keys. All fields default to `null` (no
 | `cpu_weight` | int 1–10000 | Kernel (cgroup v2) | Written to `cpu.weight` (default 100). Relative scheduling weight against sibling cgroups. |
 | `tool_timeout_seconds` | float (positive) | App (Python) | Wall-clock cap on each subprocess tool call. SIGTERM with 2s grace, then SIGKILL. |
 | `max_output_bytes` | int (positive) | App (Python) | Override of the default stdout/stderr capture cap in CLI tool results. |
+| `max_parallel_tools` | int 1–256 | App (Python) | Width of the session's tool thread pool (and of its background token-count fan-out). Default 8. Distinct from `JAATO_PARALLEL_TOOLS`, which decides *whether* to go parallel at all; this decides *how wide*. `1` still runs the parallel path, single-worker. |
 
 ### Two Enforcement Layers
 
 The fields split into two enforcement layers, but a profile author treats them as one knob set:
 
 - **Kernel-enforced** (`memory_max_mb`, `pids_max`, `cpu_weight`): Written once into cgroup v2 controller files when the session starts. When `has_kernel_limits()` returns `False`, no cgroup directory is created at all.
-- **Application-enforced** (`tool_timeout_seconds`, `max_output_bytes`): Read by the CLI / interactive_shell plugins and applied per-tool-call at the Python layer.
+- **Application-enforced** (`tool_timeout_seconds`, `max_output_bytes`, `max_parallel_tools`): applied at the Python layer. The first two are read by the CLI / interactive_shell plugins per tool call; `max_parallel_tools` is read by `JaatoSession`, which owns the thread pool. Because no subprocess boundary is involved, it is the one `runtime_limits` field an **in-process** subagent can honour — the kernel-enforced trio is refused there (`ConfinementUnavailableError`).
 
 ### Validation
 
@@ -277,7 +279,11 @@ If cgroup v2 is unavailable (cgroup v1 host, missing controllers, non-writable r
 
 ### Inheritance
 
-`runtime_limits` follows the **scalar-override** rule (§9): parent profiles must agree, or the child must override.
+The kernel-enforced ceilings follow the **scalar-override** rule (§9): parent profiles must agree, or the child must override. A cgroup controller file takes exactly one value, so interleaving a memory ceiling from one layer with a pids ceiling from another would produce a confinement neither author wrote.
+
+`max_parallel_tools` is the exception: it is **most-restrictive-wins** (minimum across every layer that declares it), the same direction as `max_turns` and `budget_control.limits`. A child may only ever narrow the pool it was spawned under — a parent that capped concurrency because its cgroup has a small `pids_max`, or because the service it calls is rate-limited, said something about the environment the child also runs in. Two parents that disagree only about the width are therefore **not** a conflict; the minimum is well-defined. The comparison that detects a genuine `runtime_limits` conflict is made with the width normalised out.
+
+`jaato-scaffold explain runtime` prints the whole block with the value that applies when no profile declares one.
 
 ---
 
@@ -1058,7 +1064,8 @@ Profiles can inherit from other profiles using the `inherits` field:
 | Merge Type | Fields | Behavior |
 |---|---|---|
 | **Collection (union)** | `plugins`, `preloaded_plugins`, `env`, `plugin_configs` | Parents first (in order), then child. Deduplicated. |
-| **Scalar (agreement-or-override)** | `model`, `provider`, `max_turns`, `gc`, `runtime_limits`, `completion_payload_schema` | Parents must agree. If they conflict, child MUST override. |
+| **Scalar (agreement-or-override)** | `model`, `provider`, `gc`, `runtime_limits` (except `max_parallel_tools`), `completion_payload_schema` | Parents must agree. If they conflict, child MUST override. |
+| **Most restrictive wins** | `max_turns`, `budget_control.limits`, `runtime_limits.max_parallel_tools` | Minimum across every layer that declares it. A child may only TIGHTEN a ceiling. |
 | **Concatenation** | `system_instructions` | Grandparent → parent → child, joined with double newlines. |
 | **Never inherited** | `name`, `description`, `model_tiers` | Always from the child profile. |
 

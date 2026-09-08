@@ -7,7 +7,7 @@ import os
 import re
 import sys
 import threading
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable, Dict, FrozenSet, List, Optional, Protocol, Tuple, Union
 from typing import runtime_checkable
@@ -1449,13 +1449,18 @@ class SubagentProfile:
             ``summary: str`` parameter is used. Inheritance follows the
             scalar-override rule (parents must agree or child overrides).
         runtime_limits: Optional per-session resource consumption caps —
-            memory, PIDs, CPU weight, tool wall-clock timeout, and stdout
-            cap.  Orthogonal to sandboxing (AppArmor): answers "how much
-            can this session consume?" rather than "what can it touch?".
-            The kernel-enforceable subset (memory, PIDs, CPU weight) is
-            applied via cgroup v2 by ``server.cgroups.CgroupsManager``;
-            the rest is read by the CLI/interactive_shell plugins at
-            tool-call time.  ``None`` means "no limits" (host defaults).
+            memory, PIDs, CPU weight, tool wall-clock timeout, stdout cap
+            and tool concurrency.  Orthogonal to sandboxing (AppArmor):
+            answers "how much can this session consume?" rather than
+            "what can it touch?".  The kernel-enforceable subset (memory,
+            PIDs, CPU weight) is applied via cgroup v2 by
+            ``server.cgroups.CgroupsManager``; the timeout and stdout cap
+            are read by the CLI/interactive_shell plugins at tool-call
+            time; ``max_parallel_tools`` is read by ``JaatoSession``,
+            which owns the thread pool.  ``None`` means "no limits"
+            (host defaults).  Inheritance: the ceilings are
+            scalar-override, ``max_parallel_tools`` is min-wins (#862) —
+            see :func:`_merge_runtime_limits`.
         budget_control: Optional multi-dimensional budget ceilings
             (``limits``: usd / tokens / seconds / tool_calls / turns) plus
             a ``degrade`` ladder applied as those ceilings are
@@ -1627,8 +1632,9 @@ class SubagentProfile:
         "error. Not inherited further; only meaningful alongside `inherits`."})
     runtime_limits: Optional[RuntimeLimits] = field(default=None, metadata={
         "description": "Per-session resource caps (memory, PIDs, CPU weight, "
-        "tool wall-clock timeout, stdout). 'How much can it consume' — "
-        "orthogonal to AppArmor's 'what can it touch'. None = host defaults."})
+        "tool wall-clock timeout, stdout, max_parallel_tools). 'How much can "
+        "it consume' — orthogonal to AppArmor's 'what can it touch'. "
+        "None = host defaults."})
     # Per-turn model-tier config.  Empty dict means "single-model
     # mode" — the framework falls back to env vars (JAATO_TIER_*) at
     # session-init time, and from there to single-model behavior using
@@ -2793,6 +2799,111 @@ def resolve_profiles(
     return resolved, errors
 
 
+def _merged_parallel_width(
+    parents: List['SubagentProfile'],
+    child: 'SubagentProfile',
+) -> Optional[int]:
+    """MIN of ``runtime_limits.max_parallel_tools`` across every layer (#862).
+
+    Most-restrictive-wins, the same safety direction ``max_turns`` and
+    ``budget_control.limits`` take: a parent that narrowed the tool pool
+    because its cgroup has a small ``pids_max``, or because the service
+    behind its tools is rate-limited, said something about the
+    environment the child also runs in.  A child may TIGHTEN it, never
+    widen it.  Divergent parent values are not a conflict — the minimum
+    is well-defined and is the safe resolution.
+
+    Args:
+        parents: The resolved parent profiles.
+        child: The profile declaring ``inherits:``.
+
+    Returns:
+        The narrowest declared width, or ``None`` when no layer sets one.
+    """
+    widths = [
+        limits.max_parallel_tools
+        for limits in (
+            p.runtime_limits for p in (*parents, child)
+        )
+        if limits is not None and limits.max_parallel_tools is not None
+    ]
+    return min(widths) if widths else None
+
+
+def _resolve_runtime_limit_ceilings(
+    parents: List['SubagentProfile'],
+    child: 'SubagentProfile',
+) -> Tuple[Optional[RuntimeLimits], List[str]]:
+    """Scalar-override for the ceilings half of ``runtime_limits``.
+
+    The child's whole block wins when it declares one; otherwise the
+    parents must agree.  A cgroup controller file takes exactly ONE
+    value, so interleaving a memory ceiling from one layer with a pids
+    ceiling from another would produce a confinement neither author
+    wrote — which is why this half is not merged per-field.
+
+    The agreement test normalises ``max_parallel_tools`` out, because
+    :func:`_merged_parallel_width` resolves that field by ``min()``: two
+    parents that agree on every ceiling and differ only in the width
+    must not be reported as conflicting.
+
+    Args:
+        parents: The resolved parent profiles.
+        child: The profile declaring ``inherits:``.
+
+    Returns:
+        ``(block, conflicts)`` — ``block`` is ``None`` when nothing was
+        declared or the parents conflicted; ``conflicts`` holds at most
+        one ready-to-render line for the caller's conflict list.
+    """
+    if child.runtime_limits is not None:
+        return child.runtime_limits, []
+
+    declaring = [p for p in parents if p.runtime_limits is not None]
+    if not declaring:
+        return None, []
+    comparable = {
+        p.name: replace(p.runtime_limits, max_parallel_tools=None)
+        for p in declaring
+    }
+    if len(set(str(v) for v in comparable.values())) == 1:
+        return declaring[0].runtime_limits, []
+    details = ", ".join(
+        f"'{name}': {val!r}" for name, val in comparable.items()
+    )
+    return None, [f"  runtime_limits: {details}"]
+
+
+def _merge_runtime_limits(
+    parents: List['SubagentProfile'],
+    child: 'SubagentProfile',
+) -> Tuple[Optional[RuntimeLimits], List[str]]:
+    """Merge ``runtime_limits`` across parents + child.
+
+    Two different rules, one per half of the block — the same shape
+    :func:`_merge_budget_control` uses:
+
+    * every field except ``max_parallel_tools`` — **scalar-override**
+      (:func:`_resolve_runtime_limit_ceilings`);
+    * ``max_parallel_tools`` — **min-wins** across every layer that
+      declares it (:func:`_merged_parallel_width`).
+
+    Args:
+        parents: The resolved parent profiles, in declaration order.
+        child: The profile declaring ``inherits:``.
+
+    Returns:
+        ``(merged, conflicts)``.  ``merged`` is ``None`` when no layer
+        declares anything; ``conflicts`` is a possibly-empty list of
+        lines for the caller's ``scalar_conflicts``.
+    """
+    width = _merged_parallel_width(parents, child)
+    base, conflicts = _resolve_runtime_limit_ceilings(parents, child)
+    if base is None and width is None:
+        return None, conflicts
+    return replace(base or RuntimeLimits(), max_parallel_tools=width), conflicts
+
+
 def _merge_budget_control(
     parents: List['SubagentProfile'],
     child: 'SubagentProfile',
@@ -3123,11 +3234,15 @@ def _merge_profiles(
     # for, which is the class of failure the block exists to prevent.
     merged_trace = _resolve_scalar('trace', child.trace)
 
-    # runtime_limits: scalar-override (parents must agree or child
-    # overrides).  Compared via str() inside _resolve_scalar — frozen
-    # dataclasses with the same field values produce identical reprs,
-    # so two parents declaring the same limits don't conflict.
-    merged_runtime_limits = _resolve_scalar('runtime_limits', child.runtime_limits)
+    # runtime_limits: scalar-override for the ceilings (parents must
+    # agree or child overrides; frozen dataclasses with the same field
+    # values produce identical reprs, so two parents declaring the same
+    # limits don't conflict) — but MIN-wins for ``max_parallel_tools``,
+    # which a child may only tighten.  See :func:`_merge_runtime_limits`.
+    merged_runtime_limits, runtime_limits_conflicts = _merge_runtime_limits(
+        parents, child,
+    )
+    scalar_conflicts.extend(runtime_limits_conflicts)
 
     # scrub_secret_env: scalar-override.  A child that says ``none`` (or
     # narrows the set) replaces the parent's value outright — the same

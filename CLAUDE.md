@@ -175,8 +175,41 @@ quirks:
 When model returns multiple function calls, jaato executes them in parallel using a thread pool.
 - Enabled by default (`JAATO_PARALLEL_TOOLS=true`)
 - Set `JAATO_PARALLEL_TOOLS=false` to disable
-- Maximum 8 concurrent tools per turn
+- Width: 8 concurrent tools per turn by default, capped per session by
+  `runtime_limits.max_parallel_tools` (#862)
 - Thread-safe callbacks via thread-local storage
+
+**Whether vs how wide.** `JAATO_PARALLEL_TOOLS` is an on/off switch and was
+the ONLY lever: the width was the literal `8`, written twice in
+`jaato_session.py` (tool execution, and the background token-count fan-out).
+Eight is a reasonable desktop default and a poor fit for two deployment shapes
+this tree already supports — a confined runner whose profile deliberately set a
+small `pids_max` (eight simultaneous `cli` subprocesses hit the cgroup ceiling
+and fail non-deterministically) and a rate-limited internal service behind
+`service_connector` (a burst of eight is the wrong shape whatever the memory
+ceiling says). Both are `runtime_limits` questions, so:
+
+```yaml
+runtime_limits:
+  pids_max: 64
+  max_parallel_tools: 2      # 1..256; unset = 8
+```
+
+`max_parallel_tools` is application-enforced by `JaatoSession` itself rather
+than by the subprocess plugins, which makes it the one `runtime_limits` field
+an **in-process** subagent can honour — the kernel-enforced trio is refused
+there (`ConfinementUnavailableError`), because there is no `fork()/exec()`
+boundary to confine. It reaches a runner-served session on the **envelope**
+(v6), not by env var: `JAATO_RUNNER_MAX_OUTPUT_CHARS` and friends are set at
+cold spawn, and a pre-warm pool slot is forked before the session exists, so a
+knob delivered that way would be inert exactly where the default path runs.
+
+Inheritance is **most-restrictive-wins** — the minimum across every layer that
+declares it, like `max_turns` and `budget_control.limits`, and unlike the rest
+of `runtime_limits`, which is child-REPLACES. A child may narrow the pool,
+never widen it; two parents differing only in the width are resolved by `min()`
+rather than reported as a conflict. `jaato-scaffold explain runtime` prints the
+whole block with the effective value.
 
 ### Application Identity (naming the app, not the framework)
 
@@ -256,6 +289,14 @@ plugin_configs: {}
 #     suppress_base_instructions: {constants: true}       # keep disk + security
 #     suppress_base_instructions: {disk: true, constants: true, security: true}
 #   Inheritance merges by UNION (a piece any layer drops stays dropped).
+# runtime_limits: per-session resource caps.  memory/pids/cpu are
+#   kernel-enforced (cgroup v2); tool_timeout_seconds / max_output_bytes /
+#   max_parallel_tools are application-enforced.  max_parallel_tools (#862)
+#   is the width of the tool thread pool (default 8) and inherits
+#   most-restrictive-wins; the rest of the block is child-replaces.
+runtime_limits:
+  pids_max: 64
+  max_parallel_tools: 2
 # scrub_secret_env: secret env vars stripped from every model-driven
 #   subprocess (cli / interactive_shell / mcp).  ON by default (#863) —
 #   absent = the framework set; `none` opts out (announced at WARNING);

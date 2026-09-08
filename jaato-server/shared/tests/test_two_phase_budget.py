@@ -96,6 +96,10 @@ def _make_session(
     session._gc_config = None
     session._tier_config = None
     session._preloaded_plugins = set()
+    # #862: the tool-pool ceiling __init__ sets.  The background
+    # token-count fan-out below shares the session's one width helper, so
+    # this helper has to stand in for the constructor here too.
+    session._max_parallel_tools = None
     # _system_instruction_override and _suppress_base_instructions are
     # normally set in configure(); tests bypass __init__ with __new__ so we
     # set them explicitly to their defaults.  The suppression knob's invariant

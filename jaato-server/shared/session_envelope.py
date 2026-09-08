@@ -73,12 +73,38 @@ from .path_utils import require_absolute_path
 # Runner-side bootstrap stashes the value onto ``JaatoSession`` so
 # subagent spawns can inherit the parent cascade via the existing
 # ``runtime.create_session()`` path.
-SESSION_ENVELOPE_VERSION = 5
+#
+# v6 (2026-09-08): added ``max_parallel_tools``.  The profile's
+# ``runtime_limits`` block is resolved daemon-side, but the two
+# application-enforced fields the RUNNER needs reach it by env var
+# (``JAATO_RUNNER_MAX_OUTPUT_CHARS`` / ``..._TOOL_TIMEOUT_SECONDS``) on
+# the COLD-spawn path only — a pool slot is forked before any session
+# exists and inherits no such env.  Pool-served sessions are the default,
+# so a knob delivered that way would be a no-op exactly where it matters.
+# This one rides the envelope instead, which every bootstrap path reads.
+SESSION_ENVELOPE_VERSION = 6
 
 
 def _optional_str(value: Any) -> Optional[str]:
     """``str(value)`` for a present, non-empty wire value; else ``None``."""
     return str(value) if value else None
+
+
+def _optional_positive_int(value: Any) -> Optional[int]:
+    """``int(value)`` for a positive wire number; else ``None``.
+
+    Deliberately lenient at the boundary: a malformed or non-positive
+    concurrency ceiling means "nobody declared one", which the session
+    answers with the framework default.  Refusing the whole envelope over
+    it would turn a typo in one profile key into a session that cannot
+    bootstrap at all — and the value is validated where it is authored,
+    by :class:`shared.runtime_limits.RuntimeLimits`.
+    """
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
 
 
 @dataclass
@@ -322,6 +348,12 @@ class SessionInitEnvelope:
     # sessions and on envelopes from older daemons; same-build
     # daemon+runner so no schema_version bump.
     created_by: Optional[str] = None
+    # v6 (#862): profile ``runtime_limits.max_parallel_tools`` — the
+    # ceiling on how many tool calls the runner-side JaatoSession runs
+    # concurrently.  ``None`` (older daemons included) means nothing
+    # declared one and the session applies the framework default, so an
+    # envelope built before this field behaves exactly as it did.
+    max_parallel_tools: Optional[int] = None
     schema_version: int = SESSION_ENVELOPE_VERSION
 
     def __post_init__(self) -> None:
@@ -397,6 +429,7 @@ class SessionInitEnvelope:
             "system_instruction_override": self.system_instruction_override,
             "client_tools": [dict(t) for t in self.client_tools],
             "created_by": self.created_by,
+            "max_parallel_tools": self.max_parallel_tools,
         }
 
     @classmethod
@@ -469,6 +502,9 @@ class SessionInitEnvelope:
                 if isinstance(t, dict)
             ],
             created_by=_optional_str(d.get("created_by")),
+            max_parallel_tools=_optional_positive_int(
+                d.get("max_parallel_tools")
+            ),
         )
 
 

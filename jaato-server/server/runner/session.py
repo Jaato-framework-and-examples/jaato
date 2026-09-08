@@ -1358,6 +1358,10 @@ def _build_session(
         ),
         tier_config=tier_config,
         budget_control=budget_control,
+        # Envelope v6 (#862): the profile's tool-pool ceiling.  ``None``
+        # from an older daemon, or from a profile that declares no
+        # ``runtime_limits``, leaves the framework default in charge.
+        max_parallel_tools=envelope.max_parallel_tools,
         # Per-plugin tool allow-lists (profile ``tools:[...]`` modifier),
         # threaded from the envelope so scoped-out tools are absent from
         # this runner session's wire body + grammar surface.

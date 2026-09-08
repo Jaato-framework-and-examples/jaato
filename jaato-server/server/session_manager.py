@@ -2499,9 +2499,18 @@ class SessionManager:
         )
 
         _iso_budget = getattr(profile, "budget_control", None)
+        # #862: the one ``runtime_limits`` field the runner-side session
+        # enforces itself.  Its kernel siblings are provisioned onto this
+        # subagent's own cgroup by the caller, and the two subprocess caps
+        # ride the spawner's env; the pool width has to arrive here.
+        _iso_width = getattr(
+            getattr(profile, "runtime_limits", None),
+            "max_parallel_tools", None,
+        )
         return SessionInitEnvelope(
             session_id=isolated_session_id,
             budget_control=_iso_budget.to_dict() if _iso_budget else None,
+            max_parallel_tools=_iso_width,
             workspace_path=workspace_path,
             profile_name=sub_apparmor_profile,
             provider_name=provider_name,

@@ -288,6 +288,28 @@ def _profile_binds_a_model(profile: Any) -> bool:
     return bound_model_for_profile(profile) is not None
 
 
+def _runtime_limit_session_kwargs(profile: Any) -> Dict[str, Any]:
+    """Session-level ``create_session`` kwargs a profile's ``runtime_limits``
+    contributes.
+
+    Today that is ``max_parallel_tools`` alone (#862) — the one field in
+    the block the SESSION enforces rather than the kernel or the
+    subprocess plugins.  Returns an EMPTY dict when the profile declares
+    none, so a caller merging this into an overrides bag does not turn an
+    empty bag into a non-empty one.
+
+    Args:
+        profile: The resolved :class:`SubagentProfile`, or ``None``.
+
+    Returns:
+        ``{"max_parallel_tools": <int>}`` or ``{}``.
+    """
+    width = getattr(
+        getattr(profile, "runtime_limits", None), "max_parallel_tools", None,
+    )
+    return {} if width is None else {"max_parallel_tools": width}
+
+
 def _dispatch_tool_output(hooks, payload, default_agent_id: str) -> None:
     """Forward a runner ``tool_output`` notification to the UI hooks.
 
@@ -2961,6 +2983,11 @@ class JaatoServer:
         if self._profile is not None and getattr(
                 self._profile, "budget_control", None) is not None:
             kwargs["budget_control"] = self._profile.budget_control
+
+        # Tool-pool width (#862).  Profile-declared; absent contributes no
+        # key at all, so an otherwise-empty kwargs bag stays empty and the
+        # ``kwargs or None`` return below keeps meaning "no overrides".
+        kwargs.update(_runtime_limit_session_kwargs(self._profile))
 
         # Apply the per-session system-instruction knobs last so they
         # win over any profile-supplied system_instructions.  Distinct
