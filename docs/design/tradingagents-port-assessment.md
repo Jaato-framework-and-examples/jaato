@@ -492,10 +492,24 @@ no model turn), and a "write the report" stage that receives the fetched
 data as prompt text. That is the Sentiment Analyst's pre-fetch pattern
 (§4.4) applied to the other three analysts, and it removes the one
 non-deterministic step upstream has — whether the model calls
-`get_verified_market_snapshot` before writing. The cost is the one
-upstream already pays: each sub-stage is a fresh session, so tool results
-reach the next step as forwarded text rather than as retained history, and
-upstream re-sends the whole message list to every node anyway.
+`get_verified_market_snapshot` before writing.
+
+Sub-stages do **not** require fresh sessions. A completion-gated session
+is not one-shot: `_signal_completion_called` is reset at the start of
+every turn (`shared/jaato_session.py:6110-6127`, whose docstring names the
+suspend/resume shape — the agent calls `signal_completion` every turn and
+the driver wakes the same session later), so one analyst session can
+signal the end of each sub-stage with a typed payload the driver journals,
+go quiet, and be driven again with the next prompt on the same history.
+While the driver stays attached that is simply another `complete()` on the
+same facade `Session`; a session that has gone cold is revived by
+`session.wake` (`server/session_manager.py:7519`), which defers only when
+no client is attached and host tools would have nowhere to dispatch. The
+completion schema can carry a `phase` field so the driver knows which
+sub-stage just ended. This keeps the tool results as retained history
+rather than forwarded text, and gives resume points at every sub-stage —
+finer than upstream, on one session, with nothing re-sent that the model
+did not already hold.
 
 jaato's own session persistence (`session.wake`, `SessionState` with the
 profile snapshot and rendered instructions — CLAUDE.md "Session Revive")
