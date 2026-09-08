@@ -107,6 +107,7 @@ you must complete · **●○○** hook only, you build the feature · **○○�
 | Knowledge storage and management | ●●○ skills (agentskills.io standard), prompt templates, `AGENTS.md` context files, packages; no catalog, memory or template engine | ●●● references catalog (local, URL, MCP, inline; auto/selectable; tags, transitive discovery, sandbox authorisation), template engine (Jinja2 and Mustache, indexed), curated memory with raw→validated lifecycle, prompt library (reads Claude skills), waypoints, subagent context sharing; embedding seam | ●●● + local sentence-transformers embedding provider and semantic matcher, ADR→ERI→module→skill knowledge hierarchy, auto-steering against instruction drift |
 | Model providers / enterprise gateways | ●●● ~30 incl. Bedrock, Vertex, Azure, Cloudflare gateway, Copilot | ●●● 19 incl. Vertex, OpenRouter, GitHub Models, NIM, EU and local; no Bedrock/Azure native | ●●● unchanged |
 | MCP | ○○○ by design | ●●● client (`.mcp.json`); not an MCP server | ●●● unchanged |
+| Service integration (REST / OpenAPI, outbound) | ○○○ no HTTP tool; `bash` + curl, or an extension | ●●● `service_connector`: OpenAPI/Swagger discovery, YAML pre-definition, Bruno import, schema-validated calls, dry-run preview, four auth types with secret URIs, header redaction, mock servers for e2e; `web_fetch`; inbound `webhook` | ●●● unchanged |
 | Multi-user server / identity | ○○○ experimental Unix-socket server, unauthenticated | ●●○ daemon, WS bearer token, `set_client_user` hook | ●●● OIDC, WS auth proxy, mTLS |
 | Delegating a permission decision to an external system (your RBAC / approval service) | ●○○ `tool_call` hook can call out synchronously | ●●● evaluators call a policy API; webhook and file channels suspend the session until the external decision arrives | ●●● + HandoffGate parks the tool, session may be unloaded and resumed on approval (demo: `reliability-exercise`) |
 | Identity model (which user may use which role, who approved) | ○○○ | ●○○ `set_client_user` hook; no approver identity on events | ●○○ OIDC login; `allowed_emails` / `allowed_groups` at the dashboard edge; no group-to-profile binding |
@@ -650,6 +651,56 @@ pi: "No MCP" by design; you write the bridge. jaato: full MCP client
 (`.mcp.json`, per-server prefixing, secret-name scrubbing of MCP subprocess
 env, results marked untrusted). Neither exposes itself as an MCP server.
 
+### Service integration
+
+A corporate harness mostly acts by calling internal services: a ticketing
+API, an HR system, a claims database. This is the outbound half of
+integration; the inbound half (webhooks) is in section 12's plugin list.
+
+**pi** has no HTTP tool. The built-in set is `read`, `bash`, `powershell`,
+`edit`, `write`, `grep`, `find`, `ls`, so an API call is either `curl` inside
+`bash`, with no schema, validation, auth handling or header redaction, or a
+custom tool you write with `pi.registerTool()`. Skills can describe an API
+in prose but do not call it. Nothing in the tree mentions OpenAPI or
+Swagger.
+
+**jaato free** ships `shared/plugins/service_connector/`
+(`docs/jaato_web_service_discovery_reference.md`):
+
+- **Three ways to register a service**: `discover_service` loads an
+  OpenAPI or Swagger spec; YAML pre-definition under
+  `.jaato/services/<service>/` with a `_service.yaml` and one file per
+  endpoint; `import_bruno_collection` for teams that already keep Bruno
+  collections. Schemas live in a tiered filesystem store, so they are
+  versionable and shared across sessions.
+- **Governed calls**: `call_service` validates the request against the
+  endpoint schema before sending and the response after, `preview_request`
+  is a dry run that shows what would be sent, per-service timeouts, and
+  `verify_ssl` and `use_proxy` per call so an internal service behind the
+  corporate proxy and a public one can coexist.
+- **Authentication**: `api_key`, `bearer`, `basic` and OAuth2 client
+  credentials, with values taken from `token_env` or a `pass://` /
+  `vault://` secret URI; `Authorization` and `X-API-Key` headers are
+  redacted in traces, and diagnostics see only credential shape hints
+  (`ghp_`, `sk-ant-`), never the secret.
+- **Mock servers** (`MockRESTServer`, port 0 allocation, fixture wiring)
+  so a harness can be end-to-end tested against the same YAML without
+  touching production, and an endpoint-level `base_url` override for mixed
+  real-and-mock setups.
+- Services are usable from profiles and from the Python SDK, and
+  `call_service` results carry `TRAIT_GREPPABLE_CONTENT` so large bodies
+  can be shrunk by `result_grep` before they reach the model.
+
+One thing to raise with the maintainers: `call_service` results are not
+marked `TRAIT_UNTRUSTED_CONTENT`, while `web_fetch`, `web_search` and MCP
+results are. An external API body is untrusted by the same reasoning as a
+web page, so a harness calling third-party services should either add the
+trait or accept that the prompt-injection boundary does not wrap those
+results today.
+
+**jaato premium** adds nothing here beyond the secret-resolver backends the
+auth layer can draw on.
+
 ### Clients and languages
 
 pi is TypeScript only; other languages talk JSONL over stdin/stdout. jaato has
@@ -727,6 +778,7 @@ conditions of adoption, not treat their absence as a design choice.
 | Prompt-injection defence | build | soft boundary ships; classifier build | same |
 | MCP client | build | ships | ships |
 | Knowledge catalog, templates, curated memory | build (skills and prompts only) | ships; bring an embedding provider for semantic lookup | ships with local embeddings |
+| Calling internal REST services with schema, auth and validation | build (curl in bash, or a custom tool) | ships (`service_connector`, OpenAPI discovery, mocks) | ships |
 | Multi-user server with auth | build | daemon + token ships; SSO build | ships (OIDC) |
 | Regulatory documentation | build | build | build |
 
