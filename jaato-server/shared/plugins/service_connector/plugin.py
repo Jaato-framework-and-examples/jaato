@@ -23,6 +23,7 @@ from jaato_sdk.plugins.model_provider.types import (
     EditableContent,
     ToolSchema,
     TRAIT_GREPPABLE_CONTENT,
+    TRAIT_UNTRUSTED_CONTENT,
     DISCOVERABILITY_DEFERRED,
 )
 
@@ -473,12 +474,24 @@ class ServiceConnectorPlugin(RunnerForwardingMixin):
                     format="json",
                     template="# Edit the request below. Save and exit to continue.\n",
                 ),
-                # call_service responses are bulk HTTP/registry payloads whose
-                # heavy data sits under structured keys (body/headers) — invisible
-                # to the text-field enrichment path.  This trait routes the full
-                # result through enrichment so result_grep can filter it while
-                # grep-mode is active.
-                traits=frozenset({TRAIT_GREPPABLE_CONTENT}),
+                # Two orthogonal traits (#857):
+                #
+                # GREPPABLE — call_service responses are bulk HTTP/registry
+                # payloads whose heavy data sits under structured keys
+                # (body/headers) — invisible to the text-field enrichment path.
+                # This trait routes the full result through enrichment so
+                # result_grep can filter it while grep-mode is active.
+                #
+                # UNTRUSTED — the response body is authored by the remote
+                # service, not by the framework or the user: a third-party API,
+                # or an internal one relaying outsider-written text (a ticket
+                # title, a CRM note).  Same reasoning as web_fetch, so the
+                # result is wrapped in the untrusted-content boundary and the
+                # model is told to treat it as data, never as instructions.
+                # Untrusted by default — there is deliberately no per-service
+                # opt-out, since the trait is declared once per tool and the
+                # boundary costs only a marker pair.
+                traits=frozenset({TRAIT_GREPPABLE_CONTENT, TRAIT_UNTRUSTED_CONTENT}),
             ),
             ToolSchema(
                 name="preview_request",
