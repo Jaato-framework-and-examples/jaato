@@ -32,7 +32,7 @@ from __future__ import annotations
 import logging
 from base64 import b64decode as _b64decode
 from binascii import Error as BinasciiError
-from typing import Any, Dict, FrozenSet, Iterable, List, Optional, Tuple
+from typing import Any, Callable, Dict, FrozenSet, Iterable, List, Optional, Tuple
 
 from jaato_sdk.plugins.model_provider.types import MediaDelta, Part
 
@@ -150,6 +150,27 @@ def stream_terminated(
     return terminal_seen or media_arrived(media_sequence) or usage_reported
 
 
+def model_wrote_text(
+    parts: Iterable[Any], pending_text: Iterable[str] = (),
+) -> bool:
+    """Whether the model produced text OF ITS OWN this turn.
+
+    The one question behind both places the transcript may go -- into
+    history (:func:`ensure_spoken_part`) and onto the wire
+    (:func:`spoken_words`) -- so the two cannot drift apart: whatever
+    reaches a client is what reaches the session's record.
+
+    ``parts`` holds text already flushed into a ``Part``; ``pending_text``
+    is a streaming loop's not-yet-flushed accumulator, which is where a
+    written answer still sits at the moment the audio ends (text is only
+    flushed on a tool-call boundary or at the end of the stream).  Asked
+    about both because the end-of-audio marker lands mid-stream.
+    """
+    if any(getattr(p, "text", None) for p in parts):
+        return True
+    return any(pending_text)
+
+
 def ensure_spoken_part(parts: List[Any], transcript: str) -> None:
     """Give a spoken-but-wordless turn a text Part, in place.
 
@@ -165,9 +186,34 @@ def ensure_spoken_part(parts: List[Any], transcript: str) -> None:
     """
     if not transcript.strip():
         return
-    if any(getattr(p, "text", None) for p in parts):
+    if model_wrote_text(parts):
         return
     parts.append(Part.from_text(transcript))
+
+
+def spoken_words(
+    transcript_sink: Optional[List[str]],
+    wrote_text: Optional[Callable[[], bool]] = None,
+) -> str:
+    """The transcript a client should be handed, or ``""``.
+
+    The wire-side twin of :func:`ensure_spoken_part`, under the SAME
+    rule (#869): the words go out only when the model wrote none of its
+    own.  A turn that both wrote and spoke already delivered its words
+    as ``AGENT_OUTPUT``, and handing the transcript over as well would
+    have a call log record the answer twice.  A turn that only spoke --
+    the normal voice-agent turn -- delivered nothing a client could
+    read, and this is what fixes that.
+
+    ``wrote_text`` is a callable rather than a bool because the answer
+    is asked for at the end-of-audio marker, mid-stream, and must be
+    read THEN: the loop's accumulator is a live list, not a snapshot.
+    """
+    if not transcript_sink:
+        return ""
+    if wrote_text is not None and wrote_text():
+        return ""
+    return "".join(transcript_sink)
 
 
 def _audio_object(delta: Any) -> Any:
@@ -293,6 +339,7 @@ def emit_audio_delta(
     mime_type: str = STREAM_AUDIO_MIME,
     transcript_sink: Optional[List[str]] = None,
     pending: Optional[List[Any]] = None,
+    wrote_text: Optional[Callable[[], bool]] = None,
 ) -> int:
     """Emit one model-generated audio chunk; return the new sequence.
 
@@ -303,6 +350,23 @@ def emit_audio_delta(
       and never produces a chunk of its own -- emitting an empty
       ``MediaDelta`` would hand clients zero bytes to play;
     * bytes advance ``sequence`` and are emitted to ``on_chunk``.
+
+    **The words ride the final chunk** (#869).  Until that landed the
+    transcript went into ``transcript_sink`` and stopped there: the
+    sink became a history Part after the stream closed, past every
+    point that emits to a client, so a voice client saw 5 s of audio
+    and no way to know what was said.  The ``pending`` buffer already
+    holds the last chunk back to mark it ``final``, and the transcript
+    is complete at exactly that moment (every transcript delta measured
+    precedes the end-of-audio marker), so the chunk released as final
+    carries ``"".join(transcript_sink)`` in its ``transcript`` field.
+    One existing event gains text; no new event, no new subscription.
+
+    Same rule as :func:`ensure_spoken_part`, via :func:`spoken_words`:
+    when ``wrote_text()`` says the model produced text of its own, the
+    final chunk carries no transcript, because those words already
+    went out as ``AGENT_OUTPUT`` and a client would log them twice.
+    A caller passing no ``wrote_text`` always gets the words.
 
     A transcript-only delta therefore returns ``sequence`` UNCHANGED: it
     is not an audio chunk, and counting it would put gaps in the
@@ -324,7 +388,8 @@ def emit_audio_delta(
     not opted in is unaffected.
     """
     if pending is not None and is_end_of_audio(delta):
-        _release(on_chunk, pending, final=True)
+        _release(on_chunk, pending, final=True,
+                 transcript=spoken_words(transcript_sink, wrote_text))
         return sequence
     found = extract_audio_delta(delta)
     if found is None:
@@ -349,16 +414,31 @@ def emit_audio_delta(
     return sequence
 
 
-def _release(on_chunk: Any, pending: List[Any], final: bool) -> None:
-    """Emit the held chunk, if any, marking it ``final`` or not."""
+def _release(
+    on_chunk: Any, pending: List[Any], final: bool, transcript: str = "",
+) -> None:
+    """Emit the held chunk, if any, marking it ``final`` or not.
+
+    ``transcript`` is stamped onto the chunk only when it is the final
+    one -- an intermediate chunk keeps whatever (usually nothing) its
+    own delta carried, so a client reads the utterance's words exactly
+    once, off the chunk that also tells it playback is over.
+    """
     if not pending:
         return
     chunk = pending.pop()
     chunk.final = final
+    if final and transcript:
+        chunk.transcript = transcript
     on_chunk(chunk)
 
 
-def flush_audio_stream(on_chunk: Any, pending: Optional[List[Any]]) -> None:
+def flush_audio_stream(
+    on_chunk: Any,
+    pending: Optional[List[Any]],
+    transcript_sink: Optional[List[str]] = None,
+    wrote_text: Optional[Callable[[], bool]] = None,
+) -> None:
     """Emit whatever is still held, marking it the last of its stream.
 
     Called when a streaming loop ends.  The upstream marker normally
@@ -367,8 +447,15 @@ def flush_audio_stream(on_chunk: Any, pending: Optional[List[Any]]) -> None:
     utterance is over, and it is conclusive.  Without it a held chunk
     would simply never be delivered, which is worse than an unmarked
     one.
+
+    Takes the same ``transcript_sink`` / ``wrote_text`` pair as
+    :func:`emit_audio_delta` so the chunk it releases carries the words
+    too (#869): a provider that sends no marker must not also be one
+    whose clients never learn what was said.  At this point the stream
+    is closed, so the sink is complete by construction.
     """
-    _release(on_chunk, pending or [], final=True)
+    _release(on_chunk, pending or [], final=True,
+             transcript=spoken_words(transcript_sink, wrote_text))
 
 
 def apply_output_modalities(
@@ -432,8 +519,11 @@ class OpenAIMediaOutputMixin:
 
     1. add this mixin to its bases (before ``ModalityCapabilityMixin``, so
        these overrides win);
-    2. call ``self.emit_media_delta(delta, on_chunk, seq)`` in its
-       streaming loop, keeping the returned sequence;
+    2. call ``self.emit_media_delta(delta, on_chunk, seq, sink, pending,
+       wrote_text)`` in its streaming loop, keeping the returned
+       sequence, and ``self.flush_media_stream(on_chunk, pending, sink,
+       wrote_text)`` when the loop ends -- the last two arguments are
+       what put the spoken words on the final chunk (#869);
     3. call ``self.apply_requested_output_modalities(kwargs)`` where it
        assembles the request body, after its own ``api_params``.
     """
@@ -445,16 +535,28 @@ class OpenAIMediaOutputMixin:
         self, delta: Any, on_chunk: Any, sequence: int,
         transcript_sink: Optional[List[str]] = None,
         pending: Optional[List[Any]] = None,
+        wrote_text: Optional[Callable[[], bool]] = None,
     ) -> int:
-        """Decode and emit OpenAI-shaped model audio; see :func:`emit_audio_delta`."""
+        """Decode and emit OpenAI-shaped model audio; see :func:`emit_audio_delta`.
+
+        ``wrote_text`` is what lets the final chunk carry the transcript
+        under the :func:`ensure_spoken_part` rule (#869): a loop passes
+        ``lambda: model_wrote_text(parts, accumulated_text)`` so the
+        words reach the client exactly when they would otherwise be
+        unobtainable.
+        """
         return emit_audio_delta(
             delta, on_chunk, sequence, self.STREAM_AUDIO_MIME, transcript_sink,
-            pending,
+            pending, wrote_text,
         )
 
-    def flush_media_stream(self, on_chunk: Any, pending: Optional[List[Any]]) -> None:
-        """Release a held final chunk; see :func:`flush_audio_stream`."""
-        flush_audio_stream(on_chunk, pending)
+    def flush_media_stream(
+        self, on_chunk: Any, pending: Optional[List[Any]],
+        transcript_sink: Optional[List[str]] = None,
+        wrote_text: Optional[Callable[[], bool]] = None,
+    ) -> None:
+        """Release a held final chunk, with the words; see :func:`flush_audio_stream`."""
+        flush_audio_stream(on_chunk, pending, transcript_sink, wrote_text)
 
     def request_output_modalities(self, kinds: Iterable[str]) -> None:
         """Record which modalities subsequent turns should ask the model to EMIT.

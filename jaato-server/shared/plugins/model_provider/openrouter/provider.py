@@ -116,6 +116,7 @@ from .._media_deltas import (
     NO_MEDIA_YET,
     OpenAIMediaOutputMixin,
     ensure_spoken_part,
+    model_wrote_text,
     media_chunk_count,
     stream_terminated,
 )
@@ -1767,6 +1768,11 @@ class OpenRouterProvider(OpenAIMediaOutputMixin, ModalityCapabilityMixin):
         # transcript-only in one measured turn, zero carrying both -- so
         # the words cannot be read off the emitted chunks.
         media_transcript: List[str] = []
+        # Read at the end-of-audio marker, mid-stream, so it must be a
+        # live question rather than a snapshot: the transcript rides the
+        # final media chunk only when the model wrote no text of its
+        # own (#869), the rule ``ensure_spoken_part`` applies to history.
+        wrote_text = lambda: model_wrote_text(parts, accumulated_text)  # noqa: E731
         accumulated_thinking: List[str] = []
         parts: List[Part] = []
         finish_reason = FinishReason.UNKNOWN
@@ -1956,7 +1962,7 @@ class OpenRouterProvider(OpenAIMediaOutputMixin, ModalityCapabilityMixin):
                     # ``_media_deltas``.
                     media_sequence = self.emit_media_delta(
                         delta, on_chunk, media_sequence, media_transcript,
-                        media_pending,
+                        media_pending, wrote_text,
                     )
 
                     if delta.tool_calls:
@@ -2009,7 +2015,8 @@ class OpenRouterProvider(OpenAIMediaOutputMixin, ModalityCapabilityMixin):
             # last chunk already; this covers a provider that sends none,
             # where the stream ending is the only evidence the utterance
             # is over -- and is conclusive.
-            self.flush_media_stream(on_chunk, media_pending)
+            self.flush_media_stream(
+                on_chunk, media_pending, media_transcript, wrote_text)
             self._trace(
                 f"{trace_prefix}_END chunks={chunk_count} "
                 f"finish_reason={finish_reason} "

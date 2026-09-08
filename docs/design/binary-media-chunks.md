@@ -755,3 +755,72 @@ block silently outrank `JAATO_GC_MEDIA_BYTES`.
 Guarded by `shared/tests/test_heard_audio_does_not_accumulate.py`, whose
 final assertion is the issue's own acceptance criterion: request payload
 across six voice turns must not grow with the turn count.
+
+## 12. The words reach the client on the final chunk (#869)
+
+§11 settled what remains when the bytes go: the *words*. For inbound audio
+that is a marker naming an id; for outbound, `ensure_spoken_part` leaves the
+model's transcript in history where the audio would have been. But history
+was the **only** place it went. Every spoken turn produced a transcript
+inside the provider, and no client could obtain it.
+
+### 12.1 Where it went
+
+`emit_audio_delta` took the transcript off `delta.audio` and appended it to a
+caller-owned list, `transcript_sink`, emitting no chunk for it — correctly,
+since an empty `MediaDelta` would hand a client zero bytes to play. At the
+end of the stream the joined sink became a text Part on the
+`ProviderResponse` (`ensure_spoken_part`). That is *after* streaming has
+finished, past every point that emits to a client: nothing produced it as
+`AGENT_OUTPUT`, and `ToolOutputEvent.chunk` — sitting empty on every media
+event — never received it either.
+
+Measured in one session:
+
+| Turn | `ask()` returned |
+|---|---|
+| model speaks only | `''` — 14 media chunks, 5.45 s of audio, one `AGENT_OUTPUT` with empty text |
+| model writes *and* speaks | the written text |
+
+A voice client could therefore record how long the agent spoke but not what
+it said; the alternative was re-transcribing audio it already held through a
+second model, paying again for words the first model had produced and thrown
+away.
+
+### 12.2 Ride the final chunk
+
+The `pending` one-slot buffer (#828, `is_end_of_audio`)
+already holds the last chunk back so it can be marked `final`, and the
+transcript is complete at exactly that moment — every transcript delta
+measured precedes the end-of-audio marker. So the chunk released as `final`
+carries `"".join(transcript_sink)` in `MediaDelta.transcript`, which
+`_deliver_model_media` already forwarded into `ToolOutputEvent.chunk`. One
+existing event gains text; no new event, no new subscription, and the
+downstream plumbing needed no change at all. The end-of-stream flush
+(`flush_audio_stream`) takes the same arguments, so a provider that sends no
+marker delivers the words too.
+
+Intermediate chunks stay wordless. A client reads the utterance exactly
+once, off the same event that tells it playback is over.
+
+### 12.3 The same rule as history
+
+`ensure_spoken_part` appends only when the model wrote no text of its own,
+because a turn that both wrote and spoke already has its words. The wire
+carries the constraint over, through one shared predicate —
+`model_wrote_text(parts, accumulated_text)` — so what a client reads off the
+wire is what history records and a call log never gets the same answer
+twice: the written text arrived as `AGENT_OUTPUT`, and the final media chunk
+then carries no transcript.
+
+The predicate is a **callable, read at the marker**, not a flag read at the
+start of the stream: the marker lands mid-stream, and a written answer at
+that moment still sits in the loop's not-yet-flushed accumulator (text is
+flushed into a Part only at a tool-call boundary or at the end of the
+stream), which is why it is asked about both.
+
+Acceptance, as the issue stated it, is guarded by
+`TestTheWordsRideTheFinalChunk` in `test_media_output_contract.py`: a client
+subscribed to model media obtains the spoken words without a second model
+call; a turn that speaks and writes does not deliver the same words twice;
+and a transcript-only delta still produces no playable chunk.

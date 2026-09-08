@@ -645,6 +645,25 @@ Knobs: profile `gc:` / `.jaato/gc.json` `evict_consumed_media`,
 `JAATO_GC_MEDIA_BYTES`. See
 [Binary Media Chunks §11](docs/design/binary-media-chunks.md).
 
+**What was said reaches the client (#869).** Every spoken turn produced a
+transcript inside the provider and no client could obtain it: the decoder
+put the words in a caller-owned sink, and the sink became a history Part
+(`ensure_spoken_part`) only after the stream closed, past every point that
+emits to a client. A voice client saw 5.45 s of audio in 14 chunks and an
+`ask()` returning `''`; a call log could record how long the agent spoke but
+not what it said. The `pending` one-slot buffer already holds the last chunk
+back to mark it `final`, and the transcript is complete at that moment, so
+the chunk released as `final` now carries the whole utterance in
+`MediaDelta.transcript` — which `_deliver_model_media` already forwarded into
+`ToolOutputEvent.chunk`. Intermediate chunks stay wordless; a client reads
+the words exactly once, off the event that also ends playback. Under the
+same rule history follows: a turn that wrote its own text sends no
+transcript, because those words already went out as `AGENT_OUTPUT`. One
+predicate, `model_wrote_text(parts, accumulated_text)`, answers for both
+destinations, and both streaming loops pass it as a callable read *at the
+marker* rather than a flag read at the start. See
+[Binary Media Chunks §12](docs/design/binary-media-chunks.md).
+
 Two shapes were available for #830 and only one is implemented here: audio as
 an **input modality** (above), not **transcription as a step**. A transcriber
 is a different animal — `microsoft/mai-transcribe-2` is served on

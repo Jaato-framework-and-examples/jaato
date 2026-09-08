@@ -8328,6 +8328,14 @@ NOTES
         both redundant and, for audio, meaningless.  It therefore never
         touches ``on_output`` or the accumulated text buffer.
 
+        ``delta.transcript`` rides in the event's ``chunk`` field.  On the
+        ``final`` chunk that is the whole utterance's words (#869) --
+        the provider stamps them there under the ``ensure_spoken_part``
+        rule, so what a client reads off the wire is what history
+        records, and never a duplicate of text already sent as
+        ``AGENT_OUTPUT``.  This method does not decide that; it forwards
+        whatever the provider put on the delta.
+
         Never raises -- a delivery failure must not abort generation.
         """
         hooks = getattr(self, "_ui_hooks", None)
