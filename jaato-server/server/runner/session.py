@@ -40,6 +40,7 @@ from shared.session_envelope import SessionInitEnvelope
 if TYPE_CHECKING:  # pragma: no cover — types only
     from shared.jaato_runtime import JaatoRuntime
     from shared.jaato_session import JaatoSession
+    from shared.plugins.registry import PluginRegistry
 
 
 logger = logging.getLogger(__name__)
@@ -225,6 +226,49 @@ def _register_client_tools_on_runner(registry, client_tools) -> None:
         )
 
 
+def _adopt_then_discover(
+    registry: "PluginRegistry",
+    envelope: SessionInitEnvelope,
+    plugin_configs: Dict[str, Any],
+) -> List[str]:
+    """Adopt carried-over plugins, then discover the rest (#890).
+
+    The ORDER is the mechanism, which is why the two calls live together in
+    one named step.  Both of ``discover()``'s paths skip a name that is
+    already registered, so adopting first means discovery never constructs a
+    rival to a warm instance; adopting after would leave the carried plugin
+    registered nowhere and the leak intact.
+
+    A cold slot, a standalone session, a slot recycled onto another
+    workspace, or a profile that changed the plugin's config all adopt
+    nothing — in which case this is exactly the pre-#890 ``discover()`` call
+    and the full plugin set is built fresh.
+
+    Args:
+        registry: The new session's registry, freshly constructed.
+        envelope: The arriving session envelope, whose cascade / workspace
+            identity gates reuse.
+        plugin_configs: The effective per-plugin config map this bootstrap
+            will pass to ``expose_all`` — compared against the config each
+            parked instance was initialized under.
+
+    Returns:
+        Names adopted, for the caller's logging.
+    """
+    from . import slot_plugins
+
+    adopted = slot_plugins.adopt_into(registry, envelope, plugin_configs)
+    registry.discover(tier_filter="runner")
+    if adopted:
+        logger.info(
+            "runner-session bootstrap: reusing warm plugin instance(s) %s "
+            "carried over from the previous session on this slot — no "
+            "re-initialize, no re-connect",
+            ", ".join(adopted),
+        )
+    return adopted
+
+
 def _configure_runtime_plugins(
     runtime: "JaatoRuntime", envelope: SessionInitEnvelope,
 ) -> None:
@@ -245,6 +289,17 @@ def _configure_runtime_plugins(
 
     Differences from daemon-side:
 
+    0. Slot-scoped adoption runs between construction and discovery.
+       A pool slot serving several stages of one cascade parks the
+       plugin instances that declare
+       :data:`~jaato_sdk.plugins.base.TRAIT_SLOT_SCOPED` at the
+       previous ``session.end``; this function adopts them into the new
+       registry so discovery skips those names and the warm resources
+       (a connected language server, a cascade's plan map) are reused
+       rather than rebuilt beside an abandoned copy.  See
+       :mod:`server.runner.slot_plugins` and #890.  The daemon has no
+       counterpart — its registry is per-``JaatoServer``, which is
+       per-session.
     1. ``registry.discover(tier_filter="runner")`` — runner-tier
        plugins only (per §3.3.5).  Daemon-tier plugins (auth, gc_*,
        cache_*, session, background) must NOT load runner-side; they
@@ -285,12 +340,18 @@ def _configure_runtime_plugins(
         "JAATO_BOOTSTRAP_TIMING", "",
     ).lower() in ("1", "true", "yes")
 
-    # Step 1-2: construct + discover (runner-tier only).
-    with timer.stage("discover"):
-        registry = PluginRegistry(model_name=envelope.model_name)
-        registry.discover(tier_filter="runner")
+    # Step 1: construct.  Discovery no longer happens here — it moved
+    # below Step 3, because #890's slot-scoped adoption has to run
+    # between the two: both discovery paths skip a name that is already
+    # registered, and that skip is what stops discovery constructing a
+    # rival to a carried-over warm instance.  Adoption in turn needs the
+    # plugin_configs map (it compares each parked instance's config
+    # against the arriving session's).  Hoisting Step 3 costs nothing —
+    # that block never touches the registry.
+    registry = PluginRegistry(model_name=envelope.model_name)
 
-    # Step 3: assemble plugin_configs.  Defaults mirror daemon-side
+    # Step 3 (hoisted, see Step 1): assemble plugin_configs.
+    # Defaults mirror daemon-side
     # `core.py:1621-1675` for the 6 runner-tier entries.  Auth plugin
     # entries are skipped — they're daemon-tier and the tier filter
     # already excluded them from the registry.  Envelope-supplied
@@ -340,6 +401,11 @@ def _configure_runtime_plugins(
         if isinstance(name, str) and name and isinstance(cfg, dict) and cfg:
             existing = plugin_configs.get(name, {})
             plugin_configs[name] = {**existing, **dict(cfg)}
+
+    # Step 2 (runs here, see Step 1): adopt the slot-scoped plugins the
+    # previous session on this pool slot parked, then discover the rest.
+    with timer.stage("discover"):
+        _adopt_then_discover(registry, envelope, plugin_configs)
 
     # Server 0.6.129+ structural fix: register framework-known values
     # on the registry BEFORE ``expose_all`` fires so each plugin's

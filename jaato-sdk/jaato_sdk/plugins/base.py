@@ -50,6 +50,62 @@ LSP server connections           yes                 no — unserialisable
 permission session whitelist     no                  yes
 cached config files              yes                 n/a — re-read
 ===============================  ==================  ==================
+
+The "survives cascade reset?" column is answered by
+:data:`TRAIT_SLOT_SCOPED`, not by this trait.
+"""
+
+TRAIT_SLOT_SCOPED = "slot_scoped"
+"""Plugin-level trait: this plugin's INSTANCE survives the cascade
+session boundary, so ``reset_for_next_session()`` is actually reachable.
+
+``reset_for_next_session()`` describes what a plugin keeps between two
+sessions of the same cascade, and several plugins answer "everything —
+the next stage benefits from all of it".  That answer was aspirational:
+the pool slot was reused but every ``session.bootstrap`` built a fresh
+:class:`~shared.plugins.registry.PluginRegistry` and called
+``create_plugin()`` again, so the preserved state belonged to an object
+the next session discarded (#890).  For ``lsp`` the discarded object
+still owned a running language server, so a cascade leaked one jdtls per
+stage (~2.3 GB over three stages) AND paid the cold start it was
+preserving state to avoid.
+
+Declaring this trait opts the plugin into instance carry-over: at the
+session boundary the runner moves the instance into a slot-scoped store
+instead of dropping it, and the next ``session.bootstrap`` on that slot
+adopts it into the new registry before discovery runs.  ``initialize()``
+is still called and is expected to early-return on the plugin's own
+``_initialized`` guard — which is what preserves the warm resource.
+``shutdown()`` keeps its documented meaning: the FINAL teardown, run at
+slot teardown rather than at every session boundary.
+
+**Carry-over is conditional.**  The runner reuses an instance only when
+the next session is the same cascade, in the same workspace, with the
+same declared config for that plugin (session identity keys excluded).
+Anything else shuts the instance down and constructs a fresh one, so a
+slot recycled onto unrelated work never inherits a warm server rooted in
+somebody else's tree.
+
+**Declare it only when the litmus test says "keep everything".**  A
+plugin whose ``reset_for_next_session()`` is a no-op merely because it
+holds no per-session state must NOT declare this trait — its state IS
+per-session (``references`` is the worked example: sources, selected
+ids and preselected paths are all per-session), and carrying the
+instance would leak one session's context into the next.  The trait
+means "everything I hold is deliberately cross-session", which is a
+stronger claim than "I have nothing to clear".
+
+A plugin declaring this trait SHOULD implement ``set_session_id(str)``
+so it can re-stamp session-scoped identity (log tags, trace file names)
+when it is adopted; the registry broadcasts the new id to plugins that
+have the method.
+
+Usage::
+
+    from jaato_sdk.plugins.base import TRAIT_SLOT_SCOPED
+
+    class LSPToolPlugin:
+        plugin_traits = frozenset({TRAIT_SLOT_SCOPED})
 """
 
 TRAIT_AUTH_PROVIDER = "auth_provider"
@@ -578,6 +634,16 @@ class ToolPlugin(Protocol):
         ``shutdown()`` would have been called in the pre-cascade-sharing
         architecture.  ``shutdown()`` is reserved for the FINAL
         teardown at slot-end (cascade idle timeout).
+
+        **Keeping state requires declaring**
+        :data:`TRAIT_SLOT_SCOPED`.  This hook runs on the instance the
+        outgoing session used, and by default that instance is dropped
+        the moment the session ends — the next ``session.bootstrap``
+        constructs a fresh one.  So a no-op written to mean "keep
+        everything, the next stage benefits" preserves state nobody
+        reads (#890).  Declare the trait and the runner carries the
+        instance across the boundary, which is what makes this hook's
+        keep-decisions observable.
         """
         ...
 

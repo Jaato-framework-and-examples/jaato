@@ -1322,17 +1322,34 @@ class RunnerRPC:
         NOT be returned to the pool because its plugin state is
         partially-reset (undefined).
 
+        After the sweep the outgoing registry is RELEASED (#890).  The
+        sweep alone was never enough: the daemon reused the slot but the
+        next ``session.bootstrap`` built a fresh registry and re-ran
+        ``discover()``, so every plugin instance the sweep had just
+        prepared was dropped — and a plugin owning an OS process kept it
+        running with nobody to stop it.  ``slot_plugins.park_from``
+        parks the instances declaring ``TRAIT_SLOT_SCOPED`` for the next
+        session on this slot to adopt, and shuts the rest down.
+
         Returns:
-            ``(True, {"plugins_reset": int, "errors": List[str]})`` —
-            ``ok`` stays True even when individual plugin resets
-            fail; daemon branches on ``errors``.  ``(False, error)``
-            only on the structural "no session host" case (which is
-            a programmer error: daemon shouldn't call session.end
-            when no session was bootstrapped).
+            ``(True, {"plugins_reset": int, "errors": List[str],
+            "plugins_carried": List[str]})`` — ``ok`` stays True even
+            when individual plugin resets fail; daemon branches on
+            ``errors``.  ``plugins_carried`` names the instances parked
+            for the next session (empty for a standalone session, or
+            when ``errors`` made the slot unpoolable).  ``(False,
+            error)`` only on the structural "no session host" case
+            (which is a programmer error: daemon shouldn't call
+            session.end when no session was bootstrapped).
         """
+        from . import slot_plugins
+
         ready, err, session = self._require_ready_session()
         if not ready:
             return err
+
+        with self._session_lock:
+            host = self._session_host
 
         runtime = getattr(session, "_runtime", None)
         registry = getattr(runtime, "registry", None) if runtime else None
@@ -1384,6 +1401,33 @@ class RunnerRPC:
             except Exception as exc:  # noqa: BLE001 — per-plugin boundary
                 errors.append(f"{name}: {type(exc).__name__}: {exc}")
 
+        # #890: release the outgoing registry.  Until now nothing did —
+        # the daemon returned the SLOT to the pool but the next
+        # ``session.bootstrap`` built a fresh registry and re-ran
+        # ``discover()``, so every plugin instance was silently dropped.
+        # Dropping is not freeing: a plugin holding an OS process kept it
+        # running with no owner, which is how a cascade accumulated one
+        # jdtls per stage.  ``park_from`` moves the slot-scoped instances
+        # into the process-level store the next bootstrap adopts from, and
+        # shuts every other initialized plugin down.
+        #
+        # ``allow_carry`` is gated on the reset sweep: a slot whose reset
+        # raised is not returned to the pool (the daemon branches on
+        # ``errors``), so parking state for a next session that will never
+        # arrive would only defer the teardown.  Same reasoning as the
+        # daemon's own "errors ⇒ do not pool" rule.
+        try:
+            envelope = getattr(host, "envelope", None)
+            parked, park_errors = slot_plugins.park_from(
+                registry, envelope, allow_carry=not errors,
+            )
+            for name in park_errors:
+                errors.append(f"{name}: shutdown() raised during session.end")
+        except Exception as exc:  # noqa: BLE001 — boundary
+            logger.exception("session.end: releasing the registry raised")
+            errors.append(f"registry_release: {type(exc).__name__}: {exc}")
+            parked = []
+
         # PR #174 hotfix (server 0.6.151+): clear the runner-side
         # session host so the next ``session.bootstrap`` on this slot
         # (cascade reuse path) is NOT rejected by the
@@ -1409,6 +1453,7 @@ class RunnerRPC:
         return True, {
             "plugins_reset": plugins_reset,
             "errors": errors,
+            "plugins_carried": parked,
         }
 
     def _require_ready_session(
@@ -4023,6 +4068,9 @@ class RunnerRPC:
         This handler is just the session-level lifecycle bookend
         that mirrors the bootstrap-then-shutdown cycle.
 
+        It also releases the session's plugin resources — see
+        :meth:`_release_session_plugins` (#890).
+
         Returns:
             ``(True, {"shutdown_session_id": str})`` on success.
             ``"shutdown_session_id"`` is the id of the session that
@@ -4046,6 +4094,7 @@ class RunnerRPC:
 
         session_id = host.session_id
         session = host.session
+        close_error: Optional[Exception] = None
         if session is not None:
             close = getattr(session, "close_session", None)
             if callable(close):
@@ -4058,15 +4107,62 @@ class RunnerRPC:
                         "surfacing error to daemon",
                         session_id, exc, exc_info=True,
                     )
-                    return False, {
-                        "error": (
-                            f"session.shutdown: close_session raised "
-                            f"{type(exc).__name__}: {exc}"
-                        ),
-                        "stage": "close",
-                    }
+                    close_error = exc
+
+        # #890: release plugin resources AFTER the on_session_end hooks
+        # (same order as ``session.end``, so a hook still sees live
+        # plugins) and on BOTH outcomes — a close_session that raised is
+        # exactly when an abandoned language server is most likely, so
+        # returning the error without reaping would trade one failure for
+        # a leak.
+        self._release_session_plugins(host, session)
+
+        if close_error is not None:
+            return False, {
+                "error": (
+                    f"session.shutdown: close_session raised "
+                    f"{type(close_error).__name__}: {close_error}"
+                ),
+                "stage": "close",
+            }
 
         return True, {"shutdown_session_id": session_id}
+
+    def _release_session_plugins(self, host: Any, session: Any) -> None:
+        """Reap every plugin resource this runner still owns (#890).
+
+        The COLD counterpart of the release :meth:`_handle_session_end`
+        performs.  The daemon reaches ``session.shutdown`` only when the
+        slot is NOT going back to the pool, so nothing here will adopt a
+        parked plugin and nothing will reuse this registry: both are shut
+        down rather than kept warm.
+
+        Doing it here, before the daemon's close ladder starts, is what
+        makes the teardown graceful — ``shutdown()`` gives a language
+        server a terminate-then-wait, whereas the process-exit backstop a
+        plugin registers for itself can only SIGKILL, and a SIGTERM that
+        outruns ``atexit`` reaps nothing at all.
+
+        Best-effort throughout: a teardown failure must not turn a
+        shutdown into an error the daemon has to handle.
+        """
+        try:
+            from . import slot_plugins
+            slot_plugins.release_all(reason="session.shutdown (cold path)")
+            runtime = getattr(session, "_runtime", None) if session else None
+            registry = getattr(runtime, "registry", None) if runtime else None
+            if registry is not None:
+                # ``allow_carry=False``: parking for a next session that
+                # will never arrive is a slower leak, not a fix.
+                slot_plugins.park_from(
+                    registry, getattr(host, "envelope", None),
+                    allow_carry=False,
+                )
+        except Exception:  # noqa: BLE001 — best-effort teardown
+            logger.exception(
+                "session.shutdown: releasing plugin resources raised; "
+                "the session is closed regardless",
+            )
 
     def _handle_session_request_stop(
         self, args: Dict[str, Any],
