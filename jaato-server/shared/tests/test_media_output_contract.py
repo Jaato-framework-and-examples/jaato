@@ -14,6 +14,8 @@ Two things are asserted here that the delivery tests cannot see:
 from __future__ import annotations
 
 import base64
+from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -30,7 +32,7 @@ from shared.plugins.model_provider._media_deltas import (
     extract_audio_delta,
 )
 from shared.plugins.model_provider.base import ModalityCapabilityMixin
-from jaato_sdk.plugins.model_provider.types import Part
+from jaato_sdk.plugins.model_provider.types import MediaDelta, Part
 
 
 def _audio_delta(payload: bytes, transcript: str = ""):
@@ -776,20 +778,6 @@ class TestTheWordsRideTheFinalChunk:
         assert model_wrote_text([], [""]) is False
         assert model_wrote_text([Part.from_text("x")]) is True
 
-    @pytest.mark.parametrize("module_path", [
-        "shared.plugins.model_provider.openrouter.provider",
-        "shared.plugins.model_provider._openai_compat.base",
-    ])
-    def test_both_loops_pass_the_predicate(self, module_path):
-        """Both loops, on both calls that can release the final chunk --
-        or half the fleet keeps a transcript no client can see."""
-        import importlib, inspect
-        src = inspect.getsource(importlib.import_module(module_path))
-        assert "wrote_text = lambda: model_wrote_text(parts, accumulated_text)" in src
-        assert "media_pending, wrote_text," in src, \
-            "the marker path releases the final chunk without the words"
-        assert "media_pending, media_transcript, wrote_text)" in src, \
-            "the flush path releases the final chunk without the words"
 
     def test_the_words_reach_the_client_event(self):
         """End to end below the provider: decoder -> session delivery ->
@@ -822,3 +810,139 @@ class TestTheWordsRideTheFinalChunk:
         assert [(c["final"], c["chunk"]) for c in calls] == [
             (False, ""), (True, "On a clear day, the sky is blue.")]
         assert base64.b64decode(calls[-1]["data_b64"]) == b"two"
+
+
+# ---- the streaming loops themselves --------------------------------------
+
+
+def _wire_chunk(*, content=None, audio=None, finish_reason=None):
+    """One chat-completions streaming chunk as both loops read it.
+
+    Plain namespaces rather than ``MagicMock``: the decoder probes
+    ``delta.audio`` with ``getattr(..., None)``, and a mock answers
+    every attribute with a truthy mock, which would make every text
+    chunk look like an audio object.
+    """
+    delta = SimpleNamespace(
+        content=content, tool_calls=None, reasoning=None,
+        reasoning_content=None, audio=audio, model_extra=None,
+    )
+    choice = SimpleNamespace(
+        delta=delta, finish_reason=finish_reason,
+        native_finish_reason=None, model_extra=None,
+    )
+    return SimpleNamespace(choices=[choice], usage=None, error=None,
+                           model_extra=None)
+
+
+def _openrouter_loop():
+    from shared.plugins.model_provider.openrouter.provider import OpenRouterProvider
+
+    provider = OpenRouterProvider()
+    provider._client = MagicMock()
+    provider._model_name = "openai/gpt-audio-mini"
+    provider._enable_thinking = False
+    return provider
+
+
+def _compat_loop():
+    from shared.plugins.model_provider.nebius.provider import NebiusProvider
+
+    provider = NebiusProvider()
+    provider._client = MagicMock()
+    provider._model_name = "some/audio-model"
+    provider._enable_thinking = False
+    provider._trace = lambda _msg: None
+    return provider
+
+
+def _run_loop(provider, chunks):
+    """Drive ``_stream_response`` over ``chunks``; return (media, response)."""
+    stream = MagicMock()
+    stream.__iter__ = lambda self: iter(chunks)
+    stream.close = MagicMock()
+    stream.response = None
+    provider._client.chat.completions.create = lambda **kw: stream
+    media = []
+
+    def on_chunk(item):
+        if isinstance(item, MediaDelta):
+            media.append(item)
+
+    response = provider._stream_response(messages=[], kwargs={}, on_chunk=on_chunk)
+    return media, response
+
+
+def _b64(raw: bytes) -> str:
+    return base64.b64encode(raw).decode()
+
+
+@pytest.mark.parametrize("loop", [_openrouter_loop, _compat_loop],
+                         ids=["openrouter", "openai_compat"])
+class TestTheLoopsHandTheDecoderALivePredicate:
+    """The loop-level half of #869, guarded by BEHAVIOUR.
+
+    `TestTheWordsRideTheFinalChunk` proves the decoder honours a
+    `wrote_text` callable it is handed.  It says nothing about what the
+    two streaming loops actually hand it -- and that is where the
+    subtle part lives: the end-of-audio marker lands MID-stream, so a
+    written answer may still be sitting in the loop's not-yet-flushed
+    accumulator, and a predicate snapshotted at loop start (or a bool)
+    would answer "spoke only" for a turn that also wrote.
+
+    These tests drive each real `_stream_response` over a fake wire and
+    read the result off the emitted chunks, so a refactor that keeps
+    the property passes (lambda or def, either name) and one that loses
+    it fails, whatever it is spelled like.
+    """
+
+    def test_text_written_after_audio_started_suppresses_the_transcript(self, loop):
+        """The order that breaks a snapshot: audio first, text second,
+        then the marker.  At the marker the text is in the accumulator
+        and nowhere else; only a live question sees it."""
+        media, response = _run_loop(loop(), [
+            _wire_chunk(audio={"transcript": "The sky "}),
+            _wire_chunk(audio={"data": _b64(b"one")}),
+            _wire_chunk(content="The sky is blue."),      # written, mid-utterance
+            _wire_chunk(audio={"transcript": "is blue."}),
+            _wire_chunk(audio={"data": _b64(b"two")}),
+            _wire_chunk(audio={"expires_at": 1788}),
+        ])
+        assert [(c.final, c.transcript) for c in media] == [(False, ""), (True, "")]
+        # History agrees: the written text stands, and is not doubled
+        # by a spoken Part carrying the same words.
+        assert [p.text for p in response.parts if p.text] == ["The sky is blue."]
+
+    def test_a_turn_that_only_spoke_delivers_the_words_through_the_loop(self, loop):
+        media, response = _run_loop(loop(), [
+            _wire_chunk(audio={"transcript": "The sky "}),
+            _wire_chunk(audio={"data": _b64(b"one")}),
+            _wire_chunk(audio={"transcript": "is blue."}),
+            _wire_chunk(audio={"data": _b64(b"two")}),
+            _wire_chunk(audio={"expires_at": 1788}),
+        ])
+        assert [(c.final, c.transcript) for c in media] == [
+            (False, ""), (True, "The sky is blue.")]
+        assert [p.text for p in response.parts if p.text] == ["The sky is blue."]
+
+    def test_the_flush_path_carries_the_words_too(self, loop):
+        """No marker: the stream just ends.  The loop's end-of-stream
+        flush must release the held chunk WITH the transcript, or a
+        provider that sends no marker leaves its clients deaf."""
+        media, _ = _run_loop(loop(), [
+            _wire_chunk(audio={"transcript": "Sure."}),
+            _wire_chunk(audio={"data": _b64(b"one")}),
+        ])
+        assert [(c.final, c.transcript) for c in media] == [(True, "Sure.")]
+
+    def test_the_flush_path_honours_written_text_too(self, loop):
+        """The flush release is a second call site; the predicate must
+        reach it as well, or a write-and-speak turn with no marker
+        delivers the words twice."""
+        media, response = _run_loop(loop(), [
+            _wire_chunk(audio={"data": _b64(b"one")}),
+            _wire_chunk(content="Written."),
+            _wire_chunk(audio={"transcript": "Spoken."}),
+        ])
+        assert [(c.final, c.transcript) for c in media] == [(True, "")]
+        assert [p.text for p in response.parts if p.text] == ["Written."]
