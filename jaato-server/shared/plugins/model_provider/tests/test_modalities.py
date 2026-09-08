@@ -206,6 +206,7 @@ def test_all_providers_expose_the_capability_contract():
         ("doubleword", "DoublewordProvider"),
         ("mimo", "MiMoProvider"),
         ("kimi", "KimiProvider"),
+        ("minimax", "MiniMaxProvider"),
     ]
     for pkg, cls_name in provider_modules:
         mod = importlib.import_module(

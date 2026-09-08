@@ -16,6 +16,7 @@ Each cell is a **wire-level** behavior the CI conformance guard asserts, not a l
 | `kimi` | ✅ | ✅ | — | — | ✅ | ✅ | — | ✅ | ✅ | ✅ | ✅ |
 | `lmstudio` | ✅ | ✅ | — | — | — | — | — | ✅ | ✅ | — | — |
 | `mimo` | ✅ | ✅ | — | — | ✅ | ✅ | — | ✅ | ✅ | ✅ | ✅ |
+| `minimax` | ✅ | ✅ | — | — | ✅ | ✅ | — | ✅ | ✅ | ✅ | ✅ |
 | `nebius` | ✅ | ✅ | — | — | ✅ | ✅ | — | ✅ | ✅ | ✅ | — |
 | `nim` | ✅ | ✅ | — | — | — | ✅ | — | ✅ | ✅ | ✅ | — |
 | `ollama` | ✅ | ✅ | — | — | — | — | — | ✅ | ✅ | — | — |
