@@ -347,7 +347,7 @@ class TestEveryInclusiveSeamConverts:
     """
 
     def test_openai_compatible_batch_path(self):
-        # nim / lmstudio / tensorrt_llm / triton / doubleword / ovhcloud / mimo /
+        # nim / lmstudio / tensorrt_llm / triton / doubleword / ovhcloud / mimo / kimi /
         # zhipuai_openai / nebius all inherit this one.
         from shared.plugins.model_provider._openai_compat.converters import (
             extract_usage,

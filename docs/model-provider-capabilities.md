@@ -13,6 +13,7 @@ Each cell is a **wire-level** behavior the CI conformance guard asserts, not a l
 | `doubleword` | ✅ | ✅ | — | — | ✅ | ✅ | — | ✅ | ✅ | ✅ | — |
 | `github_models` | — | — | — | — | — | ✅ | — | ✅ | ✅ | — | — |
 | `google_genai` | ✅ | ✅ | ✅ | ✅ | — | — | ✅ | ✅ | ✅ | — | — |
+| `kimi` | ✅ | ✅ | — | — | ✅ | ✅ | — | ✅ | ✅ | ✅ | ✅ |
 | `lmstudio` | ✅ | ✅ | — | — | — | — | — | ✅ | ✅ | — | — |
 | `mimo` | ✅ | ✅ | — | — | ✅ | ✅ | — | ✅ | ✅ | ✅ | ✅ |
 | `nebius` | ✅ | ✅ | — | — | ✅ | ✅ | — | ✅ | ✅ | ✅ | — |

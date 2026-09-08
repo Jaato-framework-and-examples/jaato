@@ -105,10 +105,10 @@ SESSION_PY = pathlib.Path(__file__).resolve().parents[1] / "jaato_session.py"
 #: (Azure inference, Copilot chat, Copilot Responses); ``claude_cli``
 #: carries two, one per CLI transport.
 #:
-#: ``_openai_compat/base.py`` stands in for nine providers: ``nim``,
+#: ``_openai_compat/base.py`` stands in for ten providers: ``nim``,
 #: ``nebius``, ``ovhcloud``, ``lmstudio``, ``tensorrt_llm``,
-#: ``doubleword``, ``triton``, ``zhipuai_openai`` and ``mimo`` all
-#: inherit that one streaming loop.
+#: ``doubleword``, ``triton``, ``zhipuai_openai``, ``mimo`` and ``kimi``
+#: all inherit that one streaming loop.
 TERMINATING_PROVIDERS = {
     "_openai_compat/base.py": 1,
     "anthropic/provider.py": 1,

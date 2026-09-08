@@ -64,6 +64,7 @@ def test_empty_config_reports_not_set():
     ("ovhcloud", "shared.plugins.model_provider.ovhcloud.env", {}),
     ("doubleword", "shared.plugins.model_provider.doubleword.env", {}),
     ("mimo", "shared.plugins.model_provider.mimo.env", {}),
+    ("kimi", "shared.plugins.model_provider.kimi.env", {}),
     ("nim", "shared.plugins.model_provider.nim.env", {}),
     # github_models' helper also takes an auth_method positional arg.
     ("github_models", "shared.plugins.model_provider.github_models.env",

@@ -203,7 +203,7 @@ def message_to_openai(
     # Default to user message.  Marshal inline_data parts into OpenAI
     # multimodal content blocks so a vision-declared model actually RECEIVES
     # the image (shared by nim/vllm/lmstudio/tensorrt_llm/zhipuai_openai/
-    # triton/nebius/ovhcloud/doubleword/mimo); text-only turns keep a plain-string
+    # triton/nebius/ovhcloud/doubleword/mimo/kimi); text-only turns keep a plain-string
     # content.
     #
     # The marshalling DISPATCHES ON MIME (#829).  This path used to send every

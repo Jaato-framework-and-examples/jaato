@@ -126,6 +126,19 @@ def _longest_prefix(table: Dict[str, Any], model: str) -> Optional[Any]:
     return best[1] if best else None
 
 
+def _configured_key_source(config: Optional[ProviderConfig]) -> Optional[str]:
+    """Where a key is configured ahead of the stored file: the profile
+    (``api_key`` top-level or in ``extra``), else the first env var set."""
+    import os
+
+    if config is not None and (config.api_key or (config.extra or {}).get("api_key")):
+        return "profile config"
+    for var in (ENV_MIMO_API_KEY, ENV_MIMO_VENDOR_API_KEY):
+        if os.environ.get(var):
+            return var
+    return None
+
+
 class MiMoProvider(OpenAICompatProvider):
     """Xiaomi MiMo provider over the OpenAI-compatible API.
 
@@ -367,33 +380,22 @@ class MiMoProvider(OpenAICompatProvider):
         counts; a stored credential file that exists but cannot be loaded
         surfaces its load error via ``on_message``.
         """
-        import os
         from .auth import try_load_credentials_with_reason
 
-        profile_key = None
-        if config is not None:
-            profile_key = config.api_key or (config.extra.get("api_key") if config.extra else None)
-        if profile_key:
-            if on_message:
-                on_message("Found MiMo API key (profile config)")
+        say = on_message or (lambda _m: None)
+        source = _configured_key_source(config)
+        if source:
+            say(f"Found MiMo API key ({source})")
             return True
-        for var in (ENV_MIMO_API_KEY, ENV_MIMO_VENDOR_API_KEY):
-            if os.environ.get(var):
-                if on_message:
-                    on_message(f"Found MiMo API key ({var})")
-                return True
-
         creds, load_error = try_load_credentials_with_reason()
         if creds and creds.api_key:
-            if on_message:
-                on_message("Found MiMo API key (stored credentials)")
+            say("Found MiMo API key (stored credentials)")
             return True
-        if load_error and on_message:
-            on_message(f"MiMo credentials file found but could not be loaded: {load_error}")
-            on_message(f"Run 'mimo-auth key <your_api_key>' to re-authenticate, or set {ENV_MIMO_API_KEY}.")
-        if not load_error and is_self_hosted(resolve_base_url()):
-            if on_message:
-                on_message(f"Self-hosted MiMo proxy ({resolve_base_url()}), no API key required")
+        if load_error:
+            say(f"MiMo credentials file found but could not be loaded: {load_error}")
+            say(f"Run 'mimo-auth key <your_api_key>' to re-authenticate, or set {ENV_MIMO_API_KEY}.")
+        elif is_self_hosted(resolve_base_url()):
+            say(f"Self-hosted MiMo proxy ({resolve_base_url()}), no API key required")
             return True
         if not allow_interactive:
             raise APIKeyNotFoundError(
