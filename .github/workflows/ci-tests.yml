@@ -114,6 +114,50 @@ jobs:
   # headers — install them first; graphviz covers the diagrams plugin's
   # render path.
   # ---------------------------------------------------------------
+  # ---------------------------------------------------------------
+  # Browser client (jaato-web). Type-checks against the TS SDK's built
+  # declarations, runs the framework-free protocol/store unit tests, and
+  # drives the real UI end-to-end against the scripted mock daemon
+  # (mock/daemon.ts speaks the wire protocol, so this exercises the same
+  # frames a python -m server --web-socket daemon would send).  No model
+  # provider or Python install is needed, which keeps the job cheap.
+  # ---------------------------------------------------------------
+  web-client:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: |
+            jaato-sdk-ts/package-lock.json
+            jaato-web/package-lock.json
+      - name: Install + build the TS SDK (declarations for the type-check)
+        working-directory: jaato-sdk-ts
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
+      - name: Install jaato-web
+        working-directory: jaato-web
+        run: npm ci --no-audit --no-fund
+      - name: Type-check
+        working-directory: jaato-web
+        run: npx tsc -p tsconfig.json --noEmit
+      - name: Unit tests (protocol, store)
+        working-directory: jaato-web
+        run: npx vitest run
+      - name: Production build
+        working-directory: jaato-web
+        run: npx vite build
+      - name: Install Playwright Chromium
+        working-directory: jaato-web
+        run: npx playwright install --with-deps chromium
+      - name: End-to-end against the mock daemon
+        working-directory: jaato-web
+        run: npx playwright test
+
   suite:
     name: suite (${{ matrix.leg.name }})
     runs-on: ubuntu-latest

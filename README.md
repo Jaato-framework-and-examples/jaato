@@ -374,7 +374,7 @@ jaato/
 │   ├── output_buffer.py           # Output rendering engine
 │   ├── pt_display.py              # Prompt toolkit display layer
 │   └── backend.py                 # IPC/WebSocket client backend
-├── web-client/                    # Web client (React/Vite/Tailwind)
+├── jaato-web/                     # Browser client (React 19 / Vite / Tailwind, on @jaato/sdk)
 ├── docs/                          # Comprehensive documentation (45+ docs)
 ├── examples/                      # Usage examples
 ├── out-of-tree-plugins/           # Third-party plugin template
