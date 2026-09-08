@@ -620,6 +620,18 @@ class InProcessClient:
             session_kwargs["preloaded_plugins"] = preloaded_plugins
         if tool_scopes:
             session_kwargs["tool_scopes"] = tool_scopes
+        # Spawn-time ``agent_params`` reach TWO consumers on the daemon path:
+        # the persona's ``{{param}}`` substitution (resolved above, at
+        # ``_resolve_agent_persona``) AND the ``{{!py:...}}`` prefetch scripts,
+        # which read them as ``RenderContext.agent_params`` when
+        # ``JaatoSession.configure`` expands the dynamic instructions.  The
+        # embedded path forwarded them to the first consumer only, so a
+        # persona whose prefetch reads ``context.agent_params`` aborted
+        # session-prep in-process with "agent_params.<key> missing" while the
+        # same profile ran under the daemon — an IPC-parity gap.
+        agent_params = _kwargs.get("agent_params")
+        if agent_params:
+            session_kwargs["agent_params"] = dict(agent_params)
         # Profile-derived session instructions (ex03 persona) + the typed
         # completion gate (ex04 byte-exact) — omit when unset so create_session
         # applies its own defaults.

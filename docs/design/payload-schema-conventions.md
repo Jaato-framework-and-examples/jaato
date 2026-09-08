@@ -138,6 +138,45 @@ The schema's `description` field names the prefetch script so
 maintainers updating the prefetch know to update the schema in
 the same change.
 
+#### 3.1.1b Every property is a `string` — the wire has already decided
+
+The symmetry of §1 stops at the type system. A completion payload is real
+JSON emitted by the model; a **spawn** payload is not JSON on the wire at
+all. `create_session` flattens `agent_params` into `key=value` argv tokens:
+
+```python
+# jaato_sdk/client/ipc.py
+if agent_params:
+    for key, value in agent_params.items():
+        args.append(f"{key}={value}")
+```
+
+So the daemon validates a dict whose every value is a string, and a property
+declared `integer` / `number` / `boolean` / `object` / `array` **can never
+pass**, no matter what the caller sends. The schema and the transport
+disagree, and the transport wins.
+
+Declare the type the wire delivers and keep the shape in a `pattern`:
+
+```json
+{"iteration": {"type": "string", "pattern": "^[0-9]+$"}}
+```
+
+then parse it where it is consumed (prefetch, processor, persona).
+
+Two reasons this convention is worth stating loudly rather than leaving to
+discovery. First, the natural instinct — "mirror the prefetch's keys *with
+their right types*" — produces exactly the unsatisfiable schema. Second, the
+runtime failure does not name the cause: the daemon logs
+`failed agent_params validation: '1' is not of type 'integer'` and **does not
+answer the request**, so the caller waits out its own 60s and reports
+`SessionNotConfirmed`, whose message says the session *may* have been created
+— which for this cause it never was. Measured 2026-09-08 on an SDK-driven
+cascade whose fix-loop stage typed `iteration` as an integer.
+
+`jaato-scaffold validate` reports this statically as
+`spawn_schema_type_unreachable`.
+
 #### 3.1.2 Strictness depends on framework integration
 
 Whether to set `additionalProperties: false` on a spawn schema is
