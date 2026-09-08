@@ -31,6 +31,7 @@ One correction to an older document in this tree: `docs/compare-rbac-profiles-fr
 lists AppArmor as a premium feature and `docs/compare-jaato-devin.md` calls jaato
 MIT. Both are stale. `jaato-server/server/apparmor.py` (about 3,000 lines) and
 `server/cgroups.py` ship in the free server, and `LICENSE` is BUSL-1.1.
+Correcting them, and the multimodal design table, is tracked as [WIP #866](https://github.com/Jaato-framework-and-examples/jaato/issues/866).
 
 ## The short answer
 
@@ -70,7 +71,7 @@ where you want the governance layer to live.**
   that turns a declarative "business law" spec into deny-by-default evaluators,
   mediated effects and anti-fabrication attestation checks. It does **not** add
   an identity model of its own (no IdP group to profile or tool mapping),
-  a tenant identifier or per-tenant quotas, sandboxing, prompt-injection
+  a tenant identifier or per-tenant quotas ([WIP #860](https://github.com/Jaato-framework-and-examples/jaato/issues/860)), sandboxing, prompt-injection
   detection, retention or any regulatory mapping, and several of its own backlog items are open.
 
 **Decision rule of thumb**
@@ -86,7 +87,10 @@ where you want the governance layer to live.**
 ## Scorecard
 
 Ratings: **●●●** ships and is usable as-is · **●●○** ships partially or as a seam
-you must complete · **●○○** hook only, you build the feature · **○○○** absent.
+you must complete · **●○○** hook only, you build the feature · **○○○** absent ·
+**WIP #n** the gap is tracked as an open jaato issue (those filed from this
+assessment are #857 to #868), so read it as work in progress rather than a
+missing feature.
 
 | Dimension | pi coding-agent | jaato free | jaato premium (on top of free) |
 |---|---|---|---|
@@ -94,29 +98,29 @@ you must complete · **●○○** hook only, you build the feature · **○○�
 | Agent-role scoping (what a given agent role may use) | ●○○ per-run `--tools` / `excludeTools`; no role files | ●●● profiles: `plugins`, `tool_scopes`, per-role permission policy, tighten-only inheritance, profile sets | ●●● + Daruma `authority.tools` default-deny |
 | Sandboxing / isolation | ●○○ documented container patterns; bubblewrap *example* | ●●● AppArmor per session, cgroups, egress proxy, runner subprocesses (Linux) | ●●● unchanged |
 | Tenant isolation | ○○○ one process per user; a container per tenant is your topology | ●●● two levels: per-session kernel confinement on one daemon (multi-tenant acceptance gate, integration-tested) or one daemon per tenant, each with its own bearer token | ●●● + gossip cluster, dashboard SSO and mTLS fronting many daemons |
-| Runtime limits (turns, tokens, cost, time) | ○○○ none; bash timeout is model-supplied | ●●● typed `budget_control` + `runtime_limits` + `max_turns` | ●●● + fork-budget carry-over |
-| Secrets / credentials | ●●○ 0600 `auth.json`, `!command` indirection; no scrubbing, full env passthrough to bash | ●●○ 0600 stores, `pass://`/`vault://` contract, opt-in env scrubbing, secret-safe repr | ●●● six resolver backends |
-| PII / redaction | ○○○ | ●○○ history + telemetry transformer seams | ●●● four-seat pseudonymisation, Presidio, sealed audit |
-| Data retention / residency | ○○○ (`--no-session` only); one JSONL per session under `~/.pi` | ●●○ plain-file persistence in a documented per-workspace layout; retention, eviction and housekeeping are deliberately left to the shop's own file-lifecycle policy; many local/EU providers | ●●○ unchanged; pseudonym table and sealed audit stream are additional records under the same policy |
-| Audit trail / traceability | ●●○ complete session JSONL tree with model + usage per message | ●●○ 114-event stream, token ledger, OTel/OpenInference, versioned session records | ●●● + attestation, provenance checks, sealed redaction audit |
+| Runtime limits (turns, tokens, cost, time) | ○○○ none; bash timeout is model-supplied | ●●● typed `budget_control` + `runtime_limits` + `max_turns`; parallel-tool width not yet a knob [WIP #862](https://github.com/Jaato-framework-and-examples/jaato/issues/862) | ●●● + fork-budget carry-over |
+| Secrets / credentials | ●●○ 0600 `auth.json`, `!command` indirection; no scrubbing, full env passthrough to bash | ●●○ 0600 stores, `pass://`/`vault://` contract, opt-in env scrubbing [WIP #863](https://github.com/Jaato-framework-and-examples/jaato/issues/863), secret-safe repr | ●●● six resolver backends |
+| PII / redaction | ○○○ | ●○○ history + telemetry transformer seams; profile `redact_content` key inert [WIP #858](https://github.com/Jaato-framework-and-examples/jaato/issues/858) | ●●● four-seat pseudonymisation, Presidio, sealed audit |
+| Data retention / residency | ○○○ (`--no-session` only); one JSONL per session under `~/.pi` | ●●○ plain-file persistence in a documented per-workspace layout; retention, eviction and housekeeping are deliberately left to the shop's own file-lifecycle policy; a per-session manifest for erasure tooling [WIP #861](https://github.com/Jaato-framework-and-examples/jaato/issues/861); many local/EU providers | ●●○ unchanged; pseudonym table and sealed audit stream are additional records under the same policy |
+| Audit trail / traceability | ●●○ complete session JSONL tree with model + usage per message | ●●○ 114-event stream, token ledger, OTel/OpenInference, versioned session records; tamper evidence [WIP #507](https://github.com/Jaato-framework-and-examples/jaato/issues/507) | ●●● + attestation, provenance checks, sealed redaction audit |
 | Interrogating a finished session (ask it why, replay from a point) | ●●○ `--session` / `--fork` resume the tree under current settings | ●●● `session.wake` under the persisted prompt, `resolve_fork_point`, `replay_messages`, `inject_prompt`, profile sets | ●●● + model-callable `interrogate_session` and replay workspaces |
 | Observability adapter | ●○○ vendor-neutral contracts, no OTel adapter, not threaded into the coding-agent SDK | ●●● OTel, Langfuse, Phoenix, cost spans | ●●● + per-server resource identity |
 | Human oversight (approve, stop, steer, ask) | ●●○ abort, steering queue, follow-ups; approval only via extension | ●●● permissions, out-of-band approval channels, clarification, plan events, completion gates, stop | ●●● + HandoffGate async approval primitive, park and resume |
-| Prompt-injection / untrusted content | ○○○ explicitly out of scope | ●●○ tagged untrusted boundary + system-prompt layer (soft) | ●●○ unchanged |
+| Prompt-injection / untrusted content | ○○○ explicitly out of scope | ●●○ tagged untrusted boundary + system-prompt layer (soft); `call_service` results not yet tagged [WIP #857](https://github.com/Jaato-framework-and-examples/jaato/issues/857) | ●●○ unchanged |
 | Context reduction | ●●● compaction, branch summaries, hooks | ●●● four GC plugins, result rewriting, deferred tools, cache plugins | ●●● (benchmark harness only) |
 | Knowledge storage and management | ●●○ skills (agentskills.io standard), prompt templates, `AGENTS.md` context files, packages; no catalog, memory or template engine | ●●● references catalog (local, URL, MCP, inline; auto/selectable; tags, transitive discovery, sandbox authorisation), template engine (Jinja2 and Mustache, indexed), curated memory with raw→validated lifecycle, prompt library (reads Claude skills), waypoints, subagent context sharing; embedding seam | ●●● + local sentence-transformers embedding provider and semantic matcher, ADR→ERI→module→skill knowledge hierarchy, auto-steering against instruction drift |
-| Model providers / enterprise gateways | ●●● ~30 incl. Bedrock, Vertex, Azure, Cloudflare gateway, Copilot | ●●● 19 incl. Vertex, OpenRouter, GitHub Models, NIM, EU and local; no Bedrock/Azure native | ●●● unchanged |
-| MCP | ○○○ by design | ●●● client (`.mcp.json`); not an MCP server | ●●● unchanged |
+| Model providers / enterprise gateways | ●●● ~30 incl. Bedrock, Vertex, Azure, Cloudflare gateway, Copilot | ●●● 19 incl. Vertex, OpenRouter, GitHub Models, NIM, EU and local; native Bedrock/Azure [WIP #508](https://github.com/Jaato-framework-and-examples/jaato/issues/508) | ●●● unchanged |
+| MCP | ○○○ by design | ●●● client (`.mcp.json`); jaato as an MCP server [WIP #864](https://github.com/Jaato-framework-and-examples/jaato/issues/864) | ●●● unchanged |
 | Service integration (REST / OpenAPI, outbound) | ○○○ no HTTP tool; `bash` + curl, or an extension | ●●● `service_connector`: OpenAPI/Swagger discovery, YAML pre-definition, Bruno import, schema-validated calls, dry-run preview, four auth types with secret URIs, header redaction, mock servers for e2e; `web_fetch`; inbound `webhook` | ●●● unchanged |
 | Multi-user server / identity | ○○○ experimental Unix-socket server, unauthenticated | ●●○ daemon, WS bearer token, `set_client_user` hook | ●●● OIDC, WS auth proxy, mTLS |
 | Delegating a permission decision to an external system (your RBAC / approval service) | ●○○ `tool_call` hook can call out synchronously | ●●● evaluators call a policy API; webhook and file channels suspend the session until the external decision arrives | ●●● + HandoffGate parks the tool, session may be unloaded and resumed on approval (demo: `reliability-exercise`) |
-| Identity model (which user may use which role, who approved) | ○○○ | ●○○ `set_client_user` hook feeds telemetry `user.id` only; no approver identity on events or session records | ●○○ OIDC login; `allowed_emails` / `allowed_groups` at the dashboard edge; no group-to-profile binding |
+| Identity model (which user may use which role, who approved) | ○○○ | ●○○ `set_client_user` hook feeds telemetry `user.id` only; approver identity on events and session records [WIP #859](https://github.com/Jaato-framework-and-examples/jaato/issues/859); tenant id and per-tenant quotas [WIP #860](https://github.com/Jaato-framework-and-examples/jaato/issues/860) | ●○○ OIDC login; `allowed_emails` / `allowed_groups` at the dashboard edge; no group-to-profile binding |
 | Multi-agent | ●○○ example extension (subprocess per subagent) | ●●● subagents, profiles, cascades, payload schemas, runner pool | ●●● + handoff, remote spawn (currently broken per backlog) |
 | Observability of cascades and orchestration | ●○○ per-task streaming and usage in the subagent example's TUI panel; no cross-process id, no spans | ●●● one `cascade_driver_id` across every stage, `cascade_events()` observer subscription, generated observer client, agent-graph attributes on OTel spans, gate and settle events, cascade budgets, sweep reports with cost | ●●● + live cascade timeline (`compile --monitor`), dashboard with Phoenix deep-links, per-server trace identity, drift monitor (in flux) |
 | Extensibility model | ●●● 33 lifecycle events, TS extensions via jiti | ●●● 5 entry-point groups, daemon hooks, enrichment pipeline, traits | ●●● scaffold verbs |
 | Scaffolding, introspection, discoverability | ●●○ excellent narrative docs, 13 SDK examples, TypeScript types, `/reload` hot reload, `--list-models`; no tool that interrogates the installed framework | ●●● `jaato-scaffold explain` (computed from the installed framework), `validate` (JSON, CI-usable), `new` with 8 self-checking archetypes and `--dry-run`, `jaato-doctor` preflight and session post-mortem, an AI-assistant skill that routes to those tools; companion architecture pack with 24 component docs, ten runnable SDK examples and side-by-side comparisons against seven SDKs | ●●● + `compile` verb on the same CLI |
-| Cross-language integration | ●●○ JSONL RPC/JSON modes; TS only | ●●● Python in-process, IPC, WS JSON, TS SDK (pre-npm) | ●●● + web components |
-| Supply chain / release integrity | ●●● pinned deps, shrinkwrap, `--ignore-scripts`, SHA256SUMS | ●●○ entry-point trust policy; TestPyPI today, PyPI intended once out of alpha; no signed releases yet | ●●○ delivered directly under the commercial licence, by design |
+| Cross-language integration | ●●○ JSONL RPC/JSON modes; TS only | ●●● Python in-process, IPC, WS JSON, TS SDK (pre-npm [WIP #868](https://github.com/Jaato-framework-and-examples/jaato/issues/868)) | ●●● + web components |
+| Supply chain / release integrity | ●●● pinned deps, shrinkwrap, `--ignore-scripts`, SHA256SUMS | ●●○ entry-point trust policy; TestPyPI today, PyPI intended once out of alpha; signed releases, SBOM and changelog [WIP #865](https://github.com/Jaato-framework-and-examples/jaato/issues/865) | ●●○ delivered directly under the commercial licence, by design |
 | Licence for internal use | ●●● MIT | ●●● BUSL grant allows | commercial |
 | Licence for resale / embedding | ●●● MIT | ○○○ forbidden until 2030-09 | commercial |
 
@@ -257,7 +261,8 @@ the authenticated id from `set_client_user` reaches only the telemetry
 `user.id` attribute and not the event stream or the session record, and
 premium's `allowed_emails` / `allowed_groups` are checked at the dashboard
 edge only. "Identity model" in
-the rest of this document means that gap, not the delegation seam.
+the rest of this document means that gap, not the delegation seam; the
+approver-identity half is tracked as [WIP #859](https://github.com/Jaato-framework-and-examples/jaato/issues/859).
 
 **jaato premium.** Daruma (`jaato_premium/scaffold/daruma/`, exposed as
 `jaato-scaffold compile spec.yaml`) compiles a YAML domain spec into a profile, a
@@ -315,7 +320,7 @@ login. What is not in the data model is a tenant *identifier*: the bearer
 token says "may drive this daemon", not which tenant, per-tenant quotas are
 not aggregated in-daemon, and the design records that the daemon process
 itself can still read every workspace's `.jaato/` (a daemon-level profile is
-deferred).
+deferred). The identifier and per-tenant quotas are tracked as [WIP #860](https://github.com/Jaato-framework-and-examples/jaato/issues/860).
 
 Limits: Linux only; no container-per-session executor; no seccomp; the
 `apparmor_parser` sudoers rule is operator work.
@@ -340,8 +345,8 @@ validated `memory_max_mb`, `pids_max`, `cpu_weight`, `tool_timeout_seconds`,
 tighten it). Interactive shell lifetimes and reaper. Parallel tools capped at 8.
 Rate-limit retry env (`AI_RETRY_*`). Bounded IPC event queue with lossy media
 and essential-event classes. `PayloadExceedsContextError` refuses a doomed
-request. Gaps: budgets are per session, not per user or tenant; the 8-way tool
-cap is not configurable.
+request. Gaps: budgets are per session, not per user or tenant ([WIP #860](https://github.com/Jaato-framework-and-examples/jaato/issues/860)); the 8-way
+tool cap is not configurable ([WIP #862](https://github.com/Jaato-framework-and-examples/jaato/issues/862)).
 
 **jaato premium.** `fork_budget.py` closes a real escalation: a fork of an
 exhausted session previously "came back with a FRESH, full ceiling", and the
@@ -365,7 +370,7 @@ URIs in profile `env:` stay unresolved on disk and are resolved daemon-side at
 spawn; unresolved URIs fail loud. `shared/secret_scrub.py` strips
 `*_API_KEY`, `*_TOKEN`, `*_SECRET` and friends from subprocess and MCP server
 environments, but **only when a profile opts in** ("deliberately no implicit
-default set"). `shared/secret_repr.py` prevents keys leaking through `repr()`
+default set"; a validate-time warning or a default-on posture is [WIP #863](https://github.com/Jaato-framework-and-examples/jaato/issues/863)). `shared/secret_repr.py` prevents keys leaking through `repr()`
 after a real incident (#721). The documented contract "never pass a credential
 as an `agent_param`" exists because rendered personas are now persisted. The
 free tree ships the URI *contract*; the resolver implementations are a premium
@@ -396,7 +401,7 @@ defaults off.
 canonical history never holds raw values) and `set_raw_view_transformer()`; a
 telemetry redactor chain and `JAATO_TELEMETRY_REDACT_CONTENT` (note: the
 profile key `plugin_configs.telemetry.redact_content` is recorded as inert in
-`shared/env_scope.py`; only the env var works). Session records live under
+`shared/env_scope.py`; only the env var works, tracked as [WIP #858](https://github.com/Jaato-framework-and-examples/jaato/issues/858)). Session records live under
 `<workspace>/.jaato/sessions/`, logs under `.jaato/logs/`, traces where the
 profile's `trace:` block says. **Retention is delegated on purpose.**
 Everything is persisted as plain files in a documented layout, and the
@@ -406,7 +411,8 @@ backup and legal-hold tooling) applies to these paths the same way it
 applies to any other application's files. `session.delete` exists for a
 targeted removal. The consequence to plan for is that data-subject erasure
 across sessions, logs, traces and telemetry exports is a search-and-delete
-your policy tooling performs over known paths, not a framework verb. No phone-home of any kind (no analytics libraries in the
+your policy tooling performs over known paths, not a framework verb; a
+per-session manifest of those paths is [WIP #861](https://github.com/Jaato-framework-and-examples/jaato/issues/861). No phone-home of any kind (no analytics libraries in the
 tree; telemetry defaults off). Data residency options are broad: fully local
 (`ollama`, `lmstudio`, `vllm`, `tensorrt_llm`, `triton`, `chrome_ai`) and EU
 (`ovhcloud`, `nebius`).
@@ -468,7 +474,8 @@ the same primitives as model-callable tools (`interrogate_session`,
 the capability.
 
 Gaps: no actor identity
-on events, no hash chain or signing, no SIEM exporter, no pricing data shipped.
+on events ([WIP #859](https://github.com/Jaato-framework-and-examples/jaato/issues/859)), no hash chain or signing ([WIP #507](https://github.com/Jaato-framework-and-examples/jaato/issues/507)), no SIEM exporter, no
+pricing data shipped.
 
 **jaato premium.** Daruma attestation guards check a model's completion receipt
 against the tool-call ledger; `provenance` and `provenance_array` generate
@@ -482,7 +489,8 @@ refactor. Still no immutable event store or signed trail.
 ## 9. EU AI Act mapping
 
 Neither product mentions the EU AI Act, ISO 42001, NIST AI RMF or SOC 2
-anywhere (grep across all three trees is empty). What follows maps the
+anywhere (grep across all three trees is empty); an obligations map for jaato
+is [WIP #867](https://github.com/Jaato-framework-and-examples/jaato/issues/867). What follows maps the
 *deployer-side* obligations most harness builders will meet (the Act's high-risk
 provisions, Articles 9–15, and the deployer duties in Article 26) to primitives.
 Whether a given harness is high-risk is a legal determination this document
@@ -653,7 +661,8 @@ does preflight and post-mortems.
 
 pi: "No MCP" by design; you write the bridge. jaato: full MCP client
 (`.mcp.json`, per-server prefixing, secret-name scrubbing of MCP subprocess
-env, results marked untrusted). Neither exposes itself as an MCP server.
+env, results marked untrusted). Neither exposes itself as an MCP server; for jaato
+that is [WIP #864](https://github.com/Jaato-framework-and-examples/jaato/issues/864).
 
 ### Building the first harness
 
@@ -780,7 +789,7 @@ marked `TRAIT_UNTRUSTED_CONTENT`, while `web_fetch`, `web_search` and MCP
 results are. An external API body is untrusted by the same reasoning as a
 web page, so a harness calling third-party services should either add the
 trait or accept that the prompt-injection boundary does not wrap those
-results today.
+results today. Tracked as [WIP #857](https://github.com/Jaato-framework-and-examples/jaato/issues/857).
 
 **jaato premium** adds nothing here beyond the secret-resolver backends the
 auth layer can draw on.
@@ -789,7 +798,7 @@ auth layer can draw on.
 
 pi is TypeScript only; other languages talk JSONL over stdin/stdout. jaato has
 Python in-process, Python IPC/WS SDK, a TypeScript SDK (pre-release, not on npm,
-40 tests), a React web client, a TUI, and premium web components
+40 tests; publication is [WIP #868](https://github.com/Jaato-framework-and-examples/jaato/issues/868)), a React web client, a TUI, and premium web components
 (`<jaato-task>`, `<jaato-profile>`). Neither ships a Slack or Teams client;
 jaato's `ClientType.CHAT` presentation contract and expandable-content
 negotiation make one a days-scale task.
@@ -872,11 +881,11 @@ its sessions and spans but not to the person who authorised it.
 | | pi | jaato free | jaato premium |
 |---|---|---|---|
 | Dependency policy | exact pins enforced, `min-release-age=2`, shrinkwrap shipped, lifecycle-script allowlist, `npm audit signatures` scheduled | Python extras; entry-point allowlist + shadow policy | private git dependency |
-| Release artefacts | npm packages, Bun binaries, `SHA256SUMS` (checksums, no Sigstore/GPG), reproducible-from-source path | three TestPyPI publish workflows (`sdk`, `server`, `tui`) with a version-exists guard; PyPI is the stated destination once the alpha label comes off; no signed releases yet; `install.py` installer | direct delivery under the commercial licence (maintainer-stated intent; no public channel by design) |
+| Release artefacts | npm packages, Bun binaries, `SHA256SUMS` (checksums, no Sigstore/GPG), reproducible-from-source path | three TestPyPI publish workflows (`sdk`, `server`, `tui`) with a version-exists guard; PyPI is the stated destination once the alpha label comes off; signed releases and SBOM [WIP #865](https://github.com/Jaato-framework-and-examples/jaato/issues/865); `install.py` installer | direct delivery under the commercial licence (maintainer-stated intent; no public channel by design) |
 | Tests | 535 test files (269 in coding-agent) | 767 test files, about 13,000 test functions | 63 files, about 1,000 tests, uneven (PII 168, secrets 1) |
 | Guards | biome, pinned-dep, entry-graph and shrinkwrap checks | required `contract-guards` CI job: protocol conformance, provider capability conformance, cyclomatic ratchet (≤15, 416 baselined), env-scope catalog ratchet | — |
 | Docs | 32 files / 12.6k lines in coding-agent, candid about limits | about 140 docs, about 70k lines, design docs record incidents; plus the companion architecture pack (24 component docs, ten runnable SDK examples, comparisons against seven SDKs and three platforms) | 18 docs, one operator doc stale |
-| Cadence | 275 releases since 2025-11-25, changelog per release | no changelog; alpha classifier; two very large files (`session_manager.py` 557 KB, `core.py` 340 KB) | alpha; 77 commits |
+| Cadence | 275 releases since 2025-11-25, changelog per release | no changelog ([WIP #865](https://github.com/Jaato-framework-and-examples/jaato/issues/865)); alpha classifier; two very large files (`session_manager.py` 557 KB, `core.py` 340 KB) | alpha; 77 commits |
 | Governance | single maintainer copyright; new-contributor issues auto-closed | single licensor | single licensor |
 
 Both are young. pi's strength is disciplined packaging and a stable, documented
@@ -909,25 +918,25 @@ conditions of adoption, not treat their absence as a design choice.
 | Actor identity on approvals and events | build | build (days; hook exists) | partial (`X-Jaato-User` at edge) |
 | Agent-role scoping (tools, limits, policy per role) | build | ships (profiles) | ships + Daruma |
 | Hooking your approval / RBAC service into permission decisions | build (`tool_call` extension) | configure (evaluator or webhook/file channel) | configure; park and resume demoed |
-| Identity model (IdP group to role, approver on the record) | build | build (hook exists) | partial (OIDC login, edge allowlist) |
-| Tenant isolation | container per tenant, your topology | ships (per-session confinement on one daemon, or daemon per tenant with its own token) | ships + cluster fronting; tenant id still a reserved field |
+| Identity model (IdP group to role, approver on the record) | build | build (hook exists); approver on the record [WIP #859](https://github.com/Jaato-framework-and-examples/jaato/issues/859) | partial (OIDC login, edge allowlist) |
+| Tenant isolation | container per tenant, your topology | ships (per-session confinement on one daemon, or daemon per tenant with its own token); tenant id and quotas [WIP #860](https://github.com/Jaato-framework-and-examples/jaato/issues/860) | ships + cluster fronting; tenant id still a reserved field |
 | Kernel or container confinement | deploy a container/VM | ships on Linux | ships |
 | Turn / token / cost / time limits | build | ships | ships |
-| Secret scrubbing from tool env | build via `spawnHook` | configure (opt-in) | configure |
+| Secret scrubbing from tool env | build via `spawnHook` | configure (opt-in; [WIP #863](https://github.com/Jaato-framework-and-examples/jaato/issues/863)) | configure |
 | Secret manager integration | `!command` | write a resolver or buy premium | ships |
 | PII pseudonymisation | build | build on seam (weeks) | ships |
 | Retention and purge | build | apply your storage policy to the documented file layout (by design) | same |
-| Data-subject erasure across sessions, logs and telemetry | build | build (search-and-delete over known paths) | build |
+| Data-subject erasure across sessions, logs and telemetry | build | build (search-and-delete over known paths; manifest [WIP #861](https://github.com/Jaato-framework-and-examples/jaato/issues/861)) | build |
 | OpenTelemetry export | write adapter; verify SDK threading | ships | ships |
-| Tamper-evident audit log | build | build | partial (sealed redaction audit) |
+| Tamper-evident audit log | build | build ([WIP #507](https://github.com/Jaato-framework-and-examples/jaato/issues/507)) | partial (sealed redaction audit) |
 | Prompt-injection defence | build | soft boundary ships; classifier build | same |
-| MCP client | build | ships | ships |
+| MCP client | build | ships; MCP server [WIP #864](https://github.com/Jaato-framework-and-examples/jaato/issues/864) | ships |
 | Knowledge catalog, templates, curated memory | build (skills and prompts only) | ships; bring an embedding provider for semantic lookup | ships with local embeddings |
 | Calling internal REST services with schema, auth and validation | build (curl in bash, or a custom tool) | ships (`service_connector`, OpenAPI discovery, mocks) | ships |
 | Watching a whole cascade as one thing | build (correlate JSONL files by hand) | ships (`cascade_events`, observer archetype, agent-graph spans) | ships + live timeline and dashboard |
 | Finding out what the installed framework can do, and validating config before a run | read the docs and types | `jaato-scaffold explain` / `validate` / `new --dry-run`, `jaato-doctor` | same, plus `compile` |
 | Multi-user server with auth | build | daemon + token ships; SSO build | ships (OIDC) |
-| Regulatory documentation | build | build | build |
+| Regulatory documentation | build | build (obligations map [WIP #867](https://github.com/Jaato-framework-and-examples/jaato/issues/867)) | build |
 
 ## 17. Risks to weigh
 
@@ -946,13 +955,15 @@ conditions of adoption, not treat their absence as a design choice.
 **jaato free**
 
 - BUSL licence; single licensor for both tiers.
-- Alpha status, no changelog, very large core modules; pin a version and own
-  the fork discipline. Packages reach TestPyPI today; PyPI publication is
-  stated intent for the exit from alpha, so pin by commit until then.
+- Alpha status, no changelog ([WIP #865](https://github.com/Jaato-framework-and-examples/jaato/issues/865)), very large core modules; pin a
+  version and own the fork discipline. Packages reach TestPyPI today; PyPI
+  publication is stated intent for the exit from alpha, so pin by commit until
+  then.
 - IPC socket is unauthenticated by design; multi-user must go through
   WebSocket.
 - Secret scrubbing and telemetry redaction are opt-in; a profile that forgets
-  them leaks. One documented inert profile key for redaction.
+  them leaks ([WIP #863](https://github.com/Jaato-framework-and-examples/jaato/issues/863)). One documented inert profile key for redaction
+  ([WIP #858](https://github.com/Jaato-framework-and-examples/jaato/issues/858)).
 - Linux-only confinement; Windows/macOS deployments fall back to path policy
   only.
 
@@ -986,6 +997,6 @@ MCP bridge and a multi-user service are all yours, realistically 3–6
 engineer-months before parity with what jaato free ships today.
 
 Either way, the three things nobody ships — approver identity in the audit
-record, data-subject erasure tooling, and the AI Act documentation set —
-should be on the plan from day one; retention itself is a storage-policy
-task on jaato's plain-file layout.
+record ([WIP #859](https://github.com/Jaato-framework-and-examples/jaato/issues/859)), data-subject erasure tooling ([WIP #861](https://github.com/Jaato-framework-and-examples/jaato/issues/861)), and the AI Act
+documentation set ([WIP #867](https://github.com/Jaato-framework-and-examples/jaato/issues/867)) — should be on the plan from day one; retention
+itself is a storage-policy task on jaato's plain-file layout.
