@@ -402,13 +402,106 @@ def _wrap_bullet(text: str, indent: int, glyph: str = "-") -> List[str]:
 
 # --------------------------------------------------------------- runtime
 
+# ``runtime_limits`` fields, by the layer that ENFORCES them.  The split is
+# the class docstring's own; naming it here rather than re-deriving keeps
+# one description of each field and one place to add the next one.
+_RUNTIME_LIMIT_FIELDS = (
+    ("memory_max_mb", "kernel", "cgroup v2 memory.max — OOM-kills the slice"),
+    ("pids_max", "kernel", "cgroup v2 pids.max — bounds fork/thread count"),
+    ("cpu_weight", "kernel", "cgroup v2 cpu.weight — fair-share, 1..10000"),
+    ("tool_timeout_seconds", "cli/shell",
+     "subprocess.run(timeout=) per tool call"),
+    ("max_output_bytes", "cli/shell", "truncates captured stdout/stderr"),
+    ("max_parallel_tools", "session",
+     "width of the tool thread pool (and of the token-count fan-out)"),
+)
+
+
+def _runtime_limits_report() -> Dict[str, Any]:
+    """Machine-readable ``runtime_limits`` summary for ``explain runtime``.
+
+    Reads :mod:`shared.runtime_limits` — the dataclass's own fields, the
+    framework's concurrency default, and the isolated-subagent defaults —
+    so an added field or a changed default shows up here without an edit.
+
+    Returns:
+        ``{"fields": [{name, layer, effective, note}, ...],
+           "isolated_subagent_defaults": {...}}``.  ``effective`` is what
+        applies when NO profile declares the field.
+    """
+    from shared import runtime_limits as rl
+
+    unset = "host default (no limit)"
+    effective = {
+        "max_parallel_tools": (
+            f"{rl.DEFAULT_MAX_PARALLEL_TOOLS} (framework default)"
+        ),
+    }
+    iso = rl.ISOLATED_SUBAGENT_DEFAULT_RUNTIME_LIMITS
+    return {
+        "fields": [
+            {
+                "name": name,
+                "layer": layer,
+                "effective": effective.get(name, unset),
+                "note": note,
+            }
+            for name, layer, note in _RUNTIME_LIMIT_FIELDS
+        ],
+        "isolated_subagent_defaults": {
+            name: getattr(iso, name)
+            for name, _layer, _note in _RUNTIME_LIMIT_FIELDS
+        },
+        "inheritance": {
+            "ceilings": "child REPLACES the block (parents must agree)",
+            "max_parallel_tools": "MIN across every layer that declares it",
+        },
+    }
+
+
+def _runtime_limits_lines(report: Dict[str, Any]) -> List[str]:
+    """Render :func:`_runtime_limits_report` as the ``explain runtime`` block."""
+    lines = [
+        "RUNTIME LIMITS  (profile `runtime_limits:` — what a session may CONSUME)",
+        "  field                 enforced by  effective when unset",
+    ]
+    for row in report["fields"]:
+        lines.append(
+            f"  {row['name']:<21} {row['layer']:<12} {row['effective']}"
+        )
+        lines.append(f"  {'':<21} {'':<12} {row['note']}")
+    iso = report["isolated_subagent_defaults"]
+    declared = ", ".join(
+        f"{k}={v}" for k, v in iso.items() if v is not None
+    )
+    lines.append(
+        f"  agent_params.isolated=true fills any field the profile omits: {declared}"
+    )
+    lines.append(
+        "  inheritance: the ceilings are child-REPLACES (parents must agree);"
+    )
+    lines.append(
+        "               max_parallel_tools is MIN across every layer that sets it,"
+    )
+    lines.append(
+        "               so a child may only ever narrow the pool it was spawned under."
+    )
+    return lines
+
+
 def runtime() -> Rendered:
     """How a session runs + how to DEBUG it — entities, the workspace flow, the
     log map, and the one-command session diagnostic.
 
+    Also reports the ``runtime_limits`` block — what a session may CONSUME —
+    introspected from :mod:`shared.runtime_limits` (fields, enforcement layer,
+    framework defaults) so it tracks the installed framework rather than a
+    prose copy that drifts.
+
     Curated (the runtime architecture is not in the plugin registry).  Pairs with
     ``jaato-doctor --session <id>``, which applies this map to a live session.
     """
+    limits = _runtime_limits_report()
     data = {
         "entities": {
             "daemon": "long-lived singleton on the IPC socket; daemon-tier plugins, "
@@ -437,6 +530,7 @@ def runtime() -> Rendered:
             "daemon log": "daemon-tier (e.g. /tmp/jaato.log)",
         },
         "debug": "jaato-doctor --session <id|latest> --workspace DIR",
+        "runtime_limits": limits,
     }
     text = (
         "jaato runtime — entities, workspace flow, logs, how to debug\n"
@@ -467,7 +561,8 @@ def runtime() -> Rendered:
         "DEBUG A SESSION (one command — reads the logs above):\n"
         "  jaato-doctor --session <id|latest> --workspace DIR\n"
         "  -> reports whether the runner-tier path plugins resolved the workspace\n"
-        "     (PASS=<ws>) or got workspace=none (FAIL + the fix), plus the log map.\n"
+        "     (PASS=<ws>) or got workspace=none (FAIL + the fix), plus the log map.\n\n"
+        + "\n".join(_runtime_limits_lines(limits)) + "\n"
     )
     return data, text
 
@@ -1421,8 +1516,9 @@ def profile() -> Rendered:
         "    completion_payload_schema,   value and overrides; `null`/absent reads as unset and\n"
         "    spawn_payload_schema         inherits.\n"
         "    max_turns,                   MOST RESTRICTIVE wins — a child may only TIGHTEN a\n"
-        "    budget_control.limits        ceiling, never raise the one it was spawned under.\n"
-        "                                 (budget_control.degrade is child-REPLACES.)\n"
+        "    budget_control.limits,       ceiling, never raise the one it was spawned under.\n"
+        "    runtime_limits.              (budget_control.degrade is child-REPLACES, and so are\n"
+        "      max_parallel_tools         runtime_limits' other, kernel-enforced ceilings.)\n"
         "    suppress_base_instructions,  UNION / OR — STICKY: a piece any layer drops stays\n"
         "    apparmor                     dropped, and a confined parent can't be un-confined.\n"
         "\n  empty vs listed `plugins` (a REQUIRED key — authors must pick):\n"

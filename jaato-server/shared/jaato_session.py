@@ -74,6 +74,7 @@ logger = logging.getLogger(__name__)
 from jaato_sdk.events import MODEL_MEDIA_CALL_ID       # noqa: F401  (re-export)
 
 from .ai_tool_runner import ToolExecutor
+from .runtime_limits import DEFAULT_MAX_PARALLEL_TOOLS
 from .session_context import set_current_session
 from .tool_id_map import StreamScrubber
 from .retry_utils import with_retry, RequestPacer, RetryCallback, RetryConfig, is_context_limit_error
@@ -604,6 +605,11 @@ class JaatoSession:
         self._executor: Optional[ToolExecutor] = None
         self._tools: Optional[List[ToolSchema]] = None
         self._system_instruction: Optional[str] = None
+        # Width of this session's tool thread pool (#862), from the
+        # profile's ``runtime_limits.max_parallel_tools``.  ``None`` =
+        # nothing declared one, so :data:`DEFAULT_MAX_PARALLEL_TOOLS`
+        # applies; see :meth:`_parallel_worker_cap`.
+        self._max_parallel_tools: Optional[int] = None
         # Per-session AppArmor reference-fragment authorizer.  Set by
         # JaatoServer.set_reference_authorizer() after WS provisions an
         # AppArmor profile.  ``None`` means no kernel layer to mutate
@@ -2282,6 +2288,7 @@ class JaatoSession:
         agent_params: Optional[Dict[str, Any]] = None,
         completion_processors: Optional[List[Any]] = None,
         tool_scopes: Optional[Dict[str, List[str]]] = None,
+        max_parallel_tools: Optional[int] = None,
         tools: Optional[List[str]] = None,  # DEPRECATED alias for ``plugins``
     ) -> None:
         """Configure the session with plugins and instructions.
@@ -2320,6 +2327,12 @@ class JaatoSession:
                 path for this session.  Used by fork-replay to point a
                 temp session at a worktree snapshot without affecting other
                 sessions sharing the same runtime.
+            max_parallel_tools: Ceiling on how many tool calls this session
+                may execute concurrently (profile
+                ``runtime_limits.max_parallel_tools``, #862).  ``None``
+                applies :data:`shared.runtime_limits.DEFAULT_MAX_PARALLEL_TOOLS`.
+                Orthogonal to ``JAATO_PARALLEL_TOOLS``, which decides
+                WHETHER to go parallel at all; this decides how wide.
             tools: DEPRECATED alias for ``plugins`` (it always took plugin
                 names, never tool names). Pass ``plugins=`` instead; ``tools=``
                 still works with a one-time deprecation warning. ``plugins``
@@ -2380,6 +2393,9 @@ class JaatoSession:
                 "Budget control active: limits=%s, %d degrade rung(s)",
                 dict(budget_control.limits), len(budget_control.degrade),
             )
+
+        # Tool-pool width (#862).
+        self._apply_parallel_tool_cap(max_parallel_tools)
 
         if tier_config is not None:
             self._tier_config = tier_config
@@ -3483,7 +3499,11 @@ class JaatoSession:
         cache = self._runtime.instruction_token_cache
 
         def _background_count() -> None:
-            max_workers = min(len(cache_misses), 8)
+            # Same session-wide ceiling as tool execution: these workers
+            # are concurrent PROVIDER calls, so a profile that narrowed
+            # its pool because the upstream is rate-limited meant this
+            # fan-out too.
+            max_workers = self._parallel_worker_cap(len(cache_misses))
             with ThreadPoolExecutor(max_workers=max_workers) as pool:
                 def _count_one(req: _TokenCountRequest) -> None:
                     try:
@@ -6926,6 +6946,9 @@ NOTES
 
         Parallel execution is enabled by default but can be disabled via the
         JAATO_PARALLEL_TOOLS environment variable (set to 'false' or '0').
+        How WIDE the pool is, when it runs, is a separate question the
+        profile answers with ``runtime_limits.max_parallel_tools`` (#862)
+        — see :meth:`_parallel_worker_cap`.
         """
         # Set activity phase: we're executing tools
         self._set_activity_phase(ActivityPhase.EXECUTING_TOOL)
@@ -6986,6 +7009,49 @@ NOTES
 
         return tool_results
 
+    def _apply_parallel_tool_cap(self, width: Optional[int]) -> None:
+        """Install the profile's tool-pool ceiling (#862).
+
+        Stored raw: ``None`` stays ``None`` so :meth:`_parallel_worker_cap`
+        can tell "nobody declared one" from "somebody declared the
+        default", which is what lets ``jaato-scaffold explain runtime``
+        say where the effective value came from.
+
+        Args:
+            width: ``runtime_limits.max_parallel_tools``, or ``None``.
+        """
+        if width is None:
+            return
+        self._max_parallel_tools = int(width)
+        logger.info(
+            "Tool concurrency capped at %d worker(s) by "
+            "runtime_limits.max_parallel_tools",
+            self._max_parallel_tools,
+        )
+
+    def _parallel_worker_cap(self, pending: int) -> int:
+        """Thread-pool width for *pending* concurrent units of work.
+
+        One place answers this for every pool the session opens, so the
+        profile's ceiling cannot apply to one of them and not the other.
+
+        The value is ``min(pending, ceiling)`` where *ceiling* is the
+        profile's ``runtime_limits.max_parallel_tools`` when one was
+        declared and :data:`~shared.runtime_limits.DEFAULT_MAX_PARALLEL_TOOLS`
+        otherwise — the literal 8 this replaced (#862).  Floored at 1
+        because ``ThreadPoolExecutor(max_workers=0)`` raises, and a caller
+        that reached here with nothing pending wants a pool it can close,
+        not an exception.
+
+        Args:
+            pending: How many items are about to be submitted.
+
+        Returns:
+            A worker count of at least 1.
+        """
+        ceiling = self._max_parallel_tools or DEFAULT_MAX_PARALLEL_TOOLS
+        return max(1, min(pending, ceiling))
+
     def _execute_function_calls_parallel(
         self,
         function_calls: List[FunctionCall],
@@ -6994,8 +7060,9 @@ NOTES
     ) -> List[ToolResult]:
         """Execute function calls in parallel using a thread pool.
 
-        All function calls are started concurrently. Results are collected
-        and returned in the original order.
+        All function calls are started concurrently, up to the width
+        :meth:`_parallel_worker_cap` allows; the rest queue behind them.
+        Results are collected and returned in the original order.
         """
         # Signal UI to flush before starting parallel tools
         if self._ui_hooks and on_output:
@@ -7016,7 +7083,7 @@ NOTES
 
         # Execute all tools in parallel
         results: Dict[str, _ToolExecutionResult] = {}
-        max_workers = min(len(function_calls), 8)  # Cap at 8 concurrent tools
+        max_workers = self._parallel_worker_cap(len(function_calls))
 
         # Capture interactive plugin channels from the spawning thread.
         # Thread-local channels (set by configure_for_subagent) are only

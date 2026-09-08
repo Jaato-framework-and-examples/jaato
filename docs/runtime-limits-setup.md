@@ -248,7 +248,8 @@ Add a `runtime_limits` field to any session profile (`.jaato/profiles/<name>.jso
     "pids_max": 128,
     "cpu_weight": 50,
     "tool_timeout_seconds": 60,
-    "max_output_bytes": 262144
+    "max_output_bytes": 262144,
+    "max_parallel_tools": 2
   }
 }
 ```
@@ -262,12 +263,17 @@ Add a `runtime_limits` field to any session profile (`.jaato/profiles/<name>.jso
 | `cpu_weight` | int 1–10000 | Kernel | Written to `cpu.weight` (default 100). Relative scheduling weight against sibling cgroups. |
 | `tool_timeout_seconds` | float (positive) | App | Wall-clock cap on each subprocess tool call. SIGTERM with 2s grace, then SIGKILL. |
 | `max_output_bytes` | int (positive) | App | Override of the default stdout/stderr cap in CLI tool results. |
+| `max_parallel_tools` | int 1–256 | App | How many tool calls the session may run concurrently (default 8). Narrow it when `pids_max` is small — eight simultaneous `cli` subprocesses under a tight pids ceiling fail non-deterministically — or when the service behind the tools is rate-limited. `JAATO_PARALLEL_TOOLS` still decides *whether* to go parallel; this decides *how wide*. |
 
 All fields are optional — set only the ones you want to enforce. Validation runs at profile load time, so typos and out-of-range values fail fast with a clear error rather than crashing mid-session.
 
 ### Inheritance
 
-`runtime_limits` participates in profile inheritance with **scalar-override** semantics, same as `gc`. Multiple parents must agree (or the child must override) to avoid a conflict error.
+The kernel-enforced ceilings participate in profile inheritance with **scalar-override** semantics, same as `gc`: multiple parents must agree (or the child must override) to avoid a conflict error.
+
+`max_parallel_tools` is **most-restrictive-wins** instead — the minimum across every layer that declares it, like `max_turns`. A child may narrow the pool, never widen it, and two parents that differ only in the width are resolved by `min()` rather than reported as a conflict.
+
+`jaato-scaffold explain runtime` prints the full block, each field's enforcement layer, and the value that applies when nothing declares one.
 
 ```json
 {

@@ -498,6 +498,7 @@ def build_session_envelope(
     env_overrides: dict = {}
     model_tiers_dict: Optional[Dict[str, Any]] = None
     budget_control_dict: Optional[Dict[str, Any]] = None
+    max_parallel_tools: Optional[int] = None
 
     if profile is not None:
         # Same source the bootstrap gate uses (core._profile_binds_a_model):
@@ -542,6 +543,15 @@ def build_session_envelope(
         # The profile holds a parsed ``BudgetControlConfig``; the wire
         # carries its re-serialised dict (runner re-parses + revalidates).
         _budget = getattr(profile, "budget_control", None)
+        # Envelope v6 (#862): the tool-pool width.  The sibling app-layer
+        # caps travel by env var on the cold-spawn path below, which a
+        # pool slot -- forked before this session existed -- never sees;
+        # this one rides the envelope so pool-served and cold-spawned
+        # sessions get the same ceiling.
+        max_parallel_tools = getattr(
+            getattr(profile, "runtime_limits", None),
+            "max_parallel_tools", None,
+        )
         # Cascade clamp (design note §3.1/§8b).  When this session belongs to
         # a cascade with a declared cap, its EFFECTIVE ceiling is
         # min(profile, cascade_remaining) per dimension — a child may only
@@ -803,6 +813,7 @@ def build_session_envelope(
         completion_processors=profile_completion_processors,
         model_tiers=model_tiers_dict,
         budget_control=budget_control_dict,
+        max_parallel_tools=max_parallel_tools,
         # Phase 2 cascade-sharing (envelope v4): forward the cascade
         # tenant ID stashed on the server by
         # ``SessionManager._construct_and_initialize_server``.  Runner

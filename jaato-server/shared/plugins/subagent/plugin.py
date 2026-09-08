@@ -42,6 +42,26 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _profile_max_parallel_tools(profile) -> Optional[int]:
+    """A profile's ``runtime_limits.max_parallel_tools``, or ``None`` (#862).
+
+    In-process subagents cannot be given kernel limits (see
+    :func:`shared.runtime_limits.assert_inprocess_can_honor`), but
+    ``max_parallel_tools`` is enforced by the session itself, so it is the
+    one ``runtime_limits`` field this path CAN honour — and the field a
+    fan-out profile most wants, since every in-process subagent's tool
+    pool competes for the same host.
+
+    Args:
+        profile: The resolved :class:`SubagentProfile`.
+
+    Returns:
+        The declared width, or ``None`` when the profile declares none.
+    """
+    limits = getattr(profile, "runtime_limits", None)
+    return getattr(limits, "max_parallel_tools", None) if limits else None
+
+
 def _get_env_connection() -> Dict[str, str]:
     """Get connection settings from environment variables.
 
@@ -616,6 +636,10 @@ class SubagentPlugin(DaemonForwardingMixin):
                     # See the sibling call site: a subagent's own declared
                     # budget was omitted, leaving it silently unbudgeted.
                     budget_control=getattr(profile, "budget_control", None),
+                    # The one ``runtime_limits`` field an in-process
+                    # subagent can honour (#862): the session owns the
+                    # thread pool, so no subprocess boundary is needed.
+                    max_parallel_tools=_profile_max_parallel_tools(profile),
                     # Per-plugin tool allow-lists (profile ``tools:[...]``).
                     # In-process subagents share the parent's registry, so
                     # the scope MUST be per-session (the session applies it
@@ -3627,6 +3651,9 @@ class SubagentPlugin(DaemonForwardingMixin):
                 # runtime-level sessions, so they are also invisible to the
                 # daemon-side pool; this is their ONLY budget.
                 budget_control=getattr(profile, "budget_control", None),
+                # See the sibling call site: application-enforced, so it
+                # survives the in-process path that refuses kernel limits.
+                max_parallel_tools=_profile_max_parallel_tools(profile),
                 suppress_base_instructions=getattr(profile, 'suppress_base_instructions', False),
                 # Per-plugin tool allow-lists (profile ``tools:[...]``) —
                 # per-session, never mutates the shared registry.

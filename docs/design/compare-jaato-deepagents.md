@@ -65,7 +65,7 @@ text-generation-inference, etc.).
 | **Custom skills** | Yes (`prompt_library` plugin) | Yes (`SKILL.md` files with YAML frontmatter) |
 | **Deferred tool loading** | Yes (core vs. discoverable) | No |
 | **Tool traits** | Yes (semantic traits like `TRAIT_FILE_WRITER`) | No |
-| **Parallel tool execution** | Yes (8 concurrent, thread pool) | Not documented |
+| **Parallel tool execution** | Yes (thread pool; 8 concurrent by default, per-profile via `runtime_limits.max_parallel_tools`) | Not documented |
 | **Background tasks** | Yes (`background` plugin — auto-backgrounds long tool calls) | No |
 | **Webhooks (inbound)** | Yes (HTTP listener, HMAC, TLS, rate limiting, IP allowlisting) | No |
 
