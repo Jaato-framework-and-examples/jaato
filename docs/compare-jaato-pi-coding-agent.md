@@ -13,7 +13,7 @@ Two candidates:
 
 | | pi coding-agent | jaato free | jaato premium |
 |---|---|---|---|
-| Repo / version | `earendil-works/pi`, `packages/coding-agent` **0.85.1** (commit `b2602be`, 2026-09-07) | `jaato-server` **0.7.0**, `jaato-sdk` **0.16.0** (commit `699c16c`, 2026-09-08) | `jaato-premium` **0.1.206** (commit `9d84676`) |
+| Repo / version | `earendil-works/pi`, `packages/coding-agent` **0.85.1** (commit `b2602be`, 2026-09-07) | `jaato-server` **0.7.0**, `jaato-sdk` **0.16.0** (commit `7306154`, 2026-09-08) | `jaato-premium` **0.1.206** (commit `9d84676`) |
 | Language / runtime | TypeScript, Node ≥ 22.19 (Bun for standalone binaries) | Python 3, daemon + IPC/WebSocket; TS client SDK (pre-release) | Python plugin pack over jaato free |
 | Licence | **MIT** | **BUSL-1.1** (Apache-2.0 on 2030-09-01) | **Proprietary**, commercial agreement only |
 | Self-description | "deliberately minimal", "no built-in permission system", "no MCP, no sub-agents" | "server-first framework for multi-provider tool orchestration" | governance, PII, SSO and clustering add-on |
@@ -27,11 +27,12 @@ documentation rather than code, it says so. Nothing here is legal advice; the EU
 AI Act section maps *primitives* to *obligations* and a compliance function
 still has to do the assessment.
 
-One correction to an older document in this tree: `docs/compare-rbac-profiles-frameworks.md`
-lists AppArmor as a premium feature and `docs/compare-jaato-devin.md` calls jaato
-MIT. Both are stale. `jaato-server/server/apparmor.py` (about 3,000 lines) and
-`server/cgroups.py` ship in the free server, and `LICENSE` is BUSL-1.1.
-Correcting them, and the multimodal design table, is tracked as [WIP #866](https://github.com/Jaato-framework-and-examples/jaato/issues/866).
+Two older comparison documents in this tree (`docs/compare-rbac-profiles-frameworks.md`,
+`docs/compare-jaato-devin.md`) and the multimodal design note carried stale
+claims about confinement, licensing and image support when this assessment was
+first written. PR #870 corrected all three and added a contract-guard test,
+`test_docs_do_not_contradict_the_tree.py`, that fails CI if any comparison
+document, this one included, contradicts the tree again ([FIXED #866](https://github.com/Jaato-framework-and-examples/jaato/issues/866)).
 
 ## The short answer
 
@@ -92,7 +93,8 @@ Ratings: **●●●** ships and is usable as-is · **●●○** ships partiall
 you must complete · **●○○** hook only, you build the feature · **○○○** absent ·
 **WIP #n** the gap is tracked as an open jaato issue (those filed from this
 assessment are #857 to #868), so read it as work in progress rather than a
-missing feature.
+missing feature · **FIXED #n** the issue was closed by a merged change after
+this assessment was first written, and the text now describes what ships.
 
 | Dimension | pi coding-agent | jaato free | jaato premium (on top of free) |
 |---|---|---|---|
@@ -101,7 +103,7 @@ missing feature.
 | Sandboxing / isolation | ●○○ documented container patterns; bubblewrap *example* | ●●● AppArmor per session, cgroups, egress proxy, runner subprocesses (Linux) | ●●● unchanged |
 | Tenant isolation | ○○○ one process per user; a container per tenant is your topology | ●●● two levels: per-session kernel confinement on one daemon (multi-tenant acceptance gate, integration-tested) or one daemon per tenant, each with its own bearer token | ●●● + gossip cluster, dashboard SSO and mTLS fronting many daemons |
 | Runtime limits (turns, tokens, cost, time) | ○○○ none; bash timeout is model-supplied | ●●● typed `budget_control` + `runtime_limits` + `max_turns`; parallel-tool width not yet a knob [WIP #862](https://github.com/Jaato-framework-and-examples/jaato/issues/862) | ●●● + fork-budget carry-over |
-| Secrets / credentials | ●●○ 0600 `auth.json`, `!command` indirection; no scrubbing, full env passthrough to bash | ●●○ 0600 stores, `pass://`/`vault://` contract, opt-in env scrubbing [WIP #863](https://github.com/Jaato-framework-and-examples/jaato/issues/863), secret-safe repr | ●●● six resolver backends |
+| Secrets / credentials | ●●○ 0600 `auth.json`, `!command` indirection; no scrubbing, full env passthrough to bash | ●●○ 0600 stores, `pass://`/`vault://` contract, env scrubbing on by default for `cli`, `interactive_shell` and `mcp` ([FIXED #863](https://github.com/Jaato-framework-and-examples/jaato/issues/863)), secret-safe repr; URI resolvers are premium | ●●● six resolver backends |
 | PII / redaction | ○○○ | ●○○ history + telemetry transformer seams; profile `redact_content` key inert [WIP #858](https://github.com/Jaato-framework-and-examples/jaato/issues/858) | ●●● four-seat pseudonymisation, Presidio, sealed audit |
 | Data retention / residency | ○○○ (`--no-session` only); one JSONL per session under `~/.pi` | ●●○ plain-file persistence in a documented per-workspace layout; retention, eviction and housekeeping are deliberately left to the shop's own file-lifecycle policy; a per-session manifest for erasure tooling [WIP #861](https://github.com/Jaato-framework-and-examples/jaato/issues/861); many local/EU providers | ●●○ unchanged; pseudonym table and sealed audit stream are additional records under the same policy |
 | Audit trail / traceability | ●●○ complete session JSONL tree with model + usage per message | ●●○ 114-event stream, token ledger, OTel/OpenInference, versioned session records; tamper evidence [WIP #507](https://github.com/Jaato-framework-and-examples/jaato/issues/507) | ●●● + attestation, provenance checks, sealed redaction audit |
@@ -370,9 +372,24 @@ Full environment passthrough to bash (see §4).
 **jaato free.** Per-provider credential stores at 0600. `pass://` and `vault://`
 URIs in profile `env:` stay unresolved on disk and are resolved daemon-side at
 spawn; unresolved URIs fail loud. `shared/secret_scrub.py` strips
-`*_API_KEY`, `*_TOKEN`, `*_SECRET` and friends from subprocess and MCP server
-environments, but **only when a profile opts in** ("deliberately no implicit
-default set"; a validate-time warning or a default-on posture is [WIP #863](https://github.com/Jaato-framework-and-examples/jaato/issues/863)). `shared/secret_repr.py` prevents keys leaking through `repr()`
+`*_API_KEY`, `*_TOKEN`, `*_SECRET`, `*_PASSWORD`, `*_CREDENTIALS`, `GH_TOKEN`
+and friends from every model-driven subprocess: `cli`, `interactive_shell`
+and MCP server spawns. When this assessment was first written that scrub was
+opt-in and `interactive_shell` had none; PR #872 flipped the default
+([FIXED #863](https://github.com/Jaato-framework-and-examples/jaato/issues/863)). Verified on commit `7306154`: a profile that declares nothing
+hands a shell an environment with the provider key gone and `PATH` kept. The
+grammar is one profile key, `scrub_secret_env`: absent or `default` is the
+framework set, a list may carry `default` and `!NAME` exemptions
+(`[default, "!GH_TOKEN"]` keeps `gh` working while the provider key stays out
+of the shell), and `none` is the only spelling that disables, announced at
+WARNING like `--ws-unsafe-no-auth`. An empty list, an empty string or a
+boolean is rejected and the default set applied, so a typo fails closed.
+`jaato-scaffold validate` and `jaato-doctor` name a profile that opts out.
+The trade a harness author must know: a session whose `cli` tool ran `gh`, an
+HTTPS `git push` with a token helper, or a cloud CLI reading
+`AWS_SECRET_ACCESS_KEY` now needs an exemption. A profile's `env:` map is
+deliberately not treated as a grant to subprocesses, because that is where
+the provider key usually lives. `shared/secret_repr.py` prevents keys leaking through `repr()`
 after a real incident (#721). The documented contract "never pass a credential
 as an `agent_param`" exists because rendered personas are now persisted. The
 free tree ships the URI *contract*; the resolver implementations are a premium
@@ -676,8 +693,8 @@ does preflight and post-mortems.
 ### MCP
 
 pi: "No MCP" by design; you write the bridge. jaato: full MCP client
-(`.mcp.json`, per-server prefixing, secret-name scrubbing of MCP subprocess
-env, results marked untrusted). Neither exposes itself as an MCP server; for jaato
+(`.mcp.json`, per-server prefixing, secret env scrubbing of MCP subprocess
+env on by default, results marked untrusted). Neither exposes itself as an MCP server; for jaato
 that is [WIP #864](https://github.com/Jaato-framework-and-examples/jaato/issues/864).
 
 ### Building the first harness
@@ -938,7 +955,7 @@ conditions of adoption, not treat their absence as a design choice.
 | Tenant isolation | container per tenant, your topology | ships (per-session confinement on one daemon, or daemon per tenant with its own token); tenant id and quotas [WIP #860](https://github.com/Jaato-framework-and-examples/jaato/issues/860) | ships + cluster fronting; tenant id still a reserved field |
 | Kernel or container confinement | deploy a container/VM | ships on Linux | ships |
 | Turn / token / cost / time limits | build | ships | ships |
-| Secret scrubbing from tool env | build via `spawnHook` | configure (opt-in; [WIP #863](https://github.com/Jaato-framework-and-examples/jaato/issues/863)) | configure |
+| Secret scrubbing from tool env | build via `spawnHook` | ships, on by default ([FIXED #863](https://github.com/Jaato-framework-and-examples/jaato/issues/863)); exempt what a developer CLI needs | same |
 | Secret manager integration | `!command` | write a resolver or buy premium | ships |
 | PII pseudonymisation | build | build on seam (weeks) | ships |
 | Retention and purge | build | apply your storage policy to the documented file layout (by design) | same |
@@ -977,8 +994,11 @@ conditions of adoption, not treat their absence as a design choice.
   then.
 - IPC socket is unauthenticated by design; multi-user must go through
   WebSocket.
-- Secret scrubbing and telemetry redaction are opt-in; a profile that forgets
-  them leaks ([WIP #863](https://github.com/Jaato-framework-and-examples/jaato/issues/863)). One documented inert profile key for redaction
+- Telemetry redaction is opt-in; a profile that forgets it leaks. Secret
+  scrubbing is on by default since PR #872 ([FIXED #863](https://github.com/Jaato-framework-and-examples/jaato/issues/863)), so the residual risk
+  moved: a developer profile that needs `gh` or a cloud CLI must exempt that
+  token explicitly, and `none` switches the scrub off for every surface at
+  once. One documented inert profile key for redaction
   ([WIP #858](https://github.com/Jaato-framework-and-examples/jaato/issues/858)).
 - Linux-only confinement; Windows/macOS deployments fall back to path policy
   only.
