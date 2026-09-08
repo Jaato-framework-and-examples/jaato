@@ -114,6 +114,7 @@ you must complete · **●○○** hook only, you build the feature · **○○�
 | Multi-agent | ●○○ example extension (subprocess per subagent) | ●●● subagents, profiles, cascades, payload schemas, runner pool | ●●● + handoff, remote spawn (currently broken per backlog) |
 | Observability of cascades and orchestration | ●○○ per-task streaming and usage in the subagent example's TUI panel; no cross-process id, no spans | ●●● one `cascade_driver_id` across every stage, `cascade_events()` observer subscription, generated observer client, agent-graph attributes on OTel spans, gate and settle events, cascade budgets, sweep reports with cost | ●●● + live cascade timeline (`compile --monitor`), dashboard with Phoenix deep-links, per-server trace identity, drift monitor (in flux) |
 | Extensibility model | ●●● 33 lifecycle events, TS extensions via jiti | ●●● 5 entry-point groups, daemon hooks, enrichment pipeline, traits | ●●● scaffold verbs |
+| Scaffolding, introspection, discoverability | ●●○ excellent narrative docs, 13 SDK examples, TypeScript types, `/reload` hot reload, `--list-models`; no tool that interrogates the installed framework | ●●● `jaato-scaffold explain` (computed from the installed framework), `validate` (JSON, CI-usable), `new` with 8 self-checking archetypes and `--dry-run`, `jaato-doctor` preflight and session post-mortem, an AI-assistant skill that routes to those tools | ●●● + `compile` verb on the same CLI |
 | Cross-language integration | ●●○ JSONL RPC/JSON modes; TS only | ●●● Python in-process, IPC, WS JSON, TS SDK (pre-npm) | ●●● + web components |
 | Supply chain / release integrity | ●●● pinned deps, shrinkwrap, `--ignore-scripts`, SHA256SUMS | ●●○ entry-point trust policy; TestPyPI today, PyPI intended once out of alpha; no signed releases yet | ●●○ delivered directly under the commercial licence, by design |
 | Licence for internal use | ●●● MIT | ●●● BUSL grant allows | commercial |
@@ -652,6 +653,61 @@ pi: "No MCP" by design; you write the bridge. jaato: full MCP client
 (`.mcp.json`, per-server prefixing, secret-name scrubbing of MCP subprocess
 env, results marked untrusted). Neither exposes itself as an MCP server.
 
+### Building the first harness
+
+How fast a team gets from an empty directory to a running, correct harness,
+and how it finds out what the framework can do without reading its source.
+
+**pi.** The developer surface is documentation and types. `docs/sdk.md`
+walks `createAgentSession` through every option, thirteen numbered examples
+in `examples/sdk/` cover custom models, tools, extensions, skills, sessions
+and the session runtime, and the TypeScript types are the introspection: an
+IDE shows what an extension may return, and a wrong shape fails at compile
+time. `/reload` hot-reloads extensions, skills, prompts and themes in a
+running session, `--list-models` prints the catalog, `pi install` pulls
+packages from npm or git. There is no command that interrogates the
+installed framework or validates a configuration before a run; the docs are
+the contract, and they are unusually good.
+
+**jaato free.** The developer surface is two executables that read the
+installed framework, so they cannot drift from it:
+
+- **`jaato-scaffold explain`** answers, from code rather than prose,
+  which providers and plugins are installed and what each one's
+  `plugin_configs` keys are; every event with its direction; the transports
+  and clients; the runtime model of sessions and runners; model tiers; the
+  full profile schema with inheritance rules; every env var with its scope
+  and typed key; the prefetch and completion contracts; and what each
+  archetype writes. Several sections carry the issue numbers of the traps
+  they exist to prevent.
+- **`jaato-scaffold validate`** checks a profile, a profile set or a whole
+  workspace against the loaders the daemon uses, with `--json` output, so
+  it is a CI gate rather than a linter.
+- **`jaato-scaffold new`** writes eight archetypes (`profile-set`,
+  `client`, `fire`, `host-tools`, `cascade`, `observer`, `processor`,
+  `sweep`) that re-check their own output: a profile set is run back
+  through the validator, a client is compile-checked, and `--dry-run` shows
+  what a flag combination would write. The generated clients carry the
+  recipe in comments, including the past incidents each line avoids.
+- **`jaato-doctor`** is the preflight: daemon reachable, socket stale or
+  live, the daemon's `HOME` versus the caller's (why a `pass://` secret
+  resolves from the wrong store), `env_file` and config paths, and the
+  WebSocket token and auth mode. With `--session latest` it becomes a
+  post-mortem that reads a session's logs and says whether its path plugins
+  resolved the workspace.
+- **An AI-assistant skill** (`.claude/skills/jaato-sdk-client/`) instructs a
+  coding assistant to reach for those two tools instead of reading source,
+  which matters for a team that will build its harnesses with an assistant.
+
+The honest counterweight: jaato's `examples/` directory holds a ten-line
+hello script, so the worked examples come from `new` rather than from a
+browsable folder; the documentation is large and often written as incident
+narrative rather than reference; and `CLAUDE.md` alone is about 1,800 lines.
+pi is easier to read; jaato is easier to interrogate.
+
+**jaato premium** adds the `compile` verb on the same CLI, so the Daruma
+spec-to-profile path uses the introspection tooling a team already knows.
+
 ### Service integration
 
 A corporate harness mostly acts by calling internal services: a ticketing
@@ -842,6 +898,7 @@ conditions of adoption, not treat their absence as a design choice.
 | Knowledge catalog, templates, curated memory | build (skills and prompts only) | ships; bring an embedding provider for semantic lookup | ships with local embeddings |
 | Calling internal REST services with schema, auth and validation | build (curl in bash, or a custom tool) | ships (`service_connector`, OpenAPI discovery, mocks) | ships |
 | Watching a whole cascade as one thing | build (correlate JSONL files by hand) | ships (`cascade_events`, observer archetype, agent-graph spans) | ships + live timeline and dashboard |
+| Finding out what the installed framework can do, and validating config before a run | read the docs and types | `jaato-scaffold explain` / `validate` / `new --dry-run`, `jaato-doctor` | same, plus `compile` |
 | Multi-user server with auth | build | daemon + token ships; SSO build | ships (OIDC) |
 | Regulatory documentation | build | build | build |
 
