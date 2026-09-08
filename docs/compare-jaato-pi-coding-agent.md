@@ -112,6 +112,7 @@ you must complete · **●○○** hook only, you build the feature · **○○�
 | Delegating a permission decision to an external system (your RBAC / approval service) | ●○○ `tool_call` hook can call out synchronously | ●●● evaluators call a policy API; webhook and file channels suspend the session until the external decision arrives | ●●● + HandoffGate parks the tool, session may be unloaded and resumed on approval (demo: `reliability-exercise`) |
 | Identity model (which user may use which role, who approved) | ○○○ | ●○○ `set_client_user` hook; no approver identity on events | ●○○ OIDC login; `allowed_emails` / `allowed_groups` at the dashboard edge; no group-to-profile binding |
 | Multi-agent | ●○○ example extension (subprocess per subagent) | ●●● subagents, profiles, cascades, payload schemas, runner pool | ●●● + handoff, remote spawn (currently broken per backlog) |
+| Observability of cascades and orchestration | ●○○ per-task streaming and usage in the subagent example's TUI panel; no cross-process id, no spans | ●●● one `cascade_driver_id` across every stage, `cascade_events()` observer subscription, generated observer client, agent-graph attributes on OTel spans, gate and settle events, cascade budgets, sweep reports with cost | ●●● + live cascade timeline (`compile --monitor`), dashboard with Phoenix deep-links, per-server trace identity, drift monitor (in flux) |
 | Extensibility model | ●●● 33 lifecycle events, TS extensions via jiti | ●●● 5 entry-point groups, daemon hooks, enrichment pipeline, traits | ●●● scaffold verbs |
 | Cross-language integration | ●●○ JSONL RPC/JSON modes; TS only | ●●● Python in-process, IPC, WS JSON, TS SDK (pre-npm) | ●●● + web components |
 | Supply chain / release integrity | ●●● pinned deps, shrinkwrap, `--ignore-scripts`, SHA256SUMS | ●●○ entry-point trust policy; TestPyPI today, PyPI intended once out of alpha; no signed releases yet | ●●○ delivered directly under the commercial licence, by design |
@@ -722,6 +723,67 @@ event fan-out; pre-warm runner pool (30 s → 7 s bootstrap). Premium adds
 handoff atoms and a HandoffGate; its remote cross-server spawn is flagged
 "broken on both legs" in its own backlog.
 
+### Seeing a cascade run
+
+Multi-agent work is only governable if someone can watch it as one thing.
+The question here is whether an operator, an auditor or a parent agent can
+follow a whole cascade rather than one session at a time.
+
+**pi.** The subagent example streams each task's tool calls and progress
+into a TUI panel, shows per-agent turns, tokens, cost and context, and
+propagates Ctrl+C to the child processes. That is the extent of it: each
+subagent is a separate `pi` process, there is no identifier that ties a
+parent and its children together across processes, the telemetry contract
+is not threaded into the coding-agent SDK, and there is no OpenTelemetry
+adapter to carry a parent span into a child. Correlating a chain after the
+fact means reading several session JSONL files and matching them by hand.
+
+**jaato free.** A cascade has an identity, and everything hangs off it:
+
+- **One id across every stage.** `cascade_driver_id` is stamped on each
+  session in a cascade at creation, persisted on the runner slot, and
+  propagated by the handoff atom to the next stage
+  (`docs/design/cascade-as-client.md`, whose origin is recorded as an
+  observability gap found in production).
+- **Observer subscription.** `IPCClient.cascade_events(cascade_driver_id,
+  event_types, role="observer")` is an async iterator over events from
+  every session carrying that id, filtered server-side; a second process
+  can attach read-only to a running cascade without owning it.
+  `jaato-scaffold new observer` writes that client, and its comments record
+  the two traps that used to make such a client silently watch nothing.
+- **Agent-level events.** `agent.created`, `agent.status_changed`,
+  `agent.output`, `agent.completed` and `agent.error` per stage;
+  `slot.settled` when a stage's runner is released; `gate.announced`,
+  `gate.released` and `gates.snapshot` when a stage parks on a
+  HandoffGate; `instruction_budget.updated` per session.
+- **From inside the loop.** The `subscribeToEvents` tool lets a parent
+  agent subscribe to plan and step events from its children, delivered as
+  inline messages through `inject_prompt`, so orchestration decisions can
+  react to progress rather than poll for it.
+- **Spans that form a graph.** The OpenTelemetry plugin stamps
+  `agent.type`, `agent.name`, `graph.node.name` and `graph.node.parent_id`
+  on each session's spans (`otel_plugin.py`), so Phoenix or Langfuse
+  renders a cascade as a tree of agents rather than a flat list of turns,
+  with cost per node.
+- **Budgets and sweeps.** `cascade_budget_set` / `get` / `clear` bound the
+  whole cascade, and `jaato-eval` records each arm's sessions, verdicts and
+  `cost_usd` into a result store and HTML report, so a cascade's behaviour
+  across model or prompt variants is compared from one table.
+
+**jaato premium.** `jaato-scaffold compile --monitor` emits a live timeline
+of every session stamped with the cascade id, sub-agents included; its own
+docstring calls it a dev and demo tool, "breadth, not depth", because
+daemon-internal seats surface as outcomes rather than per-seat steps. The
+gossip dashboard fronts several daemons with Phoenix trace deep-links and a
+per-session instruction-budget panel, and `telemetry_resource` gives each
+server an OTel resource identity so a cross-host cascade is attributable.
+The drift monitor, which scores an agent's trajectory against its plan, is
+shipped as an opt-in example and is under a declared refactor.
+
+The gap on both sides is the same one the audit section names: none of
+these streams carries a human identity, so a cascade is fully traceable to
+its sessions and spans but not to the person who authorised it.
+
 ## 14. Supply chain, release integrity, maturity
 
 | | pi | jaato free | jaato premium |
@@ -779,6 +841,7 @@ conditions of adoption, not treat their absence as a design choice.
 | MCP client | build | ships | ships |
 | Knowledge catalog, templates, curated memory | build (skills and prompts only) | ships; bring an embedding provider for semantic lookup | ships with local embeddings |
 | Calling internal REST services with schema, auth and validation | build (curl in bash, or a custom tool) | ships (`service_connector`, OpenAPI discovery, mocks) | ships |
+| Watching a whole cascade as one thing | build (correlate JSONL files by hand) | ships (`cascade_events`, observer archetype, agent-graph spans) | ships + live timeline and dashboard |
 | Multi-user server with auth | build | daemon + token ships; SSO build | ships (OIDC) |
 | Regulatory documentation | build | build | build |
 
