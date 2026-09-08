@@ -150,7 +150,14 @@ class PoolManager:
     serialize via the manager's lock.
 
     Attributes:
-        target_size: Configured pool size (default 2).
+        target_size: Floor on UNRESERVED idle slots — those with no
+            cascade affinity, which any arriving session may take
+            (default 2).
+        max_size: Ceiling on TOTAL idle slots, reservations included
+            (default ``2 * target_size``).  Floor and ceiling count
+            different things on purpose: a cascade-affined idle slot
+            is capacity for exactly one tenant, so counting it as pool
+            capacity starves everybody else (#898).
         _idle_slots: List of currently-idle slot handles.
     """
 
@@ -160,6 +167,7 @@ class PoolManager:
         target_size: int = 2,
         replenish_interval: float = 0.5,
         cascade_idle_timeout_seconds: float = DEFAULT_CASCADE_IDLE_TIMEOUT_SECONDS,
+        max_size: Optional[int] = None,
     ) -> None:
         """Initialize the pool manager.
 
@@ -167,13 +175,34 @@ class PoolManager:
             template_manager: The daemon's :class:`TemplateManager`.
                 Source of fork-slot requests; must already have
                 ``spawn()`` been called.
-            target_size: Number of idle slots to keep available.
-                Default 2 — reasonable for typical workstation; cascade
+            target_size: Number of **unreserved** idle slots to keep
+                available — slots any arriving session may take,
+                i.e. those with no cascade affinity stamped.  Default
+                2 — reasonable for typical workstation; cascade
                 harnesses spawning many concurrent sessions can raise
                 this via ``JAATO_RUNNER_POOL_SIZE`` env var (consumed
                 by daemon ``__main__.py`` and threaded here).  Values
                 <= 0 disable the pool (sessions fall back to cold-spawn
                 session-mode).
+
+                UNRESERVED, not total (#898).  A cascade-affined idle
+                slot is a RESERVATION: cross-cascade reuse is forbidden
+                by design, so such a slot is capacity for exactly one
+                tenant and is unavailable to everybody else.  Counting
+                it as pool capacity is what let a pool read "full" while
+                being empty from the point of view of every tenant but
+                one — two idle slots affined to cascade B, and cascade
+                A's ``acquire_slot`` returning ``None`` with nothing in
+                the system that would ever create a slot A could use.
+            max_size: Hard ceiling on TOTAL idle slots (unreserved +
+                reservations).  ``None`` (default) means
+                ``2 * target_size``.  This is what bounds the growth
+                that the unreserved-accounting above implies: without
+                it, one reservation per live cascade accumulates
+                without limit, and a slot is 129-187 MB by this file's
+                own measurement.  Clamped up to ``target_size`` — a
+                ceiling below the floor is not a policy.  Operators
+                raise it via ``JAATO_RUNNER_POOL_MAX_SIZE``.
             replenish_interval: Seconds the replenishment thread sleeps
                 between idle-count checks.  Default 0.5s — fast enough
                 that a 6-step cascade refilling slots between steps
@@ -189,6 +218,15 @@ class PoolManager:
         """
         self._template_manager = template_manager
         self.target_size = max(0, int(target_size))
+        #: Hard ceiling on ``len(self._idle_slots)``.  ``target_size``
+        #: is the floor on the UNRESERVED subset; this is the ceiling on
+        #: the whole list, and the two are deliberately different
+        #: numbers because reservations sit on top of the floor rather
+        #: than consuming it (#898).
+        self.max_size = (
+            max(self.target_size, int(max_size))
+            if max_size is not None else self.target_size * 2
+        )
         #: Slots dropped by the capacity check, awaiting teardown by the
         #: replenish thread.  They are already out of ``_idle_slots``, so
         #: the pool count is bounded the moment a slot is queued here.
@@ -245,6 +283,27 @@ class PoolManager:
             # actually finished (long-pause cascades within timeout
             # don't count).
             "cascade_slots_idle_torndown_total": 0,
+            # Slots dropped by the capacity check (queued for
+            # teardown), and the subset of those actually reclaimed by
+            # the replenish thread's drain.  Declared here rather than
+            # sprung into existence by ``_incr`` so ``get_telemetry``
+            # reports 0 instead of omitting the key on a daemon that
+            # has never hit the ceiling.
+            "pool_slots_over_cap_total": 0,
+            "pool_slots_over_cap_torndown_total": 0,
+            # #898.  Times a RESERVATION (cascade-affined idle slot)
+            # was evicted to admit a returning slot whose cascade is
+            # demonstrably live.  Growth in this counter alongside
+            # ``cascade_slot_reuse_misses_total`` means ``max_size`` is
+            # too small for the number of concurrent tenants.
+            "pool_stale_reservation_evicted_total": 0,
+            # #898.  Times the replenish loop wanted to fork an
+            # unreserved slot (unreserved < target_size) and could not
+            # because the pool was at ``max_size``.  THE sizing signal
+            # for a multi-tenant daemon: a nonzero value means some
+            # tenant is being served by cold-spawn while reservations
+            # hold the ceiling.  Raise ``JAATO_RUNNER_POOL_MAX_SIZE``.
+            "pool_replenish_ceiling_blocked_total": 0,
         }
         self._counters_lock = threading.Lock()
 
@@ -295,9 +354,33 @@ class PoolManager:
         return forked
 
     def idle_count(self) -> int:
-        """Return the current count of idle slots."""
+        """Return the current count of idle slots — reservations included.
+
+        This is the number ``max_size`` bounds.  It is NOT the number a
+        waiter can draw on: see :meth:`unreserved_idle_count`.
+        """
         with self._lock:
             return len(self._idle_slots)
+
+    def unreserved_idle_count(self) -> int:
+        """Return the count of idle slots usable by ANY arriving session.
+
+        A slot carrying a ``cascade_id`` is a reservation — cross-cascade
+        reuse is forbidden (warm plugin state belongs to the original
+        cascade), so it is capacity for one tenant and for nobody else.
+        Only PURE-IDLE slots are the pool's free capacity, and this is
+        the quantity the replenish loop compares against
+        ``target_size`` (#898).
+
+        Reading total idle there instead meant a pool holding two
+        B-affined slots read "full" while ``acquire_slot(cascade=A)``
+        returned ``None`` — no affine match, no pure-idle, and no
+        replenishment that would ever produce one.  A starved until B
+        released, which for the reporting incident was 31 s past the
+        client's 60 s budget.
+        """
+        with self._lock:
+            return sum(1 for s in self._idle_slots if s.cascade_id is None)
 
     def acquire_slot(
         self, cascade_driver_id: Optional[str] = None,
@@ -420,8 +503,9 @@ class PoolManager:
         """
         slot.last_session_end_ts = time.monotonic()
         evicted: Optional[PoolSlot] = None
+        stale_reservation_evicted = False
         with self._lock:
-            if len(self._idle_slots) >= self.target_size:
+            if len(self._idle_slots) >= self.max_size:
                 # AT CAPACITY.  ``target_size`` said how many to keep at
                 # LEAST and nothing said how many at most, so this list
                 # grew by one runner per cleanly-ended pool session and
@@ -430,35 +514,30 @@ class PoolManager:
                 # because gpg could not fork -- a resource leak wearing a
                 # credentials error.
                 #
-                # PREFER EVICTING A PURE-IDLE SLOT.  A cascade-affine slot
-                # carries warm state the next stage of that cascade would
-                # reuse; a pure-idle one carries none.  Dropping the affine
-                # one to keep an unaffiliated one throws away the thing the
-                # pool exists for.
+                # The ceiling is ``max_size``, not ``target_size``:
+                # ``target_size`` is the floor on the UNRESERVED subset,
+                # and reservations sit on top of it (#898).
+                #
                 # DEFAULT: the RETURNING slot goes.  It has just served a
                 # session, so it carries that session's accumulated heap
                 # (measured 129-187 MB on long-lived trees), while a
                 # resident may still be a CoW-cheap template fork.  Keeping
                 # what is already here also avoids churning the pool on
                 # every return once it is full.
-                #
-                # EXCEPTION: an affine slot displaces a PURE-IDLE resident.
-                # ``slot.cascade_id`` means the next stage of that cascade
-                # would reuse this exact runner; a pure-idle resident has no
-                # such claim on it.  Trading the unaffiliated one for the
-                # affine one keeps the warm path the pool exists to serve.
                 victim_ix = (
-                    next((i for i, s in enumerate(self._idle_slots)
-                          if s.cascade_id is None), None)
+                    self._pick_capacity_victim()
                     if slot.cascade_id is not None else None
                 )
                 if victim_ix is not None:
                     evicted = self._idle_slots.pop(victim_ix)
+                    stale_reservation_evicted = evicted.cascade_id is not None
                     self._idle_slots.append(slot)
                 else:
                     evicted = slot
             else:
                 self._idle_slots.append(slot)
+        if stale_reservation_evicted:
+            self._incr("pool_stale_reservation_evicted_total")
 
         if evicted is not None:
             # Handed to the replenish thread rather than torn down here.
@@ -472,14 +551,76 @@ class PoolManager:
             logger.info(
                 "PoolManager: pool at capacity (%d/%d); slot pid=%d "
                 "(cascade=%s) queued for teardown",
-                len(self._idle_slots), self.target_size,
+                len(self._idle_slots), self.max_size,
                 evicted.pid, evicted.cascade_id or "(pure)",
             )
         logger.info(
             "PoolManager.return_slot_after_session: slot pid=%d "
-            "returned to pool (cascade=%s; idle_count=%d/%d)",
+            "returned to pool (cascade=%s; idle_count=%d/%d, "
+            "unreserved=%d/%d)",
             slot.pid, slot.cascade_id or "(pure)",
-            len(self._idle_slots), self.target_size,
+            len(self._idle_slots), self.max_size,
+            self.unreserved_idle_count(), self.target_size,
+        )
+
+    def _pick_capacity_victim(self) -> Optional[int]:
+        """Choose which resident an AFFINE returning slot displaces.
+
+        Caller holds ``self._lock``.  Returns an index into
+        ``self._idle_slots``, or ``None`` when the returner should be
+        the one dropped.  Only consulted when the returner carries a
+        ``cascade_id``: a returner with none has no claim on the pool
+        that a resident does not also have, so it goes.
+
+        LIVENESS OUTRANKS WARMTH (#898).  The rule used to be "an affine
+        slot displaces a PURE-IDLE resident, otherwise the returner
+        goes", which fires only against *unaffiliated* residents.  When
+        both residents were affined to a second cascade, the returner --
+        belonging to a cascade demonstrably mid-run, whose next stage
+        was already queued -- was destroyed to preserve two slots of a
+        cascade that might never come back.
+
+        So the order is:
+
+        1. **The stalest RESERVATION** (largest time since its
+           ``last_session_end_ts``; a reservation that never served
+           sorts first, since it carries no warm state at all).  Losing
+           a reservation costs its cascade a cold plugin bootstrap on
+           its next stage; that cascade still RUNS, because it falls
+           through to a pure-idle slot.  A slot idle long enough to be
+           the stalest is also the one the 300 s cascade-idle sweep was
+           going to reap anyway.
+        2. **A pure-idle resident**, when there is no reservation to
+           drop.  This is the original rule and its original reason: a
+           pure-idle slot carries no warm state, so trading it for a
+           slot that does keeps the warm path the pool exists to serve.
+        3. **Neither** (``None``) -- the pool holds nothing at all, so
+           the returner is the only candidate.
+
+        Note what (1) does NOT do: it never leaves a tenant with no way
+        to run.  Reservations are the thing being spent, and a cascade
+        that loses one takes an unreserved slot instead -- which
+        ``target_size`` keeps stocked.  That is the whole trade: warm
+        state for one tenant is negotiable, capacity for every tenant
+        is not.
+        """
+        reservations = [
+            (i, s) for i, s in enumerate(self._idle_slots)
+            if s.cascade_id is not None
+        ]
+        if reservations:
+            return min(
+                reservations,
+                key=lambda pair: (
+                    pair[1].last_session_end_ts
+                    if pair[1].last_session_end_ts is not None
+                    else float("-inf")
+                ),
+            )[0]
+        return next(
+            (i for i, s in enumerate(self._idle_slots)
+             if s.cascade_id is None),
+            None,
         )
 
     def _incr(self, key: str, delta: int = 1) -> None:
@@ -503,6 +644,14 @@ class PoolManager:
             None.  Sessions fell back to cold-spawn.  If this is
             growing fast, raise ``target_size`` or check
             ``pool_replenish_failures_total``.
+          - ``pool_stale_reservation_evicted_total``: a cascade-affined
+            idle slot was dropped at the ceiling to admit a returning
+            slot of a live cascade.  Its cascade pays a cold plugin
+            bootstrap next stage; it does not stall.
+          - ``pool_replenish_ceiling_blocked_total``: replenishment
+            wanted an unreserved slot and ``max_size`` forbade it.
+            Nonzero on a multi-tenant daemon means raise
+            ``JAATO_RUNNER_POOL_MAX_SIZE``.
           - ``pool_replenish_success_total``: replenishment thread
             successfully forked a new slot.
           - ``pool_replenish_failures_total``: replenishment thread's
@@ -572,9 +721,11 @@ class PoolManager:
     def start_replenishment(self) -> None:
         """Start the background thread that keeps the pool topped up.
 
-        Pool PR 4: the thread watches ``idle_count()`` against
-        ``target_size`` and, whenever the count drops below target,
-        asks the template for a fresh fork-slot.  This is what makes
+        Pool PR 4: the thread watches
+        :meth:`unreserved_idle_count` against ``target_size`` and,
+        whenever the count of slots ANY tenant could take drops below
+        target, asks the template for a fresh fork-slot — subject to
+        the ``max_size`` ceiling on total idle slots.  This is what makes
         the pool useful for cascades — a 6-step cascade with
         target_size=2 cold-spawns 4 of 6 steps otherwise; with
         replenishment a slot's gone-and-refilled cycle is small
@@ -674,8 +825,25 @@ class PoolManager:
                 # past the operator's tolerance.
                 self._sweep_cascade_idle()
 
-                # Cheap check: pool already at target, sleep.
-                if self.idle_count() >= self.target_size:
+                # Cheap check: enough UNRESERVED slots, sleep.
+                #
+                # Unreserved, not total (#898).  ``idle_count()``
+                # counts slots a waiting tenant is FORBIDDEN to use:
+                # with two idle slots affined to cascade B and
+                # target_size=2 the pool read "full" and never forked
+                # another, while ``acquire_slot(cascade=A)`` returned
+                # None.  Nothing to run on, and nothing in the system
+                # that would ever create one, until B released.
+                if self.unreserved_idle_count() >= self.target_size:
+                    self._replenish_stop.wait(self._replenish_interval)
+                    continue
+                # ... but reservations still occupy memory, so the
+                # total is what the ceiling bounds.  Hitting it is the
+                # signal that ``max_size`` is too small for the number
+                # of concurrent tenants: some of them are being served
+                # by cold-spawn while reservations hold the ceiling.
+                if self.idle_count() >= self.max_size:
+                    self._incr("pool_replenish_ceiling_blocked_total")
                     self._replenish_stop.wait(self._replenish_interval)
                     continue
                 raw = self._template_manager.request_fork_slot()
@@ -693,8 +861,9 @@ class PoolManager:
                 self._incr("pool_replenish_success_total")
                 logger.info(
                     "PoolManager replenish: forked slot pid=%d "
-                    "(idle_count=%d/%d)",
-                    new_slot.pid, len(self._idle_slots), self.target_size,
+                    "(unreserved=%d/%d, idle_count=%d/%d)",
+                    new_slot.pid, self.unreserved_idle_count(),
+                    self.target_size, len(self._idle_slots), self.max_size,
                 )
             except Exception:  # noqa: BLE001 — boundary surface
                 logger.exception(

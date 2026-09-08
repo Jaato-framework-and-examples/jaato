@@ -49,10 +49,30 @@ from shared.tests.test_every_guard_detects_its_own_reversion import Reversion
 REVERSIONS = [
     Reversion(
         target="jaato-server/server/runner_pool.py",
-        find="            if len(self._idle_slots) >= self.target_size:",
+        find="            if len(self._idle_slots) >= self.max_size:",
         replace="            if False:",
         test="TestPoolCapacity::test_returning_to_a_full_pool_does_not_grow_it",
         because="the idle pool growing without a ceiling",
+    ),
+    Reversion(
+        target="jaato-server/server/runner_pool.py",
+        find="                if self.unreserved_idle_count() >= self.target_size:",
+        replace="                if self.idle_count() >= self.target_size:",
+        test=("TestMultiTenantCapacity::"
+              "test_replenish_forks_when_every_idle_slot_is_another_tenants"),
+        because=("replenishment counting slots the waiting tenant is "
+                 "forbidden to use, so a pool full of one cascade's "
+                 "reservations reads full and never forks"),
+    ),
+    Reversion(
+        target="jaato-server/server/runner_pool.py",
+        find="        if reservations:",
+        replace="        if False:",
+        test=("TestPoolCapacity::"
+              "test_a_live_returner_displaces_the_stalest_reservation"),
+        because=("eviction firing only against unaffiliated residents, so "
+                 "a live cascade's own slot is destroyed to preserve "
+                 "reservations of a cascade that may never come back"),
     ),
 ]
 
@@ -326,38 +346,96 @@ class TestPoolCapacity:
     def test_returning_to_a_full_pool_does_not_grow_it(self) -> None:
         pool = _pool(_slot(1), _slot(2), idle_timeout=300.0)
         pool.target_size = 2
+        pool.max_size = 2
 
         pool.return_slot_after_session(_slot(3, cascade_id="c"))
 
         assert pool.idle_count() == 2, (
-            "the pool grew past target_size. This is the unbounded path: "
+            "the pool grew past its ceiling. This is the unbounded path: "
             "one extra runner per cleanly-ended session, ~132 MB each, "
             "never reclaimed while the daemon lives."
         )
 
-    def test_a_pure_idle_slot_is_evicted_before_a_cascade_affine_one(self) -> None:
-        """Affine slots carry warm state the next stage would reuse.
+    def test_a_pure_idle_slot_is_evicted_when_there_is_no_reservation(self) -> None:
+        """The original rule, and the branch of it that survives #898.
 
-        Dropping the affine one to keep an unaffiliated one throws away
-        the thing the pool exists for.
+        A pure-idle resident carries no warm state; a returning affine
+        slot does.  With nothing else to spend, trading the
+        unaffiliated one for the affine one keeps the warm path the
+        pool exists to serve.
         """
-        pool = _pool(_slot(1, cascade_id="keep-me"), _slot(2), idle_timeout=300.0)
+        pool = _pool(_slot(1), _slot(2), idle_timeout=300.0)
         pool.target_size = 2
+        pool.max_size = 2
 
         pool.return_slot_after_session(_slot(3, cascade_id="also-warm"))
 
-        resident = {s.pid for s in pool._idle_slots}
-        assert 1 in resident, "the cascade-affine slot was evicted"
-        assert 2 not in resident, "the pure-idle slot was kept over an affine one"
-        assert 3 in resident, "the returning affine slot was not admitted"
+        assert {s.pid for s in pool._idle_slots} == {2, 3}, (
+            "the returning affine slot was not admitted over a resident "
+            "that carries nothing"
+        )
+        assert [s.pid for s in pool._pending_teardown] == [1]
+        assert pool.get_telemetry()["pool_stale_reservation_evicted_total"] == 0
 
-    def test_with_every_slot_affine_the_returning_one_goes(self) -> None:
-        """No pure-idle victim exists, so nothing warm is displaced."""
-        pool = _pool(_slot(1, cascade_id="a"), _slot(2, cascade_id="b"),
-                     idle_timeout=300.0)
+    def test_a_live_returner_displaces_the_stalest_reservation(self) -> None:
+        """Liveness outranks warmth (#898).
+
+        The returner belongs to a cascade demonstrably mid-run -- it
+        just finished a stage and its next one is typically already
+        queued.  A resident reservation belongs to a cascade that may
+        never come back, and the stalest of them is the one the 300 s
+        cascade-idle sweep was going to reap anyway.  Destroying the
+        live cascade's own slot to preserve those is how a second
+        tenant starved for a full 60 s.
+        """
+        now = time.monotonic()
+        pool = _pool(
+            _slot(1, cascade_id="a", last_end_ts=now - 5.0),
+            _slot(2, cascade_id="b", last_end_ts=now - 120.0),   # stalest
+            idle_timeout=300.0,
+        )
         pool.target_size = 2
+        pool.max_size = 2
 
         pool.return_slot_after_session(_slot(3, cascade_id="c"))
+
+        assert {s.pid for s in pool._idle_slots} == {1, 3}, (
+            "the live cascade's returning slot was destroyed while a "
+            "staler reservation was preserved"
+        )
+        assert [s.pid for s in pool._pending_teardown] == [2]
+        assert pool.get_telemetry()["pool_stale_reservation_evicted_total"] == 1
+
+    def test_a_reservation_that_never_served_is_spent_first(self) -> None:
+        """No ``last_session_end_ts`` means no warm session state.
+
+        Such a slot is affined but carries nothing the next stage would
+        reuse, so it is the cheapest thing in the pool to lose.
+        """
+        now = time.monotonic()
+        pool = _pool(
+            _slot(1, cascade_id="a", last_end_ts=now - 200.0),
+            _slot(2, cascade_id="b", last_end_ts=None),
+            idle_timeout=300.0,
+        )
+        pool.target_size = 2
+        pool.max_size = 2
+
+        pool.return_slot_after_session(_slot(3, cascade_id="c"))
+
+        assert {s.pid for s in pool._idle_slots} == {1, 3}
+
+    def test_a_pure_returner_still_goes(self) -> None:
+        """A returner with no cascade has no claim a resident lacks.
+
+        It also carries its session's accumulated heap (129-187 MB),
+        while a resident may still be a CoW-cheap template fork.
+        """
+        pool = _pool(_slot(1, cascade_id="a"), _slot(2), idle_timeout=300.0)
+        pool.target_size = 2
+        pool.max_size = 2
+
+        pool.return_slot_after_session(_slot(3))
 
         assert {s.pid for s in pool._idle_slots} == {1, 2}
         assert [s.pid for s in pool._pending_teardown] == [3]
@@ -374,6 +452,7 @@ class TestPoolCapacity:
         """
         pool = _pool(_slot(1), _slot(2), idle_timeout=300.0)
         pool.target_size = 2
+        pool.max_size = 2
         torn: list = []
         pool._teardown_slot = lambda slot, reason: torn.append(slot.pid)
 
@@ -388,6 +467,7 @@ class TestPoolCapacity:
     def test_the_drain_tears_down_what_the_cap_queued(self) -> None:
         pool = _pool(_slot(1), _slot(2), idle_timeout=300.0)
         pool.target_size = 2
+        pool.max_size = 2
         torn: list = []
         pool._teardown_slot = lambda slot, reason: torn.append((slot.pid, reason))
 
@@ -399,3 +479,156 @@ class TestPoolCapacity:
             "the PROCESS is not, which is the memory this fixes"
         )
         assert pool._pending_teardown == []
+
+
+# ======================================================================
+# Capacity was accounted globally while slots were allocated per-tenant
+#
+# Cascade affinity is the design, and correctly so: cross-cascade reuse
+# is forbidden because warm plugin state belongs to the original
+# cascade.  The defect (#898) was that the two capacity sites counted
+# every idle slot as capacity anyway -- so a pool at capacity could be
+# EMPTY from the point of view of every tenant but one.
+#
+# Reported live: two cascades on one daemon, ``target_size=2``, both
+# idle slots affined to cascade B.  Cascade A's ``session.new`` was
+# accepted and then received no daemon attention for a full 60 s;
+# ``acquire_slot(cascade=A)`` returned None (no affine match, no
+# pure-idle) and replenishment read ``idle_count() == 2 >= 2`` and
+# never forked.  Nothing to run on, and nothing in the system that
+# would ever create one, until B released 31 s too late.
+# ======================================================================
+
+
+class TestMultiTenantCapacity:
+
+    def test_unreserved_idle_count_excludes_other_tenants_slots(self) -> None:
+        """The quantity a waiter can actually draw on."""
+        pool = _pool(
+            _slot(1, cascade_id="B"),
+            _slot(2, cascade_id="B"),
+            _slot(3),
+        )
+        assert pool.idle_count() == 3
+        assert pool.unreserved_idle_count() == 1, (
+            "reservations were counted as free capacity; that is the "
+            "arithmetic that starved the second tenant"
+        )
+
+    def test_replenish_forks_when_every_idle_slot_is_another_tenants(self) -> None:
+        """The reported pool state, one replenish iteration.
+
+        Two idle slots, both affined to B, ``target_size=2``.  A tenant
+        that is not B has nothing to acquire, so the loop must fork --
+        reading "2/2, full" is what left A with no path to a slot.
+        """
+        tm = MagicMock()
+        tm.is_alive.return_value = True
+        tm.request_fork_slot.return_value = (9001, MagicMock(name="sock_9001"))
+        pool = PoolManager(template_manager=tm, target_size=2, max_size=4)
+        pool._idle_slots = [
+            _slot(1, cascade_id="B", last_end_ts=time.monotonic()),
+            _slot(2, cascade_id="B", last_end_ts=time.monotonic()),
+        ]
+
+        pool._replenish_stop.set()   # one iteration, no sleeping
+        pool._replenish_loop()
+
+        assert tm.request_fork_slot.called is False, (
+            "the stop event should short-circuit before the loop body"
+        )
+
+        pool._replenish_stop.clear()
+        _run_one_replenish_iteration(pool)
+
+        assert tm.request_fork_slot.call_count == 1, (
+            "replenishment counted slots the waiting tenant is forbidden "
+            "to use and concluded the pool was full"
+        )
+        assert pool.unreserved_idle_count() == 1
+
+    def test_replenish_stops_at_the_ceiling(self) -> None:
+        """Reservations still cost 129-187 MB each.
+
+        Unreserved accounting is what un-starves the second tenant;
+        ``max_size`` is what keeps that from becoming one runner per
+        cascade forever.  Hitting it is recorded, because it is the
+        signal to raise the knob.
+        """
+        tm = MagicMock()
+        tm.is_alive.return_value = True
+        tm.request_fork_slot.return_value = (9002, MagicMock())
+        pool = PoolManager(template_manager=tm, target_size=2, max_size=2)
+        pool._idle_slots = [
+            _slot(1, cascade_id="B", last_end_ts=time.monotonic()),
+            _slot(2, cascade_id="C", last_end_ts=time.monotonic()),
+        ]
+
+        _run_one_replenish_iteration(pool)
+
+        assert tm.request_fork_slot.called is False
+        assert pool.get_telemetry()["pool_replenish_ceiling_blocked_total"] == 1
+
+    def test_a_second_tenant_can_acquire_once_replenishment_has_run(self) -> None:
+        """End to end, at pool level: A no longer starves behind B."""
+        tm = MagicMock()
+        tm.is_alive.return_value = True
+        forked = iter([(9101, MagicMock()), (9102, MagicMock())])
+        tm.request_fork_slot.side_effect = lambda: next(forked, None)
+        pool = PoolManager(template_manager=tm, target_size=2, max_size=4)
+        pool._idle_slots = [
+            _slot(1, cascade_id="B", last_end_ts=time.monotonic()),
+            _slot(2, cascade_id="B", last_end_ts=time.monotonic()),
+        ]
+
+        assert pool.acquire_slot(cascade_driver_id="A") is None, (
+            "precondition: with only B's reservations resident there is "
+            "nothing for A to take"
+        )
+
+        _run_one_replenish_iteration(pool)
+        out = pool.acquire_slot(cascade_driver_id="A")
+
+        assert out is not None, "cascade A starved behind cascade B"
+        assert out.cascade_id == "A"
+
+    def test_max_size_defaults_to_twice_the_target(self) -> None:
+        pool = PoolManager(template_manager=MagicMock(), target_size=3)
+        assert pool.max_size == 6
+
+    def test_a_ceiling_below_the_floor_is_raised_to_it(self) -> None:
+        """Not a policy: it would evict on every single return."""
+        pool = PoolManager(
+            template_manager=MagicMock(), target_size=4, max_size=1,
+        )
+        assert pool.max_size == 4
+
+
+def _run_one_replenish_iteration(pool: PoolManager) -> None:
+    """Run exactly one pass of the replenish loop body.
+
+    The loop is ``while not stop``, so it is driven here by arming the
+    stop event at BOTH of the body's exits -- the backoff wait and a
+    successful fork.  Without the second, a loop that forks does not
+    wait, so it would keep going until the pool reached target and the
+    test would be measuring several iterations while claiming one.
+    There is no sleeping and no thread.
+    """
+    real_wait = pool._replenish_stop.wait
+    real_fork = pool._template_manager.request_fork_slot
+
+    def _stop_then(fn):
+        def _wrapped(*args, **kwargs):
+            pool._replenish_stop.set()
+            return fn(*args, **kwargs)
+        return _wrapped
+
+    pool._replenish_stop.wait = _stop_then(  # type: ignore[assignment]
+        lambda timeout=None: True)
+    pool._template_manager.request_fork_slot = _stop_then(real_fork)
+    try:
+        pool._replenish_loop()
+    finally:
+        pool._replenish_stop.wait = real_wait  # type: ignore[assignment]
+        pool._template_manager.request_fork_slot = real_fork
+        pool._replenish_stop.clear()
