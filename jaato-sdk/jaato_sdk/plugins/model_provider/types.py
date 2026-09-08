@@ -143,10 +143,12 @@ Usage::
 
 TRAIT_UNTRUSTED_CONTENT = "untrusted_content"
 """Trait for tools whose result carries content from an untrusted source —
-the open internet or a third party (``web_fetch``, ``web_search``, MCP servers).
+the open internet or a third party (``web_fetch``, ``web_search``, MCP servers,
+``call_service`` REST responses).
 
 Such content can contain *indirect prompt injection*: instructions embedded in
-a fetched page / search snippet / MCP payload that try to hijack the agent.
+a fetched page / search snippet / MCP payload / API response body that try to
+hijack the agent.
 When a tool declares this trait, the session marks its result
 (``ToolResult.untrusted``) and the provider converter wraps the model-facing
 text in the :data:`UNTRUSTED_OPEN` / :data:`UNTRUSTED_CLOSE` boundary markers
