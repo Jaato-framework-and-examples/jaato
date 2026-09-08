@@ -98,6 +98,7 @@ you must complete · **●○○** hook only, you build the feature · **○○�
 | PII / redaction | ○○○ | ●○○ history + telemetry transformer seams | ●●● four-seat pseudonymisation, Presidio, sealed audit |
 | Data retention / residency tooling | ○○○ (`--no-session` only) | ●○○ manual delete; many local/EU providers | ●○○ unchanged |
 | Audit trail / traceability | ●●○ complete session JSONL tree with model + usage per message | ●●○ 114-event stream, token ledger, OTel/OpenInference, versioned session records | ●●● + attestation, provenance checks, sealed redaction audit |
+| Interrogating a finished session (ask it why, replay from a point) | ●●○ `--session` / `--fork` resume the tree under current settings | ●●● `session.wake` under the persisted prompt, `resolve_fork_point`, `replay_messages`, `inject_prompt`, profile sets | ●●● + model-callable `interrogate_session` and replay workspaces |
 | Observability adapter | ●○○ vendor-neutral contracts, no OTel adapter, not threaded into the coding-agent SDK | ●●● OTel, Langfuse, Phoenix, cost spans | ●●● + per-server resource identity |
 | Human oversight (approve, stop, steer, ask) | ●●○ abort, steering queue, follow-ups; approval only via extension | ●●● permissions, out-of-band approval channels, clarification, plan events, completion gates, stop | ●●● + HandoffGate async approval primitive, park and resume |
 | Prompt-injection / untrusted content | ○○○ explicitly out of scope | ●●○ tagged untrusted boundary + system-prompt layer (soft) | ●●○ unchanged |
@@ -409,7 +410,29 @@ tier events. Token ledger JSONL (`LEDGER_PATH`). OpenTelemetry spans
 resolved provider-reported → `.jaato/pricing.json` (LiteLLM schema) → none; a
 Langfuse backend and a Phoenix compose file. Session records version 2.8
 persist the resolved profile and the *rendered* system instruction, so an
-auditor can recover the exact prompt a turn ran under. Gaps: no actor identity
+auditor can recover the exact prompt a turn ran under.
+
+**Interrogation is a free primitive, not a premium tool.** A finished session
+can be woken (`session.wake`) under the profile and prompt it ran with and
+asked, in prose, to account for what it did; the question arrives wrapped as
+untrusted content, so the agent reads it as data. Three typed verbs sit under
+that on the IPC and WebSocket clients (`jaato-sdk/jaato_sdk/events.py`,
+"SDK feature parity"): `inject_prompt` (steer or follow-up),
+`resolve_fork_point` (a message index, tool call id or timestamp) and
+`replay_messages` (re-run the model loop from an explicit message list or the
+current history). A profile set (`JAATO_PROFILE_SET`) shadows the session's
+own contract for the interrogation without touching the original, and
+`JAATO_REVIVE_PROFILE=disk` re-derives it. The
+`jaato-eval-issue-fix-sweep-harness` repository in the jaato organisation
+exercises this in `tools/interrogate/`: after a sweep arm passed with a
+report whose "root cause" quoted code that was never in the file, the arm was
+revived and asked to account for the discrepancy, which is exactly the
+Article 12 question a reviewer needs answered. Premium's `session_ops` wraps
+the same primitives as model-callable tools (`interrogate_session`,
+`setup_replay_workspace`, `replay_in_workspace`); it is a convenience, not
+the capability.
+
+Gaps: no actor identity
 on events, no hash chain or signing, no SIEM exporter, no pricing data shipped.
 
 **jaato premium.** Daruma attestation guards check a model's completion receipt
@@ -438,7 +461,7 @@ does not make.
 | **Accuracy, robustness, cybersecurity** (Art. 15): resilience to manipulation, e.g. prompt injection | Explicitly out of scope | Untrusted-content boundary, egress allowlist, AppArmor, permission gating | + default-deny compiled evaluators |
 | **Data governance** (Art. 10) and GDPR interplay: minimisation, protection of personal data | `blockImages`, `--no-session` | Redaction seams, local/EU providers | Four-seat pseudonymisation |
 | **Risk management, conformity documentation** (Art. 9, 11, 17) | Nothing | Nothing | Nothing |
-| **Reproducibility of a decision** | Fork/replay of session tree; no seed | Persisted profile + rendered prompt on revive; `echo` provider for deterministic CI | Replay workspaces (`session_ops`) |
+| **Reproducibility of a decision** | Fork/resume of the session tree; no seed | `session.wake` revives a finished session under its persisted profile and rendered prompt and can be asked to account for a decision; `resolve_fork_point` + `replay_messages` re-run the loop from any message, tool call or timestamp; profile sets swap the interrogation contract; `echo` provider for deterministic CI | Same primitives wrapped as model-callable tools (`session_ops`) |
 
 Honest reading: jaato gives a deployer more Article 12/14/15 *evidence* out of
 the box; pi gives a clean substrate and expects you to build the controls.
