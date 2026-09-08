@@ -815,6 +815,29 @@ model_tiers:
 > provider. While streaming, OpenAI emits **only pcm16** (24 kHz mono s16le,
 > headerless), which is why `STREAM_AUDIO_MIME` spells the parameters out.
 
+### Tool IDs on the Wire and in the Trace (#873)
+
+Tool names reach the model as hashed ids (`t_<8 hex>`, `shared/tool_id_map.py`)
+because upstreams enforce `^[a-zA-Z0-9_-]{1,128}$` and MCP names like
+`mcp.server.tool` do not pass. The reverse map is an **in-process dict**
+populated as a side effect of hashing, not a function of the id — so a
+provider trace record that named a call only by `name=<wire id>` was
+unreadable in any later process, and the tool inventory needed to re-hash
+candidates varies per session and is not recorded.
+
+Every streaming provider that hashes (`_openai_compat` and its inheritors,
+`openrouter`, `github_models`, `anthropic`) now renders its tool-call trace
+records through `wire_name_trace_fields`, which writes
+`name=<wire> tool_name=<resolved>`: `name` keeps meaning "what the wire
+said" so existing readers do not change meaning, and `tool_name` is the
+resolution made in the only process that can make it. Resolution is never
+destructive — a hallucinated id the process never issued is recorded as
+`tool_name='t_deadbeef'`, evidence of the invention rather than a
+resolved-looking name hiding it. The OpenAI-shaped loops also emit a
+`TOOL_CALL_END` record at flush, because an upstream may send the name on a
+later delta than the one that opens the call, leaving the `TOOL_CALL_START`
+record honestly nameless.
+
 ### Tool Traits
 
 Tools can declare semantic **traits** on their `ToolSchema` via the `traits` field (a `FrozenSet[str]`). Traits drive cross-cutting behavior without hardcoding tool names in session or plugin code.
