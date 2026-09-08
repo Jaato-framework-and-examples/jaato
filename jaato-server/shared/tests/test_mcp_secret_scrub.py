@@ -87,3 +87,55 @@ def test_single_string_actually_scrubs(monkeypatch):
     cfg = ServerConfig(name="s", command="x",
                        scrub_secret_env=mgr._scrub_secret_env)
     assert "GITHUB_TOKEN" not in _env(cfg.to_stdio_params())
+
+
+# ---- the plugin is where the DEFAULT lives (#863) -------------------------
+#
+# The manager / ServerConfig primitives above stay policy-free (``()`` means
+# "scrub nothing", exactly as before).  The plugin is the policy layer: an
+# absent knob resolves to the framework set, ``none`` is the announced
+# opt-out, and a malformed value fails closed.
+
+def _plugin(config):
+    from shared.plugins.mcp.plugin import MCPToolPlugin
+    p = MCPToolPlugin()
+    # Resolve the knob without starting the background MCP thread.
+    p._ensure_thread = lambda: None
+    p.initialize(config)
+    return p
+
+
+def test_plugin_absent_knob_scrubs_with_the_framework_set():
+    from shared.secret_scrub import DEFAULT_SECRET_ENV_PATTERNS
+    assert _plugin({})._scrub_secret_env == list(DEFAULT_SECRET_ENV_PATTERNS)
+
+
+def test_plugin_none_is_the_explicit_opt_out(caplog):
+    import logging
+    with caplog.at_level(logging.WARNING, logger="shared.secret_scrub"):
+        p = _plugin({"scrub_secret_env": "none"})
+    assert p._scrub_secret_env == []
+    assert any("mcp" in r.getMessage() and "DISABLED" in r.getMessage()
+               for r in caplog.records)
+
+
+def test_plugin_lone_string_is_one_pattern():
+    assert _plugin({"scrub_secret_env": "*_TOKEN"})._scrub_secret_env == ["*_TOKEN"]
+
+
+def test_plugin_malformed_fails_closed():
+    from shared.secret_scrub import DEFAULT_SECRET_ENV_PATTERNS
+    p = _plugin({"scrub_secret_env": {"nope": 1}})
+    assert p._scrub_secret_env == list(DEFAULT_SECRET_ENV_PATTERNS)
+
+
+def test_plugin_exemption_reaches_the_stdio_env(monkeypatch):
+    # End to end through the same to_stdio_params choke: the framework set
+    # strips GITHUB_TOKEN, the '!GH_TOKEN' exemption keeps gh working.
+    monkeypatch.setenv("GITHUB_TOKEN", "drop")
+    monkeypatch.setenv("GH_TOKEN", "keep")
+    p = _plugin({"scrub_secret_env": ["default", "!GH_TOKEN"]})
+    cfg = ServerConfig(name="s", command="x", scrub_secret_env=p._scrub_secret_env)
+    env = _env(cfg.to_stdio_params())
+    assert "GITHUB_TOKEN" not in env
+    assert env["GH_TOKEN"] == "keep"

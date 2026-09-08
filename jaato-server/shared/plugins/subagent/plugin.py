@@ -18,6 +18,7 @@ from datetime import datetime
 from .config import (
     SubagentConfig, SubagentProfile, SubagentResult, GCProfileConfig,
     detect_workspace_tech_stack, discover_profiles, expand_plugin_configs,
+    inject_scrub_secret_env,
     expand_variables, _find_workspace_root, gc_profile_to_plugin_config,
     validate_profile,
 )
@@ -594,6 +595,9 @@ class SubagentPlugin(DaemonForwardingMixin):
                     )
                     provider_cfg["quirks"] = dict(profile.quirks)
                     effective_plugin_configs[provider] = provider_cfg
+                # Profile-level scrub_secret_env (#863) -> subprocess
+                # surfaces, beneath their explicit knobs.
+                inject_scrub_secret_env(profile, effective_plugin_configs)
 
                 # Save parent session before create_session because configure() on
                 # the new session will overwrite self._parent_session
@@ -3180,6 +3184,10 @@ class SubagentPlugin(DaemonForwardingMixin):
                         notify_on_gc=gc_data.get('notify_on_gc', True),
                         summarize_middle_turns=gc_data.get('summarize_middle_turns'),
                         max_turns=gc_data.get('max_turns'),
+                        media_bytes_threshold=gc_data.get('media_bytes_threshold'),
+                        evict_consumed_media=gc_data.get('evict_consumed_media'),
+                        media_evict_mime_prefixes=gc_data.get(
+                            'media_evict_mime_prefixes'),
                         plugin_config=gc_data.get('plugin_config', {}),
                     )
 
@@ -3577,6 +3585,11 @@ class SubagentPlugin(DaemonForwardingMixin):
                 )
                 provider_cfg["quirks"] = dict(profile.quirks)
                 effective_plugin_configs[provider] = provider_cfg
+            # Profile-level scrub_secret_env (#863) -> the cli /
+            # interactive_shell / mcp sections, beneath their explicit
+            # knobs.  Mirrors the runner-envelope site in
+            # ``server/runner_spawn.py``.
+            inject_scrub_secret_env(profile, effective_plugin_configs)
 
             # Save parent session reference BEFORE create_session, because
             # create_session calls session.configure() which overwrites

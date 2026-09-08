@@ -43,11 +43,17 @@ from .utils import (
     create_gc_notification_message,
     create_summary_message,
     ensure_tool_call_integrity,
+    estimate_media_tokens,
     estimate_message_tokens,
     estimate_history_tokens,
     estimate_turn_tokens,
+    evict_consumed_media,
     flatten_turns,
     get_preserved_indices,
+    history_media_bytes,
+    media_pressure_reason,
+    message_media_bytes,
+    message_media_tokens,
     split_into_turns,
 )
 
@@ -228,6 +234,7 @@ def load_gc_from_file(
             max_turns=data.get('max_turns'),
             preserve_recent_turns=data.get('preserve_recent_turns', 5),
             plugin_config=data.get('plugin_config') or {},
+            **_media_settings(data),
         )
 
         logger.info("Loaded GC config from %s: type=%s", config_path, gc_type)
@@ -242,6 +249,27 @@ def load_gc_from_file(
     except Exception as e:
         logger.warning("Error reading GC config file %s: %s", config_path, e)
         return None
+
+
+def _media_settings(data: Dict) -> Dict:
+    """The media keys of ``gc.json``, absent when the file omits them.
+
+    Returned as kwargs rather than read with ``data.get(key, default)``
+    because these three defaults live on :class:`GCConfig` — one of them
+    behind an env var — and re-spelling them here would silently win over
+    ``JAATO_GC_MEDIA_BYTES`` for every session that has a ``gc.json`` at
+    all.  Omission has to mean "the dataclass decides", not "the default I
+    happened to type".
+    """
+    settings: Dict = {}
+    if data.get('media_bytes_threshold') is not None:
+        settings['media_bytes_threshold'] = int(data['media_bytes_threshold'])
+    if data.get('evict_consumed_media') is not None:
+        settings['evict_consumed_media'] = bool(data['evict_consumed_media'])
+    prefixes = data.get('media_evict_mime_prefixes')
+    if prefixes is not None:
+        settings['media_evict_mime_prefixes'] = tuple(prefixes)
+    return settings
 
 
 def get_gc_apparmor_rules() -> List[str]:
@@ -291,4 +319,11 @@ __all__ = [
     "create_gc_notification_message",
     "ensure_tool_call_integrity",
     "get_preserved_indices",
+    # Media accounting + consumed-media eviction (#850)
+    "estimate_media_tokens",
+    "message_media_bytes",
+    "message_media_tokens",
+    "history_media_bytes",
+    "media_pressure_reason",
+    "evict_consumed_media",
 ]

@@ -16,6 +16,8 @@ from typing import AsyncIterator, Dict, List, Any, Callable, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
+from shared.secret_scrub import DEFAULT_SECRET_ENV_PATTERNS, resolve_scrub_patterns
+
 from jaato_sdk.plugins.base import UserCommand, CommandParameter, CommandCompletion, HelpLines
 from jaato_sdk.plugins.model_provider.types import (
     ToolSchema, CancelledException, TRAIT_UNTRUSTED_CONTENT)
@@ -209,10 +211,11 @@ class MCPToolPlugin(RunnerForwardingMixin):
         self._config_path: Optional[str] = None  # Path config was loaded from
         self._custom_config_path: Optional[str] = None  # User-specified path via plugin_configs
         self._workspace_path: Optional[str] = None  # Client's working directory
-        # Operator-declared secret name globs stripped from every MCP server
-        # subprocess's inherited environment (secrets-broker scrub, #10). Off by
-        # default; opt-in via the 'scrub_secret_env' plugin config knob.
-        self._scrub_secret_env: List[str] = []
+        # Secret name globs stripped from every MCP server subprocess's
+        # inherited environment (secrets-broker scrub, #10).  ON by default
+        # since #863 — the framework set applies until ``initialize`` resolves
+        # the operator's 'scrub_secret_env' knob ('none' opts out).
+        self._scrub_secret_env: List[str] = list(DEFAULT_SECRET_ENV_PATTERNS)
         self._config_cache: Dict[str, Any] = {}
         self._connected_servers: set = set()
         self._failed_servers: Dict[str, str] = {}  # server -> error message
@@ -315,9 +318,11 @@ class MCPToolPlugin(RunnerForwardingMixin):
                 - workspace_path: Client's working directory for finding .mcp.json
                 - session_id: Session identifier for log disambiguation
                 - agent_name: Name for trace logging
-                - scrub_secret_env: List of env-var name globs to strip from
-                  every MCP server subprocess's inherited environment
-                  (secrets-broker scrub; default []/off)
+                - scrub_secret_env: env-var name globs to strip from every
+                  MCP server subprocess's inherited environment (secrets-
+                  broker scrub).  'default' / absent = the framework set;
+                  'none' = off (announced at WARNING); a list may carry
+                  'default' and '!EXEMPT' entries.  See shared.secret_scrub.
         """
         if self._initialized:
             return
@@ -328,16 +333,14 @@ class MCPToolPlugin(RunnerForwardingMixin):
         self._session_id = config.get("session_id")
         self._custom_config_path = config.get("config_path")
         self._workspace_path = config.get("workspace_path")
-        # Normalize like the cli plugin: a single string (common YAML mistake,
-        # e.g. `scrub_secret_env: "*_TOKEN"`) is coerced to a 1-item list rather
-        # than silently disabling scrubbing (which would fail OPEN and reintroduce
-        # the secret leak). Entries are coerced to str.
-        scrub = config.get("scrub_secret_env", [])
-        if isinstance(scrub, str):
-            scrub = [scrub]
-        self._scrub_secret_env = (
-            [str(s) for s in scrub] if isinstance(scrub, (list, tuple)) else []
-        )
+        # Secrets-broker scrub (#10, default flipped in #863): the shared
+        # resolver keeps a lone string as ONE pattern (never split into
+        # characters, which would fail OPEN), applies the framework set when
+        # the knob is absent, fails closed on a malformed value, and announces
+        # an explicit 'none' at WARNING.
+        self._scrub_secret_env = list(resolve_scrub_patterns(
+            config.get("scrub_secret_env"), surface=self.name,
+        ))
         self._trace("initialize: starting background thread")
         self._ensure_thread()
         self._initialized = True
@@ -356,18 +359,21 @@ class MCPToolPlugin(RunnerForwardingMixin):
                     ),
                 },
                 "scrub_secret_env": {
-                    "type": "array",
+                    "type": ["string", "array"],
                     "items": {"type": "string"},
-                    "default": [],
+                    "default": "default",
                     "description": (
-                        "Env-var name globs (case-insensitive fnmatch) to strip "
+                        "Env-var name globs (case-insensitive fnmatch) stripped "
                         "from the INHERITED environment of every MCP server "
                         "subprocess, so a model-invokable / third-party MCP server "
                         "named in .mcp.json cannot read raw credentials the runner "
                         "itself holds (provider key, tokens). A secret listed in a "
                         "server's own 'env' is an explicit grant and is NOT "
-                        "scrubbed. Empty = off (default). Recommended starting set: "
-                        "['*_API_KEY','*_TOKEN','*_SECRET','ANTHROPIC_AUTH_TOKEN']."
+                        "scrubbed. 'default' (also when absent) = the framework "
+                        "set (*_API_KEY, *_TOKEN, *_SECRET, ...); 'none' = off "
+                        "(announced at WARNING); a list may carry 'default' and "
+                        "'!NAME' exemption entries. Overrides the profile-level "
+                        "scrub_secret_env for this surface."
                     ),
                 },
             },

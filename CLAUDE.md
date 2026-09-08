@@ -256,9 +256,20 @@ plugin_configs: {}
 #     suppress_base_instructions: {constants: true}       # keep disk + security
 #     suppress_base_instructions: {disk: true, constants: true, security: true}
 #   Inheritance merges by UNION (a piece any layer drops stays dropped).
+# scrub_secret_env: secret env vars stripped from every model-driven
+#   subprocess (cli / interactive_shell / mcp).  ON by default (#863) —
+#   absent = the framework set; `none` opts out (announced at WARNING);
+#   `[default, '!GH_TOKEN']` keeps one tool's token while the provider
+#   key stays out of the shell.  plugin_configs.<surface>.scrub_secret_env
+#   overrides it for one surface.  See "Secret Env Scrubbing" below.
+scrub_secret_env: default
 gc:
   type: budget
   threshold_percent: 80.0
+  # media accounting + consumed-media eviction (#850); omit to keep defaults
+  media_bytes_threshold: 8388608     # bytes of binary payload; 0 disables
+  evict_consumed_media: true         # purge audio once its turn completed
+  media_evict_mime_prefixes: ["audio/"]
 # trace: typed diagnostic log paths — the validated sibling of the
 #   JAATO_TRACE_LOG / JAATO_PROVIDER_TRACE env vars, which remain the
 #   lower-precedence default (the block outranks both the workspace .env
@@ -395,9 +406,19 @@ gc_config = GCConfig(
     threshold_percent=80.0,    # Trigger when context is 80% full
     preserve_recent_turns=5,   # Keep last 5 turns
     auto_trigger=True,
+    # Media is a SECOND denominator, in bytes (#850) — a voice session can
+    # sit far below its token threshold while carrying megabytes of audio.
+    media_bytes_threshold=8 * 1024 * 1024,   # 0 disables
+    evict_consumed_media=True,               # purge bytes after the turn
+    media_evict_mime_prefixes=("audio/",),   # images survive by default
 )
 client.set_gc_plugin(gc_plugin, gc_config)
 ```
+
+The same three keys are settable per session from a profile's `gc:` block and
+from `.jaato/gc.json`; both layers pass a key only when it is present, so
+omitting one leaves the framework default (and `JAATO_GC_MEDIA_BYTES`) in
+charge rather than silently overriding it.
 
 ### Deferred Tool Loading
 
@@ -580,6 +601,75 @@ latent hardcode in every OpenAI-shaped converter (`_openai_compat` emits
 the text-only floor from `ModalityCapabilityMixin`, a user-message image
 now meets the same withhold their tool-result images always have. See
 [Binary Media Chunks §10](docs/design/binary-media-chunks.md).
+
+**How long anyone sees it (#850).** #847 fixed *which* model sees an
+utterance; media still had a lifecycle in one direction only. Outbound was
+right — model media is `CLIENT`-audience so it never enters history, and
+`ensure_spoken_part` leaves the *transcript* in its place. Inbound got
+neither: a heard utterance stayed in history verbatim and rode every later
+request. Five questions on one helpdesk call measured ~2.8 MB of accumulated
+audio and a final request carrying all of it (~3.8 MB base64), growing with
+every turn.
+
+**And GC could not see it.** `grep -rn "inline_data" shared/plugins/gc_*/`
+returned nothing: `estimate_message_tokens` walked text, function calls and
+function responses and never looked at `inline_data`, so a 600 KB utterance
+was sized at the one-token floor and no threshold could fire on the payload
+it exists to bound. Two channels now, deliberately different in kind —
+`estimate_media_tokens` puts media in the **token** denominator (so a
+media-carrying turn is sized, and eviction can prefer it), and
+`context_usage["media_bytes"]` is a second denominator in **bytes** that
+`media_pressure_reason` compares against `GCConfig.media_bytes_threshold`
+(all four strategies consult it). Bytes, because the thing that killed the
+session was request *size* and an operator bounding it thinks in megabytes;
+laundering them through a token estimate would hide the quantity that
+matters behind a guess.
+
+**Purging cannot simply delete.** In a call-retention-regulated domain "the
+agent handled a claim from audio nobody can produce" is the audit finding.
+An inbound attachment carried **no id** (`{mime_type, data, display_name}`)
+while outbound media has carried `stream_id`/`sequence` since #824 — so the
+identifier is minted at *ingest* (`jaato_sdk/media_identity.py`), as a
+SHA-256 digest of the payload rather than a uuid, because the archive side
+must be able to **recompute** it from the recording rather than look it up
+in a mapping somebody kept. The SDK client mints it (the sender is what
+archives the file); `_parts_from_user_message` back-fills the same value for
+clients that send none, and never overwrites one the caller supplied.
+
+`JaatoSession._evict_consumed_media` then replaces the bytes with a marker
+naming that id, duration and mime. It runs at the **start** of a turn, from
+both chat loops: everything in history then belongs to a completed turn, and
+a turn that died before the model saw its audio keeps the bytes for a retry.
+Unlike `_gate_history_for_active_modalities` (a per-request *copy*), this is
+destructive — the accepted trade, since re-hearing a recording yields the
+understanding the conversation already records in words. Audio only by
+default; an image is routinely re-examined across turns, a recording is not.
+Shape **A** of the two the issue names; shape **B** (substitute a
+transcript, mirroring `ensure_spoken_part`) needs a transcript source that
+chat-completions does not provide for inbound audio, and composes on top.
+Knobs: profile `gc:` / `.jaato/gc.json` `evict_consumed_media`,
+`media_evict_mime_prefixes`, `media_bytes_threshold`; env
+`JAATO_GC_MEDIA_BYTES`. See
+[Binary Media Chunks §11](docs/design/binary-media-chunks.md).
+
+**What was said reaches the client (#869).** Every spoken turn produced a
+transcript inside the provider and no client could obtain it: the decoder
+put the words in a caller-owned sink, and the sink became a history Part
+(`ensure_spoken_part`) only after the stream closed, past every point that
+emits to a client. A voice client saw 5.45 s of audio in 14 chunks and an
+`ask()` returning `''`; a call log could record how long the agent spoke but
+not what it said. The `pending` one-slot buffer already holds the last chunk
+back to mark it `final`, and the transcript is complete at that moment, so
+the chunk released as `final` now carries the whole utterance in
+`MediaDelta.transcript` — which `_deliver_model_media` already forwarded into
+`ToolOutputEvent.chunk`. Intermediate chunks stay wordless; a client reads
+the words exactly once, off the event that also ends playback. Under the
+same rule history follows: a turn that wrote its own text sends no
+transcript, because those words already went out as `AGENT_OUTPUT`. One
+predicate, `model_wrote_text(parts, accumulated_text)`, answers for both
+destinations, and both streaming loops pass it as a callable read *at the
+marker* rather than a flag read at the start. See
+[Binary Media Chunks §12](docs/design/binary-media-chunks.md).
 
 Two shapes were available for #830 and only one is implemented here: audio as
 an **input modality** (above), not **transcription as a step**. A transcriber
@@ -802,6 +892,82 @@ registers (`get_plugin_source(name)` / `get_plugin_sources()`), so a
 shadow is visible without reading logs.  `jaato-scaffold plugins` marks
 any plugin not supplied by the built-in package with
 `<- <distribution> (<module>)`.
+
+### Secret Env Scrubbing (#863)
+
+The runner legitimately holds secrets in its own `os.environ` — the
+provider key, the tokens `web_fetch` expands into headers.  A shell
+command, PTY session or MCP server the *model* drives inherits that
+environment, so `env` or `echo $GITHUB_TOKEN` hands every credential to
+model-controlled code.  `shared/secret_scrub.py` removes a set of secret
+names from the environment *given to the subprocess* (never from the
+runner's own), at three surfaces: the `cli` subprocess boundary, every
+`interactive_shell` spawn, and MCP stdio spawn.
+
+**Scrubbing is on by default.**  Until #863 it was opt-in: the module
+defined `DEFAULT_SECRET_ENV_PATTERNS` and applied it nowhere, so a profile
+with `cli` or `mcp` and no scrub configuration passed the daemon's full
+environment, provider keys included, to every command the model ran.  The
+reason was real — `gh`, `git push`, cloud CLIs need their tokens — but the
+failure was silent and the default was the unsafe one, and #712 notes that
+AppArmor gives this scrub no kernel-level backstop.  Now the default set
+applies when nothing is declared, and opting *out* is the explicit,
+WARNING-announced act, like `--ws-unsafe-no-auth`.
+
+One grammar, accepted at the profile top level (`scrub_secret_env:`, which
+covers all three surfaces) and per surface
+(`plugin_configs.<cli|interactive_shell|mcp>.scrub_secret_env`, which wins
+for that surface):
+
+| Value | Meaning |
+|-------|---------|
+| absent / `default` | the framework set: `*_API_KEY`, `*_APIKEY`, `*_TOKEN`, `*_SECRET`, `*_SECRET_KEY`, `*_PASSWORD`, `*_PASSWD`, `*_ACCESS_KEY`, `*_ACCESS_KEY_ID`, `*_SECRET_ACCESS_KEY`, `*_PRIVATE_KEY`, `*_CREDENTIALS`, `ANTHROPIC_AUTH_TOKEN`, `GH_TOKEN`, `AWS_SESSION_TOKEN` |
+| `none` | scrub nothing — the developer-desktop opt-out, logged at WARNING by each surface that applies it. The **only** spelling that disables: `[]`, `""`, a boolean, or a list holding only `!` exemptions are rejected (`invalid_scrub_secret_env`, fail closed), because in this codebase `plugins: []` means "the minimal set", not "off", and an author writing `[]` or `["!GH_TOKEN"]` to mean "nothing beyond the default" must not land on the leaky posture |
+| `"*_TOKEN"` | one glob (a lone string is one pattern, never split into characters) |
+| `[glob, ...]` | an explicit list; the entry `default` expands to the framework set in place |
+| `"!NAME"` in a list | an **exemption**: a variable matching it survives whatever else matches — `[default, '!GH_TOKEN']` keeps `gh` working while the provider key stays out of the shell |
+
+```yaml
+# a developer-desktop profile: gh and the AWS CLI keep their credentials,
+# everything else in the framework set is still scrubbed
+plugins: [cli, interactive_shell, mcp]
+scrub_secret_env: [default, "!GH_TOKEN", "!AWS_*"]
+plugin_configs:
+  mcp:
+    scrub_secret_env: default     # the MCP servers get no exemption
+```
+
+Rules the implementation holds to:
+
+- **A malformed value fails closed.**  The plugin applies the default set,
+  logs an ERROR, and `jaato-scaffold validate` reports
+  `invalid_scrub_secret_env`.  The only outcome worse than a broken
+  workflow is a silently leaked credential.
+- **An explicit grant is not scrubbed.**  A secret in an MCP server's own
+  `env` (in `.mcp.json`) or in the `env=` an interactive-shell caller
+  passes reaches that process; only the *inherited* `os.environ` is
+  filtered.  A profile's `env:` map is **not** a grant — it is where the
+  provider key usually lives.
+- **The primitives stay policy-free.**  `run_command(scrub_env=None)`,
+  `ShellSession(scrub_env=None)` and `ServerConfig.scrub_secret_env=()`
+  still mean "scrub nothing"; the default lives in the three plugins
+  (`resolve_scrub_patterns`), so it applies however a session was built,
+  profile or not.  The profile key is folded into the surfaces the profile
+  enables by `inject_scrub_secret_env` at every profile-to-session site
+  (runner envelope, in-process root session, both subagent spawn paths),
+  beneath an explicit per-surface knob.
+- **Inheritance is scalar-override**: a child's value replaces the
+  parents' outright, so `none` in one leaf profile does not leak into its
+  siblings.  The value is persisted raw in the session snapshot (#787).
+- **The leaky posture is announced three times**: `jaato-scaffold
+  validate` warns `secret_scrub_disabled` per enabled surface (and
+  `scrub_secret_env_inert` when the key names no enabled surface),
+  `jaato-doctor` preflight WARNs naming each such profile in the
+  workspace, and the plugin logs at WARNING when it applies the opt-out.
+
+Not covered here: the eventual TLS-terminating broker (#505) that keeps a
+credential out of the runner environment entirely, and the `/proc`
+hardening in #712 that would give this app-layer scrub a kernel backstop.
 
 ### Interactive Shell Sessions (`shared/plugins/interactive_shell/`)
 
@@ -1610,6 +1776,7 @@ covers it, where one exists. `jaato-scaffold explain env` renders the tags;
 | `AI_USE_CHAT_FUNCTIONS` | Enable function calling mode (`1`/`true`) |
 | `LEDGER_PATH` | Output path for token accounting JSONL |
 | `JAATO_GC_THRESHOLD` | GC trigger threshold % (default: 80.0) |
+| `JAATO_GC_MEDIA_BYTES` | Binary payload a history may carry before GC triggers, in **bytes** (default 8 MiB; `0` disables). The second GC denominator: a voice session can sit far below its token threshold while carrying megabytes of audio, which is the state GC could not see at all before #850. Typed sibling: `gc.media_bytes_threshold`. |
 | `JAATO_PARALLEL_TOOLS` | Enable parallel tool execution (default: `true`) |
 | `JAATO_DEFERRED_TOOLS` | Enable deferred tool loading (default: `true`) |
 | `JAATO_RUNNER_POOL_ENABLED` | Enable pre-warm runner pool routing (default: `true`).  Sessions consume pre-warm pool slots instead of cold-spawning a runner subprocess.  Set to `false` / `0` / `no` / `off` to disable.  See `docs/design/runner_prewarm_pool_plan.md`. |
@@ -1787,6 +1954,24 @@ Note that radon counts `and`/`or` and comprehensions as decision points, so a ru
 of defensive `x.get(k) or ""` defaults can push an otherwise flat function over
 the line. The ceiling is 15 rather than 10 precisely to leave room for that; see
 the test module's docstring for the measurements behind the choice.
+
+### Comparison and Design Docs Are Checked Against the Tree
+
+`docs/compare-*.md` and the multimodal design doc carry claims an evaluator
+quotes — the licence, whether AppArmor is free, which wires carry images —
+and both comparison docs had drifted once before (#866). The guard is
+`jaato-server/shared/tests/test_docs_do_not_contradict_the_tree.py`, in the
+required `contract-guards` job:
+
+- no line a comparison doc attributes to jaato may call it MIT or open source
+  (the identifier is read from `jaato-server/pyproject.toml`; a competitor's
+  licence on its own line or in its own column is fine);
+- no comparison-doc line may call AppArmor premium while `server/apparmor.py`
+  ships in the free package;
+- the "Where jaato is now" table in `docs/design/multimodal-model-support.md`
+  must name exactly the providers whose `PROVIDER_CAPABILITIES` declare the
+  row's capability, so adding `pdf_input` to a provider means updating that
+  row.
 
 ### Docstring Maintenance
 

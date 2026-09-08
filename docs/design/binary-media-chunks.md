@@ -612,3 +612,215 @@ same active model the request will use.
 Guarded by `shared/tests/test_history_modality_gate.py`, which checks the
 stored history in every case — a test asserting only "the text tier sent no
 audio" passes for the destructive fix too.
+
+## 11. How long anyone sees it: consumed-media eviction (#850)
+
+§10 fixed *which* model sees an utterance. This is about how long **anyone**
+sees it.
+
+Media had a lifecycle in exactly one direction. Outbound is right: model
+media is `CLIENT`-audience so it never enters history at all, and
+`ensure_spoken_part` leaves the *transcript* where the audio would have gone
+— words kept, bytes discarded. Inbound got neither treatment. An utterance
+stayed in history verbatim and rode every subsequent request, forever.
+
+Measured on a five-question helpdesk call (`heard N bytes` per turn):
+
+```
+603244 + 888044 + 417644 + 680044 + 243244  =  ~2.8 MB of audio
+```
+
+By the last question the request carried all of it (~3.8 MB base64), growing
+every turn. The run ended with `runner RPC closed before id=83 responded` at
+9.6/11 GiB of host memory — causation unproven (dmesg was unreadable), the
+growth itself measured, and a cost/latency problem regardless.
+
+### 11.1 GC could not see any of it
+
+`grep -rn "inline_data" shared/plugins/gc_*/` returned nothing.
+`estimate_message_tokens` walked `text`, `function_call` and
+`function_response` and never looked at `inline_data`, so a 600 KB utterance
+was sized at the one-token floor: a threshold set at 60% could not fire on
+the payload it exists to bound, and eviction ordering could not prefer a turn
+it believed was empty. `_update_conversation_budget` had the same hole, so
+the InstructionBudget denominator omitted it too.
+
+Two fixes, deliberately different in kind:
+
+| | Unit | Where | Why this unit |
+|---|---|---|---|
+| `estimate_media_tokens` | tokens | `estimate_message_tokens`, `_update_conversation_budget` | so a media-carrying turn is *sized*, and eviction ordering can prefer it |
+| `context_usage["media_bytes"]` | **bytes** | `media_pressure_reason`, consulted by all four strategies | so a session can trigger collection on payload while far under its token threshold |
+
+The byte channel exists because the thing that killed the session was request
+**size**, and an operator bounding it thinks in megabytes. Laundering bytes
+through a token estimate to compare against `threshold_percent` would hide
+the quantity that actually matters behind a guess. `MEDIA_BYTES_PER_TOKEN` is
+an order-of-magnitude anchor per top-level mime (audio ≈ 4.8 kB/token, image
+and PDF ≈ 1.5 kB/token, anything unclassified charged at its base64 wire cost
+of 3 B/token — the harshest rate, because a payload nobody can name is the
+one whose real cost is least knowable). Wrong-but-visible beats invisible;
+the rate shifts *when* collection fires, never whether the bytes are seen.
+
+### 11.2 Purging cannot simply delete
+
+In a domain with call-retention duties, "the agent handled a claim from audio
+nobody can produce" is exactly the audit objection. Whatever replaces the
+bytes has to carry a reference that can be cross-referenced with an archived
+recording.
+
+Nothing supported that: a user-message attachment was normalised to
+`{mime_type, data, display_name}` — **no id** — while outbound media had
+carried `stream_id`/`sequence` since #824. So the identifier had to be minted
+at **ingest**, before anything was in a position to purge.
+
+`jaato_sdk/media_identity.py` mints it as a digest of the payload
+(`att_<16 hex>` of SHA-256) rather than a uuid, because the cross-reference
+has to work from the *archive* side: someone holding a `.wav` and a
+transcript naming an id can recompute the id from the recording itself,
+so the link survives the loss of every intermediate record. Two
+byte-identical attachments collide, and that is correct — they are the same
+recording. Minting is idempotent and side-effect free, which is what lets the
+SDK client mint it (the sender is the side that archives the file, and needs
+to know what to file it under) while `_parts_from_user_message` back-fills
+the same value for clients that send none; an id the caller supplied under a
+scheme of its own is never overwritten.
+
+Note the separation the fix rests on: purging from **model context** is not
+discarding the recording. Archiving is a file on disk; keeping the bytes in a
+prompt serves nobody.
+
+### 11.3 Shape A, with shape B left open
+
+The issue names two shapes. **A** — evict the bytes, leave a marker carrying
+the id, duration and mime — is what ships: no transcript source needed, no
+new dependency. **B** — substitute a transcript, mirroring
+`ensure_spoken_part` — is higher fidelity and symmetric with outbound, and
+needs a transcript that does not exist for inbound audio on chat-completions
+today (the audio model consumes the bytes directly and emits no input
+transcription). They compose: B where a transcript is available, A as the
+floor. Both need the ingest id.
+
+```
+[Media evicted after the turn that consumed it — question.wav, audio/wav,
+ 12.6s, 588.0 KB, ref att_9f2c1ab73e0d4455. The recording is not discarded
+ by this; cite the ref to locate the archived original.]
+```
+
+### 11.4 Destructive, and at the START of a turn
+
+`evict_consumed_media` (`plugins/gc/utils.py`) is the opposite of
+`_gate_history_for_active_modalities` in the one way that matters: the gate
+filters a per-request **copy** so a later `enter_tier` back to a voice model
+can still hear, while eviction rewrites the **stored** history and the model
+genuinely cannot re-listen. That is the accepted trade — re-hearing a
+recording yields the understanding the conversation already records in words.
+
+`JaatoSession._evict_consumed_media` runs at the **start** of a turn, from
+both chat loops, immediately before the new user message is appended.
+Everything in history at that moment belongs to a turn that has completed,
+which is what makes "consumed" true without having to reason about it; and a
+turn that failed before the model ever saw its audio keeps the bytes, so the
+caller can simply send again. Running it in the previous turn's `finally`
+would look equivalent and would purge on exactly the path where the audio was
+never used. Both loops call it because a text turn following a voice turn
+must stop carrying the audio too, or the growth resumes whenever the caller
+types instead of speaking.
+
+Bookkeeping mirrors `_dedup_history_for_gc`, the other history-rewriting
+maintenance pass: the rewrite preserves `message_id`, so the per-message
+token cache is invalidated for the touched messages before the budget
+re-sync, or it reads back the pre-eviction size.
+
+Audio only, by default (`GCConfig.media_evict_mime_prefixes`). An image is
+routinely re-examined across turns ("what does the third column say?") and a
+PDF is a document the conversation keeps referring back to; a recording
+re-heard says what it said the first time.
+
+### 11.5 Knobs
+
+| Surface | Key | Default |
+|---|---|---|
+| profile `gc:` | `evict_consumed_media` | `true` |
+| profile `gc:` | `media_evict_mime_prefixes` | `["audio/"]` |
+| profile `gc:` | `media_bytes_threshold` | 8 MiB |
+| `.jaato/gc.json` | same three keys | same |
+| env | `JAATO_GC_MEDIA_BYTES` | 8 MiB (`0` disables) |
+
+The profile and `gc.json` layers pass a media key **only when it is set**,
+because these defaults live on `GCConfig` — one of them behind the env var —
+and spelling them at the loader would make every profile carrying a `gc:`
+block silently outrank `JAATO_GC_MEDIA_BYTES`.
+
+Guarded by `shared/tests/test_heard_audio_does_not_accumulate.py`, whose
+final assertion is the issue's own acceptance criterion: request payload
+across six voice turns must not grow with the turn count.
+
+## 12. The words reach the client on the final chunk (#869)
+
+§11 settled what remains when the bytes go: the *words*. For inbound audio
+that is a marker naming an id; for outbound, `ensure_spoken_part` leaves the
+model's transcript in history where the audio would have been. But history
+was the **only** place it went. Every spoken turn produced a transcript
+inside the provider, and no client could obtain it.
+
+### 12.1 Where it went
+
+`emit_audio_delta` took the transcript off `delta.audio` and appended it to a
+caller-owned list, `transcript_sink`, emitting no chunk for it — correctly,
+since an empty `MediaDelta` would hand a client zero bytes to play. At the
+end of the stream the joined sink became a text Part on the
+`ProviderResponse` (`ensure_spoken_part`). That is *after* streaming has
+finished, past every point that emits to a client: nothing produced it as
+`AGENT_OUTPUT`, and `ToolOutputEvent.chunk` — sitting empty on every media
+event — never received it either.
+
+Measured in one session:
+
+| Turn | `ask()` returned |
+|---|---|
+| model speaks only | `''` — 14 media chunks, 5.45 s of audio, one `AGENT_OUTPUT` with empty text |
+| model writes *and* speaks | the written text |
+
+A voice client could therefore record how long the agent spoke but not what
+it said; the alternative was re-transcribing audio it already held through a
+second model, paying again for words the first model had produced and thrown
+away.
+
+### 12.2 Ride the final chunk
+
+The `pending` one-slot buffer (#828, `is_end_of_audio`)
+already holds the last chunk back so it can be marked `final`, and the
+transcript is complete at exactly that moment — every transcript delta
+measured precedes the end-of-audio marker. So the chunk released as `final`
+carries `"".join(transcript_sink)` in `MediaDelta.transcript`, which
+`_deliver_model_media` already forwarded into `ToolOutputEvent.chunk`. One
+existing event gains text; no new event, no new subscription, and the
+downstream plumbing needed no change at all. The end-of-stream flush
+(`flush_audio_stream`) takes the same arguments, so a provider that sends no
+marker delivers the words too.
+
+Intermediate chunks stay wordless. A client reads the utterance exactly
+once, off the same event that tells it playback is over.
+
+### 12.3 The same rule as history
+
+`ensure_spoken_part` appends only when the model wrote no text of its own,
+because a turn that both wrote and spoke already has its words. The wire
+carries the constraint over, through one shared predicate —
+`model_wrote_text(parts, accumulated_text)` — so what a client reads off the
+wire is what history records and a call log never gets the same answer
+twice: the written text arrived as `AGENT_OUTPUT`, and the final media chunk
+then carries no transcript.
+
+The predicate is a **callable, read at the marker**, not a flag read at the
+start of the stream: the marker lands mid-stream, and a written answer at
+that moment still sits in the loop's not-yet-flushed accumulator (text is
+flushed into a Part only at a tool-call boundary or at the end of the
+stream), which is why it is asked about both.
+
+Acceptance, as the issue stated it, is guarded by
+`TestTheWordsRideTheFinalChunk` in `test_media_output_contract.py`: a client
+subscribed to model media obtains the spoken words without a second model
+call; a turn that speaks and writes does not deliver the same words twice;
+and a transcript-only delta still produces no playable chunk.

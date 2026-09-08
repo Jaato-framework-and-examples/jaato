@@ -15,6 +15,7 @@ from typing import runtime_checkable
 from shared.runtime_limits import RuntimeLimits
 from shared.budget_control import BudgetControlConfig, merge_limits
 from shared.instruction_suppression import normalize_suppression
+from shared.secret_scrub import SCRUB_SURFACES, normalize_scrub_patterns
 
 logger = logging.getLogger(__name__)
 
@@ -835,7 +836,11 @@ def expand_plugin_configs(
             If provided, ${workspaceRoot} will expand to this value.
 
     Returns:
-        Plugin configs with all variables expanded
+        Plugin configs with all variables expanded.  Always a dict: a
+        ``None`` input (a profile whose ``plugin_configs:`` is null) expands
+        to ``{}`` rather than propagating, so callers that fold profile
+        fields into the result (``inject_scrub_secret_env``) never need
+        their own guard.
 
     Example:
         >>> configs = {
@@ -845,7 +850,7 @@ def expand_plugin_configs(
         >>> expand_plugin_configs(configs, {"projectPath": "/app"})
         {'lsp': {'config_path': '/app/.lsp.json'}, 'mcp': {'config_path': '/app/.mcp.json'}}
     """
-    return expand_variables(plugin_configs, context, workspace_root_override)
+    return expand_variables(plugin_configs or {}, context, workspace_root_override)
 
 
 @dataclass
@@ -1057,6 +1062,105 @@ def _validate_trace_path(key: str, value: Any) -> str:
     return text
 
 
+def _scrub_secret_env_errors(data: Dict[str, Any]) -> List[str]:
+    """Shape errors for a profile's ``scrub_secret_env`` (#863).
+
+    Split out of :func:`validate_profile` to keep it under the complexity
+    ratchet.  Checks the profile-level key AND each subprocess surface's
+    ``plugin_configs.<surface>.scrub_secret_env`` against the one grammar
+    in :func:`shared.secret_scrub.normalize_scrub_patterns`, because a
+    malformed value at either position fails CLOSED at the plugin (the
+    default set is applied) and an author should learn that from the
+    validator rather than from a tool that cannot see its token.
+    """
+    errors: List[str] = []
+    candidates = [("'scrub_secret_env'", data.get("scrub_secret_env"))]
+    plugin_configs = data.get("plugin_configs")
+    if isinstance(plugin_configs, dict):
+        for surface in SCRUB_SURFACES:
+            cfg = plugin_configs.get(surface)
+            if isinstance(cfg, dict) and "scrub_secret_env" in cfg:
+                candidates.append((
+                    f"plugin_configs['{surface}'].scrub_secret_env",
+                    cfg["scrub_secret_env"],
+                ))
+    for label, value in candidates:
+        try:
+            normalize_scrub_patterns(value)
+        except ValueError as exc:
+            errors.append(f"{label}: {exc}")
+    return errors
+
+
+def inject_scrub_secret_env(
+    profile: Any,
+    plugin_configs_dict: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Fold a profile's ``scrub_secret_env`` into its subprocess surfaces.
+
+    For each of :data:`shared.secret_scrub.SCRUB_SURFACES` the profile
+    enables, the profile-level value is laid BENEATH the surface's own
+    ``plugin_configs.<surface>.scrub_secret_env`` (``setdefault`` — an
+    explicit per-surface knob always wins, the same rule the ``cache:``
+    field follows for ``plugin_configs.<provider>``).  A surface the
+    profile does not enable is left alone: the key would reach a plugin
+    that is not part of the session, and the validator flags the
+    inert declaration instead.
+
+    Called at every site where a profile becomes a session — the runner
+    envelope, the in-process root session, and both subagent spawn paths —
+    so the shorthand reaches the plugin whichever way the session was
+    built.  A profile that never set the key changes nothing: the plugins
+    then apply the framework default on their own, which is what makes
+    the scrub ON by default rather than dependent on this call.
+
+    Mutates ``plugin_configs_dict`` in place and returns it.
+    """
+    value = getattr(profile, "scrub_secret_env", None)
+    if value is None:
+        return plugin_configs_dict
+    enabled = set(getattr(profile, "plugins", None) or ())
+    for surface in SCRUB_SURFACES:
+        if surface not in enabled:
+            continue
+        cfg = dict(plugin_configs_dict.get(surface) or {})
+        cfg.setdefault("scrub_secret_env", value)
+        plugin_configs_dict[surface] = cfg
+    return plugin_configs_dict
+
+
+def _gc_media_errors(gc_data: Dict[str, Any]) -> List[str]:
+    """Validate the three media keys of a profile's ``gc:`` block.
+
+    A separate function rather than three more branches inline because the
+    validator it feeds is already one of the largest in the file; the
+    checks themselves are the ordinary shape ones (a byte ceiling is a
+    non-negative int, an eviction switch is a bool, a mime-prefix set is a
+    list of strings).
+    """
+    errors: List[str] = []
+    threshold = gc_data.get("media_bytes_threshold")
+    if threshold is not None:
+        if not isinstance(threshold, int) or isinstance(threshold, bool):
+            errors.append("gc.media_bytes_threshold must be an integer "
+                          "(bytes; 0 disables)")
+        elif threshold < 0:
+            errors.append("gc.media_bytes_threshold must be non-negative")
+
+    evict = gc_data.get("evict_consumed_media")
+    if evict is not None and not isinstance(evict, bool):
+        errors.append("gc.evict_consumed_media must be a boolean")
+
+    prefixes = gc_data.get("media_evict_mime_prefixes")
+    if prefixes is not None:
+        if not isinstance(prefixes, list) or not all(
+            isinstance(p, str) for p in prefixes
+        ):
+            errors.append("gc.media_evict_mime_prefixes must be a list of "
+                          "mime prefixes, e.g. [\"audio/\"]")
+    return errors
+
+
 @dataclass
 class GCProfileConfig:
     """Garbage collection configuration for a profile.
@@ -1072,6 +1176,19 @@ class GCProfileConfig:
         notify_on_gc: Whether to inject a notification into history after GC.
         summarize_middle_turns: For hybrid strategy, number of middle turns to summarize.
         max_turns: Trigger GC when turn count exceeds this limit.
+        media_bytes_threshold: Trigger GC when history carries more than
+            this many BYTES of binary payload (audio, images, PDFs); 0
+            disables the check.  The second denominator, and the only one
+            not expressed as a percentage of a token budget — media was
+            invisible to GC precisely because the payload dominating a
+            voice request is not a token quantity (#850).  ``None`` leaves
+            the framework default (``JAATO_GC_MEDIA_BYTES``, else 8 MiB).
+        evict_consumed_media: Whether binary parts are purged from history
+            once the turn that consumed them has completed, leaving a
+            marker naming the attachment's id.  ``None`` = framework
+            default (on).
+        media_evict_mime_prefixes: Which mimes eviction applies to.
+            ``None`` = framework default (``["audio/"]``).
         plugin_config: Additional plugin-specific configuration.
     """
     type: str = "truncate"
@@ -1082,6 +1199,9 @@ class GCProfileConfig:
     notify_on_gc: bool = True
     summarize_middle_turns: Optional[int] = None  # For hybrid strategy
     max_turns: Optional[int] = None
+    media_bytes_threshold: Optional[int] = None
+    evict_consumed_media: Optional[bool] = None
+    media_evict_mime_prefixes: Optional[List[str]] = None
     plugin_config: Dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -1101,6 +1221,9 @@ class GCProfileConfig:
             notify_on_gc=data.get('notify_on_gc', True),
             summarize_middle_turns=data.get('summarize_middle_turns'),
             max_turns=data.get('max_turns'),
+            media_bytes_threshold=data.get('media_bytes_threshold'),
+            evict_consumed_media=data.get('evict_consumed_media'),
+            media_evict_mime_prefixes=data.get('media_evict_mime_prefixes'),
             plugin_config=data.get('plugin_config', {}),
         )
 
@@ -1627,6 +1750,36 @@ class SubagentProfile:
         "description": "Opt the active provider into known wire-format / "
         "model-behavior workarounds (the provider reads the keys it knows; "
         "unknown keys warn). e.g. coerce_typed_tool_args (vllm)."})
+
+    # Secret env scrubbing for model-driven subprocesses (#863).
+    #
+    # The profile-level shorthand for the per-surface
+    # ``plugin_configs.<cli|interactive_shell|mcp>.scrub_secret_env`` knob.
+    # Folded into each of those surfaces the profile enables by
+    # :func:`inject_scrub_secret_env` (called wherever a profile becomes a
+    # session), BENEATH an explicit per-surface knob — more specific wins.
+    #
+    # ``None`` (absent) does NOT mean "off": the plugins scrub with the
+    # framework set when nothing is declared, so absence is the safe
+    # posture and ``none`` is the explicit, WARNING-announced opt-out.
+    # Grammar (one shape for every ingress, see ``shared/secret_scrub.py``):
+    # ``default`` | ``none`` | a glob | a list of globs where ``default``
+    # expands in place and ``!NAME`` exempts a variable a developer CLI
+    # legitimately needs (``[default, '!GH_TOKEN']`` keeps ``gh`` working
+    # while the provider key stays out of the shell).
+    #
+    # Kept as the raw value rather than a normalised tuple so the snapshot
+    # and ``explain`` show what the author wrote; normalisation happens at
+    # the plugin.  Inheritance: scalar-override (the child's value replaces
+    # the parents' outright; parents must agree when the child is silent).
+    scrub_secret_env: Optional[Any] = field(default=None, metadata={
+        "description": "Secret env-var globs stripped from every model-driven "
+        "subprocess (cli / interactive_shell / mcp). Absent = the framework "
+        "set (*_API_KEY, *_TOKEN, *_SECRET, ...) — scrubbing is ON by default. "
+        "`default` names that set; `none` opts out (announced at WARNING); a "
+        "list of globs may carry `default` and `!NAME` exemption entries, e.g. "
+        "[default, '!GH_TOKEN']. plugin_configs.<surface>.scrub_secret_env "
+        "overrides this for one surface."})
 
     # Per-profile AppArmor fragment scoping (Piece 1, 2026-05-14).
     #
@@ -2254,6 +2407,7 @@ def build_inline_profile(
         # fragments).  See :func:`_normalize_apparmor_fragments`.
         apparmor_fragments=_normalize_apparmor_fragments(data.get('apparmor_fragments')),
         quirks=quirks,
+        scrub_secret_env=data.get('scrub_secret_env'),
     )
 
 
@@ -2423,6 +2577,8 @@ def profile_to_snapshot(profile: 'SubagentProfile') -> Dict[str, Any]:
             else None
         ),
         "quirks": dict(getattr(profile, "quirks", None) or {}),
+        # Raw, as authored (str or list) -- the plugin normalises it.
+        "scrub_secret_env": getattr(profile, "scrub_secret_env", None),
     }
 
 
@@ -2531,6 +2687,7 @@ def profile_from_snapshot(data: Dict[str, Any]) -> 'SubagentProfile':
             data.get("apparmor_fragments")
         ),
         quirks=dict(data.get("quirks") or {}),
+        scrub_secret_env=data.get("scrub_secret_env"),
     )
 
 
@@ -2965,6 +3122,13 @@ def _merge_profiles(
     # so two parents declaring the same limits don't conflict.
     merged_runtime_limits = _resolve_scalar('runtime_limits', child.runtime_limits)
 
+    # scrub_secret_env: scalar-override.  A child that says ``none`` (or
+    # narrows the set) replaces the parent's value outright — the same
+    # child-wins rule as ``trace`` / ``runtime_limits``; two parents that
+    # disagree without a child override is a conflict.
+    merged_scrub_secret_env = _resolve_scalar(
+        'scrub_secret_env', child.scrub_secret_env)
+
     # model_tiers: scalar-override (the child's whole tier-config wins; inherit
     # the parent's when the child declares none).  default={} so an unset child
     # ({}) is treated as "not set" and inherits.  WAS DROPPED entirely pre-fix:
@@ -3126,6 +3290,7 @@ def _merge_profiles(
         apparmor=merged_apparmor,
         apparmor_fragments=merged_apparmor_fragments,
         quirks=merged_quirks,
+        scrub_secret_env=merged_scrub_secret_env,
     )
 
 
@@ -3357,6 +3522,7 @@ def _scan_profiles_dir(
             apparmor=bool(data.get('apparmor', False)),
             apparmor_fragments=_normalize_apparmor_fragments(data.get('apparmor_fragments')),
             quirks=quirks,
+            scrub_secret_env=data.get('scrub_secret_env'),
         )
         if data.get('system_instructions'):
             import warnings
@@ -3775,6 +3941,7 @@ def _discover_premium_profiles() -> Dict[str, 'SubagentProfile']:
             apparmor=bool(data.get('apparmor', False)),
             apparmor_fragments=_normalize_apparmor_fragments(data.get('apparmor_fragments')),
             quirks=quirks,
+            scrub_secret_env=data.get('scrub_secret_env'),
         )
         profiles[name] = profile
         logger.debug("Discovered premium profile '%s' from %s", name, file_path)
@@ -3828,6 +3995,9 @@ def validate_profile(data: Any) -> Tuple[bool, List[str], List[str]]:
             for key, val in plugin_configs.items():
                 if not isinstance(val, dict):
                     errors.append(f"plugin_configs['{key}'] must be an object")
+
+    # scrub_secret_env (#863): profile-level + per-surface shape
+    errors.extend(_scrub_secret_env_errors(data))
 
     # max_turns: positive int
     max_turns = data.get("max_turns")
@@ -3901,6 +4071,8 @@ def validate_profile(data: Any) -> Tuple[bool, List[str], List[str]]:
                     errors.append("gc.preserve_recent_turns must be an integer")
                 elif gc_preserve < 0:
                     errors.append("gc.preserve_recent_turns must be non-negative")
+
+            errors.extend(_gc_media_errors(gc_data))
 
             gc_max_turns = gc_data.get("max_turns")
             if gc_max_turns is not None:
@@ -4063,6 +4235,7 @@ class SubagentConfig:
                 model_tiers=model_tiers,
                 apparmor=bool(profile_data.get('apparmor', False)),
                 apparmor_fragments=_normalize_apparmor_fragments(profile_data.get('apparmor_fragments')),
+                scrub_secret_env=profile_data.get('scrub_secret_env'),
             )
 
         return cls(
@@ -4122,6 +4295,20 @@ def gc_profile_to_plugin_config(
     gc_plugin = load_gc_plugin(gc_plugin_name, gc_init_config)
 
     # Create GCConfig for the session
+    # The three media keys are passed only when the profile SET them:
+    # their defaults live on GCConfig (one behind JAATO_GC_MEDIA_BYTES), and
+    # spelling them here would make every profile with a `gc:` block
+    # silently override the env var.
+    media_kwargs: Dict[str, Any] = {}
+    if gc_profile.media_bytes_threshold is not None:
+        media_kwargs['media_bytes_threshold'] = gc_profile.media_bytes_threshold
+    if gc_profile.evict_consumed_media is not None:
+        media_kwargs['evict_consumed_media'] = gc_profile.evict_consumed_media
+    if gc_profile.media_evict_mime_prefixes is not None:
+        media_kwargs['media_evict_mime_prefixes'] = tuple(
+            gc_profile.media_evict_mime_prefixes
+        )
+
     gc_config = GCConfig(
         threshold_percent=gc_profile.threshold_percent,
         target_percent=gc_profile.target_percent,
@@ -4129,6 +4316,7 @@ def gc_profile_to_plugin_config(
         max_turns=gc_profile.max_turns,
         preserve_recent_turns=gc_profile.preserve_recent_turns,
         plugin_config=gc_profile.plugin_config,
+        **media_kwargs,
     )
 
     return gc_plugin, gc_config

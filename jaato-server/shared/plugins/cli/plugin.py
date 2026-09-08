@@ -30,6 +30,7 @@ from shared.ai_tool_runner import get_current_tool_output_callback, get_current_
 from jaato_sdk.plugins.model_provider.types import CancelledException
 from shared.path_utils import msys2_to_windows_path
 from shared.subprocess_runner import run_command, requires_shell, RunResult
+from shared.secret_scrub import DEFAULT_SECRET_ENV_PATTERNS, resolve_scrub_patterns
 from shared.trace import trace as _trace_write
 from shared.command_analysis import (
     Segment,
@@ -216,8 +217,10 @@ class CLIToolPlugin(BackgroundCapableMixin, RunnerForwardingMixin):
 
         self._extra_paths: List[str] = []
         # Secrets-broker (feature #10): env-var name globs to strip from the
-        # environment handed to model-driven subprocesses.  Empty = off.
-        self._scrub_secret_env: List[str] = []
+        # environment handed to model-driven subprocesses.  ON by default
+        # (#863) — the framework set applies until ``initialize`` resolves
+        # the operator's ``scrub_secret_env`` knob (``none`` opts out).
+        self._scrub_secret_env: List[str] = list(DEFAULT_SECRET_ENV_PATTERNS)
         self._max_output_chars: int = DEFAULT_MAX_OUTPUT_CHARS
         self._auto_background_threshold: float = DEFAULT_AUTO_BACKGROUND_THRESHOLD
         self._initialized = False
@@ -321,12 +324,13 @@ class CLIToolPlugin(BackgroundCapableMixin, RunnerForwardingMixin):
                     self._workspace_root = os.path.realpath(os.path.abspath(workspace))
             if 'workspace_venv' in config:
                 self._workspace_venv = config['workspace_venv']
-            if 'scrub_secret_env' in config:
-                scrub = config['scrub_secret_env']
-                if isinstance(scrub, str):
-                    scrub = [scrub]
-                if isinstance(scrub, (list, tuple)):
-                    self._scrub_secret_env = [str(s) for s in scrub]
+
+        # Secrets-broker scrub (#10, default flipped in #863): absent means
+        # the framework set; ``none`` is the announced opt-out; a malformed
+        # value fails closed.  One resolver for every surface.
+        self._scrub_secret_env = list(resolve_scrub_patterns(
+            (config or {}).get('scrub_secret_env'), surface=self.name,
+        ))
 
         # Auto-detect workspace_root from environment if not explicitly provided
         if not self._workspace_root:
@@ -543,16 +547,22 @@ class CLIToolPlugin(BackgroundCapableMixin, RunnerForwardingMixin):
                     "description": "Maximum concurrent background workers",
                 },
                 "scrub_secret_env": {
-                    "type": "array",
+                    "type": ["string", "array"],
                     "items": {"type": "string"},
-                    "default": [],
+                    "default": "default",
                     "description": (
-                        "Env-var name globs (case-insensitive fnmatch) to strip "
+                        "Env-var name globs (case-insensitive fnmatch) stripped "
                         "from the environment of commands run by this tool, so a "
                         "model-driven command cannot read raw credentials the "
-                        "runner itself holds (e.g. echo $GITHUB_TOKEN). Empty = "
-                        "off (default). Recommended starting set: "
-                        "['*_API_KEY','*_TOKEN','*_SECRET','ANTHROPIC_AUTH_TOKEN']."
+                        "runner itself holds (e.g. echo $GITHUB_TOKEN). "
+                        "'default' (also when absent) = the framework set "
+                        "(*_API_KEY, *_TOKEN, *_SECRET, ...); 'none' = off "
+                        "(announced at WARNING); a list of globs where the "
+                        "entry 'default' expands to the framework set and "
+                        "'!NAME' exempts a variable a tool legitimately needs, "
+                        "e.g. ['default', '!GH_TOKEN'] keeps gh working. "
+                        "Overrides the profile-level scrub_secret_env for this "
+                        "surface."
                     ),
                 },
                 "workspace_venv": {

@@ -2,12 +2,12 @@
 
 ## Executive Summary
 
-**Jaato** and **Devin** represent two fundamentally different approaches to AI-assisted software engineering. Jaato is an open-source, self-hosted framework for building multi-provider agentic tool orchestrators. Devin is a proprietary, cloud-hosted autonomous AI software engineer. The choice between them depends on whether you need a flexible toolkit to build your own AI agents (Jaato) or a turnkey autonomous coding assistant (Devin).
+**Jaato** and **Devin** represent two fundamentally different approaches to AI-assisted software engineering. Jaato is a source-available (BUSL-1.1), self-hosted framework for building multi-provider agentic tool orchestrators. Devin is a proprietary, cloud-hosted autonomous AI software engineer. The choice between them depends on whether you need a flexible toolkit to build your own AI agents (Jaato) or a turnkey autonomous coding assistant (Devin).
 
 | Dimension | Jaato | Devin |
 |-----------|-------|-------|
 | **Philosophy** | Framework & toolkit | Autonomous AI employee |
-| **Source** | Open-source (MIT) | Proprietary (closed-source) |
+| **Source** | Source-available (BUSL-1.1; Apache-2.0 from 2030-09-01) | Proprietary (closed-source) |
 | **Hosting** | Self-hosted | Cloud-only (Cognition Labs) |
 | **Model Support** | 8 providers, bring your own | Proprietary models (locked) |
 | **Target User** | Teams building AI agents | Teams delegating tasks to AI |
@@ -219,7 +219,7 @@ python3 -m venv .venv
 
 ## 7. Pricing & Cost Model
 
-### Jaato: Free (Open Source, MIT License)
+### Jaato: Free for internal use and self-hosting (BUSL-1.1)
 
 | Cost Component | Amount |
 |---------------|--------|
@@ -228,6 +228,8 @@ python3 -m venv .venv
 | Infrastructure | Your own compute |
 
 You can run Jaato with **zero cost** by using Ollama with local models. When using cloud providers, you pay standard API rates.
+
+The framework is licensed under the [Business Source License 1.1](../LICENSE), which is not an OSI-approved licence. Internal use, self-hosted deployment, modification and contribution are free; the one reserved use is offering the framework itself to third parties as a hosted, managed or embedded commercial AI agent orchestration service or AI development tool. Every release converts to Apache-2.0 on 2030-09-01.
 
 ### Devin: Subscription + Usage
 
@@ -247,7 +249,7 @@ API access is only available on Team ($500/month) and Enterprise plans.
 
 ### Jaato
 
-- **Fully open source** (MIT): Read, modify, and audit every line of code
+- **Full source available** (BUSL-1.1): read, modify, and audit every line of code
 - **OpenTelemetry tracing**: Span hierarchy (`jaato.turn` → `jaato.tool` → `jaato.permission`)
 - **Token accounting**: Detailed JSONL ledger of all token usage
 - **Structured events**: 25+ typed events for complete observability
@@ -301,7 +303,7 @@ API access is only available on Team ($500/month) and Enterprise plans.
 | **On-premises / air-gapped** | Fully self-hosted, local models via Ollama |
 | **Data sovereignty** | Data never leaves your infrastructure |
 | **Custom tool orchestration** | 55+ plugins, extensible architecture |
-| **Research & experimentation** | Open source, full control, cross-provider agents |
+| **Research & experimentation** | Full source, full control, cross-provider agents |
 | **Cost-sensitive teams** | Free framework + pay-per-use APIs (or free local models) |
 | **Complex permission models** | Granular 8-level permission system |
 | **Observability requirements** | OpenTelemetry, token ledger, structured events |
@@ -325,10 +327,10 @@ API access is only available on Team ($500/month) and Enterprise plans.
 
 ### Jaato
 
-- **Stage**: Open-source framework, v0.2.48 (server)
+- **Stage**: Source-available framework (BUSL-1.1), v0.2.48 (server)
 - **Test coverage**: Core tests + plugin tests + provider tests
 - **Production use**: Designed for production with daemon mode, session persistence, token accounting
-- **Community**: Open-source contributors
+- **Community**: Contributors on GitHub
 
 ### Devin
 
@@ -347,7 +349,7 @@ API access is only available on Team ($500/month) and Enterprise plans.
 |--------|-------|-------|
 | **What it is** | Framework for building AI agents | Autonomous AI software engineer |
 | **Analogy** | "Build your own robot" | "Hire a robot employee" |
-| **Control** | Full (open source, self-hosted) | Limited (cloud, proprietary) |
+| **Control** | Full (source available, self-hosted) | Limited (cloud, proprietary) |
 | **Flexibility** | Maximum (8 providers, 55+ plugins) | Minimal (fixed toolset, single provider) |
 | **Setup effort** | Higher (install, configure, extend) | Lower (sign up, connect repo) |
 | **Autonomy level** | Configurable (human-in-the-loop to autonomous) | High (autonomous by default) |

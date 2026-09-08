@@ -5,6 +5,18 @@ provider vision tables, #299 `vision` tier + content gate, #300 config-time
 vision-tier validation). Scope: **v1 = input vision via the tier system**;
 output/generation and audio/PDF breadth are explicit later scopes (§9).
 
+**Superseded for current state (2026-09, #866).** The first table below is
+the snapshot v1 was designed *against*, kept because it records why the
+design took the shape it did; it no longer describes the tree. The table
+after it is the current state, and the design that carried modality past
+v1 — PDF and audio input, audio output, media in history and under GC — is
+[Binary Media Chunks](binary-media-chunks.md). The provider capability
+declarations (`PROVIDER_CAPABILITIES` in each provider package) are the
+source of truth for which wire carries what;
+`test_provider_capability_conformance` proves each declaration on a real
+conversion, and `test_docs_do_not_contradict_the_tree` holds the current
+table to those declarations.
+
 ## Goal
 
 Let a jaato agent actually *use* a multimodal model — to start, **see images**
@@ -15,7 +27,7 @@ multimodal agent from role-specialized providers via the existing
 `vision` tier mapped to a vision-capable provider = a vision-capable agent, with
 the executor's provider untouched.
 
-## Where jaato is today (grounded)
+## Where jaato was when v1 was designed (historical snapshot)
 
 | Piece | State |
 |-------|-------|
@@ -30,6 +42,18 @@ the executor's provider untouched.
 The plumbing types and the role/tier mechanism **exist**; the gaps are
 capability-awareness, honest gating, and wiring modality content to the
 role provider.
+
+## Where jaato is now
+
+| Piece | State |
+|-------|-------|
+| Image-input conversion in adapters | ✅ every provider that declares `user_message_images` — all but `chrome_ai`, `claude_cli` and `github_models`. The OpenAI-compatible fleet shares one converter path (`model_provider/_attachments.py`), which is how the "0 of the local fleet" row above closed in one change rather than ten |
+| Input source | 🟡 `readFile` MIME-detects files, and a client attaches media on `SendMessageRequest.attachments` — an attachment with no text is a valid turn (#838). Still no paste/URL/drag-drop |
+| Modality breadth | 🟡 PDF input where the wire declares `pdf_input` (`anthropic`, `google_genai`, `openrouter`); audio input where it declares `audio_input` (`google_genai`, `openrouter`; #830). Video: no wire carries it |
+| Output (model→media) | ✅ model-emitted audio streams as `MediaDelta` and reaches clients as `CLIENT`-audience chunks (#824); declared by `output_media` on `doubleword`, `nebius`, `nim`, `openrouter`, `ovhcloud` and `zhipuai_openai` |
+| Capability awareness | ✅ `modalities()` / `resolve_modalities` for input and `output_modalities()` for output, per provider; `supports_modality()` is the framework's one answer to "can this model consume that?" |
+| Media in history | ✅ replay is gated per request by the *active* model (#847); consumed audio is evicted after its turn and GC sizes media in tokens and in bytes (#850) |
+| Multi-model-by-role | ✅ unchanged, and tier modality keys are now direction-qualified (`{audio: outbound}`; binary-media-chunks §5.5) |
 
 ## Approach — modality roles in the tier system ("Pattern 1")
 
@@ -246,6 +270,8 @@ backstop when the agent forgets.
 - **Output / generation** (model emits an image/audio) — `ProviderResponse`
   carries no model-generated media; adapters don't parse it; clients don't
   render it. Separate scope (Scope B). The detect tier here is its foundation.
+  *Closed since for audio:* #824 streams model-emitted audio as `MediaDelta`
+  on the tool-output channel; see [Binary Media Chunks](binary-media-chunks.md).
 - **Modality breadth** — PDF/audio/video converters in whichever providers fill
   those roles. (`modalities()` already generalizes; the *converters* don't.)
   *Partly closed since:* PDF landed with `pdf_input` and audio with
@@ -260,6 +286,9 @@ backstop when the agent forgets.
 - **Ingestion UX** — paste/URL/drag-drop is client-side, downstream of this.
 - **Backfilling image conversion to all 13 providers** — unnecessary under
   composition; only the providers chosen to *fill* a modality role need it.
+  *Happened anyway, cheaply:* the OpenAI-compatible fleet converts through
+  one shared module (`_attachments.py`, #829), so the backfill was one
+  change, not one per provider.
 - **Cross-provider tiers** (text executor on provider A + vision tier on
   provider B) — blocked by the V1 same-provider invariant
   (`_validate_same_provider_v1`); it's the existing V2 tier-roadmap item, not

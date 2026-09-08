@@ -420,9 +420,17 @@ class MediaDelta:
             can detect a gap left by backpressure.
         final: Last chunk of the stream.  Lets a consumer close its
             playback buffer or finish a file without a separate event.
-        transcript: Optional text the provider reports alongside the
-            audio.  Advisory only; it is not the payload and is safe to
-            render as text.
+        transcript: Text the provider reports alongside the audio.
+            Advisory only; it is not the payload and is safe to render
+            as text.  On the chunk marked ``final`` it is the WHOLE
+            utterance's transcript (#869): bytes and words arrive in
+            separate deltas, so an intermediate chunk normally carries
+            none, and the decoder stamps the accumulated words onto the
+            last chunk -- but only when the model wrote no text of its
+            own that turn, the same rule history follows, because a
+            written answer already reached the client as text.  A
+            client that wants what was said reads it off the final
+            chunk, exactly once.
     """
     mime_type: str
     data: bytes
