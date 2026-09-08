@@ -70,8 +70,8 @@ where you want the governance layer to live.**
   that turns a declarative "business law" spec into deny-by-default evaluators,
   mediated effects and anti-fabrication attestation checks. It does **not** add
   an identity model of its own (no IdP group to profile or tool mapping),
-  multi-tenancy, sandboxing, prompt-injection detection, retention or any
-  regulatory mapping, and several of its own backlog items are open.
+  a tenant identifier or per-tenant quotas, sandboxing, prompt-injection
+  detection, retention or any regulatory mapping, and several of its own backlog items are open.
 
 **Decision rule of thumb**
 
@@ -81,7 +81,7 @@ where you want the governance layer to live.**
 | TypeScript/Node shop, developer-desktop assistants, containers already the isolation story | **pi** |
 | Internal harnesses on Linux servers; you want permissions, kernel confinement, budgets, OTel and an event audit stream *without writing them* | **jaato free** |
 | Above, plus SSO, PII pseudonymisation, Vault-backed secrets, compiled deny-by-default policy, cluster | **jaato free + premium** (commercial agreement) |
-| You need tenant isolation, retention/DSAR tooling, or a signed audit trail with approver identity | **Neither ships it.** jaato's profiles give you agent roles and its permission channels let your existing approval system decide; the identity record and the rest are yours to build either way. |
+| You need retention/DSAR tooling, or a signed audit trail with approver identity | **Neither ships it.** jaato's profiles give you agent roles and its permission channels let your existing approval system decide; the identity record and the rest are yours to build either way. |
 
 ## Scorecard
 
@@ -93,6 +93,7 @@ you must complete · **●○○** hook only, you build the feature · **○○�
 | Tool-call permission / approval | ●○○ `tool_call` hook + two example gates | ●●● engine, channels, evaluators, headless API | ●●● + Daruma compiled default-deny |
 | Agent-role scoping (what a given agent role may use) | ●○○ per-run `--tools` / `excludeTools`; no role files | ●●● profiles: `plugins`, `tool_scopes`, per-role permission policy, tighten-only inheritance, profile sets | ●●● + Daruma `authority.tools` default-deny |
 | Sandboxing / isolation | ●○○ documented container patterns; bubblewrap *example* | ●●● AppArmor per session, cgroups, egress proxy, runner subprocesses (Linux) | ●●● unchanged |
+| Tenant isolation | ○○○ one process per user; a container per tenant is your topology | ●●● two levels: per-session kernel confinement on one daemon (multi-tenant acceptance gate, integration-tested) or one daemon per tenant, each with its own bearer token | ●●● + gossip cluster, dashboard SSO and mTLS fronting many daemons |
 | Runtime limits (turns, tokens, cost, time) | ○○○ none; bash timeout is model-supplied | ●●● typed `budget_control` + `runtime_limits` + `max_turns` | ●●● + fork-budget carry-over |
 | Secrets / credentials | ●●○ 0600 `auth.json`, `!command` indirection; no scrubbing, full env passthrough to bash | ●●○ 0600 stores, `pass://`/`vault://` contract, opt-in env scrubbing, secret-safe repr | ●●● six resolver backends |
 | PII / redaction | ○○○ | ●○○ history + telemetry transformer seams | ●●● four-seat pseudonymisation, Presidio, sealed audit |
@@ -290,6 +291,25 @@ scrub env or wrap commands.
 | Egress | `server/egress_proxy/`, `server/nft.py` | CONNECT-only deny-by-default allowlist proxy with proxy-side DNS; nftables enforcement script |
 | Transport | `--socket-mode 660`, `--ws-token` | IPC is unauthenticated by design (file mode only); WS bearer token, SHA-256 stored, constant-time compare |
 | Code exec | `shared/plugins/notebook/` | in-process cell execution fails closed unless AppArmor is enforcing |
+
+**Tenancy is delivered at two levels.** Inside one daemon, the confined
+runner design (`docs/design/per_session_confined_runner.md`) names
+multi-tenant correctness as its acceptance gate: two cascades from two
+workspaces run concurrently against a single daemon, a tool call in one
+workspace cannot read or write the other's tree, and
+`tests/integration/test_phase2_multitenant_apparmor.py` checks it. Runner
+tracebacks are path-sanitised before crossing the RPC boundary so one
+tenant's workspace path never lands in another's event (`runner/sanitize.py`),
+and cgroup caps are per session. Across daemons, each `jaato-server` mints
+its own bearer token (`~/.jaato/ws.token`, or `--ws-token` / `--ws-token-file`)
+and owns its own `~/.jaato`, sessions and logs, so one daemon per tenant with
+separate tokens is a supported topology rather than a workaround; premium's
+gossip cluster, dashboard SSO and mTLS front many such daemons behind one
+login. What is not in the data model is a tenant *identifier*: the bearer
+token says "may drive this daemon", not which tenant, per-tenant quotas are
+not aggregated in-daemon, and the design records that the daemon process
+itself can still read every workspace's `.jaato/` (a daemon-level profile is
+deferred).
 
 Limits: Linux only; no container-per-session executor; no seccomp; the
 `apparmor_parser` sudoers rule is operator work.
@@ -592,7 +612,7 @@ concentration across free and premium.
 |---|---|---|---|
 | **Compliance reviewer** (must refuse unsafe actions, prove what it checked) | `tool_call` block + `input` intercept; you write policy, persistence, attestation | permission policy + evaluators + completion gate that can refuse a completion; untrusted boundary | Daruma: compiled default-deny + attestation of the receipt against the ledger |
 | **Code-review bot** (read-only, CI-triggered) | strong: SDK, `tools: [read, grep, find, ls]`, `edit` patches; container it | `lsp`, `ast_search`, `filesystem_query`, `webhook` GitHub route, AppArmor read-only profile | — |
-| **Chat assistant** (Slack/Teams, many users) | one process or RPC subprocess per user; no shared server, no identity | daemon + recovery client + `ClientType.CHAT`; bearer token only | OIDC SSO, WS auth proxy, mTLS, pseudonymisation of user PII |
+| **Chat assistant** (Slack/Teams, many users) | one process or RPC subprocess per user; no shared server, no identity | daemon + recovery client + `ClientType.CHAT`; per-session confinement or one daemon per tenant; bearer token only | OIDC SSO, WS auth proxy, mTLS, cluster, pseudonymisation of user PII |
 | **Batch job runner** | `--mode json`, `PI_OFFLINE`, in-memory sessions; no limits, add your own | runner pool, `budget_control`, `jaato-eval` sweeps, `echo` provider for CI | fork-budget carry-over |
 | **IDE assistant** | TS-native, ideal fit | host-provided tools, `stageFiles`, TS SDK (vendor it until npm) | web components |
 | **Customer-facing product** | MIT | licence forbids without agreement | commercial |
@@ -606,7 +626,7 @@ concentration across free and premium.
 | Agent-role scoping (tools, limits, policy per role) | build | ships (profiles) | ships + Daruma |
 | Hooking your approval / RBAC service into permission decisions | build (`tool_call` extension) | configure (evaluator or webhook/file channel) | configure; park and resume demoed |
 | Identity model (IdP group to role, approver on the record) | build | build (hook exists) | partial (OIDC login, edge allowlist) |
-| Multi-tenant isolation | build | build | reserved field only |
+| Tenant isolation | container per tenant, your topology | ships (per-session confinement on one daemon, or daemon per tenant with its own token) | ships + cluster fronting; tenant id still a reserved field |
 | Kernel or container confinement | deploy a container/VM | ships on Linux | ships |
 | Turn / token / cost / time limits | build | ships | ships |
 | Secret scrubbing from tool env | build via `spawnHook` | configure (opt-in) | configure |
