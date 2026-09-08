@@ -1537,6 +1537,8 @@ class JaatoWSServer:
                 event.request_id,
                 event.response,
                 edited_arguments=event.edited_arguments,
+                # Attribute the decision to the authenticated WS user (#859).
+                user_id=self.get_client_user(client_id),
             )
 
         elif isinstance(event, ClarificationResponseRequest):

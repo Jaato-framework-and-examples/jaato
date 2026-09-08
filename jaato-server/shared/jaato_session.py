@@ -1202,13 +1202,16 @@ class JaatoSession:
         self._daemon_session_id = session_id
 
     def set_client_user_id(self, user_id: Optional[str]) -> None:
-        """Set the end-user identity for telemetry user tracking.
+        """Set the end-user identity for telemetry and ledger attribution.
 
-        The daemon wires this from the authenticated client user
-        (``get_client_user(client_id)`` — WS/SSO deployments; IPC has no
-        user). It is emitted as the OpenInference ``user.id`` span
-        attribute so observability backends (Langfuse's Users view)
-        attribute traces, token usage, and cost to the user.
+        The runner bootstrap wires this from
+        ``SessionInitEnvelope.created_by`` — the user the daemon
+        authenticated for the creating client (``get_client_user`` —
+        WS/SSO deployments; IPC has no user).  It is emitted as the
+        OpenInference ``user.id`` span attribute so observability
+        backends (Langfuse's Users view) attribute traces, token usage,
+        and cost to the user, and stamped as ``user_id`` on the token
+        ledger's ``response`` records (#859).
 
         Takes precedence over the ``JAATO_TELEMETRY_USER_ID`` per-session
         env fallback used by keyless/local deployments.
@@ -10056,11 +10059,20 @@ NOTES
         if not self._runtime.ledger:
             return
 
-        self._runtime.ledger._record('response', {
+        record = {
             'prompt_tokens': response.usage.prompt_tokens,
             'output_tokens': response.usage.output_tokens,
             'total_tokens': response.usage.total_tokens,
-        })
+        }
+        # #859: attribute spend to the session's authenticated user -- the
+        # same id the telemetry ``user.id`` attribute carries -- so the
+        # ledger is attributable without an observability backend.  Key
+        # omitted (not None) when there is no user, so keyless / IPC
+        # ledgers are byte-identical to before.
+        user_id = self._resolve_telemetry_user_id()
+        if user_id:
+            record['user_id'] = user_id
+        self._runtime.ledger._record('response', record)
 
     def _record_token_telemetry(self, span, response: ProviderResponse) -> None:
         """Record OpenInference token count and response attributes on a telemetry span.

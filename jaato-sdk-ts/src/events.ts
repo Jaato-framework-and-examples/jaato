@@ -2024,6 +2024,8 @@ export type ToolName4 = string;
 export type Granted = boolean;
 export type Method = string;
 export type Comment = string;
+export type UserId = string | null;
+export type Approver = string | null;
 /**
  * All event types in the protocol.
  */
@@ -14647,6 +14649,24 @@ export interface PermissionInputModeEvent {
 }
 /**
  * Permission has been resolved (granted or denied).
+ *
+ * ``method`` says HOW the decision was reached (a policy rule, an
+ * evaluator, or the channel the ASK went through); ``user_id`` and
+ * ``approver`` say WHO reached it (issue #859).  Both identity fields
+ * are ``None`` for policy decisions and for unauthenticated sessions,
+ * so an auditor can tell "nobody was asked" from "somebody answered":
+ *
+ * - ``user_id`` is the identity the DAEMON authenticated for the client
+ *   that answered the prompt (``set_client_user()`` — WS/SSO
+ *   deployments; local IPC carries no user).  It is stamped by the
+ *   transport that received the ``PermissionResponseRequest``, never
+ *   by the client itself, so it is the verified half of the trail.
+ * - ``approver`` is an identity ASSERTED by whoever answered on the
+ *   decision's channel: the ``approver`` key of a webhook / file
+ *   channel response, naming the human an external approval system
+ *   consulted.  The daemon cannot verify it; it is recorded as
+ *   claimed, so the trail can still say who the external system says
+ *   approved.
  */
 export interface PermissionResolvedEvent {
   type?: EventType14;
@@ -14658,6 +14678,8 @@ export interface PermissionResolvedEvent {
   granted?: Granted;
   method?: Method;
   comment?: Comment;
+  user_id?: UserId;
+  approver?: Approver;
 }
 /**
  * Permission status update for client toolbar display.

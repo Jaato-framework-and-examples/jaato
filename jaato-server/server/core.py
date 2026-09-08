@@ -604,6 +604,11 @@ class JaatoServer:
         self._pending_permission_request_id: Optional[str] = None
         # Edited arguments from client-side editing (set before "e" is put in queue)
         self._pending_edited_arguments: Optional[Dict[str, Any]] = None
+        # Daemon-authenticated user of the client whose response is in the
+        # queue (legacy daemon-side ASK path, #859).  The queue carries only
+        # the response key, so the identity is parked here and read back by
+        # the resolved hook when it fires for that request_id.
+        self._pending_permission_user_id: Optional[str] = None
         self._pending_clarification_request_id: Optional[str] = None
         self._pending_reference_selection_request_id: Optional[str] = None
 
@@ -4141,7 +4146,9 @@ class JaatoServer:
 
         def on_permission_resolved(tool_name: str, request_id: str,
                                    granted: bool, method: str,
-                                   comment: str = ""):
+                                   comment: str = "",
+                                   user_id: Optional[str] = None,
+                                   approver: Optional[str] = None):
             # Only clear pending-prompt state when the resolution targets
             # the currently-displayed prompt. Whitelist/blacklist auto-
             # decisions fire this hook with an empty request_id and can
@@ -4152,6 +4159,12 @@ class JaatoServer:
             if request_id and server._pending_permission_request_id == request_id:
                 server._pending_permission_request_id = None
                 server._waiting_for_channel_input = False
+                # Legacy daemon-side ASK (#859): the QueueChannel cannot
+                # carry the responder's identity, so respond_to_permission
+                # parked it; a runner-relayed ASK arrives with it set.
+                if user_id is None:
+                    user_id = server._pending_permission_user_id
+                server._pending_permission_user_id = None
 
             # Resolution status is shown in the tool tree (e.g., "✓ [once]")
             # No need to emit separate output text
@@ -4163,6 +4176,8 @@ class JaatoServer:
                 granted=granted,
                 method=method,
                 comment=comment,
+                user_id=user_id,
+                approver=approver,
             ))
 
             # Emit updated permission status (a/t/i responses change the policy)
@@ -5691,7 +5706,8 @@ class JaatoServer:
         self._model_thread.start()
 
     def respond_to_permission(self, request_id: str, response: str,
-                              edited_arguments: Optional[Dict[str, Any]] = None) -> None:
+                              edited_arguments: Optional[Dict[str, Any]] = None,
+                              user_id: Optional[str] = None) -> None:
         """Respond to a permission request.
 
         Phase 3 §7c Step 7.3: tries two resolution paths.
@@ -5716,12 +5732,19 @@ class JaatoServer:
             response: The response (y, n, a, never, etc.).
             edited_arguments: Optional edited tool arguments (when response is "e"
                 and the client handled editing locally).
+            user_id: The identity the transport authenticated for the
+                responding client (``get_client_user(client_id)``), or
+                ``None`` when the transport has none.  Recorded as
+                ``PermissionResolvedEvent.user_id`` so the audit trail
+                names who answered (issue #859).  Callers resolve it
+                from the transport, never from the request body.
         """
         # Path 1: try the runner-RPC handler first.
         prompt_handler = getattr(self, "_prompt_operator_handler", None)
         if prompt_handler is not None:
             if prompt_handler.resolve_response(
                 request_id, response, edited_arguments=edited_arguments,
+                user_id=user_id,
             ):
                 # Runner-fired ASK resolved.  No need to touch the
                 # daemon-side queue or ``_pending_edited_arguments``;
@@ -5736,6 +5759,9 @@ class JaatoServer:
             # edit_callback can retrieve them synchronously
             if edited_arguments is not None:
                 self._pending_edited_arguments = edited_arguments
+            # Park the responder's identity for the resolved hook (#859);
+            # the queue itself carries only the response key.
+            self._pending_permission_user_id = user_id
             self._channel_input_queue.put(response)
             return
 
