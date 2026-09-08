@@ -1712,6 +1712,21 @@ def paths() -> Rendered:
     mistake: jaato keeps ``~/.jaato`` deliberately daemon-global (creds + the
     auto-installed reactors live there), and isolates PER SESSION at the
     workspace / ``config_root`` layer — not at ``$HOME``.
+
+    Also states the ownership rule the contents list only implies (#896):
+    ``config_root`` is FRAMEWORK-OWNED, and a driver's own runtime state
+    (checkpoints, resume journals, run scratch) belongs at a sibling
+    ``<workspace>/.<yourapp>/`` instead.  Read as a list of contents rather
+    than a statement of ownership, ``.jaato/`` looks like "the jaato-related
+    directory for this workspace", so an SDK author with jaato-shaped state
+    files it alongside and nothing fails — until the deny surface moves.  It
+    does move: ``server/apparmor.py`` v11 introduced a broad ``.jaato/** w``
+    deny, v13 replaced it with narrow per-subpath denies after the broad one
+    blocked the daemon's own writes, and v29 added ``.jaato/templates/`` —
+    at which point the template plugin's own writer had to relocate to the
+    sibling ``.jaato/template_extracts/`` to survive it.  That is the
+    framework fixing, for itself, exactly the break a tenant parked under an
+    arbitrary ``.jaato/<name>/`` would take on a release it did not author.
     """
     data = {
         "daemon_global": {
@@ -1728,6 +1743,23 @@ def paths() -> Rendered:
                       ".jaato/sessions/"],
             "workspace_root_env": "JAATO_WORKSPACE_ROOT",
             "scope": "the isolation boundary — one per session",
+        },
+        "config_root_ownership": {
+            "owner": "framework",
+            "rule": "config_root (<workspace>/.jaato) is FRAMEWORK-OWNED: "
+                    "everything under it is either config jaato reads or "
+                    "runtime state jaato writes",
+            "tenant_state_goes": "<workspace>/.<yourapp>/  (a SIBLING of "
+                                 ".jaato, still inside the workspace so it "
+                                 "stays on the isolation boundary)",
+            "why": "the confinement deny surface under .jaato is real, "
+                   "actively maintained and moves between releases "
+                   "(server/apparmor.py v11 -> v13 -> v29); a tenant "
+                   "subpath is not denied today, and no allow rule names "
+                   "it either",
+            "precedent": ".jaato/templates/ became write-denied in template "
+                         "v29 (#893) and the template plugin's own writer "
+                         "had to move to the sibling .jaato/template_extracts/",
         },
     }
     lines = [
@@ -1755,9 +1787,34 @@ def paths() -> Rendered:
         "  config_root   = <workspace>/.jaato by default — the resolution root for",
         "    profiles / instructions / agents.  Override per-profile (config_root:)",
         "    or per-client (working_dir / env_file).",
+        "    -> FRAMEWORK-OWNED.  Everything under it is either config jaato READS",
+        "       (profiles, agents, instructions, schemas, scripts, templates) or",
+        "       runtime state jaato WRITES (logs/, sessions/, cache/, memory/,",
+        "       todos/, ...).  Do NOT park your own application's state here.",
+        "",
+        "  YOUR OWN state (checkpoints, resume journals, run scratch) goes in a",
+        "  SIBLING directory — <workspace>/.<yourapp>/ — not under .jaato/:",
+        "    <workspace>/.jaato/       framework config + framework runtime state",
+        "    <workspace>/.<yourapp>/   YOUR driver's runtime state",
+        "    -> Still inside the workspace, so a fresh workspace still isolates a",
+        "       run and the two ownerships stay legible side by side.",
+        "    -> WHY not .jaato/<yourapp>/: the confinement deny surface under",
+        "       .jaato is real, actively maintained, and MOVES between releases",
+        "       (server/apparmor.py: v11 added a broad .jaato/** write deny, v13",
+        "       replaced it with narrow per-subpath denies, v29 added",
+        "       .jaato/templates/).  A tenant-invented subpath is not denied",
+        "       today — and no allow rule names it either, so a later release",
+        "       that denies your name EACCESes every confined writer (reactor,",
+        "       prefetch, completion processor, tool) with nothing in your",
+        "       mental model to debug it.  Precedent: when v29 denied",
+        "       .jaato/templates/, the template plugin's OWN writer had to",
+        "       relocate to the sibling .jaato/template_extracts/ to survive it.",
+        "    -> The workspace outside .jaato/ is rwkl under confinement and under",
+        "       no deny, so .<yourapp>/ is writable from confined contexts too.",
         "",
         "  TL;DR  ~/.jaato = daemon-global (creds + reactors, shared).  Per-session",
         "  isolation = a fresh workspace + config_root, NEVER a $HOME override.",
+        "  .jaato/ is the FRAMEWORK's; your state goes in <workspace>/.<yourapp>/.",
     ]
     return data, "\n".join(lines)
 
