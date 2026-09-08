@@ -81,7 +81,7 @@ where you want the governance layer to live.**
 | TypeScript/Node shop, developer-desktop assistants, containers already the isolation story | **pi** |
 | Internal harnesses on Linux servers; you want permissions, kernel confinement, budgets, OTel and an event audit stream *without writing them* | **jaato free** |
 | Above, plus SSO, PII pseudonymisation, Vault-backed secrets, compiled deny-by-default policy, cluster | **jaato free + premium** (commercial agreement) |
-| You need retention/DSAR tooling, or a signed audit trail with approver identity | **Neither ships it.** jaato's profiles give you agent roles and its permission channels let your existing approval system decide; the identity record and the rest are yours to build either way. |
+| You need data-subject erasure tooling, or a signed audit trail with approver identity | **Neither ships it.** jaato's profiles give you agent roles, its permission channels let your existing approval system decide, and its plain-file layout lets your storage policy do retention; the identity record and the rest are yours to build either way. |
 
 ## Scorecard
 
@@ -97,7 +97,7 @@ you must complete · **●○○** hook only, you build the feature · **○○�
 | Runtime limits (turns, tokens, cost, time) | ○○○ none; bash timeout is model-supplied | ●●● typed `budget_control` + `runtime_limits` + `max_turns` | ●●● + fork-budget carry-over |
 | Secrets / credentials | ●●○ 0600 `auth.json`, `!command` indirection; no scrubbing, full env passthrough to bash | ●●○ 0600 stores, `pass://`/`vault://` contract, opt-in env scrubbing, secret-safe repr | ●●● six resolver backends |
 | PII / redaction | ○○○ | ●○○ history + telemetry transformer seams | ●●● four-seat pseudonymisation, Presidio, sealed audit |
-| Data retention / residency tooling | ○○○ (`--no-session` only) | ●○○ manual delete; many local/EU providers | ●○○ unchanged |
+| Data retention / residency | ○○○ (`--no-session` only); one JSONL per session under `~/.pi` | ●●○ plain-file persistence in a documented per-workspace layout; retention, eviction and housekeeping are deliberately left to the shop's own file-lifecycle policy; many local/EU providers | ●●○ unchanged; pseudonym table and sealed audit stream are additional records under the same policy |
 | Audit trail / traceability | ●●○ complete session JSONL tree with model + usage per message | ●●○ 114-event stream, token ledger, OTel/OpenInference, versioned session records | ●●● + attestation, provenance checks, sealed redaction audit |
 | Interrogating a finished session (ask it why, replay from a point) | ●●○ `--session` / `--fork` resume the tree under current settings | ●●● `session.wake` under the persisted prompt, `resolve_fork_point`, `replay_messages`, `inject_prompt`, profile sets | ●●● + model-callable `interrogate_session` and replay workspaces |
 | Observability adapter | ●○○ vendor-neutral contracts, no OTel adapter, not threaded into the coding-agent SDK | ●●● OTel, Langfuse, Phoenix, cost spans | ●●● + per-server resource identity |
@@ -391,8 +391,16 @@ canonical history never holds raw values) and `set_raw_view_transformer()`; a
 telemetry redactor chain and `JAATO_TELEMETRY_REDACT_CONTENT` (note: the
 profile key `plugin_configs.telemetry.redact_content` is recorded as inert in
 `shared/env_scope.py`; only the env var works). Session records live under
-`<workspace>/.jaato/sessions/`, logs under `.jaato/logs/`; deletion is a manual
-`session.delete`. No phone-home of any kind (no analytics libraries in the
+`<workspace>/.jaato/sessions/`, logs under `.jaato/logs/`, traces where the
+profile's `trace:` block says. **Retention is delegated on purpose.**
+Everything is persisted as plain files in a documented layout, and the
+framework owns no retention, eviction or housekeeping engine: the shop's
+existing storage policy (a scheduled sweeper, a filesystem lifecycle rule,
+backup and legal-hold tooling) applies to these paths the same way it
+applies to any other application's files. `session.delete` exists for a
+targeted removal. The consequence to plan for is that data-subject erasure
+across sessions, logs, traces and telemetry exports is a search-and-delete
+your policy tooling performs over known paths, not a framework verb. No phone-home of any kind (no analytics libraries in the
 tree; telemetry defaults off). Data residency options are broad: fully local
 (`ollama`, `lmstudio`, `vllm`, `tensorrt_llm`, `triton`, `chrome_ai`) and EU
 (`ovhcloud`, `nebius`).
@@ -406,8 +414,9 @@ jaato-specific and Spanish recognisers; NaCl SecretBox at rest under a daemon
 master key; fork-carry; 168 tests. Its own backlog lists the gaps honestly: no
 output-side leak scanning, no cross-session pseudonymisation, tools are
 trusted by default (`JAATO_REDACTION_UNTRUSTED_TOOLS` is a deny list, default
-empty), and the operator doc is stale. Nothing in either tier does retention,
-classification, DSAR or residency enforcement.
+empty), and the operator doc is stale. Retention is the shop's storage policy
+in both tiers by design; nothing in either tier does classification, DSAR
+or residency enforcement.
 
 ## 8. Auditing, traceability, observability
 
@@ -638,7 +647,8 @@ conditions of adoption, not treat their absence as a design choice.
 | Secret scrubbing from tool env | build via `spawnHook` | configure (opt-in) | configure |
 | Secret manager integration | `!command` | write a resolver or buy premium | ships |
 | PII pseudonymisation | build | build on seam (weeks) | ships |
-| Retention, purge, DSAR | build | build | build |
+| Retention and purge | build | apply your storage policy to the documented file layout (by design) | same |
+| Data-subject erasure across sessions, logs and telemetry | build | build (search-and-delete over known paths) | build |
 | OpenTelemetry export | write adapter; verify SDK threading | ships | ships |
 | Tamper-evident audit log | build | build | partial (sealed redaction audit) |
 | Prompt-injection defence | build | soft boundary ships; classifier build | same |
@@ -703,5 +713,6 @@ MCP bridge and a multi-user service are all yours, realistically 3–6
 engineer-months before parity with what jaato free ships today.
 
 Either way, the three things nobody ships — approver identity in the audit
-record, retention and erasure tooling, and the AI Act documentation set —
-should be on the plan from day one.
+record, data-subject erasure tooling, and the AI Act documentation set —
+should be on the plan from day one; retention itself is a storage-policy
+task on jaato's plain-file layout.
