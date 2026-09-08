@@ -52,16 +52,23 @@ where you want the governance layer to live.**
   tool calls and turns with brownout tiers; an egress allowlist proxy; a
   redaction seam in history and telemetry; OpenTelemetry with OpenInference
   conventions and cost attribution; an untrusted-content boundary on tool
-  results; subagents, profiles, cascades and completion gates; MCP client; 19
-  model providers. The daemon is multi-session and multi-client but has
-  **bearer-token auth only** and no identity model.
+  results; subagents, cascades and completion gates; MCP client; 19 model
+  providers. **Profiles are a role model for agents**: a profile's
+  `plugins` and `tool_scopes` allow-lists drop every unlisted tool from the
+  wire, `plugin_configs.permission.policy` is per-role policy, and
+  inheritance only ever tightens (`max_turns` and budget limits are
+  most-restrictive-wins, `apparmor` is sticky). What the daemon lacks is the
+  **principal** side: it is multi-session and multi-client with
+  **bearer-token auth only**, and no identity reaches profile resolution,
+  permission decisions or session ownership.
 - **jaato premium adds the parts a compliance officer asks for next**: OIDC SSO
   with a server-side token proxy and mTLS, four-seat PII pseudonymisation with an
   auditor-sealed audit stream, six secret backends (Vault, AWS SM, sops, pass,
   keyring, Infisical), a fork-budget containment fix, and the Daruma compiler
   that turns a declarative "business law" spec into deny-by-default evaluators,
   mediated effects and anti-fabrication attestation checks. It does **not** add
-  RBAC, multi-tenancy, sandboxing, prompt-injection detection, retention or any
+  principal-side RBAC (an IdP group to profile or tool mapping),
+  multi-tenancy, sandboxing, prompt-injection detection, retention or any
   regulatory mapping, and several of its own backlog items are open.
 
 **Decision rule of thumb**
@@ -72,7 +79,7 @@ where you want the governance layer to live.**
 | TypeScript/Node shop, developer-desktop assistants, containers already the isolation story | **pi** |
 | Internal harnesses on Linux servers; you want permissions, kernel confinement, budgets, OTel and an event audit stream *without writing them* | **jaato free** |
 | Above, plus SSO, PII pseudonymisation, Vault-backed secrets, compiled deny-by-default policy, cluster | **jaato free + premium** (commercial agreement) |
-| You need RBAC, tenant isolation, retention/DSAR tooling or a signed audit trail | **Neither ships it.** jaato leaves the least to build; budget the gap either way. |
+| You need principal RBAC (who may run which agent role), tenant isolation, retention/DSAR tooling or a signed audit trail | **Neither ships it.** jaato's profiles give you the agent-role half; budget the identity half either way. |
 
 ## Scorecard
 
@@ -82,6 +89,7 @@ you must complete · **●○○** hook only, you build the feature · **○○�
 | Dimension | pi coding-agent | jaato free | jaato premium (on top of free) |
 |---|---|---|---|
 | Tool-call permission / approval | ●○○ `tool_call` hook + two example gates | ●●● engine, channels, evaluators, headless API | ●●● + Daruma compiled default-deny |
+| Agent-role scoping (what a given agent role may use) | ●○○ per-run `--tools` / `excludeTools`; no role files | ●●● profiles: `plugins`, `tool_scopes`, per-role permission policy, tighten-only inheritance, profile sets | ●●● + Daruma `authority.tools` default-deny |
 | Sandboxing / isolation | ●○○ documented container patterns; bubblewrap *example* | ●●● AppArmor per session, cgroups, egress proxy, runner subprocesses (Linux) | ●●● unchanged |
 | Runtime limits (turns, tokens, cost, time) | ○○○ none; bash timeout is model-supplied | ●●● typed `budget_control` + `runtime_limits` + `max_turns` | ●●● + fork-budget carry-over |
 | Secrets / credentials | ●●○ 0600 `auth.json`, `!command` indirection; no scrubbing, full env passthrough to bash | ●●○ 0600 stores, `pass://`/`vault://` contract, opt-in env scrubbing, secret-safe repr | ●●● six resolver backends |
@@ -94,7 +102,8 @@ you must complete · **●○○** hook only, you build the feature · **○○�
 | Context reduction | ●●● compaction, branch summaries, hooks | ●●● four GC plugins, result rewriting, deferred tools, cache plugins | ●●● (benchmark harness only) |
 | Model providers / enterprise gateways | ●●● ~30 incl. Bedrock, Vertex, Azure, Cloudflare gateway, Copilot | ●●● 19 incl. Vertex, OpenRouter, GitHub Models, NIM, EU and local; no Bedrock/Azure native | ●●● unchanged |
 | MCP | ○○○ by design | ●●● client (`.mcp.json`); not an MCP server | ●●● unchanged |
-| Multi-user server / identity | ○○○ experimental Unix-socket server, unauthenticated | ●●○ daemon, WS bearer token, `set_client_user` hook | ●●● OIDC, WS auth proxy, mTLS; no RBAC/tenancy |
+| Multi-user server / identity | ○○○ experimental Unix-socket server, unauthenticated | ●●○ daemon, WS bearer token, `set_client_user` hook | ●●● OIDC, WS auth proxy, mTLS |
+| Principal RBAC (which user may use which role, approve, or see which session) | ○○○ | ○○○ identity never reaches profiles or permissions | ●○○ `allowed_emails` / `allowed_groups` at the dashboard edge only |
 | Multi-agent | ●○○ example extension (subprocess per subagent) | ●●● subagents, profiles, cascades, payload schemas, runner pool | ●●● + handoff, remote spawn (currently broken per backlog) |
 | Extensibility model | ●●● 33 lifecycle events, TS extensions via jiti | ●●● 5 entry-point groups, daemon hooks, enrichment pipeline, traits | ●●● scaffold verbs |
 | Cross-language integration | ●●○ JSONL RPC/JSON modes; TS only | ●●● Python in-process, IPC, WS JSON, TS SDK (pre-npm) | ●●● + web components |
@@ -186,8 +195,29 @@ and turn-duration thresholds, plus prerequisite policies
 visibility, `CancelToken` stop, and `completion_processors` that can *refuse* an
 agent's completion claim with a bounded `max_refusals`.
 
-Gap: no identity on approvals. `PermissionResolvedEvent` says "user" but not
-which user.
+**Roles for agents versus roles for people.** `jaato-scaffold explain
+profile` (run against server 0.7.0) shows the profile schema doing what an
+agent-side RBAC layer does: `plugins` is a required allow-list (`[]` wires
+only the framework set), `tool_scopes` is a per-plugin allow-list whose
+unlisted tools are "dropped from this session's wire + grammar",
+`plugin_configs.permission.policy` carries the role's blacklist and
+whitelist, and inheritance is designed so a child role can only tighten:
+`max_turns` and `budget_control.limits` are most-restrictive-wins,
+`apparmor` and `suppress_base_instructions` are sticky, `plugins` is
+union-only so a child cannot widen by omission but also cannot narrow
+except through `tool_scopes` or the permission whitelist. Profile sets
+(`.jaato/profiles/<set>/`) let one workspace carry several such role
+catalogues. Premium's Daruma compiles the same idea further into a
+generated default-deny evaluator over `authority.tools`. pi has no
+equivalent: role scoping there is a per-invocation `--tools` list or a
+`tool_call` extension.
+
+What neither tier binds is a *person* to those roles. No user identity
+reaches profile resolution, the permission plugin or the session manager in
+free (`set_client_user` stores an id and nothing consumes it), and
+`PermissionResolvedEvent` records "user" but not which user. Premium checks
+`allowed_emails` / `allowed_groups` at the dashboard edge only. "RBAC" in the
+rest of this document means this principal side.
 
 **jaato premium.** Daruma (`jaato_premium/scaffold/daruma/`, exposed as
 `jaato-scaffold compile spec.yaml`) compiles a YAML domain spec into a profile, a
@@ -196,7 +226,7 @@ host tool where the guard is fused with the effect, an attestation completion
 processor, a reactor and a pytest suite, then re-validates the output through
 the free loaders. The design refuses to emit an unsound placement. HandoffGate
 (`reactors/gates/`) is a lease-based async approval primitive that parks an
-escalated tool until a human releases it. Still no RBAC or per-user policy;
+escalated tool until a human releases it. Still no principal-side RBAC or per-user policy;
 `tenant_id` is "reserved for future multi-tenant scoping".
 
 ## 4. Sandboxing and isolation
@@ -518,7 +548,8 @@ concentration across free and premium.
 |---|---|---|---|
 | Approval policy engine with persisted decisions | build (weeks) | ships | ships |
 | Actor identity on approvals and events | build | build (days; hook exists) | partial (`X-Jaato-User` at edge) |
-| RBAC over tools, sessions, profiles | build | build | build |
+| Agent-role scoping (tools, limits, policy per role) | build | ships (profiles) | ships + Daruma |
+| Principal RBAC (IdP group to role, session ownership) | build | build | partial (edge allowlist) |
 | Multi-tenant isolation | build | build | reserved field only |
 | Kernel or container confinement | deploy a container/VM | ships on Linux | ships |
 | Turn / token / cost / time limits | build | ships | ships |
@@ -575,8 +606,8 @@ For a corporation building **internal** harnesses on Linux infrastructure that
 must show auditors permission gating, resource confinement, budgets, tracing
 and a PII story, **jaato free is the lower-effort base, and premium closes the
 SSO, secrets and pseudonymisation gaps if the commercial terms work**. Plan the
-remaining build (identity on events, RBAC, retention, signed audit, regulatory
-documentation) at roughly 6–12 engineer-weeks on top.
+remaining build (identity on events, principal RBAC, retention, signed audit,
+regulatory documentation) at roughly 6–12 engineer-weeks on top.
 
 For a corporation that will **ship a product**, is a TypeScript shop, or
 already runs every agent in a hardened container with a gateway that holds
@@ -586,6 +617,6 @@ governance layer honestly: permission engine, limits, redaction, OTel adapter,
 MCP bridge and a multi-user service are all yours, realistically 3–6
 engineer-months before parity with what jaato free ships today.
 
-Either way, the three things nobody ships — role-based access, retention and
+Either way, the three things nobody ships — principal RBAC, retention and
 erasure tooling, and the AI Act documentation set — should be on the plan from
 day one.
