@@ -2386,7 +2386,7 @@ class SessionManager:
         """The authenticated user a loaded session was created for, or
         ``None`` when the session is not loaded or has no user (#859)."""
         session = self.get_session(session_id)
-        return getattr(session, "created_by", None) if session else None
+        return session.created_by if session else None
 
     def _build_isolated_envelope(
         self,
