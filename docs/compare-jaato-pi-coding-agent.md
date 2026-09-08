@@ -13,7 +13,7 @@ Two candidates:
 
 | | pi coding-agent | jaato free | jaato premium |
 |---|---|---|---|
-| Repo / version | `earendil-works/pi`, `packages/coding-agent` **0.85.1** (commit `b2602be`, 2026-09-07) | `jaato-server` **0.7.0**, `jaato-sdk` **0.16.0** (commit `a8b5839`, 2026-09-08) | `jaato-premium` **0.1.206** (commit `9d84676`) |
+| Repo / version | `earendil-works/pi`, `packages/coding-agent` **0.85.1** (commit `b2602be`, 2026-09-07) | `jaato-server` **0.7.0**, `jaato-sdk` **0.16.0** (commit `a8b5839`, 2026-09-08) | `jaato-premium` **0.1.207** (commit `c967607`) |
 | Language / runtime | TypeScript, Node ≥ 22.19 (Bun for standalone binaries) | Python 3, daemon + IPC/WebSocket; TS client SDK (pre-release) | Python plugin pack over jaato free |
 | Licence | **MIT** | **BUSL-1.1** (Apache-2.0 on 2030-09-01) | **Proprietary**, commercial agreement only |
 | Self-description | "deliberately minimal", "no built-in permission system", "no MCP, no sub-agents" | "server-first framework for multi-provider tool orchestration" | governance, PII, SSO and clustering add-on |
@@ -72,7 +72,7 @@ where you want the governance layer to live.**
   auditor-sealed audit stream, six secret backends (Vault, AWS SM, sops, pass,
   keyring, Infisical), a fork-budget containment fix, and the Daruma compiler
   that turns a declarative "business law" spec into deny-by-default evaluators,
-  mediated effects and anti-fabrication attestation checks, and (0.1.206)
+  mediated effects and anti-fabrication attestation checks, and (since 0.1.206)
   `jaato-scaffold obligations`, an EU AI Act obligation-to-evidence map computed
   against the installed framework. It does **not** add
   an identity model of its own (no IdP group to profile or tool mapping),
@@ -522,19 +522,24 @@ refactor. Still no immutable event store or signed trail.
 ## 9. EU AI Act mapping
 
 pi does not mention the EU AI Act, ISO 42001, NIST AI RMF or SOC 2 anywhere,
-and neither did jaato until this assessment was written. jaato premium 0.1.206
-(premium PR #68) now ships **`jaato-scaffold obligations`**: 23 deployer-side
-obligations across Articles 9–17 and 26 mapped to 122 evidence rows (90 in the
-free tree, 32 premium), each naming the primitive, the artefact it produces
+and neither did jaato until this assessment was written. jaato premium
+(premium PR #68, 0.1.206) now ships **`jaato-scaffold obligations`**: 23
+deployer-side obligations across Articles 9–17 and 26 mapped to 132 evidence
+rows (100 in the free tree, 32 premium), each naming the primitive, the artefact it produces
 (file, event, span attribute), the gap and what stays with the deployer. It is
 computed rather than written: every row carries a check resolved against the
 installed jaato-server, jaato-sdk and jaato-premium (SDK event catalog, plugin
 directories, profile-schema keys, source literals, entry points), `--check`
 fails CI when a row drifts, `--workspace` adds what a given workspace enables,
 `--json` feeds a questionnaire, and articles with no primitive (9, 11, 17) say
-so. Verified here: `--check` passes against the checked-in
-`docs/design/eu-ai-act-obligations-map.md` (120 verified, 2 declared, 0
-unresolved rows). It labels itself "not legal advice". A free-tree copy of
+so. Verified here against 0.1.207: `--check` passes against the checked-in
+`docs/design/eu-ai-act-obligations-map.md` (130 verified, 2 declared, 0
+unresolved rows). The map is already exercising its own drift guard: when
+PR #876 put approver identity on the record, premium's suite failed 14 tests
+because the catalog had pinned the *absence* of that field, and premium PR
+#69 turned the #859 gap into four verified evidence rows across Articles
+12(1), 12(2)(a), 14(4)(a), 14(4)(d) and 26(2); #507 (tamper evidence) is now
+the one headline gap it tracks. It labels itself "not legal advice". A free-tree copy of
 the map is [WIP #867](https://github.com/Jaato-framework-and-examples/jaato/issues/867). What follows is this document's own, shorter map of the
 *deployer-side* obligations most harness builders will meet (the Act's high-risk
 provisions, Articles 9–15, and the deployer duties in Article 26) to primitives.
