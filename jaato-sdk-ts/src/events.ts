@@ -14569,7 +14569,12 @@ export interface ToolCallEndEvent {
  *     agent_id: Which agent produced the chunk.
  *     call_id: Correlates the chunk with a specific tool call.
  *     chunk: Output text (may contain newlines).  Empty for a
- *         pure-media chunk.
+ *         pure-media chunk -- except the ``final`` chunk of MODEL
+ *         speech (:meth:`is_model_speech`), which carries the
+ *         utterance's transcript (#869) when the model wrote no text
+ *         of its own that turn; a turn that both wrote and spoke
+ *         delivered its words as ``AGENT_OUTPUT`` and this stays
+ *         empty, so a client never receives the same words twice.
  *     stream_id: Correlates chunks belonging to one media stream.
  *         Empty for unstreamed text, preserving existing frames.
  *     sequence: Ordering, passed through from
