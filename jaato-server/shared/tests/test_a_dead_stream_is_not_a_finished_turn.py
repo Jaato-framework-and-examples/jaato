@@ -201,10 +201,10 @@ REVERSIONS = [
         find="""                    # Extract finish reason
                     if choice.finish_reason:
                         terminal_seen = True
-                        finish_reason = map_finish_reason(choice.finish_reason)""",
+                        finish_reason = self._map_finish_reason(choice.finish_reason)""",
         replace="""                    # Extract finish reason
                     if choice.finish_reason:
-                        finish_reason = map_finish_reason(choice.finish_reason)""",
+                        finish_reason = self._map_finish_reason(choice.finish_reason)""",
         test=(
             "test_every_streaming_provider_records_the_terminal_event"
             "[_openai_compat/base.py]"
