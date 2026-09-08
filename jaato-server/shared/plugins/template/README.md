@@ -47,7 +47,7 @@ The plugin subscribes to prompt enrichment to automatically detect and extract t
 │  Template plugin's enrich_prompt() is called                    │
 │                                                                 │
 │  1. Detects code blocks with {{ }} or {% %} syntax             │
-│  2. Extracts to .jaato/templates/mod-code-001-basic.java.tmpl  │
+│  2. Extracts to .jaato/template_extracts/mod-code-001-...tmpl  │
 │  3. Annotates prompt with extraction info                       │
 └─────────────────────────────────────────────────────────────────┘
                               │
@@ -57,7 +57,7 @@ The plugin subscribes to prompt enrichment to automatically detect and extract t
 │                                                                 │
 │  ---                                                            │
 │  **Extracted Templates:**                                       │
-│  [Template extracted: .jaato/templates/mod-code-001-basic...]   │
+│  [Template extracted: .jaato/template_extracts/mod-code-001...] │
 │    Variables: circuitBreakerName, fallbackMethodName, ...       │
 │    Use: renderTemplateToFile(template_path="...", variables={...})    │
 │  ---                                                            │
@@ -196,7 +196,7 @@ listAvailableTemplates()
 # Returns:
 # {
 #   "templates": [
-#     {"path": ".jaato/templates/mod-code-001-basic.java.tmpl",
+#     {"path": ".jaato/template_extracts/mod-code-001-basic.java.tmpl",
 #      "variables": ["circuitBreakerName", "fallbackMethodName", ...]}
 #   ],
 #   "count": 1
@@ -416,17 +416,41 @@ registry.expose_tool("template", {
 
 ## Storage
 
-Extracted templates are stored in `.jaato/templates/`:
+Two directories, and the plugin only ever writes to one of them.
+
+`.jaato/templates/` (or `<config_root>/templates/` when a config_root is
+set) is the **catalog** — templates an operator or an orchestrator
+provisioned, plus their `index.json`. The plugin reads it and never
+writes it: under AppArmor a confined session carries `audit deny
+<workspace>/.jaato/templates/** wlk,` alongside the other user-authored
+config (#893), because a template is authored content that becomes code,
+and an agent that could rewrite one before rendering it would have removed
+whatever rule the template encoded — with the generated file still looking
+entirely normal.
+
+`.jaato/template_extracts/` is where the plugin's own runtime writes go —
+templates extracted from tool output, and the persisted index:
 
 ```
 .jaato/
-└── templates/
+├── templates/                # catalog: provisioned, read-only to the agent
+│   └── index.json
+└── template_extracts/        # runtime: extracted on-demand, writable
+    ├── index.json
     ├── mod-code-001-basic-with-fallback.java.tmpl
     ├── mod-code-001-config.yaml.tmpl
     └── mod-code-002-retry-pattern.java.tmpl
 ```
 
-This directory can be gitignored as templates are extracted on-demand.
+It is a *sibling* of the catalog rather than a subdirectory because
+AppArmor does not let a more-specific allow override a less-specific deny,
+so a carve-out under the deny would not have worked. It always resolves
+against the workspace, never config_root, which is granted read-only under
+confinement.
+
+`template_extracts/` can be gitignored as templates are extracted
+on-demand. On load, the catalog's index wins over the extracts index on a
+name collision.
 
 ## Security
 

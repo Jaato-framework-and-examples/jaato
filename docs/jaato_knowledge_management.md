@@ -393,7 +393,7 @@ The template plugin runs after references, processing the content that reference
 │  │  • Jinja2: {% raw %}{{ variable }}, {% if %}, {% for %}{% endraw %}                │    │
 │  │  • Mustache: {{#section}}...{{/section}}, {{^inverted}}       │    │
 │  │                                                               │    │
-│  │  Extract to .jaato/templates/ with auto-generated names:      │    │
+│  │  Extract to .jaato/template_extracts/ (auto-generated names): │    │
 │  │  • Frontmatter ID → prefix (e.g., mod-code-001)              │    │
 │  │  • Heading text → template name                               │    │
 │  │  • Content hash → fallback                                    │    │
@@ -421,7 +421,7 @@ The template plugin runs after references, processing the content that reference
 │  │   Variables: Entity, basePackage, entityFields                │    │
 │  │   Use: renderTemplateToFile(template_name="Entity.java.tpl", ...)" │    │
 │  │                                                               │    │
-│  │  Persist index to .jaato/templates/index.json                 │    │
+│  │  Persist index to .jaato/template_extracts/index.json         │    │
 │  └─────────────────────────────────────────────────────────────┘    │
 │                                                                      │
 └─────────────────────────────────────────────────────────────────────┘
@@ -557,7 +557,7 @@ All templates -- whether extracted from documentation or discovered as standalon
 │  │  }                                                            │    │
 │  │                                                               │    │
 │  │  "mod-code-001-basic.java.tmpl" → {                           │    │
-│  │      source_path: ".jaato/templates/mod-code-001-basic.       │    │
+│  │      source_path: ".jaato/template_extracts/mod-code-001-     │    │
 │  │                    java.tmpl",                                │    │
 │  │      syntax: "jinja2",                                        │    │
 │  │      variables: ["circuitBreakerName", "fallbackMethod"],     │    │
@@ -570,7 +570,7 @@ All templates -- whether extracted from documentation or discovered as standalon
 │  STANDALONE                         EMBEDDED                         │
 │  • .tpl/.tmpl files in referenced   • Code blocks with template      │
 │    directories                        syntax in documentation        │
-│  • Left in original location        • Extracted to .jaato/templates/ │
+│  • Left in original location        • Extracted to template_extracts/│
 │  • Indexed, not copied              • Named from frontmatter + heading│
 │  • Name collisions disambiguated    • Content-hashed for dedup       │
 │    by parent folder                                                  │

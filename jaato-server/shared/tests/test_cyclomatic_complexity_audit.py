@@ -434,7 +434,6 @@ BASELINE: Dict[str, int] = {
     "jaato-server/shared/plugins/template/plugin.py::TemplatePlugin._execute_render_template_to_file": 30,
     "jaato-server/shared/plugins/template/plugin.py::TemplatePlugin._parse_mustache_structure": 45,
     "jaato-server/shared/plugins/template/plugin.py::TemplatePlugin._preprocess_mustache_dotted_paths": 17,
-    "jaato-server/shared/plugins/template/plugin.py::TemplatePlugin._resolve_template_path": 16,
     "jaato-server/shared/plugins/template/plugin.py::TemplatePlugin._validate_render_inputs_against_structure": 31,
     "jaato-server/shared/plugins/template/plugin.py::TemplatePlugin._validate_template_index": 26,
     "jaato-server/shared/plugins/template/plugin.py::TemplatePlugin.enrich_tool_result": 29,

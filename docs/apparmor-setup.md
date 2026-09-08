@@ -149,10 +149,24 @@ When a WS client creates a session, the server:
 | Resource | Denied |
 |----------|--------|
 | Other sessions' workspaces | Read and write |
+| User-authored config in the workspace (`.jaato/agents/`, `profiles/`, `scripts/`, `services/<name>/`, `reactors.json`, `completion_schemas/`, `spawn_schemas/`, `instructions/`, `references/`, `templates/`, `template_routing.yaml`, `apparmor-fragments/`) | Write, link, lock |
 | Raw sockets | All |
 | ptrace (debugging other processes) | All |
 | mount/umount | All |
 | `CAP_SYS_ADMIN`, `CAP_NET_ADMIN` | All |
+
+The write-denies on user-authored config are the integrity half of the
+profile: those files are read back by the framework and turned into
+behaviour (a persona, a profile, a prefetch script, a template that becomes
+code at render time), so a confined session that could rewrite one would be
+authoring its own instructions. Tenant-runtime state under `.jaato/`
+(`sessions/`, `logs/`, `cache/`, `memory/`, `todos/`, …) carries no deny and
+stays writable. Two deliberate omissions: `.jaato/prompts/`, because
+`prompt_library`'s `savePrompt` / `deletePrompt` run inside the confined
+runner, and `.jaato/template_extracts/`, which is where the template plugin
+writes the templates it extracts from tool output — the sibling directory
+that keeps that path working while the provisioned catalog in
+`.jaato/templates/` stays read-only to the agent.
 
 ### Lifecycle
 

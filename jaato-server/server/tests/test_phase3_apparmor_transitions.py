@@ -36,8 +36,17 @@ from server.runner_pool import PoolSlot
 
 
 class TestTemplateChangeProfileRule:
-    def test_template_version_bumped_to_28(self) -> None:
-        assert AppArmorManager._TEMPLATE_VERSION == 28
+    def test_template_version_at_least_28(self) -> None:
+        """Phase 3's rule landed in v28, so anything older lacks it.
+
+        A floor, not an equality: every other version pin in the tree
+        (``shared/tests/test_apparmor.py``) is ``>=`` for the same
+        reason — the number moves on every later template change, and an
+        exact match turns an unrelated bump into a failure here.  What
+        this class actually guards is the rule itself, asserted by the
+        two tests below.
+        """
+        assert AppArmorManager._TEMPLATE_VERSION >= 28
 
     def test_template_contains_jaato_ws_glob_change_profile_rule(self) -> None:
         """The per-session template's main scope must allow transitions
