@@ -57,17 +57,19 @@ where you want the governance layer to live.**
   `plugins` and `tool_scopes` allow-lists drop every unlisted tool from the
   wire, `plugin_configs.permission.policy` is per-role policy, and
   inheritance only ever tightens (`max_turns` and budget limits are
-  most-restrictive-wins, `apparmor` is sticky). What the daemon lacks is the
-  **principal** side: it is multi-session and multi-client with
-  **bearer-token auth only**, and no identity reaches profile resolution,
-  permission decisions or session ownership.
+  most-restrictive-wins, `apparmor` is sticky). The **principal** side is delegated
+  rather than modelled: a permission decision can be handed to a Python
+  evaluator or to an external system through a webhook or file channel, and
+  the session suspends until that system answers, so an existing corporate
+  approval or RBAC service decides. The daemon itself has **bearer-token
+  auth only** and records no approver identity on the decision.
 - **jaato premium adds the parts a compliance officer asks for next**: OIDC SSO
   with a server-side token proxy and mTLS, four-seat PII pseudonymisation with an
   auditor-sealed audit stream, six secret backends (Vault, AWS SM, sops, pass,
   keyring, Infisical), a fork-budget containment fix, and the Daruma compiler
   that turns a declarative "business law" spec into deny-by-default evaluators,
   mediated effects and anti-fabrication attestation checks. It does **not** add
-  principal-side RBAC (an IdP group to profile or tool mapping),
+  an identity model of its own (no IdP group to profile or tool mapping),
   multi-tenancy, sandboxing, prompt-injection detection, retention or any
   regulatory mapping, and several of its own backlog items are open.
 
@@ -79,7 +81,7 @@ where you want the governance layer to live.**
 | TypeScript/Node shop, developer-desktop assistants, containers already the isolation story | **pi** |
 | Internal harnesses on Linux servers; you want permissions, kernel confinement, budgets, OTel and an event audit stream *without writing them* | **jaato free** |
 | Above, plus SSO, PII pseudonymisation, Vault-backed secrets, compiled deny-by-default policy, cluster | **jaato free + premium** (commercial agreement) |
-| You need principal RBAC (who may run which agent role), tenant isolation, retention/DSAR tooling or a signed audit trail | **Neither ships it.** jaato's profiles give you the agent-role half; budget the identity half either way. |
+| You need tenant isolation, retention/DSAR tooling, or a signed audit trail with approver identity | **Neither ships it.** jaato's profiles give you agent roles and its permission channels let your existing approval system decide; the identity record and the rest are yours to build either way. |
 
 ## Scorecard
 
@@ -97,13 +99,14 @@ you must complete · **●○○** hook only, you build the feature · **○○�
 | Data retention / residency tooling | ○○○ (`--no-session` only) | ●○○ manual delete; many local/EU providers | ●○○ unchanged |
 | Audit trail / traceability | ●●○ complete session JSONL tree with model + usage per message | ●●○ 114-event stream, token ledger, OTel/OpenInference, versioned session records | ●●● + attestation, provenance checks, sealed redaction audit |
 | Observability adapter | ●○○ vendor-neutral contracts, no OTel adapter, not threaded into the coding-agent SDK | ●●● OTel, Langfuse, Phoenix, cost spans | ●●● + per-server resource identity |
-| Human oversight (approve, stop, steer, ask) | ●●○ abort, steering queue, follow-ups; approval only via extension | ●●● permissions, clarification, plan events, completion gates, stop | ●●● + HandoffGate async approval primitive |
+| Human oversight (approve, stop, steer, ask) | ●●○ abort, steering queue, follow-ups; approval only via extension | ●●● permissions, out-of-band approval channels, clarification, plan events, completion gates, stop | ●●● + HandoffGate async approval primitive, park and resume |
 | Prompt-injection / untrusted content | ○○○ explicitly out of scope | ●●○ tagged untrusted boundary + system-prompt layer (soft) | ●●○ unchanged |
 | Context reduction | ●●● compaction, branch summaries, hooks | ●●● four GC plugins, result rewriting, deferred tools, cache plugins | ●●● (benchmark harness only) |
 | Model providers / enterprise gateways | ●●● ~30 incl. Bedrock, Vertex, Azure, Cloudflare gateway, Copilot | ●●● 19 incl. Vertex, OpenRouter, GitHub Models, NIM, EU and local; no Bedrock/Azure native | ●●● unchanged |
 | MCP | ○○○ by design | ●●● client (`.mcp.json`); not an MCP server | ●●● unchanged |
 | Multi-user server / identity | ○○○ experimental Unix-socket server, unauthenticated | ●●○ daemon, WS bearer token, `set_client_user` hook | ●●● OIDC, WS auth proxy, mTLS |
-| Principal RBAC (which user may use which role, approve, or see which session) | ○○○ | ○○○ identity never reaches profiles or permissions | ●○○ `allowed_emails` / `allowed_groups` at the dashboard edge only |
+| Delegating a permission decision to an external system (your RBAC / approval service) | ●○○ `tool_call` hook can call out synchronously | ●●● evaluators call a policy API; webhook and file channels suspend the session until the external decision arrives | ●●● + HandoffGate parks the tool, session may be unloaded and resumed on approval (demo: `reliability-exercise`) |
+| Identity model (which user may use which role, who approved) | ○○○ | ●○○ `set_client_user` hook; no approver identity on events | ●○○ OIDC login; `allowed_emails` / `allowed_groups` at the dashboard edge; no group-to-profile binding |
 | Multi-agent | ●○○ example extension (subprocess per subagent) | ●●● subagents, profiles, cascades, payload schemas, runner pool | ●●● + handoff, remote spawn (currently broken per backlog) |
 | Extensibility model | ●●● 33 lifecycle events, TS extensions via jiti | ●●● 5 entry-point groups, daemon hooks, enrichment pipeline, traits | ●●● scaffold verbs |
 | Cross-language integration | ●●○ JSONL RPC/JSON modes; TS only | ●●● Python in-process, IPC, WS JSON, TS SDK (pre-npm) | ●●● + web components |
@@ -212,12 +215,41 @@ generated default-deny evaluator over `authority.tools`. pi has no
 equivalent: role scoping there is a per-invocation `--tools` list or a
 `tool_call` extension.
 
-What neither tier binds is a *person* to those roles. No user identity
-reaches profile resolution, the permission plugin or the session manager in
-free (`set_client_user` stores an id and nothing consumes it), and
-`PermissionResolvedEvent` records "user" but not which user. Premium checks
-`allowed_emails` / `allowed_groups` at the dashboard edge only. "RBAC" in the
-rest of this document means this principal side.
+**The person side is delegated, not modelled.** jaato does not carry an
+identity model of its own, but it ships the seam through which a
+corporation's existing RBAC or approval system takes the decision, without
+a framework change:
+
+- **Synchronous evaluators.** `.jaato/policies/*.py` scripts run on every
+  permission check, receive an `EvalContext` (`agent_name`, `session_id`,
+  `workspace_path`, `turn_index`, `model_preamble`), can call an external
+  policy service, and return any scoped decision the interactive prompt
+  offers, including deny-with-comment so the model learns why
+  (`docs/permission-evaluators.md`). They run even against pre-approved
+  tools, so a guardrail survives an `allow_all` session.
+- **Asynchronous channels.** `WebhookChannel` posts the request to an
+  approval endpoint and waits for the answer; `FileChannel` writes a request
+  file and polls for a response file, and `JAATO_PERMISSION_TIMEOUT=0` waits
+  forever, so the agent session is suspended until a separate process
+  decides (`shared/plugins/permission/channels.py`). `QueueChannel` serves
+  SDK clients and `ParentBridgedChannel` bubbles a subagent's request to its
+  parent. The webhook payload carries request id, tool, arguments and
+  context, which is what a ServiceNow, Jira or Slack approval flow needs.
+- **Park and resume (premium).** The `reliability-exercise` repository in the
+  jaato GitHub organisation (private) exercises this end to end: a
+  repeatedly failing tool is escalated and denied, a deployment reactor parks
+  a `HandoffGate` and asks a human through a Telegram bot, and on approval
+  the reactor drives the retry, in one tier after the session had been
+  unloaded and is resumed under the same id. No jaato source edits; the glue
+  is workspace-scoped reactors and scripts.
+
+So "man in the loop" is a shipped mechanism in free and a demonstrated park
+and resume in premium, and whatever RBAC the company already runs sits
+behind the webhook. What the framework still does not do is record *who*
+answered: `PermissionResolvedEvent.method` says "user", `set_client_user`
+stores an id that nothing consumes, and premium's `allowed_emails` /
+`allowed_groups` are checked at the dashboard edge only. "Identity model" in
+the rest of this document means that gap, not the delegation seam.
 
 **jaato premium.** Daruma (`jaato_premium/scaffold/daruma/`, exposed as
 `jaato-scaffold compile spec.yaml`) compiles a YAML domain spec into a profile, a
@@ -226,7 +258,7 @@ host tool where the guard is fused with the effect, an attestation completion
 processor, a reactor and a pytest suite, then re-validates the output through
 the free loaders. The design refuses to emit an unsound placement. HandoffGate
 (`reactors/gates/`) is a lease-based async approval primitive that parks an
-escalated tool until a human releases it. Still no principal-side RBAC or per-user policy;
+escalated tool until a human releases it. Still no identity model of its own or per-user policy;
 `tenant_id` is "reserved for future multi-tenant scoping".
 
 ## 4. Sandboxing and isolation
@@ -402,7 +434,7 @@ does not make.
 |---|---|---|---|
 | **Record keeping / automatic logging** (Art. 12, 26): logs sufficient to trace operation over the lifetime | Session tree with model, usage, tool calls; you add shipping and retention | Event stream + ledger + OTel + versioned session records; you add shipping, identity, retention | + attestation, sealed redaction audit |
 | **Transparency to deployers/users** (Art. 13): which model, capabilities, limitations | Model/provider in footer, env and every message | Model/provider in events and `profile_snapshot`; presentation context | + "Transparency Mandate" instruction layer (soft) |
-| **Human oversight** (Art. 14): ability to interrupt, override, not act on output | `abort()`, steering; approval only via extension | Permission prompts, clarification, stop, completion gates | + HandoffGate async approval |
+| **Human oversight** (Art. 14): ability to interrupt, override, not act on output | `abort()`, steering; approval only via extension | Permission prompts, out-of-band approval channels that suspend the session, clarification, stop, completion gates | + HandoffGate park and resume (demonstrated) |
 | **Accuracy, robustness, cybersecurity** (Art. 15): resilience to manipulation, e.g. prompt injection | Explicitly out of scope | Untrusted-content boundary, egress allowlist, AppArmor, permission gating | + default-deny compiled evaluators |
 | **Data governance** (Art. 10) and GDPR interplay: minimisation, protection of personal data | `blockImages`, `--no-session` | Redaction seams, local/EU providers | Four-seat pseudonymisation |
 | **Risk management, conformity documentation** (Art. 9, 11, 17) | Nothing | Nothing | Nothing |
@@ -549,7 +581,8 @@ concentration across free and premium.
 | Approval policy engine with persisted decisions | build (weeks) | ships | ships |
 | Actor identity on approvals and events | build | build (days; hook exists) | partial (`X-Jaato-User` at edge) |
 | Agent-role scoping (tools, limits, policy per role) | build | ships (profiles) | ships + Daruma |
-| Principal RBAC (IdP group to role, session ownership) | build | build | partial (edge allowlist) |
+| Hooking your approval / RBAC service into permission decisions | build (`tool_call` extension) | configure (evaluator or webhook/file channel) | configure; park and resume demoed |
+| Identity model (IdP group to role, approver on the record) | build | build (hook exists) | partial (OIDC login, edge allowlist) |
 | Multi-tenant isolation | build | build | reserved field only |
 | Kernel or container confinement | deploy a container/VM | ships on Linux | ships |
 | Turn / token / cost / time limits | build | ships | ships |
@@ -606,8 +639,8 @@ For a corporation building **internal** harnesses on Linux infrastructure that
 must show auditors permission gating, resource confinement, budgets, tracing
 and a PII story, **jaato free is the lower-effort base, and premium closes the
 SSO, secrets and pseudonymisation gaps if the commercial terms work**. Plan the
-remaining build (identity on events, principal RBAC, retention, signed audit,
-regulatory documentation) at roughly 6–12 engineer-weeks on top.
+remaining build (approver identity on events, group-to-profile binding,
+retention, signed audit, regulatory documentation) at roughly 6–12 engineer-weeks on top.
 
 For a corporation that will **ship a product**, is a TypeScript shop, or
 already runs every agent in a hardened container with a gateway that holds
@@ -617,6 +650,6 @@ governance layer honestly: permission engine, limits, redaction, OTel adapter,
 MCP bridge and a multi-user service are all yours, realistically 3–6
 engineer-months before parity with what jaato free ships today.
 
-Either way, the three things nobody ships — principal RBAC, retention and
-erasure tooling, and the AI Act documentation set — should be on the plan from
-day one.
+Either way, the three things nobody ships — approver identity in the audit
+record, retention and erasure tooling, and the AI Act documentation set —
+should be on the plan from day one.
