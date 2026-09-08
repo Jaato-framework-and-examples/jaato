@@ -104,6 +104,7 @@ you must complete · **●○○** hook only, you build the feature · **○○�
 | Human oversight (approve, stop, steer, ask) | ●●○ abort, steering queue, follow-ups; approval only via extension | ●●● permissions, out-of-band approval channels, clarification, plan events, completion gates, stop | ●●● + HandoffGate async approval primitive, park and resume |
 | Prompt-injection / untrusted content | ○○○ explicitly out of scope | ●●○ tagged untrusted boundary + system-prompt layer (soft) | ●●○ unchanged |
 | Context reduction | ●●● compaction, branch summaries, hooks | ●●● four GC plugins, result rewriting, deferred tools, cache plugins | ●●● (benchmark harness only) |
+| Knowledge storage and management | ●●○ skills (agentskills.io standard), prompt templates, `AGENTS.md` context files, packages; no catalog, memory or template engine | ●●● references catalog (local, URL, MCP, inline; auto/selectable; tags, transitive discovery, sandbox authorisation), template engine (Jinja2 and Mustache, indexed), curated memory with raw→validated lifecycle, prompt library (reads Claude skills), waypoints, subagent context sharing; embedding seam | ●●● + local sentence-transformers embedding provider and semantic matcher, ADR→ERI→module→skill knowledge hierarchy, auto-steering against instruction drift |
 | Model providers / enterprise gateways | ●●● ~30 incl. Bedrock, Vertex, Azure, Cloudflare gateway, Copilot | ●●● 19 incl. Vertex, OpenRouter, GitHub Models, NIM, EU and local; no Bedrock/Azure native | ●●● unchanged |
 | MCP | ○○○ by design | ●●● client (`.mcp.json`); not an MCP server | ●●● unchanged |
 | Multi-user server / identity | ○○○ experimental Unix-socket server, unauthenticated | ●●○ daemon, WS bearer token, `set_client_user` hook | ●●● OIDC, WS auth proxy, mTLS |
@@ -528,6 +529,78 @@ deferred tool loading, provider cache plugins (Anthropic, Google, ZhipuAI) with
 TTL and history breakpoints, instruction budgets. Premium adds only a GC
 benchmark harness that measures the free plugins.
 
+## 11b. Knowledge storage and management
+
+A corporate harness lives on the company's own knowledge: coding standards,
+API specifications, architecture decisions, approved code patterns, and
+what agents learned last week. This dimension asks how each SDK stores that
+knowledge, gets it in front of the model at the right moment, and keeps it
+from rotting.
+
+**pi.** Three mechanisms, all prompt-side. Skills follow the agentskills.io
+standard (`docs/skills.md`), load from `~/.pi/agent/skills`, `.pi/skills`,
+`.agents/skills` and packages, and can reuse `~/.claude/skills` and
+`~/.codex/skills`; only descriptions enter the system prompt and the body
+loads on demand. Prompt templates take positional and named arguments.
+`AGENTS.md` files are walked up from the working directory. Packages bundle
+skills, prompts, extensions and themes from npm or git. There is no
+reference catalog, no memory across sessions, no template rendering engine
+and no retrieval layer; the `examples/extensions/` directory has no memory
+or knowledge example, so each of those is an extension you write.
+
+**jaato free.** Knowledge is a first-class subsystem
+(`docs/jaato_knowledge_management.md`, `docs/jaato_memory_assessment.md`):
+
+- **References catalog** (`shared/plugins/references/`). Sources are
+  metadata, not content: local paths, URLs, MCP tool calls or inline
+  text, each `AUTO` (fetched at startup) or `SELECTABLE` (chosen by the
+  model through `selectReferences` by id or tag, or by the user). Selecting
+  a source authorises its path in the sandbox, so knowledge access and
+  confinement move together. `@reference-id` mentions in prompts and tool
+  results are detected by the enrichment pipeline, and references can
+  declare transitive dependencies. `lookup_strategy` is `tags_only`,
+  `semantic_only` or `hybrid`; the semantic half is a seam
+  (`jaato.embedding` entry point) that free ships without a provider.
+- **Template engine** (`shared/plugins/template/`). Discovers `.tpl` and
+  `.tmpl` files in referenced directories, extracts templates embedded in
+  tool output, keeps a unified index under `.jaato/templates/index.json`,
+  and renders Jinja2 or Mustache by name. This is the "consistent code from
+  the standard" half of the pipeline.
+- **Memory** (`shared/plugins/memory/`). Agents store insights with
+  `maturity="raw"` into `memories/raw/{id}.json`; a curator agent drains
+  the queue into `memories/curated.jsonl` as validated, escalated or
+  dismissed. Only curated memories surface as enrichment hints, which makes
+  curation a governance step rather than an afterthought. Retrieval is
+  tag-overlap scoring; embeddings are not used here. The continuity pattern
+  (`docs/design/agent-continuity.md`) composes this with personas.
+- **Prompt library** (`shared/plugins/prompt_library/`) with parameters,
+  command substitution and read-only interop with `.claude/skills` and
+  `.claude/commands`. **Waypoints** capture code and conversation state
+  together for rollback. **Telepathy** (`share_context`) hands context from
+  a subagent to its parent.
+- **Instruction budget** classes every knowledge source as `LOCKED`,
+  `PRESERVABLE`, `PARTIAL` or `EPHEMERAL`, so GC knows which knowledge
+  must survive a compaction.
+
+**jaato premium.** Fills the embedding seam with a local
+sentence-transformers provider and semantic matcher
+(`references_embedding_mechanism/`, registered on `jaato.embedding`), so
+hybrid tag-plus-semantic lookup works with no external vector service.
+Ships a worked knowledge hierarchy, ADR → ERI → module → skill
+(`knowledge/`, `docs/KNOWLEDGE-HIERARCHY.md`), whose point is that
+rationale is compiled into reference implementations so an executing agent
+reads the recipe and not the debate. `auto_steering` re-injects behavioural
+hints on an interval to counter instruction drift. Its own backlog lists
+what is still open: no persistent or scale-out vector index (brute-force
+`.npy` cosine today), no graph memory, no retrieval-abstention signal, and
+no memory evaluation harness.
+
+For the harnesses in section 15 this is decisive for the compliance
+reviewer and the code-review bot, both of which are only as good as the
+standards they can cite: on jaato that is a `references.json` and a
+template directory, on pi it is a skills folder plus a retrieval extension
+you build.
+
 ## 12. Integration and extensibility
 
 ### Providers and gateways
@@ -625,7 +698,7 @@ conditions of adoption, not treat their absence as a design choice.
 
 | Harness | pi | jaato free | jaato premium adds |
 |---|---|---|---|
-| **Compliance reviewer** (must refuse unsafe actions, prove what it checked) | `tool_call` block + `input` intercept; you write policy, persistence, attestation | permission policy + evaluators + completion gate that can refuse a completion; untrusted boundary | Daruma: compiled default-deny + attestation of the receipt against the ledger |
+| **Compliance reviewer** (must refuse unsafe actions, prove what it checked) | `tool_call` block + `input` intercept; you write policy, persistence, attestation; standards as skills | permission policy + evaluators + completion gate that can refuse a completion; untrusted boundary; standards as a references catalog | Daruma: compiled default-deny + attestation of the receipt against the ledger; semantic reference lookup |
 | **Code-review bot** (read-only, CI-triggered) | strong: SDK, `tools: [read, grep, find, ls]`, `edit` patches; container it | `lsp`, `ast_search`, `filesystem_query`, `webhook` GitHub route, AppArmor read-only profile | — |
 | **Chat assistant** (Slack/Teams, many users) | one process or RPC subprocess per user; no shared server, no identity | daemon + recovery client + `ClientType.CHAT`; per-session confinement or one daemon per tenant; bearer token only | OIDC SSO, WS auth proxy, mTLS, cluster, pseudonymisation of user PII |
 | **Batch job runner** | `--mode json`, `PI_OFFLINE`, in-memory sessions; no limits, add your own | runner pool, `budget_control`, `jaato-eval` sweeps, `echo` provider for CI | fork-budget carry-over |
@@ -653,6 +726,7 @@ conditions of adoption, not treat their absence as a design choice.
 | Tamper-evident audit log | build | build | partial (sealed redaction audit) |
 | Prompt-injection defence | build | soft boundary ships; classifier build | same |
 | MCP client | build | ships | ships |
+| Knowledge catalog, templates, curated memory | build (skills and prompts only) | ships; bring an embedding provider for semantic lookup | ships with local embeddings |
 | Multi-user server with auth | build | daemon + token ships; SSO build | ships (OIDC) |
 | Regulatory documentation | build | build | build |
 
