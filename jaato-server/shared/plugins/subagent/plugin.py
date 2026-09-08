@@ -3180,6 +3180,10 @@ class SubagentPlugin(DaemonForwardingMixin):
                         notify_on_gc=gc_data.get('notify_on_gc', True),
                         summarize_middle_turns=gc_data.get('summarize_middle_turns'),
                         max_turns=gc_data.get('max_turns'),
+                        media_bytes_threshold=gc_data.get('media_bytes_threshold'),
+                        evict_consumed_media=gc_data.get('evict_consumed_media'),
+                        media_evict_mime_prefixes=gc_data.get(
+                            'media_evict_mime_prefixes'),
                         plugin_config=gc_data.get('plugin_config', {}),
                     )
 

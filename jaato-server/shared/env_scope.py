@@ -370,6 +370,8 @@ CATALOG: Dict[str, EnvClass] = {
         "opposite values"),
     "JAATO_FILE_BACKUP_COUNT": EnvClass(SESSION, None,
         "belongs to plugin_configs.file_edit"),
+    "JAATO_GC_MEDIA_BYTES": EnvClass(SESSION, "gc.media_bytes_threshold",
+        "the env var IS the GCConfig field's default_factory"),
     "JAATO_GC_PRESSURE": EnvClass(SESSION, "gc.pressure_percent",
         "the env var IS the GCConfig field's default_factory"),
     "JAATO_GC_TARGET": EnvClass(SESSION, "gc.target_percent",

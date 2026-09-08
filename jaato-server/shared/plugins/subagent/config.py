@@ -1057,6 +1057,38 @@ def _validate_trace_path(key: str, value: Any) -> str:
     return text
 
 
+def _gc_media_errors(gc_data: Dict[str, Any]) -> List[str]:
+    """Validate the three media keys of a profile's ``gc:`` block.
+
+    A separate function rather than three more branches inline because the
+    validator it feeds is already one of the largest in the file; the
+    checks themselves are the ordinary shape ones (a byte ceiling is a
+    non-negative int, an eviction switch is a bool, a mime-prefix set is a
+    list of strings).
+    """
+    errors: List[str] = []
+    threshold = gc_data.get("media_bytes_threshold")
+    if threshold is not None:
+        if not isinstance(threshold, int) or isinstance(threshold, bool):
+            errors.append("gc.media_bytes_threshold must be an integer "
+                          "(bytes; 0 disables)")
+        elif threshold < 0:
+            errors.append("gc.media_bytes_threshold must be non-negative")
+
+    evict = gc_data.get("evict_consumed_media")
+    if evict is not None and not isinstance(evict, bool):
+        errors.append("gc.evict_consumed_media must be a boolean")
+
+    prefixes = gc_data.get("media_evict_mime_prefixes")
+    if prefixes is not None:
+        if not isinstance(prefixes, list) or not all(
+            isinstance(p, str) for p in prefixes
+        ):
+            errors.append("gc.media_evict_mime_prefixes must be a list of "
+                          "mime prefixes, e.g. [\"audio/\"]")
+    return errors
+
+
 @dataclass
 class GCProfileConfig:
     """Garbage collection configuration for a profile.
@@ -1072,6 +1104,19 @@ class GCProfileConfig:
         notify_on_gc: Whether to inject a notification into history after GC.
         summarize_middle_turns: For hybrid strategy, number of middle turns to summarize.
         max_turns: Trigger GC when turn count exceeds this limit.
+        media_bytes_threshold: Trigger GC when history carries more than
+            this many BYTES of binary payload (audio, images, PDFs); 0
+            disables the check.  The second denominator, and the only one
+            not expressed as a percentage of a token budget — media was
+            invisible to GC precisely because the payload dominating a
+            voice request is not a token quantity (#850).  ``None`` leaves
+            the framework default (``JAATO_GC_MEDIA_BYTES``, else 8 MiB).
+        evict_consumed_media: Whether binary parts are purged from history
+            once the turn that consumed them has completed, leaving a
+            marker naming the attachment's id.  ``None`` = framework
+            default (on).
+        media_evict_mime_prefixes: Which mimes eviction applies to.
+            ``None`` = framework default (``["audio/"]``).
         plugin_config: Additional plugin-specific configuration.
     """
     type: str = "truncate"
@@ -1082,6 +1127,9 @@ class GCProfileConfig:
     notify_on_gc: bool = True
     summarize_middle_turns: Optional[int] = None  # For hybrid strategy
     max_turns: Optional[int] = None
+    media_bytes_threshold: Optional[int] = None
+    evict_consumed_media: Optional[bool] = None
+    media_evict_mime_prefixes: Optional[List[str]] = None
     plugin_config: Dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -1101,6 +1149,9 @@ class GCProfileConfig:
             notify_on_gc=data.get('notify_on_gc', True),
             summarize_middle_turns=data.get('summarize_middle_turns'),
             max_turns=data.get('max_turns'),
+            media_bytes_threshold=data.get('media_bytes_threshold'),
+            evict_consumed_media=data.get('evict_consumed_media'),
+            media_evict_mime_prefixes=data.get('media_evict_mime_prefixes'),
             plugin_config=data.get('plugin_config', {}),
         )
 
@@ -3902,6 +3953,8 @@ def validate_profile(data: Any) -> Tuple[bool, List[str], List[str]]:
                 elif gc_preserve < 0:
                     errors.append("gc.preserve_recent_turns must be non-negative")
 
+            errors.extend(_gc_media_errors(gc_data))
+
             gc_max_turns = gc_data.get("max_turns")
             if gc_max_turns is not None:
                 if not isinstance(gc_max_turns, int) or isinstance(gc_max_turns, bool):
@@ -4122,6 +4175,20 @@ def gc_profile_to_plugin_config(
     gc_plugin = load_gc_plugin(gc_plugin_name, gc_init_config)
 
     # Create GCConfig for the session
+    # The three media keys are passed only when the profile SET them:
+    # their defaults live on GCConfig (one behind JAATO_GC_MEDIA_BYTES), and
+    # spelling them here would make every profile with a `gc:` block
+    # silently override the env var.
+    media_kwargs: Dict[str, Any] = {}
+    if gc_profile.media_bytes_threshold is not None:
+        media_kwargs['media_bytes_threshold'] = gc_profile.media_bytes_threshold
+    if gc_profile.evict_consumed_media is not None:
+        media_kwargs['evict_consumed_media'] = gc_profile.evict_consumed_media
+    if gc_profile.media_evict_mime_prefixes is not None:
+        media_kwargs['media_evict_mime_prefixes'] = tuple(
+            gc_profile.media_evict_mime_prefixes
+        )
+
     gc_config = GCConfig(
         threshold_percent=gc_profile.threshold_percent,
         target_percent=gc_profile.target_percent,
@@ -4129,6 +4196,7 @@ def gc_profile_to_plugin_config(
         max_turns=gc_profile.max_turns,
         preserve_recent_turns=gc_profile.preserve_recent_turns,
         plugin_config=gc_profile.plugin_config,
+        **media_kwargs,
     )
 
     return gc_plugin, gc_config

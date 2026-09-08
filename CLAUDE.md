@@ -259,6 +259,10 @@ plugin_configs: {}
 gc:
   type: budget
   threshold_percent: 80.0
+  # media accounting + consumed-media eviction (#850); omit to keep defaults
+  media_bytes_threshold: 8388608     # bytes of binary payload; 0 disables
+  evict_consumed_media: true         # purge audio once its turn completed
+  media_evict_mime_prefixes: ["audio/"]
 # trace: typed diagnostic log paths — the validated sibling of the
 #   JAATO_TRACE_LOG / JAATO_PROVIDER_TRACE env vars, which remain the
 #   lower-precedence default (the block outranks both the workspace .env
@@ -395,9 +399,19 @@ gc_config = GCConfig(
     threshold_percent=80.0,    # Trigger when context is 80% full
     preserve_recent_turns=5,   # Keep last 5 turns
     auto_trigger=True,
+    # Media is a SECOND denominator, in bytes (#850) — a voice session can
+    # sit far below its token threshold while carrying megabytes of audio.
+    media_bytes_threshold=8 * 1024 * 1024,   # 0 disables
+    evict_consumed_media=True,               # purge bytes after the turn
+    media_evict_mime_prefixes=("audio/",),   # images survive by default
 )
 client.set_gc_plugin(gc_plugin, gc_config)
 ```
+
+The same three keys are settable per session from a profile's `gc:` block and
+from `.jaato/gc.json`; both layers pass a key only when it is present, so
+omitting one leaves the framework default (and `JAATO_GC_MEDIA_BYTES`) in
+charge rather than silently overriding it.
 
 ### Deferred Tool Loading
 
@@ -580,6 +594,56 @@ latent hardcode in every OpenAI-shaped converter (`_openai_compat` emits
 the text-only floor from `ModalityCapabilityMixin`, a user-message image
 now meets the same withhold their tool-result images always have. See
 [Binary Media Chunks §10](docs/design/binary-media-chunks.md).
+
+**How long anyone sees it (#850).** #847 fixed *which* model sees an
+utterance; media still had a lifecycle in one direction only. Outbound was
+right — model media is `CLIENT`-audience so it never enters history, and
+`ensure_spoken_part` leaves the *transcript* in its place. Inbound got
+neither: a heard utterance stayed in history verbatim and rode every later
+request. Five questions on one helpdesk call measured ~2.8 MB of accumulated
+audio and a final request carrying all of it (~3.8 MB base64), growing with
+every turn.
+
+**And GC could not see it.** `grep -rn "inline_data" shared/plugins/gc_*/`
+returned nothing: `estimate_message_tokens` walked text, function calls and
+function responses and never looked at `inline_data`, so a 600 KB utterance
+was sized at the one-token floor and no threshold could fire on the payload
+it exists to bound. Two channels now, deliberately different in kind —
+`estimate_media_tokens` puts media in the **token** denominator (so a
+media-carrying turn is sized, and eviction can prefer it), and
+`context_usage["media_bytes"]` is a second denominator in **bytes** that
+`media_pressure_reason` compares against `GCConfig.media_bytes_threshold`
+(all four strategies consult it). Bytes, because the thing that killed the
+session was request *size* and an operator bounding it thinks in megabytes;
+laundering them through a token estimate would hide the quantity that
+matters behind a guess.
+
+**Purging cannot simply delete.** In a call-retention-regulated domain "the
+agent handled a claim from audio nobody can produce" is the audit finding.
+An inbound attachment carried **no id** (`{mime_type, data, display_name}`)
+while outbound media has carried `stream_id`/`sequence` since #824 — so the
+identifier is minted at *ingest* (`jaato_sdk/media_identity.py`), as a
+SHA-256 digest of the payload rather than a uuid, because the archive side
+must be able to **recompute** it from the recording rather than look it up
+in a mapping somebody kept. The SDK client mints it (the sender is what
+archives the file); `_parts_from_user_message` back-fills the same value for
+clients that send none, and never overwrites one the caller supplied.
+
+`JaatoSession._evict_consumed_media` then replaces the bytes with a marker
+naming that id, duration and mime. It runs at the **start** of a turn, from
+both chat loops: everything in history then belongs to a completed turn, and
+a turn that died before the model saw its audio keeps the bytes for a retry.
+Unlike `_gate_history_for_active_modalities` (a per-request *copy*), this is
+destructive — the accepted trade, since re-hearing a recording yields the
+understanding the conversation already records in words. Audio only by
+default; an image is routinely re-examined across turns, a recording is not.
+Shape **A** of the two the issue names; shape **B** (substitute a
+transcript, mirroring `ensure_spoken_part`) needs a transcript source that
+chat-completions does not provide for inbound audio, and composes on top.
+Knobs: profile `gc:` / `.jaato/gc.json` `evict_consumed_media`,
+`media_evict_mime_prefixes`, `media_bytes_threshold`; env
+`JAATO_GC_MEDIA_BYTES`. See
+[Binary Media Chunks §11](docs/design/binary-media-chunks.md).
 
 Two shapes were available for #830 and only one is implemented here: audio as
 an **input modality** (above), not **transcription as a step**. A transcriber
@@ -1610,6 +1674,7 @@ covers it, where one exists. `jaato-scaffold explain env` renders the tags;
 | `AI_USE_CHAT_FUNCTIONS` | Enable function calling mode (`1`/`true`) |
 | `LEDGER_PATH` | Output path for token accounting JSONL |
 | `JAATO_GC_THRESHOLD` | GC trigger threshold % (default: 80.0) |
+| `JAATO_GC_MEDIA_BYTES` | Binary payload a history may carry before GC triggers, in **bytes** (default 8 MiB; `0` disables). The second GC denominator: a voice session can sit far below its token threshold while carrying megabytes of audio, which is the state GC could not see at all before #850. Typed sibling: `gc.media_bytes_threshold`. |
 | `JAATO_PARALLEL_TOOLS` | Enable parallel tool execution (default: `true`) |
 | `JAATO_DEFERRED_TOOLS` | Enable deferred tool loading (default: `true`) |
 | `JAATO_RUNNER_POOL_ENABLED` | Enable pre-warm runner pool routing (default: `true`).  Sessions consume pre-warm pool slots instead of cold-spawning a runner subprocess.  Set to `false` / `0` / `no` / `off` to disable.  See `docs/design/runner_prewarm_pool_plan.md`. |

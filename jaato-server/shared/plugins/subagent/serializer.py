@@ -62,6 +62,14 @@ def serialize_subagent_state(session_info: Dict[str, Any]) -> Dict[str, Any]:
                 'notify_on_gc': profile.gc.notify_on_gc,
                 'summarize_middle_turns': profile.gc.summarize_middle_turns,
                 'max_turns': profile.gc.max_turns,
+                # Carried so a revived session keeps the media policy it was
+                # created under (#850): a profile that turned eviction OFF
+                # would otherwise start purging the moment it woke.  Each is
+                # ``None`` unless the profile set it, and restores as ``None``,
+                # so the framework default stays in charge either way.
+                'media_bytes_threshold': profile.gc.media_bytes_threshold,
+                'evict_consumed_media': profile.gc.evict_consumed_media,
+                'media_evict_mime_prefixes': profile.gc.media_evict_mime_prefixes,
                 'plugin_config': profile.gc.plugin_config,
             }
 
@@ -122,6 +130,9 @@ def deserialize_subagent_state(data: Dict[str, Any]) -> Dict[str, Any]:
                 notify_on_gc=gc_data.get('notify_on_gc', True),
                 summarize_middle_turns=gc_data.get('summarize_middle_turns'),
                 max_turns=gc_data.get('max_turns'),
+                media_bytes_threshold=gc_data.get('media_bytes_threshold'),
+                evict_consumed_media=gc_data.get('evict_consumed_media'),
+                media_evict_mime_prefixes=gc_data.get('media_evict_mime_prefixes'),
                 plugin_config=gc_data.get('plugin_config', {}),
             )
 

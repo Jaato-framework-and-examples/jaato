@@ -65,6 +65,7 @@ ALLOWLIST: Set[Tuple[str, str]] = {
     ("shared/plugins/environment/plugin.py",                      "JAATO_NO_PROXY"),
     ("shared/plugins/environment/plugin.py",                      "JAATO_SESSION_ID"),
     ("shared/plugins/environment/plugin.py",                      "JAATO_SSL_VERIFY"),
+    ("shared/plugins/gc/base.py",                                 "JAATO_GC_MEDIA_BYTES"),
     ("shared/plugins/gc/base.py",                                 "JAATO_GC_PRESSURE"),
     ("shared/plugins/gc/base.py",                                 "JAATO_GC_TARGET"),
     ("shared/plugins/gc/base.py",                                 "JAATO_GC_THRESHOLD"),
