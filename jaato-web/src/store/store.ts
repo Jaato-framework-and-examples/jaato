@@ -25,6 +25,7 @@ import type {
   ProfileInfo,
   Screen,
   ToolBlock,
+  ToolStatus,
   WorkspaceInfo,
 } from "./types";
 
@@ -326,27 +327,34 @@ export function reduce(s: JaatoState, raw: JaatoEvent): JaatoState {
       const mime = ev.mime_type as string | null | undefined;
       const data = ev.data_b64 as string | null | undefined;
       const chunk = String(ev.chunk ?? "");
-      const applied = updateTool(s, callId, agentId, (t) => ({
-        ...t,
-        // Model speech has no ToolCallEndEvent: its ``final`` chunk closes the block.
-        status: callId === "model-output" && ev.final === true ? "success" : t.status,
-        output: chunk ? t.output + chunk : t.output,
-        media: mime && data
-          ? [...t.media, { mimeType: mime, dataB64: data, streamId: ev.stream_id as string | undefined, sequence: ev.sequence as number | null | undefined, final: ev.final === true }]
-          : t.media,
-      }));
-      if (!applied && callId === "model-output" && mime && data) {
-        // Model-emitted media (speech) rides the tool-output channel under a reserved id.
+      const mediaItem = mime && data
+        ? { mimeType: mime, dataB64: data, streamId: ev.stream_id as string | undefined, sequence: ev.sequence as number | null | undefined, final: ev.final === true }
+        : null;
+
+      if (callId === "model-output") {
+        // Model-emitted media (speech) rides the tool-output channel under a
+        // reserved id and has no ToolCallEndEvent: its ``final`` chunk closes
+        // the block, and the next utterance opens a new one.  ``chunk`` on a
+        // speech frame is the utterance's transcript (#869), carried on the
+        // final chunk, so it is kept whether the block is new or continuing.
         ensureAgent(s, agentId);
         const list = [...(s.blocks[agentId] ?? [])];
         const last = list[list.length - 1];
+        const status: ToolStatus = ev.final === true ? "success" : "running";
         if (last && last.kind === "tool" && last.callId === "model-output" && last.status === "running") {
-          list[list.length - 1] = { ...last, media: [...last.media, { mimeType: mime, dataB64: data, final: ev.final === true }], status: ev.final ? "success" : "running" };
-        } else {
-          list.push({ id: nextId(), kind: "tool", agentId, callId: "model-output", toolName: "model output", args: {}, status: ev.final ? "success" : "running", startedAt: Date.now(), output: "", media: [{ mimeType: mime, dataB64: data, final: ev.final === true }], expanded: true });
+          list[list.length - 1] = { ...last, output: chunk ? last.output + chunk : last.output, media: mediaItem ? [...last.media, mediaItem] : last.media, status };
+        } else if (mediaItem || chunk) {
+          list.push({ id: nextId(), kind: "tool", agentId, callId: "model-output", toolName: "model output", args: {}, status, startedAt: Date.now(), output: chunk, media: mediaItem ? [mediaItem] : [], expanded: true });
         }
         setBlocks(s, agentId, list);
+        break;
       }
+
+      const applied = updateTool(s, callId, agentId, (t) => ({
+        ...t,
+        output: chunk ? t.output + chunk : t.output,
+        media: mediaItem ? [...t.media, mediaItem] : t.media,
+      }));
       if (applied && chunk && s.ui.popupCallId == null) {
         const hit = findTool(s, callId, agentId);
         const t = hit ? (s.blocks[hit.agentId]?.[hit.index] as ToolBlock | undefined) : undefined;

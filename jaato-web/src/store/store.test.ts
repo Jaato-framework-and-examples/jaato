@@ -66,6 +66,19 @@ describe("reduce — tool lifecycle", () => {
     expect(speech.media).toHaveLength(2);
     expect(speech.status).toBe("success");
   });
+  it("keeps the transcript that rides the final speech chunk, including a one-frame utterance", () => {
+    const d = useJaato.getState().dispatch;
+    d([ev({ type: "tool.output", agent_id: "main", call_id: "model-output", chunk: "", mime_type: "audio/pcm;rate=24000", data_b64: "AAAA", final: false })]);
+    d([ev({ type: "tool.output", agent_id: "main", call_id: "model-output", chunk: "Hello there.", mime_type: "audio/pcm;rate=24000", data_b64: "BBBB", final: true })]);
+    const first = useJaato.getState().blocks[MAIN_AGENT]![0]!;
+    if (first.kind !== "tool") throw new Error();
+    expect(first.output).toBe("Hello there.");
+    d([ev({ type: "tool.output", agent_id: "main", call_id: "model-output", chunk: "One frame.", mime_type: "audio/pcm;rate=24000", data_b64: "CCCC", final: true })]);
+    const second = useJaato.getState().blocks[MAIN_AGENT]![1]!;
+    if (second.kind !== "tool") throw new Error();
+    expect(second.output).toBe("One frame.");
+    expect(second.status).toBe("success");
+  });
 });
 
 describe("reduce — prompts", () => {
