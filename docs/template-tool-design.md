@@ -18,7 +18,7 @@ The template plugin has been implemented with two key features:
 
 2. **Automatic Template Extraction (Prompt Enrichment)**: The plugin subscribes to the prompt
    enrichment pipeline (priority 40) to detect embedded templates in documentation (MODULE.md,
-   SKILL.md, etc.) and automatically extract them to `.jaato/templates/` for later use.
+   SKILL.md, etc.) and automatically extract them to `.jaato/template_extracts/` for later use.
 
 See `shared/plugins/template/README.md` for usage documentation.
 

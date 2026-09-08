@@ -8,7 +8,8 @@ Key features:
    referenced by the references plugin and indexes them without copying.
    Runs during system instruction enrichment.
 2. Tool result enrichment: Detects embedded templates in tool outputs
-   (e.g., from readFile, cat) and extracts them to .jaato/templates/.
+   (e.g., from readFile, cat) and extracts them to
+   .jaato/template_extracts/ (see "Two directories" below).
 3. Template rendering: Renders templates with variable substitution.
    Supports BOTH Jinja2 and Mustache/Handlebars syntax (auto-detected).
 
@@ -17,11 +18,34 @@ Instructions contain documentation and examples that may use template
 syntax illustratively; extracting those produces false positives. Only
 actual file content (via tool results) triggers embedded extraction.
 
+Two directories, one catalog:
+The plugin reads from a *catalog* directory and writes to a separate
+*extracts* directory, and never the other way round:
+
+- ``<config_root>/templates/`` (or ``<workspace>/.jaato/templates/`` when
+  no config_root is set) is the CATALOG: operator- and orchestrator-
+  provisioned templates plus their ``index.json``.  The plugin only ever
+  reads it.  A confined session cannot write there — ``.jaato/templates/``
+  carries an AppArmor ``audit deny ... wlk,`` alongside the other
+  user-authored config (#893), because a template is authored content
+  that becomes code, and rewriting one before rendering it removes
+  whatever rule the template encoded.
+- ``<workspace>/.jaato/template_extracts/`` is the EXTRACTS directory:
+  everything the plugin itself writes at runtime — embedded templates
+  pulled out of tool output, and the persisted index.  It is a sibling of
+  the catalog rather than a subdirectory of it because AppArmor does not
+  let a more-specific allow override a less-specific deny, so a carve-out
+  under the deny would not work.  It always resolves against the
+  workspace, never config_root, since config_root is granted read-only
+  under confinement.
+
 Template Index:
 All templates (embedded and standalone) are registered in a unified index
 that maps template names to their source paths. The model refers to templates
 by name only; the system resolves actual paths via the index. The index is
-persisted to .jaato/templates/index.json for inspectability.
+loaded from the catalog's index.json (authoritative — catalog entries win)
+and then from the extracts index.json, and is persisted to
+.jaato/template_extracts/index.json for inspectability.
 
 Template Syntax Support:
 - Jinja2: {{ variable }}, {% if %}, {% for %}, {{ var | filter }}
@@ -121,7 +145,7 @@ class TemplateIndexEntry:
 
     Maps a template name to its actual location on disk, along with
     metadata about syntax and required variables. Covers both embedded
-    templates (extracted to .jaato/templates/) and standalone templates
+    templates (extracted to .jaato/template_extracts/) and standalone templates
     (left in their original location, not copied).
 
     Attributes:
@@ -317,11 +341,12 @@ class TemplatePlugin(RunnerForwardingMixin):
     Maintains a unified template index that maps template names to their actual
     locations on disk. Templates come from two sources:
     - Standalone: .tpl/.tmpl files found in referenced directories (not copied)
-    - Embedded: Code blocks with template syntax extracted to .jaato/templates/
+    - Embedded: Code blocks with template syntax extracted to
+      .jaato/template_extracts/
 
     The model refers to templates by name only (e.g., "Entity.java.tpl"). The
     system resolves actual paths via the index. The index is persisted to
-    .jaato/templates/index.json for inspectability.
+    .jaato/template_extracts/index.json for inspectability.
 
     Tools provided:
     - renderTemplateToFile: Render a template with variables and write to file
@@ -363,10 +388,17 @@ class TemplatePlugin(RunnerForwardingMixin):
         # references plugin's ``_config_root`` field.
         self._config_root: Optional[str] = None
         self._templates_dir: Optional[Path] = None
+        # Where the plugin's OWN runtime writes land: embedded-template
+        # extraction and the persisted index.  Always
+        # ``<workspace>/.jaato/template_extracts`` — never the catalog
+        # directory above, which a confined session may not write
+        # (#893), and never config_root, which is granted read-only
+        # under confinement.  ``None`` when no workspace is bound yet.
+        self._extracts_dir: Optional[Path] = None
         # Track extracted templates in this session: hash -> path
         self._extracted_templates: Dict[str, Path] = {}
         # Unified template index: name -> TemplateIndexEntry
-        # Covers both embedded (extracted to .jaato/templates/) and standalone
+        # Covers both embedded (extracted to .jaato/template_extracts/) and standalone
         # templates (left in original location). The model refers to templates
         # by name; the system resolves actual paths via this index.
         self._template_index: Dict[str, TemplateIndexEntry] = {}
@@ -431,6 +463,7 @@ class TemplatePlugin(RunnerForwardingMixin):
         # Templates directory: prefer config_root when set, else fall
         # back to <workspace>/.jaato/templates.
         self._templates_dir = self._compute_templates_dir()
+        self._extracts_dir = self._compute_extracts_dir()
 
         self._initialized = True
         self._load_persisted_index()
@@ -455,6 +488,32 @@ class TemplatePlugin(RunnerForwardingMixin):
             return Path(self._config_root) / "templates"
         if self._base_path is not None:
             return self._base_path / ".jaato" / "templates"
+        return None
+
+    def _compute_extracts_dir(self) -> Optional[Path]:
+        """Resolve where the plugin's own runtime writes go.
+
+        Always ``<workspace>/.jaato/template_extracts`` — deliberately
+        NOT the catalog directory ``_compute_templates_dir`` returns,
+        and deliberately not config_root-aware:
+
+        - The catalog is user-authored config.  Under AppArmor a
+          confined session carries ``audit deny .jaato/templates/**
+          wlk,`` (#893), so extraction and index persistence would fail
+          there; a sibling directory keeps both working while the
+          governed templates stay tamper-proof.  A subdirectory of the
+          catalog would not work — AppArmor does not let a
+          more-specific allow override a less-specific deny.
+        - config_root is granted read-only (``{cr}/** r,``) under
+          confinement, so routing runtime writes there fails for the
+          same reason.  The workspace is the writable tier by
+          construction.
+
+        Returns ``None`` when no workspace is bound yet, which callers
+        treat as "cannot write" rather than raising.
+        """
+        if self._base_path is not None:
+            return self._base_path / ".jaato" / "template_extracts"
         return None
 
     def _resolve_path_routing_path(self) -> Optional[Path]:
@@ -640,6 +699,7 @@ class TemplatePlugin(RunnerForwardingMixin):
         """
         self._base_path = Path(path)
         self._templates_dir = self._compute_templates_dir()
+        self._extracts_dir = self._compute_extracts_dir()
         self._path_routing_rules = None  # invalidate; lazy reload on next render
         self._load_persisted_index()
         self._indexer.build_index(list(self._template_index.values()))
@@ -670,6 +730,9 @@ class TemplatePlugin(RunnerForwardingMixin):
         """
         self._config_root = path
         self._templates_dir = self._compute_templates_dir()
+        # Unaffected by config_root (workspace-tier by construction),
+        # but recomputed here so the two stay resolved together.
+        self._extracts_dir = self._compute_extracts_dir()
         self._path_routing_rules = None  # invalidate; lazy reload on next render
         # Reload the index from the (potentially) new location so
         # listAvailableTemplates / renderTemplateToFile pick up the
@@ -679,17 +742,38 @@ class TemplatePlugin(RunnerForwardingMixin):
         self._trace(f"set_config_root: {path}, templates_dir={self._templates_dir}")
 
     def _load_persisted_index(self) -> None:
-        """Load the template index from .jaato/templates/index.json if it exists.
+        """Load the template index from both on-disk index.json files.
 
         Seeds ``_template_index`` so that ``listAvailableTemplates`` and
         ``renderTemplateToFile`` work immediately, even before the
         references plugin discovers template directories.  Entries loaded
         here are overwritten if the references plugin later discovers the
         same template name (runtime discovery takes precedence).
+
+        Two files, read in precedence order:
+
+        1. ``<catalog>/index.json`` — the provisioned catalog
+           (``<config_root>/templates`` or ``<workspace>/.jaato/templates``).
+        2. ``<workspace>/.jaato/template_extracts/index.json`` — what a
+           previous session of this workspace extracted and persisted.
+
+        First writer wins per template name (``_load_index_file`` skips
+        names already present), so a governed catalog entry is never
+        displaced by a runtime extract that happens to share its name.
         """
-        if not self._templates_dir:
-            return
-        index_path = self._templates_dir / "index.json"
+        if self._templates_dir:
+            self._load_index_file(self._templates_dir / "index.json")
+        if self._extracts_dir:
+            self._load_index_file(self._extracts_dir / "index.json")
+
+    def _load_index_file(self, index_path: Path) -> None:
+        """Merge one on-disk ``index.json`` into ``_template_index``.
+
+        Names already present are skipped, which is what makes the call
+        order in :meth:`_load_persisted_index` a precedence order.
+        Missing or malformed files are traced and ignored — the index is
+        a seed, not a requirement.
+        """
         if not index_path.exists():
             return
         try:
@@ -743,9 +827,9 @@ class TemplatePlugin(RunnerForwardingMixin):
                 )
                 loaded += 1
             if loaded:
-                self._trace(f"_load_persisted_index: loaded {loaded} templates from {index_path}")
+                self._trace(f"_load_index_file: loaded {loaded} templates from {index_path}")
         except (json.JSONDecodeError, OSError, KeyError) as exc:
-            self._trace(f"_load_persisted_index: failed to load {index_path}: {exc}")
+            self._trace(f"_load_index_file: failed to load {index_path}: {exc}")
 
     def shutdown(self) -> None:
         """Shutdown the plugin."""
@@ -1185,10 +1269,10 @@ Templates come from two sources, unified under a single index:
    location — not copied.
 
 2. **Embedded templates**: Code blocks with template syntax found in documentation
-   (MODULE.md, etc.). These are extracted to `.jaato/templates/`.
+   (MODULE.md, etc.). These are extracted to `.jaato/template_extracts/`.
 
 Both types are registered in the index and can be referenced by name only.
-The index is persisted to `.jaato/templates/index.json` for inspection.
+The index is persisted to `.jaato/template_extracts/index.json` for inspection.
 
 ### Template Syntax (both supported, auto-detected)
 
@@ -1531,7 +1615,7 @@ Template rendering writes files to the workspace."""
         """Detect embedded templates in tool results and extract them.
 
         Scans tool output for fenced code blocks containing Jinja2 template
-        syntax. When found, extracts them to .jaato/templates/ and annotates
+        syntax. When found, extracts them to .jaato/template_extracts/ and annotates
         the result.
 
         Extraction is **suppressed** when the file being read belongs to a
@@ -1947,18 +2031,28 @@ Template rendering writes files to the workspace."""
         return directories
 
     def _persist_index(self) -> None:
-        """Write the template index to .jaato/templates/index.json.
+        """Write the template index to .jaato/template_extracts/index.json.
 
-        Persists the in-memory index for inspectability and debugging.
-        The runtime uses the in-memory _template_index; this file is
-        informational only.
+        Persists the in-memory index for inspectability and debugging,
+        and as the seed a later session of the same cascade picks up via
+        :meth:`_load_persisted_index`.  The runtime uses the in-memory
+        _template_index, so a failed write degrades to a missing debug
+        artefact rather than a broken session.
+
+        Writes to ``_extracts_dir``, not to the catalog: the catalog's
+        own ``index.json`` is provisioned by whoever provisioned the
+        templates, and a confined session may not write there (#893).
+        On load the catalog index takes precedence over this one.
         """
         if not self._template_index:
             return
+        if self._extracts_dir is None:
+            self._trace("_persist_index: no extracts dir resolved, skipping")
+            return
 
         try:
-            self._templates_dir.mkdir(parents=True, exist_ok=True)
-            index_path = self._templates_dir / "index.json"
+            self._extracts_dir.mkdir(parents=True, exist_ok=True)
+            index_path = self._extracts_dir / "index.json"
 
             index_data = {
                 "generated_at": datetime.now().isoformat(),
@@ -2114,7 +2208,13 @@ Template rendering writes files to the workspace."""
         return extensions.get(lang_lower, ".tmpl")
 
     def _extract_template(self, name: str, content: str, lang: str) -> Tuple[Optional[Path], bool]:
-        """Extract template content to .jaato/templates/ directory.
+        """Extract template content to the .jaato/template_extracts/ directory.
+
+        Writes to ``_extracts_dir``, never to the catalog directory
+        ``_templates_dir``: the catalog holds operator-provisioned,
+        governed templates that a confined session must not be able to
+        rewrite before rendering them (#893).  See
+        :meth:`_compute_extracts_dir`.
 
         Args:
             name: Template filename.
@@ -2124,13 +2224,17 @@ Template rendering writes files to the workspace."""
         Returns:
             Tuple of (path, is_new) where:
             - path: Path to extracted template, or None on failure
+              (including "no workspace bound, nowhere to write")
             - is_new: True if newly created, False if reusing existing file
         """
+        if self._extracts_dir is None:
+            self._trace(f"cannot extract template {name}: no extracts dir resolved")
+            return None, False
         try:
-            # Ensure templates directory exists
-            self._templates_dir.mkdir(parents=True, exist_ok=True)
+            # Ensure the extracts directory exists
+            self._extracts_dir.mkdir(parents=True, exist_ok=True)
 
-            template_path = self._templates_dir / name
+            template_path = self._extracts_dir / name
 
             # Handle name collisions by appending counter
             counter = 1
@@ -2140,7 +2244,7 @@ Template rendering writes files to the workspace."""
                 # Check if existing file has same content
                 if template_path.read_text(encoding="utf-8") == content:
                     return template_path, False  # Reuse existing (not new)
-                template_path = self._templates_dir / f"{base_name}-{counter}{suffix}"
+                template_path = self._extracts_dir / f"{base_name}-{counter}{suffix}"
                 counter += 1
 
             # Write template
@@ -2941,8 +3045,10 @@ Template rendering writes files to the workspace."""
         2. Absolute path (if absolute)
         3. Relative to current working directory
         4. Relative to base_path (configured path)
-        5. Relative to .jaato/templates/
-        6. Resolved path (handles .. components)
+        5. Relative to the template catalog (.jaato/templates/ or
+           <config_root>/templates/)
+        6. Relative to .jaato/template_extracts/
+        7. Resolved path (handles .. components)
 
         The index lookup (step 1) enables the model to refer to templates by
         name only (e.g., "Entity.java.tpl") regardless of where the file
@@ -2982,21 +3088,20 @@ Template rendering writes files to the workspace."""
                 return path, paths_tried
             return None, paths_tried
 
-        # 4. Try relative to base_path (workspace)
-        if self._base_path is not None:
-            base_path = self._base_path / path
-            paths_tried.append(str(base_path))
-            if base_path.exists():
-                return base_path, paths_tried
+        # 4-6. Try the path relative to each known root, in order: the
+        # workspace, the template catalog, then .jaato/template_extracts/
+        # (where this session's own embedded extractions landed — a
+        # separate directory from the catalog since #893, so without it a
+        # bare filename the index doesn't carry would stop resolving).
+        for root in (self._base_path, self._templates_dir, self._extracts_dir):
+            if root is None:
+                continue
+            candidate = root / path
+            paths_tried.append(str(candidate))
+            if candidate.exists():
+                return candidate, paths_tried
 
-        # 5. Try relative to .jaato/templates/
-        if self._templates_dir is not None:
-            templates_path = self._templates_dir / path
-            paths_tried.append(str(templates_path))
-            if templates_path.exists():
-                return templates_path, paths_tried
-
-        # 6. Try resolving .. components from base_path
+        # 7. Try resolving .. components from base_path
         if self._base_path is not None:
             try:
                 resolved = (self._base_path / path).resolve()
@@ -3042,7 +3147,7 @@ Template rendering writes files to the workspace."""
         """List all templates available in this session.
 
         Returns templates from the unified index, covering both embedded
-        templates (extracted from code blocks to .jaato/templates/) and
+        templates (extracted from code blocks to .jaato/template_extracts/) and
         standalone templates (discovered in referenced directories, left
         in their original location).
 

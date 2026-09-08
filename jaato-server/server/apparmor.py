@@ -277,7 +277,22 @@ class AppArmorManager:
     # sub-profile does NOT inherit this rule; only the runner main
     # thread can trigger the transition (the LLM-driven scope can't
     # cross profile boundaries).
-    _TEMPLATE_VERSION = 28
+    # v29 (2026-09-08): ``audit deny .jaato/templates/** wlk,`` added to
+    # the base, ``tool_hat``, ``//child`` and isolated-subagent bodies.
+    # ``.jaato/templates/`` was the one user-authored config subpath the
+    # v13 list missed, so a confined agent could rewrite a template and
+    # then render it — removing a governed rule from generated code
+    # while the output still looked normal (#893).  The template
+    # plugin's in-confinement writers (embedded-template extraction,
+    # index persistence) moved to the sibling ``.jaato/template_extracts/``
+    # in the same change, so the runtime authoring path survives the
+    # deny instead of silently failing.  Read access is untouched:
+    # ``renderTemplateToFile`` runs under ``tool_hat`` and must still
+    # read the catalog, so templates get no read-deny.  The routing
+    # table ``.jaato/template_routing.yaml`` — which decides where a
+    # rendered template lands — is denied alongside it, being read-only
+    # to the plugin and of the same class.
+    _TEMPLATE_VERSION = 29
 
     # AppArmor profile template.  Placeholders are filled per-session by
     # ``_render_profile()``.
@@ -301,9 +316,9 @@ profile jaato-ws-{session_id} flags=({profile_flags}) {{
   # Server 0.6.55+ (template v13): broad ``.jaato/** w`` deny replaced
   # with narrow per-subpath denies on user-authored config ONLY
   # (agents, profiles, prompts, scripts, schemas, services definitions,
-  # reactors.json, instructions, references).  Pre-0.6.55 the broad
-  # deny was empirically shown to win over more-specific allows on
-  # AppArmor 4.0 — the carve-out approach didn't work as designed.
+  # reactors.json, instructions, references, templates).  Pre-0.6.55
+  # the broad deny was empirically shown to win over more-specific
+  # allows on AppArmor 4.0 — the carve-out approach didn't work as designed.
   # Narrow per-subpath denies avoid the deny-vs-allow specificity
   # conflict entirely: tenant-runtime subpaths are not under any deny,
   # only the explicitly-named user-authored config subpaths are.
@@ -333,6 +348,27 @@ profile jaato-ws-{session_id} flags=({profile_flags}) {{
   audit deny {workspace_path}/.jaato/spawn_schemas/**      wlk,
   audit deny {workspace_path}/.jaato/instructions/**       wlk,
   audit deny {workspace_path}/.jaato/references/**         wlk,
+  # Template catalog (#893) — a template is not inert data: it is
+  # authored content that BECOMES code at render time, and in a
+  # KB-driven pipeline it is where a governed rule is *prevented*
+  # rather than merely detected.  A confined agent that could rewrite
+  # ``Entity.tpl`` before calling ``renderTemplateToFile`` would have
+  # removed the constraint the template encoded, and the generated
+  # file would look entirely normal.
+  #
+  # The template plugin's own runtime writes (embedded-template
+  # extraction from tool output, index persistence) target
+  # ``.jaato/template_extracts/``, a SIBLING directory deliberately
+  # left out of every deny — not a carve-out under this one, because
+  # a more-specific allow does not override a less-specific deny
+  # (see v13 above).
+  audit deny {workspace_path}/.jaato/templates/**          wlk,
+  # The routing table that decides WHERE a rendered template lands
+  # (``_apply_path_routing``).  Same class as the catalog itself: the
+  # plugin only reads it, and an agent that could rewrite it would
+  # redirect generated files out from under the rule the routing
+  # encodes.
+  audit deny {workspace_path}/.jaato/template_routing.yaml wlk,
   # Workspace-tier AppArmor fragments — read by _render_profile on
   # the NEXT session spawn.  A confined runner that could write a
   # fragment here would be authoring its own future-session rules
@@ -1404,6 +1440,16 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
   audit deny {workspace_path}/.jaato/spawn_schemas/**      wlk,
   audit deny {workspace_path}/.jaato/instructions/**       wlk,
   audit deny {workspace_path}/.jaato/references/**         wlk,
+  # Template catalog — governed content that becomes code at render
+  # time (mirrors base, #893).  Runtime extraction writes to the
+  # sibling ``.jaato/template_extracts/``, which is under no deny.
+  audit deny {workspace_path}/.jaato/templates/**          wlk,
+  # The routing table that decides WHERE a rendered template lands
+  # (``_apply_path_routing``).  Same class as the catalog itself: the
+  # plugin only reads it, and an agent that could rewrite it would
+  # redirect generated files out from under the rule the routing
+  # encodes.
+  audit deny {workspace_path}/.jaato/template_routing.yaml wlk,
   # Workspace-tier AppArmor fragments — privilege-escalation guard
   # (mirrors base; isolated sub-runner could otherwise plant rules
   # for the next session's profile).
@@ -2181,6 +2227,12 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
     audit deny {workspace_path}/.jaato/spawn_schemas/**      wlk,
     audit deny {workspace_path}/.jaato/instructions/**       wlk,
     audit deny {workspace_path}/.jaato/references/**         wlk,
+    # Template catalog — governed content that becomes code at render
+    # time (mirrors base, #893).  Runtime extraction writes to the
+    # sibling ``.jaato/template_extracts/``, which is under no deny.
+    audit deny {workspace_path}/.jaato/templates/**          wlk,
+    # Routing table for rendered output (mirrors base, #893).
+    audit deny {workspace_path}/.jaato/template_routing.yaml wlk,
     # Workspace-tier AppArmor fragments — privilege-escalation guard
     # (mirrors base; a tool execution under tool_hat could otherwise
     # plant rules for the next session's profile).
@@ -2331,6 +2383,12 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
     audit deny {workspace_path}/.jaato/spawn_schemas/**      wlk,
     audit deny {workspace_path}/.jaato/instructions/**       wlk,
     audit deny {workspace_path}/.jaato/references/**         wlk,
+    # Template catalog — governed content that becomes code at render
+    # time (mirrors base, #893).  Runtime extraction writes to the
+    # sibling ``.jaato/template_extracts/``, which is under no deny.
+    audit deny {workspace_path}/.jaato/templates/**          wlk,
+    # Routing table for rendered output (mirrors base, #893).
+    audit deny {workspace_path}/.jaato/template_routing.yaml wlk,
     # Workspace-tier AppArmor fragments — privilege-escalation guard
     # (mirrors base; a //child subprocess could otherwise plant
     # rules for the next session's profile).

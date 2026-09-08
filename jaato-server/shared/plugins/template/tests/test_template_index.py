@@ -380,8 +380,11 @@ class TestIndexPersistence:
 
         plugin._persist_index()
 
-        index_path = plugin._templates_dir / "index.json"
+        # #893: the runtime persist targets the extracts dir, never the
+        # catalog — a confined session may not write .jaato/templates/.
+        index_path = plugin._extracts_dir / "index.json"
         assert index_path.exists()
+        assert not (plugin._templates_dir / "index.json").exists()
 
         data = json.loads(index_path.read_text())
         assert "generated_at" in data
@@ -397,8 +400,8 @@ class TestIndexPersistence:
 
     def test_persist_empty_index_is_noop(self, plugin):
         plugin._persist_index()
-        index_path = plugin._templates_dir / "index.json"
-        assert not index_path.exists()
+        assert not (plugin._extracts_dir / "index.json").exists()
+        assert not (plugin._templates_dir / "index.json").exists()
 
 
 # ==================== Cross-plugin Integration ====================
@@ -600,7 +603,8 @@ class TestEnrichmentWithStandalone:
 
         plugin.enrich_system_instructions("# Instructions")
 
-        index_path = plugin._templates_dir / "index.json"
+        # #893: persisted to the extracts dir, not the catalog.
+        index_path = plugin._extracts_dir / "index.json"
         assert index_path.exists()
 
         data = json.loads(index_path.read_text())
@@ -1175,6 +1179,132 @@ class TestConfigRootResolution:
         # After set_config_root: _templates_dir points at cr/templates,
         # and _load_persisted_index ran (no exception).
         assert p._templates_dir == templates_at_cr
+
+
+# ==================== Catalog vs Extracts Split (#893) ====================
+
+class TestCatalogExtractsSplit:
+    """The plugin reads the catalog and writes the extracts directory.
+
+    Issue #893 added ``audit deny <workspace>/.jaato/templates/** wlk,``
+    to every confined profile body, because a template is authored
+    content that becomes code at render time — an agent that can rewrite
+    one before rendering it has removed whatever rule it encoded.  The
+    plugin's own in-confinement writers (embedded-template extraction,
+    index persistence) therefore target the SIBLING
+    ``<workspace>/.jaato/template_extracts/``.  A subdirectory of the
+    catalog would not work: AppArmor does not let a more-specific allow
+    override a less-specific deny.
+    """
+
+    def test_extracts_dir_is_workspace_sibling_of_catalog(self, tmp_path):
+        ws = tmp_path / "sandbox"
+        ws.mkdir()
+        p = TemplatePlugin()
+        p.initialize({"base_path": str(ws)})
+        assert p._extracts_dir == ws / ".jaato" / "template_extracts"
+        assert p._extracts_dir != p._templates_dir
+
+    def test_extracts_dir_ignores_config_root(self, tmp_path):
+        """config_root is granted read-only under confinement, so runtime
+        writes stay on the workspace tier even when the catalog moves."""
+        ws = tmp_path / "sandbox"
+        cr = tmp_path / "repo" / ".jaato"
+        ws.mkdir()
+        cr.mkdir(parents=True)
+        p = TemplatePlugin()
+        p.initialize({"base_path": str(ws)})
+        p.set_config_root(str(cr))
+        assert p._templates_dir == cr / "templates"
+        assert p._extracts_dir == ws / ".jaato" / "template_extracts"
+
+    def test_compute_extracts_dir_returns_none_without_workspace(self):
+        p = TemplatePlugin()
+        assert p._compute_extracts_dir() is None
+
+    def test_extract_template_writes_to_extracts_not_catalog(self, tmp_path):
+        ws = tmp_path / "sandbox"
+        ws.mkdir()
+        p = TemplatePlugin()
+        p.initialize({"base_path": str(ws)})
+
+        path, is_new = p._extract_template(
+            "Entity.java.tpl", "class {{ name }} {}", "java",
+        )
+
+        assert is_new is True
+        assert path == p._extracts_dir / "Entity.java.tpl"
+        assert path.read_text() == "class {{ name }} {}"
+        assert not (p._templates_dir / "Entity.java.tpl").exists()
+
+    def test_extract_template_without_workspace_returns_none(self):
+        """No workspace bound → nowhere to write, and no AttributeError."""
+        p = TemplatePlugin()
+        p.initialize({})
+        assert p._extract_template("X.tpl", "{{ a }}", "java") == (None, False)
+
+    def test_resolve_finds_template_in_extracts_dir(self, tmp_path):
+        """A bare filename the index doesn't carry still resolves from
+        the extracts directory."""
+        ws = tmp_path / "sandbox"
+        ws.mkdir()
+        p = TemplatePlugin()
+        p.initialize({"base_path": str(ws)})
+        p._extracts_dir.mkdir(parents=True, exist_ok=True)
+        (p._extracts_dir / "Loose.java.tpl").write_text("class {{ n }} {}")
+
+        resolved, _tried = p._resolve_template_path("Loose.java.tpl")
+        assert resolved == p._extracts_dir / "Loose.java.tpl"
+
+    def test_catalog_index_wins_over_extracts_index(self, tmp_path):
+        """Both index files load; the governed catalog entry is the one
+        that survives a name collision."""
+        ws = tmp_path / "sandbox"
+        ws.mkdir()
+        catalog = ws / ".jaato" / "templates"
+        extracts = ws / ".jaato" / "template_extracts"
+        catalog.mkdir(parents=True)
+        extracts.mkdir(parents=True)
+        (catalog / "index.json").write_text(json.dumps({
+            "templates": {
+                "Entity.java.tpl": {
+                    "name": "Entity.java.tpl",
+                    "source_path": str(catalog / "Entity.java.tpl"),
+                    "syntax": "mustache",
+                    "variables": ["name"],
+                    "origin": "standalone",
+                },
+            },
+        }))
+        (extracts / "index.json").write_text(json.dumps({
+            "templates": {
+                "Entity.java.tpl": {
+                    "name": "Entity.java.tpl",
+                    "source_path": str(extracts / "Entity.java.tpl"),
+                    "syntax": "mustache",
+                    "variables": [],
+                    "origin": "embedded",
+                },
+                "Extra.java.tpl": {
+                    "name": "Extra.java.tpl",
+                    "source_path": str(extracts / "Extra.java.tpl"),
+                    "syntax": "mustache",
+                    "variables": [],
+                    "origin": "embedded",
+                },
+            },
+        }))
+
+        p = TemplatePlugin()
+        p.initialize({"base_path": str(ws)})
+
+        entry = p._template_index["Entity.java.tpl"]
+        assert entry.origin == "standalone", (
+            "a runtime extract must not displace the governed catalog entry"
+        )
+        assert entry.source_path == str(catalog / "Entity.java.tpl")
+        # The extracts-only entry still loads.
+        assert "Extra.java.tpl" in p._template_index
 
 
 # ==================== Mustache Dotted-Path Preprocessing ====================
