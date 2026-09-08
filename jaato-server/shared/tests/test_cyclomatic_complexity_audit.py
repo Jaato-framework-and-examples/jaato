@@ -234,7 +234,6 @@ BASELINE: Dict[str, int] = {
     "jaato-server/shared/plugins/clarification/plugin.py::ClarificationPlugin._execute_clarification": 32,
     "jaato-server/shared/plugins/cli/plugin.py::CLIToolPlugin._execute": 23,
     "jaato-server/shared/plugins/cli/plugin.py::CLIToolPlugin._execute_streaming": 24,
-    "jaato-server/shared/plugins/cli/plugin.py::CLIToolPlugin.initialize": 18,
     "jaato-server/shared/plugins/code_block_formatter/plugin.py::CodeBlockFormatterPlugin._render_code_block": 23,
     "jaato-server/shared/plugins/diff_formatter/renderers/side_by_side.py::SideBySideRenderer._render_pair": 17,
     "jaato-server/shared/plugins/enrichment_formatter.py::_word_wrap": 16,

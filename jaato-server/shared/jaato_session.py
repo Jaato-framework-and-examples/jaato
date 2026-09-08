@@ -2994,9 +2994,7 @@ class JaatoSession:
                    or {})
         profile_key = self._active_provider_name or getattr(
             self._provider, 'name', None)
-        config, _promoted_api_key = resolve_provider_extra(
-            base_extra, pending.get('plugin_configs'), profile_key)
-        return config
+        return dict(base_extra)
 
     def _wire_cache_plugin(self) -> None:
         """Attach the cache plugin matching the CURRENTLY ACTIVE provider.

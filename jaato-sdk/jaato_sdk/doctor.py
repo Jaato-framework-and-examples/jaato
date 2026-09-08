@@ -639,6 +639,52 @@ def check_workspace(workspace: str, config_root: Optional[str]) -> List[Check]:
     ]
 
 
+def check_secret_scrub(workspace: str, config_root: Optional[str]) -> List[Check]:
+    """Preflight the workspace's profiles for an unscrubbed subprocess surface.
+
+    Secret env scrubbing is ON by default (#863), so the only way a
+    profile's ``cli`` / ``interactive_shell`` / ``mcp`` plugin hands the
+    daemon's provider keys to model-driven commands is a deliberate
+    ``scrub_secret_env: none`` (profile-level or per-surface).  That is a
+    legitimate developer-desktop choice, but it should be a VISIBLE one
+    before a session starts — so this check runs the same
+    ``secret_scrub_disabled`` / ``invalid_scrub_secret_env`` rules as
+    ``jaato-scaffold validate`` over the resolved workspace profiles
+    (workspace tier and the inherited ``~/.jaato`` tier alike) and WARNs
+    naming each profile.  Soft-imports the server-side validator; a
+    client-only install WARNs that it could not check rather than
+    reporting PASS on nothing.
+    """
+    try:
+        from shared.scaffold.validate import validate_workspace  # type: ignore
+    except Exception:
+        return [Check("secret scrub", WARN,
+                      "jaato-server's validator is not importable here — cannot "
+                      "check the workspace profiles' scrub_secret_env (install "
+                      "jaato-server / run from its env).")]
+    try:
+        diags = validate_workspace(workspace, config_root=config_root)
+    except Exception as exc:  # noqa: BLE001 — a preflight never crashes
+        return [Check("secret scrub", WARN,
+                      f"could not resolve the workspace profiles: {exc}")]
+    disabled = sorted({
+        f"{d.profile} ({d.where})" for d in diags
+        if d.code in ("secret_scrub_disabled", "invalid_scrub_secret_env")
+    })
+    if disabled:
+        return [Check("secret scrub", WARN,
+                      "model-driven subprocesses inherit the daemon's FULL "
+                      "environment (provider keys, tokens) in: "
+                      + ", ".join(disabled)
+                      + " — set `scrub_secret_env: default`, or exempt only "
+                      "the names a tool needs: [default, '!GH_TOKEN'].  "
+                      "Details: `jaato-scaffold validate`.")]
+    return [Check("secret scrub", PASS,
+                  "every profile's cli / interactive_shell / mcp subprocesses "
+                  "run with secret env vars scrubbed (the default set, or the "
+                  "profile's own patterns).")]
+
+
 # --------------------------------------------------------------------------
 # WebSocket transport (daemon-side preflight)
 #
@@ -887,6 +933,7 @@ def run_checks(
     checks += check_secret(info, secret)
     checks += check_env_file(env_file, workspace)
     checks += check_workspace(workspace, config_root)
+    checks += check_secret_scrub(workspace, config_root)
     checks += check_driver(workspace)
     return checks
 

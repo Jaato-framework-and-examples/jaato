@@ -588,7 +588,9 @@ def build_session_envelope(
         # Symmetric to the ``envelope.session_env`` resolution channel
         # (PR #91 → #92).  Same trust posture: resolved plaintext on
         # the daemon↔runner socketpair, never logged or forwarded.
-        from shared.plugins.subagent.config import expand_plugin_configs
+        from shared.plugins.subagent.config import (
+            expand_plugin_configs, inject_scrub_secret_env,
+        )
         raw_plugin_configs = {
             k: dict(v)
             for k, v in (getattr(profile, "plugin_configs", {}) or {}).items()
@@ -626,6 +628,11 @@ def build_session_envelope(
             )
             provider_cfg["quirks"] = dict(profile_quirks)
             plugin_configs_dict[effective_provider_for_quirks] = provider_cfg
+        # Profile-level ``scrub_secret_env`` (#863) -> the cli /
+        # interactive_shell / mcp sections, beneath their explicit knobs.
+        # Same channel as cache + quirks above, for the same reason: the
+        # plugin_configs dict is what already reaches the runner.
+        inject_scrub_secret_env(profile, plugin_configs_dict)
         profile_tool_scopes = getattr(profile, "tool_scopes", {}) or {}
         for name in names:
             spec = {"name": name, "preload": name in preloaded}

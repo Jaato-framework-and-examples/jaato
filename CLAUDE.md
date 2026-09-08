@@ -256,6 +256,13 @@ plugin_configs: {}
 #     suppress_base_instructions: {constants: true}       # keep disk + security
 #     suppress_base_instructions: {disk: true, constants: true, security: true}
 #   Inheritance merges by UNION (a piece any layer drops stays dropped).
+# scrub_secret_env: secret env vars stripped from every model-driven
+#   subprocess (cli / interactive_shell / mcp).  ON by default (#863) —
+#   absent = the framework set; `none` opts out (announced at WARNING);
+#   `[default, '!GH_TOKEN']` keeps one tool's token while the provider
+#   key stays out of the shell.  plugin_configs.<surface>.scrub_secret_env
+#   overrides it for one surface.  See "Secret Env Scrubbing" below.
+scrub_secret_env: default
 gc:
   type: budget
   threshold_percent: 80.0
@@ -866,6 +873,82 @@ registers (`get_plugin_source(name)` / `get_plugin_sources()`), so a
 shadow is visible without reading logs.  `jaato-scaffold plugins` marks
 any plugin not supplied by the built-in package with
 `<- <distribution> (<module>)`.
+
+### Secret Env Scrubbing (#863)
+
+The runner legitimately holds secrets in its own `os.environ` — the
+provider key, the tokens `web_fetch` expands into headers.  A shell
+command, PTY session or MCP server the *model* drives inherits that
+environment, so `env` or `echo $GITHUB_TOKEN` hands every credential to
+model-controlled code.  `shared/secret_scrub.py` removes a set of secret
+names from the environment *given to the subprocess* (never from the
+runner's own), at three surfaces: the `cli` subprocess boundary, every
+`interactive_shell` spawn, and MCP stdio spawn.
+
+**Scrubbing is on by default.**  Until #863 it was opt-in: the module
+defined `DEFAULT_SECRET_ENV_PATTERNS` and applied it nowhere, so a profile
+with `cli` or `mcp` and no scrub configuration passed the daemon's full
+environment, provider keys included, to every command the model ran.  The
+reason was real — `gh`, `git push`, cloud CLIs need their tokens — but the
+failure was silent and the default was the unsafe one, and #712 notes that
+AppArmor gives this scrub no kernel-level backstop.  Now the default set
+applies when nothing is declared, and opting *out* is the explicit,
+WARNING-announced act, like `--ws-unsafe-no-auth`.
+
+One grammar, accepted at the profile top level (`scrub_secret_env:`, which
+covers all three surfaces) and per surface
+(`plugin_configs.<cli|interactive_shell|mcp>.scrub_secret_env`, which wins
+for that surface):
+
+| Value | Meaning |
+|-------|---------|
+| absent / `default` | the framework set: `*_API_KEY`, `*_APIKEY`, `*_TOKEN`, `*_SECRET`, `*_SECRET_KEY`, `*_PASSWORD`, `*_PASSWD`, `*_ACCESS_KEY`, `*_ACCESS_KEY_ID`, `*_SECRET_ACCESS_KEY`, `*_PRIVATE_KEY`, `*_CREDENTIALS`, `ANTHROPIC_AUTH_TOKEN`, `GH_TOKEN`, `AWS_SESSION_TOKEN` |
+| `none` (also `[]`) | scrub nothing — the developer-desktop opt-out, logged at WARNING by each surface that applies it |
+| `"*_TOKEN"` | one glob (a lone string is one pattern, never split into characters) |
+| `[glob, ...]` | an explicit list; the entry `default` expands to the framework set in place |
+| `"!NAME"` in a list | an **exemption**: a variable matching it survives whatever else matches — `[default, '!GH_TOKEN']` keeps `gh` working while the provider key stays out of the shell |
+
+```yaml
+# a developer-desktop profile: gh and the AWS CLI keep their credentials,
+# everything else in the framework set is still scrubbed
+plugins: [cli, interactive_shell, mcp]
+scrub_secret_env: [default, "!GH_TOKEN", "!AWS_*"]
+plugin_configs:
+  mcp:
+    scrub_secret_env: default     # the MCP servers get no exemption
+```
+
+Rules the implementation holds to:
+
+- **A malformed value fails closed.**  The plugin applies the default set,
+  logs an ERROR, and `jaato-scaffold validate` reports
+  `invalid_scrub_secret_env`.  The only outcome worse than a broken
+  workflow is a silently leaked credential.
+- **An explicit grant is not scrubbed.**  A secret in an MCP server's own
+  `env` (in `.mcp.json`) or in the `env=` an interactive-shell caller
+  passes reaches that process; only the *inherited* `os.environ` is
+  filtered.  A profile's `env:` map is **not** a grant — it is where the
+  provider key usually lives.
+- **The primitives stay policy-free.**  `run_command(scrub_env=None)`,
+  `ShellSession(scrub_env=None)` and `ServerConfig.scrub_secret_env=()`
+  still mean "scrub nothing"; the default lives in the three plugins
+  (`resolve_scrub_patterns`), so it applies however a session was built,
+  profile or not.  The profile key is folded into the surfaces the profile
+  enables by `inject_scrub_secret_env` at every profile-to-session site
+  (runner envelope, in-process root session, both subagent spawn paths),
+  beneath an explicit per-surface knob.
+- **Inheritance is scalar-override**: a child's value replaces the
+  parents' outright, so `none` in one leaf profile does not leak into its
+  siblings.  The value is persisted raw in the session snapshot (#787).
+- **The leaky posture is announced three times**: `jaato-scaffold
+  validate` warns `secret_scrub_disabled` per enabled surface (and
+  `scrub_secret_env_inert` when the key names no enabled surface),
+  `jaato-doctor` preflight WARNs naming each such profile in the
+  workspace, and the plugin logs at WARNING when it applies the opt-out.
+
+Not covered here: the eventual TLS-terminating broker (#505) that keeps a
+credential out of the runner environment entirely, and the `/proc`
+hardening in #712 that would give this app-layer scrub a kernel backstop.
 
 ### Interactive Shell Sessions (`shared/plugins/interactive_shell/`)
 
