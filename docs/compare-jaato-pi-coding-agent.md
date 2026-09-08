@@ -110,7 +110,7 @@ you must complete · **●○○** hook only, you build the feature · **○○�
 | Service integration (REST / OpenAPI, outbound) | ○○○ no HTTP tool; `bash` + curl, or an extension | ●●● `service_connector`: OpenAPI/Swagger discovery, YAML pre-definition, Bruno import, schema-validated calls, dry-run preview, four auth types with secret URIs, header redaction, mock servers for e2e; `web_fetch`; inbound `webhook` | ●●● unchanged |
 | Multi-user server / identity | ○○○ experimental Unix-socket server, unauthenticated | ●●○ daemon, WS bearer token, `set_client_user` hook | ●●● OIDC, WS auth proxy, mTLS |
 | Delegating a permission decision to an external system (your RBAC / approval service) | ●○○ `tool_call` hook can call out synchronously | ●●● evaluators call a policy API; webhook and file channels suspend the session until the external decision arrives | ●●● + HandoffGate parks the tool, session may be unloaded and resumed on approval (demo: `reliability-exercise`) |
-| Identity model (which user may use which role, who approved) | ○○○ | ●○○ `set_client_user` hook; no approver identity on events | ●○○ OIDC login; `allowed_emails` / `allowed_groups` at the dashboard edge; no group-to-profile binding |
+| Identity model (which user may use which role, who approved) | ○○○ | ●○○ `set_client_user` hook feeds telemetry `user.id` only; no approver identity on events or session records | ●○○ OIDC login; `allowed_emails` / `allowed_groups` at the dashboard edge; no group-to-profile binding |
 | Multi-agent | ●○○ example extension (subprocess per subagent) | ●●● subagents, profiles, cascades, payload schemas, runner pool | ●●● + handoff, remote spawn (currently broken per backlog) |
 | Observability of cascades and orchestration | ●○○ per-task streaming and usage in the subagent example's TUI panel; no cross-process id, no spans | ●●● one `cascade_driver_id` across every stage, `cascade_events()` observer subscription, generated observer client, agent-graph attributes on OTel spans, gate and settle events, cascade budgets, sweep reports with cost | ●●● + live cascade timeline (`compile --monitor`), dashboard with Phoenix deep-links, per-server trace identity, drift monitor (in flux) |
 | Extensibility model | ●●● 33 lifecycle events, TS extensions via jiti | ●●● 5 entry-point groups, daemon hooks, enrichment pipeline, traits | ●●● scaffold verbs |
@@ -252,9 +252,11 @@ a framework change:
 So "man in the loop" is a shipped mechanism in free and a demonstrated park
 and resume in premium, and whatever RBAC the company already runs sits
 behind the webhook. What the framework still does not do is record *who*
-answered: `PermissionResolvedEvent.method` says "user", `set_client_user`
-stores an id that nothing consumes, and premium's `allowed_emails` /
-`allowed_groups` are checked at the dashboard edge only. "Identity model" in
+answered: `PermissionResolvedEvent.method` says "user" but carries no user id,
+the authenticated id from `set_client_user` reaches only the telemetry
+`user.id` attribute and not the event stream or the session record, and
+premium's `allowed_emails` / `allowed_groups` are checked at the dashboard
+edge only. "Identity model" in
 the rest of this document means that gap, not the delegation seam.
 
 **jaato premium.** Daruma (`jaato_premium/scaffold/daruma/`, exposed as
