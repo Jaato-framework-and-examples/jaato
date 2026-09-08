@@ -265,6 +265,9 @@ def validate_profile(
         _check_quirks(prof_quirks, pinfo, provider_name, add,
                       where_prefix="quirks")
 
+    # --- secret env scrub (#863) -----------------------------------------
+    _check_secret_scrub(profile, add)
+
     # --- gc strategy -----------------------------------------------------
     gc = getattr(profile, "gc", None)
     gc_type = getattr(gc, "type", None) if gc is not None else None
@@ -586,6 +589,61 @@ def _check_model_tiers(mt_cfg, add, provider_name=None):
                                entry.get("provider") or provider_name)
 
 
+def _effective_scrub_value(profile, surface):
+    """The ``scrub_secret_env`` value surface ``surface`` will resolve.
+
+    Mirrors the runtime precedence exactly — ``plugin_configs.<surface>``
+    wins when it names the key at all, else the profile-level key, else
+    ``None`` (which the plugin reads as the framework default).  Returns
+    ``(value, where)`` so a finding can point at the field that decided.
+    """
+    cfg = (getattr(profile, "plugin_configs", None) or {}).get(surface)
+    if isinstance(cfg, dict) and "scrub_secret_env" in cfg:
+        return cfg["scrub_secret_env"], f"plugin_configs.{surface}.scrub_secret_env"
+    return getattr(profile, "scrub_secret_env", None), "scrub_secret_env"
+
+
+def _check_secret_scrub(profile, add):
+    """Flag a subprocess surface that runs with the runner's full environment.
+
+    The scrub is ON by default (#863), so a profile that says nothing is
+    fine.  What this surfaces is the DELIBERATE leaky posture — a profile
+    (or one of its ``plugin_configs`` sections) that resolves to no scrub
+    pattern for a plugin that spawns model-driven subprocesses — and the
+    two defects around it: a value the grammar rejects (which the plugin
+    fails CLOSED on, so the author's intent is silently replaced by the
+    default set) and a profile-level key with no surface to apply to.
+    """
+    from shared.secret_scrub import (
+        SCRUB_HINT, SCRUB_SURFACES, is_scrub_disabled, normalize_scrub_patterns,
+    )
+    enabled = [s for s in SCRUB_SURFACES
+               if s in (getattr(profile, "plugins", None) or [])]
+    profile_value = getattr(profile, "scrub_secret_env", None)
+    if profile_value is not None and not enabled:
+        add("info", "scrub_secret_env_inert",
+            "scrub_secret_env is set but the profile enables none of the "
+            f"plugins it applies to ({', '.join(SCRUB_SURFACES)}) — it "
+            "changes nothing here", where="scrub_secret_env")
+    for surface in enabled:
+        value, where = _effective_scrub_value(profile, surface)
+        try:
+            patterns = normalize_scrub_patterns(value)
+        except ValueError as exc:
+            add("error", "invalid_scrub_secret_env",
+                f"{exc} — the {surface} plugin fails CLOSED on this (the "
+                "framework default set is applied and the value ignored)",
+                where=where)
+            continue
+        if is_scrub_disabled(patterns):
+            add("warn", "secret_scrub_disabled",
+                f"plugin '{surface}' spawns model-driven subprocesses with the "
+                "runner's FULL environment — every provider API key and token "
+                "the daemon holds is readable by any command the model runs "
+                f"(`env`, `echo $GITHUB_TOKEN`).  {SCRUB_HINT}.",
+                where=where)
+
+
 def _validate_plugin_knobs(cfg_name, cfg, plugins, add):
     """Flag top-level knob names a non-provider plugin does not declare.
 
@@ -840,16 +898,19 @@ def validate_workspace(
     *,
     profile_set: Optional[str] = None,
     only: Optional[str] = None,
+    config_root: Optional[str] = None,
 ) -> List[Diagnostic]:
     """Resolve + validate every profile in a workspace (optionally one set).
 
     Reuses the framework's ``discover_profiles`` for resolution so the
-    effective profiles match what the daemon would load.
+    effective profiles match what the daemon would load.  ``config_root``
+    overrides the ``<workspace>/.jaato`` tier the same way a client's
+    ``config_root`` does at session creation (the doctor passes its own).
     """
     from shared.plugins.subagent.config import discover_profiles
 
     ws = Path(workspace).resolve()
-    config_root = str(ws / ".jaato")
+    config_root = str(Path(config_root).resolve()) if config_root else str(ws / ".jaato")
     result = discover_profiles(
         profiles_dir=".jaato/profiles",
         base_path=str(ws),
@@ -865,7 +926,7 @@ def validate_workspace(
     # profile is ``workspace`` iff a file with its name lives under
     # ``<ws>/.jaato/profiles`` (the config_root tier); else it came from the user
     # tier.  Workspace-level checks (.env, prefetch) are ``workspace``.
-    _ws_profiles = ws / ".jaato" / "profiles"
+    _ws_profiles = Path(config_root) / "profiles"
     ws_stems = {
         p.stem for p in _ws_profiles.rglob("*")
         if p.is_file() and p.suffix in (".yaml", ".yml", ".json")

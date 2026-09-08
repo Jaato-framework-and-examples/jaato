@@ -19,10 +19,11 @@ import os
 import sys
 import time
 import threading
-from typing import Callable, Optional, Dict, Any
+from typing import Callable, Optional, Dict, Any, Sequence
 
 from .ansi import strip_ansi
 from ..workspace_venv import apply_venv_to_env
+from shared.secret_scrub import scrub_env as _scrub_secret_env
 from shared.ai_tool_runner import get_current_cancel_token
 from jaato_sdk.plugins.model_provider.types import CancelledException
 
@@ -229,6 +230,7 @@ class ShellSession:
         cwd: Optional[str] = None,
         preexec_fn: Optional[Callable[[], None]] = None,
         workspace_venv: Optional[str] = None,
+        scrub_env: Optional[Sequence[str]] = None,
     ):
         """Spawn an interactive process and prepare idle-based I/O.
 
@@ -254,6 +256,13 @@ class ShellSession:
                 before the new program starts.  Honoured by the
                 ``pexpect`` and ``popen_spawn`` backends.  Ignored by
                 ``wexpect`` (Windows native — no fork).
+            scrub_env: Secret env-var name globs (see
+                :mod:`shared.secret_scrub`) removed from the INHERITED
+                ``os.environ`` copy before *env* is overlaid — so a
+                variable the caller hands over explicitly is a grant that
+                survives, while the runner's own credentials do not reach
+                a model-driven shell.  ``None`` / empty = no scrubbing (the
+                plugin resolves the policy; the session only applies it).
 
         Raises:
             ImportError: If no backend is available (``_spawn is None``).
@@ -269,8 +278,11 @@ class ShellSession:
         self.created_at = time.time()
         self.last_interaction = time.time()
 
-        # Merge extra env vars with current environment
-        spawn_env = os.environ.copy()
+        # Merge extra env vars with current environment.  The inherited copy
+        # is scrubbed FIRST (secrets-broker, #503/#863); the caller's
+        # explicit ``env`` is overlaid afterwards and never scrubbed, the
+        # same grant rule the MCP spawn applies to a server's own ``env``.
+        spawn_env = _scrub_secret_env(os.environ, scrub_env or ())
         # Disable pager programs that would block
         spawn_env['PAGER'] = 'cat'
         spawn_env['GIT_PAGER'] = 'cat'

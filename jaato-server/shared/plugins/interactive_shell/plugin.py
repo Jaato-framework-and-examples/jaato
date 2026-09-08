@@ -27,6 +27,7 @@ from .session import ShellSession, _BACKEND, _BACKEND_ERROR, IS_MSYS2
 from .ansi import strip_ansi
 from shared.ai_tool_runner import get_current_tool_output_callback
 from shared.plugins.runner_forwarding import RunnerForwardingMixin
+from shared.secret_scrub import DEFAULT_SECRET_ENV_PATTERNS, resolve_scrub_patterns
 from ..workspace_venv import (
     resolve_venv_path, ensure_workspace_venv, pip_apparmor_rules,
 )
@@ -82,6 +83,12 @@ class InteractiveShellPlugin(RunnerForwardingMixin):
         # Workspace-scoped venv path for spawned sessions (None/empty = off).
         # See shared/plugins/workspace_venv.py.
         self._workspace_venv: Optional[str] = None
+        # Secrets-broker scrub (#10 / #503 / #863): env-var name globs
+        # stripped from the inherited environment of every spawned PTY
+        # session, so a model-driven REPL cannot ``echo $GITHUB_TOKEN``.
+        # ON by default — the framework set applies until ``initialize``
+        # resolves the operator's ``scrub_secret_env`` knob.
+        self._scrub_secret_env: List[str] = list(DEFAULT_SECRET_ENV_PATTERNS)
         self._agent_name: Optional[str] = None
         self._initialized = False
         self._tool_output_callback: Optional[Callable[[str], None]] = None
@@ -143,6 +150,11 @@ class InteractiveShellPlugin(RunnerForwardingMixin):
                 - idle_timeout: Output settling time in seconds (default: 0.5)
                 - workspace_root: Working directory for spawned processes
                 - agent_name: Agent context for trace logging
+                - scrub_secret_env: env-var name globs stripped from every
+                  spawned session's inherited environment ('default' /
+                  absent = the framework set; 'none' = off, announced at
+                  WARNING; a list may carry 'default' and '!EXEMPT'
+                  entries).  See ``shared.secret_scrub``.
         """
         if config:
             self._agent_name = config.get('agent_name')
@@ -162,6 +174,13 @@ class InteractiveShellPlugin(RunnerForwardingMixin):
                     )
             if 'workspace_venv' in config:
                 self._workspace_venv = config['workspace_venv']
+
+        # Secrets-broker scrub (#503's second gap, closed by #863): absent
+        # means the framework set; ``none`` is the announced opt-out; a
+        # malformed value fails closed.
+        self._scrub_secret_env = list(resolve_scrub_patterns(
+            (config or {}).get('scrub_secret_env'), surface=self.name,
+        ))
 
         self._initialized = True
         self._start_reaper()
@@ -257,6 +276,21 @@ class InteractiveShellPlugin(RunnerForwardingMixin):
                     "type": "number",
                     "default": 0.5,
                     "description": "Output settling time in seconds",
+                },
+                "scrub_secret_env": {
+                    "type": ["string", "array"],
+                    "items": {"type": "string"},
+                    "default": "default",
+                    "description": (
+                        "Env-var name globs (case-insensitive fnmatch) stripped "
+                        "from the inherited environment of every spawned "
+                        "session, so a model-driven shell/REPL cannot read raw "
+                        "credentials the runner holds. 'default' (also when "
+                        "absent) = the framework set; 'none' = off (announced "
+                        "at WARNING); a list may carry 'default' and '!NAME' "
+                        "exemption entries. Overrides the profile-level "
+                        "scrub_secret_env for this surface."
+                    ),
                 },
                 "workspace_venv": {
                     "type": "string",
@@ -742,6 +776,7 @@ IMPORTANT NOTES:
                 cwd=self._workspace_root,
                 preexec_fn=self._build_subprocess_preexec_fn(),
                 workspace_venv=venv_path,
+                scrub_env=self._scrub_secret_env or None,
             )
 
             # Read initial output (program banner, first prompt, etc.)

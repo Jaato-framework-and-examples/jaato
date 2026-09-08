@@ -2860,7 +2860,9 @@ class JaatoServer:
         kwargs: Dict[str, Any] = {}
 
         if self._profile:
-            from shared.plugins.subagent.config import expand_plugin_configs
+            from shared.plugins.subagent.config import (
+                expand_plugin_configs, inject_scrub_secret_env,
+            )
 
             # ALWAYS pass ``profile.plugins`` through — including the
             # empty-list case.  Pre-fix this branch used a falsy check
@@ -2890,11 +2892,17 @@ class JaatoServer:
             if self._profile.system_instructions:
                 kwargs["system_instructions"] = self._profile.system_instructions
 
-            if self._profile.plugin_configs:
-                expanded = expand_plugin_configs(
-                    self._profile.plugin_configs,
-                    workspace_root_override=self._workspace_path,
-                )
+            # Expand even an empty plugin_configs: the profile-level
+            # ``scrub_secret_env`` (#863) is folded into the cli /
+            # interactive_shell / mcp sections here, and a profile that
+            # says ``scrub_secret_env: none`` with no plugin_configs of
+            # its own still has to reach those plugins.
+            expanded = expand_plugin_configs(
+                self._profile.plugin_configs,
+                workspace_root_override=self._workspace_path,
+            )
+            inject_scrub_secret_env(self._profile, expanded)
+            if expanded:
                 kwargs["plugin_configs"] = expanded
 
             if self._profile.provider:

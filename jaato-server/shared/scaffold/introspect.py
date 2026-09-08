@@ -329,6 +329,17 @@ def _profile_field_constraints() -> Dict[str, str]:
     except Exception:
         pass
     try:
+        from shared import secret_scrub as ss
+        out["scrub_secret_env"] = (
+            f"'{ss.SCRUB_DEFAULT}' (also when absent) = the framework set "
+            f"[{', '.join(ss.DEFAULT_SECRET_ENV_PATTERNS)}]  |  "
+            f"'{ss.SCRUB_NONE}' = off, announced at WARNING  |  "
+            f"a list of globs; the entry '{ss.SCRUB_DEFAULT}' expands in place and "
+            f"'{ss.EXEMPT_PREFIX}NAME' exempts a variable  |  applies to plugins: "
+            f"{', '.join(ss.SCRUB_SURFACES)}")
+    except Exception:
+        pass
+    try:
         from shared import budget_control as bc
         dims = ", ".join(sorted(bc.VALID_DIMENSIONS))
         actions = ", ".join(sorted(bc.VALID_ACTIONS))
