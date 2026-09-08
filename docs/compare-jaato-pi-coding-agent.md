@@ -13,7 +13,7 @@ Two candidates:
 
 | | pi coding-agent | jaato free | jaato premium |
 |---|---|---|---|
-| Repo / version | `earendil-works/pi`, `packages/coding-agent` **0.85.1** (commit `b2602be`, 2026-09-07) | `jaato-server` **0.7.0**, `jaato-sdk` **0.16.0** (commit `7306154`, 2026-09-08) | `jaato-premium` **0.1.206** (commit `9d84676`) |
+| Repo / version | `earendil-works/pi`, `packages/coding-agent` **0.85.1** (commit `b2602be`, 2026-09-07) | `jaato-server` **0.7.0**, `jaato-sdk` **0.16.0** (commit `a8b5839`, 2026-09-08) | `jaato-premium` **0.1.206** (commit `9d84676`) |
 | Language / runtime | TypeScript, Node ≥ 22.19 (Bun for standalone binaries) | Python 3, daemon + IPC/WebSocket; TS client SDK (pre-release) | Python plugin pack over jaato free |
 | Licence | **MIT** | **BUSL-1.1** (Apache-2.0 on 2030-09-01) | **Proprietary**, commercial agreement only |
 | Self-description | "deliberately minimal", "no built-in permission system", "no MCP, no sub-agents" | "server-first framework for multi-provider tool orchestration" | governance, PII, SSO and clustering add-on |
@@ -64,7 +64,9 @@ where you want the governance layer to live.**
   evaluator or to an external system through a webhook or file channel, and
   the session suspends until that system answers, so an existing corporate
   approval or RBAC service decides. The daemon itself has **bearer-token
-  auth only** and records no approver identity on the decision.
+  auth only**; since PR #876 the authenticated user id, or the approver an
+  external system names, is recorded on the resolved permission event, the
+  ledger and the session record.
 - **jaato premium adds the parts a compliance officer asks for next**: OIDC SSO
   with a server-side token proxy and mTLS, four-seat PII pseudonymisation with an
   auditor-sealed audit stream, six secret backends (Vault, AWS SM, sops, pass,
@@ -85,7 +87,7 @@ where you want the governance layer to live.**
 | TypeScript/Node shop, developer-desktop assistants, containers already the isolation story | **pi** |
 | Internal harnesses on Linux servers; you want permissions, kernel confinement, budgets, OTel and an event audit stream *without writing them* | **jaato free** |
 | Above, plus SSO, PII pseudonymisation, Vault-backed secrets, compiled deny-by-default policy, cluster | **jaato free + premium** (commercial agreement) |
-| You need data-subject erasure tooling, or a signed audit trail with approver identity | **Neither ships it.** jaato's profiles give you agent roles, its permission channels let your existing approval system decide, and its plain-file layout lets your storage policy do retention; the identity record and the rest are yours to build either way. |
+| You need data-subject erasure tooling, or a tamper-evident audit trail | **Neither ships it.** jaato's profiles give you agent roles, its permission channels let your existing approval system decide and now record who answered, and its plain-file layout lets your storage policy do retention; erasure tooling and signing are yours to build either way. |
 
 ## Scorecard
 
@@ -116,9 +118,9 @@ this assessment was first written, and the text now describes what ships.
 | Model providers / enterprise gateways | ●●● ~30 incl. Bedrock, Vertex, Azure, Cloudflare gateway, Copilot | ●●● 19 incl. Vertex, OpenRouter, GitHub Models, NIM, EU and local; native Bedrock/Azure [WIP #508](https://github.com/Jaato-framework-and-examples/jaato/issues/508) | ●●● unchanged |
 | MCP | ○○○ by design | ●●● client (`.mcp.json`); jaato as an MCP server [WIP #864](https://github.com/Jaato-framework-and-examples/jaato/issues/864) | ●●● unchanged |
 | Service integration (REST / OpenAPI, outbound) | ○○○ no HTTP tool; `bash` + curl, or an extension | ●●● `service_connector`: OpenAPI/Swagger discovery, YAML pre-definition, Bruno import, schema-validated calls, dry-run preview, four auth types with secret URIs, header redaction, mock servers for e2e; `web_fetch`; inbound `webhook` | ●●● unchanged |
-| Multi-user server / identity | ○○○ experimental Unix-socket server, unauthenticated | ●●○ daemon, WS bearer token, `set_client_user` hook | ●●● OIDC, WS auth proxy, mTLS |
+| Multi-user server / identity | ○○○ experimental Unix-socket server, unauthenticated | ●●○ daemon, WS bearer token, `set_client_user` hook; the creator's id persisted on the session record | ●●● OIDC, WS auth proxy, mTLS |
 | Delegating a permission decision to an external system (your RBAC / approval service) | ●○○ `tool_call` hook can call out synchronously | ●●● evaluators call a policy API; webhook and file channels suspend the session until the external decision arrives | ●●● + HandoffGate parks the tool, session may be unloaded and resumed on approval (demo: `reliability-exercise`) |
-| Identity model (which user may use which role, who approved) | ○○○ | ●○○ `set_client_user` hook feeds telemetry `user.id` only; approver identity on events and session records [WIP #859](https://github.com/Jaato-framework-and-examples/jaato/issues/859); tenant id and per-tenant quotas [WIP #860](https://github.com/Jaato-framework-and-examples/jaato/issues/860) | ●○○ OIDC login; `allowed_emails` / `allowed_groups` at the dashboard edge; no group-to-profile binding |
+| Identity model (which user may use which role, who approved) | ○○○ | ●●○ who approved ships ([FIXED #859](https://github.com/Jaato-framework-and-examples/jaato/issues/859)): the transport-verified `user_id` and an external system's asserted `approver` on `PermissionResolvedEvent`, the ledger and the session record; which user may use which role is still yours; tenant id and per-tenant quotas [WIP #860](https://github.com/Jaato-framework-and-examples/jaato/issues/860) | ●●○ the OIDC-authenticated id is what lands on the record; `allowed_emails` / `allowed_groups` at the dashboard edge; no group-to-profile binding |
 | Multi-agent | ●○○ example extension (subprocess per subagent) | ●●● subagents, profiles, cascades, payload schemas, runner pool | ●●● + handoff, remote spawn (currently broken per backlog) |
 | Observability of cascades and orchestration | ●○○ per-task streaming and usage in the subagent example's TUI panel; no cross-process id, no spans | ●●● one `cascade_driver_id` across every stage, `cascade_events()` observer subscription, generated observer client, agent-graph attributes on OTel spans, gate and settle events, cascade budgets, sweep reports with cost | ●●● + live cascade timeline (`compile --monitor`), dashboard with Phoenix deep-links, per-server trace identity, drift monitor (in flux) |
 | Extensibility model | ●●● 33 lifecycle events, TS extensions via jiti | ●●● 5 entry-point groups, daemon hooks, enrichment pipeline, traits | ●●● scaffold verbs |
@@ -204,7 +206,8 @@ queue, parent-bridged (subagent asks parent). Per-profile policy under
 `plugin_configs.permission.policy`. Headless harnesses answer
 `PermissionRequestedEvent` with `PermissionResponseRequest` (may edit arguments)
 and mutate rules at runtime. `PermissionResolvedEvent.method` records whether a
-human, the whitelist, the blacklist or the default decided. Separately, the
+human, the whitelist, the blacklist or the default decided, and `user_id` /
+`approver` record which human (PR #876). Separately, the
 `reliability` plugin enforces repetitive-call, error-retry, introspection-loop
 and turn-duration thresholds, plus prerequisite policies
 (`docs/reliability-policies-config.md`). Human-in-the-loop beyond approval:
@@ -259,14 +262,25 @@ a framework change:
 
 So "man in the loop" is a shipped mechanism in free and a demonstrated park
 and resume in premium, and whatever RBAC the company already runs sits
-behind the webhook. What the framework still does not do is record *who*
-answered: `PermissionResolvedEvent.method` says "user" but carries no user id,
-the authenticated id from `set_client_user` reaches only the telemetry
-`user.id` attribute and not the event stream or the session record, and
-premium's `allowed_emails` / `allowed_groups` are checked at the dashboard
-edge only. "Identity model" in
-the rest of this document means that gap, not the delegation seam; the
-approver-identity half is tracked as [WIP #859](https://github.com/Jaato-framework-and-examples/jaato/issues/859).
+behind the webhook. When this assessment was first written the framework did
+not record *who* answered: `PermissionResolvedEvent.method` said "user" with
+no user id, and the authenticated id from `set_client_user` reached only the
+telemetry `user.id` attribute (the runner-side setter had no caller at all,
+so runner-tier spans were anonymous too). PR #876 closed that ([FIXED #859](https://github.com/Jaato-framework-and-examples/jaato/issues/859)),
+verified on commit `a8b5839`. Two fields, kept apart because their
+provenance differs: `user_id` is stamped by the daemon from the
+authenticated transport of the client that answered, never read from the
+response body; `approver` is whatever an external system put in the
+`approver` key of its webhook or file response, recorded as claimed. Both
+are empty for policy decisions and on unauthenticated IPC, so "nobody was
+asked" stays distinguishable from "somebody answered". The same id reaches
+the token ledger (`permission-check` and `response` records) and the session
+record as `created_by` (record version 2.9), inherited by isolated
+subagents, so a session is attributable after the fact without telemetry.
+What remains is the other half of an identity model: which IdP group may use
+which profile. Premium's `allowed_emails` / `allowed_groups` are checked at
+the dashboard edge only, and nothing maps a group to a role. "Identity
+model" in the rest of this document means that remaining gap.
 
 **jaato premium.** Daruma (`jaato_premium/scaffold/daruma/`, exposed as
 `jaato-scaffold compile spec.yaml`) compiles a YAML domain spec into a profile, a
@@ -492,9 +506,9 @@ the same primitives as model-callable tools (`interrogate_session`,
 `setup_replay_workspace`, `replay_in_workspace`); it is a convenience, not
 the capability.
 
-Gaps: no actor identity
-on events ([WIP #859](https://github.com/Jaato-framework-and-examples/jaato/issues/859)), no hash chain or signing ([WIP #507](https://github.com/Jaato-framework-and-examples/jaato/issues/507)), no SIEM exporter, no
-pricing data shipped.
+Gaps: no hash chain or signing ([WIP #507](https://github.com/Jaato-framework-and-examples/jaato/issues/507)), no SIEM exporter, no pricing
+data shipped. Actor identity on events, ledger and record ships since PR #876
+([FIXED #859](https://github.com/Jaato-framework-and-examples/jaato/issues/859)).
 
 **jaato premium.** Daruma attestation guards check a model's completion receipt
 against the tool-call ledger; `provenance` and `provenance_array` generate
@@ -529,7 +543,7 @@ does not make.
 
 | Obligation (paraphrased) | pi | jaato free | jaato premium |
 |---|---|---|---|
-| **Record keeping / automatic logging** (Art. 12, 26): logs sufficient to trace operation over the lifetime | Session tree with model, usage, tool calls; you add shipping and retention | Event stream + ledger + OTel + versioned session records; you add shipping, identity, retention | + attestation, sealed redaction audit |
+| **Record keeping / automatic logging** (Art. 12, 26): logs sufficient to trace operation over the lifetime | Session tree with model, usage, tool calls; you add shipping and retention | Event stream + ledger + OTel + versioned session records; you add shipping and retention | + attestation, sealed redaction audit |
 | **Transparency to deployers/users** (Art. 13): which model, capabilities, limitations | Model/provider in footer, env and every message | Model/provider in events and `profile_snapshot`; presentation context | + "Transparency Mandate" instruction layer (soft) |
 | **Human oversight** (Art. 14): ability to interrupt, override, not act on output | `abort()`, steering; approval only via extension | Permission prompts, out-of-band approval channels that suspend the session, clarification, stop, completion gates | + HandoffGate park and resume (demonstrated) |
 | **Accuracy, robustness, cybersecurity** (Art. 15): resilience to manipulation, e.g. prompt injection | Explicitly out of scope | Untrusted-content boundary, egress allowlist, AppArmor, permission gating | + default-deny compiled evaluators |
@@ -905,9 +919,11 @@ server an OTel resource identity so a cross-host cascade is attributable.
 The drift monitor, which scores an agent's trajectory against its plan, is
 shipped as an opt-in example and is under a declared refactor.
 
-The gap on both sides is the same one the audit section names: none of
-these streams carries a human identity, so a cascade is fully traceable to
-its sessions and spans but not to the person who authorised it.
+On pi none of these streams carries a human identity, so a cascade is fully
+traceable to its processes but not to the person who authorised it. On jaato
+the creator's id is persisted on the session record and inherited by isolated
+subagents since PR #876, so a cascade is attributable to the person who started
+it; what no stream carries yet is a tamper-evident seal ([WIP #507](https://github.com/Jaato-framework-and-examples/jaato/issues/507)).
 
 ## 14. Supply chain, release integrity, maturity
 
@@ -948,10 +964,10 @@ conditions of adoption, not treat their absence as a design choice.
 | Capability | pi | jaato free | jaato premium |
 |---|---|---|---|
 | Approval policy engine with persisted decisions | build (weeks) | ships | ships |
-| Actor identity on approvals and events | build | build (days; hook exists) | partial (`X-Jaato-User` at edge) |
+| Actor identity on approvals and events | build | ships ([FIXED #859](https://github.com/Jaato-framework-and-examples/jaato/issues/859)); an external approver names itself in the webhook or file response | ships; the OIDC id is the one recorded |
 | Agent-role scoping (tools, limits, policy per role) | build | ships (profiles) | ships + Daruma |
 | Hooking your approval / RBAC service into permission decisions | build (`tool_call` extension) | configure (evaluator or webhook/file channel) | configure; park and resume demoed |
-| Identity model (IdP group to role, approver on the record) | build | build (hook exists); approver on the record [WIP #859](https://github.com/Jaato-framework-and-examples/jaato/issues/859) | partial (OIDC login, edge allowlist) |
+| Identity model (IdP group to role, approver on the record) | build | approver on the record ships ([FIXED #859](https://github.com/Jaato-framework-and-examples/jaato/issues/859)); group-to-role binding build | partial (OIDC login, edge allowlist); group-to-role binding build |
 | Tenant isolation | container per tenant, your topology | ships (per-session confinement on one daemon, or daemon per tenant with its own token); tenant id and quotas [WIP #860](https://github.com/Jaato-framework-and-examples/jaato/issues/860) | ships + cluster fronting; tenant id still a reserved field |
 | Kernel or container confinement | deploy a container/VM | ships on Linux | ships |
 | Turn / token / cost / time limits | build | ships | ships |
@@ -1021,9 +1037,9 @@ For a corporation building **internal** harnesses on Linux infrastructure that
 must show auditors permission gating, resource confinement, budgets, tracing
 and a PII story, **jaato free is the lower-effort base, and premium closes the
 SSO, secrets and pseudonymisation gaps if the commercial terms work**. Plan the
-remaining build (approver identity on events, group-to-profile binding,
-retention, signed audit, the regulatory documents beyond the obligations map)
-at roughly 6–12 engineer-weeks on top.
+remaining build (group-to-profile binding, retention, signed audit, the
+regulatory documents beyond the obligations map) at roughly 4–10
+engineer-weeks on top.
 
 For a corporation that will **ship a product**, is a TypeScript shop, or
 already runs every agent in a hardened container with a gateway that holds
@@ -1033,8 +1049,9 @@ governance layer honestly: permission engine, limits, redaction, OTel adapter,
 MCP bridge and a multi-user service are all yours, realistically 3–6
 engineer-months before parity with what jaato free ships today.
 
-Either way, the two things nobody ships — approver identity in the audit
-record ([WIP #859](https://github.com/Jaato-framework-and-examples/jaato/issues/859)) and data-subject erasure tooling ([WIP #861](https://github.com/Jaato-framework-and-examples/jaato/issues/861)) — should be on
-the plan from day one, as should the AI Act documents beyond the obligations
-map premium now generates (the free-tree copy is [WIP #867](https://github.com/Jaato-framework-and-examples/jaato/issues/867)); retention
-itself is a storage-policy task on jaato's plain-file layout.
+Either way, the one thing nobody ships — data-subject erasure tooling
+([WIP #861](https://github.com/Jaato-framework-and-examples/jaato/issues/861)) — should be on the plan from day one, as should the AI Act
+documents beyond the obligations map premium now generates (the free-tree
+copy is [WIP #867](https://github.com/Jaato-framework-and-examples/jaato/issues/867)); retention itself is a storage-policy task on jaato's
+plain-file layout. Approver identity, the other gap this assessment first
+named, is now on the record in jaato ([FIXED #859](https://github.com/Jaato-framework-and-examples/jaato/issues/859)) and remains a build on pi.
