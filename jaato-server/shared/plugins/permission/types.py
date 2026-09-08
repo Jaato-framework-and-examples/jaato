@@ -161,12 +161,21 @@ class PromptResponse:
             args dict.  ``None`` for non-edit responses.
         comment: Optional free-text comment the operator attached to
             the response (used by some channels for audit).
+        user_id: Daemon-authenticated identity of the client that
+            answered (issue #859).  Stamped by the daemon from the
+            transport's ``get_client_user()`` when it routes the
+            ``PermissionResponseRequest`` into
+            ``PromptOperatorHandler.resolve_response`` — never taken
+            from the response body, so the runner can trust it.
+            ``None`` for unauthenticated (IPC) clients; older daemons
+            omit the key and deserialize to ``None``.
     """
 
     request_id: str
     response: str
     edited_arguments: Optional[Dict[str, Any]] = None
     comment: Optional[str] = None
+    user_id: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -178,14 +187,17 @@ class PromptResponse:
                 else None
             ),
             "comment": self.comment,
+            "user_id": self.user_id,
         }
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "PromptResponse":
         edited = d.get("edited_arguments")
+        user_id = d.get("user_id")
         return cls(
             request_id=str(d.get("request_id", "")),
             response=str(d.get("response", "")),
             edited_arguments=dict(edited) if edited else None,
             comment=d.get("comment"),
+            user_id=str(user_id) if user_id else None,
         )

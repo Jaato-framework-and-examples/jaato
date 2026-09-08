@@ -821,7 +821,26 @@ class PermissionInputModeEvent(Event):
 
 
 class PermissionResolvedEvent(Event):
-    """Permission has been resolved (granted or denied)."""
+    """Permission has been resolved (granted or denied).
+
+    ``method`` says HOW the decision was reached (a policy rule, an
+    evaluator, or the channel the ASK went through); ``user_id`` and
+    ``approver`` say WHO reached it (issue #859).  Both identity fields
+    are ``None`` for policy decisions and for unauthenticated sessions,
+    so an auditor can tell "nobody was asked" from "somebody answered":
+
+    - ``user_id`` is the identity the DAEMON authenticated for the client
+      that answered the prompt (``set_client_user()`` — WS/SSO
+      deployments; local IPC carries no user).  It is stamped by the
+      transport that received the ``PermissionResponseRequest``, never
+      by the client itself, so it is the verified half of the trail.
+    - ``approver`` is an identity ASSERTED by whoever answered on the
+      decision's channel: the ``approver`` key of a webhook / file
+      channel response, naming the human an external approval system
+      consulted.  The daemon cannot verify it; it is recorded as
+      claimed, so the trail can still say who the external system says
+      approved.
+    """
     type: EventType = Field(default=EventType.PERMISSION_RESOLVED)
     agent_id: str = ""  # Which agent's permission was resolved
     request_id: str = ""
@@ -829,6 +848,12 @@ class PermissionResolvedEvent(Event):
     granted: bool = False
     method: str = ""  # "user", "whitelist", "blacklist", "default"
     comment: str = ""  # Advisory comment (from yc: or ALLOW_WITH_COMMENT evaluator)
+    # Daemon-authenticated identity of the client that answered the
+    # prompt; None for policy decisions and unauthenticated (IPC) clients.
+    user_id: Optional[str] = None
+    # Identity an external approval system attached to its response
+    # (webhook / file channel ``approver`` key); None when none was given.
+    approver: Optional[str] = None
 
 
 class PermissionStatusEvent(Event):

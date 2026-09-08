@@ -2240,6 +2240,8 @@ class SessionManager:
             workspace_path=workspace_path,
             sub_apparmor_profile=sub_profile_name,
             agent_params=agent_params,
+            # #859: a subagent acts for the user who owns its parent.
+            created_by=self._creator_of(parent_session_id),
         )
         bootstrap_ok = self._dispatch_isolated_session_bootstrap(
             sub_handle, envelope,
@@ -2380,6 +2382,12 @@ class SessionManager:
             cgroup_path=cgroup_path,
         )
 
+    def _creator_of(self, session_id: str) -> Optional[str]:
+        """The authenticated user a loaded session was created for, or
+        ``None`` when the session is not loaded or has no user (#859)."""
+        session = self.get_session(session_id)
+        return session.created_by if session else None
+
     def _build_isolated_envelope(
         self,
         *,
@@ -2388,9 +2396,14 @@ class SessionManager:
         workspace_path: str,
         sub_apparmor_profile: str,
         agent_params: Optional[Dict[str, Any]],
+        created_by: Optional[str] = None,
     ) -> Any:
         """Build a :class:`SessionInitEnvelope` for an isolated
         subagent's runner-side bootstrap (Phase 4 §4.3.6c).
+
+        ``created_by`` is the parent session's authenticated user; it is
+        ferried so the isolated runner's telemetry and ledger name the
+        same person as the parent's (#859).
 
         Mirrors ``server.runner_spawn.build_session_envelope`` but
         sources fields from the reconstructed SubagentProfile
@@ -2517,6 +2530,7 @@ class SessionManager:
             completion_processors=completion_processors_to_wire(
                 getattr(profile, "completion_processors", []) or []
             ),
+            created_by=created_by,
         )
 
     def _dispatch_isolated_session_bootstrap(
@@ -3309,6 +3323,13 @@ class SessionManager:
         # and by WS pre-init hook so it threads to spawn_session_runner.
         # Same per-session-handle pattern as ``_agent_params`` above.
         server._cascade_driver_id = envelope.cascade_driver_id
+
+        # #859: stash the authenticated creator the same way, so
+        # ``build_session_envelope`` can ferry it to the runner-side
+        # JaatoSession (``set_client_user_id``) -- until now the id
+        # stopped at the daemon's Session record and reached neither
+        # the ledger nor the telemetry user attribute.
+        server._client_user_id = envelope.created_by
 
         # Phase 4 §B: resolve workspace .env + profile.env + overrides
         # BEFORE the runner-spawn fork so secret URIs (pass://,
@@ -8155,6 +8176,9 @@ class SessionManager:
             # flaky-fail, root-caused via PROVISION_ENTER client_id=None).  None
             # on a clientless background restore preserves the old skip.
             client_id=client_id,
+            # #859: the creator recorded on the session record (2.9+), so
+            # a revived runner session is attributed to the same user.
+            created_by=getattr(state, "created_by", None),
             sandbox_mode=getattr(state, "sandbox_mode", None),
             # Drive confinement from the SAVED sandbox_mode (precedence-1
             # apparmor_override in _provision) rather than re-running the
@@ -8417,6 +8441,7 @@ class SessionManager:
             workspace_path=state.workspace_path,
             user_inputs=state.user_inputs or [],  # Command history for prompt restoration
             provisioned=state.metadata.get('provisioned', False),
+            created_by=getattr(state, "created_by", None),  # 2.9+ (#859)
             sandbox_mode=getattr(state, "sandbox_mode", None),
             # Carry the inline spec forward so a re-save of the restored
             # session re-persists it (survives restore → save → restore).
@@ -8996,6 +9021,9 @@ class SessionManager:
                     budget_control=budget_control_cfg,
                     sibling_name=session.sibling_name,
                     cascade_driver_id=session.cascade_driver_id,
+                    # 2.9+ (#859): the authenticated creator, so the record
+                    # says whose session this was without telemetry.
+                    created_by=session.created_by,
                     workspace_path=session.workspace_path,
                     config_root=session.config_root,
                     # Persist confinement so orphan-revive / disk-restore re-applies
@@ -10537,6 +10565,8 @@ class SessionManager:
         client_id: str,
         session_id: str,
         event: Event,
+        *,
+        user_id: Optional[str] = None,
     ) -> None:
         """Route a request to the appropriate session.
 
@@ -10544,6 +10574,12 @@ class SessionManager:
             client_id: The requesting client.
             session_id: The target session.
             event: The request event.
+            user_id: The identity the transport authenticated for
+                ``client_id`` (``EventSink.get_client_user``), or ``None``
+                when it has none — local IPC, or the manager's own
+                headless dispatches.  Consumed by the permission response
+                path so the resolved event can name who answered (#859);
+                the transport layer supplies it, never the event body.
         """
         from jaato_sdk.events import ClientConfigRequest
 
@@ -10699,6 +10735,7 @@ class SessionManager:
             server.respond_to_permission(
                 event.request_id, event.response,
                 edited_arguments=event.edited_arguments,
+                user_id=user_id,
             )
 
         elif isinstance(event, ClarificationResponseRequest):

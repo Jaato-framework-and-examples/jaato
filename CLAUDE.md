@@ -326,6 +326,7 @@ with what the files on disk say today (issue #787):
 | the resolved profile | `SessionState.profile_snapshot` (`profile_to_snapshot`) | `profile_from_snapshot` → `BootstrapEnvelope.profile` |
 | the rendered system instruction | `SessionState.rendered_instructions` (snapshotted at the end of `JaatoSession.configure()`) | `BootstrapEnvelope.system_instruction_override` |
 | the creation `agent_params` | `SessionState.agent_params` | `BootstrapEnvelope.agent_params` |
+| the authenticated creator (#859, record 2.9+) | `SessionState.created_by` | `BootstrapEnvelope.created_by` → `SessionInitEnvelope.created_by` → `set_client_user_id` |
 
 Record version 2.8+. Restoring the render means a revive does **not** re-run
 the persona's `{{!py:...}}` prefetch scripts — which is what made a session
@@ -447,6 +448,50 @@ Architecture: daemon spawns a **template subprocess** at startup that imports al
 **Pool routing gates** (`spawn_session_runner`): pool is consulted iff `pool_manager` wired AND env flag enabled AND `cgroup_attach is None` (cgroup migration mid-life is a follow-up).  Apparmor opt-in sessions ARE eligible (slot self-confines to the per-session profile).
 
 See `docs/design/runner_prewarm_pool_plan.md` for the full multi-PR plan + decision log.
+
+### Slot-scoped Plugin Lifetime (#890)
+
+A pool slot serves several sessions of one cascade in turn, and
+`reset_for_next_session()` is the hook at that boundary — several plugins
+answer it with "keep everything, the next stage benefits". They were keeping
+state on an object nobody would read: every `session.bootstrap` built a fresh
+`PluginRegistry` and re-ran `discover()`, which calls `create_plugin()`, and
+nothing shut the outgoing registry down. Dropping a reference is not freeing a
+resource, so `lsp` started a language server per stage and left the previous
+one running with no owner — three live jdtls (~2.3 GB) on a 5-subphase run,
+each stage paying the cold start the preserved state existed to avoid.
+
+**`TRAIT_SLOT_SCOPED` is what makes the hook reachable.** A plugin declaring it
+is carried across the boundary as an INSTANCE:
+
+| When | What happens |
+|------|--------------|
+| `session.end` (warm — slot returns to the pool) | `reset_for_next_session()` on every plugin as before, then `slot_plugins.park_from`: slot-scoped instances move into a process-level store, **every other initialized plugin gets `shutdown()`** |
+| next `session.bootstrap` on that slot | `slot_plugins.adopt_into` registers the parked instances **before** `discover()` — both discovery paths skip a name already registered, so no rival is constructed. `expose_all` still calls `initialize()`; the plugin's own `_initialized` guard is what makes it a no-op and preserves the warm resource |
+| `session.shutdown` (cold — slot is being reaped) | everything is shut down, parked and current alike; a graceful `shutdown()` beats the SIGKILL-only process-exit backstop |
+
+Declared today by `lsp` (connected LSP clients + the thread that owns them) and
+`todo` (the per-agent plan map a later stage reads). **A no-op
+`reset_for_next_session()` is not on its own a reason to declare it** —
+`references` has one because it has nothing to clear, while its state
+(sources, selected ids, preselected paths) is emphatically per-session, and
+carrying that instance would leak one stage's context into the next. The trait
+means "everything I hold is deliberately cross-session".
+
+**Reuse is conditional.** A slot returns to the pool and may be handed
+unrelated work, so an instance is adopted only when the arriving session
+matches on cascade (`cascade_driver_id`), workspace, config root, and that
+plugin's declared config — session-identity keys (`session_id`, `agent_name`)
+excluded, since counting them would make every comparison a miss. Any
+mismatch shuts the parked instance down rather than leaving it running. A
+standalone session (no cascade) parks nothing, and neither does a boundary
+whose reset sweep raised — the daemon won't pool that slot, so parking for a
+next session that never arrives is only a slower leak.
+
+`PluginRegistry` gains `adopt_plugin()` / `is_adopted()` / `shutdown_all()`,
+and `set_session_id()` now **broadcasts** to plugins implementing it: a carried
+instance's `initialize()` early-returns, so nothing else refreshes the session
+identity it logs under.
 
 ### Binary Media Chunks (delivery)
 
@@ -872,6 +917,13 @@ Plugins themselves can declare **plugin-level traits** via a `plugin_traits` cla
 | Constant | Value | Contract |
 |----------|-------|----------|
 | `TRAIT_AUTH_PROVIDER` | `"auth_provider"` | Plugin provides interactive authentication for a model provider. Must also expose `provider_name` property identifying which provider. |
+| `TRAIT_SESSION_PERSISTENT` | `"session_persistent"` | Plugin state must outlive an unload/reload of the SAME session. Must implement `get_persistence_state()` / `restore_persistence_state()`; `SessionManager` snapshots into `metadata['plugin_states'][<name>]`. |
+| `TRAIT_SLOT_SCOPED` | `"slot_scoped"` | Plugin INSTANCE survives the cascade session boundary — the runner carries it across sessions served by the same pool slot instead of constructing a new one. `shutdown()` then means slot teardown, not session teardown. See [Slot-scoped plugin lifetime](#slot-scoped-plugin-lifetime-890). |
+
+The three answer different questions and compose freely: `session_persistent`
+is "survives THIS session being unloaded and reloaded",  `slot_scoped` is
+"survives the NEXT session of the same cascade starting", `auth_provider` is a
+capability rather than a lifetime.
 
 **How it works:**
 1. Plugin declares: `plugin_traits = frozenset({TRAIT_AUTH_PROVIDER})`
@@ -991,6 +1043,30 @@ Rules the implementation holds to:
 Not covered here: the eventual TLS-terminating broker (#505) that keeps a
 credential out of the runner environment entirely, and the `/proc`
 hardening in #712 that would give this app-layer scrub a kernel backstop.
+
+### Approver Identity (#859)
+
+`PermissionResolvedEvent` said HOW a decision was reached (`method`) and
+nothing about WHO reached it; the authenticated user the daemon knew
+(`set_client_user()`) reached only the telemetry `user.id` span attribute,
+so an auditor joined approvals against spans by timestamp, and a keyless
+deployment had nothing to join against.  Three things now carry identity,
+all optional so unauthenticated IPC sessions are unchanged:
+
+| Where | Field | Meaning |
+|-------|-------|---------|
+| `PermissionResolvedEvent` | `user_id` | the identity the daemon authenticated for the client that answered — stamped by the transport that received the `PermissionResponseRequest` (`get_client_user`), never taken from the request body, and carried to the runner on `PromptResponse.user_id` |
+| `PermissionResolvedEvent` | `approver` | the name an external approval system attached to its webhook / file response (`"approver": "..."`); asserted, recorded as claimed |
+| ledger `permission-check` record | `user_id` / `approver` | the same two, on the token ledger |
+| ledger `response` record | `user_id` | the session's user — the same id the telemetry `user.id` attribute carries |
+| session record header | `created_by` | the session's user, persisted (record version 2.9) and restored onto the daemon `Session` and the revived runner session |
+
+Both event fields are `None` for a policy decision (whitelist, evaluator,
+suspension), so "nobody was asked" stays distinguishable from "somebody
+answered".  The session's own user reaches the runner-side `JaatoSession`
+on `SessionInitEnvelope.created_by` — `set_client_user_id` previously had
+no caller, so runner-tier telemetry was anonymous too.  Related: #507 is
+the integrity half (tamper evidence); this is the identity half.
 
 ### Interactive Shell Sessions (`shared/plugins/interactive_shell/`)
 

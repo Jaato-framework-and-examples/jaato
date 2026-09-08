@@ -70,6 +70,7 @@ def _make_server(*, with_handler: bool = True) -> JaatoServer:
     srv._channel_input_queue = queue.Queue()
     srv._pending_permission_request_id: Optional[str] = None
     srv._pending_edited_arguments: Optional[Dict[str, Any]] = None
+    srv._pending_permission_user_id: Optional[str] = None  # #859
 
     if with_handler:
         srv._prompt_operator_handler = PromptOperatorHandler(
@@ -307,3 +308,47 @@ def test_e2e_full_ask_roundtrip_through_handler_and_responder() -> None:
         return result
 
     asyncio.run(_run())
+
+
+# ----------------------------------------------------------------------
+# #859 — the responding client's identity follows both paths
+# ----------------------------------------------------------------------
+
+
+def test_path_1_carries_user_id_to_the_runner() -> None:
+    """``respond_to_permission(user_id=...)`` lands on the PromptResponse
+    the runner-side permission plugin receives."""
+    srv = _make_server()
+    handler = srv._prompt_operator_handler
+
+    async def _drive() -> Any:
+        ask_task = asyncio.create_task(
+            handler.handle(_make_payload("req-859-1").to_dict()),
+        )
+        await asyncio.sleep(0)
+        srv.respond_to_permission("req-859-1", "y", user_id="sso|alice")
+        return await asyncio.wait_for(ask_task, timeout=1.0)
+
+    result = asyncio.run(_drive())
+    assert result["response"] == "y"
+    assert result["user_id"] == "sso|alice"
+    # Path 1 never parks anything for the legacy hook.
+    assert srv._pending_permission_user_id is None
+
+
+def test_path_2_parks_user_id_for_the_resolved_hook() -> None:
+    """The legacy queue carries only the response key, so the identity
+    is parked on the server for the resolved hook to read back."""
+    srv = _make_server(with_handler=False)
+    srv._pending_permission_request_id = "req-859-2"
+    srv.respond_to_permission("req-859-2", "y", user_id="sso|alice")
+    assert srv._channel_input_queue.get_nowait() == "y"
+    assert srv._pending_permission_user_id == "sso|alice"
+
+
+def test_path_2_without_user_parks_none() -> None:
+    srv = _make_server(with_handler=False)
+    srv._pending_permission_request_id = "req-859-3"
+    srv._pending_permission_user_id = "stale-from-earlier-prompt"
+    srv.respond_to_permission("req-859-3", "n")
+    assert srv._pending_permission_user_id is None

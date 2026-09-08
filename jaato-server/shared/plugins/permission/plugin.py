@@ -119,7 +119,9 @@ class PermissionPlugin(RunnerForwardingMixin):
         # Permission lifecycle hooks for UI integration
         # on_requested: (tool_name, request_id, tool_args, response_options, call_id) -> None
         self._on_permission_requested: Optional[Callable[[str, str, Dict[str, Any], List[PermissionResponseOption], Optional[str]], None]] = None
-        self._on_permission_resolved: Optional[Callable[[str, str, bool, str], None]] = None
+        # on_resolved: (tool_name, request_id, granted, method, *, comment,
+        #               user_id, approver) -> None — see set_permission_hooks
+        self._on_permission_resolved: Optional[Callable[..., None]] = None
         # Phase 3 §3.7 deeper: cached RunnerRPCChannel instance.  When
         # the plugin runs runner-side, ASK decisions can't reach the
         # connected client through ConsoleChannel / WebhookChannel —
@@ -215,7 +217,7 @@ class PermissionPlugin(RunnerForwardingMixin):
     def set_permission_hooks(
         self,
         on_requested: Optional[Callable[[str, str, Dict[str, Any], List[PermissionResponseOption], Optional[str]], None]] = None,
-        on_resolved: Optional[Callable[[str, str, bool, str, str], None]] = None
+        on_resolved: Optional[Callable[..., None]] = None
     ) -> None:
         """Set hooks for permission lifecycle events.
 
@@ -236,9 +238,16 @@ class PermissionPlugin(RunnerForwardingMixin):
                   - decision: The ChannelDecision this maps to
                 - call_id: Unique identifier for the tool call (for parallel tool matching)
             on_resolved: Called when permission is resolved.
-                Signature: (tool_name, request_id, granted, method) -> None
+                Signature: (tool_name, request_id, granted, method,
+                *, comment="", user_id=None, approver=None) -> None
                 method is one of: "yes", "always", "once", "never",
-                "whitelist", "blacklist", "timeout", "default"
+                "whitelist", "blacklist", "timeout", "default".
+                ``user_id`` is the daemon-authenticated identity of the
+                client that answered a channel prompt and ``approver``
+                the name an external approval system attached to its
+                response (issue #859); both are ``None`` for policy
+                decisions, so a hook must accept them as keywords with
+                defaults.
         """
         self._trace(f"set_permission_hooks: on_requested={on_requested is not None}, on_resolved={on_resolved is not None}")
         self._on_permission_requested = on_requested
@@ -1834,6 +1843,13 @@ class PermissionPlugin(RunnerForwardingMixin):
 
                             # Final decision - exit loop
                             allowed, info = self._handle_channel_response(tool_name, current_args, response)
+                            # Who decided (#859): the daemon-authenticated
+                            # responder and/or the approver an external
+                            # system named.  Merged here, once, so the
+                            # hook, the ledger and the tool result all
+                            # see the same attribution.
+                            info.update(response.attribution())
+                            self._attribute_last_decision(response.attribution())
 
                             # Include edit metadata in info
                             if was_edited:
@@ -1848,6 +1864,8 @@ class PermissionPlugin(RunnerForwardingMixin):
                                     tool_name, request.request_id, allowed,
                                     info.get('method', 'unknown'),
                                     comment=info.get('comment', ''),
+                                    user_id=info.get('user_id'),
+                                    approver=info.get('approver'),
                                 )
 
                             return allowed, info
@@ -1967,6 +1985,18 @@ class PermissionPlugin(RunnerForwardingMixin):
             "decision": decision,
             "reason": reason,
         })
+
+    def _attribute_last_decision(self, attribution: Dict[str, str]) -> None:
+        """Stamp who decided onto the entry ``_log_decision`` just wrote.
+
+        ``_handle_channel_response`` logs the decision before the caller
+        knows the channel's attribution, and the log is the plugin's own
+        audit trail (issue #859), so the identity is added to that entry
+        afterwards — under the same policy lock, so the last entry is
+        this decision.  No-op when the channel named nobody.
+        """
+        if attribution and self._execution_log:
+            self._execution_log[-1].update(attribution)
 
     def _get_display_info(
         self,

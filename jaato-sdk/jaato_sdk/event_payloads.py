@@ -393,6 +393,12 @@ class PermissionResolvedPayload(TypedDict):
     granted: bool
     method: str
     comment: str
+    # Who decided (#859).  ``user_id`` is the daemon-authenticated user of
+    # the client that answered; ``approver`` is the name an external
+    # approval system attached to its response.  Both absent / None for
+    # policy decisions and unauthenticated sessions.
+    user_id: NotRequired[Optional[str]]
+    approver: NotRequired[Optional[str]]
     # Which session this event is about (protocol 1.2+).  Mirrors the
     # base ``Event.session_id``, stamped centrally as the daemon routes;
     # NotRequired because a hand-built payload need not supply it.

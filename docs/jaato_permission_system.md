@@ -405,7 +405,8 @@ The permission system is channel-agnostic. Different channels handle the user in
 │    │  {                                      │                       │
 │    │    "request_id": "abc123",              │                       │
 │    │    "decision": "allow",                 │                       │
-│    │    "reason": "Approved by admin"        │                       │
+│    │    "reason": "Approved by admin",       │                       │
+│    │    "approver": "alice@example.com"      │  (optional, #859)     │
 │    │  }                                      │                       │
 │    │ ◄───────────────────────────────────── │                       │
 │    │                                         │                       │
@@ -719,7 +720,29 @@ class PermissionResolvedEvent(Event):
     request_id: str
     granted: bool                          # Was it approved?
     method: str                            # How was it decided?
+    comment: str                           # Advisory comment, if any
+    user_id: Optional[str]                 # WHO answered: the daemon-authenticated
+                                           # user of the responding client (#859)
+    approver: Optional[str]                # WHO an external approval system
+                                           # (webhook / file response) named
 ```
+
+### Who Decided (#859)
+
+`method` says *how* a decision was reached; `user_id` and `approver` say
+*who* reached it, and they are kept apart because their provenance differs:
+
+| Field | Set when | Source | Verified? |
+|-------|----------|--------|-----------|
+| `user_id` | a client answered the prompt over an authenticated transport | the daemon's `get_client_user(client_id)` for the client that sent `PermissionResponseRequest`, stamped on the `PromptResponse` the runner receives | yes — the transport's identity, never the request body |
+| `approver` | an external system answered through the webhook or file channel | the `approver` key of that response JSON | no — recorded as claimed |
+| neither | a policy rule, evaluator or suspension decided; or the transport has no user (local IPC) | — | — |
+
+The same attribution lands on the ledger's `permission-check` record and on
+the plugin's own execution log, and the session record header carries
+`created_by` (record version 2.9) so a session is attributable after the
+fact without telemetry.  The ledger's `response` records carry the same
+`user_id` the telemetry `user.id` attribute does.
 
 ### Event Flow
 
@@ -750,7 +773,8 @@ class PermissionResolvedEvent(Event):
 │    │ ◄───────────────────────────────────────────────── │            │
 │    │                                                    │            │
 │    │  PermissionResolvedEvent                           │            │
-│    │  {granted: true, method: "user_approved"}         │            │
+│    │  {granted: true, method: "user_approved",         │            │
+│    │   user_id: "sso|alice", approver: null}           │            │
 │    │ ─────────────────────────────────────────────────► │            │
 │    │                                                    │            │
 │    │                                          Clear permission       │

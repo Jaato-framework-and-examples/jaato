@@ -7,5 +7,7 @@
   "tool_name": "",
   "granted": false,
   "method": "",
-  "comment": ""
+  "comment": "",
+  "user_id": null,
+  "approver": null
 }

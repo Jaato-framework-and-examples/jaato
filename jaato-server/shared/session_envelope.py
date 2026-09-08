@@ -76,6 +76,11 @@ from .path_utils import require_absolute_path
 SESSION_ENVELOPE_VERSION = 5
 
 
+def _optional_str(value: Any) -> Optional[str]:
+    """``str(value)`` for a present, non-empty wire value; else ``None``."""
+    return str(value) if value else None
+
+
 @dataclass
 class SessionInitEnvelope:
     """Daemon → runner session-bootstrap payload.
@@ -308,6 +313,15 @@ class SessionInitEnvelope:
     # daemon.plugin_execute (sentinel plugin name).  Empty default = backward
     # compat; same-build daemon+runner so no schema_version bump needed.
     client_tools: List[Dict[str, Any]] = field(default_factory=list)
+    # #859: the authenticated user the session was created for.  Known
+    # daemon-side since the WS/SSO work (``Session.created_by``) but it
+    # never crossed to the runner, so the runner-side ``JaatoSession``
+    # -- the one that opens telemetry spans and writes ledger records --
+    # had no user to stamp (``set_client_user_id`` had no caller).  The
+    # runner bootstrap now stamps it.  ``None`` on unauthenticated (IPC)
+    # sessions and on envelopes from older daemons; same-build
+    # daemon+runner so no schema_version bump.
+    created_by: Optional[str] = None
     schema_version: int = SESSION_ENVELOPE_VERSION
 
     def __post_init__(self) -> None:
@@ -382,6 +396,7 @@ class SessionInitEnvelope:
             ),
             "system_instruction_override": self.system_instruction_override,
             "client_tools": [dict(t) for t in self.client_tools],
+            "created_by": self.created_by,
         }
 
     @classmethod
@@ -453,6 +468,7 @@ class SessionInitEnvelope:
                 dict(t) for t in (d.get("client_tools") or [])
                 if isinstance(t, dict)
             ],
+            created_by=_optional_str(d.get("created_by")),
         )
 
 

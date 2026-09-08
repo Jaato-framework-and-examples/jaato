@@ -17,7 +17,8 @@ from typing import Any, Callable, Dict, List, Optional
 
 from jaato_sdk.plugins.base import (
     UserCommand, CommandParameter, CommandCompletion,
-    ToolResultEnrichmentResult, HelpLines, PluginSetting
+    ToolResultEnrichmentResult, HelpLines, PluginSetting,
+    TRAIT_SLOT_SCOPED,
 )
 from jaato_sdk.plugins.model_provider.types import (
     ToolSchema,
@@ -457,7 +458,23 @@ class LSPToolPlugin(RunnerForwardingMixin):
     background thread with an asyncio event loop to handle the async LSP
     protocol.  Which of the two sources answers is decided in exactly one
     place, ``_language_servers_from_profile``.
+
+    **Lifetime is the pool slot, not the session.**  The instance owns a
+    background thread and, through it, one language-server subprocess per
+    connected server — jdtls costs minutes to start and hundreds of MB to
+    hold.  :data:`TRAIT_SLOT_SCOPED` is what makes
+    :meth:`reset_for_next_session`'s keep-everything answer reachable: the
+    runner carries this instance across the cascade session boundary
+    instead of dropping it, so ``initialize()`` early-returns on
+    ``_initialized`` and the warm servers are reused.  Without the trait
+    the next ``session.bootstrap`` built a fresh instance and the old one
+    was garbage — while its jdtls kept running, owned by nobody (#890).
+
+    ``shutdown()`` is therefore the slot's teardown, not the session's,
+    and it is the only thing that reaps the servers.
     """
+
+    plugin_traits = frozenset({TRAIT_SLOT_SCOPED})
 
     def __init__(self):
         self._clients: Dict[str, LSPClient] = {}
@@ -1386,6 +1403,31 @@ class LSPToolPlugin(RunnerForwardingMixin):
             )
         return clamped
 
+    def set_session_id(self, session_id: Optional[str]) -> None:
+        """Re-stamp the session identity on a carried-over instance.
+
+        A slot-scoped plugin outlives the session that constructed it
+        (#890), so the ``session_id`` this plugin read from
+        ``initialize(config)`` names the FIRST session of the cascade and
+        goes stale at every boundary after it — ``initialize()``
+        early-returns on ``_initialized``, so nothing else refreshes it.
+        The registry broadcasts the new id on adoption, which lands here.
+
+        Only trace-log identity is affected: ``_session_id`` tags every
+        ``_trace`` line and disambiguates concurrent sessions in
+        ``.jaato/logs/lsp_debug.log``.  Connections, the background thread
+        and the config cache are deliberately untouched — carrying them is
+        the point of the trait.
+        """
+        if session_id == self._session_id:
+            return
+        previous = self._session_id
+        self._session_id = session_id
+        self._trace(
+            f"set_session_id: {previous!r} -> {session_id!r} "
+            f"(slot-scoped instance serving a new cascade session)"
+        )
+
     def set_workspace_path(self, path: str) -> None:
         """Set the workspace path for finding config files.
 
@@ -1513,6 +1555,17 @@ class LSPToolPlugin(RunnerForwardingMixin):
         "between cascade sessions"; for lsp specifically, the contract
         is "don't touch anything".  ``shutdown()`` is the final
         cascade-end teardown — still tears down clients + thread.
+
+        **This no-op was unreachable until #890.**  It ran on the
+        instance the outgoing session used, and that instance was then
+        dropped: every ``session.bootstrap`` built a fresh registry and
+        called ``create_plugin()`` again, so the state this method
+        carefully preserved belonged to an object nobody read from — and
+        the jdtls it had started kept running with no owner.  A 5-subphase
+        cascade held three live JVMs (~2.3 GB) and paid three cold starts.
+        The class-level :data:`TRAIT_SLOT_SCOPED` declaration is what
+        carries the instance across the boundary and makes the answer
+        below true.
         """
         self._trace(
             "reset_for_next_session: NO-OP — LSP client connections + "

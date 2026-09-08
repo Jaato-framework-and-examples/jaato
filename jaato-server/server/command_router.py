@@ -329,8 +329,12 @@ class CommandRouter:
             self._handle_post_auth_response(client_id, event)
             return
 
-        # Route to session
-        self._session_manager.handle_request(client_id, session_id, event)
+        # Route to session.  The transport's authenticated user rides
+        # along so a permission response can be attributed (#859).
+        self._session_manager.handle_request(
+            client_id, session_id, event,
+            user_id=self._event_sink.get_client_user(client_id),
+        )
 
     # ------------------------------------------------------------------
     # Session commands

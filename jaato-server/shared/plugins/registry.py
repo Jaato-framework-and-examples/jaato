@@ -256,6 +256,11 @@ class PluginRegistry:
         # later claim on an occupied name can name the incumbent
         # (issue #684).
         self._plugin_sources: Dict[str, PluginOrigin] = {}
+        # Names registered by :meth:`adopt_plugin` — instances carried
+        # over from a previous session on the same pool slot rather than
+        # constructed by discovery (#890).  Kept so introspection can
+        # tell a warm instance from a fresh one.
+        self._adopted: Set[str] = set()
         self._exposed: Set[str] = set()
         self._enrichment_only: Set[str] = set()  # Plugins for prompt enrichment only
         self._configs: Dict[str, Dict[str, Any]] = {}
@@ -1611,6 +1616,112 @@ class PluginRegistry:
         for name in list(self._exposed):
             self.unexpose_tool(name)
 
+    def adopt_plugin(
+        self,
+        name: str,
+        plugin: AnyPlugin,
+        origin: Optional[PluginOrigin] = None,
+        *,
+        enrichment_only: bool = False,
+    ) -> None:
+        """Register an ALREADY-CONSTRUCTED plugin instance before discovery.
+
+        The carry-over half of :data:`~jaato_sdk.plugins.base.TRAIT_SLOT_SCOPED`
+        (#890).  A pool slot that serves several cascade sessions builds a
+        fresh registry per ``session.bootstrap``; without this the fresh
+        registry calls ``create_plugin()`` again and the previous instance —
+        along with whatever OS resource it owned — is simply dropped.  The
+        runner moves slot-scoped instances into a slot-level store at the
+        session boundary and adopts them here on the next bootstrap.
+
+        Adoption must run BEFORE :meth:`discover`, because both discovery
+        paths skip a name that is already registered.  That skip is the
+        mechanism: an adopted plugin keeps its instance and discovery never
+        constructs a rival.  Passing the ``origin`` recorded for the
+        previous registration also keeps the skip quiet — the
+        already-provided-by warning exempts a collision between two
+        registrations of the same module (see :meth:`_warn_name_taken`), so
+        an adopted built-in does not masquerade as a shadowing attempt.
+
+        The instance is registered but NOT exposed: ``expose_all`` still runs
+        for it, which calls ``initialize()`` with this session's config.  A
+        slot-scoped plugin is expected to early-return on its own
+        ``_initialized`` guard, which is precisely what preserves the warm
+        resource across the boundary.
+
+        Args:
+            name: Plugin name to register under.
+            plugin: The live instance carried over.
+            origin: Provenance recorded for the previous registration.
+                Defaults to a directory-scan origin for the built-in
+                package, which is what a built-in carries.
+            enrichment_only: True when the previous registry had this
+                plugin in its enrichment-only set (it provides no tools).
+        """
+        self._plugins[name] = plugin
+        self._plugin_sources[name] = origin or PluginOrigin(
+            name=name,
+            via="directory",
+            module=f"{_BUILTIN_PLUGIN_PACKAGE}.{name}",
+        )
+        self._adopted.add(name)
+        if enrichment_only:
+            self._enrichment_only.add(name)
+        self._tool_plugin_cache.clear()
+        _trace(f" Plugin '{name}' adopted (carried over from a previous session)")
+
+    def is_adopted(self, name: str) -> bool:
+        """True when ``name`` was registered by :meth:`adopt_plugin`.
+
+        Distinguishes an instance carried over from a previous session on
+        the same pool slot from one discovery constructed for this session.
+        """
+        return name in self._adopted
+
+    def shutdown_all(self, skip: Optional[Set[str]] = None) -> List[str]:
+        """Shut down every INITIALIZED plugin and forget it.
+
+        The teardown counterpart of :meth:`expose_all`.  ``unexpose_all``
+        covers only ``_exposed``; enrichment-only plugins are initialized
+        through the same path and hold resources too, so a teardown that
+        skips them is not a teardown.
+
+        Nothing called this before #890: the runner dropped its registry
+        reference at the session boundary and relied on garbage collection,
+        which does not terminate a subprocess a plugin started.
+
+        Args:
+            skip: Plugin names to leave alone — the slot-scoped instances
+                the caller is about to carry into the next session.
+
+        Returns:
+            Names of plugins whose ``shutdown()`` raised.  The plugin is
+            forgotten regardless; a failed teardown must not wedge the
+            slot.
+        """
+        skip = skip or set()
+        errors: List[str] = []
+        for name in list(self._exposed | self._enrichment_only):
+            if name in skip:
+                continue
+            plugin = self._plugins.get(name)
+            if plugin is None:
+                continue
+            try:
+                plugin.shutdown()
+            except Exception as exc:  # noqa: BLE001 — per-plugin boundary
+                logger.warning(
+                    "Plugin '%s' shutdown() during registry teardown "
+                    "failed: %s. Continuing.", name, exc, exc_info=True,
+                )
+                self._failed_plugins[name] = ("shutdown", str(exc))
+                errors.append(name)
+            self._exposed.discard(name)
+            self._enrichment_only.discard(name)
+            self._configs.pop(name, None)
+        self._tool_plugin_cache.clear()
+        return errors
+
     def collect_prerequisite_policies(self) -> list:
         """Collect prerequisite policies from all exposed plugins.
 
@@ -1706,18 +1817,37 @@ class PluginRegistry:
                     _trace(f"  -> {name}.set_config_root() failed: {exc}")
 
     def set_session_id(self, session_id: Optional[str]) -> None:
-        """Set the session_id injected into plugin configs at init.
+        """Set the session_id injected into plugin configs at init, and
+        broadcast it to plugins that track it themselves.
 
-        Server 0.6.129+: matches :meth:`set_workspace_path` /
-        :meth:`set_config_root` shape but doesn't broadcast — session_id
-        doesn't change mid-session, so no broadcast hook needed.  The
-        value is read by :meth:`_augment_plugin_config` at
-        :meth:`expose_tool` time.
+        Server 0.6.129+: matched :meth:`set_workspace_path` /
+        :meth:`set_config_root` in shape but deliberately did not
+        broadcast, on the reasoning that session_id doesn't change
+        mid-session.  The value is read by :meth:`_augment_plugin_config`
+        at :meth:`expose_tool` time, which covers every plugin that
+        learns its session id from ``initialize(config)``.
+
+        A slot-scoped plugin (#890) is the case that reasoning missed.
+        It is carried across the cascade session boundary and its
+        ``initialize()`` early-returns, so the id in its config is the id
+        of the session that constructed it — not the session now running.
+        For ``lsp`` that id names the trace log, so every stage after the
+        first wrote under the first stage's tag.  Broadcasting keeps the
+        two in step; plugins without the method are skipped, so this is a
+        no-op for everything that already learns its id at init.
 
         Args:
             session_id: Session identifier, or ``None`` to clear.
         """
         self._session_id = session_id
+        for name, plugin in self._plugins.items():
+            if plugin is None or not hasattr(plugin, 'set_session_id'):
+                continue
+            try:
+                plugin.set_session_id(session_id)
+                _trace(f"  -> {name}.set_session_id()")
+            except Exception as exc:  # noqa: BLE001 — broadcast boundary
+                _trace(f"  -> {name}.set_session_id() failed: {exc}")
 
     @property
     def session_id(self) -> Optional[str]:
