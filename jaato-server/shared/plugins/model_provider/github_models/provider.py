@@ -21,6 +21,7 @@ import json
 import os
 from shared.session_context import get_workspace_root, get_config_root
 from shared.secret_repr import secret_safe_repr
+from shared.tool_id_map import wire_name_trace_fields
 import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
@@ -1852,6 +1853,13 @@ class GitHubModelsProvider(ModalityCapabilityMixin):
                         args=args,
                         unreadable_args=unreadable_args,
                     )
+                    # The name may have arrived on a later delta than the
+                    # one that opened the call, so the START record can be
+                    # nameless; this one never is (#873).
+                    self._trace(
+                        f"TOOL_CALL_END idx={idx} id={tool_id!r} "
+                        + wire_name_trace_fields(sanitized_name)
+                    )
                     parts.append(Part.from_function_call(fc))
                     function_calls.append(fc)
             tool_call_accumulators.clear()
@@ -1901,7 +1909,13 @@ class GitHubModelsProvider(ModalityCapabilityMixin):
                             # Log first occurrence of tool call
                             tc_id = tc.get("id")
                             tc_name = tc.get("function", {}).get("name", "")
-                            self._trace(f"TOOL_CALL_START idx={idx} id={tc_id!r} name={tc_name!r}")
+                            # ``name`` is the hashed wire id; the resolved
+                            # ``tool_name`` beside it is what a reader of the
+                            # journal can actually use (#873).
+                            self._trace(
+                                f"TOOL_CALL_START idx={idx} id={tc_id!r} "
+                                + wire_name_trace_fields(tc_name)
+                            )
                             tool_call_accumulators[idx] = {
                                 "id": tc_id,
                                 "type": "function",

@@ -127,7 +127,7 @@ from .._prose_tools import (
     rewrite_prose_tool_calls,
 )
 from shared.app_identity import AppIdentity, resolve_app_identity
-from shared.tool_id_map import tool_choice_to_wire
+from shared.tool_id_map import tool_choice_to_wire, wire_name_trace_fields
 
 from .env import (
     DEFAULT_BASE_URL,
@@ -1853,6 +1853,13 @@ class OpenRouterProvider(OpenAIMediaOutputMixin, ModalityCapabilityMixin):
                         args=args,
                         unreadable_args=unreadable_args,
                     )
+                    # The name may have arrived on a later delta than the
+                    # one that opened the call, so the START record can be
+                    # nameless; this one never is (#873).
+                    self._trace(
+                        f"TOOL_CALL_END idx={idx} id={tool_id!r} "
+                        + wire_name_trace_fields(func_name)
+                    )
                     parts.append(Part.from_function_call(fc))
                     function_calls.append(fc)
             tool_call_accumulators.clear()
@@ -1969,10 +1976,14 @@ class OpenRouterProvider(OpenAIMediaOutputMixin, ModalityCapabilityMixin):
                         for tc_delta in delta.tool_calls:
                             idx = tc_delta.index
                             if idx not in tool_call_accumulators:
+                                # ``name`` is the hashed wire id; the
+                                # resolved ``tool_name`` beside it is what a
+                                # reader of the journal can use (#873).
                                 self._trace(
                                     f"TOOL_CALL_START idx={idx} "
                                     f"id={tc_delta.id!r} "
-                                    f"name={getattr(tc_delta.function, 'name', '')!r}"
+                                    + wire_name_trace_fields(
+                                        getattr(tc_delta.function, 'name', ''))
                                 )
                                 tool_call_accumulators[idx] = {
                                     "id": tc_delta.id,
