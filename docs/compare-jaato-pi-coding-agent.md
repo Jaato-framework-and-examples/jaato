@@ -13,7 +13,7 @@ Two candidates:
 
 | | pi coding-agent | jaato free | jaato premium |
 |---|---|---|---|
-| Repo / version | `earendil-works/pi`, `packages/coding-agent` **0.85.1** (commit `b2602be`, 2026-09-07) | `jaato-server` **0.7.0**, `jaato-sdk` **0.16.0** (commit `699c16c`, 2026-09-08) | `jaato-premium` **0.1.205** (commit `3d4b8ab`) |
+| Repo / version | `earendil-works/pi`, `packages/coding-agent` **0.85.1** (commit `b2602be`, 2026-09-07) | `jaato-server` **0.7.0**, `jaato-sdk` **0.16.0** (commit `699c16c`, 2026-09-08) | `jaato-premium` **0.1.206** (commit `9d84676`) |
 | Language / runtime | TypeScript, Node ≥ 22.19 (Bun for standalone binaries) | Python 3, daemon + IPC/WebSocket; TS client SDK (pre-release) | Python plugin pack over jaato free |
 | Licence | **MIT** | **BUSL-1.1** (Apache-2.0 on 2030-09-01) | **Proprietary**, commercial agreement only |
 | Self-description | "deliberately minimal", "no built-in permission system", "no MCP, no sub-agents" | "server-first framework for multi-provider tool orchestration" | governance, PII, SSO and clustering add-on |
@@ -69,10 +69,12 @@ where you want the governance layer to live.**
   auditor-sealed audit stream, six secret backends (Vault, AWS SM, sops, pass,
   keyring, Infisical), a fork-budget containment fix, and the Daruma compiler
   that turns a declarative "business law" spec into deny-by-default evaluators,
-  mediated effects and anti-fabrication attestation checks. It does **not** add
+  mediated effects and anti-fabrication attestation checks, and (0.1.206)
+  `jaato-scaffold obligations`, an EU AI Act obligation-to-evidence map computed
+  against the installed framework. It does **not** add
   an identity model of its own (no IdP group to profile or tool mapping),
   a tenant identifier or per-tenant quotas ([WIP #860](https://github.com/Jaato-framework-and-examples/jaato/issues/860)), sandboxing, prompt-injection
-  detection, retention or any regulatory mapping, and several of its own backlog items are open.
+  detection or retention, and several of its own backlog items are open.
 
 **Decision rule of thumb**
 
@@ -488,9 +490,21 @@ refactor. Still no immutable event store or signed trail.
 
 ## 9. EU AI Act mapping
 
-Neither product mentions the EU AI Act, ISO 42001, NIST AI RMF or SOC 2
-anywhere (grep across all three trees is empty); an obligations map for jaato
-is [WIP #867](https://github.com/Jaato-framework-and-examples/jaato/issues/867). What follows maps the
+pi does not mention the EU AI Act, ISO 42001, NIST AI RMF or SOC 2 anywhere,
+and neither did jaato until this assessment was written. jaato premium 0.1.206
+(premium PR #68) now ships **`jaato-scaffold obligations`**: 23 deployer-side
+obligations across Articles 9–17 and 26 mapped to 122 evidence rows (90 in the
+free tree, 32 premium), each naming the primitive, the artefact it produces
+(file, event, span attribute), the gap and what stays with the deployer. It is
+computed rather than written: every row carries a check resolved against the
+installed jaato-server, jaato-sdk and jaato-premium (SDK event catalog, plugin
+directories, profile-schema keys, source literals, entry points), `--check`
+fails CI when a row drifts, `--workspace` adds what a given workspace enables,
+`--json` feeds a questionnaire, and articles with no primitive (9, 11, 17) say
+so. Verified here: `--check` passes against the checked-in
+`docs/design/eu-ai-act-obligations-map.md` (120 verified, 2 declared, 0
+unresolved rows). It labels itself "not legal advice". A free-tree copy of
+the map is [WIP #867](https://github.com/Jaato-framework-and-examples/jaato/issues/867). What follows is this document's own, shorter map of the
 *deployer-side* obligations most harness builders will meet (the Act's high-risk
 provisions, Articles 9–15, and the deployer duties in Article 26) to primitives.
 Whether a given harness is high-risk is a legal determination this document
@@ -503,13 +517,15 @@ does not make.
 | **Human oversight** (Art. 14): ability to interrupt, override, not act on output | `abort()`, steering; approval only via extension | Permission prompts, out-of-band approval channels that suspend the session, clarification, stop, completion gates | + HandoffGate park and resume (demonstrated) |
 | **Accuracy, robustness, cybersecurity** (Art. 15): resilience to manipulation, e.g. prompt injection | Explicitly out of scope | Untrusted-content boundary, egress allowlist, AppArmor, permission gating | + default-deny compiled evaluators |
 | **Data governance** (Art. 10) and GDPR interplay: minimisation, protection of personal data | `blockImages`, `--no-session` | Redaction seams, local/EU providers | Four-seat pseudonymisation |
-| **Risk management, conformity documentation** (Art. 9, 11, 17) | Nothing | Nothing | Nothing |
+| **Risk management, conformity documentation** (Art. 9, 11, 17) | Nothing | Nothing | Nothing (the obligations map says so per article) |
+| **Obligation-to-evidence map** (the page a procurement review asks for first) | Nothing | Build from this section ([WIP #867](https://github.com/Jaato-framework-and-examples/jaato/issues/867)) | `jaato-scaffold obligations`, computed and drift-checked; `--workspace` shows what this deployment enables |
 | **Reproducibility of a decision** | Fork/resume of the session tree; no seed | `session.wake` revives a finished session under its persisted profile and rendered prompt and can be asked to account for a decision; `resolve_fork_point` + `replay_messages` re-run the loop from any message, tool call or timestamp; profile sets swap the interrogation contract; `echo` provider for deterministic CI | Same primitives wrapped as model-callable tools (`session_ops`) |
 
 Honest reading: jaato gives a deployer more Article 12/14/15 *evidence* out of
 the box; pi gives a clean substrate and expects you to build the controls.
-Neither produces the documentation set (risk register, technical file,
-instructions for use). Budget for that regardless.
+Neither produces the risk register, technical file or instructions for use;
+premium now produces the obligation-to-evidence map the technical file cites.
+Budget for the rest regardless.
 
 ## 10. Prompt injection and untrusted content
 
@@ -936,7 +952,7 @@ conditions of adoption, not treat their absence as a design choice.
 | Watching a whole cascade as one thing | build (correlate JSONL files by hand) | ships (`cascade_events`, observer archetype, agent-graph spans) | ships + live timeline and dashboard |
 | Finding out what the installed framework can do, and validating config before a run | read the docs and types | `jaato-scaffold explain` / `validate` / `new --dry-run`, `jaato-doctor` | same, plus `compile` |
 | Multi-user server with auth | build | daemon + token ships; SSO build | ships (OIDC) |
-| Regulatory documentation | build | build (obligations map [WIP #867](https://github.com/Jaato-framework-and-examples/jaato/issues/867)) | build |
+| Regulatory documentation | build | obligations map [WIP #867](https://github.com/Jaato-framework-and-examples/jaato/issues/867); risk register, technical file, instructions for use build | obligations map ships (`jaato-scaffold obligations`); the rest build |
 
 ## 17. Risks to weigh
 
@@ -986,7 +1002,8 @@ must show auditors permission gating, resource confinement, budgets, tracing
 and a PII story, **jaato free is the lower-effort base, and premium closes the
 SSO, secrets and pseudonymisation gaps if the commercial terms work**. Plan the
 remaining build (approver identity on events, group-to-profile binding,
-retention, signed audit, regulatory documentation) at roughly 6–12 engineer-weeks on top.
+retention, signed audit, the regulatory documents beyond the obligations map)
+at roughly 6–12 engineer-weeks on top.
 
 For a corporation that will **ship a product**, is a TypeScript shop, or
 already runs every agent in a hardened container with a gateway that holds
@@ -996,7 +1013,8 @@ governance layer honestly: permission engine, limits, redaction, OTel adapter,
 MCP bridge and a multi-user service are all yours, realistically 3–6
 engineer-months before parity with what jaato free ships today.
 
-Either way, the three things nobody ships — approver identity in the audit
-record ([WIP #859](https://github.com/Jaato-framework-and-examples/jaato/issues/859)), data-subject erasure tooling ([WIP #861](https://github.com/Jaato-framework-and-examples/jaato/issues/861)), and the AI Act
-documentation set ([WIP #867](https://github.com/Jaato-framework-and-examples/jaato/issues/867)) — should be on the plan from day one; retention
+Either way, the two things nobody ships — approver identity in the audit
+record ([WIP #859](https://github.com/Jaato-framework-and-examples/jaato/issues/859)) and data-subject erasure tooling ([WIP #861](https://github.com/Jaato-framework-and-examples/jaato/issues/861)) — should be on
+the plan from day one, as should the AI Act documents beyond the obligations
+map premium now generates (the free-tree copy is [WIP #867](https://github.com/Jaato-framework-and-examples/jaato/issues/867)); retention
 itself is a storage-policy task on jaato's plain-file layout.
