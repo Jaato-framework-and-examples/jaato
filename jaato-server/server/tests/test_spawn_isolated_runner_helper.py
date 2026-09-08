@@ -1106,11 +1106,15 @@ def _inject_parent_session(sm, parent_session_id: str, parent_limits):
     Builds the minimum attribute chain
     ``session.server._profile.runtime_limits``.  ``parent_limits``
     can be a ``RuntimeLimits`` instance OR ``None`` (to exercise the
-    no-parent-limits branch)."""
+    no-parent-limits branch).
+
+    ``created_by`` mirrors the real ``Session`` field (#859): the spawn
+    path reads the parent's authenticated user straight off the record,
+    with no fallback, so the stub must carry it like a session does."""
     from types import SimpleNamespace
     profile = SimpleNamespace(runtime_limits=parent_limits)
     server = SimpleNamespace(_profile=profile)
-    session = SimpleNamespace(server=server)
+    session = SimpleNamespace(server=server, created_by=None)
     sm._sessions[parent_session_id] = session
 
 

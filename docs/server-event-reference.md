@@ -405,6 +405,9 @@ Event
 | `tool_name` | `str` | Tool name |
 | `granted` | `bool` | Whether permission was granted |
 | `method` | `str` | `"user"`, `"whitelist"`, `"blacklist"`, or `"default"` |
+| `comment` | `str` | Advisory comment (`yc:` response or `ALLOW_WITH_COMMENT` evaluator) |
+| `user_id` | `Optional[str]` | Daemon-authenticated user of the client that answered the prompt (#859); `None` for policy decisions and unauthenticated (IPC) clients |
+| `approver` | `Optional[str]` | Identity an external approval system attached to its webhook / file response (#859); recorded as claimed |
 
 ---
 

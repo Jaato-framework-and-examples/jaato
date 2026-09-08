@@ -708,6 +708,29 @@ def _maybe_self_confine(envelope: SessionInitEnvelope) -> None:
         ) from exc
 
 
+def _stamp_daemon_identity(envelope: SessionInitEnvelope, session: Any) -> None:
+    """Stamp the daemon's session id and the authenticated creator onto
+    the runner-side session (bootstrap steps 3b / 3c).
+
+    ``session_id`` is this session's daemon id — every runner-tier
+    consumer of the per-session id (memory ``source_session``, telemetry
+    ``jaato.session_id``, ``{{session_id}}``) reads it from here rather
+    than from shared registry state.
+
+    ``created_by`` (#859) is the user the daemon authenticated for the
+    creating client.  Until this stamp nothing called
+    ``set_client_user_id`` on the runner-side session, so the telemetry
+    ``user.id`` attribute and the ledger's ``user_id`` stayed empty on
+    every runner-tier session.  Absent on IPC sessions and on envelopes
+    from older daemons — then nothing is stamped, as before.
+    """
+    if envelope.session_id:
+        session.set_daemon_session_id(envelope.session_id)
+    created_by = getattr(envelope, "created_by", None)
+    if created_by:
+        session.set_client_user_id(created_by)
+
+
 def _maybe_install_child_callback(
     envelope: SessionInitEnvelope, session: Any,
 ) -> None:
@@ -1036,8 +1059,7 @@ def bootstrap_session(
     # its OWN JaatoSession, so stamping the id here (envelope.session_id
     # is this session's daemon id) gives every consumer a per-execution,
     # per-sibling-correct value via ``get_current_session()``.
-    if envelope.session_id:
-        session.set_daemon_session_id(envelope.session_id)
+    _stamp_daemon_identity(envelope, session)
 
     # ---- 4. Phase 5 §5.10c — install AppArmor child-profile
     # transition callback on subprocess-spawning plugins.

@@ -158,6 +158,21 @@ if TYPE_CHECKING:
     from shared.runtime_limits import RuntimeLimits
 
 
+def _permission_attribution(perm_info: Dict[str, Any]) -> Dict[str, str]:
+    """The identity keys a permission decision carries, for the ledger (#859).
+
+    ``user_id`` is the daemon-authenticated responder, ``approver`` the
+    name an external approval system attached; the permission plugin sets
+    them only for channel decisions, so a policy decision yields ``{}``
+    and the ledger record gains no key rather than a ``None``.
+    """
+    return {
+        key: perm_info[key]
+        for key in ('user_id', 'approver')
+        if perm_info.get(key)
+    }
+
+
 class ToolExecutor:
     """Registry mapping tool names to callables.
 
@@ -1236,7 +1251,9 @@ class ToolExecutor:
                     permission_meta['was_edited'] = True
                 if perm_info.get('comment') and allowed:
                     permission_meta['comment'] = perm_info['comment']
-                # Record permission check to ledger
+                # Record permission check to ledger.  ``user_id`` /
+                # ``approver`` (#859) say WHO decided a channel prompt;
+                # absent for policy decisions, like the event's fields.
                 if self._ledger is not None:
                     self._ledger._record('permission-check', {
                         'tool': name,
@@ -1244,6 +1261,7 @@ class ToolExecutor:
                         'allowed': allowed,
                         'reason': perm_info.get('reason', ''),
                         'method': perm_info.get('method', 'unknown'),
+                        **_permission_attribution(perm_info),
                     })
                 if not allowed:
                     if debug:

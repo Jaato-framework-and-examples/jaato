@@ -211,6 +211,7 @@ class PromptOperatorHandler:
         *,
         edited_arguments: Optional[Dict[str, Any]] = None,
         comment: Optional[str] = None,
+        user_id: Optional[str] = None,
     ) -> bool:
         """Resolve the pending future for *request_id*.
 
@@ -220,6 +221,15 @@ class PromptOperatorHandler:
         resolved; ``False`` if no future was waiting (e.g. the
         client responded after the prompt timed out, or the runner
         cancelled the call before the response arrived).
+
+        Args:
+            user_id: The identity the transport authenticated for the
+                responding client (``get_client_user(client_id)``),
+                or ``None`` when it has none (local IPC).  Rides the
+                ``PromptResponse`` to the runner so the permission
+                plugin can attribute the decision (issue #859).  The
+                caller resolves it from the transport, never from the
+                request body.
         """
         fut = self._pending.get(request_id)
         if fut is None or fut.done():
@@ -229,6 +239,7 @@ class PromptOperatorHandler:
             response=response,
             edited_arguments=edited_arguments,
             comment=comment,
+            user_id=user_id,
         )
         fut.set_result(prompt_response)
         return True

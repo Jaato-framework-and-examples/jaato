@@ -263,7 +263,10 @@ def serialize_session_state(state: SessionState) -> Dict[str, Any]:
         # 2.8: profile_snapshot / rendered_instructions / agent_params --
         # a revived session RESTORES the recipe and the prompt it ran
         # under instead of re-deriving them from disk (issue #787).
-        'version': '2.8',
+        # 2.9: created_by -- the authenticated user the session was
+        # created for, so the record is attributable without telemetry
+        # (issue #859).
+        'version': '2.9',
         'session_id': state.session_id,
         'description': state.description,
         'created_at': state.created_at.isoformat(),
@@ -286,6 +289,9 @@ def serialize_session_state(state: SessionState) -> Dict[str, Any]:
         'config_root': state.config_root,
         'sandbox_mode': state.sandbox_mode,
         'agent_name': state.agent_name,
+        # 2.9+ (#859).  Fixed key list, like every field above: the
+        # dataclass field alone never reaches disk.
+        'created_by': state.created_by,
         'history': serialize_history(state.history),
         'budget_state': state.budget_state,
         # budget_control usage.  Enumerated explicitly like every other field
@@ -345,6 +351,7 @@ def deserialize_session_state(data: Dict[str, Any]) -> SessionState:
         config_root=data.get('config_root'),
         sandbox_mode=data.get('sandbox_mode'),
         agent_name=data.get('agent_name'),
+        created_by=data.get('created_by'),  # None on pre-2.9 records
         budget_state=data.get('budget_state'),
         budget_usage=data.get('budget_usage'),
         budget_exhausted_reason=data.get('budget_exhausted_reason'),

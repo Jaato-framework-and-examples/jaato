@@ -185,7 +185,7 @@ class TestSessionStateSerialization:
 
         data = serialize_session_state(state)
 
-        assert data["version"] == "2.8"
+        assert data["version"] == "2.9"
         assert data["session_id"] == "20251207_143022"
         assert data["description"] == "Test session"
         assert data["turn_count"] == 1
@@ -240,7 +240,7 @@ class TestSessionStateSerialization:
         )
 
         data = serialize_session_state(state)
-        assert data["version"] == "2.8"
+        assert data["version"] == "2.9"
         assert data["config_root"] == "/repo/.jaato"
         assert data["profile_name"] == "discovery"
 
@@ -274,7 +274,7 @@ class TestSessionStateSerialization:
             profile_spec=spec,
         )
         data = serialize_session_state(state)
-        assert data["version"] == "2.8"
+        assert data["version"] == "2.9"
         assert data["profile_spec"] == spec              # full recipe on the wire
 
         restored = deserialize_session_state(data)
@@ -543,6 +543,33 @@ class TestMessageProvenanceSerialization:
         data = serialize_session_state(state)
         assert data["agent_name"] == "telegram_chat"
         assert deserialize_session_state(data).agent_name == "telegram_chat"
+
+    def test_created_by_round_trip(self):
+        """2.9 (#859): the authenticated creator is on the record, so a
+        session is attributable after unload without telemetry."""
+        state = SessionState(
+            session_id="who_test",
+            history=[],
+            created_at=datetime(2026, 9, 8, 10, 0, 0),
+            updated_at=datetime(2026, 9, 8, 10, 0, 0),
+            created_by="sso|alice",
+        )
+        data = serialize_session_state(state)
+        assert data["version"] == "2.9"
+        assert data["created_by"] == "sso|alice"
+        assert deserialize_session_state(data).created_by == "sso|alice"
+
+    def test_pre_2_9_record_deserializes_created_by_none(self):
+        """Records written before 2.9 -- and unauthenticated sessions --
+        carry no user; deserialize to None."""
+        data = {
+            "version": "2.8",
+            "session_id": "old",
+            "created_at": "2026-06-30T12:00:00",
+            "updated_at": "2026-06-30T12:00:00",
+            "history": [],
+        }
+        assert deserialize_session_state(data).created_by is None
 
     def test_pre_2_6_record_deserializes_agent_name_none(self):
         """Pre-2.6 JSONs lack ``agent_name`` — deserialize to None (unchanged;

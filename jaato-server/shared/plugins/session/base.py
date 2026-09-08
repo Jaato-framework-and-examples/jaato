@@ -89,6 +89,21 @@ class SessionState:
     workspace_path: Optional[str] = None
     """Workspace path (directory) where this session was created."""
 
+    created_by: Optional[str] = None
+    """The authenticated user the session was created for (record version
+    2.9+, issue #859).
+
+    The daemon has held this in memory as ``Session.created_by`` since the
+    WS/SSO work, but the record never carried it, so once a session was
+    unloaded nothing on disk said whose it was -- an auditor had to join
+    the session id against telemetry ``user.id`` spans, and a keyless
+    deployment had no telemetry to join against.  Restored onto the daemon
+    ``Session`` and ferried to the revived runner session on load.
+
+    ``None`` on records written before 2.9 and on sessions created over an
+    unauthenticated transport (local IPC carries no user).
+    """
+
     config_root: Optional[str] = None
     """Framework-config root override at session-creation time.
 

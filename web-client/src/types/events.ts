@@ -121,6 +121,11 @@ export interface PermissionResolvedEvent extends BaseEvent {
   tool_name: string;
   granted: boolean;
   method?: string;
+  comment?: string;
+  /** Daemon-authenticated user of the client that answered (#859); null for policy decisions. */
+  user_id?: string | null;
+  /** Identity an external approval system attached to its response (#859). */
+  approver?: string | null;
 }
 
 // Clarification events
