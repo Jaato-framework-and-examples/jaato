@@ -15,7 +15,7 @@ tool access control, permission enforcement, and security boundaries.
 | **Per-agent tool scoping** | Plugin list per profile → registry only exposes listed tools | Tools list per Agent constructor | Tools list per `ToolNode`; middleware can filter dynamically by user role |
 | **Blacklist / whitelist** | Static + session-level, pattern-based (globs), argument-level | Not built-in; implementable in callbacks | Deep Agents: `-S` shell allow-list (specific cmds / `recommended` / `all`) + 13 blocked injection patterns |
 | **Session isolation** | ContextVar + threading.local; CI-enforced plugin safety | Separate Session objects; no thread isolation guarantees | Separate state per graph node; no isolation enforcement |
-| **Sandboxing** | Path scoping, shell metachar blocking, sanitization config; **AppArmor profiles** (premium) for kernel-level MAC | GKE Code Executor (container/microVM), VPC-SC | LangSmith Sandboxes (microVM), deprecated Pyodide |
+| **Sandboxing** | Path scoping, shell metachar blocking, sanitization config; **AppArmor profiles** for kernel-level MAC, in the free server ([setup guide](apparmor-setup.md)) | GKE Code Executor (container/microVM), VPC-SC | LangSmith Sandboxes (microVM), deprecated Pyodide |
 | **Auth delegation** | OAuth plugins per provider (Anthropic PKCE, GitHub device code, Google) | `ToolContext.request_credential()` + OAuth flows | Not built-in; manual token management |
 
 ---
@@ -232,7 +232,7 @@ deepagents run -S all                   # permit anything
 | Per-thread permission channels | Subagent approvals don't leak to parent |
 | Profile-scoped `env` vars | Only applied to the subagent's thread |
 | Path scoping / sanitization | Configurable allowed/denied filesystem paths |
-| **AppArmor profiles** (premium) | Kernel-level Mandatory Access Control — confines tool processes to declared file, network, and capability rules |
+| **AppArmor profiles** (free server, [setup guide](apparmor-setup.md)) | Kernel-level Mandatory Access Control — confines tool processes to declared file, network, and capability rules |
 
 ### Google ADK
 
@@ -258,7 +258,7 @@ deepagents run -S all                   # permit anything
 
 LangChain's strongest isolation story is **LangSmith Sandboxes** — true microVM isolation with binary authorization and network restrictions. However, this is a paid service, not a framework feature.
 
-**Comparison note:** Jaato's premium AppArmor support provides **kernel-level MAC** (Mandatory Access Control) — a different isolation approach that operates at the OS level rather than requiring container/microVM infrastructure. AppArmor profiles confine tool processes to declared filesystem paths, network access, and Linux capabilities, and are enforced by the kernel itself (not bypassable by the agent). This gives jaato a strong isolation primitive that doesn't require external infrastructure, though it complements rather than replaces container-level isolation for full defense-in-depth.
+**Comparison note:** Jaato's AppArmor support ships in the free server (`server/apparmor.py`, `server/cgroups.py`): WebSocket sessions are confined automatically when AppArmor is available, and IPC sessions opt in through `IPCClient(apparmor=True)` or a profile's `apparmor: true`. It provides **kernel-level MAC** (Mandatory Access Control) — a different isolation approach that operates at the OS level rather than requiring container/microVM infrastructure. AppArmor profiles confine tool processes to declared filesystem paths, network access, and Linux capabilities, and are enforced by the kernel itself (not bypassable by the agent). This gives jaato a strong isolation primitive that doesn't require external infrastructure, though it complements rather than replaces container-level isolation for full defense-in-depth.
 
 ---
 
@@ -272,7 +272,7 @@ LangChain's strongest isolation story is **LangSmith Sandboxes** — true microV
 - **Plugin (preload) syntax** — fine-grained control over tool loading strategy
 - **CI-enforced session safety** — automated tests catch cross-session leakage
 - **Profile-level GC strategy** — each agent role can have different context management
-- **AppArmor confinement** (premium) — kernel-level Mandatory Access Control that confines tool processes to declared file paths, network access, and Linux capabilities; enforced by the kernel, not bypassable by the agent
+- **AppArmor confinement** (free server) — kernel-level Mandatory Access Control that confines tool processes to declared file paths, network access, and Linux capabilities; enforced by the kernel, not bypassable by the agent
 
 ### Google ADK Only
 - **`ToolContext.request_credential()`** — first-class OAuth flow integrated into tool execution
@@ -309,7 +309,7 @@ LangChain's strongest isolation story is **LangSmith Sandboxes** — true microV
 1. ~~**Global guardrail plugins**~~ (from ADK) — ADK registers guardrail plugins on the Runner so they apply to all agents. Jaato achieves the same via **profile inheritance**: define permission policies in a base profile, and all derived profiles inherit those guardrails. This is declarative and auditable (checked into the repo), whereas ADK's approach requires imperative code.
 2. ~~**`request_credential()` in tool context**~~ (from ADK) — ADK's `request_credential()` targets interactive sessions where a user is present to complete an OAuth flow mid-conversation. Jaato targets automated setups (CI/CD, daemon mode, enterprise) where credentials are pre-provisioned via profile `env` vars with `${VAULT_SECRET_ID}` expansion. This is a deliberate design difference, not a gap.
 3. ~~**Graph-based interruption**~~ (from LangGraph) — LangGraph pauses graph execution and lets humans modify agent state before resuming. Jaato already covers both aspects: **async pause/resume** via webhook/queue approval channels (agent blocks on permission request, external system responds asynchronously), and **state modification** via editable tool calls (tools flagged as modifiable let the user invoke an editor to modify the full tool call — e.g., `createPlan()`, `writeFile()` — before execution proceeds). Different mechanism, same capabilities.
-4. ~~**Container/microVM sandbox integration**~~ (from both) — jaato already has kernel-level confinement via AppArmor (premium), and its server-first architecture (daemon mode with IPC/WebSocket) means the server can be deployed inside a container for full container-level isolation. This is a deployment choice, not a missing framework feature. Combined with AppArmor, this provides defense-in-depth comparable to or exceeding GKE Code Executor and LangSmith Sandboxes.
+4. ~~**Container/microVM sandbox integration**~~ (from both) — jaato already has kernel-level confinement via AppArmor (in the free server), and its server-first architecture (daemon mode with IPC/WebSocket) means the server can be deployed inside a container for full container-level isolation. This is a deployment choice, not a missing framework feature. Combined with AppArmor, this provides defense-in-depth comparable to or exceeding GKE Code Executor and LangSmith Sandboxes.
 
 ### New Opportunity Inspired by ADK
 5. **Runtime-injectable permission evaluators** (inspired by ADK's `before_tool_callback`) — Jaato's declarative JSON policies excel at static rules (patterns, globs, blacklists/whitelists), but some permission decisions require dynamic logic: checking an external policy service, evaluating argument combinations, applying time-based restrictions, or conditioning on session history. Support a `"evaluator"` field in permission configs that references a Python script:
