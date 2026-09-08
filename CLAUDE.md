@@ -903,7 +903,7 @@ for that surface):
 | Value | Meaning |
 |-------|---------|
 | absent / `default` | the framework set: `*_API_KEY`, `*_APIKEY`, `*_TOKEN`, `*_SECRET`, `*_SECRET_KEY`, `*_PASSWORD`, `*_PASSWD`, `*_ACCESS_KEY`, `*_ACCESS_KEY_ID`, `*_SECRET_ACCESS_KEY`, `*_PRIVATE_KEY`, `*_CREDENTIALS`, `ANTHROPIC_AUTH_TOKEN`, `GH_TOKEN`, `AWS_SESSION_TOKEN` |
-| `none` (also `[]`) | scrub nothing — the developer-desktop opt-out, logged at WARNING by each surface that applies it |
+| `none` | scrub nothing — the developer-desktop opt-out, logged at WARNING by each surface that applies it. The **only** spelling that disables: `[]`, `""`, a boolean, or a list holding only `!` exemptions are rejected (`invalid_scrub_secret_env`, fail closed), because in this codebase `plugins: []` means "the minimal set", not "off", and an author writing `[]` or `["!GH_TOKEN"]` to mean "nothing beyond the default" must not land on the leaky posture |
 | `"*_TOKEN"` | one glob (a lone string is one pattern, never split into characters) |
 | `[glob, ...]` | an explicit list; the entry `default` expands to the framework set in place |
 | `"!NAME"` in a list | an **exemption**: a variable matching it survives whatever else matches — `[default, '!GH_TOKEN']` keeps `gh` working while the provider key stays out of the shell |

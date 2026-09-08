@@ -7,6 +7,8 @@ with the default set), and a profile-level key with no surface to apply to.
 """
 from types import SimpleNamespace
 
+import pytest
+
 from shared.scaffold import introspect
 from shared.scaffold.validate import validate_profile
 
@@ -40,7 +42,7 @@ def test_profile_level_none_warns_per_enabled_surface():
 
 
 def test_per_surface_knob_decides_and_is_named():
-    diags = _validate(["cli", "mcp"], {"cli": {"scrub_secret_env": []}},
+    diags = _validate(["cli", "mcp"], {"cli": {"scrub_secret_env": "none"}},
                       scrub=["*_TOKEN"])
     assert _codes(diags, "secret_scrub_disabled") == [
         ("warn", "plugin_configs.cli.scrub_secret_env")]
@@ -51,9 +53,17 @@ def test_per_surface_knob_can_rescue_a_profile_level_none():
     assert _codes(diags, "secret_scrub_disabled") == []
 
 
-def test_only_exemptions_is_disabled():
-    diags = _validate(["cli"], scrub=["!GH_TOKEN"])
-    assert len(_codes(diags, "secret_scrub_disabled")) == 1
+@pytest.mark.parametrize("value", [[], "", ["!GH_TOKEN"]])
+def test_ambiguous_opt_out_is_an_error_not_a_disabled_warning(value):
+    # Only ``none`` disables.  ``[]`` / an exemption-only list read as "the
+    # default plus..." to an author, so they are refused (and fail closed at
+    # the plugin) rather than quietly selecting the leaky posture.
+    diags = _validate(["cli"], scrub=value)
+    [(sev, where)] = _codes(diags, "invalid_scrub_secret_env")
+    assert sev == "error" and where == "scrub_secret_env"
+    assert _codes(diags, "secret_scrub_disabled") == []
+    assert any("none" in d.message for d in diags
+               if d.code == "invalid_scrub_secret_env")
 
 
 def test_malformed_value_is_an_error_naming_fail_closed():

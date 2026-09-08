@@ -31,7 +31,8 @@ alike (see :func:`normalize_scrub_patterns`):
 
 ============================  =================================================
 ``default`` (or absent)        the framework set, :data:`DEFAULT_SECRET_ENV_PATTERNS`
-``none`` (also ``[]``)         scrub nothing — announced at WARNING
+``none``                       scrub nothing — announced at WARNING.  The ONLY
+                               spelling that disables the scrub (see below)
 ``"*_TOKEN"``                  one glob (a lone string is one pattern, never
                                split into characters)
 ``[glob, ...]``                an explicit list; the entry ``default`` expands
@@ -48,6 +49,16 @@ Precedence, most specific first: ``plugin_configs.<surface>.scrub_secret_env``
 value fails **closed** (the default set is applied and the defect logged),
 because the only outcome worse than a broken workflow is a silently-leaked
 credential.
+
+**Only ``none`` disables.**  An empty list, an empty string, a boolean, and a
+list holding nothing but ``!`` exemptions are all *rejected* rather than read
+as an opt-out.  Each is ambiguous in exactly the way this control cannot
+afford: in this codebase ``plugins: []`` idiomatically means "the minimal
+set", not "off", so an author writing ``scrub_secret_env: []`` (or
+``["!GH_TOKEN"]`` with the ``default`` entry forgotten) to mean "nothing
+beyond the default" would otherwise select the leaky posture #863 exists to
+eliminate.  Rejecting them costs nothing — the author who really wants the
+scrub off types ``none`` — and removes the ambiguity.
 
 Pairs with the egress proxy (feature #1): egress limits *where* a subprocess can
 connect; this limits *what secrets* it can read to send.  The eventual
@@ -175,6 +186,17 @@ def _expand_entries(entries: Iterable[Any]) -> Tuple[str, ...]:
     return tuple(out)
 
 
+#: The refusal for a value that LOOKS like an opt-out but is not spelled
+#: ``none`` — see the module docstring for why these are rejected rather than
+#: read as "off".
+_AMBIGUOUS_OPT_OUT = (
+    "scrub_secret_env: {what} is ambiguous — it could mean 'nothing beyond "
+    "the default' or 'off'.  Write 'none' to disable the scrub, 'default' "
+    "for the framework set, or a list such as [default, '!GH_TOKEN'] to "
+    "exempt a variable"
+)
+
+
 def normalize_scrub_patterns(value: Any) -> Tuple[str, ...]:
     """Turn a ``scrub_secret_env`` value into the pattern tuple it means.
 
@@ -190,26 +212,34 @@ def normalize_scrub_patterns(value: Any) -> Tuple[str, ...]:
 
     Raises:
         ValueError: For a value of an unsupported shape (a dict, a number, a
-            list holding a non-string).  Callers that must not fail — the
-            plugins — go through :func:`resolve_scrub_patterns`, which turns
-            this into a fail-closed default; the validator surfaces it as an
-            error instead.
+            boolean, a list holding a non-string), and for the ambiguous
+            opt-out spellings — ``[]``, ``""`` and an exemption-only list —
+            because ``none`` is the only way to disable the scrub.  Callers
+            that must not fail — the plugins — go through
+            :func:`resolve_scrub_patterns`, which turns this into a
+            fail-closed default; the validator surfaces it as an error.
     """
-    if value is None or value is True:
+    if value is None:
         return tuple(DEFAULT_SECRET_ENV_PATTERNS)
-    if value is False:
-        return ()
     if isinstance(value, str):
         text = value.strip()
-        if not text or text.lower() == SCRUB_NONE:
+        if text.lower() == SCRUB_NONE:
             return ()
         if text.lower() == SCRUB_DEFAULT:
             return tuple(DEFAULT_SECRET_ENV_PATTERNS)
+        if not text:
+            raise ValueError(_AMBIGUOUS_OPT_OUT.format(what="an empty string"))
         # A lone string is ONE pattern, never split into characters (which
         # would silently disable scrubbing — fail OPEN).
         return (text,)
     if isinstance(value, (list, tuple)):
-        return _expand_entries(value)
+        if not value:
+            raise ValueError(_AMBIGUOUS_OPT_OUT.format(what="an empty list"))
+        patterns = _expand_entries(value)
+        if is_scrub_disabled(patterns):
+            raise ValueError(_AMBIGUOUS_OPT_OUT.format(
+                what="a list with no scrub glob (only '!' exemptions)"))
+        return patterns
     raise ValueError(
         f"scrub_secret_env must be 'default', 'none', a glob, or a list of "
         f"globs; got {type(value).__name__}: {value!r}"

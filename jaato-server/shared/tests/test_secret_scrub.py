@@ -73,7 +73,9 @@ def test_scrub_env_honours_exemptions():
     }
 
 
-def test_only_exemptions_scrubs_nothing_and_reads_as_disabled():
+def test_only_exemptions_scrubs_nothing_at_the_primitive_and_reads_as_disabled():
+    # The PRIMITIVE is policy-free; the grammar layer above refuses this
+    # shape (see test_ambiguous_opt_out_spellings_are_rejected).
     assert scrub_env({"X_TOKEN": "v"}, ["!GH_TOKEN"]) == {"X_TOKEN": "v"}
     assert is_scrub_disabled(["!GH_TOKEN"])
     assert is_scrub_disabled(())
@@ -87,14 +89,30 @@ def test_absent_means_the_framework_set():
     assert normalize_scrub_patterns(None) == tuple(DEFAULT_SECRET_ENV_PATTERNS)
 
 
-@pytest.mark.parametrize("value", ["default", "DEFAULT", " default ", True])
+@pytest.mark.parametrize("value", ["default", "DEFAULT", " default "])
 def test_default_shorthand(value):
     assert normalize_scrub_patterns(value) == tuple(DEFAULT_SECRET_ENV_PATTERNS)
 
 
-@pytest.mark.parametrize("value", ["none", "NONE", "", [], (), False])
-def test_none_shorthand_is_the_explicit_opt_out(value):
+@pytest.mark.parametrize("value", ["none", "NONE", " none "])
+def test_none_is_the_explicit_opt_out(value):
     assert normalize_scrub_patterns(value) == ()
+
+
+@pytest.mark.parametrize("value", [[], (), "", "  ", ["!GH_TOKEN"], ["!A_*", "!B"]])
+def test_ambiguous_opt_out_spellings_are_rejected(value):
+    # ``none`` is the ONLY way to disable.  ``[]`` reads as "the minimal set"
+    # elsewhere in this codebase (``plugins: []``), and an exemption-only
+    # list is ``[default, '!X']`` with the ``default`` forgotten — either
+    # would otherwise select the leaky posture the flip exists to remove.
+    with pytest.raises(ValueError, match="ambiguous"):
+        normalize_scrub_patterns(value)
+
+
+@pytest.mark.parametrize("value", [True, False])
+def test_booleans_are_outside_the_grammar(value):
+    with pytest.raises(ValueError):
+        normalize_scrub_patterns(value)
 
 
 def test_lone_string_is_one_pattern_not_characters():
@@ -149,6 +167,14 @@ def test_resolve_malformed_fails_closed_with_an_error(caplog):
     assert rec.levelno == logging.ERROR
     assert "interactive_shell" in rec.getMessage()
     assert "fail closed" in rec.getMessage()
+
+
+def test_resolve_empty_list_fails_closed_not_open(caplog):
+    # The one shape most likely to be typed by mistake lands on the SAFE side.
+    with caplog.at_level(logging.ERROR, logger="shared.secret_scrub"):
+        out = resolve_scrub_patterns([], surface="cli")
+    assert out == tuple(DEFAULT_SECRET_ENV_PATTERNS)
+    assert any("ambiguous" in r.getMessage() for r in caplog.records)
 
 
 def test_resolve_explicit_list_is_silent(caplog):
