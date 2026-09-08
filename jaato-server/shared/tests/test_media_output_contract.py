@@ -30,6 +30,7 @@ from shared.plugins.model_provider._media_deltas import (
     extract_audio_delta,
 )
 from shared.plugins.model_provider.base import ModalityCapabilityMixin
+from jaato_sdk.plugins.model_provider.types import Part
 
 
 def _audio_delta(payload: bytes, transcript: str = ""):
@@ -656,3 +657,168 @@ class TestFinalMarksTheLastChunk:
         src = inspect.getsource(importlib.import_module(module_path))
         assert "media_pending" in src, "no one-slot buffer in this loop"
         assert "flush_media_stream" in src, "a held chunk would never be delivered"
+
+
+class TestTheWordsRideTheFinalChunk:
+    """The transcript reaches the wire on the chunk marked `final` (#869).
+
+    Every spoken turn produced a transcript inside the provider and no
+    client could obtain it: `emit_audio_delta` put the words in a
+    caller-owned sink, and the sink became a history Part only after
+    the stream closed -- past every point that emits to a client.  A
+    voice client watching a call saw 5.45 s of audio in 14 chunks and
+    an `ask()` that returned `''`; a call log could record how long the
+    agent spoke but not what it said.
+
+    The `pending` buffer already holds the last chunk back so it can be
+    marked `final`, and the transcript is complete at that moment, so
+    the words ride that chunk.  Under the SAME rule `ensure_spoken_part`
+    applies to history: a turn that wrote its own text already sent the
+    words as `AGENT_OUTPUT`, and a client must never get them twice.
+    """
+
+    def _frames(self):
+        return [
+            {"audio": {"transcript": "On a clear day, "}},
+            {"audio": {"data": base64.b64encode(b"one").decode()}},
+            {"audio": {"transcript": "the sky is blue."}},
+            {"audio": {"data": base64.b64encode(b"two").decode()}},
+            {"audio": {"expires_at": 1788}},
+        ]
+
+    def _run(self, frames, wrote_text=None, flush=True):
+        got, seq, pending, sink = [], 0, [], []
+        for f in frames:
+            seq = _media_deltas.emit_audio_delta(
+                f, got.append, seq, transcript_sink=sink, pending=pending,
+                wrote_text=wrote_text)
+        if flush:
+            _media_deltas.flush_audio_stream(
+                got.append, pending, sink, wrote_text)
+        return got, sink
+
+    def test_the_final_chunk_carries_the_whole_transcript(self):
+        got, _ = self._run(self._frames())
+        assert [(c.final, c.transcript) for c in got] == [
+            (False, ""), (True, "On a clear day, the sky is blue.")]
+
+    def test_intermediate_chunks_stay_wordless(self):
+        """Exactly once: a client logging `chunk` off every event must
+        not see a growing prefix on each one."""
+        got, _ = self._run(self._frames())
+        assert all(c.transcript == "" for c in got if not c.final)
+
+    def test_a_stream_with_no_marker_delivers_the_words_on_flush(self):
+        """A provider that sends no end-of-audio marker must not also be
+        one whose clients never learn what was said."""
+        got, _ = self._run(self._frames()[:-1])
+        assert got[-1].final is True
+        assert got[-1].transcript == "On a clear day, the sky is blue."
+
+    def test_a_turn_that_wrote_its_own_text_sends_no_transcript(self):
+        """The `ensure_spoken_part` rule, carried to the wire: the words
+        went out as AGENT_OUTPUT already."""
+        got, _ = self._run(self._frames(), wrote_text=lambda: True)
+        assert [c.final for c in got] == [False, True]
+        assert got[-1].transcript == ""
+
+    def test_wrote_text_is_read_at_the_marker_not_at_the_start(self):
+        """Text can arrive after the first audio chunk; the answer is a
+        live question, so the loop's accumulator is consulted THEN."""
+        written = []
+        frames = self._frames()
+        got, seq, pending, sink = [], 0, [], []
+        for i, f in enumerate(frames):
+            if i == 3:              # the model writes, mid-utterance
+                written.append("The sky is blue.")
+            seq = _media_deltas.emit_audio_delta(
+                f, got.append, seq, transcript_sink=sink, pending=pending,
+                wrote_text=lambda: bool(written))
+        assert got[-1].final is True and got[-1].transcript == ""
+
+    def test_without_the_predicate_the_words_always_go_out(self):
+        """A caller that has no text accumulator gets the transcript."""
+        got, _ = self._run(self._frames(), wrote_text=None)
+        assert got[-1].transcript == "On a clear day, the sky is blue."
+
+    def test_a_transcript_only_stream_still_emits_no_chunk(self):
+        """Acceptance: no playable chunk is invented to carry the words.
+        A turn with words and no bytes keeps them for history only."""
+        frames = [{"audio": {"transcript": "just words"}},
+                  {"audio": {"expires_at": 1}}]
+        got, sink = self._run(frames)
+        assert got == []
+        assert sink == ["just words"]
+
+    def test_the_wire_and_history_agree(self):
+        """One predicate behind both destinations, so a client's record
+        and the session's record can never diverge."""
+        from shared.plugins.model_provider._media_deltas import (
+            ensure_spoken_part, model_wrote_text)
+
+        for parts in ([], [Part.from_text("I wrote this")]):
+            got, sink = self._run(
+                self._frames(), wrote_text=lambda: model_wrote_text(parts))
+            ensure_spoken_part(parts, "".join(sink))
+            spoken_in_history = [
+                p.text for p in parts
+                if p.text == "On a clear day, the sky is blue."]
+            assert bool(got[-1].transcript) == bool(spoken_in_history)
+
+    def test_pending_text_counts_as_written(self):
+        """The loop flushes text into a Part only at a tool-call boundary
+        or the end of the stream, so at the marker a written answer is
+        still in the accumulator -- which must therefore be asked too."""
+        from shared.plugins.model_provider._media_deltas import model_wrote_text
+
+        assert model_wrote_text([], ["Hello"]) is True
+        assert model_wrote_text([], []) is False
+        assert model_wrote_text([], [""]) is False
+        assert model_wrote_text([Part.from_text("x")]) is True
+
+    @pytest.mark.parametrize("module_path", [
+        "shared.plugins.model_provider.openrouter.provider",
+        "shared.plugins.model_provider._openai_compat.base",
+    ])
+    def test_both_loops_pass_the_predicate(self, module_path):
+        """Both loops, on both calls that can release the final chunk --
+        or half the fleet keeps a transcript no client can see."""
+        import importlib, inspect
+        src = inspect.getsource(importlib.import_module(module_path))
+        assert "wrote_text = lambda: model_wrote_text(parts, accumulated_text)" in src
+        assert "media_pending, wrote_text," in src, \
+            "the marker path releases the final chunk without the words"
+        assert "media_pending, media_transcript, wrote_text)" in src, \
+            "the flush path releases the final chunk without the words"
+
+    def test_the_words_reach_the_client_event(self):
+        """End to end below the provider: decoder -> session delivery ->
+        the `on_tool_output` hook that becomes `ToolOutputEvent`.  The
+        transcript lands in `chunk` on the final media event, under the
+        reserved model-output call id, and nowhere else."""
+        from shared.jaato_session import JaatoSession, MODEL_MEDIA_CALL_ID
+
+        calls = []
+
+        class _Hooks:
+            def on_tool_output(self, **kw):
+                calls.append(kw)
+
+        session = JaatoSession.__new__(JaatoSession)
+        session._agent_id = "main"
+        session._ui_hooks = _Hooks()
+        session._trace = lambda *a, **k: None
+
+        seq, pending, sink = 0, [], []
+        for f in self._frames():
+            seq = _media_deltas.emit_audio_delta(
+                f, session._deliver_model_media, seq,
+                transcript_sink=sink, pending=pending,
+                wrote_text=lambda: False)
+        _media_deltas.flush_audio_stream(
+            session._deliver_model_media, pending, sink, lambda: False)
+
+        assert [c["call_id"] for c in calls] == [MODEL_MEDIA_CALL_ID] * 2
+        assert [(c["final"], c["chunk"]) for c in calls] == [
+            (False, ""), (True, "On a clear day, the sky is blue.")]
+        assert base64.b64decode(calls[-1]["data_b64"]) == b"two"
