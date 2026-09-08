@@ -852,7 +852,7 @@ Plugins can subscribe to enrich user prompts before they are sent to the model. 
 │  ┌─────────────────────────────────────────────────────────────────────┐   │
 │  │ Priority 40: template                                                │   │
 │  │ Detects embedded templates in injected content, extracts to         │   │
-│  │ .jaato/templates/, annotates prompt with extraction info            │   │
+│  │ .jaato/template_extracts/, annotates prompt with extraction info    │   │
 │  └─────────────────────────────────────────────────────────────────────┘   │
 │       │                                                                     │
 │       ▼                                                                     │
@@ -895,7 +895,7 @@ sequenceDiagram
     Note over Ref: Inject MODULE.md content<br/>with embedded templates
     Ref-->>PR: prompt with MODULE.md
     PR->>Tmpl: enrich_prompt(enriched)
-    Note over Tmpl: Detect {{var}} syntax<br/>Extract to .jaato/templates/
+    Note over Tmpl: Detect {{var}} syntax<br/>Extract to .jaato/template_extracts/
     Tmpl-->>PR: prompt + template annotations
     PR->>Multi: enrich_prompt(enriched)
     Note over Multi: Check for @image refs
@@ -926,7 +926,7 @@ class TemplatePlugin:
 
     def enrich_prompt(self, prompt: str) -> PromptEnrichmentResult:
         # Detect code blocks with {{ }} or {% %} syntax
-        # Extract to .jaato/templates/
+        # Extract to .jaato/template_extracts/
         # Annotate prompt with extraction info
         return PromptEnrichmentResult(prompt=enriched, metadata={...})
 ```

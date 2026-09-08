@@ -2,6 +2,7 @@
 
 import os
 import platform
+import re
 import sys
 from pathlib import Path
 from unittest.mock import patch, MagicMock
@@ -681,6 +682,120 @@ class TestRenderProfile:
                 "audit deny /workspace/.jaato/apparmor-fragments/** wlk"
                 in child_body
             ), "//child body missing apparmor-fragments write-deny"
+
+    def test_workspace_templates_writes_denied_in_all_profiles(
+        self, manager,
+    ):
+        """Pin: ``<workspace>/.jaato/templates/**`` is write-denied in
+        EVERY profile body — base, isolated sub-profile (§4.3.4),
+        tool_hat (§5.10), //child (§5.10).
+
+        Issue #893: a template is authored content that BECOMES code at
+        render time, and in a KB-driven pipeline it is where a governed
+        rule is *prevented* rather than merely detected.  Without this
+        deny a confined agent could rewrite ``Entity.tpl`` and then call
+        ``renderTemplateToFile`` — the constraint the template encoded is
+        gone and the generated file still looks entirely normal.  Same
+        ``wlk`` pattern as the other v13 narrow per-subpath denies.
+        """
+        # Column-aligned in the template, so match the padding loosely.
+        deny = re.compile(
+            r"audit deny /workspace/\.jaato/templates/\*\*\s+wlk,"
+        )
+
+        # Base profile
+        profile = manager._render_profile("s1", "/workspace")
+        assert deny.search(profile), (
+            "base profile missing templates write-deny"
+        )
+
+        # Isolated sub-profile
+        sub = manager._render_sub_profile(
+            parent_session_id="parent-A",
+            subagent_id="agent-B",
+            workspace_path="/workspace",
+        )
+        assert deny.search(sub), (
+            "isolated sub-profile missing templates write-deny"
+        )
+
+        # tool_hat body (extract via brace counting)
+        if "profile tool_hat" in profile:
+            tool_hat_body = self._extract_brace_body(
+                profile, "profile tool_hat",
+            )
+            assert deny.search(tool_hat_body), (
+                "tool_hat body missing templates write-deny"
+            )
+
+        # //child body
+        if "profile child" in profile:
+            child_body = self._extract_brace_body(
+                profile, "profile child",
+            )
+            assert deny.search(child_body), (
+                "//child body missing templates write-deny"
+            )
+
+    def test_workspace_template_routing_writes_denied_in_all_profiles(
+        self, manager,
+    ):
+        """``.jaato/template_routing.yaml`` is denied alongside the catalog.
+
+        The routing table decides WHERE a rendered template lands
+        (``TemplatePlugin._apply_path_routing``).  The plugin only ever
+        reads it, so denying costs nothing — and leaving it writable
+        would let an agent redirect generated files out from under the
+        rule the routing encodes, which is the #893 gap in another
+        shape.
+        """
+        deny = re.compile(
+            r"audit deny /workspace/\.jaato/template_routing\.yaml\s+wlk,"
+        )
+        profile = manager._render_profile("s1", "/workspace")
+        assert deny.search(profile), "base profile missing routing write-deny"
+
+        sub = manager._render_sub_profile(
+            parent_session_id="parent-A",
+            subagent_id="agent-B",
+            workspace_path="/workspace",
+        )
+        assert deny.search(sub), (
+            "isolated sub-profile missing routing write-deny"
+        )
+
+        for label in ("profile tool_hat", "profile child"):
+            if label in profile:
+                assert deny.search(
+                    self._extract_brace_body(profile, label)
+                ), f"{label} body missing routing write-deny"
+
+    def test_workspace_templates_stay_readable_and_extracts_writable(
+        self, manager,
+    ):
+        """The #893 deny is write-only, and it stops at the catalog.
+
+        ``renderTemplateToFile`` runs under ``tool_hat`` and must READ
+        the catalog, so templates get no read-deny (unlike agents/,
+        profiles/, prompts/ ...).  The template plugin's own runtime
+        writes go to the sibling ``.jaato/template_extracts/``, which
+        must stay under no deny at all — AppArmor does not let a
+        more-specific allow override a less-specific deny, so a
+        carve-out *under* the templates deny would not have worked.
+        """
+        profile = manager._render_profile("s1", "/workspace")
+
+        read_deny = re.compile(
+            r"audit deny /workspace/\.jaato/templates/\*\*\s+r,"
+        )
+        assert not read_deny.search(profile), (
+            "templates must stay readable — renderTemplateToFile reads "
+            "the catalog from inside tool_hat"
+        )
+        assert "/workspace/.jaato/template_extracts" not in profile, (
+            "the extracts directory must be under no deny; it falls "
+            "through to the broad workspace rwkl grant"
+        )
 
     def test_allows_reading_user_tier_services(self, manager):
         """Regression: SchemaStore's tiered lookup reads
