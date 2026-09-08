@@ -112,7 +112,7 @@ you must complete · **●○○** hook only, you build the feature · **○○�
 | Multi-agent | ●○○ example extension (subprocess per subagent) | ●●● subagents, profiles, cascades, payload schemas, runner pool | ●●● + handoff, remote spawn (currently broken per backlog) |
 | Extensibility model | ●●● 33 lifecycle events, TS extensions via jiti | ●●● 5 entry-point groups, daemon hooks, enrichment pipeline, traits | ●●● scaffold verbs |
 | Cross-language integration | ●●○ JSONL RPC/JSON modes; TS only | ●●● Python in-process, IPC, WS JSON, TS SDK (pre-npm) | ●●● + web components |
-| Supply chain / release integrity | ●●● pinned deps, shrinkwrap, `--ignore-scripts`, SHA256SUMS | ●●○ entry-point trust policy; TestPyPI only, no signed releases | ●○○ private git+ssh |
+| Supply chain / release integrity | ●●● pinned deps, shrinkwrap, `--ignore-scripts`, SHA256SUMS | ●●○ entry-point trust policy; TestPyPI today, PyPI intended once out of alpha; no signed releases yet | ●●○ delivered directly under the commercial licence, by design |
 | Licence for internal use | ●●● MIT | ●●● BUSL grant allows | commercial |
 | Licence for resale / embedding | ●●● MIT | ○○○ forbidden until 2030-09 | commercial |
 
@@ -594,7 +594,7 @@ handoff atoms and a HandoffGate; its remote cross-server spawn is flagged
 | | pi | jaato free | jaato premium |
 |---|---|---|---|
 | Dependency policy | exact pins enforced, `min-release-age=2`, shrinkwrap shipped, lifecycle-script allowlist, `npm audit signatures` scheduled | Python extras; entry-point allowlist + shadow policy | private git dependency |
-| Release artefacts | npm packages, Bun binaries, `SHA256SUMS` (checksums, no Sigstore/GPG), reproducible-from-source path | TestPyPI publish workflows only; no signed releases; `install.py` installer | git+ssh |
+| Release artefacts | npm packages, Bun binaries, `SHA256SUMS` (checksums, no Sigstore/GPG), reproducible-from-source path | three TestPyPI publish workflows (`sdk`, `server`, `tui`) with a version-exists guard; PyPI is the stated destination once the alpha label comes off; no signed releases yet; `install.py` installer | direct delivery under the commercial licence (maintainer-stated intent; no public channel by design) |
 | Tests | 535 test files (269 in coding-agent) | 767 test files, about 13,000 test functions | 63 files, about 1,000 tests, uneven (PII 168, secrets 1) |
 | Guards | biome, pinned-dep, entry-graph and shrinkwrap checks | required `contract-guards` CI job: protocol conformance, provider capability conformance, cyclomatic ratchet (≤15, 416 baselined), env-scope catalog ratchet | — |
 | Docs | 32 files / 12.6k lines in coding-agent, candid about limits | about 140 docs, about 70k lines, design docs record incidents | 18 docs, one operator doc stale |
@@ -604,7 +604,13 @@ handoff atoms and a HandoffGate; its remote cross-server spawn is flagged
 Both are young. pi's strength is disciplined packaging and a stable, documented
 extension contract. jaato's is breadth of shipped policy and unusually strong
 contract tests, offset by alpha labelling, no changelog and single-vendor
-concentration across free and premium.
+concentration across free and premium. On distribution, read jaato's current
+state as a stage rather than a stance: the three TestPyPI workflows are the
+rehearsal for PyPI, which the maintainer states is the intended channel for
+the free packages once they leave alpha, while premium will keep being handed
+over directly because its licence is a per-customer agreement. A procurement
+checklist should therefore ask for PyPI publication and release signing as
+conditions of adoption, not treat their absence as a design choice.
 
 ## 15. Harness-by-harness
 
@@ -658,7 +664,8 @@ concentration across free and premium.
 
 - BUSL licence; single licensor for both tiers.
 - Alpha status, no changelog, very large core modules; pin a version and own
-  the fork discipline.
+  the fork discipline. Packages reach TestPyPI today; PyPI publication is
+  stated intent for the exit from alpha, so pin by commit until then.
 - IPC socket is unauthenticated by design; multi-user must go through
   WebSocket.
 - Secret scrubbing and telemetry redaction are opt-in; a profile that forgets
@@ -668,7 +675,9 @@ concentration across free and premium.
 
 **jaato premium**
 
-- Proprietary, private-git distribution, no published pricing or SLA.
+- Proprietary; delivered directly under a per-customer agreement rather than
+  through a package index, which is deliberate given the licence. No
+  published pricing or SLA.
 - Open backlog items in the exact areas a buyer cares about: remote spawn
   broken, stale pseudonymisation operator doc, session journal in-memory only,
   drift subsystem under refactor.
