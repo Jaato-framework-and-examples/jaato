@@ -43,8 +43,9 @@ as they stand.
 
 What jaato does **not** hand you (§6): a native OpenAI / Azure / Bedrock
 provider (those route through OpenRouter or an OpenAI-compatible endpoint),
-node-granular checkpointing (the driver journals stage payloads instead),
-and an embedding memory (TradingAgents does not have one either, see §4.5).
+pipeline checkpointing as a framework feature (the driver journals stage
+payloads instead, at whatever granularity it chooses), and an embedding
+memory (TradingAgents does not have one either, see §4.5).
 
 ---
 
@@ -474,12 +475,27 @@ LangChain-core pieces (`ChatPromptTemplate`, `bind_tools`,
 ### 4.8 Checkpoint and resume
 
 TradingAgents checkpoints after every node and resumes a crashed run from
-the last one (`trading_graph.py:431-492`, opt-in). Its node granularity is
-the port's stage granularity, so a driver that appends each stage's
-`(stage_name, payload)` to a per-run journal keyed on the same
+the last one (`trading_graph.py:431-492`, opt-in). A driver that appends
+each stage's `(stage_name, payload)` to a per-run journal keyed on the same
 `sha256(ticker:date:run_signature)` idea (`checkpointer.py:28-38`) and skips
 journaled stages on restart gives the same behaviour in a few dozen lines.
 Within a debate, journal per turn. Clear on success, as upstream does.
+
+**The granularity is the driver's to choose, not a property of the
+framework.** Upstream's analysts are checkpointed per tool round trip only
+because each round trip happens to be a separate graph node (analyst →
+tool node → analyst). A port can run an analyst as one session and resume
+at the stage boundary, or split it into journaled sub-stages and resume
+finer than upstream does: a "choose indicators" stage whose payload is the
+list, a deterministic fetch (a `{{!py:…}}` prefetch or the driver itself,
+no model turn), and a "write the report" stage that receives the fetched
+data as prompt text. That is the Sentiment Analyst's pre-fetch pattern
+(§4.4) applied to the other three analysts, and it removes the one
+non-deterministic step upstream has — whether the model calls
+`get_verified_market_snapshot` before writing. The cost is the one
+upstream already pays: each sub-stage is a fresh session, so tool results
+reach the next step as forwarded text rather than as retained history, and
+upstream re-sends the whole message list to every node anyway.
 
 jaato's own session persistence (`session.wake`, `SessionState` with the
 profile snapshot and rendered instructions — CLAUDE.md "Session Revive")
@@ -676,7 +692,7 @@ a tool-use turn, which is the path a prose-only suite never exercises.
 | # | Gap | Severity | Mitigation |
 |---|---|---|---|
 | 1 | **No native `openai`, `azure`, `bedrock` providers.** `explain providers` lists 18; OpenAI, xAI, DeepSeek, Qwen, GLM, MiniMax, Mistral, Kimi, Groq are reached through `openrouter`; a self-hosted or third-party OpenAI-compatible endpoint through `nim` / `vllm` with a `base_url`. Azure OpenAI and Bedrock have no route today. | medium | write the two providers (the OpenAI-compatible base class makes Azure a base-URL + header variant); Bedrock is a genuine new adapter. Not needed for the first cut. |
-| 2 | **Stage-level, not node-level, resume.** Equivalent granularity for this pipeline, but it is driver code, not a framework feature. | low | ~50 lines; journal per debate turn. |
+| 2 | **Pipeline resume is driver code, not a framework feature.** jaato persists sessions, not pipeline position; the driver journals stage payloads. Granularity is the driver's choice — stage-level, or finer than upstream by splitting an analyst into choose / fetch / write sub-stages (§4.8). | low | ~50 lines; journal per debate turn and per sub-stage. |
 | 3 | **Provider quirks live in TradingAgents' client layer** (DeepSeek `reasoning_content` round-trip, MiniMax `reasoning_split`, content-block flattening). jaato's providers carry their own quirk tables; whether every TradingAgents-curated model behaves is a per-model check, not a design question. | low–medium | run the `echo`-free smoke on each model the profile set names; `quirks:` is the escape hatch. |
 | 4 | **Structured-output reliability on small models.** Upstream degrades to free text; jaato re-prompts within `max_turns` and the processor's `max_refusals`. A model that never calls `signal_completion` burns its budget and returns nothing. | medium | `on_exhausted: allow` plus `is_review` fallback; pick `max_turns` per stage from a dry run; `strict_tools` where the upstream supports it. |
 | 5 | **Per-stage session cost.** In-process, a session is a `JaatoSession` construction — cheap. In daemon mode each stage claims a warm pool slot (~7 s bootstrap per stage, shared across the cascade). Twelve-plus stages per run is fine; sub-second latency per node is not on offer either way. | low | in-process for the library path; daemon only when observers or multi-tenant isolation matter. |
