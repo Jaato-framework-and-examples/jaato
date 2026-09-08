@@ -1853,6 +1853,24 @@ of defensive `x.get(k) or ""` defaults can push an otherwise flat function over
 the line. The ceiling is 15 rather than 10 precisely to leave room for that; see
 the test module's docstring for the measurements behind the choice.
 
+### Comparison and Design Docs Are Checked Against the Tree
+
+`docs/compare-*.md` and the multimodal design doc carry claims an evaluator
+quotes — the licence, whether AppArmor is free, which wires carry images —
+and both comparison docs had drifted once before (#866). The guard is
+`jaato-server/shared/tests/test_docs_do_not_contradict_the_tree.py`, in the
+required `contract-guards` job:
+
+- no line a comparison doc attributes to jaato may call it MIT or open source
+  (the identifier is read from `jaato-server/pyproject.toml`; a competitor's
+  licence on its own line or in its own column is fine);
+- no comparison-doc line may call AppArmor premium while `server/apparmor.py`
+  ships in the free package;
+- the "Where jaato is now" table in `docs/design/multimodal-model-support.md`
+  must name exactly the providers whose `PROVIDER_CAPABILITIES` declare the
+  row's capability, so adding `pdf_input` to a provider means updating that
+  row.
+
 ### Docstring Maintenance
 
 Whenever you read or modify code, check that the docstrings on the classes, methods, and functions you touch are **present, accurate, and complete**. If they are missing, outdated, or misleading, update them as part of the same change. Specifically:
