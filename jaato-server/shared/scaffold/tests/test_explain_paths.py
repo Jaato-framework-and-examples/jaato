@@ -21,3 +21,23 @@ def test_paths_renders_both_layers_and_the_home_warning():
 def test_paths_is_listed_in_overview():
     _data, text = explain.overview()
     assert "jaato-scaffold explain paths" in text
+
+
+def test_paths_states_config_root_is_framework_owned():
+    """#896: the contents list implied ownership without ever stating it, so
+    an SDK author with jaato-shaped state (checkpoints, resume journals)
+    reasonably filed it under ``.jaato/`` and nothing failed -- until the
+    confinement deny surface moved onto the name."""
+    _data, text = explain.paths()
+    assert "FRAMEWORK-OWNED" in text
+    assert "<workspace>/.<yourapp>/" in text          # where it DOES go
+    assert "server/apparmor.py" in text               # why, checkable at source
+    assert "template_extracts" in text                # the precedent
+
+
+def test_paths_json_carries_the_ownership_rule():
+    data, _text = explain.paths()
+    own = data["config_root_ownership"]
+    assert own["owner"] == "framework"
+    assert ".<yourapp>/" in own["tenant_state_goes"]
+    assert "apparmor" in own["why"]
