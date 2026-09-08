@@ -12,6 +12,14 @@ order. This guarantees telemetry stability across deployments.
 User-facing surfaces (TUI, events, logs, permissions) always show the
 real name. The ID exists only at the provider boundary.
 
+The provider trace log sits *on* that boundary and records what the wire
+said — so on a hashing provider a tool-call record used to name the call
+only by its id, which nothing outside the issuing process can resolve
+(the reverse map is an in-process dict, not a function of the id).
+:func:`wire_name_trace_fields` is the one place that renders a tool-call
+trace record: the wire id stays under ``name`` and the resolved name is
+written beside it as ``tool_name`` (#873).
+
 The full name is hashed — including any variant suffix like ``-stream``
 (server 0.6.65+).  Earlier versions special-cased ``:stream`` and emitted
 ``t_<hash>:stream``, but the colon failed strict upstream tool-name regexes
@@ -23,7 +31,7 @@ convention rather than via shared ID prefixes.
 
 import hashlib
 import re
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 
 _reverse: Dict[str, str] = {}
@@ -112,6 +120,12 @@ def id_to_name(id_str: str) -> str:
     Returns the input unchanged if the ID is not recognized (e.g., when
     the model hallucinates a tool ID that was never issued).
 
+    The reverse map is **process-local**: it is populated as a side effect
+    of :func:`name_to_id` and is not a function of the id, so an id can be
+    resolved only in the process that hashed the name.  A trace line that
+    records the wire id alone is therefore unreadable once the process
+    exits — which is why :func:`wire_name_trace_fields` exists (#873).
+
     Args:
         id_str: The hash-derived ID from the model's response.
 
@@ -119,6 +133,36 @@ def id_to_name(id_str: str) -> str:
         Original name, or the input if not found.
     """
     return _reverse.get(id_str, id_str)
+
+
+def wire_name_trace_fields(wire_name: Optional[str]) -> str:
+    """Render the two name fields a tool-call trace record carries (#873).
+
+    Returns ``name=<wire> tool_name=<resolved>``: ``name`` keeps meaning
+    "whatever the wire said" (the hashed id on every provider that hashes,
+    so existing readers of that field do not change meaning), and
+    ``tool_name`` is the human-readable name beside it — resolved *now*,
+    in the only process that can, because the reverse map dies with it.
+
+    Resolution is **not destructive**: an id this process never issued
+    (a hallucinated ``t_deadbeef``) comes back unchanged from
+    :func:`id_to_name`, so the record shows ``name='t_deadbeef'
+    tool_name='t_deadbeef'`` — honest evidence that the model invented the
+    call, rather than a resolved-looking name that hides it.  A provider
+    that does not hash (the name on the wire is already the real one)
+    renders both fields equal, which is what makes the same journal grep
+    the same across providers.
+
+    Args:
+        wire_name: The tool name exactly as it came off the wire.  May be
+            empty — or ``None``, which renders the same — when an upstream
+            sends the name on a later streaming delta than the one that
+            opens the call.  Tolerated here rather than at each call site
+            because those sit in streaming loops the complexity ratchet
+            holds at their frozen size.
+    """
+    wire_name = wire_name or ""
+    return f"name={wire_name!r} tool_name={id_to_name(wire_name)!r}"
 
 
 def tool_choice_to_wire(tool_choice: Any) -> Any:

@@ -326,6 +326,7 @@ with what the files on disk say today (issue #787):
 | the resolved profile | `SessionState.profile_snapshot` (`profile_to_snapshot`) | `profile_from_snapshot` → `BootstrapEnvelope.profile` |
 | the rendered system instruction | `SessionState.rendered_instructions` (snapshotted at the end of `JaatoSession.configure()`) | `BootstrapEnvelope.system_instruction_override` |
 | the creation `agent_params` | `SessionState.agent_params` | `BootstrapEnvelope.agent_params` |
+| the authenticated creator (#859, record 2.9+) | `SessionState.created_by` | `BootstrapEnvelope.created_by` → `SessionInitEnvelope.created_by` → `set_client_user_id` |
 
 Record version 2.8+. Restoring the render means a revive does **not** re-run
 the persona's `{{!py:...}}` prefetch scripts — which is what made a session
@@ -815,6 +816,29 @@ model_tiers:
 > provider. While streaming, OpenAI emits **only pcm16** (24 kHz mono s16le,
 > headerless), which is why `STREAM_AUDIO_MIME` spells the parameters out.
 
+### Tool IDs on the Wire and in the Trace (#873)
+
+Tool names reach the model as hashed ids (`t_<8 hex>`, `shared/tool_id_map.py`)
+because upstreams enforce `^[a-zA-Z0-9_-]{1,128}$` and MCP names like
+`mcp.server.tool` do not pass. The reverse map is an **in-process dict**
+populated as a side effect of hashing, not a function of the id — so a
+provider trace record that named a call only by `name=<wire id>` was
+unreadable in any later process, and the tool inventory needed to re-hash
+candidates varies per session and is not recorded.
+
+Every streaming provider that hashes (`_openai_compat` and its inheritors,
+`openrouter`, `github_models`, `anthropic`) now renders its tool-call trace
+records through `wire_name_trace_fields`, which writes
+`name=<wire> tool_name=<resolved>`: `name` keeps meaning "what the wire
+said" so existing readers do not change meaning, and `tool_name` is the
+resolution made in the only process that can make it. Resolution is never
+destructive — a hallucinated id the process never issued is recorded as
+`tool_name='t_deadbeef'`, evidence of the invention rather than a
+resolved-looking name hiding it. The OpenAI-shaped loops also emit a
+`TOOL_CALL_END` record at flush, because an upstream may send the name on a
+later delta than the one that opens the call, leaving the `TOOL_CALL_START`
+record honestly nameless.
+
 ### Tool Traits
 
 Tools can declare semantic **traits** on their `ToolSchema` via the `traits` field (a `FrozenSet[str]`). Traits drive cross-cutting behavior without hardcoding tool names in session or plugin code.
@@ -968,6 +992,30 @@ Rules the implementation holds to:
 Not covered here: the eventual TLS-terminating broker (#505) that keeps a
 credential out of the runner environment entirely, and the `/proc`
 hardening in #712 that would give this app-layer scrub a kernel backstop.
+
+### Approver Identity (#859)
+
+`PermissionResolvedEvent` said HOW a decision was reached (`method`) and
+nothing about WHO reached it; the authenticated user the daemon knew
+(`set_client_user()`) reached only the telemetry `user.id` span attribute,
+so an auditor joined approvals against spans by timestamp, and a keyless
+deployment had nothing to join against.  Three things now carry identity,
+all optional so unauthenticated IPC sessions are unchanged:
+
+| Where | Field | Meaning |
+|-------|-------|---------|
+| `PermissionResolvedEvent` | `user_id` | the identity the daemon authenticated for the client that answered — stamped by the transport that received the `PermissionResponseRequest` (`get_client_user`), never taken from the request body, and carried to the runner on `PromptResponse.user_id` |
+| `PermissionResolvedEvent` | `approver` | the name an external approval system attached to its webhook / file response (`"approver": "..."`); asserted, recorded as claimed |
+| ledger `permission-check` record | `user_id` / `approver` | the same two, on the token ledger |
+| ledger `response` record | `user_id` | the session's user — the same id the telemetry `user.id` attribute carries |
+| session record header | `created_by` | the session's user, persisted (record version 2.9) and restored onto the daemon `Session` and the revived runner session |
+
+Both event fields are `None` for a policy decision (whitelist, evaluator,
+suspension), so "nobody was asked" stays distinguishable from "somebody
+answered".  The session's own user reaches the runner-side `JaatoSession`
+on `SessionInitEnvelope.created_by` — `set_client_user_id` previously had
+no caller, so runner-tier telemetry was anonymous too.  Related: #507 is
+the integrity half (tamper evidence); this is the identity half.
 
 ### Interactive Shell Sessions (`shared/plugins/interactive_shell/`)
 

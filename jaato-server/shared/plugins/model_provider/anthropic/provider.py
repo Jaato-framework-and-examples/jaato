@@ -23,6 +23,7 @@ from typing import Any, Dict, FrozenSet, List, Optional, Set
 
 logger = logging.getLogger(__name__)
 
+from shared.tool_id_map import wire_name_trace_fields
 from ..base import (
     MODALITY_TEXT,
     ModalityCapabilityMixin,
@@ -1484,7 +1485,13 @@ class AnthropicProvider(ModalityCapabilityMixin):
                                 thinking_emitted = True
                             # Start tracking a new tool call
                             idx = block_info["index"]
-                            self._trace(f"STREAM_TOOL_START idx={idx} name={block_info['name']}")
+                            # Anthropic hashes too (``anthropic/converters``
+                            # emits ``name_to_id``), so ``name`` here is the
+                            # wire id; write the resolved name beside it (#873).
+                            self._trace(
+                                f"STREAM_TOOL_START idx={idx} id={block_info['id']!r} "
+                                + wire_name_trace_fields(block_info['name'])
+                            )
                             current_tool_calls[idx] = {
                                 "id": block_info["id"],
                                 "name": block_info["name"],

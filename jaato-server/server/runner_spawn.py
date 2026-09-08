@@ -827,6 +827,11 @@ def build_session_envelope(
         system_instruction_override=getattr(
             server, "_system_instruction_override", None,
         ),
+        # #859: the authenticated creator, stashed on the per-session
+        # server by ``_construct_and_initialize_server`` from
+        # ``BootstrapEnvelope.created_by``, so the runner-side session
+        # can stamp telemetry spans and ledger records with a user.
+        created_by=getattr(server, "_client_user_id", None),
         # 2026-06-21: client-provided ("host") tools registered via the WS/IPC
         # protocol BEFORE session.new (e.g. a telegram client's send_to_telegram),
         # ferried so the RUNNER-tier model SEES them in list_tools.  Pre-fix they

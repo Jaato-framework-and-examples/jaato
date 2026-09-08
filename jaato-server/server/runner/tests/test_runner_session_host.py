@@ -58,10 +58,15 @@ class _StubSession:
     def __init__(self, **kwargs: Any) -> None:
         self.create_session_kwargs = dict(kwargs)
         self._daemon_session_id: Optional[str] = None
+        self._client_user_id: Optional[str] = None
 
     def set_daemon_session_id(self, session_id: str) -> None:
         # Bootstrap stamps envelope.session_id onto the session.
         self._daemon_session_id = session_id
+
+    def set_client_user_id(self, user_id: Optional[str]) -> None:
+        # Bootstrap stamps envelope.created_by onto the session (#859).
+        self._client_user_id = user_id
 
 
 class _StubRuntime:
@@ -316,3 +321,25 @@ def test_host_is_ready_true_after_bootstrap() -> None:
     assert host.is_ready is True
     assert host.session is not None
     assert host.runtime is runtime
+
+
+# ----------------------------------------------------------------------
+# #859 — the authenticated creator is stamped on the runner-side session
+# ----------------------------------------------------------------------
+
+
+def test_bootstrap_stamps_created_by_as_client_user_id() -> None:
+    """``set_client_user_id`` had no caller: the daemon knew the user
+    (``Session.created_by``) and the runner session never did, so the
+    telemetry ``user.id`` attribute and the ledger stayed anonymous."""
+    env = _good_envelope(created_by="sso|alice")
+    runtime = _StubRuntime()
+    host = bootstrap_session(env, runtime_factory=lambda e: runtime)
+    assert host.session._client_user_id == "sso|alice"
+
+
+def test_bootstrap_without_created_by_leaves_user_unset() -> None:
+    env = _good_envelope()
+    runtime = _StubRuntime()
+    host = bootstrap_session(env, runtime_factory=lambda e: runtime)
+    assert host.session._client_user_id is None
