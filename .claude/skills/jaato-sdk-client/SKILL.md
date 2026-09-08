@@ -120,6 +120,51 @@ long-lived (a TUI, an observer, a cascade driver, anything that must survive a
 daemon restart — a per-run `jaato-server --stop` + autostart). `jaato-scaffold
 explain clients` lays out the choice.
 
+## Three ways a harness hangs with nothing logged
+
+All three end the same way — the daemon is content, the work is done, and your
+driver sits there — so none of them looks like the bug it is. `jaato-scaffold
+validate` now reports the first two before you run anything.
+
+**1. `echo` with no `usage` → no terminal event, ever.** A turn is recorded
+only when the provider reported tokens (`jaato_session.py`: `if
+turn_data['total'] > 0`), and the post-turn hook gated on that record is the
+ONE site that emits both `TurnCompletedEvent` and the quiescence flush
+(`SessionTerminatedEvent`). `Session.complete()` settles on those, not on
+`AGENT_COMPLETED` — so a zero-usage turn delivers its payload and then nothing.
+Every echo-backed profile needs a spend:
+
+```yaml
+plugin_configs:
+  echo:
+    usage: {prompt_tokens: 1000, output_tokens: 200}
+```
+
+The framework's own conformance profiles all pass one. Validator code:
+`echo_reports_no_usage`. (Also: `echo` is a legitimate, installed provider —
+it is only hidden from `explain providers`.)
+
+**2. A `spawn_payload_schema` property typed anything but `string`.**
+`agent_params` cross the IPC wire as `key=value` **argv tokens**
+(`ipc.py`: `args.append(f"{key}={value}")`), so the daemon validates strings.
+`{"iteration": {"type": "integer"}}` is refused on EVERY spawn, the refusal is
+logged daemon-side and never answered, and the caller gets a 60s
+`SessionNotConfirmed` saying the session *may* have been created — for this
+cause it never is. Type them `string`, add a `pattern` for shape, parse in the
+prefetch. Validator code: `spawn_schema_type_unreachable`.
+
+**3. The workspace `.env` IS the session env.** A profile's `${VAR}` and every
+`pass://` / `vault://` URI is resolved daemon-side against that file, not
+against your driver's process env. A driver that *writes* the workspace `.env`
+(to set `JAATO_PROFILE_SET`, say) must COMPOSE it from the operator's env-file
+rather than replace it, or the provider credential has no way to reach the
+session.
+
+When you do hit a hang, the discriminating probe is cheap: subscribe to every
+`EventType`, run the stage, and print what arrived. `AGENT_COMPLETED` present
+with `TURN_COMPLETED`/`SESSION_TERMINATED` absent is trap 1; no session at all
+is trap 2.
+
 ## Profile sets
 
 Tier-1 `_base_<agent>.yaml` (provider-agnostic, `inherits:`) + tier-2

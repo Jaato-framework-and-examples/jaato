@@ -19,6 +19,7 @@ exists to surface.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -31,6 +32,14 @@ from . import introspect
 # ``top_level`` is not a nesting key — its knobs sit directly under the
 # provider — so it is excluded from the "is this key a layer?" test.
 _NESTING_LAYERS = frozenset(n for n in KNOB_LAYERS if n != "top_level")
+
+#: The framework's deterministic test double.  It is deliberately absent from
+#: the ``explain providers`` catalogue (nobody should PICK it for production),
+#: but it is installed, it is what the live conformance suite runs on, and a
+#: profile naming it is legitimate — so it must not be reported as an unknown
+#: provider.  Doing so told every harness author that their working, zero-cost
+#: echo profile was invalid.
+ECHO_PROVIDER = "echo"
 
 
 @dataclass
@@ -80,7 +89,9 @@ def validate_profile(
     # --- provider --------------------------------------------------------
     if provider_name:
         pinfo = introspect.resolve_provider(provider_name)
-        if pinfo is None:
+        if pinfo is None and provider_name == ECHO_PROVIDER:
+            _check_echo_profile(profile, add)
+        elif pinfo is None:
             add("error", "unknown_provider",
                 f"provider '{provider_name}' is not a known model provider "
                 f"(have: {', '.join(sorted(providers))})", where="provider")
@@ -278,6 +289,137 @@ def validate_profile(
                 f"gc type '{gc_type}' not among {gc_names}", where="gc.type")
 
     return out
+
+
+#: JSON-Schema types a spawn payload can actually carry over the IPC wire.
+#: ``agent_params`` are serialised as ``key=value`` argv tokens
+#: (``jaato_sdk/client/ipc.py``: ``args.append(f"{key}={value}")``), so every
+#: value reaches the daemon as a STRING.
+_WIRE_SAFE_SPAWN_TYPES = frozenset({"string", "null"})
+
+
+def _load_spawn_schema(profile, config_root: str):
+    """Resolve a profile's ``spawn_payload_schema`` to a dict, or None.
+
+    Accepts both declared forms: an inline dict, or a path resolved against
+    ``config_root`` the way ``shared/spawn_schema_loader.py`` resolves it.
+    """
+    raw = getattr(profile, "spawn_payload_schema", None)
+    if isinstance(raw, dict):
+        return raw
+    if not isinstance(raw, str) or not raw:
+        return None
+    for candidate in (Path(config_root) / raw,
+                      Path(config_root) / "spawn_schemas" / raw):
+        if candidate.is_file():
+            try:
+                return json.loads(candidate.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                return None
+    return None
+
+
+def _check_spawn_schema_wire_types(profiles, config_root: str, out) -> None:
+    """Flag a ``spawn_payload_schema`` that the IPC wire can never satisfy.
+
+    ``spawn_payload_schema`` is documented as the input-boundary mirror of
+    ``completion_payload_schema`` and is validated with ``jsonschema`` against
+    the ``agent_params`` dict.  But agent_params do not cross the IPC wire as
+    JSON: ``create_session`` flattens them into ``key=value`` argv tokens, so
+    the daemon validates a dict whose every value is a **string**.
+
+    A property declared ``integer`` / ``number`` / ``boolean`` / ``object`` /
+    ``array`` therefore fails validation on EVERY spawn, no matter what the
+    caller passes.  The failure is expensive to read: the daemon logs the
+    rejection and does not answer, so the caller waits out its own timeout and
+    then reports ``SessionNotConfirmed`` — whose message says the session may
+    have been created, which for this cause it never is.
+
+    Measured 2026-09-08: a cascade's fix-loop stage declared
+    ``iteration: {type: integer}``, passed ``iteration=1`` as an int, and the
+    daemon rejected ``'1' is not of type 'integer'`` on every attempt.
+
+    Args:
+        profiles: Mapping of profile name -> resolved profile object.
+        config_root: Directory that path-form schemas resolve against.
+        out: Diagnostic list to append to.
+    """
+    for pname, profile in sorted((profiles or {}).items()):
+        schema = _load_spawn_schema(profile, config_root)
+        if not isinstance(schema, dict):
+            continue
+        for key, spec in sorted((schema.get("properties") or {}).items()):
+            if not isinstance(spec, dict):
+                continue
+            declared = spec.get("type")
+            types = {declared} if isinstance(declared, str) else set(declared or ())
+            offending = sorted(t for t in types if t not in _WIRE_SAFE_SPAWN_TYPES)
+            if not offending:
+                continue
+            out.append(Diagnostic(
+                "error", "spawn_schema_type_unreachable",
+                f"spawn_payload_schema property '{key}' is typed "
+                f"{'/'.join(offending)}, which no spawn can satisfy over IPC: "
+                f"agent_params are sent as `key=value` argv tokens, so the "
+                f"daemon always validates STRINGS.  The spawn is refused "
+                f"server-side and the caller sees a 60s timeout reported as "
+                f"SessionNotConfirmed.  Declare it as a string (add a "
+                f"`pattern` if you need the shape, e.g. '^[0-9]+$') and parse "
+                f"it in the prefetch/persona.",
+                profile=pname, where=f"spawn_payload_schema.properties.{key}"))
+
+
+def _check_echo_profile(profile, add) -> None:
+    """Check a profile bound to the ``echo`` test double.
+
+    Two findings, and the second is the load-bearing one.
+
+    ``echo`` is installed and legitimate — the live conformance suite runs on
+    it — but it is excluded from the ``explain providers`` catalogue, so the
+    generic branch reported it as an unknown provider.  That is a false
+    positive on a working profile, so it is stated as an ``info`` instead.
+
+    The real trap is ``usage``.  Echo reports the spend it is TOLD to and none
+    otherwise, and a turn is recorded in ``turn_accounting`` only when the
+    provider reported tokens (``jaato_session.py``: ``if turn_data['total'] >
+    0``).  The post-turn hook gated on that record
+    (``server/runner/rpc.py:_forward_post_turn_hooks``) is the single site that
+    fires BOTH ``TurnCompletedEvent`` AND ``flush_session_quiescent()`` ->
+    ``SessionTerminatedEvent``.  So an echo profile with no ``usage`` runs its
+    turn, does its work, delivers ``AgentCompletedEvent`` — and emits NO
+    terminal event at all.  Every driver that waits on the documented terminus
+    (``Session.complete`` / ``.ask`` / ``.stream``) then waits until its own
+    timeout, with no error anywhere to say why.
+
+    Measured 2026-09-08: an otherwise-correct cascade hung at its first stage
+    on exactly this, while the same profile plus a ``usage`` block returned
+    immediately.  The framework's own conformance profiles all pass
+    ``usage=TURN_USAGE`` for this reason.
+
+    Args:
+        profile: The resolved profile object under validation.
+        add: The diagnostic sink ``(severity, code, message, where=...)``.
+    """
+    add("info", "echo_is_a_test_double",
+        "provider 'echo' is the framework's deterministic test double — no "
+        "credentials, no network, fixed responses.  It is absent from "
+        "`explain providers` (nobody should pick it for production) but it IS "
+        "installed, and it is what the live conformance suite runs on.",
+        where="provider")
+    echo_cfg = (getattr(profile, "plugin_configs", None) or {}).get(ECHO_PROVIDER) or {}
+    if not echo_cfg.get("usage"):
+        add("warn", "echo_reports_no_usage",
+            "echo is configured without `usage`, so it reports ZERO tokens "
+            "every turn — and a turn is recorded only when the provider "
+            "reported tokens.  The post-turn hook gated on that record is the "
+            "one site that emits BOTH TurnCompletedEvent and "
+            "SessionTerminatedEvent, so this session will do its work, deliver "
+            "AgentCompletedEvent, and then emit NO terminal event: a driver "
+            "awaiting the terminus (Session.complete/.ask/.stream) hangs to "
+            "its timeout with nothing logged.  Declare a spend, e.g. "
+            "plugin_configs.echo.usage: {prompt_tokens: 1000, output_tokens: "
+            "200}.",
+            where=f"plugin_configs.{ECHO_PROVIDER}.usage")
 
 
 def _check_tier_exit(key, raw, add):
@@ -966,6 +1108,7 @@ def validate_workspace(
     # workspace-tier assets.
     _before = len(out)
     _check_prefetch_directives(ws, config_root, out)
+    _check_spawn_schema_wire_types(result.profiles, config_root, out)
     for d in out[_before:]:
         d.tier = "workspace"
     return out
