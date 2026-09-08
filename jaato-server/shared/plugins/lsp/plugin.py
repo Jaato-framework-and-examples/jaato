@@ -1424,18 +1424,24 @@ class LSPToolPlugin(RunnerForwardingMixin):
                     )
                     self._request_queue.put((MSG_RETRY_AUTOCONNECT, {}))
 
-    def _resolve_path(self, path: str) -> str:
+    def _resolve_path(self, path: Optional[str]) -> Optional[str]:
         """Resolve a path to an absolute path.
 
         If path is relative, resolves it against workspace_path (if set)
         or falls back to os.path.abspath (resolves against cwd).
 
         Args:
-            path: Path to resolve (can be relative or absolute).
+            path: Path to resolve (can be relative or absolute).  ``None``
+                and ``""`` pass through: several LSP methods legitimately
+                carry no ``file_path`` (``workspace_symbols``), and asking
+                the resolver to answer for "no path" keeps that branch here
+                rather than at each of its call sites.
 
         Returns:
-            Absolute path.
+            Absolute path, or the falsy input unchanged.
         """
+        if not path:
+            return path
         if os.path.isabs(path):
             return path
         if self._workspace_path:
@@ -3462,8 +3468,26 @@ Use 'lsp status' to see connected language servers and their capabilities."""
         return f"{operation}{detail}. Run 'lsp status' to check server state."
 
     async def _call_lsp_method(self, client: LSPClient, method: str, args: Dict[str, Any]) -> Any:
-        """Call an LSP method on the client."""
-        file_path = args.get('file_path')
+        """Call an LSP method on the client.
+
+        `file_path` is resolved against the SESSION workspace before anything
+        touches the filesystem.  Every file-based method arrives here —
+        diagnostics, hover, goto_definition, find_references,
+        document_symbols, rename — and each one is reached by two kinds of
+        caller that disagree about paths: a model calling `lsp_*` by hand,
+        and `enrich_tool_result`, which takes whatever the writing tool put
+        in its result.  `file_edit` reports a WORKSPACE-RELATIVE `path`, and
+        an unresolved relative path is opened against the daemon's cwd, so
+        the enrichment failed on every write with `[Errno 2] No such file or
+        directory` — observed on a live cascade, where the sibling
+        `artifact_tracker` enrichment resolved the very same string on the
+        very same tool result one line earlier.
+
+        `_resolve_path` is the plugin's own resolver and was already correct;
+        it simply had a single caller (`get_file_dependents`) and this
+        chokepoint was not it.
+        """
+        file_path = self._resolve_path(args.get('file_path'))
 
         # Methods that require full parsing need to wait for the server
         # to emit `textDocument/publishDiagnostics` (or the equivalent
