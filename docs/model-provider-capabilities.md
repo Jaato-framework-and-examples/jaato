@@ -14,6 +14,7 @@ Each cell is a **wire-level** behavior the CI conformance guard asserts, not a l
 | `github_models` | — | — | — | — | — | ✅ | — | ✅ | ✅ | — | — |
 | `google_genai` | ✅ | ✅ | ✅ | ✅ | — | — | ✅ | ✅ | ✅ | — | — |
 | `lmstudio` | ✅ | ✅ | — | — | — | — | — | ✅ | ✅ | — | — |
+| `mimo` | ✅ | ✅ | — | — | ✅ | ✅ | — | ✅ | ✅ | ✅ | ✅ |
 | `nebius` | ✅ | ✅ | — | — | ✅ | ✅ | — | ✅ | ✅ | ✅ | — |
 | `nim` | ✅ | ✅ | — | — | — | ✅ | — | ✅ | ✅ | ✅ | — |
 | `ollama` | ✅ | ✅ | — | — | — | — | — | ✅ | ✅ | — | — |

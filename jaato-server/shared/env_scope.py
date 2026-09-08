@@ -510,6 +510,15 @@ CATALOG: Dict[str, EnvClass] = {
     "JAATO_GOOGLE_USE_VERTEX": EnvClass(SESSION, None,
         "Vertex-vs-API backend selection with no google_genai "
         "knob"),
+    "JAATO_MIMO_API_KEY": EnvClass(SESSION, "plugin_configs.mimo.api_key",
+        "credential; mimo exposes the knob, so a profile can carry a "
+        "pass:// URI instead of the env var"),
+    "JAATO_MIMO_BASE_URL": EnvClass(SESSION, "plugin_configs.mimo.base_url",
+        "endpoint override (region / plan hosts); mimo exposes the knob"),
+    "JAATO_MIMO_CONTEXT_LENGTH": EnvClass(SESSION, "plugin_configs.mimo.context_length",
+        "manual context-window override; mimo exposes the knob"),
+    "JAATO_MIMO_MODEL": EnvClass(SESSION, "model",
+        "the profile's own `model` field selects the model"),
     "JAATO_NEBIUS_API_KEY": EnvClass(SESSION, "plugin_configs.nebius.api_key",
         "credential; nebius exposes the knob, so a profile can carry a "
         "pass:// URI instead of the env var"),
@@ -566,6 +575,8 @@ CATALOG: Dict[str, EnvClass] = {
         "endpoint override; lmstudio exposes the knob"),
     "LMSTUDIO_MODEL": EnvClass(SESSION, "model",
         "the profile's own `model` field selects the model"),
+    "MIMO_API_KEY": EnvClass(SESSION, "plugin_configs.mimo.api_key",
+        "credential; the vendor's own documented variable, honoured beneath JAATO_MIMO_API_KEY"),
     "NEBIUS_API_KEY": EnvClass(SESSION, "plugin_configs.nebius.api_key",
         "credential; nebius exposes the knob, so a profile can carry a "
         "pass:// URI instead of the env var"),

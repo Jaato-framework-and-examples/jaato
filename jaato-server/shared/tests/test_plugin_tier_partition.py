@@ -179,7 +179,7 @@ def test_canonical_plugin_classifications() -> None:
     # tokens cross sessions).
     for auth in (
         "anthropic_auth", "antigravity_auth", "github_auth",
-        "nim_auth", "openrouter_auth", "zhipuai_auth",
+        "nim_auth", "openrouter_auth", "zhipuai_auth", "mimo_auth",
     ):
         assert tiers.get(auth) == "daemon", (
             f"{auth} must be daemon-tier (auth plugins span sessions)"
@@ -234,7 +234,7 @@ def test_discover_runner_filter_excludes_daemon_plugins() -> None:
     # Auth plugins are daemon-tier; verify they're excluded.
     daemon_auth = {
         "anthropic_auth", "antigravity_auth", "github_auth",
-        "nim_auth", "openrouter_auth", "zhipuai_auth",
+        "nim_auth", "openrouter_auth", "zhipuai_auth", "mimo_auth",
     }
     leaked = daemon_auth & set(discovered)
     assert leaked == set(), (
