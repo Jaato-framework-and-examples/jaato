@@ -1,8 +1,9 @@
 # MiniMax, Kimi and MiMo providers — brainstorm and design
 
-Status: **design, no code yet**. Written 2026-09-08 against the tree at
-`7306154` and the three vendors' public documentation as of that date
-(sources in §10). Every wire fact below that came from a vendor page rather
+Status: **implemented on this branch** (seam, then `mimo`, `kimi`, `minimax`,
+each its own commit); §10 records where the code diverged from the design.
+Written 2026-09-08 against the tree at `7306154` and the three vendors' public documentation as of that date
+(sources in §11). Every wire fact below that came from a vendor page rather
 than a live probe is marked *(docs)*; the few that were probed are marked
 *(probed)*.
 
@@ -684,7 +685,34 @@ Open questions, each with the default this design takes:
 - **Pricing tables.** `.jaato/pricing.json` is operator-owned; ship the
   list prices from §4–6 as an example, not as defaults.
 
-## 10. Sources
+## 10. Implementation notes (where the code diverged)
+
+- **Knob outranks table.** §4.2 / §6.2 said catalog → table → knob. The
+  built-in table is the provider's *guess*, so the operator's
+  `context_length` knob now beats it: catalog → knob → table → fail-loud
+  (`resolve_context_window` for the first two, the table after). Kimi is
+  unchanged: catalog → knob, no table.
+- **MiniMax `2056` is a quota error, not a rate limit.** §4.1 proposed
+  `RateLimitError(retry_after=<reset − now>)`; a Token Plan window resets
+  hours later and the retry ladder tops out at seconds, so it is a
+  non-transient `QuotaExhaustedError(resets_at=…)` alongside `1008`.
+- **No automatic `prompt_cache_key`** (§5.6). The provider has no
+  per-session identity to key on — `_agent_id` is `"main"` for every main
+  session, so a default would have shared one cache key across sessions.
+  It stays a profile knob.
+- **Auth plugins shipped** (`minimax_auth`, `kimi_auth`, `mimo_auth`, the
+  `nim_auth` shape). The three newest providers before this work
+  (`nebius`, `ovhcloud`, `doubleword`) document a `*-auth` command that
+  no plugin provides; these three do provide it.
+- **The base gained the §7 hooks as written**, plus `_wire_tools` (Kimi's
+  `strict: false`), `_map_finish_reason` (MiMo's `repetition_truncation`)
+  and `_finish_batch_response` (which also fills `reasoning_tokens` from
+  `completion_tokens_details` on every OpenAI-compat provider).
+- **The MiniMax `{"role": ""}` chunk** is not pinned by a test: the
+  OpenAI SDK constructs stream chunks without validation, and a
+  MagicMock-based test would prove nothing about that.
+
+## 11. Sources
 
 MiniMax: platform.minimax.io/docs (`api-reference/text-openai-api`,
 `text-chat-openai.md`, `text-prompt-caching.md`, `models/openai/list-models.md`,
