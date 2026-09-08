@@ -451,9 +451,12 @@ class LogCapture:
 class LSPToolPlugin(RunnerForwardingMixin):
     """Plugin that provides LSP (Language Server Protocol) tool execution.
 
-    This plugin connects to LSP servers defined in .lsp.json and exposes
-    code intelligence tools to the AI model. It runs a background thread
-    with an asyncio event loop to handle the async LSP protocol.
+    This plugin connects to LSP servers declared either by the session
+    profile (``plugin_configs.lsp.languageServers``) or by a ``.lsp.json``
+    file, and exposes code intelligence tools to the AI model. It runs a
+    background thread with an asyncio event loop to handle the async LSP
+    protocol.  Which of the two sources answers is decided in exactly one
+    place, ``_language_servers_from_profile``.
     """
 
     def __init__(self):
@@ -466,6 +469,11 @@ class LSPToolPlugin(RunnerForwardingMixin):
         self._config_path: Optional[str] = None  # Explicit config path from plugin_configs
         self._custom_config_path: Optional[str] = None  # User-specified path
         self._workspace_path: Optional[str] = None  # Client's working directory
+        # The server table the PROFILE declared, captured RAW (pre-variable-
+        # expansion) in `initialize`.  ``None`` means the profile declared
+        # none, so the `.lsp.json` search runs.  See
+        # `_language_servers_from_profile` for the rule and why raw.
+        self._profile_config: Optional[Dict[str, Any]] = None
         self._config_cache: Dict[str, Any] = {}
         self._connected_servers: set = set()
         self._failed_servers: Dict[str, str] = {}
@@ -532,6 +540,10 @@ class LSPToolPlugin(RunnerForwardingMixin):
 
         Args:
             config: Optional configuration dict. Supports:
+                - languageServers: the server table, declared by the
+                  profile.  When the key is PRESENT it IS the
+                  configuration and no `.lsp.json` is read at all — see
+                  `_language_servers_from_profile`.
                 - config_path: Path to .lsp.json file (overrides default search)
                 - workspace_path: Client's working directory for finding .lsp.json
                 - session_id: Session identifier for log disambiguation
@@ -540,8 +552,19 @@ class LSPToolPlugin(RunnerForwardingMixin):
         if self._initialized:
             return
 
+        raw_config: Dict[str, Any] = config or {}
+
+        # Captured BEFORE `expand_variables`, and kept raw for the same
+        # reason `.lsp.json` content is never expanded at load time: a
+        # server's `${workspaceRoot}` must survive until `connect_server`
+        # expands it with `workspace_root_override=self._workspace_path`.
+        # `initialize` runs BEFORE the framework's `set_workspace_path`
+        # broadcast, so expanding a server spec here would auto-detect the
+        # daemon cwd — the asymmetry PR-157 closed for file-loaded args.
+        self._profile_config = self._language_servers_from_profile(raw_config)
+
         # Expand variables in config values (e.g., ${projectPath}, ${workspaceRoot})
-        config = expand_variables(config) if config else {}
+        config = expand_variables(raw_config) if raw_config else {}
 
         # Extract config values
         self._agent_name = config.get('agent_name')
@@ -845,6 +868,80 @@ class LSPToolPlugin(RunnerForwardingMixin):
             rules.append(expanded)
         return rules
 
+    @staticmethod
+    def _language_servers_from_profile(
+        plugin_config: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        """The server table the PROFILE declares, or None when it declares none.
+
+        `plugin_configs.lsp.languageServers` carries the same mapping a
+        `.lsp.json` carries under the same key, so one spec shape serves
+        both sources and nothing about a server changes with where it was
+        written.  Returned in `.lsp.json` shape (``{"languageServers":
+        {...}}``) so a caller can use it wherever the parsed file went.
+
+        This is the single place the source question is answered; BOTH
+        readers call it first — `_load_config_cache` (runtime) and
+        `_load_lsp_config_static` (apparmor composer).  They must agree:
+        a profile that declares a server the composer never sees gets no
+        `ix` grant, and the confined runner then cannot exec it.
+
+        The rule:
+
+        - **key absent** -> ``None``.  The file search runs exactly as
+          before; a workspace that has always used `.lsp.json` is
+          untouched.
+        - **key present** -> the profile IS the configuration and NO file
+          is read, not even `~/.lsp.json`.  Present-and-empty (``{}``) is
+          itself a declaration: *this profile runs no language server*.
+          Merging the two sources would give one session two writers of
+          one table, and the file half is writable by the model (see the
+          trust note in `get_apparmor_rules`) — so the profile suppresses
+          the file rather than layering over it.
+        - **key present but not a mapping** -> an authoring error: logged
+          at ERROR and read as no servers.  Falling back to the file would
+          make the profile's own declaration silently inert.
+        - **an entry whose spec is not a mapping** -> logged at ERROR and
+          dropped, by name.  Every consumer downstream (`connect_server`,
+          both apparmor composers, the debug writer) reads a spec with
+          ``.get``; validating the shape once here is what keeps them fed
+          with what they already expect.
+
+        The value is returned RAW — never variable-expanded.  See
+        `initialize` for why that matters.
+
+        Preferred over `.lsp.json` for the same reason
+        `apparmor_extra_rules` is profile-only: `.jaato/profiles/**` is
+        `audit deny ... wlk,` on both the runner and //child layers, while
+        `.lsp.json` at workspace root is model-writable — and each
+        server's `command` becomes an exec grant in the per-session
+        apparmor profile.
+        """
+        if 'languageServers' not in plugin_config:
+            return None
+
+        declared = plugin_config['languageServers']
+        if not isinstance(declared, dict):
+            logger.error(
+                "lsp: plugin_configs.lsp.languageServers must be a mapping of "
+                "server-name -> spec, got %s — reading it as no servers. No "
+                "`.lsp.json` is consulted: the key is present.",
+                type(declared).__name__,
+            )
+            return {'languageServers': {}}
+
+        servers: Dict[str, Any] = {}
+        for name, spec in declared.items():
+            if not isinstance(spec, dict):
+                logger.error(
+                    "lsp: plugin_configs.lsp.languageServers['%s'] must be a "
+                    "mapping with at least `command`, got %s — dropping it.",
+                    name, type(spec).__name__,
+                )
+                continue
+            servers[name] = spec
+        return {'languageServers': servers}
+
     @classmethod
     def _load_lsp_config_static(
         cls,
@@ -859,7 +956,10 @@ class LSPToolPlugin(RunnerForwardingMixin):
         concern; the composer only needs to know which servers will
         be configured so it can emit exec grants for them).
 
-        Search order matches the instance method exactly:
+        Source order matches the instance method exactly:
+            0. ``plugin_config["languageServers"]`` — when the profile
+               declares the table it IS the configuration and NO file is
+               read (`_language_servers_from_profile`)
             1. ``plugin_config["config_path"]`` if set
             2. ``<workspace_path>/.lsp.json`` if workspace set
             3. ``~/.lsp.json`` fallback
@@ -870,6 +970,10 @@ class LSPToolPlugin(RunnerForwardingMixin):
         `.lsp.json` yet — apparmor fragment just emits no server
         rules in that case).
         """
+        from_profile = cls._language_servers_from_profile(plugin_config)
+        if from_profile is not None:
+            return from_profile
+
         candidate_paths: List[str] = []
         custom = plugin_config.get('config_path')
         if custom:
@@ -1386,8 +1490,9 @@ class LSPToolPlugin(RunnerForwardingMixin):
           multi-instance state-isolation symptom (enrichment instance
           sees empty set while connect instance had the server
           registered).
-        - ``_config_cache``: parsed ``.lsp.json`` — the workspace
-          config doesn't change within a cascade.
+        - ``_config_cache``: the resolved server table — from the
+          session profile, or parsed from ``.lsp.json``.  Neither
+          changes within a cascade.
         - Background thread + request_queue + response_queue: the
           machinery owning LSP client lifecycles — tearing them down
           + re-creating would discard exactly the LSP state we want
@@ -2276,12 +2381,36 @@ Use 'lsp status' to see connected language servers and their capabilities."""
     def get_config_schema(self) -> List[PluginSetting]:
         return [
             PluginSetting(
+                name="languageServers",
+                type="dict",
+                default={},
+                description=(
+                    "The server table, declared by the profile, in the "
+                    "same shape `.lsp.json` uses under the same key: "
+                    "{'java': {'command': 'jdtls', 'args': [...], "
+                    "'languageId': 'java'}}.  When this key is PRESENT it "
+                    "IS the configuration and NO `.lsp.json` is read — not "
+                    "config_path, not <workspace>/.lsp.json, not "
+                    "~/.lsp.json; present-and-empty declares that this "
+                    "profile runs no language server.  Absent keeps the "
+                    "file search.  Prefer it over the file: "
+                    "`.jaato/profiles/**` is apparmor write-denied to the "
+                    "runner while `.lsp.json` at workspace root is not, "
+                    "and every server's `command` becomes an exec grant in "
+                    "the per-session apparmor profile.  `${workspaceRoot}` "
+                    "in a spec is expanded at connect time, as it is for "
+                    "the file."
+                ),
+            ),
+            PluginSetting(
                 name="config_path",
                 type="str",
                 default="",
                 description=(
                     "Override path to .lsp.json. Defaults to "
-                    "<workspace>/.lsp.json then ~/.lsp.json."
+                    "<workspace>/.lsp.json then ~/.lsp.json.  Inert when "
+                    "`languageServers` is declared — that key suppresses "
+                    "the file search entirely."
                 ),
             ),
             PluginSetting(
@@ -2440,13 +2569,14 @@ Use 'lsp status' to see connected language servers and their capabilities."""
             ("                      Includes capabilities and error information", "dim"),
             ("", ""),
             ("    connect <name>    Connect to a configured but disconnected server", "dim"),
-            ("                      Server must be defined in .lsp.json", "dim"),
+            ("                      Server must be declared by the profile or .lsp.json", "dim"),
             ("", ""),
             ("    disconnect <name> Disconnect from a running server", "dim"),
             ("                      Keeps configuration, just stops the connection", "dim"),
             ("", ""),
             ("    reload            Reload configuration from .lsp.json", "dim"),
             ("                      Picks up external changes to the config file", "dim"),
+            ("                      No-op when the profile declares the servers", "dim"),
             ("", ""),
             ("    logs [clear]      Show interaction logs for debugging", "dim"),
             ("                      Use 'clear' to reset the log buffer", "dim"),
@@ -2462,8 +2592,19 @@ Use 'lsp status' to see connected language servers and their capabilities."""
             ("    lsp logs                  Show interaction logs", "dim"),
             ("    lsp logs clear            Clear all logs", "dim"),
             ("", ""),
-            ("CONFIGURATION FILE", "bold"),
-            ("    LSP servers are configured in .lsp.json:", ""),
+            ("CONFIGURATION", "bold"),
+            ("    Preferred - in the session profile, which the runner cannot write:", ""),
+            ("", ""),
+            ("    plugin_configs:", "dim"),
+            ("      lsp:", "dim"),
+            ("        languageServers:", "dim"),
+            ("          python:", "dim"),
+            ('            command: pyright-langserver', "dim"),
+            ('            args: ["--stdio"]', "dim"),
+            ('            languageId: python', "dim"),
+            ("", ""),
+            ("    Declaring that key suppresses .lsp.json entirely, including ~/.lsp.json.", "dim"),
+            ("    Otherwise, LSP servers are configured in .lsp.json:", ""),
             ("", ""),
             ('    {', "dim"),
             ('      "languageServers": {', "dim"),
@@ -2497,7 +2638,7 @@ Use 'lsp status' to see connected language servers and their capabilities."""
             ("    C/C++:            clangd", "dim"),
             ("", ""),
             ("NOTES", "bold"),
-            ("    - Servers auto-connect on startup if configured in .lsp.json", "dim"),
+            ("    - Servers auto-connect on startup once configured", "dim"),
             ("    - LSP provides diagnostics, hover info, and completions to the model", "dim"),
             ("    - Failed servers show error details in 'lsp status'", "dim"),
             ("    - Use 'lsp logs' to debug communication issues", "dim"),
@@ -2507,7 +2648,7 @@ Use 'lsp status' to see connected language servers and their capabilities."""
         self._load_config_cache()
         servers = self._config_cache.get('languageServers', {})
         if not servers:
-            return "No LSP servers configured. Create .lsp.json to configure servers."
+            return f"No LSP servers configured. To configure: {self._no_servers_hint()}."
 
         lines = ["Configured LSP servers:"]
         for name, spec in servers.items():
@@ -2522,7 +2663,7 @@ Use 'lsp status' to see connected language servers and their capabilities."""
         self._load_config_cache()
         servers = self._config_cache.get('languageServers', {})
         if not servers:
-            return "No LSP servers configured."
+            return f"No LSP servers configured. To configure: {self._no_servers_hint()}."
 
         lines = ["LSP Server Status:", "-" * 50]
         for name in servers:
@@ -2603,9 +2744,37 @@ Use 'lsp status' to see connected language servers and their capabilities."""
         except Exception as e:
             return f"Error disconnecting: {e}"
 
+    def _no_servers_hint(self) -> str:
+        """How to configure servers, naming the source THIS session uses.
+
+        A session whose profile declares `languageServers` must not be
+        told to create a `.lsp.json`: that file is not read, so the advice
+        would send the operator to edit a file the session ignores.  No
+        trailing period — call sites punctuate.
+        """
+        if self._profile_config is not None:
+            return ("the session profile declares no server under "
+                    "plugin_configs.lsp.languageServers")
+        return ("declare plugin_configs.lsp.languageServers in the session "
+                "profile, or create .lsp.json")
+
     def _cmd_reload(self) -> str:
         if not self._initialized:
             self.initialize()
+
+        # A profile-declared table has no on-disk source to re-read: the
+        # profile is resolved once, at session creation.  Reporting
+        # "config unchanged" here would read as "I checked the file and
+        # it is the same", which is a claim this command cannot make.
+        if self._profile_config is not None:
+            self._load_config_cache()
+            count = len(self._config_cache.get('languageServers', {}))
+            return (
+                f"Servers come from the session profile "
+                f"(plugin_configs.lsp.languageServers), not from a file — "
+                f"nothing to reload. {count} server(s) declared; edit the "
+                f"profile and start a new session to change them."
+            )
 
         # Force reload config from disk
         old_servers = set(self._config_cache.get('languageServers', {}).keys()) if self._config_cache else set()
@@ -2667,15 +2836,32 @@ Use 'lsp status' to see connected language servers and their capabilities."""
         return '\n'.join(lines) if lines else "No matching log entries."
 
     def _load_config_cache(self, force: bool = False) -> None:
-        """Load LSP configuration from file.
+        """Resolve the server table — from the profile, or from a file.
 
-        Search order:
+        Source order:
+        0. ``plugin_configs.lsp.languageServers`` — when the profile
+           declares the table it IS the configuration and NO file is
+           read (see `_language_servers_from_profile`)
         1. Custom path from plugin_configs (config_path)
         2. .lsp.json in workspace directory (client's working directory)
         3. .lsp.json in current working directory (fallback)
         4. ~/.lsp.json in home directory
         """
         if self._config_cache and not force:
+            return
+
+        if self._profile_config is not None:
+            self._config_cache = self._profile_config
+            self._config_path = None  # the profile, not a file on disk
+            count = len(self._config_cache.get('languageServers', {}))
+            self._log_event(
+                LOG_INFO,
+                f"Loaded config from the session profile "
+                f"(plugin_configs.lsp.languageServers, {count} server(s))",
+            )
+            self._write_config_debug_entry(
+                "the session profile (plugin_configs.lsp.languageServers)"
+            )
             return
 
         # Build search paths - custom path takes priority
@@ -2708,43 +2894,53 @@ Use 'lsp status' to see connected language servers and their capabilities."""
                     self._log_event(LOG_WARN, f"Failed to load {path}: {e}")
                     continue
 
-                # Diagnostic side-channel: write the load event to
-                # the operator-configured diagnostic log.  This MUST
-                # NOT abort config loading if it fails — the log is
-                # for human inspection, not load-bearing.  Pre-0.6.136
-                # this was wrapped in the same outer try/except as the
-                # json.load, which silently broke the entire LSP
-                # enrichment chain when apparmor denied the write.
-                debug_path = self._resolve_debug_log_path(
-                    self._debug_log_path_raw, self._workspace_path
-                )
-                if debug_path:
-                    try:
-                        parent_dir = os.path.dirname(debug_path)
-                        if parent_dir:
-                            os.makedirs(parent_dir, exist_ok=True)
-                        session_tag = f":{self._session_id}" if self._session_id else ""
-                        with open(debug_path, "a") as df:
-                            df.write(f"[LSP{session_tag}] Config loaded from: {path}\n")
-                            servers = self._config_cache.get('languageServers', {})
-                            for name, spec in servers.items():
-                                df.write(
-                                    f"[LSP{session_tag}]   Server '{name}': "
-                                    f"command={spec.get('command')}, "
-                                    f"args={spec.get('args', [])}\n"
-                                )
-                            df.flush()
-                    except OSError as e:
-                        # Apparmor-denied, disk full, parent missing,
-                        # etc.  Surface the failure via the in-memory
-                        # log so `lsp logs` shows it, but do NOT abort
-                        # the load — the config is already cached.
-                        self._log_event(
-                            LOG_WARN,
-                            f"Failed to write debug log to {debug_path}: {e}",
-                        )
+                self._write_config_debug_entry(path)
                 return
         self._config_cache = {}
+
+    def _write_config_debug_entry(self, source: str) -> None:
+        """Record where the server table came from, and what is in it.
+
+        Diagnostic side-channel: written to the operator-configured
+        diagnostic log (`debug_log_path`).  This MUST NOT abort config
+        loading if it fails — the log is for human inspection, not
+        load-bearing.  Pre-0.6.136 the write was wrapped in the same
+        outer try/except as the `json.load`, which silently broke the
+        entire LSP enrichment chain when apparmor denied the write.
+
+        Called from BOTH arms of `_load_config_cache` (profile-declared
+        and file-loaded) so the two cannot drift into logging different
+        things; `source` is what the entry names as the origin — a path
+        for the file arm, a phrase naming the profile for the other.
+        """
+        debug_path = self._resolve_debug_log_path(
+            self._debug_log_path_raw, self._workspace_path
+        )
+        if not debug_path:
+            return
+        try:
+            parent_dir = os.path.dirname(debug_path)
+            if parent_dir:
+                os.makedirs(parent_dir, exist_ok=True)
+            session_tag = f":{self._session_id}" if self._session_id else ""
+            with open(debug_path, "a") as df:
+                df.write(f"[LSP{session_tag}] Config loaded from: {source}\n")
+                servers = self._config_cache.get('languageServers', {})
+                for name, spec in servers.items():
+                    df.write(
+                        f"[LSP{session_tag}]   Server '{name}': "
+                        f"command={spec.get('command')}, "
+                        f"args={spec.get('args', [])}\n"
+                    )
+                df.flush()
+        except OSError as e:
+            # Apparmor-denied, disk full, parent missing, etc.  Surface
+            # the failure via the in-memory log so `lsp logs` shows it,
+            # but do NOT abort the load — the config is already cached.
+            self._log_event(
+                LOG_WARN,
+                f"Failed to write debug log to {debug_path}: {e}",
+            )
 
     def _ensure_thread(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -3170,8 +3366,10 @@ Use 'lsp status' to see connected language servers and their capabilities."""
         servers = self._config_cache.get('languageServers', {})
 
         if not servers:
-            parts.append("No LSP servers configured in .lsp.json")
-            parts.append("Create .lsp.json with server configuration to enable LSP features")
+            parts.append("No LSP servers configured")
+            parts.append(
+                f"To enable LSP features, {self._no_servers_hint()}"
+            )
             return ". ".join(parts)
 
         # Check for failed servers
@@ -3229,11 +3427,12 @@ Use 'lsp status' to see connected language servers and their capabilities."""
 
         # Case 1: No servers configured at all
         if not servers:
-            return f"{operation}{detail}. No LSP servers configured - create .lsp.json to enable LSP features."
+            return (f"{operation}{detail}. No LSP servers configured - "
+                    f"to enable LSP features, {self._no_servers_hint()}.")
 
         # Case 2: No server configured for this language
         if lang and not matching_servers:
-            return f"{operation}{detail}. No LSP server configured for {lang} files in .lsp.json."
+            return f"{operation}{detail}. No LSP server configured for {lang} files."
 
         # Case 3: Server configured but failed to start
         failed_matching = [s for s in matching_servers if s in self._failed_servers]

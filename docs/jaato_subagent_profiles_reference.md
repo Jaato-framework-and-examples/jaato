@@ -984,6 +984,34 @@ PermissionPlugin.initialize(config)
 }
 ```
 
+### LSP Server Embedding
+
+The `lsp` plugin's server table is the same mapping `.lsp.json` carries,
+so it can be declared inline instead of shipped as a separate file:
+
+```yaml
+plugin_configs:
+  lsp:
+    languageServers:
+      java:
+        command: jdtls
+        args: ["-data", "${workspaceRoot}/.jaato/jdtls-data"]
+        languageId: java
+    connect_timeout_seconds: 60.0
+```
+
+Declaring `languageServers` **suppresses the file entirely** — `config_path`,
+`<workspace>/.lsp.json` and `~/.lsp.json` are all skipped; present-and-empty
+(`{}`) declares that this profile runs no language server. Omitting the key
+keeps the file search unchanged.
+
+Prefer the profile. `.jaato/profiles/**` is AppArmor write-denied to the
+runner, while `.lsp.json` at the workspace root is writable by model-driven
+tools — and each server's `command` becomes an `ix` exec grant in the
+per-session AppArmor profile. Same trust boundary that makes
+`apparmor_extra_rules` profile-only. See
+`jaato-server/shared/plugins/lsp/README.md`.
+
 ### Provider-Specific Knobs via `plugin_configs`
 
 The model provider is itself a plugin, so provider-specific knobs go under `plugin_configs[provider_name]`:

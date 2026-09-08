@@ -84,17 +84,9 @@ def validate_profile(
         out.append(Diagnostic(sev, code, msg, profile=name, where=where))
 
     provider_name = getattr(profile, "provider", None)
-    pinfo: Optional[introspect.ProviderInfo] = None
 
     # --- provider --------------------------------------------------------
-    if provider_name:
-        pinfo = introspect.resolve_provider(provider_name)
-        if pinfo is None and provider_name == ECHO_PROVIDER:
-            _check_echo_profile(profile, add)
-        elif pinfo is None:
-            add("error", "unknown_provider",
-                f"provider '{provider_name}' is not a known model provider "
-                f"(have: {', '.join(sorted(providers))})", where="provider")
+    pinfo = _resolve_and_check_provider(profile, provider_name, providers, add)
     # model present? (a resolved, runnable profile should bind one; a pure
     # base/abstract profile legitimately has neither provider nor model)
     model = getattr(profile, "model", None)
@@ -367,6 +359,40 @@ def _check_spawn_schema_wire_types(profiles, config_root: str, out) -> None:
                 f"`pattern` if you need the shape, e.g. '^[0-9]+$') and parse "
                 f"it in the prefetch/persona.",
                 profile=pname, where=f"spawn_payload_schema.properties.{key}"))
+
+
+def _resolve_and_check_provider(
+    profile, provider_name, providers, add,
+) -> Optional[introspect.ProviderInfo]:
+    """Resolve the profile's provider, reporting what the catalogue says.
+
+    Returns the resolved ``ProviderInfo`` — the caller needs it to check
+    ``quirks`` against what that provider actually honors — or ``None``
+    when the profile names no provider, or names one the catalogue does
+    not carry.
+
+    ``echo`` is the one name that resolves to nothing and is still
+    correct: it is the framework's own deterministic test double, and it
+    is deliberately excluded from the ``explain providers`` catalogue, so
+    the plain unknown-provider error would be a false positive on every
+    conformance profile in the tree.  It gets its own checks instead.
+
+    Lives outside ``validate_profile`` because that function is over the
+    complexity ceiling and frozen at its recorded size; new provider
+    checks belong here.
+    """
+    if not provider_name:
+        return None
+    pinfo = introspect.resolve_provider(provider_name)
+    if pinfo is not None:
+        return pinfo
+    if provider_name == ECHO_PROVIDER:
+        _check_echo_profile(profile, add)
+        return None
+    add("error", "unknown_provider",
+        f"provider '{provider_name}' is not a known model provider "
+        f"(have: {', '.join(sorted(providers))})", where="provider")
+    return None
 
 
 def _check_echo_profile(profile, add) -> None:

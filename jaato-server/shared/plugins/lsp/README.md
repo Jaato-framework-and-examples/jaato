@@ -119,6 +119,59 @@ LSP uses JSON-RPC 2.0 over stdio with Content-Length headers:
 
 ## Configuration
 
+Servers can be declared in **two** places.  Prefer the profile.
+
+### In the session profile (preferred)
+
+`plugin_configs.lsp.languageServers` takes the same mapping `.lsp.json`
+carries under the same key, so a spec is written once and moves between
+the two without change:
+
+```yaml
+# .jaato/profiles/_base_codegen.yaml
+plugins: [lsp]
+plugin_configs:
+  lsp:
+    languageServers:
+      java:
+        command: jdtls
+        args: ["-data", "${workspaceRoot}/.jaato/jdtls-data"]
+        languageId: java
+    connect_timeout_seconds: 60.0
+```
+
+**Declaring that key suppresses the file entirely** — not `config_path`,
+not `<workspace>/.lsp.json`, not `~/.lsp.json`.  Present-and-empty
+(`languageServers: {}`) is itself a declaration: *this profile runs no
+language server*.  Absent keeps the file search exactly as it was.  The
+two sources never merge: merging would give one session two writers of
+one table, and only one of the two writers is trustworthy —
+
+> **Trust boundary.** `.jaato/profiles/**` carries `audit deny ... wlk,`
+> on both the runner and `//child` layers: operator-only, tamper-proof at
+> runtime.  `.lsp.json` sits at the workspace root and **is** writable by
+> model-driven tools.  Each server's `command` becomes an `ix` exec grant
+> in the per-session AppArmor profile (see below), so a model that can
+> rewrite `.lsp.json` can choose a binary the next session is granted
+> permission to exec.  This is the same reason `apparmor_extra_rules` is
+> profile-only.
+
+`plugin_configs` is deep-merged by plugin name, key by key, so a base
+profile can declare the table once and every leaf that inherits it keeps
+it while overriding only its own keys (`connect_timeout_seconds`, say). A
+leaf that sets `languageServers` itself replaces the table wholesale.
+That is the shape to use for a stack: the stack's base profile owns the
+servers, the per-stage profiles inherit them.
+
+A malformed declaration is an authoring error, never a silent fall-back to
+the file: a non-mapping value is logged at ERROR and read as no servers,
+and an entry whose spec is not a mapping is logged and dropped by name.
+Variable expansion is unchanged — `${workspaceRoot}` in a spec is expanded
+at connect time, with the session workspace, exactly as for file-loaded
+specs.
+
+### In `.lsp.json`
+
 Create `.lsp.json` in your project root or home directory:
 
 ```json
@@ -222,11 +275,18 @@ the LSP client implements several mechanisms:
    `textDocument/didOpen`, `textDocument/didChange`, and `workspace/didChangeWatchedFiles`
    notifications.
 
-### Configuration Search Order
+### Configuration Source Order
 
-1. Custom path from `plugin_configs` (see below)
+0. `plugin_configs.lsp.languageServers` — when the profile declares the
+   table it **is** the configuration and no file is read
+1. Custom path from `plugin_configs` (`config_path`, see below)
 2. `.lsp.json` in current working directory
 3. `~/.lsp.json` in home directory
+
+Resolved in one place, `_language_servers_from_profile`, which **both**
+readers call: `_load_config_cache` (runtime) and `_load_lsp_config_static`
+(the AppArmor composer).  They have to agree — a server the composer never
+sees gets no `ix` grant, and the confined runner then cannot exec it.
 
 ### Using with Subagent Profiles
 
@@ -259,7 +319,8 @@ Settings live under `plugin_configs.lsp` in a profile:
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `config_path` | string | _(unset — falls back to `<workspace>/.lsp.json` then `~/.lsp.json`)_ | Override `.lsp.json` discovery path. |
+| `languageServers` | object | _(unset — the file search runs)_ | The server table, in `.lsp.json` shape. When PRESENT it is the configuration and no file is read at all; present-and-empty declares that this profile runs no language server. Preferred over the file: the profile is AppArmor write-denied to the runner, `.lsp.json` is not. |
+| `config_path` | string | _(unset — falls back to `<workspace>/.lsp.json` then `~/.lsp.json`)_ | Override `.lsp.json` discovery path. **Inert when `languageServers` is declared.** |
 | `connect_timeout_seconds` | float | `30.0` | Per-server LSP `initialize` handshake timeout. Raise for heavy-init servers — Eclipse JDT LS (jdtls) on Maven / Gradle workspaces typically needs 30-60s; default `15.0` (pre server-version-bump) starves it. Clamped to `[1.0, 300.0]`; out-of-range values are clamped and logged in the trace, not rejected. |
 | `diagnostics_max_wait_seconds` | float | `5.0` | Upper bound on the post-`didOpen` / post-`didChange` wait for the server's first `textDocument/publishDiagnostics` batch. The framework awaits a per-URI `asyncio.Event` signalled by the JSON-RPC reader, so calls return AS SOON AS the batch arrives — raising the max costs nothing in the fast-server case. Pre-0.6.134 this was a hard-coded `0.8s` sleep that starved jdtls (Maven cold cache: 3-8s first batch). Clamped to `[0.0, 60.0]`; `0` disables the await entirely (legacy "read cache as-is" behavior). |
 | `diagnostics_min_wait_seconds` | float | `0.5` | Floor on the same wait. Even when an early `publishDiagnostics` arrives, we wait at least this long so multi-stage analysis pipelines (parser → compiler → linter) have a chance to deliver their later batches before the cache read. Clamped to `[0.0, diagnostics_max_wait_seconds]`. |
@@ -271,7 +332,11 @@ Example codegen profile snippet:
 ```yaml
 plugin_configs:
   lsp:
-    config_path: "${workspaceRoot}/.lsp.json"
+    languageServers:                            # or config_path, not both
+      java:
+        command: jdtls
+        args: ["-data", "${workspaceRoot}/.jaato/jdtls-data"]
+        languageId: java
     connect_timeout_seconds: 60.0
     diagnostics_max_wait_seconds: 10.0            # raise for cold Maven workspaces
     diagnostics_min_wait_seconds: 1.0             # let jdtls multi-stage settle
@@ -283,8 +348,9 @@ plugin_configs:
 ### AppArmor Exec Grants for Configured Servers
 
 Since server 0.6.137, the lsp plugin's `get_apparmor_rules`
-classmethod also emits `ix` (inherit-exec) grants for each LSP
-server configured in `.lsp.json`. Under PR-148 apparmor
+classmethod also emits `ix` (inherit-exec) grants for each
+configured LSP server — read from `plugin_configs.lsp.languageServers`
+when the profile declares it, from `.lsp.json` otherwise. Under PR-148 apparmor
 confinement, the runner-side `connect_server` call uses
 `asyncio.create_subprocess_exec` to launch the configured
 server — without an `ix` grant on the canonical binary path,
