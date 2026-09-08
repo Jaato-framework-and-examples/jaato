@@ -137,6 +137,21 @@ class OpenAICompatProvider(OpenAIMediaOutputMixin, ModalityCapabilityMixin):
     # Models known to expose reasoning/thinking via ``reasoning_content``.
     REASONING_CAPABLE_MODELS: List[str] = []
 
+    # Whether an assistant turn's reasoning goes BACK to the model on the
+    # next request (docs/design/minimax-kimi-mimo-providers.md §3).  Off
+    # by default: for the DeepSeek-R1-era models this base was written
+    # for, the reasoning of a finished turn is noise, and every existing
+    # inheritor keeps that behaviour.  A provider fronting a wire whose
+    # thinking models REQUIRE the replay (MiMo answers 400 without it,
+    # Kimi K3 wants the assistant message back as-is, MiniMax measures a
+    # large quality drop) sets it True, and then three things follow: the
+    # streaming loop and the batch path put the reasoning in a leading
+    # ``Part.thought`` (not only in ``ProviderResponse.thinking``, which
+    # the UI reads), the session keeps that part in history, and
+    # ``history_to_openai`` replays it through ``_reasoning_replay_fields``.
+    # Declared to the capability contract as ``reasoning_replay``.
+    replay_reasoning: bool = False
+
     def __init__(self) -> None:
         """Initialize the provider (not yet connected)."""
         self._client: Optional[OpenAI] = None
@@ -389,6 +404,46 @@ class OpenAICompatProvider(OpenAIMediaOutputMixin, ModalityCapabilityMixin):
         """Hook: list available models (provider-specific).  Default: none."""
         return []
 
+    # ==================== Reasoning replay hooks ====================
+
+    def _reasoning_replay_fields(self, text: str) -> Dict[str, Any]:
+        """Wire fields that replay one assistant turn's reasoning ``text``.
+
+        Every vendor documents ``reasoning_content``; a wire that wants a
+        second field alongside it (MiniMax echoes ``reasoning_details``)
+        overrides this.  Only consulted when :attr:`replay_reasoning` is
+        set.
+        """
+        return {"reasoning_content": text}
+
+    def _reasoning_from_delta(self, delta: Any) -> Optional[str]:
+        """The reasoning text carried by one streaming ``delta``, if any.
+
+        The base reads ``delta.reasoning_content`` (DeepSeek's spelling,
+        adopted by Kimi, MiMo and most OpenAI-shaped wires).  A wire that
+        streams reasoning under another shape overrides this — MiniMax
+        with ``reasoning_split`` delivers ``delta.reasoning_details[]``.
+        """
+        reasoning = getattr(delta, "reasoning_content", None)
+        return reasoning if reasoning and isinstance(reasoning, str) else None
+
+    def _history_reasoning_fields(self):
+        """The ``reasoning_fields`` callable ``history_to_openai`` replays
+        with — this provider's shape when it opts in, else ``None``."""
+        return self._reasoning_replay_fields if self.replay_reasoning else None
+
+    def _attach_reasoning_part(self, parts: List[Part], thinking: Optional[str]) -> None:
+        """Prepend ``Part(thought=thinking)`` when this wire replays reasoning.
+
+        Thought first, text and tool calls after — the vendors emit
+        reasoning before content and expect it replayed in that order.
+        Both the streaming loop and the batch path call this so a turn
+        looks the same in history whichever path produced it.  No-op when
+        :attr:`replay_reasoning` is off or the turn carried no reasoning.
+        """
+        if self.replay_reasoning and thinking:
+            parts.insert(0, Part.from_thought(thinking))
+
     # ==================== Stateless Completion ====================
 
     def _apply_api_params(
@@ -470,7 +525,8 @@ class OpenAICompatProvider(OpenAIMediaOutputMixin, ModalityCapabilityMixin):
             if system_instruction:
                 openai_messages.append({"role": "system",
                                         "content": system_instruction})
-            openai_messages.extend(history_to_openai(list(messages)))
+            openai_messages.extend(history_to_openai(
+                list(messages), reasoning_fields=self._history_reasoning_fields()))
 
         # Build kwargs
         kwargs: Dict[str, Any] = {}
@@ -502,6 +558,8 @@ class OpenAICompatProvider(OpenAIMediaOutputMixin, ModalityCapabilityMixin):
                     **kwargs,
                 )
                 provider_response = response_from_openai(response)
+                self._attach_reasoning_part(
+                    provider_response.parts, provider_response.thinking)
                 # Non-streaming cache-hit count (the streaming path sets this
                 # per-chunk); response_from_openai doesn't carry it.
                 cached = self._extract_cache_tokens(getattr(response, "usage", None))
@@ -699,8 +757,8 @@ class OpenAICompatProvider(OpenAIMediaOutputMixin, ModalityCapabilityMixin):
 
                     # Extract reasoning/thinking (e.g. DeepSeek-R1)
                     if self._enable_thinking:
-                        reasoning = getattr(delta, "reasoning_content", None)
-                        if reasoning and isinstance(reasoning, str):
+                        reasoning = self._reasoning_from_delta(delta)
+                        if reasoning:
                             self._trace(f"{trace_prefix}_THINKING len={len(reasoning)}")
                             accumulated_thinking.append(reasoning)
                             if on_thinking:
@@ -822,6 +880,7 @@ class OpenAICompatProvider(OpenAIMediaOutputMixin, ModalityCapabilityMixin):
         )
 
         thinking = "".join(accumulated_thinking) if accumulated_thinking else None
+        self._attach_reasoning_part(parts, thinking)
 
         # A stream that stopped arriving is not a turn that finished
         # (#687).  Raises rather than returning the fragment.

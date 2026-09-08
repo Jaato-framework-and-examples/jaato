@@ -3131,12 +3131,24 @@ class JaatoSession:
         response parts to only text and function_call (excludes
         function_response parts which belong to user/tool messages).
 
+        ``Part.thought`` is kept only when the provider declares
+        ``replay_reasoning`` — the wires whose thinking models require the
+        previous turn's reasoning back on the next request of a tool-call
+        loop (docs/design/minimax-kimi-mimo-providers.md §3).  Gating on
+        the provider rather than on the part means a provider that emits a
+        thought part incidentally (google_genai) keeps the history it
+        always had, and no existing provider's replay changes.
+
         Args:
             response: The ProviderResponse from the provider.
         """
+        # ``is True`` and not truthiness: a test double answers every
+        # attribute with a mock, and a mock must read as "does not replay".
+        keep_thought = getattr(self._provider, "replay_reasoning", False) is True
         history_parts = [
             p for p in response.parts
             if p.text is not None or p.function_call is not None
+            or (keep_thought and p.thought is not None)
         ]
         if history_parts:
             self._history.append(Message(
