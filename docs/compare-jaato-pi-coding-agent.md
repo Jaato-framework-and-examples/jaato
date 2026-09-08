@@ -114,7 +114,7 @@ you must complete · **●○○** hook only, you build the feature · **○○�
 | Multi-agent | ●○○ example extension (subprocess per subagent) | ●●● subagents, profiles, cascades, payload schemas, runner pool | ●●● + handoff, remote spawn (currently broken per backlog) |
 | Observability of cascades and orchestration | ●○○ per-task streaming and usage in the subagent example's TUI panel; no cross-process id, no spans | ●●● one `cascade_driver_id` across every stage, `cascade_events()` observer subscription, generated observer client, agent-graph attributes on OTel spans, gate and settle events, cascade budgets, sweep reports with cost | ●●● + live cascade timeline (`compile --monitor`), dashboard with Phoenix deep-links, per-server trace identity, drift monitor (in flux) |
 | Extensibility model | ●●● 33 lifecycle events, TS extensions via jiti | ●●● 5 entry-point groups, daemon hooks, enrichment pipeline, traits | ●●● scaffold verbs |
-| Scaffolding, introspection, discoverability | ●●○ excellent narrative docs, 13 SDK examples, TypeScript types, `/reload` hot reload, `--list-models`; no tool that interrogates the installed framework | ●●● `jaato-scaffold explain` (computed from the installed framework), `validate` (JSON, CI-usable), `new` with 8 self-checking archetypes and `--dry-run`, `jaato-doctor` preflight and session post-mortem, an AI-assistant skill that routes to those tools | ●●● + `compile` verb on the same CLI |
+| Scaffolding, introspection, discoverability | ●●○ excellent narrative docs, 13 SDK examples, TypeScript types, `/reload` hot reload, `--list-models`; no tool that interrogates the installed framework | ●●● `jaato-scaffold explain` (computed from the installed framework), `validate` (JSON, CI-usable), `new` with 8 self-checking archetypes and `--dry-run`, `jaato-doctor` preflight and session post-mortem, an AI-assistant skill that routes to those tools; companion architecture pack with 24 component docs, ten runnable SDK examples and side-by-side comparisons against seven SDKs | ●●● + `compile` verb on the same CLI |
 | Cross-language integration | ●●○ JSONL RPC/JSON modes; TS only | ●●● Python in-process, IPC, WS JSON, TS SDK (pre-npm) | ●●● + web components |
 | Supply chain / release integrity | ●●● pinned deps, shrinkwrap, `--ignore-scripts`, SHA256SUMS | ●●○ entry-point trust policy; TestPyPI today, PyPI intended once out of alpha; no signed releases yet | ●●○ delivered directly under the commercial licence, by design |
 | Licence for internal use | ●●● MIT | ●●● BUSL grant allows | commercial |
@@ -699,11 +699,36 @@ installed framework, so they cannot drift from it:
   coding assistant to reach for those two tools instead of reading source,
   which matters for a team that will build its harnesses with an assistant.
 
-The honest counterweight: jaato's `examples/` directory holds a ten-line
-hello script, so the worked examples come from `new` rather than from a
-browsable folder; the documentation is large and often written as incident
-narrative rather than reference; and `CLAUDE.md` alone is about 1,800 lines.
-pi is easier to read; jaato is easier to interrogate.
+**The architecture pack.** The framework tree's own `examples/` holds a
+ten-line hello script and much of its documentation is written as incident
+narrative, so the readable on-ramp lives in a companion repository,
+`the_Jaato_Arch_visualization` in the jaato GitHub organisation (public):
+
+- **24 standalone component documents** (`components/00-overview.md` to
+  `23-scaffold.md`, about 3,800 lines) following one template: what it is,
+  where it sits in the stack, responsibilities, lifecycle, configuration,
+  neighbours, an example, and a diagram brief for a slide. They cover the
+  daemon, runner pool, runners, runtime and session, plugins, providers,
+  profiles, personas, cascades and stages, reactors, prefetch scripts,
+  completion schemas and processors, workspace, lifecycle and events,
+  telemetry, redaction, secrets, memory, drift, gossip and the scaffold
+  tool. References use symbol anchors rather than line numbers so they do
+  not rot, and the pack flags what is design-stage only.
+- **Ten runnable Python SDK examples** (`examples/python-sdk/ex01` basic
+  ask through `ex10` recovery, with `setup.sh`, `daemon.sh` and a smoke
+  test) covering streaming, persona and memory, typed completion, client
+  tools, multi-tool, permissions, subagents and a cascade.
+- **Side-by-side SDK comparisons** against LangChain, Mastra, Pydantic AI,
+  Agno, Strands, the OpenAI Agents SDK and the Claude Agent SDK (about
+  2,700 lines, ten worked examples each, simplest to most complex), and
+  **platform comparisons** against Ona, Kiro and Intent. This document is
+  the pi entry in that series and could be ported into it.
+
+With the pack included the reading gap narrows to this: pi's reference is
+in one place and versioned with the code; jaato's is split between an
+incident-driven in-tree corpus, a computed `explain`, and a companion pack.
+pi is easier to read from a single tab; jaato is easier to interrogate and
+has the broader onboarding library.
 
 **jaato premium** adds the `compile` verb on the same CLI, so the Daruma
 spec-to-profile path uses the introspection tooling a team already knows.
@@ -848,7 +873,7 @@ its sessions and spans but not to the person who authorised it.
 | Release artefacts | npm packages, Bun binaries, `SHA256SUMS` (checksums, no Sigstore/GPG), reproducible-from-source path | three TestPyPI publish workflows (`sdk`, `server`, `tui`) with a version-exists guard; PyPI is the stated destination once the alpha label comes off; no signed releases yet; `install.py` installer | direct delivery under the commercial licence (maintainer-stated intent; no public channel by design) |
 | Tests | 535 test files (269 in coding-agent) | 767 test files, about 13,000 test functions | 63 files, about 1,000 tests, uneven (PII 168, secrets 1) |
 | Guards | biome, pinned-dep, entry-graph and shrinkwrap checks | required `contract-guards` CI job: protocol conformance, provider capability conformance, cyclomatic ratchet (≤15, 416 baselined), env-scope catalog ratchet | — |
-| Docs | 32 files / 12.6k lines in coding-agent, candid about limits | about 140 docs, about 70k lines, design docs record incidents | 18 docs, one operator doc stale |
+| Docs | 32 files / 12.6k lines in coding-agent, candid about limits | about 140 docs, about 70k lines, design docs record incidents; plus the companion architecture pack (24 component docs, ten runnable SDK examples, comparisons against seven SDKs and three platforms) | 18 docs, one operator doc stale |
 | Cadence | 275 releases since 2025-11-25, changelog per release | no changelog; alpha classifier; two very large files (`session_manager.py` 557 KB, `core.py` 340 KB) | alpha; 77 commits |
 | Governance | single maintainer copyright; new-contributor issues auto-closed | single licensor | single licensor |
 
