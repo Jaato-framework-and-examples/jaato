@@ -2123,6 +2123,83 @@ class IPCClient:
             payload=payload,
         ))
 
+    async def wake_session(
+        self,
+        session_id: str,
+        text: str = "",
+        *,
+        attachments: Optional[list] = None,
+        source: str = "user",
+        event_id: Optional[str] = None,
+    ) -> None:
+        """Wake ``session_id`` — revive it if cold and start a USER turn on it.
+
+        The typed form of ``execute_command("session.wake", payload=...)``,
+        and the reason it exists is ``attachments``: the payload dict is
+        free-form, so a caller could always have put bytes in it, but nothing
+        told them the field existed or normalised a file path into the wire
+        shape.  ``send_message`` accepts ``attachments`` and the two resume
+        verbs did not, which made the limitation invisible from the API
+        surface a reader starts at (#845).
+
+        Fire-and-forget, like the command it wraps: refusals arrive on the
+        event stream as an ``ErrorEvent`` with ``error_type="WakeError"``, and
+        the woken turn's output flows to the session's attached clients (the
+        caller need not be one).
+
+        The wake payload is UNTRUSTED — it may be a public PR comment, a
+        webhook body, a recording left by a caller — so the daemon wraps it in
+        the untrusted-content boundary before the model sees it.  Attachments
+        cannot be wrapped (bytes have no marker to carry), so the daemon
+        instead names each one INSIDE the boundary and states that the media
+        delivered with it came from the same source: the model is told that
+        the audio is data to interpret, never instructions to follow.
+
+        Args:
+            session_id: The session to wake.  Cold sessions are revived from
+                disk; the workspace is resolved daemon-side, never from here.
+            text: The wake message.  May be empty when ``attachments`` carry
+                the content — an attachment IS content (#838), and for a
+                spoken utterance it is the whole message.
+            attachments: Optional binary content — each a file-path ``str`` OR
+                a ``{mime_type, data, display_name}`` dict, as
+                :meth:`send_message` accepts, normalised here by the same
+                :meth:`_normalize_attachments`.  Requires daemon protocol
+                >= :attr:`MIN_ATTACHMENT_RESUME_PROTOCOL`.
+            source: Provenance tag recorded in the untrusted-content wrapper
+                (e.g. ``"user"``, ``"github"``, ``"cron"``).
+            event_id: Idempotency key.  A redelivered id is a benign no-op, so
+                an at-least-once ingress can retry safely.
+
+        Raises:
+            ValueError: if neither ``text`` nor ``attachments`` is given (a
+                wake with no content would drive an empty turn), or if the
+                daemon is too old to carry attachments.
+        """
+        wire_attachments: List[Dict[str, Any]] = []
+        if attachments:
+            self._require_attachment_resume_protocol("session.wake")
+            wire_attachments = self._normalize_attachments(attachments)
+        if not text and not wire_attachments:
+            raise ValueError(
+                "session.wake requires text or attachments — a wake with no "
+                "content drives a turn the model has nothing to answer"
+            )
+        payload: Dict[str, Any] = {
+            "session_id": session_id,
+            "text": text,
+            "source": source,
+        }
+        if event_id is not None:
+            payload["event_id"] = event_id
+        if wire_attachments:
+            payload["attachments"] = wire_attachments
+        await self._send_event(CommandRequest(
+            command="session.wake",
+            args=[],
+            payload=payload,
+        ))
+
     # ---- typed wake-primitive methods (see _wake_client) ----
     async def bind_wake(self, wake_ref: str, trust_keys: list, *,
                         timeout: float = 30.0):
@@ -2242,12 +2319,47 @@ class IPCClient:
     #: nothing answers, so waiting would hang every call.
     MIN_INJECT_RESULT_PROTOCOL = "1.3"
 
+    #: Wire-protocol minor from which the two RESUME verbs (``inject_prompt``
+    #: and ``session.wake``) carry ``attachments``.  Below this the daemon
+    #: ignores the field — and for BYTES that is not a benign no-op, so the
+    #: SDK refuses the call instead of letting the payload vanish.
+    MIN_ATTACHMENT_RESUME_PROTOCOL = "1.5"
+
+    def _require_attachment_resume_protocol(self, verb: str) -> None:
+        """Refuse an attachment-bearing resume against a daemon too old to
+        carry it.
+
+        An additive optional field is normally safe to send blind: an older
+        peer ignores it and the call degrades to what it always did.  That
+        reasoning holds for a ``request_id`` and NOT for an attachment — the
+        degraded call is a turn driven with the text and WITHOUT the audio
+        that was the whole message, which for a blank-text voice utterance is
+        an empty turn reported as a success.  So this is checked, not hoped.
+
+        An UNKNOWN version (no handshake yet) is refused on the same
+        principle: ``_protocol_compatible`` answers ``False`` for ``None``,
+        and "I have not been told what this daemon can do" is not a licence
+        to send bytes it may drop.
+        """
+        if _protocol_compatible(
+                self.server_protocol_version,
+                self.MIN_ATTACHMENT_RESUME_PROTOCOL):
+            return
+        spoken = self.server_protocol_version or "unknown (not connected)"
+        raise ValueError(
+            f"{verb}: this daemon speaks protocol {spoken} and would DROP "
+            f"the attachments (needs >= "
+            f"{self.MIN_ATTACHMENT_RESUME_PROTOCOL}).  Send the content "
+            f"through send_message() on a live session, or upgrade the daemon."
+        )
+
     async def inject_prompt(
         self,
         text: str,
         source_type: str = "user",
         source_id: Optional[str] = None,
         timeout: float = 10.0,
+        attachments: Optional[list] = None,
     ) -> Optional[str]:
         """Inject a prompt into the session's message queue.
 
@@ -2271,11 +2383,27 @@ class IPCClient:
                 / ``"parent"`` for reactor / hook callers.
             source_id: Caller identifier for telemetry / logs.
             timeout: Seconds to wait for the daemon's result event.
+            attachments: Optional binary user content — each a file-path
+                ``str`` OR a ``{mime_type, data, display_name}`` dict, exactly
+                as :meth:`send_message` accepts, normalised here by the same
+                :meth:`_normalize_attachments`.  Requires daemon protocol
+                >= :attr:`MIN_ATTACHMENT_RESUME_PROTOCOL` (an older daemon
+                would silently drop the bytes, so the call is refused).
+
+                **An attachment-bearing inject is idle-only.**  Only the
+                drive branch of an inject can carry bytes — a queued message
+                is folded into the running turn as text, and there is nowhere
+                in that shape to put an ``inline_data`` part — so the daemon
+                offers it with ``require_idle`` and a busy target answers
+                ``"busy"`` with nothing enqueued.  That is a retry-safe
+                refusal, not a delivery.
 
         Returns:
             One of ``"accepted"`` (the target was idle, so a turn was
             STARTED), ``"queued"`` (the target is mid-turn and its running
-            turn will drain the message), ``"terminated"`` (loaded but dead),
+            turn will drain the message), ``"busy"`` (attachments were sent
+            and the target is mid-turn, so NOTHING was enqueued — retry when
+            it goes idle), ``"terminated"`` (loaded but dead),
             ``"no_session"`` (not loaded), ``"unreachable"`` (live, but
             nothing was sent -- re-sending is SAFE), or ``"not_confirmed"``
             (an offer was made and its answer was lost -- re-sending MAY
@@ -2296,6 +2424,14 @@ class IPCClient:
             string so that "I was not told" stays checkable instead of
             being mistaken for a real state.
         """
+        wire_attachments: List[Dict[str, Any]] = []
+        if attachments:
+            # Refuse BEFORE normalising: reading the files is pointless work
+            # if the daemon cannot carry them, and a raise here is the whole
+            # point — the alternative is a turn that runs without them.
+            self._require_attachment_resume_protocol("inject_prompt")
+            wire_attachments = self._normalize_attachments(attachments)
+
         if not _protocol_compatible(
                 self.server_protocol_version,
                 self.MIN_INJECT_RESULT_PROTOCOL):
@@ -2314,6 +2450,7 @@ class IPCClient:
                 text=text,
                 source_type=source_type,
                 source_id=source_id,
+                attachments=wire_attachments,
             ))
             return None
 
@@ -2323,6 +2460,7 @@ class IPCClient:
             source_type=source_type,
             source_id=source_id,
             request_id=req_id,
+            attachments=wire_attachments,
         ))
         try:
             return await asyncio.wait_for(

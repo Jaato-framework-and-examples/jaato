@@ -441,6 +441,7 @@ CAPABILITY_FIELDS = (
     "streaming",
     "cancellation",
     "output_media",
+    "reasoning_replay",
 )
 
 
@@ -473,6 +474,7 @@ class ProviderCapabilities:
     streaming: bool = True              # on_chunk token streaming
     cancellation: bool = True           # cancel_token actually halts generation
     output_media: bool = False          # model-generated media -> MediaDelta on on_chunk
+    reasoning_replay: bool = False      # an assistant turn's reasoning goes back on the next request
 
     def as_dict(self) -> Dict[str, bool]:
         return {f: bool(getattr(self, f)) for f in CAPABILITY_FIELDS}

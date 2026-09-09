@@ -10,7 +10,7 @@ from __future__ import annotations
 import base64
 import json
 import uuid
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from openai.types.chat import ChatCompletion, ChatCompletionChunk
@@ -101,7 +101,32 @@ def tool_schemas_to_openai(schemas: Optional[List[ToolSchema]]) -> Optional[List
 
 # ==================== Message Conversion ====================
 
-def message_to_openai(message: Message) -> List[Dict[str, Any]]:
+def _followup_label(pdf_as_file: bool, audio_as_input_audio: bool) -> str:
+    """Lead-line noun for the message carrying a tool result's attachments.
+
+    ``"Image"`` on a wire that carries only images, ``"Attachment"`` where
+    PDFs or audio also ride — a follow-up headed "Image(s)" that contains
+    a PDF describes itself wrongly to the model reading it.
+    """
+    return "Image" if not (pdf_as_file or audio_as_input_audio) else "Attachment"
+
+"""Maps an assistant turn's reasoning text to the wire fields that replay it.
+
+The default shape every vendor documents is ``{"reasoning_content": text}``;
+a vendor with a second field (MiniMax's ``reasoning_details``) supplies its
+own callable.  ``None`` means the wire does not replay reasoning and thought
+parts are dropped on conversion, which was the only behaviour before the
+reasoning-replay seam (docs/design/minimax-kimi-mimo-providers.md §3).
+"""
+
+
+def message_to_openai(
+    message: Message,
+    reasoning_fields: Optional[ReasoningFields] = None,
+    *,
+    pdf_as_file: bool = False,
+    audio_as_input_audio: bool = False,
+) -> List[Dict[str, Any]]:
     """Convert internal Message to OpenAI message dict(s).
 
     Returns a LIST: one internal ``TOOL`` message can carry N parallel
@@ -112,8 +137,28 @@ def message_to_openai(message: Message) -> List[Dict[str, Any]]:
     off the wire.  Non-tool messages map to a single-element list.  Shared by
     the nim / vllm / lmstudio / tensorrt_llm providers (identical SDK + wire).
 
+    The two keyword flags are the WIRE POLICY, not a model capability:
+    they say what *this endpoint* carries beyond images.  They default to
+    ``False`` — the base OpenAI chat format and every gateway in this tree
+    that declares ``pdf_input=False`` / ``audio_input=False`` — and the
+    provider that owns a wire carrying more turns them on (see
+    ``OpenAICompatProvider.WIRE_PDF_AS_FILE`` / ``WIRE_AUDIO_AS_INPUT_AUDIO``).
+    They are threaded rather than assumed because a converter that guesses
+    is exactly what #829 was.
+
     Args:
         message: Internal message.
+ as ``file`` blocks.
+        audio_as_input_audio: Whether this wire carries audio INPUT as
+            ``input_audio`` blocks (#830).
+ ``Part.thought``
+            text is replayed on the assistant dict through this callable
+            (``{"reasoning_content": text}`` by default).  The vendors whose
+            thinking models require the previous turn's reasoning back on
+            the next request of a tool-call loop (MiMo returns 400 without
+            it; Kimi K3 wants the assistant message back "as-is") opt in
+            via ``OpenAICompatProvider.replay_reasoning``.  ``None`` keeps
+            the historical behaviour: thought parts never reach the wire.
 
     Returns:
         List of dicts in OpenAI chat message format (1 per tool result).
@@ -149,7 +194,10 @@ def message_to_openai(message: Message) -> List[Dict[str, Any]]:
             # carry is withheld and SAID so, never re-labelled as an image
             # (#829).
             followup = tool_result_followup_message(
-                getattr(fr, "attachments", None), label="Image"
+                getattr(fr, "attachments", None),
+                pdf_as_file=pdf_as_file,
+                audio_as_input_audio=audio_as_input_audio,
+                label=_followup_label(pdf_as_file, audio_as_input_audio),
             )
             if followup is not None:
                 image_followups.append(followup)
@@ -174,13 +222,14 @@ def message_to_openai(message: Message) -> List[Dict[str, Any]]:
                 for fc in function_calls
             ]
             if not content:
-                msg["content"] = None
+                msg["content"] = _empty_assistant_content(reasoning_fields)
+        msg.update(replay_reasoning_fields(message, reasoning_fields))
         return [msg]
 
     # Default to user message.  Marshal inline_data parts into OpenAI
     # multimodal content blocks so a vision-declared model actually RECEIVES
     # the image (shared by nim/vllm/lmstudio/tensorrt_llm/zhipuai_openai/
-    # triton/nebius/ovhcloud/doubleword); text-only turns keep a plain-string
+    # triton/nebius/ovhcloud/doubleword/mimo/kimi/minimax); text-only turns keep a plain-string
     # content.
     #
     # The marshalling DISPATCHES ON MIME (#829).  This path used to send every
@@ -190,7 +239,11 @@ def message_to_openai(message: Message) -> List[Dict[str, Any]]:
     # mimes are not carried by this wire — every provider sharing this
     # converter declares ``pdf_input=False`` — so they are withheld, and the
     # withholding is stated in-band rather than silently mislabelled.
-    return user_message_with_attachments(content, message.parts)
+    return user_message_with_attachments(
+        content, message.parts,
+        pdf_as_file=pdf_as_file,
+        audio_as_input_audio=audio_as_input_audio,
+    )
 
 
 def message_from_openai(msg: Dict[str, Any]) -> Message:
@@ -251,11 +304,51 @@ def message_from_openai(msg: Dict[str, Any]) -> Message:
     return Message(role=Role.USER, parts=parts)
 
 
-def history_to_openai(history: List[Message]) -> List[Dict[str, Any]]:
+def _empty_assistant_content(reasoning_fields: Optional[ReasoningFields]) -> Optional[str]:
+    """``content`` for an assistant turn that made tool calls and said nothing.
+
+    A replaying wire gets ``""``: MiMo's documented 400 was reproduced
+    against ``content: null`` next to ``tool_calls`` (XiaomiMiMo/MiMo#44),
+    and every vendor example sends the empty string.  A non-replaying wire
+    keeps ``None``, byte-identical to before the seam.
+    """
+    return "" if reasoning_fields is not None else None
+
+
+def replay_reasoning_fields(
+    message: Message,
+    reasoning_fields: Optional[ReasoningFields],
+) -> Dict[str, Any]:
+    """The wire fields that replay ``message``'s reasoning, or ``{}``.
+
+    Joins the ``Part.thought`` texts of a ``MODEL`` message (a turn holds
+    one, but the join costs nothing and tolerates a split) and hands them
+    to ``reasoning_fields``.  Empty when the wire does not replay, when the
+    message is not the model's, or when it carries no thought — so a
+    caller can ``update()`` the assistant dict unconditionally.
+    """
+    if reasoning_fields is None or message.role != Role.MODEL:
+        return {}
+    thought = "".join(p.thought for p in message.parts if p.thought)
+    return reasoning_fields(thought) if thought else {}
+
+
+def history_to_openai(
+    history: List[Message],
+    reasoning_fields: Optional[ReasoningFields] = None,
+    *,
+    pdf_as_file: bool = False,
+    audio_as_input_audio: bool = False,
+) -> List[Dict[str, Any]]:
     """Convert internal history to OpenAI message list.
 
     Args:
         history: List of internal messages.
+        reasoning_fields: Forwarded to :func:`message_to_openai` — the
+            replay shape for assistant reasoning, or ``None`` to drop it.
+        pdf_as_file: Whether this wire carries PDFs as ``file`` blocks.
+        audio_as_input_audio: Whether this wire carries audio INPUT as
+            ``input_audio`` blocks.
 
     Returns:
         List of OpenAI message dicts.
@@ -263,7 +356,14 @@ def history_to_openai(history: List[Message]) -> List[Dict[str, Any]]:
     # Flatten: message_to_openai returns a LIST (a TOOL message with N
     # parallel function_responses → N wire tool messages).
     return [
-        wire for m in (history or []) for wire in message_to_openai(m)
+        wire
+        for m in (history or [])
+        for wire in message_to_openai(
+            m,
+            reasoning_fields=reasoning_fields,
+            pdf_as_file=pdf_as_file,
+            audio_as_input_audio=audio_as_input_audio,
+        )
     ]
 
 

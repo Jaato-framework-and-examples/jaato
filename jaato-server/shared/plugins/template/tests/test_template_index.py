@@ -3927,6 +3927,173 @@ class TestPathRouting:
         assert out2 == "WORKSPACE_LOC/a/b/X.java"
 
 
+# ==================== Profile-declared Path Routing (#900) ====================
+
+class TestProfileDeclaredPathRouting:
+    """``plugin_configs.template.file_conventions`` declares the same
+    ``(glob, prefix)`` table ``template_routing.yaml`` does, on the
+    vehicle a cascade already uses for stack knowledge
+    (``plugin_configs.lsp.languageServers``, #879).
+
+    Precedence mirrors that knob exactly: the key's PRESENCE is the
+    declaration, so the profile suppresses the file rather than layering
+    over it.  Two writers of one table is what the lsp knob avoided, and
+    routing decides where generated files land while the file tier is
+    reachable from the workspace and ``.jaato/profiles/**`` is not.
+    """
+
+    JAVA_KNOB = {
+        "file_conventions": {
+            "output_path_routing": [
+                {"glob": "pom.xml", "prefix": ""},
+                {"glob": "**/*Test.java", "prefix": "src/test/java"},
+                {"glob": "**/*.java", "prefix": "src/main/java"},
+            ],
+        },
+    }
+
+    def _plugin_with(self, workspace, config):
+        p = TemplatePlugin()
+        p.initialize({"base_path": str(workspace), **config})
+        return p
+
+    def _write_file_routing(self, workspace, prefix):
+        path = workspace / ".jaato" / PATH_ROUTING_FILENAME
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(textwrap.dedent(f"""\
+            file_conventions:
+              output_path_routing:
+                - {{ glob: "**/*.java", prefix: "{prefix}" }}
+        """))
+        return path
+
+    def test_knob_declares_the_routing_table(self, tmp_workspace):
+        p = self._plugin_with(tmp_workspace, self.JAVA_KNOB)
+        assert p._apply_path_routing("com/bank/Customer.java") == (
+            "src/main/java/com/bank/Customer.java"
+        )
+        # First-match-wins survives the source change.
+        assert p._apply_path_routing("com/bank/CustomerTest.java") == (
+            "src/test/java/com/bank/CustomerTest.java"
+        )
+        # Empty prefix is still match-and-leave-alone.
+        assert p._apply_path_routing("pom.xml") == "pom.xml"
+        # Unmatched paths still pass through.
+        assert p._apply_path_routing("README.md") == "README.md"
+
+    def test_knob_wins_over_the_file(self, tmp_workspace):
+        """Both tiers declare a table; the profile's is the one applied
+        and the file is not read at all."""
+        self._write_file_routing(tmp_workspace, "FILE_LOC")
+        p = self._plugin_with(tmp_workspace, self.JAVA_KNOB)
+        assert p._apply_path_routing("com/bank/Customer.java") == (
+            "src/main/java/com/bank/Customer.java"
+        )
+
+    def test_absent_knob_keeps_the_file(self, tmp_workspace):
+        """A profile that declares nothing leaves the file tier exactly
+        as it was — full back-compat for workspaces using the file."""
+        self._write_file_routing(tmp_workspace, "FILE_LOC")
+        p = self._plugin_with(tmp_workspace, {})
+        assert p._apply_path_routing("a/X.java") == "FILE_LOC/a/X.java"
+
+    def test_present_and_empty_declares_no_routing(self, tmp_workspace):
+        """``file_conventions: {}`` is itself a declaration: this profile
+        routes nothing, and the file does NOT get to speak instead."""
+        self._write_file_routing(tmp_workspace, "FILE_LOC")
+        p = self._plugin_with(tmp_workspace, {"file_conventions": {}})
+        assert p._apply_path_routing("a/X.java") == "a/X.java"
+
+    def test_empty_rules_list_declares_no_routing(self, tmp_workspace):
+        self._write_file_routing(tmp_workspace, "FILE_LOC")
+        p = self._plugin_with(
+            tmp_workspace, {"file_conventions": {"output_path_routing": []}},
+        )
+        assert p._apply_path_routing("a/X.java") == "a/X.java"
+
+    def test_malformed_knob_does_not_fall_back_to_the_file(self, tmp_workspace):
+        """A non-mapping value is an authoring error, read as no routing.
+        Falling back to the file would make the profile's own declaration
+        silently inert — the failure this knob exists to make loud."""
+        self._write_file_routing(tmp_workspace, "FILE_LOC")
+        p = self._plugin_with(tmp_workspace, {"file_conventions": "src/main/java"})
+        assert p._apply_path_routing("a/X.java") == "a/X.java"
+
+    def test_malformed_entries_are_dropped_not_fatal(self, tmp_workspace):
+        p = self._plugin_with(tmp_workspace, {
+            "file_conventions": {
+                "output_path_routing": [
+                    "**/*.java",                                  # not a mapping
+                    {"prefix": "src/main/java"},                  # no glob
+                    {"glob": "**/*.java", "prefix": ["nope"]},    # non-str prefix
+                    {"glob": "**/*.yml", "prefix": "src/main/resources/"},
+                ],
+            },
+        })
+        # The one well-formed rule survives, with its trailing slash
+        # normalised away.
+        assert p._apply_path_routing("application.yml") == (
+            "src/main/resources/application.yml"
+        )
+        assert p._apply_path_routing("a/X.java") == "a/X.java"
+
+    def test_knob_survives_workspace_and_config_root_changes(
+        self, tmp_workspace, tmp_path,
+    ):
+        """The knob arrives with the session, not with a directory: the
+        file tier's cache invalidation must not lose it."""
+        config_root = tmp_path / "framework_config"
+        config_root.mkdir()
+        (config_root / PATH_ROUTING_FILENAME).write_text(textwrap.dedent("""\
+            file_conventions:
+              output_path_routing:
+                - { glob: "**/*.java", prefix: "CONFIG_ROOT_LOC" }
+        """))
+        p = self._plugin_with(tmp_workspace, self.JAVA_KNOB)
+
+        p.set_config_root(str(config_root))
+        assert p._apply_path_routing("a/X.java") == "src/main/java/a/X.java"
+
+        p.set_workspace_path(str(tmp_workspace))
+        assert p._apply_path_routing("a/X.java") == "src/main/java/a/X.java"
+
+    def test_render_e2e_routes_from_the_knob(self, tmp_workspace, tmp_path):
+        """End-to-end: renderTemplateToFile lands the file at the
+        knob-routed location, as it does for the file tier."""
+        p = self._plugin_with(tmp_workspace, self.JAVA_KNOB)
+        tpl_dir = tmp_path / "templates"
+        tpl_dir.mkdir()
+        (tpl_dir / "Entity.java.tpl").write_text(textwrap.dedent("""\
+            // Output: {{basePackagePath}}/domain/{{Entity}}.java
+            package {{basePackage}}.domain;
+            public class {{Entity}} {}
+        """))
+        for entry in p._discover_standalone_templates(tpl_dir):
+            p._template_index[entry.name] = entry
+
+        result = p._execute_render_template_to_file({
+            "template_id": _template_id("Entity.java.tpl"),
+            "variables": {
+                "Entity": "Customer",
+                "basePackage": "com.bank",
+                "basePackagePath": "com/bank",
+            },
+        })
+        assert result.get("success") is True, result
+        expected = (
+            p._base_path / "src/main/java/com/bank/domain/Customer.java"
+        )
+        assert expected.exists(), (
+            f"File missing at expected routed path {expected}: {result}"
+        )
+
+    def test_knob_is_declared_in_the_config_schema(self):
+        """Declaring it is what makes a typo fail `jaato-scaffold
+        validate` instead of failing a run."""
+        settings = TemplatePlugin().get_config_schema()
+        names = [s.name for s in settings]
+        assert "file_conventions" in names
+
 # ==================== Output-Directive Stripping at Render (server 0.6.41+) ====================
 
 class TestOutputDirectiveStripping:

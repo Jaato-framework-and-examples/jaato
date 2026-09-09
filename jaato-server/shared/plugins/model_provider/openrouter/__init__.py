@@ -31,6 +31,7 @@ PROVIDER_CAPABILITIES = ProviderCapabilities(
     streaming=True,
     cancellation=True,
     output_media=True,   # verified end to end: a spoken answer reaches a client as
+    reasoning_replay=False,
 #   ToolOutputEvent media chunks and plays.
 )
 

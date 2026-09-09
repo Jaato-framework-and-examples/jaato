@@ -50,7 +50,8 @@ def _sm(*sessions):
     sm._sibling_pending, sm._sibling_exchanges = {}, {}
     sm.driven = []
     sm.send_message_to_session = (
-        lambda sid, text: sm.driven.append((sid, text)) or True
+        lambda sid, text, attachments=None:
+        sm.driven.append((sid, text)) or True
     )
     sm._get_persisted_sessions = lambda workspace_path=None: []
     # The decision now belongs to the TARGET session, so the double has
@@ -98,7 +99,7 @@ def test_the_driven_text_still_carries_the_untrusted_boundary():
 
 def test_a_failed_drive_is_refused_not_reported_accepted():
     sm = _sm(_session("s-a", "alice"), _session("s-b", "bob"))
-    sm.send_message_to_session = lambda sid, text: False
+    sm.send_message_to_session = lambda sid, text, attachments=None: False
     assert sm.deliver_sibling_message("s-a", "bob", "hi")["status"] == "refused"
 
 

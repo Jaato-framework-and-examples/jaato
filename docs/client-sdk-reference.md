@@ -234,7 +234,8 @@ Every method below exists in both SDKs with identical semantics. Python uses `sn
 | Python | TypeScript | WS verb |
 |---|---|---|
 | `send_message(text, attachments?, parallel_tools?)` | `sendMessage(text, attachments?, parallelTools?)` | `message.send` |
-| `inject_prompt(text, source_type?, source_id?)` | `injectPrompt(text, sourceType?, sourceId?)` | `inject_prompt.request` |
+| `inject_prompt(text, source_type?, source_id?, timeout?, attachments?)` | `injectPrompt(text, sourceType?, sourceId?, attachments?)` | `inject_prompt.request` |
+| `wake_session(session_id, text?, attachments?, source?, event_id?)` | `wakeSession(sessionId, text?, {attachments?, source?, eventId?})` | `session.wake` (command) |
 | `replay_messages(request_id, messages?, timeout_seconds?)` | `replayMessages(requestId, messages?, timeoutSeconds?)` | `replay_messages.request` |
 | `resolve_fork_point(request_id, after_message?, after_tool_call?, after_timestamp?)` | `resolveForkPoint(requestId, opts)` | `resolve_fork_point.request` |
 | `stop()` | `stop(agentId?)` | `session.stop` |
@@ -298,6 +299,35 @@ Injects a prompt into the session's message queue. The `source_type` dimension s
 - `"system"` / `"event"` / `"parent"` — reactor / hook callers
 
 This single verb covers pi-agent's `steer` and `followUp` patterns.
+
+`attachments` (protocol 1.5+, #845) carries binary user content in the same
+shape `send_message` accepts. Two consequences worth knowing before you send
+one:
+
+- **It is idle-only.** The queued branch of an inject folds the message into
+  the running turn as *text* and has nowhere to put an `inline_data` part, so
+  the daemon offers an attachment-bearing message with `require_idle` and a
+  busy target answers `"busy"` with **nothing enqueued**. Retry when it goes
+  idle; do not read `busy` as delivery.
+- **An old daemon raises rather than degrading.** Below protocol 1.5 the
+  field would be ignored and the turn would run without the bytes — for a
+  blank-text utterance, an empty turn reported as a success — so the Python
+  SDK refuses the call instead.
+
+**`wake_session` / `wakeSession`**
+
+Revives `session_id` from disk if it is cold and starts a USER turn on it —
+the typed form of `execute_command("session.wake", payload=…)`, and the way
+to drive a session that has already completed. Fire-and-forget: a refusal
+arrives on the event stream as an `ErrorEvent` with
+`error_type: "WakeError"`.
+
+`text` may be empty when `attachments` carry the content: an attachment IS
+content (#838), and for a spoken utterance it is the whole message. A wake
+carrying neither is refused. The daemon wraps the payload in its
+untrusted-content boundary and names each attachment inside it, so media
+arriving this way is data the model interprets, never instructions it
+follows.
 
 **`replay_messages` / `replayMessages`**
 

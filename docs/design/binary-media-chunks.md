@@ -824,3 +824,113 @@ Acceptance, as the issue stated it, is guarded by
 subscribed to model media obtains the spoken words without a second model
 call; a turn that speaks and writes does not deliver the same words twice;
 and a transcript-only delta still produces no playable chunk.
+
+## 13. Driving a session that has already ended (#845)
+
+Sections 8–12 made a session that *hears* and *speaks* possible. They all
+concern one live turn. This section is about the turn after the session
+stopped.
+
+There are exactly two ways to drive an **existing** session, and both were
+text-only:
+
+```python
+# server/command_router.py  _handle_session_wake
+#   payload {session_id, text, source?, event_id?}   — no attachments
+# jaato_sdk/client/ipc.py   inject_prompt(self, text, source_type=..., ...)
+# jaato_sdk/events.py       InjectPromptRequest.text: str = ""
+```
+
+`attachments` existed only on `send_message` (and the `ask` / `complete` /
+`stream` wrappers over it) — the **live-session** path.
+
+### 13.1 Why that closes the door on a voice agent
+
+A completion-gated session is *designed* to end: `signal_completion` makes it
+quiescent, emits `SESSION_TERMINATED` and releases the runner. The documented
+way back in is `session.wake`, which cold-revives from disk. That works
+perfectly for a text agent, whose next input is a sentence. For a voice agent
+the next input is a spoken utterance, and there was no field to put it in.
+
+Measured while building a push-to-talk loop against a
+`modalities: {audio: bidirectional}` tier:
+
+| Attempt | Result |
+|---|---|
+| reuse the live session object after completion | `400 … tool_call_ids did not have response messages` on a real second question; a **hang** when the same audio was sent twice |
+| `session.wake` with the utterance | not expressible |
+| `inject_prompt` with the utterance | not expressible; and into a completed session it returns `terminated`, a documented non-delivery |
+
+The workaround — drop the completion contract, keep one live session, call
+`ask()` per turn — is right for a *conversation* and does nothing for the
+shapes wake exists for: a suspended agent revived hours later, a cascade arm
+resumed on a schedule, anything cold-started from disk.
+
+### 13.2 Bytes cannot be wrapped, so the boundary is stated beside them
+
+A wake payload is untrusted by construction — whoever holds the session id
+drives it, which may be a webhook, a cron, or a public PR comment — so
+`wake_session` has always passed its `text` through `wrap_untrusted_content`.
+An attachment has nowhere to put a marker: an audio part is `inline_data` on
+the wire and there is nothing in it to defang. Inheriting the text-only wrap
+"by accident" would have left the model weighing a **spoken** instruction
+differently from the identical **typed** one, which is the asymmetry the
+boundary exists to remove.
+
+`_wrap_wake_content` answers it explicitly: each attachment is named *inside*
+the wrapper — mime, display name, and the ingest id §11.2 mints — with a line
+saying the media delivered alongside is data to interpret and never
+instructions. Metadata only; the payload stays an `inline_data` part, because
+base64 in the prompt would both double the cost of the bytes and bypass the
+provider's own media handling. A wake carrying attachments and **no text** is
+normal (for a spoken message the attachment *is* the message, §9), and
+produces a wrapper carrying only the manifest — never an empty one, so the
+model is never handed unexplained media.
+
+### 13.3 An attachment-bearing inject is idle-only
+
+Wake always drives a fresh turn, so it can carry anything a turn can carry.
+`inject_prompt` has two outcomes and only one of them can:
+
+| Outcome | What happens to the message | Can it carry bytes? |
+|---------|-----------------------------|---------------------|
+| `needs_turn` → **drive** | becomes a `SendMessageRequest` — the same path a client send takes | yes |
+| **queue** behind a running turn | folded in as TEXT: appended to the last tool result's `model_suffix` (`_send_tool_results_and_continue`) or replayed as `Message.from_text` (`_handle_pending_mid_turn_prompt`) | no |
+
+Neither queued shape has anywhere to put an `inline_data` part. So
+`deliver_prompt_to_session` sets `require_idle` whenever attachments are
+present, whether or not the caller asked: a busy target answers `BUSY` with
+**nothing enqueued**, a retry-safe refusal, instead of accepting the message
+and discarding the payload that *was* the message. Silently stripping it
+would reproduce §9's failure one layer up — a turn reported as delivered
+that the model has nothing to answer.
+
+A text-only inject is bit-identical to before; the idle-only rule is what
+attachments cost, and it is paid only by callers who send them.
+
+### 13.4 An old daemon is refused, not degraded
+
+`attachments` is an additive optional field, and additive optional fields are
+normally safe to send blind — an older peer ignores them and the call degrades
+to what it always did. That reasoning holds for a `request_id` (protocol 1.3)
+and fails here: the degraded call is a turn driven **without** the audio, and
+for a blank-text utterance that is an empty turn reported as a success. The
+SDK therefore raises when the daemon predates protocol 1.5
+(`IPCClient.MIN_ATTACHMENT_RESUME_PROTOCOL`), rather than letting the payload
+vanish between two versions that both claim compatibility.
+
+### 13.5 What did NOT change
+
+The queue does not learn to carry media. `QueuedMessage` is still text, and
+mid-turn piggyback is still a string appended to a tool result — teaching
+half the drain sites to carry parts would make delivery a lottery on which
+site collected the message. The honest shape is the one above: the drive path
+carries bytes, the queue path refuses them by name.
+
+The **HTTP wake ingress** (`server/wake_ingress.py`) stays text-only too. Its
+canonical signed body is `{wake_ref, text, source, event_id, ts}` and the
+relay signs the RAW bytes of it; putting a base64 payload inside that
+envelope changes a verified security contract (and the size of every signed
+request) rather than adding a field. A relay that needs to deliver media
+should be given its own body shape and its own decision about what is
+signed — a separate change, deliberately not made in passing here.

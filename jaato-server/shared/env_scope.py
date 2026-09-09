@@ -153,6 +153,18 @@ CATALOG: Dict[str, EnvClass] = {
     # Per-session attribution is a real need and is served by the typed
     # provider knobs (``plugin_configs.openrouter.app_title`` /
     # ``http_referer``), which outrank these.  See shared/app_identity.py.
+    "AZURE_OPENAI_API_KEY": EnvClass(SESSION, "plugin_configs.azure_openai.api_key",
+        "credential; azure_openai exposes the knob, so a profile can carry "
+        "a pass:// URI instead of the env var"),
+    "AZURE_OPENAI_API_VERSION": EnvClass(SESSION, "plugin_configs.azure_openai.api_version",
+        "the vendor's own name for the api-version date; azure_openai "
+        "exposes the knob"),
+    "AZURE_OPENAI_DEPLOYMENT": EnvClass(SESSION, "model",
+        "on Azure the profile's own `model` field carries the DEPLOYMENT "
+        "name; this is only its default"),
+    "AZURE_OPENAI_ENDPOINT": EnvClass(SESSION, "plugin_configs.azure_openai.endpoint",
+        "the vendor's own name for the resource URL; azure_openai exposes "
+        "the knob"),
     "JAATO_APP_CATEGORIES": EnvClass(HOST, None,
         "comma-separated marketplace categories the application claims; a "
         "property of the product, not of a conversation"),
@@ -172,6 +184,21 @@ CATALOG: Dict[str, EnvClass] = {
     # ---- daemon / runner lifecycle -----------------------------------
     "JAATO_APPARMOR_COMPLAIN": EnvClass(HOST, None,
         "kernel policy load mode; a host-wide diagnostic posture"),
+    "JAATO_AZURE_OPENAI_API_KEY": EnvClass(SESSION, "plugin_configs.azure_openai.api_key",
+        "credential; azure_openai exposes the knob, so a profile can carry "
+        "a pass:// URI instead of the env var"),
+    "JAATO_AZURE_OPENAI_API_VERSION": EnvClass(SESSION, "plugin_configs.azure_openai.api_version",
+        "the api-version date pins which request fields exist; "
+        "azure_openai exposes the knob"),
+    "JAATO_AZURE_OPENAI_AUTH": EnvClass(SESSION, "plugin_configs.azure_openai.auth",
+        "key vs Microsoft Entra ID; azure_openai exposes the knob"),
+    "JAATO_AZURE_OPENAI_CONTEXT_LENGTH": EnvClass(SESSION, "plugin_configs.azure_openai.context_length",
+        "manual context-window override; azure_openai exposes the knob"),
+    "JAATO_AZURE_OPENAI_DEPLOYMENT": EnvClass(SESSION, "model",
+        "on Azure the profile's own `model` field carries the DEPLOYMENT "
+        "name; this is only its default"),
+    "JAATO_AZURE_OPENAI_ENDPOINT": EnvClass(SESSION, "plugin_configs.azure_openai.endpoint",
+        "the resource URL; azure_openai exposes the knob"),
     "JAATO_BOOTSTRAP_TIMING": EnvClass(HOST, None,
         "prints a bootstrap timing report; a developer toggle, not agent "
         "behaviour"),
@@ -188,6 +215,22 @@ CATALOG: Dict[str, EnvClass] = {
     "JAATO_EPHEMERAL_TIMEOUT_S": EnvClass(HOST, None,
         "the daemon's reaper deadline for relay sessions, applied to all "
         "of them"),
+    "JAATO_OPENAI_API": EnvClass(SESSION, "plugin_configs.openai.api",
+        "which wire to speak (chat / responses); openai exposes the knob"),
+    "JAATO_OPENAI_API_KEY": EnvClass(SESSION, "plugin_configs.openai.api_key",
+        "credential; openai exposes the knob, so a profile can carry a "
+        "pass:// URI instead of the env var"),
+    "JAATO_OPENAI_BASE_URL": EnvClass(SESSION, "plugin_configs.openai.base_url",
+        "endpoint override; openai exposes the knob"),
+    "JAATO_OPENAI_CONTEXT_LENGTH": EnvClass(SESSION, "plugin_configs.openai.context_length",
+        "the context window, which OpenAI's catalog never reports; openai "
+        "exposes the knob"),
+    "JAATO_OPENAI_MODEL": EnvClass(SESSION, "model",
+        "the profile's own `model` field selects the model"),
+    "JAATO_OPENAI_ORG_ID": EnvClass(SESSION, "plugin_configs.openai.organization",
+        "billing attribution header; openai exposes the knob"),
+    "JAATO_OPENAI_PROJECT_ID": EnvClass(SESSION, "plugin_configs.openai.project",
+        "billing attribution header; openai exposes the knob"),
     "JAATO_PROVIDER_TRACE": EnvClass(SESSION, "trace.provider_log",
         "the incident in issue #775; now typed and validated"),
     "JAATO_REVIVE_PERSONA": EnvClass(HOST, None,
@@ -242,6 +285,18 @@ CATALOG: Dict[str, EnvClass] = {
         "google_genai knob"),
     "MODEL_NAME": EnvClass(SESSION, "model",
         "the profile's own `model` field is the typed equivalent"),
+    "OPENAI_API_KEY": EnvClass(SESSION, "plugin_configs.openai.api_key",
+        "credential; openai exposes the knob, so a profile can carry a "
+        "pass:// URI instead of the env var"),
+    "OPENAI_BASE_URL": EnvClass(SESSION, "plugin_configs.openai.base_url",
+        "the vendor's own name for the endpoint override; openai exposes "
+        "the knob"),
+    "OPENAI_ORG_ID": EnvClass(SESSION, "plugin_configs.openai.organization",
+        "the vendor's own name for the organization header; openai "
+        "exposes the knob"),
+    "OPENAI_PROJECT_ID": EnvClass(SESSION, "plugin_configs.openai.project",
+        "the vendor's own name for the project header; openai exposes the "
+        "knob"),
     "PATH": EnvClass(AMBIENT, None,
         "the host environment being read"),
     "PYTHONPATH": EnvClass(AMBIENT, None,
@@ -520,6 +575,33 @@ CATALOG: Dict[str, EnvClass] = {
     "JAATO_GOOGLE_USE_VERTEX": EnvClass(SESSION, None,
         "Vertex-vs-API backend selection with no google_genai "
         "knob"),
+    "JAATO_KIMI_API_KEY": EnvClass(SESSION, "plugin_configs.kimi.api_key",
+        "credential; kimi exposes the knob, so a profile can carry a "
+        "pass:// URI instead of the env var"),
+    "JAATO_KIMI_BASE_URL": EnvClass(SESSION, "plugin_configs.kimi.base_url",
+        "endpoint override (.cn platform, Kimi Code plan); kimi exposes the knob"),
+    "JAATO_KIMI_CONTEXT_LENGTH": EnvClass(SESSION, "plugin_configs.kimi.context_length",
+        "manual context-window override; kimi exposes the knob"),
+    "JAATO_KIMI_MODEL": EnvClass(SESSION, "model",
+        "the profile's own `model` field selects the model"),
+    "JAATO_MIMO_API_KEY": EnvClass(SESSION, "plugin_configs.mimo.api_key",
+        "credential; mimo exposes the knob, so a profile can carry a "
+        "pass:// URI instead of the env var"),
+    "JAATO_MIMO_BASE_URL": EnvClass(SESSION, "plugin_configs.mimo.base_url",
+        "endpoint override (region / plan hosts); mimo exposes the knob"),
+    "JAATO_MIMO_CONTEXT_LENGTH": EnvClass(SESSION, "plugin_configs.mimo.context_length",
+        "manual context-window override; mimo exposes the knob"),
+    "JAATO_MIMO_MODEL": EnvClass(SESSION, "model",
+        "the profile's own `model` field selects the model"),
+    "JAATO_MINIMAX_API_KEY": EnvClass(SESSION, "plugin_configs.minimax.api_key",
+        "credential; minimax exposes the knob, so a profile can carry a "
+        "pass:// URI instead of the env var"),
+    "JAATO_MINIMAX_BASE_URL": EnvClass(SESSION, "plugin_configs.minimax.base_url",
+        "endpoint override (the .cn platform); minimax exposes the knob"),
+    "JAATO_MINIMAX_CONTEXT_LENGTH": EnvClass(SESSION, "plugin_configs.minimax.context_length",
+        "manual context-window override; minimax exposes the knob"),
+    "JAATO_MINIMAX_MODEL": EnvClass(SESSION, "model",
+        "the profile's own `model` field selects the model"),
     "JAATO_NEBIUS_API_KEY": EnvClass(SESSION, "plugin_configs.nebius.api_key",
         "credential; nebius exposes the knob, so a profile can carry a "
         "pass:// URI instead of the env var"),
@@ -576,6 +658,12 @@ CATALOG: Dict[str, EnvClass] = {
         "endpoint override; lmstudio exposes the knob"),
     "LMSTUDIO_MODEL": EnvClass(SESSION, "model",
         "the profile's own `model` field selects the model"),
+    "MIMO_API_KEY": EnvClass(SESSION, "plugin_configs.mimo.api_key",
+        "credential; the vendor's own documented variable, honoured beneath JAATO_MIMO_API_KEY"),
+    "MINIMAX_API_KEY": EnvClass(SESSION, "plugin_configs.minimax.api_key",
+        "credential; the vendor's own documented variable, honoured beneath JAATO_MINIMAX_API_KEY"),
+    "MOONSHOT_API_KEY": EnvClass(SESSION, "plugin_configs.kimi.api_key",
+        "credential; the vendor's own documented variable, honoured beneath JAATO_KIMI_API_KEY"),
     "NEBIUS_API_KEY": EnvClass(SESSION, "plugin_configs.nebius.api_key",
         "credential; nebius exposes the knob, so a profile can carry a "
         "pass:// URI instead of the env var"),

@@ -55,6 +55,11 @@ INTENTIONALLY_ABSENT = {
         "matching signature (asserted in "
         "jaato_sdk/tests/test_sdk_parity_methods.py), which is the part a "
         "caller can observe",
+    "MIN_ATTACHMENT_RESUME_PROTOCOL":
+        "implementation detail of the INNER IPCClient's attachment-bearing "
+        "inject_prompt / wake_session guard; recovery forwards both METHODS "
+        "and the inner client raises when the daemon is too old to carry the "
+        "bytes -- same reasoning as MIN_INJECT_RESULT_PROTOCOL above",
 }
 
 

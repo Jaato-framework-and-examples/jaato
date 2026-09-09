@@ -23,6 +23,7 @@ into "unverified" silently.
 """
 
 import base64
+import importlib
 import importlib.util
 import json
 from pathlib import Path
@@ -55,6 +56,12 @@ from shared.tests.test_every_guard_detects_its_own_reversion import (  # noqa: E
 # at the file they actually use at runtime).
 _CONVERTERS: Dict[str, Tuple[str, str]] = {
     "nim":            ("_openai_compat/converters.py",        "message_to_openai"),
+    # The native OpenAI wire carries more than the gateways sharing the
+    # shared converter do, so it has its own module pinning that policy on
+    # (PDFs as ``file`` blocks, audio as ``input_audio``).  ``azure_openai``
+    # deliberately uses the conservative shared one -- see its declaration.
+    "openai":         ("openai/converters.py",     "message_to_openai"),
+    "azure_openai":   ("_openai_compat/converters.py",        "message_to_openai"),
     "nebius":         ("nebius/converters.py",     "message_to_openai"),
     "openrouter":     ("openrouter/converters.py", "message_to_openai"),
     "vllm":           ("_openai_compat/converters.py",        "message_to_openai"),
@@ -64,6 +71,9 @@ _CONVERTERS: Dict[str, Tuple[str, str]] = {
     "triton":         ("_openai_compat/converters.py",        "message_to_openai"),
     "ovhcloud":       ("_openai_compat/converters.py",        "message_to_openai"),
     "doubleword":     ("_openai_compat/converters.py",        "message_to_openai"),
+    "mimo":           ("_openai_compat/converters.py",        "message_to_openai"),
+    "kimi":           ("_openai_compat/converters.py",        "message_to_openai"),
+    "minimax":        ("_openai_compat/converters.py",        "message_to_openai"),
     "anthropic":      ("anthropic/converters.py",  "message_to_anthropic"),
     "chrome_ai":      ("chrome_ai/converters.py",  "message_to_prompt_api"),
     "ollama":         ("anthropic/converters.py",  "message_to_anthropic"),
@@ -440,6 +450,78 @@ REVERSIONS = [
                 "is #829 wearing #830's clothes: carried, but mislabelled",
     ),
 ]
+
+
+# ---------------------------------------------------------------- reasoning replay
+
+_REASONING = "CONFORMANCE-REASONING-PAYLOAD-1234567890"
+
+
+def _reasoned_tool_turn() -> Message:
+    """An assistant turn that thought, then called a tool — the shape every
+    replaying vendor's multi-turn rule is about."""
+    from jaato_sdk.plugins.model_provider.types import FunctionCall
+    return Message(role=Role.MODEL, parts=[
+        Part(thought=_REASONING),
+        Part(function_call=FunctionCall(id="c1", name="readFile",
+                                        args={"path": "x"})),
+    ])
+
+
+def _load_provider_instance(provider: str):
+    """``create_provider()`` for ``provider``, or skip when its SDK is absent
+    in this environment (the contract-guards job installs every extra)."""
+    try:
+        mod = importlib.import_module(f"shared.plugins.model_provider.{provider}")
+    except ImportError as exc:  # pragma: no cover - env-dependent
+        pytest.skip(f"{provider} SDK not installed here: {exc}")
+    factory = getattr(mod, "create_provider", None)
+    if factory is None:
+        pytest.skip(f"{provider} has no create_provider()")
+    return factory()
+
+
+@pytest.mark.parametrize("provider", sorted(_provider_dirs()))
+def test_declared_reasoning_replay_puts_reasoning_on_the_wire(provider):
+    """A provider declaring ``reasoning_replay`` must (1) opt in through
+    ``replay_reasoning`` — the attribute the session gates history on —
+    and (2) map a thought part to wire fields carrying the reasoning text,
+    through the converter it actually uses at runtime."""
+    if not _read_declaration(provider).get("reasoning_replay"):
+        pytest.skip(f"{provider} does not declare reasoning_replay")
+    inst = _load_provider_instance(provider)
+    assert getattr(inst, "replay_reasoning", False) is True, (
+        f"{provider} declares reasoning_replay=True but its provider class "
+        "does not set replay_reasoning = True, so the session would drop "
+        "the thought part before it could ever be replayed."
+    )
+    relpath, fn = _CONVERTERS[provider]
+    history_to_wire = _load_converter(relpath, "history_to_openai")
+    wire = history_to_wire([_reasoned_tool_turn()],
+                           reasoning_fields=inst._reasoning_replay_fields)
+    assert _REASONING in json.dumps(wire, default=str), (
+        f"{provider} declares reasoning_replay=True but {fn} did NOT put the "
+        "thought part's text on the assistant message."
+    )
+    assistant = [m for m in wire if m.get("role") == "assistant"]
+    assert assistant and assistant[0].get("content") == "", (
+        f"{provider}: a replayed assistant turn with tool calls and no text "
+        "must carry content \"\" (MiMo rejects null next to tool_calls)."
+    )
+
+
+@pytest.mark.parametrize("provider", sorted(_provider_dirs()))
+def test_undeclared_reasoning_replay_is_not_opted_in(provider):
+    """The declaration and the opt-in attribute must agree in the other
+    direction too: a provider that replays without declaring it would be
+    a wire behaviour the capability doc denies."""
+    if _read_declaration(provider).get("reasoning_replay"):
+        pytest.skip(f"{provider} declares reasoning_replay")
+    inst = _load_provider_instance(provider)
+    assert getattr(inst, "replay_reasoning", False) is not True, (
+        f"{provider} sets replay_reasoning = True but declares "
+        "reasoning_replay=False."
+    )
 
 
 def test_every_provider_is_either_conformance_tested_or_explicitly_pending():

@@ -12,7 +12,11 @@
 import { strict as assert } from "node:assert";
 import { afterEach, beforeEach, describe, test } from "node:test";
 
-import { JaatoClient, MIN_PROTOCOL_VERSION } from "./client.js";
+import {
+  JaatoClient,
+  MIN_ATTACHMENT_RESUME_PROTOCOL,
+  MIN_PROTOCOL_VERSION,
+} from "./client.js";
 import {
   ConnectionClosedError,
   IncompatibleServerError,
@@ -372,6 +376,89 @@ describe("JaatoClient typed methods", () => {
     assert.equal(ev.type, EventTypeValue.TOOL_EXECUTE_RESULT);
     assert.equal((ev as { call_id?: string }).call_id, "call_99");
     assert.equal((ev as { error?: string }).error, "tool crashed");
+  });
+});
+
+describe("JaatoClient resume verbs carry attachments (#845)", () => {
+  // Both ways of driving an EXISTING session — session.wake and
+  // injectPrompt — were text-only, while `attachments` sat on sendMessage,
+  // the LIVE-session path.  A session whose input is audio could be started
+  // with an utterance and never driven again with one.
+  let client: JaatoClient;
+
+  afterEach(async () => {
+    await client.close();
+    restoreWebSocket();
+  });
+
+  async function connected(protocol = MIN_ATTACHMENT_RESUME_PROTOCOL) {
+    installMockWebSocket();
+    client = new JaatoClient({ url: "ws://localhost:8080" });
+    await connectAndAck(client, protocol);
+    if (lastInstance) lastInstance.sent = [];
+  }
+
+  test("injectPrompt forwards attachments", async () => {
+    await connected();
+    await client.injectPrompt("look", "user", undefined, [
+      { mime_type: "image/png", data: "QUJD" },
+    ]);
+    const [ev] = getSent();
+    const atts = (ev as { attachments?: Array<Record<string, unknown>> })
+      .attachments;
+    assert.equal(atts?.[0].mime_type, "image/png");
+  });
+
+  test("wakeSession puts the utterance in the command payload", async () => {
+    await connected();
+    await client.wakeSession("sess_1", "", {
+      attachments: [{ mime_type: "audio/wav", data: "QUJD" }],
+      source: "phone",
+      eventId: "e1",
+    });
+    const [ev] = getSent();
+    const payload = (ev as { payload?: Record<string, unknown> }).payload!;
+    assert.equal((ev as { command?: string }).command, "session.wake");
+    assert.equal(payload.session_id, "sess_1");
+    // Blank text is the NORMAL shape: for a spoken message the attachment
+    // IS the message.
+    assert.equal(payload.text, "");
+    assert.equal(payload.source, "phone");
+    assert.equal(payload.event_id, "e1");
+  });
+
+  test("wakeSession with neither text nor attachments is refused", async () => {
+    await connected();
+    await assert.rejects(
+      () => client.wakeSession("sess_1"),
+      /text or attachments/,
+    );
+    assert.equal(getSent().length, 0);
+  });
+
+  test("a daemon that would DROP the bytes is refused, not degraded", async () => {
+    // The degraded call is a turn driven without the audio that was the whole
+    // message — for a blank-text utterance, an empty turn reported as success.
+    await connected("1.4");
+    await assert.rejects(
+      () =>
+        client.wakeSession("sess_1", "", {
+          attachments: [{ mime_type: "audio/wav", data: "QUJD" }],
+        }),
+      /DROP the attachments/,
+    );
+    await assert.rejects(
+      () => client.injectPrompt("hi", "user", undefined, [{ data: "QUJD" }]),
+      /DROP the attachments/,
+    );
+    assert.equal(getSent().length, 0);
+  });
+
+  test("a text-only resume still works against an older daemon", async () => {
+    await connected("1.4");
+    await client.wakeSession("sess_1", "have another look");
+    await client.injectPrompt("steer");
+    assert.equal(getSent().length, 2);
   });
 });
 

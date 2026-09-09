@@ -29,7 +29,7 @@ today, one per non-image mime family:
 content block, parsed by the upstream model or by OpenRouter's
 ``file-parser`` plugin) and declares ``pdf_input=True``; every
 ``_openai_compat`` sharer (nim, vllm, lmstudio, tensorrt_llm,
-zhipuai_openai, triton, nebius, ovhcloud, doubleword) declares
+zhipuai_openai, triton, nebius, ovhcloud, doubleword, mimo, kimi, minimax) declares
 ``pdf_input=False``, so for them a PDF is content the wire does not carry
 and is withheld.  The capability declaration and the converter now agree
 — before this module they contradicted each other.
