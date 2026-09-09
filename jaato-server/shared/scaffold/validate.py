@@ -219,8 +219,11 @@ def validate_profile(
             # get_config_schema (a mistyped knob is silently ignored at
             # runtime otherwise).  Nested / free-form sub-structures — e.g.
             # ``permission.policy`` tree, ``permission.evaluators`` map — are
-            # NOT descended; only the top-level knob names are checked.
+            # NOT descended by the generic name check; only the top-level knob
+            # names are.  A knob whose VALUE shape decides behaviour badly
+            # enough to earn a descent registers one in ``_PLUGIN_VALUE_CHECKS``.
             _validate_plugin_knobs(cfg_name, cfg, plugins, add)
+            _check_plugin_knob_values(cfg_name, cfg, add)
             continue
         knobs = cfg_provider.knobs
         if not isinstance(cfg, dict):
@@ -835,6 +838,91 @@ def _validate_plugin_knobs(cfg_name, cfg, plugins, add):
                 f"'{key}' is not a declared {cfg_name} config knob "
                 f"(silently ignored at runtime; known: {valid})",
                 where=f"plugin_configs.{cfg_name}.{key}")
+
+
+def _check_template_routing(cfg, add):
+    """Validate ``plugin_configs.template.file_conventions``'s shape (#900).
+
+    The generic knob check (:func:`_validate_plugin_knobs`) verifies knob
+    NAMES and deliberately does not descend into a knob's value.  Routing
+    earns the exception: the plugin drops a malformed rule and carries on,
+    so a bad table is not an error at runtime — it is *no routing*, and
+    generated files then land outside the declared source root, where a
+    validator gate does not look.  The gate examines zero files and
+    reports a clean verdict over nothing.
+
+    Also flags the one case the precedence rule makes surprising: a
+    profile that declares ``file_conventions`` WITHOUT an
+    ``output_path_routing`` list.  A knowledge base's stack declaration
+    carries other keys under that name (``source_dirs``,
+    ``source_extension``, ``build_file``), and carrying such a block into
+    the profile verbatim suppresses ``template_routing.yaml`` — the key
+    being present IS the declaration — while declaring no rules of its
+    own.  Routing then silently stops.
+    """
+    if not isinstance(cfg, dict) or "file_conventions" not in cfg:
+        return
+    where = "plugin_configs.template.file_conventions"
+    conventions = cfg["file_conventions"]
+    if not isinstance(conventions, dict):
+        add("error", "invalid_template_routing",
+            f"file_conventions must be a mapping carrying "
+            f"'output_path_routing', got {type(conventions).__name__} — the "
+            "plugin reads it as no routing and, because the key is present, "
+            "reads no template_routing.yaml either", where=where)
+        return
+
+    if "output_path_routing" not in conventions:
+        add("warn", "template_routing_empty",
+            "file_conventions declares no 'output_path_routing' — the key's "
+            "presence alone suppresses template_routing.yaml, so this "
+            "profile routes nothing.  Declare the rules here, or drop the "
+            "key to keep the file", where=where)
+        return
+
+    rules = conventions["output_path_routing"]
+    where_rules = f"{where}.output_path_routing"
+    if not isinstance(rules, list):
+        add("error", "invalid_template_routing",
+            f"output_path_routing must be a list of {{glob, prefix}} entries, "
+            f"got {type(rules).__name__} (dropped at runtime — no routing)",
+            where=where_rules)
+        return
+
+    for i, rule in enumerate(rules):
+        rule_where = f"{where_rules}[{i}]"
+        if not isinstance(rule, dict):
+            add("error", "invalid_template_routing",
+                f"entry must be a mapping with 'glob' (and optionally "
+                f"'prefix'), got {type(rule).__name__} (dropped at runtime)",
+                where=rule_where)
+            continue
+        glob, prefix = rule.get("glob"), rule.get("prefix", "")
+        if not isinstance(glob, str) or not glob:
+            add("error", "invalid_template_routing",
+                f"entry needs a non-empty string 'glob', got {glob!r} "
+                "(dropped at runtime)", where=f"{rule_where}.glob")
+        if not isinstance(prefix, str):
+            add("error", "invalid_template_routing",
+                f"'prefix' must be a string ('' means match-and-leave-alone), "
+                f"got {type(prefix).__name__} (dropped at runtime)",
+                where=f"{rule_where}.prefix")
+
+
+#: Per-plugin value-shape checks, keyed by ``plugin_configs`` name.  The
+#: generic name check (:func:`_validate_plugin_knobs`) deliberately does not
+#: descend into a knob's value; an entry here is a knob whose CONTENT decides
+#: behaviour badly enough to earn the exception.
+_PLUGIN_VALUE_CHECKS = {
+    "template": _check_template_routing,
+}
+
+
+def _check_plugin_knob_values(cfg_name, cfg, add):
+    """Run the per-plugin value-shape check for ``cfg_name``, if any."""
+    check = _PLUGIN_VALUE_CHECKS.get(cfg_name)
+    if check is not None:
+        check(cfg, add)
 
 
 def _check_quirks(quirks_dict, pinfo, provider_name, add, where_prefix=None):

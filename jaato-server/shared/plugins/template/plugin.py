@@ -58,6 +58,7 @@ See docs/template-tool-design.md for the design specification.
 
 import hashlib
 import json
+import logging
 import os
 import re
 import tempfile
@@ -93,6 +94,7 @@ _PYBARS_RENDER_LOCK = threading.Lock()
 
 from jaato_sdk.plugins.base import (
     PermissionDisplayInfo,
+    PluginSetting,
     PromptEnrichmentResult,
     SystemInstructionEnrichmentResult,
     ToolResultEnrichmentResult,
@@ -102,6 +104,8 @@ from jaato_sdk.plugins.model_provider.types import EditableContent, ToolSchema, 
 from shared.plugins.runner_forwarding import RunnerForwardingMixin
 from shared.tool_id_map import name_to_id, id_to_name
 from shared.trace import trace as _trace_write
+
+logger = logging.getLogger(__name__)
 
 
 def _template_id(name: str) -> str:
@@ -137,6 +141,17 @@ TEMPLATE_FILE_EXTENSIONS = {'.tpl', '.tmpl'}
 # call's resolved output_path BEFORE writing.  See ``_apply_path_routing``
 # for semantics.  Absent file = no-op (current behaviour preserved).
 PATH_ROUTING_FILENAME = "template_routing.yaml"
+
+# The profile knob carrying the same table (#900).  Routing is STACK
+# knowledge — where a ``.java`` file belongs is a fact about the stack,
+# exactly as a language server is — and a cascade already ships stack
+# knowledge on the profile, which is the call the framework made once
+# already for ``plugin_configs.lsp.languageServers`` (#879).  The file
+# above stays the convention-over-configuration ergonomic; the knob is
+# the declared, validated, apparmor-protected sibling.  Precedence and
+# the reason for it live in ``_routing_from_profile``.
+PATH_ROUTING_CONFIG_KEY = "file_conventions"
+PATH_ROUTING_RULES_KEY = "output_path_routing"
 
 
 @dataclass
@@ -430,6 +445,17 @@ class TemplatePlugin(RunnerForwardingMixin):
         # so the next call re-loads from the new location.
         self._path_routing_rules: Optional[List[Tuple[str, str]]] = None
 
+        # Routing rules the PROFILE declared via
+        # ``plugin_configs.template.file_conventions`` (#900), parsed
+        # once by ``initialize``.  ``None`` means the profile declared
+        # no ``file_conventions`` key at all and the file tier answers;
+        # a list (including an empty one) means the profile IS the
+        # configuration and no file is read.  Unlike
+        # ``_path_routing_rules`` this is NOT a cache and is never
+        # invalidated by a workspace / config_root change — the knob
+        # arrives with the session, not with a directory.
+        self._profile_routing_rules: Optional[List[Tuple[str, str]]] = None
+
         # Thread-local storage for ``//``-stripped-line numbers from the
         # most recent ``_parse_mustache_structure`` call on THIS thread.
         # Read by ``_execute_list_template_variables`` to surface a
@@ -452,9 +478,29 @@ class TemplatePlugin(RunnerForwardingMixin):
         _trace_write(prefix, msg)
 
     def initialize(self, config: Optional[Dict[str, Any]] = None) -> None:
-        """Initialize the template plugin."""
+        """Initialize the template plugin.
+
+        Args:
+            config: Optional configuration dict.  Supports:
+
+                - ``file_conventions``: the output-path routing table,
+                  declared by the profile (#900).  When the key is
+                  PRESENT it IS the configuration and no
+                  ``template_routing.yaml`` is read — see
+                  :meth:`_routing_from_profile`.
+                - ``base_path``: workspace override (framework-supplied
+                  via the registry's framework-key augmentation).
+                - ``agent_name``: name for trace logging.
+        """
         config = config or {}
         self._agent_name = config.get("agent_name")
+
+        # Parsed BEFORE anything else that could read routing, and
+        # deliberately not re-read later: the knob is a property of the
+        # session's profile, so unlike the file tier it has no
+        # workspace / config_root dependency to invalidate against.
+        self._profile_routing_rules = self._routing_from_profile(config)
+        self._path_routing_rules = None  # invalidate; lazy reload on next render
 
         # Allow custom base path
         if "base_path" in config:
@@ -522,6 +568,12 @@ class TemplatePlugin(RunnerForwardingMixin):
         Mirrors ``_compute_templates_dir``'s priority chain: prefer
         ``<config_root>/template_routing.yaml`` when config_root is
         set, otherwise ``<workspace>/.jaato/template_routing.yaml``.
+
+        Consulted only when the profile declares no routing table of its
+        own — a present ``plugin_configs.template.file_conventions``
+        suppresses BOTH tiers (see :meth:`_routing_from_profile`), which
+        is what frees a cascade from having to know which of the two
+        would have won.
         """
         if self._config_root is not None:
             return Path(self._config_root) / PATH_ROUTING_FILENAME
@@ -529,15 +581,157 @@ class TemplatePlugin(RunnerForwardingMixin):
             return self._base_path / ".jaato" / PATH_ROUTING_FILENAME
         return None
 
+    @staticmethod
+    def _parse_routing_rules(rules_raw: Any, source: str) -> List[Tuple[str, str]]:
+        """Normalise a declared ``output_path_routing`` list into
+        ``(glob, prefix)`` tuples, in declared order.
+
+        One parser for both tiers — the YAML file and the profile knob
+        carry the SAME shape under the same key, which is what lets a
+        knowledge base's ``file_conventions`` declaration be carried
+        into a session verbatim, on either vehicle.
+
+        Malformed input never raises and never routes: a non-list, or
+        an entry that is not a mapping of ``glob``/``prefix`` strings,
+        is dropped with an ERROR naming ``source``.  Silence is the one
+        outcome worth avoiding — an inert routing table lands generated
+        files outside the declared source root, where a validator gate
+        does not look, so the gate examines zero files and reports a
+        clean verdict over nothing (#900).
+
+        Args:
+            rules_raw: The value found under ``output_path_routing``.
+            source: Human-readable origin for log lines (a file path,
+                or ``plugin_configs.template.file_conventions``).
+
+        Returns:
+            The parsed rules; empty when nothing valid was declared.
+        """
+        if rules_raw is None:
+            return []
+        if not isinstance(rules_raw, list):
+            logger.error(
+                "template: %s.%s must be a list of {glob, prefix} entries, "
+                "got %s — reading it as no routing rules.",
+                source, PATH_ROUTING_RULES_KEY, type(rules_raw).__name__,
+            )
+            return []
+
+        rules: List[Tuple[str, str]] = []
+        for rule in rules_raw:
+            if not isinstance(rule, dict):
+                logger.error(
+                    "template: %s.%s entry must be a mapping with `glob` "
+                    "(and optionally `prefix`), got %s — dropping it.",
+                    source, PATH_ROUTING_RULES_KEY, type(rule).__name__,
+                )
+                continue
+            glob = rule.get("glob")
+            prefix = rule.get("prefix", "")
+            if not isinstance(glob, str) or not isinstance(prefix, str):
+                logger.error(
+                    "template: %s.%s entry needs string `glob` and `prefix`, "
+                    "got glob=%r prefix=%r — dropping it.",
+                    source, PATH_ROUTING_RULES_KEY, glob, prefix,
+                )
+                continue
+            # Normalise: strip any trailing slash from prefix so the
+            # join logic in ``_apply_path_routing`` is uniform.
+            rules.append((glob, prefix.rstrip("/")))
+        return rules
+
+    def _routing_from_profile(
+        self, config: Dict[str, Any],
+    ) -> Optional[List[Tuple[str, str]]]:
+        """The routing table the PROFILE declares, or None when it declares none.
+
+        ``plugin_configs.template.file_conventions`` carries the same
+        mapping ``template_routing.yaml`` carries at its top level, so
+        one shape serves both sources and nothing about a rule changes
+        with where it was written::
+
+            plugin_configs:
+              template:
+                file_conventions:
+                  output_path_routing:
+                    - {glob: "pom.xml",       prefix: ""}
+                    - {glob: "**/*Test.java", prefix: "src/test/java"}
+                    - {glob: "**/*.java",     prefix: "src/main/java"}
+
+        The rule, mirroring ``plugin_configs.lsp.languageServers``
+        (#879), which is the framework's existing answer for the same
+        shape of stack knowledge:
+
+        - **key absent** -> ``None``.  The file search runs exactly as
+          before; a workspace that has always used
+          ``template_routing.yaml`` is untouched.
+        - **key present** -> the profile IS the configuration and NO
+          file is read, neither the config_root tier nor the workspace
+          tier.  Present-and-empty (``{}``, or an empty
+          ``output_path_routing``) is itself a declaration: *this
+          profile routes nothing*.  Merging the two sources would give
+          one session two writers of one table, and the file half is
+          model-writable while ``.jaato/profiles/**`` carries
+          ``audit deny ... wlk,`` (#893) — so the profile suppresses the
+          file rather than layering over it.  Routing decides where
+          generated files land; that is precisely why the protected
+          tier wins.
+        - **key present but not a mapping** -> an authoring error:
+          logged at ERROR and read as no routing.  Falling back to the
+          file would make the profile's own declaration silently inert.
+
+        Args:
+            config: The plugin's ``initialize`` config dict.
+
+        Returns:
+            The parsed rules when the profile declares the key (possibly
+            empty), else ``None``.
+        """
+        if PATH_ROUTING_CONFIG_KEY not in config:
+            return None
+
+        where = f"plugin_configs.template.{PATH_ROUTING_CONFIG_KEY}"
+        declared = config[PATH_ROUTING_CONFIG_KEY]
+        if not isinstance(declared, dict):
+            logger.error(
+                "template: %s must be a mapping carrying `%s`, got %s — "
+                "reading it as no routing rules.  No `%s` is consulted: the "
+                "key is present.",
+                where, PATH_ROUTING_RULES_KEY, type(declared).__name__,
+                PATH_ROUTING_FILENAME,
+            )
+            return []
+
+        rules = self._parse_routing_rules(
+            declared.get(PATH_ROUTING_RULES_KEY), where,
+        )
+        self._trace(
+            f"path_routing loaded {len(rules)} rule(s) from {where} "
+            f"(profile declares the table; {PATH_ROUTING_FILENAME} not read)"
+        )
+        return rules
+
     def _load_path_routing(self) -> List[Tuple[str, str]]:
-        """Load + cache the path-routing rules from
-        ``<config_root>/template_routing.yaml`` (or the workspace-tier
-        fallback).  Returns the list of ``(glob, prefix)`` tuples in
-        declared order; empty list when the file is absent, malformed,
-        or carries no rules.
+        """Resolve + cache the path-routing rules for this session.
+
+        Source order (#900):
+
+        0. ``plugin_configs.template.file_conventions`` — when the
+           profile declares the key it IS the configuration and NO file
+           is read (see :meth:`_routing_from_profile`).
+        1. ``<config_root>/template_routing.yaml``, or the workspace-tier
+           fallback ``<workspace>/.jaato/template_routing.yaml``
+           (see :meth:`_resolve_path_routing_path`).
+        2. Neither -> no routing at all, which is pre-0.6.40 behaviour.
+
+        Returns the list of ``(glob, prefix)`` tuples in declared order;
+        empty list when no source declares any, or when the file is
+        absent / malformed.
 
         Cached on ``self._path_routing_rules``; cleared by
         ``set_workspace_path`` / ``set_config_root`` / ``initialize``.
+        The profile tier survives those (it has no directory to move
+        with) and is re-read from ``self._profile_routing_rules``.
 
         YAML schema (server 0.6.40+ — minimal first cut):
 
@@ -565,13 +759,18 @@ class TemplatePlugin(RunnerForwardingMixin):
         expansion (``{yml,yaml}``) is NOT supported — write separate
         rules for each extension.
 
-        File auto-discovery is the convention-over-configuration
-        ergonomic; the env-var pointer is the kb-driven escape hatch
-        and ships in a follow-up if needed.  When the file is absent
-        the plugin behaves exactly as it did pre-0.6.40 — full
-        back-compat preserved.
+        File auto-discovery remains the convention-over-configuration
+        ergonomic and is fully supported; the profile knob is the
+        declared, validated escape hatch a kb-driven cascade carries on
+        the vehicle it already uses for stack knowledge.  When neither
+        source declares rules the plugin behaves exactly as it did
+        pre-0.6.40 — full back-compat preserved.
         """
         if self._path_routing_rules is not None:
+            return self._path_routing_rules
+
+        if self._profile_routing_rules is not None:
+            self._path_routing_rules = self._profile_routing_rules
             return self._path_routing_rules
 
         path = self._resolve_path_routing_path()
@@ -587,20 +786,14 @@ class TemplatePlugin(RunnerForwardingMixin):
             self._path_routing_rules = []
             return []
 
-        rules_raw = (
-            (data.get("file_conventions") or {}).get("output_path_routing")
-            or []
+        # A YAML document that is not a mapping (a bare list or string)
+        # has no `file_conventions` section by construction — read it as
+        # no rules rather than letting `.get` raise on it.
+        section = data.get(PATH_ROUTING_CONFIG_KEY) if isinstance(data, dict) else None
+        rules = self._parse_routing_rules(
+            section.get(PATH_ROUTING_RULES_KEY) if isinstance(section, dict) else None,
+            str(path),
         )
-        rules: List[Tuple[str, str]] = []
-        for rule in rules_raw:
-            if not isinstance(rule, dict):
-                continue
-            glob = rule.get("glob")
-            prefix = rule.get("prefix", "")
-            if isinstance(glob, str) and isinstance(prefix, str):
-                # Normalise: strip any trailing slash from prefix so the
-                # join logic below is uniform.
-                rules.append((glob, prefix.rstrip("/")))
         self._trace(
             f"path_routing loaded {len(rules)} rule(s) from {path}"
         )
@@ -866,12 +1059,40 @@ class TemplatePlugin(RunnerForwardingMixin):
         self._surfaced_template_names.clear()
         self._trace("on_history_cleared: cleared surfaced template tracking")
 
-    def get_config_schema(self) -> Dict[str, Any]:
-        """Return JSON Schema for this plugin's configuration."""
-        return {
-            "type": "object",
-            "properties": {},
-        }
+    def get_config_schema(self) -> List[PluginSetting]:
+        """Declare the plugin's profile-settable configuration.
+
+        One knob today: ``file_conventions``, the output-path routing
+        table (#900).  Declaring it is what makes a typo in it fail
+        ``jaato-scaffold validate`` instead of failing a run — an
+        undeclared key is reported as ``unknown_knob`` and silently
+        ignored at runtime, which for routing means generated files
+        land outside the declared source root.
+        """
+        return [
+            PluginSetting(
+                name=PATH_ROUTING_CONFIG_KEY,
+                type="dict",
+                default={},
+                description=(
+                    "Output-path routing, declared by the profile, in "
+                    "the same shape `template_routing.yaml` carries at "
+                    "its top level: {'output_path_routing': [{'glob': "
+                    "'**/*.java', 'prefix': 'src/main/java'}, ...]}.  "
+                    "Rules are first-match-wins on `PurePath.match`; an "
+                    "empty prefix means match-and-leave-alone; "
+                    "prepending is idempotent.  When this key is PRESENT "
+                    "it IS the configuration and NO `template_routing."
+                    "yaml` is read — not the config_root tier, not the "
+                    "workspace tier; present-and-empty declares that "
+                    "this profile routes nothing.  Absent keeps the file "
+                    "search.  Prefer it over the file: routing decides "
+                    "where generated files land, and `.jaato/profiles/"
+                    "**` is apparmor write-denied to the runner while "
+                    "the file tier is reachable from the workspace."
+                ),
+            ),
+        ]
 
     def get_prerequisite_policies(self):
         """Declare template-first file creation policy for reliability enforcement.
