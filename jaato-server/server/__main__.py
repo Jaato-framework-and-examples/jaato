@@ -384,8 +384,26 @@ class JaatoDaemon:
                 "to 2", _pool_size_raw,
             )
             _pool_size = 2
+        # Ceiling on TOTAL idle slots (#898).  ``JAATO_RUNNER_POOL_SIZE``
+        # is the floor on the UNRESERVED subset; cascade reservations sit
+        # on top of it, one per live tenant, so the two are different
+        # numbers.  Unset means ``2 * target_size`` -- headroom for one
+        # reservation per unreserved slot, which is what a two-tenant
+        # daemon needs and what the reported starvation lacked.
+        _pool_max_raw = os.environ.get("JAATO_RUNNER_POOL_MAX_SIZE", "")  # env: hard ceiling on total idle pre-warm slots incl. per-cascade reservations
+        _pool_max = None
+        if _pool_max_raw.strip():
+            try:
+                _pool_max = int(_pool_max_raw)
+            except ValueError:
+                logger.warning(
+                    "JAATO_RUNNER_POOL_MAX_SIZE=%r is not an int; "
+                    "defaulting to 2 * JAATO_RUNNER_POOL_SIZE",
+                    _pool_max_raw,
+                )
         self._pool_manager: PoolManager = PoolManager(
             self._template_manager, target_size=_pool_size,
+            max_size=_pool_max,
         )
 
         # Shutdown flag

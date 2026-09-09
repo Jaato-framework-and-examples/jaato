@@ -480,11 +480,49 @@ Architecture: daemon spawns a **template subprocess** at startup that imports al
 - **Subreaper**: daemon calls `prctl(PR_SET_CHILD_SUBREAPER, 1)` at startup so orphaned descendants (slots whose template died) re-parent to the daemon.
 - **Watchdog**: `PoolManager` replenishment thread detects template death + auto-respawns + refills pool.
 - **READY handshake**: template sends `"READY\n"` after plugin discovery completes; daemon's `TemplateManager.spawn` blocks for it (30s timeout) instead of a fixed sleep.
-- **Telemetry**: `PoolManager.get_telemetry()` exposes counters (`pool_slot_acquired_total`, `pool_acquire_miss_total`, `pool_replenish_success_total`, `pool_replenish_failures_total`, `template_respawn_attempts_total`, `template_respawn_failures_total`).
+- **Telemetry**: `PoolManager.get_telemetry()` exposes counters (`pool_slot_acquired_total`, `pool_acquire_miss_total`, `pool_replenish_success_total`, `pool_replenish_failures_total`, `template_respawn_attempts_total`, `template_respawn_failures_total`, `pool_slots_over_cap_total`, `pool_stale_reservation_evicted_total`, `pool_replenish_ceiling_blocked_total`).
 
 **Configuration:**
 - Enabled by default (`JAATO_RUNNER_POOL_ENABLED=true`).  Disable with `=false` / `0` / `no` / `off`.
 - Pool size via `JAATO_RUNNER_POOL_SIZE` (default 2).
+- Ceiling via `JAATO_RUNNER_POOL_MAX_SIZE` (default `2 x` the pool size) — see below.
+
+**A reservation is not capacity (#898).** Slots carry a `cascade_id` and
+cross-cascade reuse is forbidden by design (warm plugin state belongs to the
+original cascade), so a cascade-affined idle slot is capacity for exactly ONE
+tenant. Both capacity sites counted it as capacity for everybody, and a pool at
+capacity could therefore be empty from the point of view of every tenant but
+one: with two idle slots affined to cascade B and `target_size=2`,
+`acquire_slot(cascade=A)` returned `None` (no affine match, no pure-idle) while
+replenishment read `idle_count() == 2 >= 2` and never forked. Nothing to run on,
+and nothing in the system that would ever create one, until B released — 31 s
+past A's 60 s client budget.
+
+The floor and the ceiling now count different things:
+
+| Knob | Counts | Means |
+|------|--------|-------|
+| `JAATO_RUNNER_POOL_SIZE` (`target_size`, default 2) | **unreserved** idle slots — those with no cascade affinity | how many warm slots ANY arriving session may take.  What replenishment tops up. |
+| `JAATO_RUNNER_POOL_MAX_SIZE` (`max_size`, default `2 x target_size`) | **all** idle slots, reservations included | the memory ceiling.  A slot is 129–187 MB, so one reservation per live cascade cannot accumulate unbounded. |
+
+Reservations sit ON TOP of the floor rather than consuming it, which is what
+lets a second tenant's arrival grow the pool instead of starving behind the
+first. Eviction at the ceiling follows from the same principle — **liveness
+outranks warmth**: a returning slot whose cascade is demonstrably mid-run
+displaces the **stalest reservation** (the one the 300 s cascade-idle sweep was
+going to reap anyway), and only when there is no reservation to spend does it
+displace a pure-idle resident, as before. A cascade that loses its reservation
+still RUNS — it falls through to an unreserved slot and pays a cold plugin
+bootstrap. Warm state for one tenant is negotiable; capacity for every tenant is
+not.
+
+Nothing here depends on a tenant declaring "cascade finished" — there is no such
+call, and the crash case is when a pinned slot hurts most. The 300 s
+cascade-idle sweep remains the backstop. Two counters are the sizing signal:
+`pool_stale_reservation_evicted_total` (reservations spent at the ceiling) and
+`pool_replenish_ceiling_blocked_total` (replenishment wanted an unreserved slot
+and `max_size` refused) — nonzero on a multi-tenant daemon means raise
+`JAATO_RUNNER_POOL_MAX_SIZE`.
 
 **Pool routing gates** (`spawn_session_runner`): pool is consulted iff `pool_manager` wired AND env flag enabled AND `cgroup_attach is None` (cgroup migration mid-life is a follow-up).  Apparmor opt-in sessions ARE eligible (slot self-confines to the per-session profile).
 
@@ -1920,7 +1958,8 @@ covers it, where one exists. `jaato-scaffold explain env` renders the tags;
 | `JAATO_PARALLEL_TOOLS` | Enable parallel tool execution (default: `true`) |
 | `JAATO_DEFERRED_TOOLS` | Enable deferred tool loading (default: `true`) |
 | `JAATO_RUNNER_POOL_ENABLED` | Enable pre-warm runner pool routing (default: `true`).  Sessions consume pre-warm pool slots instead of cold-spawning a runner subprocess.  Set to `false` / `0` / `no` / `off` to disable.  See `docs/design/runner_prewarm_pool_plan.md`. |
-| `JAATO_RUNNER_POOL_SIZE` | Number of pre-warm pool slots to keep idle (default: 2).  Raise for cascades that fan out stages **concurrently** (each simultaneous stage needs its own warm slot).  Sequential/back-to-back stages do NOT need a larger pool — they reuse one warm slot via the `slot.settled` handoff (the next stage is spawned on slot-availability), so pool size >1 only helps parallel fan-out. |
+| `JAATO_RUNNER_POOL_SIZE` | Number of **unreserved** pre-warm pool slots to keep idle (default: 2) — slots any arriving session may take.  Raise for cascades that fan out stages **concurrently** (each simultaneous stage needs its own warm slot).  Sequential/back-to-back stages do NOT need a larger pool — they reuse one warm slot via the `slot.settled` handoff (the next stage is spawned on slot-availability), so pool size >1 only helps parallel fan-out.  Cascade-affined idle slots (reservations) are **not** counted here (#898): they are capacity for one tenant only, and counting them as pool capacity starved everybody else. |
+| `JAATO_RUNNER_POOL_MAX_SIZE` | Hard ceiling on **total** idle pool slots, reservations included (default: `2 x JAATO_RUNNER_POOL_SIZE`).  This is the memory bound — a slot is 129–187 MB — on the growth that per-tenant reservations imply.  Raise it when `pool_replenish_ceiling_blocked_total` is nonzero: some tenant is being served by cold-spawn while reservations hold the ceiling. |
 | `JAATO_IPC_EVENT_QUEUE_MAX` | Per-client IPC event-queue bound (default 2048). Beyond it, lossy tool-output chunks are evicted oldest-first (media before text); essential lifecycle events are queued past the bound rather than dropped, because losing one desynchronises the client permanently. A non-numeric or non-positive value falls back to the default — "unbounded" is the bug this exists to fix. See [Binary Media Chunks](docs/design/binary-media-chunks.md). |
 | `JAATO_AMBIGUOUS_WIDTH` | Width for East Asian Ambiguous chars in tables (`1` default, `2` for CJK terminals) |
 | `JAATO_SESSION_LOG_DIR` | Per-session log directory, relative to workspace (default: `.jaato/logs`) |

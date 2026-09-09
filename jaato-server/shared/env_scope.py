@@ -213,6 +213,10 @@ CATALOG: Dict[str, EnvClass] = {
     "JAATO_RUNNER_POOL_ENABLED": EnvClass(HOST, None,
         "pre-warm pool routing; a property of the daemon, not of one "
         "session"),
+    "JAATO_RUNNER_POOL_MAX_SIZE": EnvClass(HOST, None,
+        "ceiling on the daemon's total warm slots, cascade "
+        "reservations included; one memory budget per daemon, and a "
+        "per-session value would be a lie about a shared pool"),
     "JAATO_RUNNER_POOL_SIZE": EnvClass(HOST, None,
         "how many warm slots the daemon keeps; one number per daemon"),
     "JAATO_RUNNER_PROFILE": EnvClass(INTERNAL, None,

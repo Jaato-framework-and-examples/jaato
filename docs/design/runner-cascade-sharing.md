@@ -444,6 +444,20 @@ operator config `JAATO_RUNNER_POOL_MAX_OVERFLOW` (future knob, not in
 Phase 1) caps the temporary excess.  Phase 0 defers this knob; ship
 without limit + observe behavior.
 
+**Shipped as `JAATO_RUNNER_POOL_MAX_SIZE` (#898)**, and it turned out to
+be load-bearing rather than a mitigation for a hypothetical.  What
+shipped without it was not "no limit" — `target_size` bounded the total,
+and because a cascade-affined idle slot is capacity for one tenant only,
+that bound made the M < N case *starve* rather than overflow: with both
+idle slots affined to cascade B, `acquire_slot(cascade=A)` returned
+`None` and the replenishment thread read the pool as full and never
+forked.  "Spawn fresh from pool" was the right decision; the accounting
+underneath it could not carry it out.  The knob is now the ceiling on
+TOTAL idle slots while `JAATO_RUNNER_POOL_SIZE` is the floor on the
+UNRESERVED ones — reservations sit on top of the floor, so a second
+tenant's arrival grows the pool instead of evicting the first, and the
+ceiling is what keeps that bounded (129–187 MB a slot).
+
 ### 5.4 Idle teardown firing during active session
 
 Timer-based teardown could race with an in-flight session.
@@ -614,7 +628,7 @@ All Phase 0 decisions are locked.  Phase 1 can begin without further input.
 
 - Cross-cascade slot reuse (workspace-tier reuse across cascade runs)
 - Operator knob for `cascade_idle_timeout_seconds` (uses default 300s)
-- Pool overflow cap (`JAATO_RUNNER_POOL_MAX_OVERFLOW`)
+- ~~Pool overflow cap (`JAATO_RUNNER_POOL_MAX_OVERFLOW`)~~ — shipped as `JAATO_RUNNER_POOL_MAX_SIZE` (#898); see §5.3
 - Cascade keep-alive IPC ping verb (for known-long-gap cascades)
 - Web client (telegram, etc.) cascade_driver_id flows — Phase 2 IPC change
   is the touchpoint; WS clients adopt as needed
