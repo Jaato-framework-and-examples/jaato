@@ -151,7 +151,7 @@ def test_a_failed_drive_is_unreachable_not_not_confirmed(_capture, monkeypatch):
     sm = _manager(_server(_NeedsTurn()))
     monkeypatch.setattr(
         SessionManager, "send_message_to_session",
-        lambda self, sid, text: False, raising=True,
+        lambda self, sid, text, attachments=None: False, raising=True,
     )
 
     assert sm.deliver_prompt_to_session("s-1", "hello") == UNREACHABLE
@@ -165,7 +165,7 @@ def test_a_successful_drive_is_still_accepted(_capture, monkeypatch):
     sm = _manager(_server(_NeedsTurn()))
     monkeypatch.setattr(
         SessionManager, "send_message_to_session",
-        lambda self, sid, text: True, raising=True,
+        lambda self, sid, text, attachments=None: True, raising=True,
     )
 
     assert sm.deliver_prompt_to_session("s-1", "hello") == ACCEPTED

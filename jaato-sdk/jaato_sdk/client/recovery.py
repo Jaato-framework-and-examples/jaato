@@ -971,12 +971,14 @@ class IPCRecoveryClient:
         source_type: str = "user",
         source_id: Optional[str] = None,
         timeout: float = 10.0,
+        attachments: Optional[list] = None,
     ) -> Optional[str]:
         """Inject a prompt into the session's message queue.
 
         See :meth:`IPCClient.inject_prompt` for full docs, including what
-        each status means and why ``None`` is "not told" rather than
-        "not delivered".
+        each status means, why ``None`` is "not told" rather than
+        "not delivered", and why an ``attachments``-bearing inject is
+        idle-only (a busy target answers ``"busy"`` with nothing enqueued).
 
         Returns ``None`` when no underlying client is connected — the same
         unknown-status signal the delegate uses, since a recovery client
@@ -986,8 +988,31 @@ class IPCRecoveryClient:
         if self._client:
             return await self._client.inject_prompt(
                 text, source_type, source_id, timeout=timeout,
+                attachments=attachments,
             )
         return None
+
+    async def wake_session(
+        self,
+        session_id: str,
+        text: str = "",
+        *,
+        attachments: Optional[list] = None,
+        source: str = "user",
+        event_id: Optional[str] = None,
+    ) -> None:
+        """Wake a session by id, optionally carrying binary content.
+
+        See :meth:`IPCClient.wake_session`.  A no-op when no underlying
+        client is connected — the same shape as the other fire-and-forget
+        command wrappers here, which cannot report a refusal either.
+        """
+        self._check_can_send()
+        if self._client:
+            await self._client.wake_session(
+                session_id, text, attachments=attachments,
+                source=source, event_id=event_id,
+            )
 
     async def replay_messages(
         self,

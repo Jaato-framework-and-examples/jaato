@@ -23,6 +23,7 @@ class _Calls:
     def __init__(self):
         self.resume = []      # (session_id, workspace_path)
         self.drive = []       # (session_id, text)
+        self.drive_attachments = []   # per-drive attachment list (#845)
         self.drive_ok = True
         self.resume_ok = True
 
@@ -53,8 +54,11 @@ def _make_manager(tmp_path, loaded_ids=(), attached=False):
         m._sessions[session_id] = _FakeSession()  # revived, no client attached
         return session_id
 
-    def _drive(session_id, text):
+    def _drive(session_id, text, attachments=None):
+        # ``attachments`` is what #845 added to this call; the double records
+        # it so a stub cannot pass while production's call signature moved.
         calls.drive.append((session_id, text))
+        calls.drive_attachments.append(list(attachments or []))
         return calls.drive_ok
 
     m.resume_session = _resume

@@ -22,6 +22,7 @@ export type {
 export {
   JaatoClient,
   MIN_PROTOCOL_VERSION,
+  MIN_ATTACHMENT_RESUME_PROTOCOL,
   isProtocolCompatible,
   type JaatoClientOptions,
 } from "./client.js";

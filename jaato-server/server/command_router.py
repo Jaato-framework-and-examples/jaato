@@ -24,6 +24,36 @@ from shared.session_id import is_safe_session_id
 logger = logging.getLogger(__name__)
 
 
+def _decode_wake_request(
+    args: List[Any], payload: Optional[dict],
+) -> "tuple[Optional[str], Optional[str], str, Optional[str], List[dict]]":
+    """Decode a ``session.wake`` request from either accepted shape.
+
+    Returns ``(session_id, text, source, event_id, attachments)``.  The
+    structured ``payload`` wins over positional ``args`` field by field, as
+    it always has.
+
+    ``attachments`` (#845) is payload-only: bytes have no positional
+    spelling, and a positional string would be a CLIENT-SIDE path the daemon
+    cannot read (the whole reason ``_normalize_attachments`` expands paths on
+    the sending side, especially cross-host WS).  Only mapping entries
+    survive; anything else is dropped here rather than being handed onward
+    as something the multimodal path would have to re-check.  Dropping is
+    not silent in effect — a wake whose attachments were ALL unusable and
+    carried no text fails the caller's usage check and is refused by name.
+    """
+    p = payload or {}
+    session_id = p.get("session_id") or (args[0] if len(args) > 0 else None)
+    text = p.get("text") or (args[1] if len(args) > 1 else None)
+    source = p.get("source") or (args[2] if len(args) > 2 else "user")
+    event_id = p.get("event_id") or (args[3] if len(args) > 3 else None)
+    raw = p.get("attachments")
+    attachments = (
+        [a for a in raw if isinstance(a, dict)] if isinstance(raw, list) else []
+    )
+    return session_id, text, source, event_id, attachments
+
+
 class CommandRouter:
     """Transport-agnostic command dispatcher for the Jaato daemon.
 
@@ -663,29 +693,38 @@ class CommandRouter:
         if cold, for the client-agnostic wake primitive.
 
         Accepts a structured ``payload`` (SDK callers) —
-        ``{session_id, text, source?, event_id?}`` — or positional ``args``
-        ``[session_id, text, source?, event_id?]``.  Authentication is the
+        ``{session_id, text, source?, event_id?, attachments?}`` — or
+        positional ``args`` ``[session_id, text, source?, event_id?]``.
+        Authentication is the
         transport's boundary (IPC socket-mode / WS bearer token / the HTTP
         shim's #498 fail-closed check); this handler runs only for callers
         already past that gate.  On refusal it emits an ``ErrorEvent`` with the
         reason; on success the woken turn's output flows to the session's
         attached clients (the caller need not be one).
+
+        ``attachments`` (protocol 1.5+, payload form only — bytes have no
+        positional spelling) carries binary content in the same canonical wire
+        shape ``SendMessageRequest`` accepts, so a session whose input is
+        audio can be resumed with an utterance rather than only described in
+        text (#845).  AN ATTACHMENT IS CONTENT: a wake carrying attachments
+        and no text is valid — for a spoken utterance the attachment IS the
+        message (#838) — so the usage check requires text OR attachments,
+        not text.
         """
         from jaato_sdk.events import ErrorEvent
-        p = payload or {}
-        session_id = p.get("session_id") or (args[0] if len(args) > 0 else None)
-        text = p.get("text") or (args[1] if len(args) > 1 else None)
-        source = p.get("source") or (args[2] if len(args) > 2 else "user")
-        event_id = p.get("event_id") or (args[3] if len(args) > 3 else None)
-        if not session_id or not text:
+        session_id, text, source, event_id, attachments = _decode_wake_request(
+            args, payload)
+        if not session_id or not (text or attachments):
             self._event_sink.send_event(client_id, ErrorEvent(
-                error="session.wake requires session_id and text",
+                error=("session.wake requires session_id and text "
+                       "(or attachments)"),
                 error_type="UsageError",
                 recoverable=True,
             ))
             return
         outcome, detail = self._session_manager.wake_session(
-            session_id, text, source=source, event_id=event_id,
+            session_id, text or "", source=source, event_id=event_id,
+            attachments=attachments,
         )
         # Only genuine failures surface as an error.  OK and DUPLICATE are both
         # successes — a redelivered event_id is an idempotent no-op, not a
