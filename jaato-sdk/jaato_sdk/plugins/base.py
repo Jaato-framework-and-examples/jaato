@@ -5,6 +5,13 @@ from dataclasses import dataclass, field
 from typing import Protocol, List, Dict, Any, Callable, FrozenSet, Optional, NamedTuple, runtime_checkable
 
 from .model_provider.types import ToolSchema
+# Re-exported beside the protocol it serves (issue #918): a plugin that
+# needs a credential reads it with ``get_session_env``, NOT with
+# ``os.environ.get`` -- on a daemon serving concurrent sessions the
+# global dict carries whichever session's ``env:`` map was overlaid
+# last, so a plain read can return another tenant's token.  See
+# :mod:`jaato_sdk.session_env` for the full hazard.
+from ..session_env import get_session_env  # noqa: F401  (re-exported)
 
 
 # ---------------------------------------------------------------------------

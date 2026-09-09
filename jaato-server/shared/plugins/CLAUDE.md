@@ -48,8 +48,30 @@ __all__ = ["MyPlugin", "create_plugin", "PLUGIN_KIND", "PLUGIN_TIER"]
 
 **Why this matters:** `PluginRegistry.discover(tier_filter="...")`
 filters discovery by tier.  Without `PLUGIN_TIER`, a plugin is
-silently excluded when a tier filter is set — same footgun as
-missing `PLUGIN_KIND`.
+excluded when a tier filter is set — same footgun as missing
+`PLUGIN_KIND` — and the runner, the runner's `__main__` and the
+embedded client all pass `tier_filter="runner"`, while the daemon-side
+registry and `jaato-scaffold` pass none.  So an un-annotated plugin is
+*listed as installed* and *absent from every session*.
+
+Since #917 that exclusion is no longer quiet.  Three surfaces say it:
+
+| Surface | What it does |
+|---|---|
+| `PluginRegistry` | logs at **WARNING**, naming the plugin, the filter, and the file to edit.  A *mismatched* tier stays at debug — that is the partition working, not a mistake. |
+| `jaato-scaffold explain plugins` | marks the row `[no PLUGIN_TIER - will not load in the runner]` and prints the fix.  This walk discovers unfiltered, so it will always *see* such a plugin; what it must not do is imply it works. |
+| `jaato-scaffold validate` | `plugin_missing_tier`, **error**, on a profile naming one. |
+
+**Out-of-tree plugins are the case that matters.**  The build gate
+below is an AST scan of `shared/plugins/`, so a distribution shipping
+`[project.entry-points."jaato.plugins"]` is invisible to it and nothing
+in that distribution's own repo knows the rule exists.  The
+entry-point path also never checks `PLUGIN_KIND`, so a package missing
+*both* constants is registered and then dropped by every filter —
+which is precisely how the in-tree `calculator` plugin spent its life
+unreachable from any session.  The gate now covers every package named
+in jaato-server's own entry-point table, whether or not it declares
+`PLUGIN_KIND`.
 
 The build-fail gate is in `shared/tests/test_plugin_tier_partition.py`:
 new plugins without an explicit tier fail
@@ -494,6 +516,37 @@ of bug.
 10. **Model providers:** `verify_auth()` works before `initialize()` (no `self._client` access)
 11. **File-writing tools:** Declare `traits=frozenset({TRAIT_FILE_WRITER})` and include `path`/`files_modified` in result
 12. **Model-supplied paths:** Read/write via `path_safety` helpers, never `check()` then `open()`; search tools re-check every result, not just the root
+13. **Credentials:** read them with `get_session_env(...)`, never `os.environ.get(...)` — see below
+
+## Critical: read credentials with `get_session_env`, not `os.environ`
+
+```python
+from jaato_sdk.session_env import get_session_env   # out-of-tree plugins
+from shared.session_context import get_session_env  # in-tree (same function)
+
+token = get_session_env("GRAPH_CLIENT_SECRET")
+```
+
+`JaatoServer._with_session_env()` overlays each session's `env:` map onto
+the daemon's `os.environ` for the duration of a turn.  On a daemon
+serving two sessions concurrently, a plain `os.environ` read can
+therefore return **another session's token** — non-deterministically,
+with no error and no log line.  For an OAuth-bearing connector that is
+the difference between two tenants' credentials staying separate and
+not.  `get_session_env` reads the session-scoped `ContextVar` first and
+falls back to `os.environ`, so the same call is correct inside the
+daemon and outside it (tests, a CLI) — there is no reason to write the
+unsafe one.
+
+It lives in **`jaato_sdk.session_env`** (also re-exported from
+`jaato_sdk` and `jaato_sdk.plugins.base`) and `shared.session_context`
+imports it back, so an out-of-tree distribution reaches it without
+depending on jaato-server, and there is exactly one `ContextVar`: the
+one the daemon sets is the one the plugin reads (#918).
+
+`get_current_session()` is deliberately **not** on the SDK surface — it
+hands back a `JaatoSession`, and a plugin reaching into
+`session._runtime` is not something to make easier from out of tree.
 
 ## Critical: `verify_auth()` in Model Provider Plugins
 
