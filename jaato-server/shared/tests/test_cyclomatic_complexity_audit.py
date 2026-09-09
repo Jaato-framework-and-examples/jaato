@@ -451,7 +451,7 @@ BASELINE: Dict[str, int] = {
     "jaato-server/shared/plugins/web_fetch/plugin.py::WebFetchPlugin._fetch_url": 30,
     "jaato-server/shared/plugins/web_fetch/plugin.py::WebFetchPlugin._html_to_markdown": 36,
     "jaato-server/shared/plugins/web_fetch/plugin.py::WebFetchPlugin.initialize": 18,
-    "jaato-server/shared/plugins/webhook/config.py::validate_config": 40,
+    "jaato-server/shared/plugins/webhook/config.py::validate_config": 31,
     "jaato-server/shared/retry_utils.py::classify_error": 17,  # -5 (#687): the redundant "TUPLE and isinstance(exc, TUPLE)" guards went
     "jaato-server/shared/retry_utils.py::is_context_limit_error": 22,
     "jaato-server/shared/retry_utils.py::with_retry": 23,

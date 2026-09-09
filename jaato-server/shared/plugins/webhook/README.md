@@ -118,6 +118,13 @@ Call in a loop after subscribing. Blocks up to `timeout` seconds waiting for eve
       "event_type_header": "X-GitHub-Event",
       "metadata": { "source": "github" }
     },
+    "gitlab": {
+      "path": "/webhook/gitlab",
+      "secret_header": "X-Gitlab-Token",
+      "secret_algo": "token",
+      "event_type_header": "X-Gitlab-Event",
+      "metadata": { "source": "gitlab" }
+    },
     "generic": {
       "path": "/webhook",
       "allow_unauthenticated": true
@@ -145,7 +152,7 @@ Each layer is deep-merged, not replaced — a profile can override just `port` w
 |-----|------|---------|-------------|
 | `port` | int | `9100` | HTTP listener port |
 | `host` | str | `127.0.0.1` | Bind address (localhost only by default) |
-| `secret` | str | `null` | Global HMAC secret. Use `${ENV_VAR}` syntax. |
+| `secret` | str | `null` | Global shared secret — the HMAC key under `hmac-sha256`, the expected header value under `token`. Overridden per route by `routes.<name>.metadata.secret`. Use `${ENV_VAR}` syntax. |
 | `routes` | object | `{}` | Named routes. **No default route** — empty means the listener 404s every path (fail-closed; a zero-config open endpoint was removed). |
 | `max_body_size` | int | `1048576` | Maximum request body in bytes (1 MB) |
 | `response_timeout` | float | `5.0` | Seconds before responding to sender |
@@ -158,18 +165,61 @@ Each layer is deep-merged, not replaced — a profile can override just `port` w
 | Key | Type | Required | Description |
 |-----|------|----------|-------------|
 | `path` | str | Yes | URL path (must start with `/`) |
-| `secret_header` | str | No | Header containing HMAC signature |
-| `secret_algo` | str | No | Algorithm — only `hmac-sha256` supported |
+| `secret_header` | str | No | Header carrying the route's credential — an HMAC digest, or the shared secret itself under `secret_algo: "token"` |
+| `secret_algo` | str | No | How that header is verified: `hmac-sha256` (preferred) or `token` (weaker — see below) |
 | `event_type_header` | str | No | Header to extract event type from |
-| `metadata` | object | No | Static metadata merged into every event |
+| `metadata` | object | No | Static metadata merged into every event. `metadata.secret` overrides the global `secret` for this route. |
 | `allow_unauthenticated` | bool | No | Accept **unsigned** requests on this route (default `false`, fail-closed). A route with no `secret_header` is refused unless mutual TLS or an IP allowlist is configured, or this is set. |
 
+`secret_header` and `secret_algo` are a pair: declaring one without the other is
+a **500**, never a silent downgrade to unsigned, and an unrecognised
+`secret_algo` is a hard config-validation error. A typo can't skip verification.
+
+#### `secret_algo: "hmac-sha256"` — the default choice
+
+The header carries an HMAC-SHA256 digest **over the request body**, keyed by the
+shared secret, optionally prefixed `sha256=` (GitHub convention). The secret
+never travels, and a captured request cannot be replayed against a different
+body. Use this whenever the producer signs bodies — GitHub, Stripe, and most
+large senders do.
+
+#### `secret_algo: "token"` — for producers that don't sign
+
+Some producers ship the shared secret **verbatim** in a header and expect a
+constant-time comparison. GitLab is the canonical case: it sends the configured
+secret in `X-Gitlab-Token` and signs nothing. Without this mode the only way to
+ingest such a webhook was `allow_unauthenticated: true` — throwing away a secret
+that was right there in the request.
+
+```json
+"gitlab": {
+  "path": "/webhook/gitlab",
+  "secret_header": "X-Gitlab-Token",
+  "secret_algo": "token",
+  "event_type_header": "X-Gitlab-Event"
+}
+```
+
+> **`token` is weaker than `hmac-sha256`, not a peer of it.** The secret is
+> present in **every** request, so it is readable by anything that terminates
+> TLS (a load balancer, a reverse proxy, an ingress controller, a logging
+> sidecar that records headers), and a captured request replays forever against
+> any payload — the body is not covered. **Pair it with TLS** (`tls.enabled`),
+> keep it off shared ingress paths where you can, and rotate the secret on any
+> suspicion of exposure. Reach for it only when the producer gives you no
+> signature to check; if it signs bodies, use `hmac-sha256`.
+>
+> Every `token` route logs a **WARNING at listener startup** naming the route
+> and header, and a louder one when TLS is off — the same posture as
+> `--ws-unsafe-no-auth` and `scrub_secret_env: none`. The mode is deliberately
+> not the quiet path of least resistance.
+
 > **Authentication (fail-closed).** A route is accepted only when it is
-> authenticated by one of: an HMAC secret (`secret_header` + `secret_algo`),
-> mutual TLS (`tls.ca_certfile` set), a non-empty `allowed_ips` allowlist, or an
-> explicit `allow_unauthenticated: true`. A matched route with none of these
-> returns **401** — an untrusted caller can never drive agent sessions through an
-> unsigned endpoint left open by omission.
+> authenticated by one of: the route's shared secret (`secret_header` +
+> `secret_algo`, in either mode), mutual TLS (`tls.ca_certfile` set), a non-empty
+> `allowed_ips` allowlist, or an explicit `allow_unauthenticated: true`. A
+> matched route with none of these returns **401** — an untrusted caller can
+> never drive agent sessions through an unsigned endpoint left open by omission.
 
 ### TLS Configuration
 
