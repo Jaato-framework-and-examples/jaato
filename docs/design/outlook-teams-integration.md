@@ -255,16 +255,16 @@ is the answer to "how do we know what third-party code is in the agent".
 ### A3. The two upstream gaps this example exposes
 
 Both are small, and neither blocks `jaato-m365`; they are what the exercise is
-*for*.
+*for*.  Filed as **#917** and **#918**.
 
-1. **An unannotated out-of-tree plugin is silently skipped.** The `PLUGIN_TIER`
+1. **An unannotated out-of-tree plugin is silently skipped** (#917). The `PLUGIN_TIER`
    contract is enforced only by an in-tree test. Either the registry should
    log a WARNING when it skips an *entry-point* plugin for a missing
    annotation (it currently `_trace`s at debug), or `_gate_entry_point` should
    name it — the same reasoning that promoted the protocol-gap check from
    `_trace` to `logger.warning` at #171. An external author has no other
    feedback channel.
-2. **`get_session_env` is not on the SDK.** It lives in
+2. **`get_session_env` is not on the SDK** (#918). It lives in
    `shared/session_context.py`, so the one thing every credential-bearing
    connector plugin needs is reachable only by importing jaato-server. The
    workaround is a soft import:
@@ -442,10 +442,10 @@ need a server release. That is the test a connector should pass. If building
 `jaato-m365` required a framework change, the framework would be missing an
 extension point; it isn't, and the exercise is what proves it.
 
-The two micro-gaps in §A3 (a WARNING on the `PLUGIN_TIER` skip, an SDK
-re-export of `get_session_env`) sit outside the phases: neither blocks
-anything, both are worth upstreaming once the example has demonstrated it
-needed them.
+The two micro-gaps in §A3 — #917 (a WARNING on the `PLUGIN_TIER` skip) and
+#918 (an SDK re-export of `get_session_env`) — sit outside the phases: neither
+blocks anything, and both were found by designing against the extension point
+rather than by reasoning about it.
 
 ---
 
