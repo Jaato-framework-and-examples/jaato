@@ -13,8 +13,15 @@ jobs:
         with:
           python-version: "3.12"
 
+      # `openrouter` is here for its `openai>=1.0` dependency, not for the
+      # provider: shared/tests/test_connection_error_rebuilds_client.py does a
+      # module-level `import openai`, so under a bare `.[dev]` it fails at
+      # COLLECTION and pytest exits 2 with 4069 other tests never run. ci-tests
+      # never saw this — it installs `.[all]` and passes
+      # --continue-on-collection-errors — so the gap only ever showed up here,
+      # on the job that gates a release.
       - name: Install dependencies
-        run: pip install -e jaato-sdk/ && pip install -e "jaato-server/.[dev]"
+        run: pip install -e jaato-sdk/ && pip install -e "jaato-server/.[dev,openrouter]"
 
       - name: Run tests
         run: pytest jaato-server/shared/tests/ jaato-server/server/test_client.py jaato-server/server/test_workspace_command.py
