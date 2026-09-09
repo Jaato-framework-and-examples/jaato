@@ -27,6 +27,12 @@ what an arm *is*, not which cell of the matrix it occupies.
 ## Install
 
 ```bash
+pip install jaato-eval
+```
+
+Or, from a checkout of the framework repo:
+
+```bash
 pip install -e jaato-eval/
 ```
 

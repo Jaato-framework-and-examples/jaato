@@ -1,4 +1,4 @@
-name: "Publish jaato-sdk to TestPyPI"
+name: "Publish jaato-sdk to PyPI"
 
 on:
   workflow_dispatch:
@@ -9,9 +9,16 @@ jobs:
     permissions:
       contents: read
       id-token: write
-    environment: testpypi-sdk
+    environment: pypi-sdk
     steps:
+      # fetch-depth: 0 — scripts/build_readme.py derives the changelog that
+      # becomes the package's PyPI long description from `git log` since the
+      # previous "Bump <pkg>" commit.  checkout's default depth of 1 leaves it
+      # a single commit to look at, so the published changelog was whatever
+      # that one commit happened to be.
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-python@v6
         with:
@@ -20,7 +27,7 @@ jobs:
       - name: Install build
         run: pip install build
 
-      - name: Check version not already on TestPyPI
+      - name: Check version not already on PyPI
         run: |
           version=$(python -c "
           import tomllib, pathlib
@@ -29,9 +36,9 @@ jobs:
           ")
           echo "Package version: $version"
           status=$(curl -s -o /dev/null -w '%{http_code}' \
-            "https://test.pypi.org/pypi/jaato-sdk/${version}/json")
+            "https://pypi.org/pypi/jaato-sdk/${version}/json")
           if [ "$status" = "200" ]; then
-            echo "::error::Version ${version} of jaato-sdk already exists on TestPyPI"
+            echo "::error::Version ${version} of jaato-sdk already exists on PyPI"
             exit 1
           fi
           echo "Version ${version} is available for publishing"
@@ -45,8 +52,7 @@ jobs:
         run: python -m build .
         working-directory: jaato-sdk
 
-      - name: Publish to TestPyPI
+      - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
-          repository-url: https://test.pypi.org/legacy/
           packages-dir: jaato-sdk/dist/
