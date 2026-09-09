@@ -69,6 +69,54 @@ class Diagnostic:
 
 # ---------------------------------------------------------------- per-profile
 
+def _check_plugins(names: Any, plugins: Dict[str, Any], add) -> None:
+    """Check a profile's ``plugins:`` list: installed, and loadable.
+
+    Two different findings, deliberately not collapsed into one:
+
+    ``unknown_plugin``
+        the name resolves to nothing installed.
+
+    ``plugin_missing_tier``
+        it IS installed and discoverable — and the runner will still
+        drop it, because tier-filtered discovery excludes a plugin whose
+        package declares no ``PLUGIN_TIER`` (issue #917).  An *error*
+        rather than a warning: the session is already broken (every tool
+        the profile asked for is absent) while the profile is valid by
+        every other measure, so nothing else in the pipeline says a
+        word.  The in-tree build gate is an AST scan of
+        ``shared/plugins/`` and cannot see the out-of-tree distribution
+        where this actually happens.
+
+    They never double-fire: an uninstalled plugin has no tier to be
+    missing.
+
+    Split out of :func:`validate_profile` rather than inlined — that
+    function is far over the complexity ceiling and frozen in the audit
+    baseline (see ``test_cyclomatic_complexity_audit``).
+
+    Args:
+        names: The profile's resolved ``plugins`` list (bare names;
+            ``(preload)`` modifiers are parsed out at profile-load time
+            into ``preloaded_plugins``).
+        plugins: The introspected inventory, keyed by plugin name.
+        add: The per-profile diagnostic sink from :func:`validate_profile`.
+    """
+    for plug in names:
+        if plug not in plugins:
+            add("error", "unknown_plugin",
+                f"plugin '{plug}' is not installed (run "
+                "`jaato-scaffold explain plugins`)", where=f"plugins.{plug}")
+            continue
+        if getattr(plugins[plug], "tier_missing", False):
+            add("error", "plugin_missing_tier",
+                f"plugin '{plug}' declares no PLUGIN_TIER, so the runner "
+                "will not load it — this session would come up without "
+                "its tools. Add PLUGIN_TIER = \"runner\" to the plugin "
+                "package's __init__.py",
+                where=f"plugins.{plug}")
+
+
 def validate_profile(
     profile: Any,
     *,
@@ -109,11 +157,7 @@ def validate_profile(
             "set-overlay or inherits did not bind a model", where="model")
 
     # --- plugins ---------------------------------------------------------
-    for plug in getattr(profile, "plugins", None) or []:
-        if plug not in plugins:
-            add("error", "unknown_plugin",
-                f"plugin '{plug}' is not installed (run "
-                "`jaato-scaffold explain plugins`)", where=f"plugins.{plug}")
+    _check_plugins(getattr(profile, "plugins", None) or [], plugins, add)
 
     # --- model_tiers (V2: cross-provider tiers allowed) ------------------
     _check_model_tiers(getattr(profile, "model_tiers", None) or {}, add,

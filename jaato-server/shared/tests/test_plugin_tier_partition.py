@@ -28,6 +28,7 @@ trigger plugin imports (which can fail without optional deps —
 from __future__ import annotations
 
 import ast
+import tomllib
 from pathlib import Path
 from typing import Dict, Optional, Set, Tuple
 
@@ -35,6 +36,57 @@ import pytest
 
 
 PLUGIN_DIR = Path(__file__).resolve().parents[1] / "plugins"
+
+#: jaato-server's own ``pyproject.toml`` -- the source of truth for which
+#: in-tree packages are published as plugins.  Read rather than
+#: hardcoded so a package added to the table is covered the day it
+#: lands, which is the whole point of a gate.
+PYPROJECT = Path(__file__).resolve().parents[2] / "pyproject.toml"
+
+#: The entry-point groups whose members reach the model through
+#: ``PluginRegistry`` -- the only ones a tier filter applies to.
+#:
+#: ``jaato.gc_plugins`` and ``jaato.cache_plugins`` are deliberately
+#: absent.  Both have their OWN untiered loader
+#: (``discover_gc_plugins()`` / the cache equivalent) that calls
+#: ``ep.load()`` directly and never consults ``PLUGIN_TIER``, so a
+#: strategy without the annotation loads correctly -- ``gc_budget``'s
+#: module docstring says as much on purpose.  Requiring the constants
+#: there would be a gate demanding an annotation nothing reads.
+#:
+#: ``jaato.premium`` / ``jaato.extensions`` / ``jaato.embedding`` are
+#: not ``PluginRegistry`` plugins at all.
+_PLUGIN_ENTRY_POINT_GROUPS = (
+    "jaato.plugins",
+    "jaato.enrichment_plugins",
+)
+
+
+def _entry_point_plugin_packages() -> Dict[str, str]:
+    """Map ``package name -> entry-point group`` for every declared plugin.
+
+    The value of an entry point is ``shared.plugins.<name>:create_plugin``
+    (or ``...<name>.plugin:create_plugin``); what matters for the
+    annotation gate is the ``shared/plugins/<name>/`` directory, so the
+    module path is trimmed back to that segment.
+
+    Returns ``{}`` rather than raising when the file cannot be parsed --
+    the caller asserts non-empty, so a silent parse failure fails the
+    test instead of vacuously passing it.
+    """
+    try:
+        data = tomllib.loads(PYPROJECT.read_text())
+    except (OSError, tomllib.TOMLDecodeError):
+        return {}
+    table = (data.get("project") or {}).get("entry-points") or {}
+    out: Dict[str, str] = {}
+    for group in _PLUGIN_ENTRY_POINT_GROUPS:
+        for _name, value in (table.get(group) or {}).items():
+            module = str(value).split(":", 1)[0]
+            parts = module.split(".")
+            if len(parts) >= 3 and parts[0] == "shared" and parts[1] == "plugins":
+                out[parts[2]] = group
+    return out
 
 
 def _read_plugin_init_attrs(init_path: Path) -> Dict[str, Optional[str]]:
@@ -114,6 +166,52 @@ def test_every_plugin_with_kind_has_tier() -> None:
         f"{sorted(missing)}.  Add ``PLUGIN_TIER = \"daemon\"`` or "
         f"``PLUGIN_TIER = \"runner\"`` to each __init__.py per the "
         f"parent design §4.2 classification table."
+    )
+
+
+def test_every_entry_point_plugin_has_kind_and_tier() -> None:
+    """A plugin the framework DECLARES as an entry point must be annotated.
+
+    :func:`test_every_plugin_with_kind_has_tier` keys on ``PLUGIN_KIND``
+    being present, which is sound for the directory scan — that path
+    refuses a module without one, so an unannotated package is simply
+    not a plugin.  The entry-point path never reads ``PLUGIN_KIND`` at
+    all: the factory is loaded and its result registered regardless.
+
+    A package with NEITHER constant therefore falls through both gates
+    and lands in the worst state available — registered by the
+    entry-point path (so ``jaato-scaffold plugins`` lists it and a
+    profile may name it), excluded by every tier filter (so the runner
+    that serves the session never loads it), and reported nowhere.
+
+    ``calculator`` shipped in exactly that state (issue #917): a real
+    tool plugin, in this repository's own
+    ``[project.entry-points."jaato.plugins"]`` table, absent from every
+    session that asked for it.
+    """
+    declared = _entry_point_plugin_packages()
+    assert declared, (
+        "read no entry points from jaato-server/pyproject.toml — the "
+        "parse broke, and a gate that reads nothing passes everything"
+    )
+
+    unannotated = {}
+    for package, group in sorted(declared.items()):
+        init = PLUGIN_DIR / package / "__init__.py"
+        if not init.exists():
+            continue          # an entry point outside shared/plugins/
+        attrs = _read_plugin_init_attrs(init)
+        gap = [k for k in ("PLUGIN_KIND", "PLUGIN_TIER")
+               if not isinstance(attrs.get(k), str)]
+        if gap:
+            unannotated[package] = (group, gap)
+
+    assert unannotated == {}, (
+        f"Plugin packages declared as entry points but missing "
+        f"annotations: {unannotated}.  The entry-point path registers "
+        f"them anyway and every tier filter drops them, so sessions "
+        f"naming them come up without their tools.  Add the missing "
+        f"constants to shared/plugins/<name>/__init__.py."
     )
 
 

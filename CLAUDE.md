@@ -1247,6 +1247,84 @@ shadow is visible without reading logs.  `jaato-scaffold plugins` marks
 any plugin not supplied by the built-in package with
 `<- <distribution> (<module>)`.
 
+### Out-of-Tree Plugin Authoring (#917, #918)
+
+Passing the trust gate is not the same as being loaded, and building
+against the SDK is not the same as being able to read a credential.
+Both gaps hit exactly one audience — a third party writing a plugin
+against the documented entry-point surface, which is what that
+extension point is *for* — and both failed silently.
+
+**`PLUGIN_TIER` decides whether the session ever sees the plugin.**
+Discovery is tier-filtered and the filter is not the same on both
+sides: the runner, the runner's `__main__` and `jaato_embedded` pass
+`tier_filter="runner"`; the daemon-side registry and
+`shared/scaffold/introspect.py` pass none.  A plugin whose package
+declares no `PLUGIN_TIER` is excluded under **any** filter — the
+deliberate "annotate or be excluded" contract — so the split ran
+straight through the diagnostic: the author installed the
+distribution, ran `jaato-scaffold plugins`, saw the plugin listed with
+its provenance line, wrote `plugins: [m365]` in a profile, and the
+session came up without the tools.  No error, no warning, one debug
+`_trace`.  `test_plugin_tier_partition` fails the build on this, but
+its walk is an AST scan of `shared/plugins/` and cannot see a
+distribution outside that path; nothing in the third party's own repo
+knows the rule exists.  Worse than a trust refusal, which at least
+avoids executing code: `ep.load()` has already run when the tier is
+read, so the module is imported and *then* discarded.
+
+Three surfaces now say it, and each distinguishes the mistake from the
+mechanism working — a **mismatched** tier (`daemon` under a `runner`
+filter) is correct partitioning and stays at debug; only a **missing**
+one is announced:
+
+| Surface | Signal |
+|---|---|
+| `PluginRegistry` | `logger.WARNING` naming the entry point, its `ep.value`, the filter, and the package `__init__.py` to edit — the same PR #171 promotion the protocol-gap check got, for the same audience |
+| `jaato-scaffold explain plugins` | the row is marked `[no PLUGIN_TIER - will not load in the runner]`, with a footer naming the fix.  This walk must keep discovering unfiltered (it is an inventory, not a session); what it must not do is imply the plugin works |
+| `jaato-scaffold validate` | `plugin_missing_tier`, severity **error** — the profile is valid by every other measure and the session is already broken |
+
+The entry-point path never reads `PLUGIN_KIND` either, so a package
+missing **both** constants is registered by that path and dropped by
+every filter.  The in-tree `calculator` plugin shipped in exactly that
+state, listed in this repo's own
+`[project.entry-points."jaato.plugins"]` table and reachable from no
+session; it is annotated now, and the gate covers every package that
+table names rather than only those declaring `PLUGIN_KIND`.
+
+**`get_session_env` is the credential read, and it is on the SDK
+surface.**  The plugin contract is otherwise cleanly SDK-shaped —
+`ToolPlugin` / `UserCommand` / `TRAIT_*` from `jaato_sdk.plugins.base`,
+`ToolSchema` from `jaato_sdk.plugins.model_provider.types`, and
+`jaato-sdk` never imports `shared` — with one hole, sitting where a
+connector's credential handling goes.  The session-scoped read lived
+only in `shared/session_context.py`, so a third-party plugin either
+took a hard dependency on jaato-server or wrote `os.environ.get(...)`.
+
+That is not a missed abstraction.  `JaatoServer._with_session_env()`
+overlays each session's `env:` map onto the daemon's `os.environ` for
+the duration of a turn, so on a daemon serving two tenants a plain read
+can return **another session's token** — non-deterministically, with no
+error.  It works on the author's machine and in every single-session
+test.
+
+```python
+from jaato_sdk.session_env import get_session_env    # also jaato_sdk,
+                                                     # jaato_sdk.plugins.base
+token = get_session_env("GRAPH_CLIENT_SECRET")
+```
+
+`shared/session_context.py` imports the three functions back, so every
+in-tree caller keeps its import path and — the part that makes the fix
+real rather than cosmetic — there is exactly **one `ContextVar`
+object**: the one the daemon sets is the one the plugin reads.  A
+second var declared in the SDK would read empty, fall through to
+`os.environ`, and reproduce the leak wearing the fix as a disguise, so
+the test asserts object identity rather than behaviour.
+`get_current_session` is deliberately **not** exported — it hands back
+a `JaatoSession`, and a plugin reaching into `session._runtime` is not
+something to make easier from out of tree.
+
 ### Secret Env Scrubbing (#863)
 
 The runner legitimately holds secrets in its own `os.environ` — the

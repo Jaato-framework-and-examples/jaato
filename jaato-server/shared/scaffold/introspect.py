@@ -147,6 +147,15 @@ class PluginInfo:
     # visible in ``jaato-scaffold plugins`` without reading daemon logs.
     source: str = ""
     builtin: bool = True
+    # Tier reachability (issue #917).  ``introspect.plugins()`` discovers
+    # with NO tier filter, so it lists plugins the runner would skip:
+    # ``PluginRegistry.discover(tier_filter="runner")`` excludes anything
+    # without a ``PLUGIN_TIER`` annotation, and this is the surface an
+    # author consults to answer "is my plugin wired?".  Reporting such a
+    # plugin as present, with nothing said, is how a third-party
+    # distribution reaches a profile that then comes up without its
+    # tools.  True when the annotation is missing entirely.
+    tier_missing: bool = False
 
 
 @dataclass
@@ -498,6 +507,44 @@ def _command_subcommands(plugin: Any, command: str) -> List[str]:
     return subs
 
 
+def _stamp_kind_and_tier(info: "PluginInfo", module_name: str) -> None:
+    """Copy ``PLUGIN_KIND`` / ``PLUGIN_TIER`` onto *info* from the module.
+
+    Mirrors ``PluginRegistry._lookup_module_tier``: the annotation may
+    sit on the factory's own module OR on its parent package, and both
+    are legitimate — so reading only the package would report a
+    correctly-annotated plugin as un-annotated and print an alarming,
+    wrong warning on every ``explain plugins``.
+
+    Best-effort by design: this walk is offline introspection over
+    whatever happens to be installed, and one plugin whose package
+    cannot be re-imported must cost its own row, not the inventory.  A
+    failure therefore leaves the defaults, which report the plugin as
+    annotated — the quiet answer, chosen because the alternative is
+    accusing a working plugin.
+
+    Args:
+        info: The row being built; mutated in place.
+        module_name: ``type(plugin).__module__``.
+
+    A separate function rather than inlined: :func:`plugins` is over the
+    complexity ceiling and frozen in the audit baseline, so new logic
+    belongs in a helper (see ``test_cyclomatic_complexity_audit``).
+    """
+    import importlib
+    try:
+        pkg = importlib.import_module(module_name.rsplit(".", 1)[0])
+        info.kind = getattr(pkg, "PLUGIN_KIND", "tool")
+        info.tier = getattr(pkg, "PLUGIN_TIER", None)
+        if info.tier is None:
+            info.tier = getattr(
+                importlib.import_module(module_name), "PLUGIN_TIER", None,
+            )
+        info.tier_missing = info.tier is None
+    except Exception:
+        pass
+
+
 def plugins() -> Dict[str, PluginInfo]:
     """All tool/enrichment plugins, best-effort offline.
 
@@ -518,15 +565,7 @@ def plugins() -> Dict[str, PluginInfo]:
         info = PluginInfo(name=name)
         plugin = reg.get_plugin(name)
         _stamp_origin(info, reg.get_plugin_source(name))
-        # kind / tier from the plugin's module (module-level constants)
-        mod = type(plugin).__module__
-        try:
-            import importlib
-            pkg = importlib.import_module(mod.rsplit(".", 1)[0])
-            info.kind = getattr(pkg, "PLUGIN_KIND", "tool")
-            info.tier = getattr(pkg, "PLUGIN_TIER", None)
-        except Exception:
-            pass
+        _stamp_kind_and_tier(info, type(plugin).__module__)
         # tools (best-effort)
         try:
             for schema in plugin.get_tool_schemas() or []:
