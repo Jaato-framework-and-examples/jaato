@@ -83,10 +83,40 @@ _SCOPES_HELP = ("plugins | plugin | commands | providers | provider | gc | env |
                 "archetype")
 
 
+_DEPS_WORDS = ("dependencies", "deps")
+
+
+def _take_deps_word(scope, name, extra):
+    """Pull the optional `dependencies` word out of the query, wherever it sits.
+
+    Dependencies are a FACET of every scope rather than a scope of their own —
+    a provider imports packages, a plugin shells out, the framework is two
+    distributions that drift — so the word is appended to whatever you were
+    already asking:
+
+        explain dependencies
+        explain provider openrouter dependencies
+        explain plugin cli deps
+
+    Accepted in any position after the verb, because a reader who types it
+    first is asking the same question as one who types it last.
+    """
+    words = [w for w in (scope, name, extra) if w]
+    kept = [w for w in words if w not in _DEPS_WORDS]
+    asked = len(kept) != len(words)
+    kept += [None, None]
+    return kept[0], kept[1], asked
+
+
 def _cmd_explain(args) -> int:
-    scope = args.scope
-    name = args.name
+    scope, name, deps = _take_deps_word(
+        args.scope, args.name, getattr(args, "extra", None))
     ws = args.workspace or "."
+    if deps:
+        from . import dependencies as _deps
+        data, text = _deps.render(scope, name)
+        print(json.dumps(data, indent=2) if args.json else text)
+        return 0
     if scope is None:
         data, text = _explain.overview()
     elif scope in _SIMPLE_SCOPES:
@@ -301,6 +331,10 @@ def main(argv=None) -> int:
     pe.add_argument("name", nargs="?",
                     help="name for plugin/provider/event/archetype scope, or a "
                          "filter for env/events")
+    pe.add_argument("extra", nargs="?",
+                    help="the optional word `dependencies` (or `deps`) — a facet "
+                         "of any scope: what it needs, what is installed, and "
+                         "whether this environment agrees with itself")
     pe.add_argument("--workspace", help="workspace dir (for `sets`)")
     pe.add_argument("--json", action="store_true")
     pe.set_defaults(func=_cmd_explain)

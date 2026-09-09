@@ -225,6 +225,47 @@ def _premium_pyproject_reactors(spec) -> Optional[List[str]]:
     return sorted(eps.keys()) if isinstance(eps, dict) else None
 
 
+def check_dependency_coherence() -> List[Check]:
+    """Do this environment's jaato distributions agree with their own sources?
+
+    `pip` records a version at install time; an editable install keeps pointing
+    at a working tree that moves. When they part company, every version-derived
+    answer in the environment names a build that is not the one running — the
+    provenance stamp `jaato-scaffold install` writes, a bug report's "installed
+    version", a compatibility decision.  Nothing else notices, because the
+    import still succeeds.
+
+    WARN, not FAIL: a skew misleads, it does not stop work.
+    """
+    try:
+        from shared.scaffold import dependencies as _deps
+    except Exception:      # noqa: BLE001 — sdk installed without the server
+        return [Check("dependency coherence", WARN,
+                      "cannot check: `shared.scaffold` is not importable "
+                      "(jaato-server not installed in this env)")]
+
+    skewed, seen = [], []
+    for name in _deps.JAATO_DISTS:
+        st = _deps.dist_state(name)
+        if not st["installed"]:
+            continue
+        seen.append(f"{name} {st['installed']}")
+        if st["skew"]:
+            skewed.append(f"{name}: metadata {st['installed']} vs source "
+                          f"{st['source_version']}")
+    if not seen:
+        return [Check("dependency coherence", WARN, "no jaato distributions found")]
+    if skewed:
+        return [Check("dependency coherence", WARN,
+                      "; ".join(skewed) +
+                      " — reinstall the editable distribution (`pip install -e "
+                      "<source>`) so version-derived answers stop naming a build "
+                      "that is not running. `jaato-scaffold explain dependencies` "
+                      "shows the full picture.")]
+    return [Check("dependency coherence", PASS,
+                  ", ".join(seen) + " — metadata agrees with sources")]
+
+
 def check_sdk_skill() -> List[Check]:
     """Is the agent-facing `jaato-sdk` skill installed, and does it match?
 
@@ -975,6 +1016,7 @@ def run_checks(
     checks: List[Check] = []
     checks += check_python_env()
     checks += check_premium_reactors()
+    checks += check_dependency_coherence()
     checks += check_sdk_skill()
     checks += check_socket(info, auto_start=auto_start)
     checks += check_daemon_identity(info)

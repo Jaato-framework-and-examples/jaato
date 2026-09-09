@@ -83,6 +83,28 @@ jaato-scaffold explain archetypes            # what `new` WRITES, per archetype
 jaato-scaffold explain archetype <name>      # its tree, file by file, and its self-check
 ```
 
+**`dependencies` is a word you append to any of them**, not a topic of its own —
+what a provider imports, what a plugin shells out to, which extras a transport
+needs, and whether this environment agrees with itself:
+
+```
+jaato-scaffold explain dependencies             # distributions, version skew, extras
+jaato-scaffold explain provider openrouter deps # what its code actually imports
+jaato-scaffold explain plugin cli deps
+```
+
+Everything there is derived — requirements from installed metadata, imports by
+parsing the implementation, health by trying it. There is no table mapping a
+provider to a package, because such a table is wrong the moment someone adds an
+import, and a wrong table is worse than none: the reader stops checking.
+
+Two things it catches that nothing else does. **Version skew** — `pip` records a
+version at install time while an editable install keeps pointing at a tree that
+moves, so every version-derived answer can name a build that is not running.
+**Shadowing** — `PYTHONPATH` pointing at a checkout makes that checkout answer
+instead of the installed copy, which is why the doctor insists on the daemon's
+environment.
+
 Generate rather than hand-write. Archetypes: **`profile-set`, `cascade`,
 `client`, `fire`, `host-tools`, `observer`, `processor`, `sweep`.**
 
