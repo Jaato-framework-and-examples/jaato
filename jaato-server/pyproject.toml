@@ -172,6 +172,13 @@ cache_google_genai = "shared.plugins.cache_google_genai:create_plugin"
 where = ["."]
 include = ["shared*", "server*", "jaato_embedded*"]
 
+# The jaato-sdk skill ships WITH the framework it documents, so an installed
+# copy cannot describe a different version than the one running.  `jaato-
+# scaffold install skill` copies it out of here; `jaato-doctor` compares the
+# stamp it leaves against this distribution's version.
+[tool.setuptools.package-data]
+"shared.scaffold" = ["skills/*/*.md", "skills/*/*.sh", "skills/*/references/*.md"]
+
 [tool.pytest.ini_options]
 # Register custom marks so pytest doesn't warn on use.  ``apparmor``
 # gates the §2.6 multitenant integration test on hosts with

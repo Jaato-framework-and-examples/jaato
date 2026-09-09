@@ -62,6 +62,12 @@ def overview() -> Rendered:
         "  jaato-scaffold explain completion       # the OUTPUT-side hook\n"
         "  jaato-scaffold explain archetypes        # what `new` WRITES\n"
         "  jaato-scaffold explain archetype <name>\n"
+        "\n"
+        "the agent-facing guide to building on this SDK ships WITH this build,\n"
+        "so an installed copy cannot describe a different framework:\n"
+        "  jaato-scaffold install jaato-sdk         # -> ~/.claude/skills/ (all repos)\n"
+        "  jaato-scaffold install --workspace DIR   # -> that project only\n"
+        "  jaato-doctor                             # says when a copy has gone stale\n"
     )
     return data, text
 

@@ -230,6 +230,28 @@ def _cmd_new(args) -> int:
 
 # ----------------------------------------------------- external verbs (plugins)
 
+def _cmd_install(args) -> int:
+    from . import install as _install
+    names = _install.available()
+    if not names:
+        print("this build ships no installable assets", file=sys.stderr)
+        return 1
+    name = args.asset or ("jaato-sdk" if "jaato-sdk" in names else names[0])
+    dest = _install.target_dir(name, user=not args.workspace, workspace=args.workspace)
+    changed, lines = _install.install(name, dest, force=args.force, dry_run=args.dry_run)
+    if args.json:
+        state, detail = _install.compare(name, dest)
+        print(json.dumps({"asset": name, "dest": str(dest), "changed": changed,
+                          "state": state, "detail": detail,
+                          "version": _install.framework_version()}, indent=2))
+        return 0
+    for line in lines:
+        print(line)
+    # A refusal is not a crash: the operator asked a reasonable thing and the
+    # answer is "there is already one there".  Non-zero so a script notices.
+    return 0 if (changed or args.dry_run) else 1
+
+
 def _discover_external_verbs() -> list:
     """Load verbs contributed by external packages via entry points.
 
@@ -356,6 +378,24 @@ def main(argv=None) -> int:
                          "an appended-to one exactly as the real run would.")
     pn.add_argument("--json", action="store_true")
     pn.set_defaults(func=_cmd_new)
+
+    pi = sub.add_parser(
+        "install", help="install a framework-shipped asset (the jaato-sdk skill)",
+        description="Copy an asset that ships WITH this framework build to where "
+                    "tools look for it, stamped with the version it came from so "
+                    "`jaato-doctor` can tell you when it goes stale.")
+    pi.add_argument("asset", nargs="?", default=None,
+                    help="asset name (default: jaato-sdk)")
+    pi.add_argument("--workspace", default=None,
+                    help="install into DIR/.claude/skills/ instead of ~/.claude/skills/ "
+                         "— project scope rather than user scope")
+    pi.add_argument("--force", action="store_true",
+                    help="overwrite an existing copy")
+    pi.add_argument("--dry-run", action="store_true",
+                    help="print what would be written, write nothing")
+    pi.add_argument("--json", action="store_true")
+    pi.set_defaults(func=_cmd_install)
+
 
     # External verbs (e.g. the premium `compile` verb) — discovered via the
     # `jaato.scaffold_verbs` entry-point group.  Built-in names win on collision.

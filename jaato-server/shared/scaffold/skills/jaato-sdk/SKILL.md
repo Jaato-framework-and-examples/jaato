@@ -181,6 +181,21 @@ When you do hit a hang, the discriminating probe is cheap: subscribe to every
 `TURN_COMPLETED`/`SESSION_TERMINATED` absent is trap 1; no session at all is
 trap 2 or 3.
 
+## Keeping this file honest
+
+This skill ships as package data of the framework it describes, so the copy you
+are reading came from a specific build and says which:
+
+```
+cat ~/.claude/skills/jaato-sdk/.installed-from   # the build this copy came from
+jaato-scaffold install jaato-sdk --force         # replace it with the current one
+jaato-doctor                                     # reports absent / stale / edited
+```
+
+If something here contradicts `explain`, **`explain` is right** — it reads the
+installed framework, this file was written against one. Fix the file, and if
+`explain` was silent on the point, file that too.
+
 ## Deeper references
 
 Load only what the task needs:
