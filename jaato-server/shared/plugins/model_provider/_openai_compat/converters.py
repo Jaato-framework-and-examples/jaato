@@ -101,7 +101,22 @@ def tool_schemas_to_openai(schemas: Optional[List[ToolSchema]]) -> Optional[List
 
 # ==================== Message Conversion ====================
 
-def message_to_openai(message: Message) -> List[Dict[str, Any]]:
+def _followup_label(pdf_as_file: bool, audio_as_input_audio: bool) -> str:
+    """Lead-line noun for the message carrying a tool result's attachments.
+
+    ``"Image"`` on a wire that carries only images, ``"Attachment"`` where
+    PDFs or audio also ride — a follow-up headed "Image(s)" that contains
+    a PDF describes itself wrongly to the model reading it.
+    """
+    return "Image" if not (pdf_as_file or audio_as_input_audio) else "Attachment"
+
+
+def message_to_openai(
+    message: Message,
+    *,
+    pdf_as_file: bool = False,
+    audio_as_input_audio: bool = False,
+) -> List[Dict[str, Any]]:
     """Convert internal Message to OpenAI message dict(s).
 
     Returns a LIST: one internal ``TOOL`` message can carry N parallel
@@ -112,8 +127,20 @@ def message_to_openai(message: Message) -> List[Dict[str, Any]]:
     off the wire.  Non-tool messages map to a single-element list.  Shared by
     the nim / vllm / lmstudio / tensorrt_llm providers (identical SDK + wire).
 
+    The two keyword flags are the WIRE POLICY, not a model capability:
+    they say what *this endpoint* carries beyond images.  They default to
+    ``False`` — the base OpenAI chat format and every gateway in this tree
+    that declares ``pdf_input=False`` / ``audio_input=False`` — and the
+    provider that owns a wire carrying more turns them on (see
+    ``OpenAICompatProvider.WIRE_PDF_AS_FILE`` / ``WIRE_AUDIO_AS_INPUT_AUDIO``).
+    They are threaded rather than assumed because a converter that guesses
+    is exactly what #829 was.
+
     Args:
         message: Internal message.
+        pdf_as_file: Whether this wire carries PDFs as ``file`` blocks.
+        audio_as_input_audio: Whether this wire carries audio INPUT as
+            ``input_audio`` blocks (#830).
 
     Returns:
         List of dicts in OpenAI chat message format (1 per tool result).
@@ -149,7 +176,10 @@ def message_to_openai(message: Message) -> List[Dict[str, Any]]:
             # carry is withheld and SAID so, never re-labelled as an image
             # (#829).
             followup = tool_result_followup_message(
-                getattr(fr, "attachments", None), label="Image"
+                getattr(fr, "attachments", None),
+                pdf_as_file=pdf_as_file,
+                audio_as_input_audio=audio_as_input_audio,
+                label=_followup_label(pdf_as_file, audio_as_input_audio),
             )
             if followup is not None:
                 image_followups.append(followup)
@@ -190,7 +220,11 @@ def message_to_openai(message: Message) -> List[Dict[str, Any]]:
     # mimes are not carried by this wire — every provider sharing this
     # converter declares ``pdf_input=False`` — so they are withheld, and the
     # withholding is stated in-band rather than silently mislabelled.
-    return user_message_with_attachments(content, message.parts)
+    return user_message_with_attachments(
+        content, message.parts,
+        pdf_as_file=pdf_as_file,
+        audio_as_input_audio=audio_as_input_audio,
+    )
 
 
 def message_from_openai(msg: Dict[str, Any]) -> Message:
@@ -251,11 +285,19 @@ def message_from_openai(msg: Dict[str, Any]) -> Message:
     return Message(role=Role.USER, parts=parts)
 
 
-def history_to_openai(history: List[Message]) -> List[Dict[str, Any]]:
+def history_to_openai(
+    history: List[Message],
+    *,
+    pdf_as_file: bool = False,
+    audio_as_input_audio: bool = False,
+) -> List[Dict[str, Any]]:
     """Convert internal history to OpenAI message list.
 
     Args:
         history: List of internal messages.
+        pdf_as_file: Whether this wire carries PDFs as ``file`` blocks.
+        audio_as_input_audio: Whether this wire carries audio INPUT as
+            ``input_audio`` blocks.
 
     Returns:
         List of OpenAI message dicts.
@@ -263,7 +305,13 @@ def history_to_openai(history: List[Message]) -> List[Dict[str, Any]]:
     # Flatten: message_to_openai returns a LIST (a TOOL message with N
     # parallel function_responses → N wire tool messages).
     return [
-        wire for m in (history or []) for wire in message_to_openai(m)
+        wire
+        for m in (history or [])
+        for wire in message_to_openai(
+            m,
+            pdf_as_file=pdf_as_file,
+            audio_as_input_audio=audio_as_input_audio,
+        )
     ]
 
 

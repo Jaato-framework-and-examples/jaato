@@ -8,6 +8,7 @@ Each cell is a **wire-level** behavior the CI conformance guard asserts, not a l
 |---|---|---|---|---|---|---|---|---|---|---|
 | `anthropic` | ✅ | ✅ | ✅ | — | — | ✅ | ✅ | ✅ | ✅ | — |
 | `antigravity` | ✅ | — | — | — | — | ✅ | — | ✅ | ✅ | — |
+| `azure_openai` | ✅ | ✅ | — | — | ✅ | — | — | ✅ | ✅ | ✅ |
 | `chrome_ai` | — | — | — | — | — | — | — | ✅ | ✅ | — |
 | `claude_cli` | — | — | — | — | — | ✅ | — | ✅ | — | — |
 | `doubleword` | ✅ | ✅ | — | — | ✅ | ✅ | — | ✅ | ✅ | ✅ |
@@ -17,6 +18,7 @@ Each cell is a **wire-level** behavior the CI conformance guard asserts, not a l
 | `nebius` | ✅ | ✅ | — | — | ✅ | ✅ | — | ✅ | ✅ | ✅ |
 | `nim` | ✅ | ✅ | — | — | — | ✅ | — | ✅ | ✅ | ✅ |
 | `ollama` | ✅ | ✅ | — | — | — | — | — | ✅ | ✅ | — |
+| `openai` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | — | ✅ | ✅ | ✅ |
 | `openrouter` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `ovhcloud` | ✅ | ✅ | — | — | ✅ | ✅ | — | ✅ | ✅ | ✅ |
 | `tensorrt_llm` | ✅ | ✅ | — | — | — | — | — | ✅ | ✅ | — |

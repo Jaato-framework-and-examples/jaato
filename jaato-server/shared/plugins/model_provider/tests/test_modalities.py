@@ -204,6 +204,8 @@ def test_all_providers_expose_the_capability_contract():
         ("nebius", "NebiusProvider"),
         ("ovhcloud", "OVHcloudProvider"),
         ("doubleword", "DoublewordProvider"),
+        ("openai", "OpenAIProvider"),
+        ("azure_openai", "AzureOpenAIProvider"),
     ]
     for pkg, cls_name in provider_modules:
         mod = importlib.import_module(

@@ -126,6 +126,8 @@ Four plugin types:
 **Model Provider Plugins** - SDK abstraction for multi-provider support:
 - `model_provider/types.py`: Provider-agnostic types (`ToolSchema`, `Message`, `ProviderResponse`)
 - `model_provider/google_genai/`: Google GenAI/Vertex AI
+- `model_provider/openai/`: OpenAI, natively — **two wires in one plugin**: Chat Completions (the shared `_openai_compat` transport, with PDF `file` blocks and `input_audio` enabled because OpenAI's own endpoint carries them) and the **Responses API** (`api: responses` — flat `input` items, typed SSE events, reasoning summaries). `context_length` must be set: OpenAI's catalog reports no window for any model
+- `model_provider/azure_openai/`: Azure OpenAI — deployment-name routing (`model:` carries the *deployment*, not the model id), a required `api_version`, and resource-key **or** Microsoft Entra ID auth (`auth: aad`, via `azure-identity`); `context_length` must be set
 - `model_provider/anthropic/`: Anthropic Claude API
 - `model_provider/claude_cli/`: Claude Code CLI wrapper (uses subscription, not API credits)
 - `model_provider/github_models/`: GitHub Models API (uses `azure-ai-inference` SDK)
@@ -1304,6 +1306,118 @@ Plugins are automatically wired during initialization - no manual wiring needed:
 2. **Personal Access Token** (`ghp_...` or `github_pat_...`): Set `GITHUB_TOKEN` env var
 
 The device code flow uses GitHub Copilot's OAuth client ID and doesn't require creating a PAT manually.
+
+### OpenAI (native — Chat Completions and the Responses API)
+| Variable | Purpose |
+|----------|---------|
+| `JAATO_OPENAI_API_KEY` | API key (jaato namespace, highest priority) |
+| `OPENAI_API_KEY` | API key (the vendor's own documented variable; honored so a machine already set up for the OpenAI SDK works with no extra config) |
+| `JAATO_OPENAI_BASE_URL` / `OPENAI_BASE_URL` | Endpoint (default: `https://api.openai.com/v1`) |
+| `JAATO_OPENAI_MODEL` | Default model name (e.g. `gpt-5.1`) |
+| `JAATO_OPENAI_CONTEXT_LENGTH` | Context window (**required in practice** — see below) |
+| `JAATO_OPENAI_ORG_ID` / `OPENAI_ORG_ID` | `OpenAI-Organization` header (billing attribution) |
+| `JAATO_OPENAI_PROJECT_ID` / `OPENAI_PROJECT_ID` | `OpenAI-Project` header; a project-scoped key needs it |
+| `JAATO_OPENAI_API` | Wire selector: `chat` (default) or `responses` |
+
+**Authentication (in priority order):**
+1. `plugin_configs.openai.api_key` (may carry a `pass://` / `vault://` URI)
+2. `JAATO_OPENAI_API_KEY`, then the vendor's `OPENAI_API_KEY`
+3. The stored `openai_auth.json` (`config_root` → `<workspace>/.jaato/` → `~/.jaato/`)
+
+**Two wires, one plugin.**  jaato already reached OpenAI's models through
+OpenRouter and through nine OpenAI-*compatible* gateways.  What it had no
+way to speak was the endpoint OpenAI itself serves — and, in particular,
+the **Responses API**, which no compatible gateway offers and which is
+where OpenAI ships first.  `plugin_configs.openai.api` selects:
+
+| `api:` | Transport | Shape |
+|--------|-----------|-------|
+| `chat` (default) | the shared `_openai_compat` streaming loop | `messages`, choice deltas, `prompt_tokens`/`completion_tokens` |
+| `responses` | `openai/responses.py` | a flat `input` item list, top-level `function_call` items keyed by `call_id`, typed SSE events, `input_tokens`/`output_tokens` |
+
+The two disagree about the name of the most-used knob
+(`max_output_tokens` vs `max_tokens`), so the `api_params` allow-list is
+**per wire**: a chat-only key on the Responses wire is dropped with a
+warning rather than forwarded into a 400.  The Responses transport streams
+text and reasoning deltas for the UX but builds the parts that become
+history from the `response` object on the terminal event — the API's own
+account of what it produced.  Every request is sent `store: false` with the
+full `input`: jaato owns the history and its GC decides what the model
+sees, so a server-side thread keyed by `previous_response_id` would
+silently diverge from it (`api_params.store: true` opts back in).
+
+**You must set a context window.**  OpenAI's `GET /v1/models` serves bare
+entries — `{id, object, created, owned_by}`, no capacity for any model — so
+`plugin_configs.openai.context_length` (or `JAATO_OPENAI_CONTEXT_LENGTH`)
+is required and `connect()` fails loud without it.  No per-model table is
+hardcoded: GC sizes the whole history against that number, and a stale
+table would truncate a session or over-fill a request without saying so.
+Input *modalities* are a different question and do carry a table (a wrong
+entry withholds an attachment, visibly; it does not corrupt the history),
+with `plugin_configs.openai.modalities` above it.
+
+```yaml
+# profile example: the Responses wire, with reasoning
+provider: openai
+model: gpt-5.1
+plugin_configs:
+  openai:
+    api: responses
+    context_length: 400000      # required — the catalog reports none
+    project: proj_abc123        # a project-scoped key needs its header
+    api_params:
+      reasoning: {effort: high, summary: auto}
+      max_output_tokens: 16384
+```
+
+`pip install 'jaato-server[openai]'`.
+
+### Azure OpenAI
+| Variable | Purpose |
+|----------|---------|
+| `JAATO_AZURE_OPENAI_ENDPOINT` / `AZURE_OPENAI_ENDPOINT` | Resource URL, `https://<resource>.openai.azure.com` (**required**) |
+| `JAATO_AZURE_OPENAI_API_VERSION` / `AZURE_OPENAI_API_VERSION` | The `api-version` date, e.g. `2024-10-21` (**required**) |
+| `JAATO_AZURE_OPENAI_API_KEY` / `AZURE_OPENAI_API_KEY` | Resource key (not needed under Entra auth) |
+| `JAATO_AZURE_OPENAI_DEPLOYMENT` / `AZURE_OPENAI_DEPLOYMENT` | Default deployment name when a profile names none |
+| `JAATO_AZURE_OPENAI_CONTEXT_LENGTH` | Context window (**required in practice** — see below) |
+| `JAATO_AZURE_OPENAI_AUTH` | Credential kind: `key` (default) or `aad` |
+
+Azure serves OpenAI's models on the same request and response shapes, so
+the transport is the shared `_openai_compat` one unchanged.  Everything
+*around* the request is Azure's, and each piece is load-bearing:
+
+- **Deployment-name routing.**  `model:` carries the DEPLOYMENT name your
+  subscription chose, not a model id; the SDK's `AzureOpenAI` client turns
+  it into `/openai/deployments/<name>/chat/completions`.  The same name can
+  be repointed at a different model version without changing, which is also
+  why no per-model context table could be right here.
+- **A pinned `api-version`.**  Required, with no default: the date decides
+  which request fields exist, so a framework-chosen default would silently
+  decide what your deployment accepts and change under you when it moved.
+- **Key or Microsoft Entra ID.**  `auth: aad` mints a bearer token per
+  request from whatever identity the host already has (managed identity,
+  workload identity, `az login`) and stores no secret at all — which is why
+  "no key found" is not the end of the credential search for this provider.
+  Needs `pip install 'jaato-server[azure-openai]'` for `azure-identity`.
+- **Wire extensions are not assumed.**  PDFs (`file` blocks) and audio
+  (`input_audio`) are gated on Azure by api-version *and* by what the
+  deployment points at, so this provider declares `pdf_input=False` /
+  `audio_input=False` and uses the shared images-only converter.  The
+  native `openai` provider declares both because its one endpoint carries
+  them unconditionally; here it would be a guess about someone's resource.
+
+```yaml
+# profile example: Entra ID auth, no secret anywhere
+provider: azure_openai
+model: prod-gpt4o            # the DEPLOYMENT name, not "gpt-4o"
+plugin_configs:
+  azure_openai:
+    endpoint: https://my-resource.openai.azure.com
+    api_version: "2024-10-21"
+    auth: aad
+    context_length: 128000   # required — Azure reports no capacity
+    model_name: gpt-4o       # what the deployment serves, so vision is detected
+```
 
 ### Anthropic Claude
 | Variable | Purpose |
