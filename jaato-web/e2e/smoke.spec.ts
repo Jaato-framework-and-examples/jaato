@@ -32,8 +32,46 @@ test("bare-word commands: proposal, Tab completion, Enter runs the command", asy
   await expect(listbox.getByRole("option", { name: /model/ })).toBeVisible();
   await box.press("Tab");
   await expect(box).toHaveValue("model ");
-  await box.type("mock-2");
+  await box.pressSequentially("mock-2");
+  // Assert the ARGUMENT, not just the hint.  "runs command" is already
+  // visible from the bare "model ", so it says nothing about whether the
+  // argument arrived -- it cannot separate a scrambled line from a good
+  // one, and the failure then reads as a missing message rather than as
+  // the mistyped command it is.
+  await expect(box).toHaveValue("model mock-2");
   await expect(page.getByText("runs command")).toBeVisible();
+  await box.press("Enter");
+  await expect(page.getByText("Model switched to mock-2")).toBeVisible();
+});
+
+test("accepting a completion never moves the caret into what is typed next", async ({ page }) => {
+  // Accepting a completion sets the text now and has to place the caret
+  // after it; doing that from a requestAnimationFrame callback left a
+  // window one frame wide in which the user is already typing the
+  // argument.  When the frame landed mid-word the caret jumped back to
+  // the end of the completed word and the rest of the argument was
+  // inserted there -- "model " + "mock-2" submitted as "model ck-2mo",
+  // so the daemon switched to a model nobody asked for.
+  //
+  // Occasional in CI (it needs the frame to land between two
+  // keystrokes), deterministic here: rAF is delayed past the typing so
+  // the bad frame is guaranteed to land in the middle.  Against a caret
+  // applied in a layout effect there is no frame to miss and the delay
+  // is inert, which is the point -- this fails only if the scheduling
+  // goes back.
+  await page.addInitScript(() => {
+    const real = window.requestAnimationFrame.bind(window);
+    window.requestAnimationFrame = ((cb: FrameRequestCallback) =>
+      real(() => window.setTimeout(() => cb(performance.now()), 250))) as typeof window.requestAnimationFrame;
+  });
+  await openSession(page);
+  const box = composer(page);
+  await box.fill("mo");
+  await expect(page.getByRole("listbox", { name: "Command proposals" })).toBeVisible();
+  await box.press("Tab");
+  await expect(box).toHaveValue("model ");
+  await box.pressSequentially("mock-2", { delay: 100 });
+  await expect(box).toHaveValue("model mock-2");
   await box.press("Enter");
   await expect(page.getByText("Model switched to mock-2")).toBeVisible();
 });

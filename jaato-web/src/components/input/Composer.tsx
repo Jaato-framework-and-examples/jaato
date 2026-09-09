@@ -25,7 +25,7 @@
  * typed text becomes the answer (``y``, ``a``, an option key, a free-
  * text reply), exactly like typing into the TUI while a prompt is up.
  */
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { commandCompletions, wouldRouteAsCommand, type CommandSpec, type Completion } from "@/protocol/commands";
 
 export interface ComposerProps {
@@ -80,12 +80,33 @@ export function Composer({ commands, disabled, captureMode, history, onSubmit, o
   }, []);
   useEffect(resize, [text, resize]);
 
+  // Caret position a completion asked for, applied once React has
+  // committed the text it was computed against.
+  //
+  // WHY NOT requestAnimationFrame.  Accepting a completion sets the text
+  // synchronously and used to move the caret from a rAF callback, which
+  // runs BEFORE the next paint but well after the input events the user
+  // is already generating.  Anyone typing the argument faster than the
+  // next frame -- a quick human typist, and Playwright every time -- had
+  // the caret yanked back to the end of the completed word mid-word, so
+  // "model " + "mock-2" landed as "model ck-2mo".  A layout effect runs
+  // synchronously after the DOM mutation and before the browser can
+  // dispatch another keystroke against it, so there is no window left to
+  // type into.
+  const pendingCaret = useRef<number | null>(null);
+  useLayoutEffect(() => {
+    const pos = pendingCaret.current;
+    if (pos === null) return;
+    pendingCaret.current = null;
+    ref.current?.setSelectionRange(pos, pos);
+    setCaret(pos);
+  }, [text]);
+
   const accept = (c: Completion) => {
     const rest = text.slice(caret).replace(/^\S*/, "");
     const next = c.insert + " " + rest.replace(/^\s+/, "");
+    pendingCaret.current = c.insert.length + 1;
     setText(next);
-    const pos = c.insert.length + 1;
-    requestAnimationFrame(() => { ref.current?.setSelectionRange(pos, pos); setCaret(pos); });
   };
 
   const submit = () => {
