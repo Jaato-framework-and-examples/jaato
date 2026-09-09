@@ -899,6 +899,27 @@ completeness for a stream), everything else is **essential** and is queued past
 the bound rather than desynchronising the client. `dropped_chunk_count()`
 reports what was lost.
 
+**Bytes on the runner RPC wire (#920).** The daemon ↔ runner channel is
+length-prefixed JSON, and JSON has no `bytes`. The runner encoded with
+`json.dumps(payload, default=str)`, so a binary payload was serialised as its
+**Python repr** — every non-printable byte becoming `\xNN`, which JSON then
+escaped again. A 120 s utterance (3.84 MB, what `MAX_UTTERANCE_SECONDS`
+legally produces) crossed as a **16.13 MB** frame: over the 10 MB
+`MAX_MESSAGE_SIZE`, so the peer refused it, closed the transport, and every
+in-flight call died with it — including the `session.send_message` that WAS
+the turn. Size was the lesser half: `str(b'\x00\xff')` does not round-trip,
+so a payload small enough to pass the cap (an image, a short clip, a PDF)
+delivered a repr string nothing would ever decode. The cap failing loudly on
+size before it could fail quietly on content was luck, not design.
+
+Three fixes, one per layer:
+
+| Layer | Before | Now |
+|-------|--------|-----|
+| encoding | `default=str` reached bytes | `server/runner/json_codec.py` — bytes become `{"__bytes_b64__": ...}` and decode back to bytes; `str` stays the fallback for genuinely diagnostic objects (a datetime, an enum). Used by **both** ends, so daemon→runner bytes stop raising `TypeError` too |
+| the payload that broke | `agent_history_updated` handed raw `Message` objects to that encoder, which stringified each whole message | serialised with the canonical session serializer — the shape `session.get_history` already used (1.33x, and `AgentState.history` holds `Message`s again instead of repr strings the reconnect replay reads `msg.role` off) |
+| the blast radius | an oversized frame was written, and the reader — which consumes the length prefix but not the body — could only close the channel | oversized frames are refused at the **write** side: the runner answers that one call with `FrameTooLargeError` and keeps serving, the daemon raises it to that one caller before anything reaches the socket |
+
 **Client renderability.** `PresentationContext.renderable_media` declares the
 MIME types a viewer can play (`can_render_media()` honours `type/*` wildcards
 and ignores parameters). This is the CLIENT axis and is kept strictly apart
