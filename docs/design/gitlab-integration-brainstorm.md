@@ -33,7 +33,7 @@ one does not settle the others.
 | # | Direction | The agent's relationship to GitLab | Existing seam |
 |---|-----------|-----------------------------------|---------------|
 | **A** | **Outbound** — read and write GitLab | agent calls the API: read an MR diff, post a note, retry a pipeline, open an issue | `service_connector` / `mcp` / `cli` |
-| **B** | **Inbound** — react to GitLab | GitLab calls jaato: MR opened, pipeline failed, comment mentioning the bot | `webhook` |
+| **B** | **Inbound** — react to GitLab | GitLab calls jaato: MR opened, pipeline failed, comment mentioning the bot | `webhook` (unblocked by #930) |
 | **C** | **Host** — jaato runs *inside* GitLab | a `.gitlab-ci.yml` job spawns the daemon and drives a session | runner / `runtime_limits` / AppArmor |
 | **D** | **Provider** — GitLab Duo as a model backend | GitLab's AI Gateway serves models | `model_provider/` |
 
@@ -147,54 +147,63 @@ A3 is a documented escape hatch, not a recommendation.
 
 ## 4. What actually blocks this today
 
-Three concrete findings. The first is a defect; the second is a trap; the
-third is already solved and worth knowing.
+Three concrete findings. The first **was** a defect and is now fixed; the
+second is a trap; the third was already solved and is worth knowing.
 
-### 4.1 The webhook plugin cannot authenticate a GitLab webhook (blocks direction B)
+### 4.1 GitLab webhook ingress — was blocked, fixed in `fa01b47` (#930 / #932)
 
-**GitLab does not sign webhook bodies.** It sends a plain shared secret in
-`X-Gitlab-Token` and expects constant-time equality. GitHub's
-`X-Hub-Signature-256` is an HMAC over the body; GitLab's is not.
+**Resolved. Kept here because the shape of the fix constrains how direction B
+should be configured.**
 
-jaato's webhook route config accepts exactly one algorithm:
+GitLab does not sign webhook bodies: it sends the configured secret verbatim in
+`X-Gitlab-Token` and expects constant-time equality. `RouteConfig.secret_algo`
+accepted only `hmac-sha256`, and `routes.py` fails closed on a half-configured
+pair — so the only configuration that ingested a GitLab webhook was
+`allow_unauthenticated: true`, the flag whose whole purpose is to be
+unreachable by omission. A secret sat in the request and was thrown away.
 
-```python
-# shared/plugins/webhook/config.py:391
-algo = route.get('secret_algo')
-if algo is not None and algo != 'hmac-sha256':
-    errors.append(f"routes['{name}'].secret_algo must be 'hmac-sha256' ...")
-```
-
-and `routes.py:131` fails **closed** on a half-configured pair:
+`secret_algo` now names a **verification mode** rather than an algorithm
+(`config.py:35`):
 
 ```python
-intends_hmac = bool(route.secret_header or route.secret_algo)
-if intends_hmac and not (route.secret_header and route.secret_algo):
-    return None, 500, "Server misconfigured: ... signature verification cannot run."
+SECRET_ALGO_HMAC_SHA256 = 'hmac-sha256'
+SECRET_ALGO_TOKEN       = 'token'
+SECRET_ALGOS = (SECRET_ALGO_HMAC_SHA256, SECRET_ALGO_TOKEN)
 ```
 
-That is correct behaviour and exactly why GitLab does not fit: setting
-`secret_header: X-Gitlab-Token` with no valid `secret_algo` is a 500, and
-there is no algo value that means "compare the header to the secret".
+so a GitLab route is now expressible directly:
 
-So **the only way to ingest a GitLab webhook today is
-`allow_unauthenticated: true`** — the flag whose own docstring frames it as
-the thing an operator must not reach for by omission. Falling back to it here
-would be reaching for it by *design*.
+```json
+"gitlab": {
+  "path": "/webhook/gitlab",
+  "secret_header": "X-Gitlab-Token",
+  "secret_algo": "token",
+  "event_type_header": "X-Gitlab-Event"
+}
+```
 
-**Proposal:** add a third authentication mode, e.g.
-`secret_algo: "token"` (or a distinct `secret_match: equals`), verified with
-`hmac.compare_digest(header_value, secret)`. Small change — the validation
-list in `config.py`, a branch in `verify_signature`, and the `intends_hmac`
-predicate already generalises. Two rules it must hold to:
+**The two modes are not peers, and direction B has to be built knowing it:**
 
-- **an unknown algo stays a hard error** — the fail-closed posture is the
-  point, and a typo must never degrade to "accept anything";
-- **`token` mode must be documented as weaker than HMAC** and paired with
-  TLS in the README's route table, because a shared secret in a header is
-  replayable in a way an HMAC over the body is not.
+| Mode | Header carries | Property |
+|------|----------------|----------|
+| `hmac-sha256` | an HMAC digest over the request **body** | the secret never travels; a captured request cannot be replayed against another payload |
+| `token` | the shared secret **verbatim** | **weaker** — readable by any TLS-terminating hop, replayable against any payload |
 
-Without this, direction B is blocked on anything but an IP allowlist.
+GitLab leaves no choice of mode, so the compensating controls are the
+deployment's: **terminate TLS at the listener** (`tls.enabled`), and prefer
+`allowed_ips` where the instance has stable egress. `token` mode WARNs at
+listener startup, louder when TLS is off (`http_server.py:200`) — the same
+posture as `--ws-unsafe-no-auth`. That warning is a standing signal, not noise
+to suppress.
+
+Two properties of the fix worth carrying into any GitLab route review:
+
+- **No cross-mode leniency.** `token` strips no `sha256=` prefix and never
+  reads the body, so an HMAC digest does not authenticate a token route and
+  vice versa. A route mistyped from one mode to the other fails shut.
+- **An unknown algo is still a hard error** — set membership at
+  `config.py:444`, and the incomplete-pair 500 is untouched. Widening the
+  vocabulary widened what `secret_algo` may *say*, never what it may omit.
 
 ### 4.2 `GITLAB_TOKEN` is scrubbed by default (traps A3, and A2 if misconfigured)
 
@@ -260,13 +269,15 @@ disposable), but it should be an explicit, documented posture.
 | Stage | Deliverable | Framework code? |
 |-------|-------------|-----------------|
 | 1 | GitLab profile + stored `service_connector` schemas; docs covering §4.2 | none |
-| 2 | `secret_algo: "token"` in the webhook plugin (§4.1) + a `gitlab` route example | ~30 lines + tests |
+| ~~2~~ | ~~`secret_algo: "token"` in the webhook plugin~~ — **landed in `fa01b47`** (#930 / #932), with a `gitlab` route example in CLAUDE.md | done |
 | 3 | `.gitlab-ci.yml` reference job (§5) | none; docs + example |
 | 4 | Thin `gitlab` plugin with composite workflow tools, *if* stage 1 measurement justifies it | new plugin |
 | — | GitLab Duo as a `model_provider` | out of scope; unrelated to 1–4 |
 
-Stage 2 is the only one that is a genuine framework defect rather than
-configuration, and it is small — it is the natural first PR.
+Stage 2 was the only genuine framework defect rather than configuration, and
+it has landed — so **stages 1, 3 and 4 are all docs, profiles and examples
+until measurement says otherwise.** Nothing else here is blocked on framework
+work.
 
 ---
 
@@ -274,8 +285,12 @@ configuration, and it is small — it is the natural first PR.
 
 1. **Is direction B (webhook ingress) actually wanted**, or is GitLab CI
    (direction C) the trigger mechanism, making the webhook path unnecessary?
-   These are alternative ways to be woken by an MR, and C needs no new
-   framework code.
+   These are alternative ways to be woken by an MR. With #930 landed neither
+   needs framework code, so the choice is now purely operational: B means
+   running a reachable TLS listener holding a replayable shared secret; C
+   means a short-lived `CI_JOB_TOKEN` and no inbound surface at all. That
+   argues for C as the default and B for events CI does not raise (a comment
+   mentioning the bot, an MR opened without a pipeline).
 2. **How complete is GitLab's OpenAPI document** on the endpoints that matter
    (merge request diffs, discussions, pipeline jobs)? This decides how much of
    A4 stage 4 is really needed. Worth measuring against a live instance before
