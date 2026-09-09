@@ -16,7 +16,10 @@ enumerates what a workspace already has.
 
 ## The inheritance rules that bite
 
-- `plugins` is a **union** — a child cannot remove what a parent added.
+- `plugins` is a **union** — a child cannot remove what a parent added, and
+  `plugins: []` in a child **adds nothing; it does not clear the parent's**.
+  You do NOT need to repeat a parent's list to extend it. To reduce the tool
+  surface: `tool_scopes`, the permission whitelist, or do not inherit.
 - `completion_processors` **concatenate**; the only removal is naming an entry
   in `suppress_inherited_processors`, and an entry matching nothing is a load
   error.
@@ -43,6 +46,14 @@ keys **no child overrides**, and keep any dict a child extends in the child.
 
 Verify a resolution rather than reasoning about it — resolve the profile and
 print what came back.
+
+Both of these were stated BACKWARDS in a widely-copied skill: "lists are
+REPLACED, not concatenated… you must repeat the base's plugin list", and
+"dicts merge recursively until they hit a leaf scalar/list". Two agents ran
+into it on the same day; one nearly rewrote a working profile because of it.
+The rules above are what the installed framework does — measured, not read.
+When this file and `explain profile` disagree, believe `explain`, and when
+neither settles it, resolve a profile and look.
 
 ## Personas and `agent_params`
 
