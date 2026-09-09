@@ -212,7 +212,7 @@ jobs:
                 jaato-server/shared/plugins/
 
           # jaato-tui/tests ran in NO merge-gating workflow — only in the
-          # TestPyPI publish job, which runs AFTER the merge it should have
+          # release publish job, which runs AFTER the merge it should have
           # been able to block. Same shape as the directories below: a suite
           # exists, is green, and gates nothing. It is the cheapest leg here
           # (~2s of tests), and the client is where #704 shipped — a daemon
