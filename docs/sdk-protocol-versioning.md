@@ -74,6 +74,44 @@ won't see any field that was added after its minimum.
 
 ## CHANGELOG
 
+### 1.5 — the resume verbs carry bytes
+
+`InjectPromptRequest.attachments` (optional), and the same field on the
+`session.wake` command's `payload`, so the two ways of driving an
+EXISTING session accept the binary content `send_message` already
+accepted. Before this both were text-only, and `attachments` lived only
+on the live-session path — so a session whose input is audio could be
+started with an utterance and never driven again with one. That closed
+the resume path to exactly the sessions 1.4's inbound media opened (see
+#845).
+
+`session.wake` takes it in the structured `payload` only. Bytes have no
+positional spelling, and a positional string would be a *client-side
+path* the daemon cannot read — which is why `_normalize_attachments`
+expands paths on the sending side in the first place.
+
+**This one is not safe to send blind.** An additive optional field
+normally degrades harmlessly: an older peer ignores it and the call does
+what it always did. That reasoning holds for a `request_id` and fails for
+an attachment, because the degraded call is a turn driven with the text
+and *without* the audio that was the whole message — and for a blank-text
+utterance, an empty turn reported as a success. So the Python SDK
+**raises** when `server_protocol_version < 1.5` and the caller passed
+attachments (`IPCClient.MIN_ATTACHMENT_RESUME_PROTOCOL`), rather than
+letting the payload vanish between two versions that both claim to be
+compatible.
+
+The other asymmetry is inside `inject_prompt`, and it is a property of
+the daemon rather than the wire: an attachment-bearing inject is
+**idle-only**. A queued message is folded into the running turn as text —
+appended to the last tool result's model suffix, or replayed as a user
+text message — and neither shape has anywhere to put an `inline_data`
+part. So the daemon offers such a message with `require_idle`, and a busy
+target answers `busy` with **nothing enqueued**. `busy` was previously
+reachable only when a caller asked for backpressure; it is now reachable
+whenever attachments are sent, and it is a retry-safe refusal, not a
+delivery.
+
 ### 1.4 — tool output can carry bytes
 
 `ToolOutputEvent` gains `stream_id`, `sequence`, `mime_type`, `data_b64`

@@ -12514,6 +12514,9 @@ export type SessionId98 = string;
 export type Text5 = string;
 export type SourceType = string;
 export type SourceId = string | null;
+export type Attachments1 = {
+  [k: string]: unknown;
+}[];
 export type RequestId29 = string | null;
 /**
  * All event types in the protocol.
@@ -16134,6 +16137,7 @@ export interface InjectPromptRequest {
   text?: Text5;
   source_type?: SourceType;
   source_id?: SourceId;
+  attachments?: Attachments1;
   request_id?: RequestId29;
 }
 /**
@@ -16150,6 +16154,11 @@ export interface InjectPromptRequest {
  * * ``"accepted"``    — the target was idle, so a turn was STARTED on it.
  * * ``"queued"``      — the target is mid-turn; its running turn will
  *   drain the message.
+ * * ``"busy"``        — the target is mid-turn and NOTHING was enqueued.
+ *   Reachable when the inject carried ``attachments``: the queued path
+ *   folds a message into the running turn as text and cannot carry bytes,
+ *   so an attachment-bearing inject is offered idle-only rather than
+ *   accepted with its payload dropped.  Retry-safe; retry when idle.
  * * ``"terminated"``  — the target is loaded but terminal and will run no
  *   further turns.  Reported from the target's own terminal stamp, never
  *   inferred from silence.

@@ -835,6 +835,31 @@ destinations, and both streaming loops pass it as a callable read *at the
 marker* rather than a flag read at the start. See
 [Binary Media Chunks §12](docs/design/binary-media-chunks.md).
 
+**A session that ended can be driven with bytes (#845).** Everything above
+concerns one live turn. There are two ways to drive an **existing** session
+— `session.wake` and `inject_prompt` — and both were text-only, while
+`attachments` sat on `send_message`, the *live-session* path. A
+completion-gated session is designed to END (`signal_completion` releases the
+runner) and the documented way back in is `session.wake`; for a voice agent
+the next input is a spoken utterance and there was no field to put it in, so
+the resume path was closed to exactly the sessions #830 made possible. Both
+verbs now take the same `attachments` `send_message` accepts, normalised by
+the same `IPCClient._normalize_attachments`, plus typed
+`IPCClient.wake_session(...)` / `wakeSession(...)` so the field is visible
+from the API surface a reader starts at. Protocol **1.5**.
+
+Three rules the fix holds to:
+
+| Rule | Why |
+|------|-----|
+| the untrusted boundary is **stated beside** the bytes, not inherited | a wake payload is untrusted (a webhook, a cron, a public comment), and an audio part has no marker to defang. `_wrap_wake_content` names each attachment INSIDE the wrapper — mime, display name, ingest id, never the payload — so a **spoken** instruction is not weighed differently from the identical typed one |
+| an attachment-bearing **inject is idle-only** | only the drive branch can carry bytes; a queued message is folded into the running turn as TEXT (a tool result's `model_suffix`, or `Message.from_text`) and has nowhere to put an `inline_data` part. So `deliver_prompt_to_session` forces `require_idle`: a busy target answers `BUSY` with **nothing enqueued** rather than accepting the message and dropping the payload that WAS the message. A text-only inject is unchanged |
+| an old daemon is **refused, not degraded** | an additive optional field normally degrades harmlessly — true of #620's `request_id`, false of bytes: the degraded call is a turn driven without the audio, and for a blank-text utterance an empty turn reported as a success. The SDK raises below `MIN_ATTACHMENT_RESUME_PROTOCOL` |
+
+An attachment IS content here too (#838): a wake carrying only an utterance
+is valid; one carrying neither text nor bytes is refused by name. See
+[Binary Media Chunks §13](docs/design/binary-media-chunks.md).
+
 Two shapes were available for #830 and only one is implemented here: audio as
 an **input modality** (above), not **transcription as a step**. A transcriber
 is a different animal — `microsoft/mai-transcribe-2` is served on

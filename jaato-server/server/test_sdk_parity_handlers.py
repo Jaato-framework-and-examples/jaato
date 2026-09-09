@@ -342,7 +342,7 @@ class TestInjectPromptHandler:
         server._model_running = False
         driven: List[str] = []
         manager.send_message_to_session = (  # type: ignore[method-assign]
-            lambda sid, text: (driven.append(text), True)[1]
+            lambda sid, text, attachments=None: (driven.append(text), True)[1]
         )
 
         manager.handle_request(
