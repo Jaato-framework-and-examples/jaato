@@ -66,6 +66,8 @@ def test_empty_config_reports_not_set():
     ("mimo", "shared.plugins.model_provider.mimo.env", {}),
     ("kimi", "shared.plugins.model_provider.kimi.env", {}),
     ("minimax", "shared.plugins.model_provider.minimax.env", {}),
+    ("openai", "shared.plugins.model_provider.openai.env", {}),
+    ("azure_openai", "shared.plugins.model_provider.azure_openai.env", {}),
     ("nim", "shared.plugins.model_provider.nim.env", {}),
     # github_models' helper also takes an auth_method positional arg.
     ("github_models", "shared.plugins.model_provider.github_models.env",

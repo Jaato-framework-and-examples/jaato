@@ -56,6 +56,12 @@ from shared.tests.test_every_guard_detects_its_own_reversion import (  # noqa: E
 # at the file they actually use at runtime).
 _CONVERTERS: Dict[str, Tuple[str, str]] = {
     "nim":            ("_openai_compat/converters.py",        "message_to_openai"),
+    # The native OpenAI wire carries more than the gateways sharing the
+    # shared converter do, so it has its own module pinning that policy on
+    # (PDFs as ``file`` blocks, audio as ``input_audio``).  ``azure_openai``
+    # deliberately uses the conservative shared one -- see its declaration.
+    "openai":         ("openai/converters.py",     "message_to_openai"),
+    "azure_openai":   ("_openai_compat/converters.py",        "message_to_openai"),
     "nebius":         ("nebius/converters.py",     "message_to_openai"),
     "openrouter":     ("openrouter/converters.py", "message_to_openai"),
     "vllm":           ("_openai_compat/converters.py",        "message_to_openai"),

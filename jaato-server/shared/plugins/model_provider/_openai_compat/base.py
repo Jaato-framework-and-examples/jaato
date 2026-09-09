@@ -137,6 +137,22 @@ class OpenAICompatProvider(OpenAIMediaOutputMixin, ModalityCapabilityMixin):
     # Models known to expose reasoning/thinking via ``reasoning_content``.
     REASONING_CAPABLE_MODELS: List[str] = []
 
+    # --- wire policy: what this endpoint carries BEYOND images.
+    #
+    # Images ride every OpenAI-shaped wire in this tree, so they need no
+    # flag.  PDFs (``file`` blocks) and audio input (``input_audio``
+    # blocks) do not: they are extensions that a given endpoint either
+    # implements or 400s on.  The default is the base chat format — no
+    # PDFs, no audio — which is what every existing sharer declares
+    # (``pdf_input=False`` / ``audio_input=False``), so leaving these
+    # alone keeps a provider byte-identical on the wire.
+    #
+    # A subclass raising one MUST also raise the matching
+    # ``PROVIDER_CAPABILITIES`` field: the conformance guard runs the
+    # converter and fails when a declaration and a converter disagree,
+    # which is the check that would have caught #829.
+    WIRE_PDF_AS_FILE: bool = False
+    WIRE_AUDIO_AS_INPUT_AUDIO: bool = False
     # Whether an assistant turn's reasoning goes BACK to the model on the
     # next request (docs/design/minimax-kimi-mimo-providers.md §3).  Off
     # by default: for the DeepSeek-R1-era models this base was written
@@ -639,7 +655,11 @@ class OpenAICompatProvider(OpenAIMediaOutputMixin, ModalityCapabilityMixin):
                 openai_messages.append({"role": "system",
                                         "content": system_instruction})
             openai_messages.extend(history_to_openai(
-                list(messages), reasoning_fields=self._history_reasoning_fields()))
+                list(messages),
+                pdf_as_file=self.WIRE_PDF_AS_FILE,
+                audio_as_input_audio=self.WIRE_AUDIO_AS_INPUT_AUDIO,
+                reasoning_fields=self._history_reasoning_fields(),
+            ))
 
         # Build kwargs
         kwargs: Dict[str, Any] = {}

@@ -88,6 +88,10 @@ PROVIDER_DIR = (
 #: reported one block earlier.
 RESOLVING_PROVIDERS = {
     "_openai_compat/base.py": 1,
+    # Two: the Responses transport resolves once for its streaming path
+    # and once for its non-streamed one, which build their parts from
+    # different objects and so cannot share the call.
+    "openai/responses.py": 2,
     "anthropic/provider.py": 1,
     "antigravity/provider.py": 1,
     "claude_cli/provider.py": 2,

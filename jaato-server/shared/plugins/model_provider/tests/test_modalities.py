@@ -207,6 +207,8 @@ def test_all_providers_expose_the_capability_contract():
         ("mimo", "MiMoProvider"),
         ("kimi", "KimiProvider"),
         ("minimax", "MiniMaxProvider"),
+        ("openai", "OpenAIProvider"),
+        ("azure_openai", "AzureOpenAIProvider"),
     ]
     for pkg, cls_name in provider_modules:
         mod = importlib.import_module(
