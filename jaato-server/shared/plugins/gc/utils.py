@@ -283,6 +283,14 @@ def estimate_message_tokens(message: Message) -> int:
             elif part.inline_data:
                 media_tokens += estimate_media_tokens(part.inline_data)
 
+            # Reasoning a replaying wire sends back on every later request
+            # (docs/design/minimax-kimi-mimo-providers.md §3).  It is
+            # context in the plainest sense, and a Kimi K3 turn at maximum
+            # effort carries tens of thousands of tokens of it — the #850
+            # blind spot again, in text, unless it is counted here.
+            elif part.thought:
+                total_chars += len(part.thought)
+
     # Rough estimate: 4 chars per token (conservative)
     return max(1, total_chars // 4 + media_tokens)
 

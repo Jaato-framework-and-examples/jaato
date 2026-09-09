@@ -105,10 +105,10 @@ SESSION_PY = pathlib.Path(__file__).resolve().parents[1] / "jaato_session.py"
 #: (Azure inference, Copilot chat, Copilot Responses); ``claude_cli``
 #: carries two, one per CLI transport.
 #:
-#: ``_openai_compat/base.py`` stands in for eight providers: ``nim``,
+#: ``_openai_compat/base.py`` stands in for eleven providers: ``nim``,
 #: ``nebius``, ``ovhcloud``, ``lmstudio``, ``tensorrt_llm``,
-#: ``doubleword``, ``triton`` and ``zhipuai_openai`` all inherit that
-#: one streaming loop.
+#: ``doubleword``, ``triton``, ``zhipuai_openai``, ``mimo``, ``kimi``
+#: and ``minimax`` all inherit that one streaming loop.
 TERMINATING_PROVIDERS = {
     "_openai_compat/base.py": 1,
     "anthropic/provider.py": 1,
@@ -201,10 +201,10 @@ REVERSIONS = [
         find="""                    # Extract finish reason
                     if choice.finish_reason:
                         terminal_seen = True
-                        finish_reason = map_finish_reason(choice.finish_reason)""",
+                        finish_reason = self._map_finish_reason(choice.finish_reason)""",
         replace="""                    # Extract finish reason
                     if choice.finish_reason:
-                        finish_reason = map_finish_reason(choice.finish_reason)""",
+                        finish_reason = self._map_finish_reason(choice.finish_reason)""",
         test=(
             "test_every_streaming_provider_records_the_terminal_event"
             "[_openai_compat/base.py]"

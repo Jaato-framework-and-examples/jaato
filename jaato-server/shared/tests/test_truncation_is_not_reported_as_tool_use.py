@@ -101,8 +101,8 @@ RESOLVING_PROVIDERS = {
 #: The defect, put back.  ``_openai_compat/base.py`` stands in for the
 #: whole family: it is the streaming path ``nim``, ``nebius``,
 #: ``ovhcloud``, ``lmstudio``, ``tensorrt_llm``, ``doubleword``,
-#: ``triton`` and ``zhipuai_openai`` all inherit, so one reversion there
-#: is eight providers' worth of regression.
+#: ``triton``, ``zhipuai_openai``, ``mimo``, ``kimi`` and ``minimax`` all
+#: inherit, so one reversion there is eleven providers' worth of regression.
 REVERSIONS = [
     Reversion(
         target="jaato-sdk/jaato_sdk/plugins/model_provider/types.py",
