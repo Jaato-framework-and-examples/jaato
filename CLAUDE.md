@@ -142,6 +142,11 @@ Four plugin types:
 - `model_provider/nebius/`: Nebius Token Factory (serverless open-model inference, OpenAI-compatible; `/v1/models` catalog auto-detects context window + input modalities)
 - `model_provider/ovhcloud/`: OVHcloud AI Endpoints (serverless open-model inference on OVHcloud's EU cloud, OpenAI-compatible unified gateway; catalog auto-detects context window when reported, manual knobs otherwise; opt-in keyless free tier)
 - `model_provider/doubleword/`: Doubleword (serverless open-model inference priced by delivery window, OpenAI-compatible; `api_params.service_tier: flex` opts into the discounted async tier — queued work, ~1 min to first token — on the same chat endpoint; `context_length` must be set — the catalog reports no per-model window)
+- `model_provider/minimax/`: MiniMax (hosted, OpenAI-compatible; `MiniMax-M3` 1M window with adaptive thinking + image input, `MiniMax-M2.7` 200K always-thinking; `reasoning_split` requested on every call, reasoning replayed as `reasoning_content` + `reasoning_details`; `tool_choice` folded to `none`/`auto`; `max_completion_tokens` always sent; built-in context table beneath the `context_length` knob; region-bound keys, `.cn` platform via `base_url`)
+- `model_provider/kimi/`: Moonshot AI Kimi (hosted, OpenAI-compatible; `kimi-k3` 1M, `kimi-k2.7-code` / `kimi-k2.6` 256K; `GET /v1/models` reports context length **and** image/reasoning flags, so both are catalog-detected; `thinking_level` → K3 `reasoning_effort`, `enable_thinking` / `thinking_keep` → K2.6's `thinking` object; sampling parameters are a 400 on this wire and are not forwarded; tools stamped `strict: false`; the quota-exhausted 429 stops the retry loop; Kimi Code plan via `base_url`)
+- `model_provider/mimo/`: Xiaomi MiMo (hosted, OpenAI-compatible; `mimo-v2.5-pro` text / `mimo-v2.5` omnimodal, both 1M; thinking toggle `enable_thinking` → `thinking: {type}`; **reasoning replay is mandatory** — the vendor answers 400 to a tool loop that omits `reasoning_content`; `tool_choice` is `auto` only; not available in the EU, UK or Korea)
+
+All three set `replay_reasoning = True` — see **Reasoning Replay** below.
 
 **Model Quirks** — per-model workarounds a profile opts into via `quirks:`
 (injected into `config.extra["quirks"]`; each provider declares the names it
@@ -149,7 +154,7 @@ honors in its `PROVIDER_QUIRKS` contract):
 
 | Quirk | Honored by | Effect |
 |-------|-----------|--------|
-| `prose_tool_calls` | all OpenAI-compat providers (nim, nebius, ovhcloud, lmstudio, tensorrt_llm, triton, vllm, zhipuai_openai) + openrouter | Prose-emulated tool calling for upstream models that cannot emit native tool calls: the `tools` array is withheld, schemas are prompt-injected (hashed wire ids, model picks by description), tool traffic in history is replayed as text, and fenced ` ```tool_call ` JSON blocks in the response are parsed back into `FunctionCall` parts. Reliability tier below native tool calling (hallucinated ids surface as recoverable unknown-tool errors; malformed blocks stay visible in text). Shared machinery in `model_provider/_prose_tools.py` — the same protocol `chrome_ai` uses unconditionally. |
+| `prose_tool_calls` | all OpenAI-compat providers (nim, nebius, ovhcloud, doubleword, minimax, kimi, mimo, lmstudio, tensorrt_llm, triton, vllm, zhipuai_openai) + openrouter | Prose-emulated tool calling for upstream models that cannot emit native tool calls: the `tools` array is withheld, schemas are prompt-injected (hashed wire ids, model picks by description), tool traffic in history is replayed as text, and fenced ` ```tool_call ` JSON blocks in the response are parsed back into `FunctionCall` parts. Reliability tier below native tool calling (hallucinated ids surface as recoverable unknown-tool errors; malformed blocks stay visible in text). Shared machinery in `model_provider/_prose_tools.py` — the same protocol `chrome_ai` uses unconditionally. |
 | `coerce_typed_tool_args`, `force_tool_choice_for_lifecycle`, `force_narration_between_tools`, `auto_finalize_on_complete` | vllm | Small-model tool-calling workarounds; see `vllm/provider.py` |
 
 ```yaml
@@ -159,6 +164,41 @@ model: some-vendor/cheap-model
 quirks:
   prose_tool_calls: true
 ```
+
+### Reasoning Replay (interleaved thinking)
+
+The thinking models of MiniMax, Kimi and MiMo ask the client to send the
+assistant's `reasoning_content` **back** on the next request of a tool-call
+loop — MiMo returns `400` without it, Kimi K3 wants the assistant message
+back "as-is", MiniMax measures a large quality drop. Before the seam the
+session dropped thought parts from history and every OpenAI-shaped converter
+ignored `Part.thought` on replay, so no provider could satisfy that rule.
+
+The seam is opt-in per provider via `OpenAICompatProvider.replay_reasoning`
+(default `False`; every pre-existing inheritor's wire is byte-identical) and
+declared to the capability contract as `reasoning_replay`:
+
+| Touch | Where | Effect |
+|-------|-------|--------|
+| the turn's reasoning becomes a leading `Part.thought` | `_openai_compat/base.py` (streaming loop + `_finish_batch_response`) | history has something to replay; `ProviderResponse.thinking` still feeds the UI |
+| the session keeps thought parts in history | `JaatoSession._add_model_response_to_history`, gated `provider.replay_reasoning is True` | a mock or a non-opted provider changes nothing |
+| the converter replays them | `message_to_openai(..., reasoning_fields=)` → `{"reasoning_content": text}` by default, `content: ""` next to `tool_calls` | a vendor with a second field overrides `_reasoning_replay_fields` (MiniMax adds `reasoning_details`) |
+| GC sizes them | `gc/utils.estimate_message_tokens` | replayed reasoning is context, and a K3 turn at max effort carries tens of thousands of tokens of it |
+| persistence round-trips them | `serialize_message` / `deserialize_message` (already did) | a revived session replays what it replayed live |
+
+Reasoning is read off streaming deltas through `_reasoning_from_delta`, so a
+wire that streams it under another field (MiniMax's `reasoning_details[]`)
+overrides one method. Full design and the cost argument (auto-caching makes
+the replayed prefix cheaper, not dearer): [MiniMax, Kimi and MiMo providers](docs/design/minimax-kimi-mimo-providers.md) §3.
+
+The same PR gave the base three more inert hooks the three providers share:
+`_THINKING_KNOBS` + `_apply_thinking_knobs` (profile thinking keys consumed
+rather than warned about), `_thinking_request_fields` (merged beneath the
+profile's `extra_body`), `_tool_choice_vocabulary` + `_narrow_tool_choice`
+(a value the vendor rejects becomes `auto` **with a warning** — never a
+silent drop, never a 400), `_MAX_TOKENS_WIRE_NAME` (`max_completion_tokens`
+where the vendor deprecated `max_tokens`), `_wire_tools` and
+`_map_finish_reason`.
 
 ### Tool Execution Flow
 
@@ -2019,6 +2059,124 @@ plugin_configs:
 > this provider; background-job polling and batch-job support are a
 > follow-up.
 
+### MiniMax
+| Variable | Purpose |
+|----------|---------|
+| `JAATO_MINIMAX_API_KEY` | API key (jaato namespace, highest priority) — an API key from https://platform.minimax.io or a Token Plan subscription key (`sk-cp-...`), which works on `/v1` unchanged |
+| `MINIMAX_API_KEY` | API key (the vendor's own variable; honoured beneath the jaato one) |
+| `JAATO_MINIMAX_BASE_URL` | Endpoint (default: `https://api.minimax.io/v1`; China: `https://api.minimax.cn/v1` — keys are region-bound, a China key is `401` on `.io`) |
+| `JAATO_MINIMAX_MODEL` | Default model name (e.g. `MiniMax-M3`, `MiniMax-M2.7`) |
+| `JAATO_MINIMAX_CONTEXT_LENGTH` | Override the built-in per-model window |
+
+**Authentication (in priority order):** `JAATO_MINIMAX_API_KEY`, then `MINIMAX_API_KEY`, then `minimax-auth key <key>` (validated against `GET /v1/models`, stored as `minimax_auth.json`).
+
+| Model | Context | Thinking | Input |
+|-------|---------|----------|-------|
+| `MiniMax-M3` | 1,000,000 | `thinking: {type: adaptive\|disabled}` via `api_params.enable_thinking`; default on | text + image |
+| `MiniMax-M2.7`, `-highspeed` (+ legacy M2 / M2.1 / M2.5) | 204,800 | always on (`enable_thinking: false` is logged and ignored) | text |
+
+The catalog is bare, so the window comes from a built-in table beneath
+`plugin_configs.minimax.context_length`. `reasoning_split: true` is sent on
+every call so reasoning never arrives as `<think>` inside the text (a block
+that still leaks is moved to the reasoning channel); replay echoes both
+`reasoning_content` and `reasoning_details`. `tool_choice` accepts `none` /
+`auto` (anything else is folded to `auto` with a warning). `max_completion_tokens`
+is always sent — the vendor default truncates tool-call JSON — defaulting to
+the model's recommended cap (M3 131072, M2.x 65536). `presence_penalty` /
+`frequency_penalty` are unsupported and `response_format` is silently ignored
+upstream for M2.x, so neither is forwarded. `api_params.service_tier: priority`
+is 1.5× price. Error code `2056` (Token Plan 5-hour window, names the reset
+time) and `1008` (balance) are non-transient quota errors; `1026` / `1027` are
+the content filter.
+
+```yaml
+provider: minimax
+model: MiniMax-M3
+plugin_configs:
+  minimax:
+    api_params:
+      enable_thinking: true      # M3 only
+      max_tokens: 131072         # sent as max_completion_tokens
+```
+
+### Moonshot AI Kimi
+| Variable | Purpose |
+|----------|---------|
+| `JAATO_KIMI_API_KEY` | API key (jaato namespace, highest priority) from https://platform.kimi.ai/console/api-keys (K3 unlocks after a first top-up) |
+| `MOONSHOT_API_KEY` | API key (the vendor's own variable; honoured beneath the jaato one) |
+| `JAATO_KIMI_BASE_URL` | Endpoint (default: `https://api.moonshot.ai/v1`; China `https://api.moonshot.cn/v1`; Kimi Code plan `https://api.kimi.com/coding/v1` with the plan's own ids `k3`, `kimi-for-coding`) |
+| `JAATO_KIMI_MODEL` | Default model name (e.g. `kimi-k3`) |
+| `JAATO_KIMI_CONTEXT_LENGTH` | Manual override when the catalog lacks the model |
+
+**Authentication (in priority order):** `JAATO_KIMI_API_KEY`, then `MOONSHOT_API_KEY`, then `kimi-auth key <key>` (validated against `GET /v1/users/me/balance`, stored as `kimi_auth.json`).
+
+`GET /v1/models` reports `context_length`, `supports_image_in` and
+`supports_reasoning` per model, so the window, input modalities and thinking
+support are **catalog-detected at connect** (catalog → knob → fail-loud, no
+table). Every id before `kimi-k2.6` was retired on 2026-08-31 and answers
+`404`.
+
+| Model | Context | Thinking control | `tool_choice` |
+|-------|---------|------------------|---------------|
+| `kimi-k3` | 1,048,576 | always on; `api_params.thinking_level: low\|high\|max` → `reasoning_effort` (changing it mid-session restarts the prefix cache) | full set |
+| `kimi-k2.7-code`, `-highspeed` | 262,144 | forced `{type: enabled, keep: all}` | `auto` / `none` |
+| `kimi-k2.6` | 262,144 | `enable_thinking` → `thinking.type`; `thinking_keep: all` → `thinking.keep` | `auto` / `none` |
+
+**Sampling parameters are a 400 on this wire** (`temperature`, `top_p`, `n`,
+penalties are fixed per model), so the forwarded allow-list is exactly what
+the request schema names: `max_tokens` (→ `max_completion_tokens`),
+`tool_choice`, `stop`, `response_format`, `prompt_cache_key`. Tool
+definitions are stamped `strict: false` (Kimi defaults strict **on** and the
+framework's schemas are not authored for it; `api_params.strict_tools: true`
+opts in). Cache hits are read from top-level `usage.cached_tokens`. `429` is
+split by `error.type`: `engine_overloaded_error` and `rate_limit_reached_error`
+back off, `exceeded_current_quota_error` (balance) stops the retry loop.
+
+```yaml
+provider: kimi
+model: kimi-k3
+plugin_configs:
+  kimi:
+    api_params:
+      thinking_level: high
+      prompt_cache_key: my-task-42   # required on the Kimi Code plan
+```
+
+### Xiaomi MiMo
+| Variable | Purpose |
+|----------|---------|
+| `JAATO_MIMO_API_KEY` | API key (jaato namespace, highest priority) from https://platform.xiaomimimo.com/#/console/api-keys |
+| `MIMO_API_KEY` | API key (the vendor's own variable; honoured beneath the jaato one) |
+| `JAATO_MIMO_BASE_URL` | Endpoint (default: `https://api.xiaomimimo.com/v1`; Token Plan keys `tp-...` only work against `https://token-plan-{cn,sgp,ams}.xiaomimimo.com/v1`) |
+| `JAATO_MIMO_MODEL` | Default model name (`mimo-v2.5-pro` or `mimo-v2.5`) |
+| `JAATO_MIMO_CONTEXT_LENGTH` | Override the built-in per-model window |
+
+**Authentication (in priority order):** `JAATO_MIMO_API_KEY`, then `MIMO_API_KEY`, then `mimo-auth key <key>` (validated against `GET /v1/models`, stored as `mimo_auth.json`). Not available in the EU, the UK or Korea (`403`).
+
+| Model | Context | Input | Thinking |
+|-------|---------|-------|----------|
+| `mimo-v2.5-pro` | 1,048,576 | text | `api_params.enable_thinking` → `thinking: {type: enabled\|disabled}`; default on |
+| `mimo-v2.5` | 1,048,576 | text + image (the model also takes video and audio; neither wire is probed yet) | same |
+
+The V2 series was deprecated on 2026-06-30 and is not in the table. **In
+thinking mode the vendor refuses (`400`) the next request of a tool loop
+unless the assistant message carries its `reasoning_content`** — the case
+the reasoning-replay seam exists for. While thinking is on the vendor forces
+`temperature=1.0` / `top_p=0.95` whatever is sent. `tool_choice` accepts
+`auto` only. `finish_reason: repetition_truncation` maps to `MAX_TOKENS`.
+`402` (balance), `403` (region / key) and `421` (content filter) are
+non-transient.
+
+```yaml
+provider: mimo
+model: mimo-v2.5
+plugin_configs:
+  mimo:
+    api_params:
+      enable_thinking: false     # the vendor's own advice for tool-heavy work
+      response_format: {type: json_object}
+```
+
 ### Claude CLI Provider
 | Variable | Purpose |
 |----------|---------|
@@ -2120,6 +2278,9 @@ anthropic-auth login/logout/status     # Anthropic OAuth (PKCE flow)
 antigravity-auth login/logout/status   # Google OAuth (PKCE flow)
 github-auth login/poll/logout/status   # GitHub OAuth (device code flow)
 nim-auth login/key/logout/status       # NVIDIA NIM API key
+minimax-auth login/key/logout/status   # MiniMax API key
+kimi-auth login/key/logout/status      # Moonshot AI Kimi API key
+mimo-auth login/key/logout/status      # Xiaomi MiMo API key
 ```
 
 ### Session Commands
@@ -2293,5 +2454,6 @@ This is not optional cleanup — treat missing or inaccurate docstrings as a def
 - [Competitor Memory Systems](docs/design/competitor-memory-systems.md) - Survey of nine agent-memory products, sorted by what a *framework* owes: pattern (nothing) / seam (an extension point) / fidelity (a fix) / not ours. Records which items were already expressible as cascade patterns, which memory hot paths are not pluggable, and why the pattern corpus needs `certify/`-style contract tests run against `main`.
 - [Agent Continuity Pattern](docs/design/agent-continuity.md) - `{{continuity_scope}}` + memory plugin enrichment + raw/curated lifecycle: persona-level continuity across sessions composed from existing primitives, no new framework code. Reference impl in `jaato-knowledge-manager/.jaato.example/`.
 - [Model Tiers × Prompt Caching](docs/design/model-tier-prompt-cache.md) - What `enter_tier` costs when prompt caching is on: cache is keyed per model, so an in-place tier switch re-reads the whole prefix cold (break-even ~6 consecutive calls at the new tier). Covers the `_wire_cache_plugin` gap that made profile cache knobs inert, the system-block tier line that invalidates BP1, and the per-provider knob divergence + proposed common `cache:` field.
+- [MiniMax, Kimi and MiMo providers](docs/design/minimax-kimi-mimo-providers.md) - Design for three first-party OpenAI-compatible providers (`minimax`, `kimi`, `mimo`) and the framework prerequisite they share: **reasoning replay** — sending an assistant turn's `reasoning_content` back on the next request of a tool-call loop, which the session currently drops from history and every OpenAI-shaped converter ignores. Covers the surface decision (chat completions, not the Anthropic shims), per-vendor thinking-control dialects, tool-choice vocabularies, catalog vs table context resolution, error taxonomies, and the registration checklist.
 - [AppArmor Setup](docs/apparmor-setup.md) - Kernel-enforced workspace isolation. WS deployments confine automatically when AppArmor is available; IPC clients opt in via `IPCClient(..., apparmor=True)` (defaults to `False`).
 - [GCP Setup Guide](docs/gcp-setup.md) - Setting up GCP project for Vertex AI

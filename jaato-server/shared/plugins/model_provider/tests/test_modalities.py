@@ -204,6 +204,9 @@ def test_all_providers_expose_the_capability_contract():
         ("nebius", "NebiusProvider"),
         ("ovhcloud", "OVHcloudProvider"),
         ("doubleword", "DoublewordProvider"),
+        ("mimo", "MiMoProvider"),
+        ("kimi", "KimiProvider"),
+        ("minimax", "MiniMaxProvider"),
         ("openai", "OpenAIProvider"),
         ("azure_openai", "AzureOpenAIProvider"),
     ]

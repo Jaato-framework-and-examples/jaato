@@ -10,7 +10,7 @@ from __future__ import annotations
 import base64
 import json
 import uuid
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from openai.types.chat import ChatCompletion, ChatCompletionChunk
@@ -110,9 +110,19 @@ def _followup_label(pdf_as_file: bool, audio_as_input_audio: bool) -> str:
     """
     return "Image" if not (pdf_as_file or audio_as_input_audio) else "Attachment"
 
+"""Maps an assistant turn's reasoning text to the wire fields that replay it.
+
+The default shape every vendor documents is ``{"reasoning_content": text}``;
+a vendor with a second field (MiniMax's ``reasoning_details``) supplies its
+own callable.  ``None`` means the wire does not replay reasoning and thought
+parts are dropped on conversion, which was the only behaviour before the
+reasoning-replay seam (docs/design/minimax-kimi-mimo-providers.md §3).
+"""
+
 
 def message_to_openai(
     message: Message,
+    reasoning_fields: Optional[ReasoningFields] = None,
     *,
     pdf_as_file: bool = False,
     audio_as_input_audio: bool = False,
@@ -138,9 +148,17 @@ def message_to_openai(
 
     Args:
         message: Internal message.
-        pdf_as_file: Whether this wire carries PDFs as ``file`` blocks.
+ as ``file`` blocks.
         audio_as_input_audio: Whether this wire carries audio INPUT as
             ``input_audio`` blocks (#830).
+ ``Part.thought``
+            text is replayed on the assistant dict through this callable
+            (``{"reasoning_content": text}`` by default).  The vendors whose
+            thinking models require the previous turn's reasoning back on
+            the next request of a tool-call loop (MiMo returns 400 without
+            it; Kimi K3 wants the assistant message back "as-is") opt in
+            via ``OpenAICompatProvider.replay_reasoning``.  ``None`` keeps
+            the historical behaviour: thought parts never reach the wire.
 
     Returns:
         List of dicts in OpenAI chat message format (1 per tool result).
@@ -204,13 +222,14 @@ def message_to_openai(
                 for fc in function_calls
             ]
             if not content:
-                msg["content"] = None
+                msg["content"] = _empty_assistant_content(reasoning_fields)
+        msg.update(replay_reasoning_fields(message, reasoning_fields))
         return [msg]
 
     # Default to user message.  Marshal inline_data parts into OpenAI
     # multimodal content blocks so a vision-declared model actually RECEIVES
     # the image (shared by nim/vllm/lmstudio/tensorrt_llm/zhipuai_openai/
-    # triton/nebius/ovhcloud/doubleword); text-only turns keep a plain-string
+    # triton/nebius/ovhcloud/doubleword/mimo/kimi/minimax); text-only turns keep a plain-string
     # content.
     #
     # The marshalling DISPATCHES ON MIME (#829).  This path used to send every
@@ -285,8 +304,38 @@ def message_from_openai(msg: Dict[str, Any]) -> Message:
     return Message(role=Role.USER, parts=parts)
 
 
+def _empty_assistant_content(reasoning_fields: Optional[ReasoningFields]) -> Optional[str]:
+    """``content`` for an assistant turn that made tool calls and said nothing.
+
+    A replaying wire gets ``""``: MiMo's documented 400 was reproduced
+    against ``content: null`` next to ``tool_calls`` (XiaomiMiMo/MiMo#44),
+    and every vendor example sends the empty string.  A non-replaying wire
+    keeps ``None``, byte-identical to before the seam.
+    """
+    return "" if reasoning_fields is not None else None
+
+
+def replay_reasoning_fields(
+    message: Message,
+    reasoning_fields: Optional[ReasoningFields],
+) -> Dict[str, Any]:
+    """The wire fields that replay ``message``'s reasoning, or ``{}``.
+
+    Joins the ``Part.thought`` texts of a ``MODEL`` message (a turn holds
+    one, but the join costs nothing and tolerates a split) and hands them
+    to ``reasoning_fields``.  Empty when the wire does not replay, when the
+    message is not the model's, or when it carries no thought — so a
+    caller can ``update()`` the assistant dict unconditionally.
+    """
+    if reasoning_fields is None or message.role != Role.MODEL:
+        return {}
+    thought = "".join(p.thought for p in message.parts if p.thought)
+    return reasoning_fields(thought) if thought else {}
+
+
 def history_to_openai(
     history: List[Message],
+    reasoning_fields: Optional[ReasoningFields] = None,
     *,
     pdf_as_file: bool = False,
     audio_as_input_audio: bool = False,
@@ -295,6 +344,8 @@ def history_to_openai(
 
     Args:
         history: List of internal messages.
+        reasoning_fields: Forwarded to :func:`message_to_openai` — the
+            replay shape for assistant reasoning, or ``None`` to drop it.
         pdf_as_file: Whether this wire carries PDFs as ``file`` blocks.
         audio_as_input_audio: Whether this wire carries audio INPUT as
             ``input_audio`` blocks.
@@ -309,6 +360,7 @@ def history_to_openai(
         for m in (history or [])
         for wire in message_to_openai(
             m,
+            reasoning_fields=reasoning_fields,
             pdf_as_file=pdf_as_file,
             audio_as_input_audio=audio_as_input_audio,
         )

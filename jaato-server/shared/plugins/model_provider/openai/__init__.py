@@ -59,6 +59,12 @@ PROVIDER_CAPABILITIES = ProviderCapabilities(
     streaming=True,
     cancellation=True,
     output_media=True,
+    # OpenAI's reasoning models are not asked to hand their thinking back:
+    # the Responses API keeps that continuity server-side (an `include`
+    # of `reasoning.encrypted_content` is its mechanism, opaque to us),
+    # and Chat Completions returns no reasoning text at all, so there is
+    # nothing to replay on either wire.
+    reasoning_replay=False,
 )
 
 # --- Provider config-knob contract (authored from provider.py read sites) ---
