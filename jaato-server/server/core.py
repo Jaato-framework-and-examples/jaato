@@ -272,6 +272,7 @@ class AgentState:
         self.pending_formatter_feedback: Optional[str] = None
 
 
+from shared.completion_nudge import resolve_max_completion_nudges
 from shared.model_tiers import (bound_model_for_profile,
                                 bound_provider_for_profile)
 
@@ -5599,7 +5600,19 @@ class JaatoServer:
                 # tool was filtered preserves the user's expected
                 # contract: TUI / web / chat sessions stay alive across
                 # turns until the user disconnects.
-                MAX_COMPLETION_NUDGES = 2
+                #
+                # The BUDGET is the profile's (#919).  It was a
+                # function-local ``= 2`` here and in two other files,
+                # which made it the one bound in this path a deployment
+                # could not express -- ``max_turns``, ``runtime_limits``
+                # and a processor's ``max_refusals`` all are.  The number
+                # now lives once, in ``shared.completion_nudge``, and the
+                # resolver falls back to it for a session with no profile
+                # or a profile predating the field, so an unconfigured
+                # deployment is byte-identical to before.
+                MAX_COMPLETION_NUDGES = resolve_max_completion_nudges(
+                    server._profile,
+                )
                 # Phase 3 §7c step 6.6.4.3b: completion-nudge
                 # guard now goes through the runner-RPC
                 # ``session.try_completion_nudge`` handler (shipped
