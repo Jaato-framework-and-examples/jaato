@@ -6399,56 +6399,37 @@ class SessionManager:
         # Catches missing-required-field bugs from BOTH spawn paths
         # (model-driven spawn_subagent AND reactor-side
         # create_headless_session) at a single chokepoint.
-        if (
-            profile is not None
-            and getattr(profile, 'spawn_payload_schema', None) is not None
-        ):
-            try:
-                from shared.spawn_schema_loader import resolve_spawn_schema
-                resolved_schema = resolve_spawn_schema(
-                    profile.spawn_payload_schema,
-                    workspace_path=workspace_path,
-                    config_root=config_root,
+        #
+        # ``agent_params`` reach this function as argv ``key=value`` tokens
+        # partitioned by ``command_router._handle_session_new``, so every
+        # value here is a STRING and only a string-typed property can pass.
+        # #883 ratified that as the contract rather than papering over it,
+        # and ``validate_spawn_params`` is where both boundaries share it —
+        # including the note that tells an author whose schema refuses every
+        # spawn that the PROFILE is at fault, not the call.
+        if profile is not None:
+            from shared.spawn_schema_loader import validate_spawn_params
+            spawn_details = validate_spawn_params(
+                getattr(profile, 'spawn_payload_schema', None),
+                agent_params,
+                workspace_path=workspace_path,
+                config_root=config_root,
+            )
+            if spawn_details:
+                err_msg = (
+                    f"create_session(profile={profile_name!r}) failed "
+                    f"agent_params validation: {spawn_details}"
+                    f"The profile requires agent_params matching its "
+                    f"spawn_payload_schema "
+                    f"({profile.spawn_payload_schema!r})."
                 )
-                if resolved_schema is not None:
-                    import jsonschema
-                    try:
-                        jsonschema.validate(
-                            instance=agent_params or {},
-                            schema=resolved_schema,
-                        )
-                    except jsonschema.ValidationError as exc:
-                        required = list(resolved_schema.get('required') or [])
-                        missing = [
-                            f for f in required
-                            if not agent_params or f not in agent_params
-                        ]
-                        details = (
-                            f"missing required fields: {missing}. "
-                            if missing
-                            else f"first failure: {exc.message}. "
-                        )
-                        err_msg = (
-                            f"create_session(profile={profile_name!r}) failed "
-                            f"agent_params validation: {details}"
-                            f"The profile requires agent_params matching its "
-                            f"spawn_payload_schema "
-                            f"({profile.spawn_payload_schema!r})."
-                        )
-                        logger.error(err_msg)
-                        self._emit_to_client(client_id, ErrorEvent(
-                            error=err_msg,
-                            error_type="SpawnPayloadValidationError",
-                            recoverable=True,
-                        ))
-                        return ""
-            except Exception as exc:
-                # Schema-loader bug or jsonschema crash — log and skip
-                # validation rather than blocking session creation.
-                logger.warning(
-                    "spawn_payload_schema validation skipped for profile "
-                    "%s: %s", profile_name, exc,
-                )
+                logger.error(err_msg)
+                self._emit_to_client(client_id, ErrorEvent(
+                    error=err_msg,
+                    error_type="SpawnPayloadValidationError",
+                    recoverable=True,
+                ))
+                return ""
 
         # Create JaatoServer for this session
         # Provider is determined by env_file, with optional overrides.

@@ -151,7 +151,10 @@ it is only hidden from `explain providers`.)
 logged daemon-side and never answered, and the caller gets a 60s
 `SessionNotConfirmed` saying the session *may* have been created — for this
 cause it never is. Type them `string`, add a `pattern` for shape, parse in the
-prefetch. Validator code: `spawn_schema_type_unreachable`.
+prefetch. Validator code: `spawn_schema_type_unreachable`. #883 ratified this
+as the contract, so the in-process `spawn_subagent` boundary refuses it the
+same way (it used to accept a typed value the wire could never deliver) and
+the refusal names the profile as the cause rather than the value you passed.
 
 **3. The workspace `.env` IS the session env.** A profile's `${VAR}` and every
 `pass://` / `vault://` URI is resolved daemon-side against that file, not

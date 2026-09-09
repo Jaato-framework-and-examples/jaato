@@ -1490,6 +1490,17 @@ class IPCClient:
                 what persists across turns, sessions and profiles.
             agent_params: Parameter values for the agent's ``{{param}}``
                 placeholders.  Only used when *agent* is specified.
+
+                **String-shaped, and the annotation is the contract.**
+                Each pair is flattened into a ``key=value`` argv token
+                below, so a non-string value arrives at the daemon as
+                its ``str()`` and nothing on the far side restores the
+                type.  A profile's ``spawn_payload_schema`` is validated
+                against what arrives, so declaring a property
+                ``integer`` / ``boolean`` / ``object`` / ``array``
+                refuses every spawn whatever you pass here — declare it
+                ``string`` with a ``pattern`` and parse it in the
+                prefetch or persona (#883).
             sibling_name: Cascade-scoped ADDRESS other sessions use to
                 reach this one via ``send_to_sibling`` — the same string
                 they pass, so there is no translation between what you
@@ -1581,6 +1592,15 @@ class IPCClient:
         if agent:
             args.extend(["--agent", agent])
         if agent_params:
+            # The string-shaped spawn boundary (#883).  ``key=value``
+            # argv tokens are the whole transport for agent_params, and
+            # ``command_router._handle_session_new`` partitions them back
+            # on the first ``=`` — so the daemon validates strings and
+            # ``spawn_payload_schema`` is a string-typed schema.  Carrying
+            # them as JSON instead was considered and rejected on record:
+            # it restores a symmetry a ``pattern`` already expresses, at
+            # the cost of the argv protocol and the string-oriented
+            # ``{{param}}`` persona substitution.
             for key, value in agent_params.items():
                 args.append(f"{key}={value}")
         # Phase 2 cascade-sharing (server 0.6.144+): forward the

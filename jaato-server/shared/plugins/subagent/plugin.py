@@ -23,6 +23,7 @@ from .config import (
     validate_profile,
 )
 from shared.instruction_suppression import suppression_to_wire
+from shared.spawn_schema_loader import validate_spawn_params
 from jaato_sdk.plugins.base import UserCommand, CommandCompletion, CommandParameter, HelpLines
 from jaato_sdk.plugins.model_provider.types import (
     ToolSchema,
@@ -3144,10 +3145,9 @@ class SubagentPlugin(DaemonForwardingMixin):
         # ``workspace_path is None`` branch: a conditional import binds the name
         # function-local, so when the workspace resolves early (self._workspace_path
         # or registry.get_workspace_path() non-None — the common case, ALWAYS true
-        # for an embedded session) the branch is skipped and the later uses (the
-        # spawn-schema workspace fallback at ``or get_workspace_root()`` and the
-        # debug line) raise UnboundLocalError. Binding it once up-front keeps the
-        # name a proper local for every path.
+        # for an embedded session) the branch is skipped and the later use (the
+        # debug line below) raises UnboundLocalError. Binding it once up-front
+        # keeps the name a proper local for every path.
         from shared.session_context import get_workspace_root
         workspace_path = self._workspace_path
         if workspace_path is None and self._runtime and self._runtime.registry:
@@ -3275,62 +3275,38 @@ class SubagentPlugin(DaemonForwardingMixin):
         # prefetch's runtime check.  The detector for rewind-with-hint
         # picks up the error message and lets the supervisor re-call
         # spawn_subagent with the missing fields populated.
-        if profile.spawn_payload_schema is not None:
-            try:
-                from shared.spawn_schema_loader import resolve_spawn_schema
-                workspace_for_schema = (
-                    parent_cwd
-                    or (self._runtime.registry.get_workspace_path()
-                        if self._runtime and self._runtime.registry else None)
-                    or get_workspace_root()
-                )
-                resolved_schema = resolve_spawn_schema(
-                    profile.spawn_payload_schema,
-                    workspace_path=workspace_for_schema,
-                    config_root=self._config_root,
-                )
-                if resolved_schema is not None:
-                    import jsonschema
-                    try:
-                        jsonschema.validate(
-                            instance=agent_params_arg or {},
-                            schema=resolved_schema,
-                        )
-                    except jsonschema.ValidationError as exc:
-                        # Collect every required field that's still
-                        # missing so the supervisor can fix them all in
-                        # one retry instead of hammering the spawn-loop.
-                        required = list(resolved_schema.get('required') or [])
-                        missing = [
-                            f for f in required
-                            if not agent_params_arg or f not in agent_params_arg
-                        ]
-                        details = (
-                            f"missing required fields: {missing}. "
-                            if missing
-                            else f"first failure: {exc.message}. "
-                        )
-                        return SubagentResult(
-                            success=False,
-                            response='',
-                            error=(
-                                f"spawn_subagent({profile_name!r}) failed "
-                                f"agent_params validation: {details}"
-                                f"The '{profile_name}' profile requires "
-                                f"agent_params matching its spawn_payload_schema "
-                                f"({profile.spawn_payload_schema!r}). "
-                                f"Re-call spawn_subagent with the missing "
-                                f"fields populated from the prompt's case data — "
-                                f"do not paraphrase or omit."
-                            ),
-                        ).to_dict()
-            except Exception as exc:
-                # Schema-loader bug or jsonschema crash — degrade gracefully:
-                # log and skip validation rather than blocking the spawn.
-                logger.warning(
-                    "spawn_payload_schema validation skipped for profile "
-                    "%s: %s", profile_name, exc,
-                )
+        #
+        # Shared with the daemon's ``create_session`` boundary (#883), so
+        # a profile's schema cannot mean one thing here and another over
+        # IPC.  This is the path where the difference was real: a model
+        # emitting ``{"iteration": 1}`` hands us a Python ``int``, while
+        # the same params over the wire arrive as ``"1"``.  The helper
+        # validates the wire's string view either way; the params handed
+        # to the session, the persona and the prefetch are untouched.
+        spawn_details = validate_spawn_params(
+            profile.spawn_payload_schema,
+            agent_params_arg,
+            # ``parent_cwd`` already IS the resolved workspace (it falls
+            # back to ``os.getcwd()``), so the registry/get_workspace_root
+            # chain this replaces could never be reached.
+            workspace_path=parent_cwd,
+            config_root=self._config_root,
+        )
+        if spawn_details:
+            return SubagentResult(
+                success=False,
+                response='',
+                error=(
+                    f"spawn_subagent({profile_name!r}) failed "
+                    f"agent_params validation: {spawn_details}"
+                    f"The '{profile_name}' profile requires "
+                    f"agent_params matching its spawn_payload_schema "
+                    f"({profile.spawn_payload_schema!r}). "
+                    f"Re-call spawn_subagent with the missing "
+                    f"fields populated from the prompt's case data — "
+                    f"do not paraphrase or omit."
+                ),
+            ).to_dict()
 
         # Build the full prompt
         full_prompt = task
