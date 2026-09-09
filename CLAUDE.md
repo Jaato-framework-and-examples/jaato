@@ -381,6 +381,13 @@ completion_processors:
     phase: finalization       # finalization (default) | completeness
     max_refusals: 3           # unset = unbounded (the pre-#768 behaviour)
     on_exhausted: allow       # allow (default) | fail
+# max_completion_nudges: the OTHER direction — how many times the framework
+#   re-prompts an agent that ended its loop without calling
+#   signal_completion at all, before giving up with NudgeExhausted.  Where
+#   `max_refusals` bounds how many times the gate may BLOCK a completion,
+#   this bounds how many chances the model gets to CALL it (#919).
+#   Unset = 2, which is right for a strong tool-caller and is unchanged.
+max_completion_nudges: 4
 ```
 
 **SDK API:**
@@ -397,6 +404,61 @@ await client.create_session(profile="researcher")
 - `session.profiles` — list available profiles (→ `SessionProfilesEvent`)
 
 **Flow:** Client sends `session.new --profile researcher` → server discovers profiles from `.jaato/profiles/` → resolves `SubagentProfile` → `JaatoServer` applies profile overrides (model, provider, plugins, plugin_configs, GC) during `initialize()`.
+
+### The Completion-Nudge Budget (#919)
+
+A session whose surface carries `signal_completion` is expected to call it
+before its loop ends. When the loop settles without that call the framework
+re-prompts the model — a **nudge** — and re-enters the loop; the budget bounds
+how many times, before it gives up and emits `NudgeExhausted`.
+
+That budget was a function-local `MAX_COMPLETION_NUDGES = 2` in **three**
+files — `server/core.py` (the daemon's top-level guard),
+`jaato_embedded/client.py` (the in-process lead) and
+`shared/plugins/subagent/plugin.py` (the subagent loop). Nothing kept the three
+equal, and none was reachable from a profile — which made it the one bound in
+the completion path a deployment could not express:
+
+| bound | configurable? |
+|---|---|
+| completion-processor refusals | `max_refusals` + `on_exhausted`, per processor |
+| turns before the (sub)agent returns | `max_turns` |
+| session resource caps | `runtime_limits` |
+| **completion nudges** | **`max_completion_nudges`** |
+
+`try_completion_nudge(max_nudges)` always took the bound as an argument, so the
+plumbing was already there; what was missing was a value to pass.
+
+```yaml
+# .jaato/profiles/<agent>.yaml
+max_completion_nudges: 4      # default 2, unchanged when unset
+```
+
+**Two stays the default.** For a strong tool-caller it is right, and raising it
+globally would make weak models loop longer for everyone. The number belongs to
+the deployment: a voice agent whose audio tier hands off, writes to memory,
+narrates the write and never calls the tool routinely burns one of its two
+nudges on a redundant `enter_tier` (`already_at_tier`), leaving exactly one real
+attempt — announcing a tool instead of invoking it is a documented weakness of
+that model class, not something persona prose fixes.
+
+- **Per SESSION, not per turn** — the claim `_completion_nudges_fired` has
+  always made (#767): a turn start does not refund a nudge, or the subagent
+  loop's `while` could not terminate at all.
+- **Positive integer.** `0` is refused at load, not read as "never nudge": the
+  give-up predicate is `nudges_fired >= max`, so a budget of 0 would report
+  `NudgeExhausted` on sessions that completed **cleanly**. A deployment that
+  wants no nudging keeps `signal_completion` out of the surface.
+- **Inheritance follows `max_turns`**: child overrides outright, else the
+  minimum across the parents that declared one.
+- **One definition.** `shared/completion_nudge.py` owns
+  `DEFAULT_MAX_COMPLETION_NUDGES` and the resolver every site now calls, so the
+  three paths cannot drift again. A profile predating the field — an older
+  session snapshot, or no profile at all — resolves to the default rather than
+  raising, so an unconfigured deployment behaves exactly as before.
+  `jaato_eval.sign_off` restates the number deliberately (the eval engine must
+  not import `server.*` / `shared.*`); that copy is a reporting ceiling, and is
+  stale in exactly one direction against a profile that raised its own.
 
 ### Session Revive (waking a persisted session)
 
@@ -1340,10 +1402,46 @@ The webhook plugin provides an inbound HTTP listener for receiving external webh
       "secret_header": "X-Hub-Signature-256",
       "secret_algo": "hmac-sha256",
       "event_type_header": "X-GitHub-Event"
+    },
+    "gitlab": {
+      "path": "/webhook/gitlab",
+      "secret_header": "X-Gitlab-Token",
+      "secret_algo": "token",
+      "event_type_header": "X-Gitlab-Event"
     }
   }
 }
 ```
+
+**Route auth: two modes, and they are not peers (#930).** `secret_algo` names
+how the route's shared secret is checked:
+
+| Mode | Header carries | Property |
+|------|----------------|----------|
+| `hmac-sha256` | an HMAC digest over the request **body** | the secret never travels; a captured request cannot be replayed against another payload |
+| `token` | the shared secret **verbatim**, compared with `hmac.compare_digest` | **weaker**: readable by anything that terminates TLS, and replayable against any payload |
+
+`token` exists because a large class of producers signs nothing — GitLab sends
+the configured secret in `X-Gitlab-Token` and expects an equality check. Before
+it, the *only* configuration that ingested such a webhook was
+`allow_unauthenticated: true`: a secret sitting in the request, thrown away, on
+the flag whose whole purpose is to be unreachable by omission.
+
+Three properties keep the wider vocabulary from becoming a softer posture:
+
+- **A pair, still fail-closed.** `secret_header` without `secret_algo` (or the
+  reverse) is a 500, and an `secret_algo` outside `SECRET_ALGOS` is a hard
+  config-validation error *and* a 500 at request time — never a downgrade to
+  unsigned. Widening the vocabulary widens what `secret_algo` may **say**, never
+  what it may omit.
+- **No cross-mode leniency.** `token` strips no `sha256=` prefix and reads no
+  body; a valid HMAC digest does not authenticate a `token` route, and the
+  reverse. Either transformation would accept a secret nobody configured.
+- **Announced, not silent.** Every `token` route logs a WARNING at listener
+  startup naming route and header, and a louder one when TLS is off (the secret
+  is then sent in the clear). Same posture as `--ws-unsafe-no-auth` and
+  `scrub_secret_env: none` — so `token` cannot become the quiet path of least
+  resistance for a producer that *does* sign bodies. Pair it with TLS.
 
 **Corporate hardening** (all stdlib, no external deps):
 - **TLS/SSL**: HTTPS with optional mutual TLS (client certificate verification)
@@ -2558,7 +2656,7 @@ This is not optional cleanup — treat missing or inaccurate docstrings as a def
 - [Application Identity](docs/design/app-identity.md) - Naming the application an integrator built, rather than reporting every SDK-based harness upstream as "jaato". `AppIdentity` + the four-tier precedence (provider knob → provider env → `JaatoRuntime(app_identity=)` → `JAATO_APP_*`), the `(powered by jaato)` suffix, header-safety sanitisation, and why the env vars are `host`-scoped.
 - [Env Vars vs Profile Keys](docs/design/env-vars-vs-profile-keys.md) - Which of the 186 env vars earned a typed profile/`plugin_configs` key, and which are correctly env-only. The tagged catalog lives in `shared/env_scope.py` (scope: `session` / `host` / `ambient` / `internal`, plus the typed key where one exists) and is enforced by `test_env_scope_catalog.py`; 38 session-scoped knobs with no typed key sit in a may-only-shrink ratchet, each carrying a tier and a **proposed** key (`explain env untyped` prints both). Includes the credential policy for the three providers whose peers expose an `api_key` knob and they don't.
 - [The Self-Bounding Completion Gate](docs/design/completion-gate.md) - What `completion_processors` is for and the seven rules a working one had to get right, each attached to the incident that produced it. Covers `max_refusals:` / `on_exhausted:` (the gate's own refusal ceiling, distinct from `max_turns`, which is and remains the retry budget), the `faults[]` channel that keeps an unfixable environment fault from burning the retry budget, why a broken gate must never read as a passing one, and the load-once-per-session caching the counter used to depend on as folklore. Start from `jaato-scaffold explain completion` and `jaato-scaffold new processor` — both are computed from the framework, so they cannot drift the way the prose can. §9 covers why the gate is three files rather than one: `jaato-scaffold new sweep` emits the checks (`acceptance.sh`, shared with the post-hoc graders), the processor, and the profile's `completion_processors:` + `completion_payload_schema:` as ONE set (`--no-gate` opts out), because a profile carrying processors and no schema has no lenient gate — `_should_hide_signal_completion` removes `signal_completion` entirely, so the agent cannot signal and the gate never runs. §11 covers why a session that completed is still drivable: `signal_completion` ends the TURN, and the continuation it skips was also the only writer of that batch's results into history, so a completed conversation used to end on a `tool_calls` block nothing answered and every later request — `send_message` and `session.wake` alike — was rejected by the provider (#913). `_record_terminal_tool_results` writes them without the round-trip, which is what makes "complete every turn to enforce a contract, then keep talking" usable.
-- [Payload-Schema Conventions](docs/design/payload-schema-conventions.md) - Symmetric authoring guide for `spawn_payload_schema` (input boundary) and `completion_payload_schema` (output boundary). Mirror prefetch required-keys; always carry `warnings[]` / `errors[]` escape hatches; persona ↔ schema consistency check; canonical-hash strip rules; `agent_params` interaction with agent-continuity (§6).
+- [Payload-Schema Conventions](docs/design/payload-schema-conventions.md) - Symmetric authoring guide for `spawn_payload_schema` (input boundary) and `completion_payload_schema` (output boundary) — symmetric in everything but the type system: a completion payload is JSON the model emitted, a spawn payload crosses the IPC wire as `key=value` argv tokens, so **every spawn property is a `string`** (`pattern` carries the shape, the consumer parses). #883 ratified that rather than reopening the transport, and both spawn boundaries now validate the same string view — the in-process `spawn_subagent` call used to accept a typed value the wire could never deliver, so one profile meant two things. A refusal caused by the schema names the profile; `jaato-scaffold validate` catches it before any spawn as `spawn_schema_type_unreachable`. Mirror prefetch required-keys; always carry `warnings[]` / `errors[]` escape hatches; persona ↔ schema consistency check; canonical-hash strip rules; `agent_params` interaction with agent-continuity (§6).
 - [Competitor Memory Systems](docs/design/competitor-memory-systems.md) - Survey of nine agent-memory products, sorted by what a *framework* owes: pattern (nothing) / seam (an extension point) / fidelity (a fix) / not ours. Records which items were already expressible as cascade patterns, which memory hot paths are not pluggable, and why the pattern corpus needs `certify/`-style contract tests run against `main`.
 - [Agent Continuity Pattern](docs/design/agent-continuity.md) - `{{continuity_scope}}` + memory plugin enrichment + raw/curated lifecycle: persona-level continuity across sessions composed from existing primitives, no new framework code. Reference impl in `jaato-knowledge-manager/.jaato.example/`.
 - [Model Tiers × Prompt Caching](docs/design/model-tier-prompt-cache.md) - What `enter_tier` costs when prompt caching is on: cache is keyed per model, so an in-place tier switch re-reads the whole prefix cold (break-even ~6 consecutive calls at the new tier). Covers the `_wire_cache_plugin` gap that made profile cache knobs inert, the system-block tier line that invalidates BP1, and the per-provider knob divergence + proposed common `cache:` field.

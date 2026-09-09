@@ -14,8 +14,12 @@ a non-determinism failure mode in kb-enablement-2.0 codegen
 (2026-05-03). Input-side mechanism shipped earlier; conventions
 documented here for the first time alongside the
 output-side rules to surface the architectural symmetry.
-Backward-compatible: schemas predating any of these conventions
-continue to work.
+Input-side **types** ratified as string-only by #883 (2026-09-09)
+— see §3.1.1b, which carries the decision and the two rejected
+alternatives. Backward-compatible except for one case named
+there: a non-string spawn property, already an error to
+`jaato-scaffold validate` and already refused over IPC, is now
+refused at the in-process `spawn_subagent` boundary too.
 
 ---
 
@@ -49,6 +53,15 @@ boundaries get the same protection: malformed payloads are caught
 and surfaced loudly at the boundary, not silently as
 mid-execution prefetch failures or downstream cascade
 inconsistencies.
+
+**The symmetry stops at the type system, and that half is
+deliberate (#883).** A completion payload is JSON the model
+emitted, so every JSON type is available to it. A spawn payload is
+not JSON on the wire at all — `agent_params` cross as `key=value`
+argv tokens — so **every spawn property is a `string`**; `pattern`
+carries the shape and the consumer parses. §3.1.1b is the rule and
+the record of the decision. Read the diagram as *both boundaries
+are validated*, not *both boundaries are typed alike*.
 
 ### Where each schema lives
 
@@ -176,6 +189,39 @@ cascade whose fix-loop stage typed `iteration` as an integer.
 
 `jaato-scaffold validate` reports this statically as
 `spawn_schema_type_unreachable`.
+
+##### The decision (#883)
+
+Two features that are each correct in isolation could not both be honoured:
+the schema promised typed validation, the wire delivered strings. #883
+**ratified the wire's behaviour as the contract** — `spawn_payload_schema`
+is a string-shaped boundary. The two alternatives are recorded here so the
+question is not reopened by accident:
+
+| Option | Why not |
+|---|---|
+| Carry `agent_params` as JSON on the wire | Restores a symmetry a `pattern` already expresses, at the cost of the argv protocol, its parser, and the `{{param}}` persona substitution — which is string-oriented by nature (`resolve_agent` renders values into prompt text). Non-trivial blast radius for a case already covered. |
+| Coerce at the boundary before validating | Cheapest-looking and the worst: `"1"` → `1` is unambiguous, `"true"` / `"null"` / `"[1,2]"` are not, and it invents a second, undocumented type system between the wire and the schema. |
+
+Ratifying it made the rule hold at **both** spawn boundaries, which it
+previously did not. The model-driven `spawn_subagent` call is an in-process
+function call, so a model emitting `{"iteration": 1}` handed the validator a
+real `int`: a typed schema passed there and failed over IPC, and one profile
+meant two different things depending on who spawned it. Both call sites now
+route through `spawn_schema_loader.validate_spawn_params`, which validates
+the wire's string view (`spawn_params_for_validation`). The rendering is for
+**validation only** — the params handed to the session, the persona and the
+prefetch are untouched, so a spawn-time flag like `agent_params.isolated`
+still reads as the caller sent it.
+
+One consequence worth stating plainly: a profile that declares a non-string
+property and is spawned only in-process used to work, and now fails. It was
+already an error to `jaato-scaffold validate` and already broken over IPC;
+the failure is now the same on both paths, and it names the cause. The
+refusal appends `spawn_type_contract_note`, which points at the **profile**
+rather than at the call — the bare `jsonschema` message (`'1' is not of type
+'integer'`) names the value the caller passed and blames it, when that value
+could not have been anything else.
 
 #### 3.1.2 Strictness depends on framework integration
 

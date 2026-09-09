@@ -48,8 +48,12 @@ apart, every one reporting the same two errors, with no work in between. The arm
 BLOCKED having spent its budget on the loop, where the run before it had reached a
 graded verdict.
 
-Nothing upstream catches this. `MAX_COMPLETION_NUDGES` bounds the *opposite* direction
-(an agent that stops **without** signalling), and was itself unbounded until #767.
+Nothing upstream catches this. The completion-nudge budget bounds the *opposite*
+direction (an agent that stops **without** signalling), and was itself unbounded until
+#767 — and until #919 it was not a profile knob either, but a function-local
+`MAX_COMPLETION_NUDGES = 2` in three files. It is now `max_completion_nudges:` at the
+profile top level (default 2, unchanged when unset), with one definition in
+`shared/completion_nudge.py`; see the CLAUDE.md section of the same name.
 
 **Now:** a processor entry declares its own ceiling.
 
