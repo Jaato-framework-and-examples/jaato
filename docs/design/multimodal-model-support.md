@@ -47,7 +47,7 @@ role provider.
 
 | Piece | State |
 |-------|-------|
-| Image-input conversion in adapters | ✅ every provider that declares `user_message_images` — all but `chrome_ai`, `claude_cli` and `github_models`. The OpenAI-compatible fleet shares one converter path (`model_provider/_attachments.py`), which is how the "0 of the local fleet" row above closed in one change rather than ten |
+| Image-input conversion in adapters | ✅ every provider that declares `user_message_images` — 4/13 providers (anthropic, google_genai, antigravity, openrouter). The OpenAI-compatible fleet shares one converter path (`model_provider/_attachments.py`), which is how the "0 of the local fleet" row above closed in one change rather than ten |
 | Input source | 🟡 `readFile` MIME-detects files, and a client attaches media on `SendMessageRequest.attachments` — an attachment with no text is a valid turn (#838). Still no paste/URL/drag-drop |
 | Modality breadth | 🟡 PDF input where the wire declares `pdf_input` (`anthropic`, `google_genai`, `openrouter`); audio input where it declares `audio_input` (`google_genai`, `openrouter`; #830). Video: no wire carries it |
 | Output (model→media) | ✅ model-emitted audio streams as `MediaDelta` and reaches clients as `CLIENT`-audience chunks (#824); declared by `output_media` on `doubleword`, `nebius`, `nim`, `openrouter`, `ovhcloud` and `zhipuai_openai` |

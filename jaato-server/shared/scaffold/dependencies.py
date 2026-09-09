@@ -121,30 +121,35 @@ def _module_file(dotted: str) -> Optional[Path]:
     return Path(f) if f else None
 
 
-def third_party_imports(paths: List[Path]) -> List[str]:
-    """Top-level non-stdlib, non-first-party imports, parsed from source.
+def _imported_names(path: Path) -> set:
+    """Every top-level module name one file imports, parsed not imported.
 
-    Parsed rather than imported, so a package that is missing still shows up —
-    which is exactly the case worth reporting.
+    Parsing rather than importing is the point: a package that is MISSING
+    still shows up, which is exactly the case worth reporting.  A file that
+    will not parse contributes nothing rather than failing the scan.
     """
+    if not path or not path.is_file():
+        return set()
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"))
+    except SyntaxError:
+        return set()
+    names = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            names.update(a.name.split(".")[0] for a in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
+            # node.level means a relative import — first-party by definition.
+            names.add(node.module.split(".")[0])
+    return names
+
+
+def third_party_imports(paths: List[Path]) -> List[str]:
+    """The non-stdlib, non-first-party subset of what ``paths`` import."""
     stdlib = getattr(sys, "stdlib_module_names", frozenset())
     found = set()
     for p in paths:
-        if not p or not p.is_file():
-            continue
-        try:
-            tree = ast.parse(p.read_text(encoding="utf-8", errors="replace"))
-        except SyntaxError:
-            continue
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import):
-                for a in node.names:
-                    found.add(a.name.split(".")[0])
-            elif isinstance(node, ast.ImportFrom):
-                if node.level:           # relative import — first-party by definition
-                    continue
-                if node.module:
-                    found.add(node.module.split(".")[0])
+        found |= _imported_names(p)
     return sorted(n for n in found
                   if n and n not in stdlib and n not in FIRST_PARTY and not n.startswith("_"))
 

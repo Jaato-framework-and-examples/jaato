@@ -244,6 +244,12 @@ CATALOG: Dict[str, EnvClass] = {
         "the profile's own `model` field is the typed equivalent"),
     "PATH": EnvClass(AMBIENT, None,
         "the host environment being read"),
+    "PYTHONPATH": EnvClass(AMBIENT, None,
+        "the host environment being read -- `explain dependencies` reports "
+        "whether it is set, because importlib.metadata resolves a "
+        "distribution along sys.path, so a PYTHONPATH pointing at a source "
+        "checkout answers INSTEAD of the installed copy and hides a version "
+        "skew.  Never set by the framework"),
     "PROJECT_ID": EnvClass(SESSION, None,
         "the GCP project -- connection identity with no "
         "google_genai knob"),
