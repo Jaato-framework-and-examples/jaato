@@ -22,6 +22,7 @@ from .config import (
     expand_variables, _find_workspace_root, gc_profile_to_plugin_config,
     validate_profile,
 )
+from shared.completion_nudge import resolve_max_completion_nudges
 from shared.instruction_suppression import suppression_to_wire
 from jaato_sdk.plugins.base import UserCommand, CommandCompletion, CommandParameter, HelpLines
 from jaato_sdk.plugins.model_provider.types import (
@@ -3859,7 +3860,11 @@ class SubagentPlugin(DaemonForwardingMixin):
             # The flag ``session._signal_completion_called`` is flipped
             # in ``LifecycleTools._execute_signal_completion`` on
             # successful invocation.
-            MAX_COMPLETION_NUDGES = 2
+            #
+            # The budget is this subagent's PROFILE's (#919), resolved
+            # through the one shared default so this loop, the daemon's
+            # top-level guard and the embedded lead cannot drift.
+            MAX_COMPLETION_NUDGES = resolve_max_completion_nudges(profile)
             while (
                 not getattr(session, '_signal_completion_called', False)
                 and getattr(session, '_completion_nudges_fired', 0) < MAX_COMPLETION_NUDGES

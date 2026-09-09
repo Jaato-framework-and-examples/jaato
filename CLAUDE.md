@@ -381,6 +381,13 @@ completion_processors:
     phase: finalization       # finalization (default) | completeness
     max_refusals: 3           # unset = unbounded (the pre-#768 behaviour)
     on_exhausted: allow       # allow (default) | fail
+# max_completion_nudges: the OTHER direction — how many times the framework
+#   re-prompts an agent that ended its loop without calling
+#   signal_completion at all, before giving up with NudgeExhausted.  Where
+#   `max_refusals` bounds how many times the gate may BLOCK a completion,
+#   this bounds how many chances the model gets to CALL it (#919).
+#   Unset = 2, which is right for a strong tool-caller and is unchanged.
+max_completion_nudges: 4
 ```
 
 **SDK API:**
@@ -397,6 +404,61 @@ await client.create_session(profile="researcher")
 - `session.profiles` — list available profiles (→ `SessionProfilesEvent`)
 
 **Flow:** Client sends `session.new --profile researcher` → server discovers profiles from `.jaato/profiles/` → resolves `SubagentProfile` → `JaatoServer` applies profile overrides (model, provider, plugins, plugin_configs, GC) during `initialize()`.
+
+### The Completion-Nudge Budget (#919)
+
+A session whose surface carries `signal_completion` is expected to call it
+before its loop ends. When the loop settles without that call the framework
+re-prompts the model — a **nudge** — and re-enters the loop; the budget bounds
+how many times, before it gives up and emits `NudgeExhausted`.
+
+That budget was a function-local `MAX_COMPLETION_NUDGES = 2` in **three**
+files — `server/core.py` (the daemon's top-level guard),
+`jaato_embedded/client.py` (the in-process lead) and
+`shared/plugins/subagent/plugin.py` (the subagent loop). Nothing kept the three
+equal, and none was reachable from a profile — which made it the one bound in
+the completion path a deployment could not express:
+
+| bound | configurable? |
+|---|---|
+| completion-processor refusals | `max_refusals` + `on_exhausted`, per processor |
+| turns before the (sub)agent returns | `max_turns` |
+| session resource caps | `runtime_limits` |
+| **completion nudges** | **`max_completion_nudges`** |
+
+`try_completion_nudge(max_nudges)` always took the bound as an argument, so the
+plumbing was already there; what was missing was a value to pass.
+
+```yaml
+# .jaato/profiles/<agent>.yaml
+max_completion_nudges: 4      # default 2, unchanged when unset
+```
+
+**Two stays the default.** For a strong tool-caller it is right, and raising it
+globally would make weak models loop longer for everyone. The number belongs to
+the deployment: a voice agent whose audio tier hands off, writes to memory,
+narrates the write and never calls the tool routinely burns one of its two
+nudges on a redundant `enter_tier` (`already_at_tier`), leaving exactly one real
+attempt — announcing a tool instead of invoking it is a documented weakness of
+that model class, not something persona prose fixes.
+
+- **Per SESSION, not per turn** — the claim `_completion_nudges_fired` has
+  always made (#767): a turn start does not refund a nudge, or the subagent
+  loop's `while` could not terminate at all.
+- **Positive integer.** `0` is refused at load, not read as "never nudge": the
+  give-up predicate is `nudges_fired >= max`, so a budget of 0 would report
+  `NudgeExhausted` on sessions that completed **cleanly**. A deployment that
+  wants no nudging keeps `signal_completion` out of the surface.
+- **Inheritance follows `max_turns`**: child overrides outright, else the
+  minimum across the parents that declared one.
+- **One definition.** `shared/completion_nudge.py` owns
+  `DEFAULT_MAX_COMPLETION_NUDGES` and the resolver every site now calls, so the
+  three paths cannot drift again. A profile predating the field — an older
+  session snapshot, or no profile at all — resolves to the default rather than
+  raising, so an unconfigured deployment behaves exactly as before.
+  `jaato_eval.sign_off` restates the number deliberately (the eval engine must
+  not import `server.*` / `shared.*`); that copy is a reporting ceiling, and is
+  stale in exactly one direction against a profile that raised its own.
 
 ### Session Revive (waking a persisted session)
 

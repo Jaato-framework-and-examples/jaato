@@ -139,6 +139,11 @@ def _resolve_named_profile(name: str, config_root: Optional[str]) -> Dict[str, A
         "system_instructions": profile.system_instructions,
         "completion_payload_schema": profile.completion_payload_schema,
         "suppress_base_instructions": profile.suppress_base_instructions,
+        # The completion-nudge budget (#919) — forwarded so an embedded
+        # lead nudges as many times as the same profile would under the
+        # daemon.  ``None`` (the common case) means the framework default.
+        "max_completion_nudges": getattr(
+            profile, "max_completion_nudges", None),
     }
 
 
@@ -319,6 +324,7 @@ class InProcessClient:
         system_instructions: Optional[str] = None,
         completion_payload_schema: Optional[Any] = None,
         suppress_base_instructions: Any = False,
+        max_completion_nudges: Optional[int] = None,
         env_file: Optional[str] = ".env",
         project: Optional[str] = None,
         location: Optional[str] = None,
@@ -356,6 +362,12 @@ class InProcessClient:
         # embedded session matches the daemon's (ex03 persona, ex04 byte-exact).
         self._system_instructions = system_instructions
         self._completion_payload_schema = completion_payload_schema
+        # The profile's completion-nudge budget (#919), or None for the
+        # framework default.  Held rather than resolved here because the
+        # resolver lives in ``shared`` and this facade stays SDK-only-
+        # importable at module load; ``_maybe_completion_nudge`` resolves
+        # it inside the embedded-runtime path.
+        self._max_completion_nudges = max_completion_nudges
         # The profile knob that controls base-layer composition:
         # Granular base-composition knob (bool / dict / list): which framework
         # instruction pieces to drop.  ``False`` composes persona ON TOP of all
@@ -934,7 +946,16 @@ class InProcessClient:
         ``try_completion_nudge``) isn't spent. Without this an embedded
         delegation lead resumes + produces its result but never calls
         signal_completion, so SESSION_TERMINATED never fires."""
-        MAX_COMPLETION_NUDGES = 2
+        # The nudge budget is the profile's (#919), resolved through the
+        # one shared default so this lead nudges as many times as the same
+        # profile would under the daemon.  The raw-value sibling, because
+        # what crossed into this facade is a profile SPEC DICT — there is
+        # no SubagentProfile in process to hand the attribute reader.
+        from shared.completion_nudge import coerce_max_completion_nudges
+
+        MAX_COMPLETION_NUDGES = coerce_max_completion_nudges(
+            self._max_completion_nudges, where="<embedded lead>",
+        )
         lead = (
             self._embedded.get_session()
             if hasattr(self._embedded, "get_session")
@@ -1035,6 +1056,10 @@ class _InProcessSessionContext:
                 "model", "provider", "plugins", "plugin_configs",
                 "system_instructions", "completion_payload_schema",
                 "suppress_base_instructions",
+                # #919 — the completion-nudge budget.  Forwarded like every
+                # other spec field so an embedded lead nudges as many times
+                # as the same profile would under the daemon.
+                "max_completion_nudges",
             ):
                 if spec.get(key) is not None and self._kwargs.get(key) is None:
                     self._kwargs[key] = spec[key]
