@@ -1075,6 +1075,56 @@ Tools can declare semantic **traits** on their `ToolSchema` via the `traits` fie
 1. Add a `TRAIT_*` constant in `shared/plugins/model_provider/types.py` with a docstring documenting the contract
 2. Update consumers (session, plugins) to query `get_tool_traits()` for the new trait
 
+### Tool-Result Enrichment Reaches Every Dict Result (#922)
+
+`enrich_tool_result` speaks **strings**, and most tools return a **dict**, so
+something has to decide what text an enricher sees. That decision used to be
+a guess: the session enriched fields named one of six well-known names
+(`result`, `content`, `stdout`, `output`, `text`, `data`) and only from 100
+characters up. Both filters were invisible, and `store_memory` fails both —
+its text lives in `message`, and the message measured **83 characters**. So
+`memory` and `references`, the only two plugins that implement tool-result
+enrichment, never ran on the pairing they exist for (*"the agent just wrote
+down something about X; surface what we know about X"*). A catalogued
+reference matching a memory's tags 3/3 was never offered, and there was no
+error, no warning and not one trace line to say why — the plugin looked
+correctly written and simply never fired. More generally, every dict-returning
+tool had to happen to name its text one of six ways or be exempt forever.
+
+The session no longer guesses which key holds "the text":
+
+| Result shape | What the chain receives |
+|--------------|-------------------------|
+| a **string** result | the string, verbatim (unchanged) |
+| a dict from a tool declaring `TRAIT_FILE_WRITER` / `TRAIT_GREPPABLE_CONTENT` | the whole JSON (unchanged) |
+| **any other dict** | a *text view*: one `key: value` line per scalar field, then the **anchor** field's raw value |
+
+The **anchor** is the field an enriched view is written back to — the first
+present name from the conventional six (so tools already using one keep
+receiving hints exactly where they did), else the **wordiest** string field.
+Wordiest rather than longest is what stops a one-word `status: "success"`
+out-weighing a short sentence. `tool_result_text_view` /
+`apply_text_view_enrichment` (`shared/tool_result_builder.py`) are the two
+halves, and the write-back is what makes one text view serve both enricher
+shapes: whatever still carries the header is the anchor's new value, so an
+appended hint block (`memory`) and an in-place `@ref-id` expansion
+(`references`) both land on the field the tool actually used, and the header
+fields are context for matching only — never written back. A dict with no
+string field at all takes its addition under `_enrichment`.
+
+Three properties follow, each attached to a way the old path went wrong:
+
+- **No length floor.** A tag match does not need 100 characters of context to
+  be valid; the floor was aimed at semantic matching.
+- **One chain invocation per result.** The old loop ran once per matching
+  field, so a dict with both `content` and `output` collected two hint blocks.
+- **A skip is audible.** A dict carrying no text at all traces `ENRICH_SKIP`
+  naming its keys, and a run traces `ENRICH` with the anchor and the plugins
+  that contributed. Silence was half the defect.
+
+Nested payloads are deliberately not rendered into the view — handing an
+enricher a whole structured result is what the two traits above are for.
+
 ### Plugin-Level Traits
 
 Plugins themselves can declare **plugin-level traits** via a `plugin_traits` class attribute (`FrozenSet[str]`). These work like tool traits but identify *plugin* capabilities rather than individual tool behaviors.
