@@ -105,6 +105,21 @@ jobs:
   # conformance ~27s). A dedicated runner for the 1s suite would cost a
   # minute of setup to save nothing.
   #
+  # THOSE NUMBERS GO STALE, and the one that did nearly stopped this leg
+  # running at all. `shared/tests` reached 18m36s on main against the 20
+  # minute cap below -- fifteen seconds of headroom -- because
+  # test_every_guard_detects_its_own_reversion.py runs one subprocess per
+  # declared REVERSIONS entry and every guard added since has lengthened
+  # it. It cleared the WHOLE jaato-server bytecode cache before each of
+  # those subprocesses, so each one recompiled the tree for a guarantee
+  # about the single file it rewrites (#913): 16.8s per case against 8.8s
+  # with the cache warm. Scoped to that one file the same nine cases went
+  # 183s -> 110s, which takes the leg back to roughly 8 minutes.
+  #
+  # The lesson for whoever balances these legs next: this leg's cost is a
+  # FUNCTION OF HOW MANY GUARDS THE REPO HAS, so it grows on commits that
+  # touch nothing here. Re-measure it, do not assume the numbers above.
+  #
   # `--continue-on-collection-errors` so a single bad import (e.g. a stale
   # symbol) doesn't mask the rest of the suite.
   #
@@ -151,6 +166,11 @@ jobs:
       - name: Production build
         working-directory: jaato-web
         run: npx vite build
+      # `--with-deps` shells out to apt-get update, so this job needs the
+      # same drop as the suite job -- see the note there.
+      - name: Drop the unused third-party apt sources
+        run: sudo rm -f /etc/apt/sources.list.d/google-chrome.list
+                        /etc/apt/sources.list.d/google-chrome.sources
       - name: Install Playwright Chromium
         working-directory: jaato-web
         run: npx playwright install --with-deps chromium
@@ -279,6 +299,23 @@ jobs:
           cache-dependency-path: |
             jaato-sdk/pyproject.toml
             jaato-server/pyproject.toml
+      # The runner image ships an apt source for Google Chrome that nothing
+      # here installs from -- `libkrb5-dev` and `graphviz` come from Ubuntu's
+      # archive, and Playwright fetches its own browser build from its own
+      # CDN (`--with-deps` only wants Ubuntu's shared libraries). But
+      # `apt-get update` exits 100 if ANY configured source is broken, so an
+      # index race on dl.google.com takes down every leg that touches apt.
+      # It did, on 2026-09-09: `Hash Sum mismatch` on
+      # chrome-stable/deb/dists/stable/main/binary-amd64/Packages.gz,
+      # reproduced identically on a re-run, red on five suite legs plus
+      # web-client (whose `playwright install --with-deps` shells out to
+      # apt), while nothing in the tree had changed.
+      # Dropping the source we do not use makes `apt-get update` depend only
+      # on the Ubuntu archive -- so it still fails loudly if THAT breaks,
+      # which is the failure worth hearing about.
+      - name: Drop the unused third-party apt sources
+        run: sudo rm -f /etc/apt/sources.list.d/google-chrome.list
+                        /etc/apt/sources.list.d/google-chrome.sources
       - name: System build deps (gssapi / diagrams)
         run: sudo apt-get update && sudo apt-get install -y libkrb5-dev graphviz
       - name: Install (editable, all extras)
