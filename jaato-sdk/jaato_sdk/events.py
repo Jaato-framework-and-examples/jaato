@@ -70,7 +70,17 @@ from pydantic import BaseModel, ConfigDict, Field
 # declare ``min_protocol_version="1.4"``: against a 1.3 daemon the
 # fields are simply never sent, which is indistinguishable from a model
 # that chose not to speak.
-PROTOCOL_VERSION = "1.4"
+# 1.5 (2026-09-09): additive optional ``attachments`` on
+# InjectPromptRequest, so the two RESUME verbs (``session.wake`` and
+# ``inject_prompt``) carry the same binary content ``send_message``
+# already accepts.  Before it, a session whose input is audio (or an
+# image, or a PDF) could be STARTED with that content and never driven
+# again with it -- the resume path was closed to exactly the sessions
+# #830 made possible.  Older daemons ignore the field, which for BYTES
+# is not a benign no-op: a client that sends attachments must declare
+# ``min_protocol_version="1.5"`` (the SDK refuses the call rather than
+# letting the payload be silently dropped).
+PROTOCOL_VERSION = "1.5"
 
 
 # =============================================================================
@@ -1968,6 +1978,21 @@ class InjectPromptRequest(Event):
     text: str = ""
     source_type: str = "user"  # "user" | "child" | "system" | "event" | "parent"
     source_id: Optional[str] = None  # caller identifier for telemetry / logs
+    #: Binary user content in the same canonical wire shape
+    #: :class:`SendMessageRequest` accepts (``{mime_type, data: base64-str,
+    #: display_name, attachment_id}``), normalised client-side by
+    #: ``IPCClient._normalize_attachments``.  Protocol 1.5+.
+    #:
+    #: AN ATTACHMENT-BEARING INJECT IS IDLE-ONLY.  The two outcomes of an
+    #: inject are "drive a turn" and "queue behind the running one", and
+    #: only the first can carry bytes: a queued message is folded into the
+    #: running turn as TEXT (appended to a tool result's model suffix, or
+    #: replayed as a user text message), and there is nowhere in either
+    #: shape to put an ``inline_data`` part.  So the daemon offers an
+    #: attachment-bearing message with ``require_idle``: a busy target
+    #: answers ``"busy"`` with NOTHING enqueued, rather than accepting the
+    #: message and dropping its payload.  Retry when the target goes idle.
+    attachments: List[Dict[str, Any]] = Field(default_factory=list)
     #: Correlates this inject with the :class:`InjectPromptResultEvent` that
     #: answers it.  ``None`` (the default, and what every pre-1.3 client
     #: sends) keeps the historical fire-and-forget behaviour: the daemon
@@ -1989,6 +2014,11 @@ class InjectPromptResultEvent(Event):
     * ``"accepted"``    — the target was idle, so a turn was STARTED on it.
     * ``"queued"``      — the target is mid-turn; its running turn will
       drain the message.
+    * ``"busy"``        — the target is mid-turn and NOTHING was enqueued.
+      Reachable when the inject carried ``attachments``: the queued path
+      folds a message into the running turn as text and cannot carry bytes,
+      so an attachment-bearing inject is offered idle-only rather than
+      accepted with its payload dropped.  Retry-safe; retry when idle.
     * ``"terminated"``  — the target is loaded but terminal and will run no
       further turns.  Reported from the target's own terminal stamp, never
       inferred from silence.

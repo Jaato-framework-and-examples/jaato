@@ -59,7 +59,13 @@ def _sm(running):
     sm._lock = threading.RLock()
     sm.drove = []
     sm.offered = offered
-    sm.send_message_to_session = lambda sid, text: sm.drove.append((sid, text)) or True
+    # ``attachments`` is keyword-only in practice at this call site (#845) and
+    # defaults to empty, so the double records it rather than refusing it --
+    # a stub that cannot be called the way production calls it tests nothing.
+    sm.send_message_to_session = (
+        lambda sid, text, attachments=None:
+        sm.drove.append((sid, text, tuple(attachments or ()))) or True
+    )
     return sm
 
 
@@ -67,7 +73,7 @@ def test_an_idle_target_is_driven_not_queued():
     """The watchdog's case: nothing was listening, so nothing happened."""
     sm = _sm(running=False)
     assert sm.inject_prompt_to_session("s-1", "are you stuck?") is True
-    assert sm.drove == [("s-1", "are you stuck?")]
+    assert sm.drove == [("s-1", "are you stuck?", ())]
 
 
 def test_a_busy_target_is_still_queued_not_preempted():
@@ -89,7 +95,7 @@ def test_the_decision_ignores_the_daemon_side_replica():
     """
     idle = _sm(running=False)          # replica says busy, session says idle
     assert idle.inject_prompt_to_session("s-1", "wake up") is True
-    assert idle.drove == [("s-1", "wake up")], "followed the stale replica"
+    assert idle.drove == [("s-1", "wake up", ())], "followed the stale replica"
 
     busy = _sm(running=True)           # replica says idle, session says busy
     assert busy.inject_prompt_to_session("s-1", "steer") is True

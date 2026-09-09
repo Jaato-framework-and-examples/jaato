@@ -72,7 +72,7 @@ def _sm(*sessions, on_disk=(), disk_by_workspace=None):
         sm.delivered.append(sid) or True
     )
     sm.send_message_to_session = (
-        lambda sid, t: sm.delivered.append(sid) or True
+        lambda sid, t, attachments=None: sm.delivered.append(sid) or True
     )
     sm._get_persisted_sessions = lambda workspace_path=None: list(
         disk.get(workspace_path, []))
