@@ -278,12 +278,34 @@ class ResponsesTransport:
         """
         if self._apply_audio_event(etype, event, acc, on_chunk):
             return
+        if self._apply_call_event(etype, event, acc):
+            return
         if etype == "response.output_text.delta":
             delta = _get(event, "delta") or ""
             if delta:
                 acc.add_text(_get(event, "output_index") or 0, delta)
                 on_chunk(delta)
-        elif etype == "response.output_item.added":
+        elif etype in _THINKING_EVENTS and self._enable_thinking:
+            delta = _get(event, "delta") or ""
+            if delta:
+                acc.add_thinking(delta)
+                if on_thinking:
+                    on_thinking(delta)
+
+    def _apply_call_event(
+        self, etype: str, event: Any, acc: _ResponsesAccumulator,
+    ) -> bool:
+        """Route a tool-call event into the accumulator.
+
+        Three events build one call: the item announcement carries the
+        ``call_id`` and name, the argument deltas build the JSON string,
+        and the ``.done`` event replaces it with the API's own final copy
+        — authoritative, because it cannot have lost a delta.
+
+        Returns:
+            True when the event was a tool-call event and was handled.
+        """
+        if etype == "response.output_item.added":
             item = _get(event, "item")
             index = _get(event, "output_index") or 0
             acc.open_item(index, item)
@@ -293,18 +315,16 @@ class ResponsesTransport:
                     f"id={_get(item, 'call_id')!r} "
                     + wire_name_trace_fields(_get(item, "name") or "")
                 )
-        elif etype == "response.function_call_arguments.delta":
+            return True
+        if etype == "response.function_call_arguments.delta":
             acc.add_arguments(
                 _get(event, "output_index") or 0, _get(event, "delta") or "")
-        elif etype == "response.function_call_arguments.done":
+            return True
+        if etype == "response.function_call_arguments.done":
             acc.set_arguments(
                 _get(event, "output_index") or 0, _get(event, "arguments"))
-        elif etype in _THINKING_EVENTS and self._enable_thinking:
-            delta = _get(event, "delta") or ""
-            if delta:
-                acc.add_thinking(delta)
-                if on_thinking:
-                    on_thinking(delta)
+            return True
+        return False
 
     def _apply_audio_event(
         self,

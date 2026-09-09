@@ -489,52 +489,23 @@ class OpenAIProvider(ResponsesTransport, OpenAICompatProvider):
             APIKeyNotFoundError: If no key is found and the endpoint is
                 not a local proxy (unless ``allow_interactive``).
         """
-        import os
-        from .auth import try_load_credentials_with_reason
-
-        if config is not None:
-            profile_key = config.api_key or (
-                (config.extra or {}).get("api_key"))
-            if profile_key:
-                if on_message:
-                    on_message("Found OpenAI API key (profile config)")
-                return True
-
-        for var in (ENV_OPENAI_API_KEY, ENV_VENDOR_API_KEY):
-            if os.environ.get(var):
-                if on_message:
-                    on_message(f"Found OpenAI API key ({var})")
-                return True
-
-        creds, load_error = try_load_credentials_with_reason()
-        if creds and creds.api_key:
-            if on_message:
-                on_message("Found OpenAI API key (stored credentials)")
+        if _profile_api_key(config):
+            _say(on_message, "Found OpenAI API key (profile config)")
             return True
 
-        if load_error:
-            if on_message:
-                on_message(
-                    "OpenAI credentials file found but could not be loaded: "
-                    f"{load_error}"
-                )
-                on_message(
-                    "Repair or delete that file, or set "
-                    f"{ENV_OPENAI_API_KEY} instead."
-                )
-            if not allow_interactive:
-                raise APIKeyNotFoundError(
-                    checked_locations=get_checked_credential_locations(
-                        config=config)
-                )
-            return False
+        env_var = _env_api_key_var()
+        if env_var:
+            _say(on_message, f"Found OpenAI API key ({env_var})")
+            return True
 
-        if is_self_hosted(resolve_base_url()):
-            if on_message:
-                on_message(
-                    f"Local OpenAI-compatible proxy ({resolve_base_url()}), "
-                    "no API key required"
-                )
+        if _stored_api_key_found(on_message):
+            return True
+
+        base_url = resolve_base_url()
+        if is_self_hosted(base_url):
+            _say(on_message,
+                 f"Local OpenAI-compatible proxy ({base_url}), "
+                 "no API key required")
             return True
 
         if not allow_interactive:
@@ -567,6 +538,60 @@ class OpenAIProvider(ResponsesTransport, OpenAICompatProvider):
             pass
 
         return "OpenAI API key"
+
+
+def _say(on_message, text: str) -> None:
+    """Report a credential-search step, when the caller wants to hear it."""
+    if on_message:
+        on_message(text)
+
+
+def _profile_api_key(config: Optional[ProviderConfig]) -> Optional[str]:
+    """The profile's key, from either place the daemon may have put it.
+
+    ``pass://`` secrets are expanded into the verify-time ``ProviderConfig``
+    by the daemon, so this is a real source at the pre-init gate and not
+    merely a later override.
+    """
+    if config is None:
+        return None
+    return config.api_key or (config.extra or {}).get("api_key")
+
+
+def _env_api_key_var() -> Optional[str]:
+    """The name of the env var holding a key, or ``None``.
+
+    The NAME rather than the value: the caller reports which variable was
+    used, and a credential must not pass through a log line to do it.
+    """
+    import os
+    for var in (ENV_OPENAI_API_KEY, ENV_VENDOR_API_KEY):
+        if os.environ.get(var):
+            return var
+    return None
+
+
+def _stored_api_key_found(on_message) -> bool:
+    """Whether the credential FILE yielded a key, reporting a broken one.
+
+    "Present but corrupt" and "not configured" are different problems with
+    different fixes, so a file that exists and will not load says so
+    instead of being reported as an absence.
+    """
+    from .auth import try_load_credentials_with_reason
+
+    credentials, load_error = try_load_credentials_with_reason()
+    if credentials and credentials.api_key:
+        _say(on_message, "Found OpenAI API key (stored credentials)")
+        return True
+    if load_error:
+        _say(on_message,
+             f"OpenAI credentials file found but could not be loaded: "
+             f"{load_error}")
+        _say(on_message,
+             f"Repair or delete that file, or set {ENV_OPENAI_API_KEY} "
+             f"instead.")
+    return False
 
 
 def _parse_structured_output(response) -> None:

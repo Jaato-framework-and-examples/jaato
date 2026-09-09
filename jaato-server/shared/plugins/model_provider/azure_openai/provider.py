@@ -404,8 +404,7 @@ class AzureOpenAIProvider(OpenAICompatProvider):
             APIKeyNotFoundError: On the key path, when no key is found
                 (unless ``allow_interactive``).
         """
-        import os
-        from .auth import azure_identity_available, try_load_credentials_with_reason
+        from .auth import azure_identity_available
 
         extra = (config.extra if config is not None else None) or {}
         method = (
@@ -415,29 +414,8 @@ class AzureOpenAIProvider(OpenAICompatProvider):
         if method == AUTH_AAD:
             return self._verify_entra(on_message, azure_identity_available())
 
-        profile_key = (config.api_key if config is not None else None) or \
-            extra.get("api_key")
-        if profile_key:
-            if on_message:
-                on_message("Found Azure OpenAI key (profile config)")
+        if _key_is_configured(config, extra, on_message):
             return True
-
-        for var in (ENV_AZURE_API_KEY, ENV_VENDOR_API_KEY):
-            if os.environ.get(var):
-                if on_message:
-                    on_message(f"Found Azure OpenAI key ({var})")
-                return True
-
-        creds, load_error = try_load_credentials_with_reason()
-        if creds and creds.api_key:
-            if on_message:
-                on_message("Found Azure OpenAI key (stored credentials)")
-            return True
-        if load_error and on_message:
-            on_message(
-                "Azure OpenAI credentials file found but could not be "
-                f"loaded: {load_error}"
-            )
 
         if not allow_interactive:
             raise APIKeyNotFoundError(
@@ -486,6 +464,45 @@ class AzureOpenAIProvider(OpenAICompatProvider):
             pass
 
         return "Azure OpenAI key"
+
+
+def _say(on_message, text: str) -> None:
+    """Report a credential-search step, when the caller wants to hear it."""
+    if on_message:
+        on_message(text)
+
+
+def _key_is_configured(config, extra, on_message) -> bool:
+    """Whether a resource key is reachable, naming where it came from.
+
+    Profile knob (which the daemon may have expanded from a ``pass://``
+    URI) → either env spelling → the stored credential file.  A file that
+    exists and will not load says so: "present but corrupt" and "not
+    configured" have different fixes.
+    """
+    import os
+    from .auth import try_load_credentials_with_reason
+
+    profile_key = (config.api_key if config is not None else None) or \
+        extra.get("api_key")
+    if profile_key:
+        _say(on_message, "Found Azure OpenAI key (profile config)")
+        return True
+
+    for var in (ENV_AZURE_API_KEY, ENV_VENDOR_API_KEY):
+        if os.environ.get(var):
+            _say(on_message, f"Found Azure OpenAI key ({var})")
+            return True
+
+    credentials, load_error = try_load_credentials_with_reason()
+    if credentials and credentials.api_key:
+        _say(on_message, "Found Azure OpenAI key (stored credentials)")
+        return True
+    if load_error:
+        _say(on_message,
+             f"Azure OpenAI credentials file found but could not be "
+             f"loaded: {load_error}")
+    return False
 
 
 def create_provider() -> AzureOpenAIProvider:
