@@ -1612,14 +1612,19 @@ class SubagentProfile:
     spawn_payload_schema: Optional[Union[str, Dict[str, Any]]] = field(
         default=None, metadata={
         "description": "JSON Schema constraining the spawn-time payload "
-        "(input boundary), mirror of completion_payload_schema. Inline dict or "
-        "a .jaato/completion_schemas/ path. TYPE EVERY PROPERTY `string`: "
-        "agent_params cross the IPC wire as `key=value` argv tokens, so the "
-        "daemon validates strings and a property typed integer/number/boolean/"
-        "object/array is refused on EVERY spawn (add a `pattern` for shape and "
-        "parse in the prefetch). The refusal is logged daemon-side and not "
-        "answered, so the caller sees a 60s SessionNotConfirmed rather than the "
-        "reason — `jaato-scaffold validate` reports it as "
+        "(input boundary), mirror of completion_payload_schema in everything "
+        "but the type system. Inline dict or a .jaato/spawn_schemas/ "
+        "path (spawn_schema_loader resolves it; the field previously named "
+        "completion_schemas/ here, which is the OTHER schema's root). "
+        "TYPE EVERY PROPERTY `string`: agent_params cross the IPC wire "
+        "as `key=value` argv tokens, so the daemon validates strings and a "
+        "property typed integer/number/boolean/object/array is refused on "
+        "EVERY spawn (add a `pattern` for shape and parse in the prefetch). "
+        "#883 ratified that as the contract, so BOTH boundaries — this one "
+        "and the model-driven spawn_subagent call, where a model emitting "
+        "`{\"n\": 1}` used to hand the validator a real int — validate the "
+        "wire's string view, and a refusal caused by the schema says so. "
+        "`jaato-scaffold validate` reports it before a spawn as "
         "spawn_schema_type_unreachable."})
     # Unified completion-processor surface (server 0.6.125+).  Replaces
     # the prior split between ``completion_artifacts`` (renderers that

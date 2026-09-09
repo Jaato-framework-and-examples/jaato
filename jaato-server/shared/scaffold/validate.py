@@ -25,6 +25,11 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from shared.plugins.model_provider.base import KNOB_LAYERS
+# The wire-type predicate lives with the contract it enforces, so this
+# static check and the two runtime spawn boundaries cannot drift apart
+# about what "string-shaped" means.  #883 ratified that contract; the
+# loader's module notes carry the decision and the rejected alternatives.
+from shared.spawn_schema_loader import unreachable_spawn_types
 from jaato_sdk.plugins.model_provider.types import DISCOVERABILITY_EAGER
 from . import introspect
 
@@ -286,13 +291,6 @@ def validate_profile(
     return out
 
 
-#: JSON-Schema types a spawn payload can actually carry over the IPC wire.
-#: ``agent_params`` are serialised as ``key=value`` argv tokens
-#: (``jaato_sdk/client/ipc.py``: ``args.append(f"{key}={value}")``), so every
-#: value reaches the daemon as a STRING.
-_WIRE_SAFE_SPAWN_TYPES = frozenset({"string", "null"})
-
-
 def _load_spawn_schema(profile, config_root: str):
     """Resolve a profile's ``spawn_payload_schema`` to a dict, or None.
 
@@ -334,6 +332,14 @@ def _check_spawn_schema_wire_types(profiles, config_root: str, out) -> None:
     ``iteration: {type: integer}``, passed ``iteration=1`` as an int, and the
     daemon rejected ``'1' is not of type 'integer'`` on every attempt.
 
+    #883 ratified the wire's behaviour as the contract, which makes this a
+    check on a stated rule rather than a warning about an accident.  The two
+    runtime boundaries now enforce the same rule
+    (``spawn_schema_loader.validate_spawn_params``) and append
+    ``spawn_type_contract_note`` to the refusal, so an author who never runs
+    the validator still gets told the profile is at fault.  This check remains
+    the cheap half: it fires without a spawn.
+
     Args:
         profiles: Mapping of profile name -> resolved profile object.
         config_root: Directory that path-form schemas resolve against.
@@ -343,14 +349,7 @@ def _check_spawn_schema_wire_types(profiles, config_root: str, out) -> None:
         schema = _load_spawn_schema(profile, config_root)
         if not isinstance(schema, dict):
             continue
-        for key, spec in sorted((schema.get("properties") or {}).items()):
-            if not isinstance(spec, dict):
-                continue
-            declared = spec.get("type")
-            types = {declared} if isinstance(declared, str) else set(declared or ())
-            offending = sorted(t for t in types if t not in _WIRE_SAFE_SPAWN_TYPES)
-            if not offending:
-                continue
+        for key, offending in sorted(unreachable_spawn_types(schema).items()):
             out.append(Diagnostic(
                 "error", "spawn_schema_type_unreachable",
                 f"spawn_payload_schema property '{key}' is typed "
