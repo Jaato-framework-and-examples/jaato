@@ -461,13 +461,12 @@ BASELINE: Dict[str, int] = {
     "jaato-server/shared/scaffold/build.py::_new_profile_set": 26,
     "jaato-server/shared/scaffold/explain.py::event": 21,
     "jaato-server/shared/scaffold/explain.py::events": 17,
-    "jaato-server/shared/scaffold/explain.py::plugin": 17,
     "jaato-server/shared/scaffold/explain.py::profile_cost": 23,
     "jaato-server/shared/scaffold/explain.py::provider": 16,
     "jaato-server/shared/scaffold/explain.py::sets": 17,
     "jaato-server/shared/scaffold/introspect.py::_env_reads": 21,
     "jaato-server/shared/scaffold/introspect.py::events": 32,
-    "jaato-server/shared/scaffold/introspect.py::plugins": 23,
+    "jaato-server/shared/scaffold/introspect.py::plugins": 21,
     "jaato-server/shared/scaffold/validate.py::_check_prefetch_directives": 18,
     # 70 -> 68: the provider branch moved out to
     # `_resolve_and_check_provider`.  Ratcheted down, per the guard.

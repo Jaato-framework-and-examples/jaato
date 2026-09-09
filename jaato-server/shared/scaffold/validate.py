@@ -20,6 +20,7 @@ exists to surface.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -266,11 +267,14 @@ def validate_profile(
             # Non-provider plugin config (permission / cli / notebook / …):
             # validate top-level knob NAMES against the plugin's declared
             # get_config_schema (a mistyped knob is silently ignored at
-            # runtime otherwise).  Nested / free-form sub-structures — e.g.
+            # runtime otherwise), and each declared knob's VALUE against the
+            # ``enum`` / ``type`` that same schema publishes (#925) — a knob
+            # violating its own declared enum used to validate clean and then
+            # fall back silently.  Nested / free-form sub-structures — e.g.
             # ``permission.policy`` tree, ``permission.evaluators`` map — are
-            # NOT descended by the generic name check; only the top-level knob
-            # names are.  A knob whose VALUE shape decides behaviour badly
-            # enough to earn a descent registers one in ``_PLUGIN_VALUE_CHECKS``.
+            # still NOT descended; only top-level knobs are.  A knob whose
+            # STRUCTURE decides behaviour badly enough to need more than a
+            # declared type registers a check in ``_PLUGIN_VALUE_CHECKS``.
             _validate_plugin_knobs(cfg_name, cfg, plugins, add)
             _check_plugin_knob_values(cfg_name, cfg, add)
             continue
@@ -858,29 +862,133 @@ def _check_secret_scrub(profile, add):
                 where=where)
 
 
-def _validate_plugin_knobs(cfg_name, cfg, plugins, add):
-    """Flag top-level knob names a non-provider plugin does not declare.
+# A declared type token → the predicate a value must satisfy.  Two
+# vocabularies reach here and both are the plugin author's own: JSON Schema
+# (``integer`` / ``boolean`` / ``array`` / ``object``) from a raw-dict
+# ``get_config_schema``, and Python-ish names (``int`` / ``bool`` / ``dict``)
+# from the ``PluginSetting`` object form.  A token in neither is UNKNOWN and
+# checks nothing — the table is a source of findings, never of guesses.
+#
+# ``bool`` is excluded from the numeric predicates deliberately: Python makes
+# ``True`` an ``int``, so ``timeout: true`` would otherwise satisfy a knob
+# declared ``integer`` — which is exactly the silent-ignore shape this check
+# exists to catch.
+_KNOB_TYPE_PREDICATES = {
+    "string":  lambda v: isinstance(v, str),
+    "str":     lambda v: isinstance(v, str),
+    "integer": lambda v: isinstance(v, int) and not isinstance(v, bool),
+    "int":     lambda v: isinstance(v, int) and not isinstance(v, bool),
+    "number":  lambda v: isinstance(v, (int, float)) and not isinstance(v, bool),
+    "float":   lambda v: isinstance(v, (int, float)) and not isinstance(v, bool),
+    "boolean": lambda v: isinstance(v, bool),
+    "bool":    lambda v: isinstance(v, bool),
+    "array":   lambda v: isinstance(v, (list, tuple)),
+    "list":    lambda v: isinstance(v, (list, tuple)),
+    "object":  lambda v: isinstance(v, dict),
+    "dict":    lambda v: isinstance(v, dict),
+    "null":    lambda v: v is None,
+}
 
-    Uses the plugin's introspected ``get_config_schema`` (``config_keys``).
-    Only validates when the plugin declares a schema — a plugin that declares
-    none opts out (we cannot tell a typo from an accepted free-form key).
-    Emits ``warn`` (not ``error``): a plugin's schema may be incomplete, so a
-    hard failure would risk false positives; the signal still surfaces likely
-    typos (e.g. ``evaluatorss``) which are silently ignored at runtime.
+# ``scheme://…`` — a secret URI (``pass://``, ``vault://``) the daemon
+# resolves at spawn, or a plain URL.
+_KNOB_URI_RE = re.compile(r"^[a-z][a-z0-9_+.-]*://")
+
+
+def _knob_value_is_deferred(value) -> bool:
+    """True when a knob's value is not this validator's to judge.
+
+    A ``${VAR}`` placeholder and a ``scheme://`` secret URI are both resolved
+    LATER — by ``expand_variables`` at session-prep, against an environment
+    the validator does not have.  Their literal form is a ``str`` whatever the
+    knob declares, so checking it would report ``timeout: ${HTTP_TIMEOUT}``
+    as a type error and ``lookup_strategy: ${STRATEGY}`` as an enum
+    violation.  Deferring matches what ``subagent.config`` already does at
+    every other boundary that meets an unexpanded value.
+    """
+    return isinstance(value, str) and (
+        "${" in value or bool(_KNOB_URI_RE.match(value)))
+
+
+def _check_knob_value(cfg_name, key, value, setting, add):
+    """Check one knob's VALUE against the plugin's own declared schema (#925).
+
+    Two findings, and their severities differ because the declarations differ
+    in strength:
+
+    * ``invalid_knob_value`` (**error**) — the value is outside the knob's
+      declared ``enum``.  A plugin that spells out ``["memory","file",
+      "hybrid"]`` has left nothing to be generous about, and the runtime
+      consequence is the silent-fallback shape validate exists to catch:
+      ``todo.storage_type: sqlite`` raises inside ``create_storage``, is
+      caught, printed to daemon stdout, and replaced with in-memory storage —
+      so an operator who asked for persistence gets none and nothing fails.
+    * ``knob_type_mismatch`` (**warn**) — the value does not match the
+      declared ``type``.  Softer on purpose: YAML scalar typing is easy to
+      trip over (a quoted ``"30"``), a plugin may coerce, and a declared type
+      can be an incomplete summary of what the knob accepts.
+
+    Both are generic, driven by the declaration a plugin already publishes, so
+    an OUT-OF-TREE plugin gets them with nothing to register — unlike
+    ``_PLUGIN_VALUE_CHECKS``, which is a hardcoded jaato-server dict keyed by
+    plugin name and therefore unreachable from a third-party distribution.
+    That dict stays for genuinely structural knobs
+    (``template.file_conventions``), which no declared type can describe.
+    """
+    where = f"plugin_configs.{cfg_name}.{key}"
+    # ``None`` is "unset", not "wrongly typed" — many knobs default to it.
+    if value is None or _knob_value_is_deferred(value):
+        return
+    if setting.enum is not None and value not in setting.enum:
+        valid = ", ".join(repr(c) for c in setting.enum)
+        add("error", "invalid_knob_value",
+            f"{cfg_name}.{key} = {value!r} is not one of the values the "
+            f"plugin declares ({valid}) — the value is not rejected at "
+            f"runtime, it is silently replaced by a fallback", where=where)
+        return
+    predicates = [_KNOB_TYPE_PREDICATES[tok]
+                  for tok in setting.type.split("|")
+                  if tok in _KNOB_TYPE_PREDICATES]
+    if not predicates:
+        return          # undeclared or unrecognised type — nothing asserted
+    if not any(pred(value) for pred in predicates):
+        add("warn", "knob_type_mismatch",
+            f"{cfg_name}.{key} = {value!r} ({type(value).__name__}) does not "
+            f"match the declared type '{setting.type}' — assigned without "
+            f"coercion at runtime and carried downstream", where=where)
+
+
+def _validate_plugin_knobs(cfg_name, cfg, plugins, add):
+    """Flag top-level knob names — and values — a non-provider plugin rejects.
+
+    Uses the plugin's introspected ``get_config_schema``
+    (``config_settings``).  Only validates when the plugin declares a schema —
+    a plugin that declares none opts out (we cannot tell a typo from an
+    accepted free-form key).
+
+    An unknown NAME emits ``warn`` (not ``error``): a plugin's schema may be
+    incomplete, so a hard failure would risk false positives; the signal still
+    surfaces likely typos (e.g. ``evaluatorss``) which are silently ignored at
+    runtime.  That generosity does not carry over to a declared knob's VALUE —
+    see :func:`_check_knob_value`, which is where a declared ``enum`` or
+    ``type`` is actually checked.  Nested / free-form sub-structures are still
+    not descended: only a top-level knob's own scalar shape is judged.
     """
     if not isinstance(cfg, dict):
         return
     pinfo = plugins.get(cfg_name)
-    if pinfo is None or not pinfo.config_keys:
+    if pinfo is None or not pinfo.config_settings:
         return
-    known = set(pinfo.config_keys)
-    for key in cfg:
-        if key not in known:
-            valid = ", ".join(sorted(known))
+    declared = {s.name: s for s in pinfo.config_settings}
+    for key, value in cfg.items():
+        setting = declared.get(key)
+        if setting is None:
+            valid = ", ".join(sorted(declared))
             add("warn", "unknown_knob",
                 f"'{key}' is not a declared {cfg_name} config knob "
                 f"(silently ignored at runtime; known: {valid})",
                 where=f"plugin_configs.{cfg_name}.{key}")
+            continue
+        _check_knob_value(cfg_name, key, value, setting, add)
 
 
 def _check_template_routing(cfg, add):
