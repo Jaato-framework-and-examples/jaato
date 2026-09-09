@@ -202,9 +202,11 @@ BASELINE: Dict[str, int] = {
     # loop gained that decision but handed both of its provider calls to
     # _complete_parts_turn and its two text emissions to
     # _emit_batched_response_text, so it came down rather than up
-    # (36 -> 31).
+    # (36 -> 31).  Down one more in #913, which moved the parts loop's
+    # cap-gate-append onto the shared _append_tool_results_to_history so
+    # the terminal signal_completion path writes history the same way.
     "jaato-server/shared/jaato_session.py::JaatoSession._run_chat_loop": 86,
-    "jaato-server/shared/jaato_session.py::JaatoSession._run_chat_loop_with_parts": 31,
+    "jaato-server/shared/jaato_session.py::JaatoSession._run_chat_loop_with_parts": 30,
     "jaato-server/shared/jaato_session.py::JaatoSession._send_tool_results_and_continue": 27,
     "jaato-server/shared/jaato_session.py::JaatoSession._track_activated_tools_in_budget": 20,
     "jaato-server/shared/jaato_session.py::JaatoSession._update_conversation_budget": 37,

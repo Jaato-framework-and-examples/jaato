@@ -125,6 +125,7 @@ from jaato_sdk.plugins.model_provider.types import (
     TurnOutcome,
     TurnResult,
     replay_excerpt,
+    session_completed_call_error,
     tool_result_is_error,
     tool_result_status,
     unexecuted_call_error,
@@ -6003,6 +6004,14 @@ NOTES
         # retry signal_completion with a corrected payload.
         if getattr(self, "_signal_completion_called", False):
             final_text = ''.join(accumulated_text) if accumulated_text else ""
+            # Skipping the continuation must not skip the BOOKKEEPING it
+            # happened to carry.  ``_send_tool_results_and_continue`` was
+            # the only writer of this batch's results into history, so
+            # returning here left a dangling ``tool_calls`` block and
+            # every later request on this session -- a further
+            # ``send_message``, or a ``session.wake`` revive -- 400'd
+            # (#913).  Record them, then return.
+            self._record_terminal_tool_results(tool_results)
             self._trace(
                 "SIGNAL_COMPLETION_TERMINATES_TURN: skipping continuation "
                 "(spur + model round-trip) — session is over"
@@ -8794,12 +8803,9 @@ NOTES
         Appends tool results to session history as a TOOL message, then
         calls ``provider.complete()`` with the full history.
         """
-        # Proactive size guard: cap results before they enter history
-        tool_results = self._cap_tool_results(tool_results)
-        # Append tool results to session history
-        tool_results = self._gate_tool_results_for_active_modalities(tool_results)
-        tool_result_parts = [Part(function_response=r) for r in tool_results]
-        self._history.append(Message(role=Role.TOOL, parts=tool_result_parts))
+        # Cap, gate and append -- the one writer of executed results
+        # into history, shared with the terminal path (#913).
+        tool_results = self._append_tool_results_to_history(tool_results)
 
         # Probe B (force_narration_between_tools, 2026-06-09).  Empirical
         # finding from kb cascade context-stage falsification on
@@ -9282,6 +9288,110 @@ NOTES
             f"{[fc.name for fc in fcs]}"
         )
         return len(fcs)
+
+    def _append_tool_results_to_history(
+        self, tool_results: List[ToolResult]
+    ) -> List[ToolResult]:
+        """Cap, modality-gate and append tool results as one ``TOOL`` message.
+
+        THE INVARIANT (stated in full on
+        :meth:`_reconcile_unanswered_calls`): every ``tool_use`` block in
+        history must have a matching ``tool_result``.  This is the single
+        place that discharges it for results that were actually produced,
+        so every path that executes a tool group writes history the same
+        way -- whether or not it goes on to ask the model for a
+        continuation.
+
+        The two steps before the append are not incidental:
+
+        * :meth:`_cap_tool_results` bounds an oversized payload *before*
+          it enters history, rather than leaving GC to evict it after.
+        * :meth:`_gate_tool_results_for_active_modalities` strips
+          attachments the active model cannot consume, replacing them
+          with the withheld note (#847).
+
+        Args:
+            tool_results: Results for one executed tool group.
+
+        Returns:
+            The results as they were written -- capped and gated -- so a
+            caller that also sends them to the provider sends exactly
+            what history holds.
+        """
+        tool_results = self._cap_tool_results(tool_results)
+        tool_results = self._gate_tool_results_for_active_modalities(tool_results)
+        self._history.append(Message(
+            role=Role.TOOL,
+            parts=[Part(function_response=r) for r in tool_results],
+        ))
+        return tool_results
+
+    def _record_terminal_tool_results(
+        self, tool_results: List[ToolResult]
+    ) -> None:
+        """Write the results of the batch that ended the session (#913).
+
+        ``signal_completion`` terminates the turn: the continuation --
+        :meth:`_send_tool_results_and_continue` -- is skipped, and with
+        it the model round-trip that would have been wasted.  But that
+        continuation was also the ONLY thing that wrote the batch's
+        results into history, so skipping it left the conversation
+        ending on an assistant message whose ``tool_calls`` nothing
+        answers.  Every OpenAI/Azure-shaped upstream rejects that on the
+        *next* request::
+
+            An assistant message with 'tool_calls' must be followed by
+            tool messages responding to those tool_call_ids
+
+        which made a completed session impossible to drive again --
+        neither by a further :meth:`send_message` nor by the
+        ``session.wake`` revive path the framework ships for exactly
+        that purpose, and with no error at wake time to say so.  The
+        optimisation and the bookkeeping were coupled; only the
+        optimisation was ever intended.
+
+        The results are therefore recorded here instead.  The round-trip
+        stays skipped -- the session IS over as far as this turn goes --
+        and the *history* is well-formed whether or not another turn
+        ever happens, which is what makes "complete every turn to
+        enforce a contract, then keep talking" a usable pattern rather
+        than a choice between typed payloads and a second turn.
+
+        Calls the batch never dispatched are answered too.
+        ``signal_completion`` is terminal for the whole batch, so a model
+        that emitted it in parallel with another call leaves that other
+        ``tool_use`` unanswered as well; each gets
+        :func:`session_completed_call_error` in the same ``TOOL``
+        message.  Only a *trailing* ``MODEL`` message can hold such
+        calls, mirroring :meth:`_reconcile_unanswered_calls`.
+
+        Args:
+            tool_results: The executed batch's results, in the shape
+                :meth:`_execute_function_call_group` produced.
+        """
+        answered = {r.call_id for r in tool_results}
+        orphans: List[FunctionCall] = []
+        messages = self._history.messages
+        if messages and messages[-1].role == Role.MODEL:
+            orphans = [
+                p.function_call for p in messages[-1].parts
+                if p.function_call and p.function_call.id not in answered
+            ]
+        self._append_tool_results_to_history(list(tool_results) + [
+            ToolResult(
+                call_id=fc.id,
+                name=fc.name,
+                result=session_completed_call_error(fc),
+                is_error=True,
+            )
+            for fc in orphans
+        ])
+        self._trace(
+            f"SIGNAL_COMPLETION_RECORDS_RESULTS: {len(tool_results)} "
+            f"result(s) written to history; "
+            f"{len(orphans)} undispatched call(s) answered "
+            f"{[fc.name for fc in orphans]}"
+        )
 
     def _inject_synthetic_cancelled_results(self, fcs: List[FunctionCall]) -> None:
         """Append synthetic cancelled tool results to history for unexecuted tool calls.
@@ -11409,12 +11519,9 @@ NOTES
                 # Send tool results back (with retry for rate limits)
                 self._pacer.pace()  # Proactive rate limiting
 
-                # Proactive size guard: cap results before they enter history
-                tool_results = self._cap_tool_results(tool_results)
-                # Append tool results to session history
-                tool_results = self._gate_tool_results_for_active_modalities(tool_results)
-                tool_result_parts = [Part(function_response=r) for r in tool_results]
-                self._history.append(Message(role=Role.TOOL, parts=tool_result_parts))
+                # Cap, gate and append (see
+                # ``_append_tool_results_to_history``).
+                tool_results = self._append_tool_results_to_history(tool_results)
 
                 with self._telemetry.llm_span(
                     model=self._model_name or "unknown",

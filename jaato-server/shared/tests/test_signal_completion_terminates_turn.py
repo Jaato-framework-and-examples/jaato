@@ -211,6 +211,11 @@ class TestExecuteToolsAndContinueTermination:
         session._trace = lambda msg: None
         session._update_conversation_budget = MagicMock()
         session._maybe_collect_before_send = MagicMock()
+        # The terminal path records the batch's results into history so a
+        # completed session stays revivable (#913).  Stubbed here because
+        # this class pins the CONTROL FLOW; the history invariant itself is
+        # pinned by test_a_completed_session_keeps_a_valid_history.py.
+        session._record_terminal_tool_results = MagicMock()
         return session
 
     def test_terminates_when_signal_completion_called(self):
@@ -243,6 +248,10 @@ class TestExecuteToolsAndContinueTermination:
 
         # The continuation path must NOT have been touched.
         session._send_tool_results_and_continue.assert_not_called()
+        # ...but the bookkeeping it used to carry still happens: the
+        # batch's results are written to history, or the next request on
+        # this session 400s on a dangling tool_calls block (#913).
+        session._record_terminal_tool_results.assert_called_once()
 
     def test_does_not_terminate_when_flag_false(self):
         """Flag is False (= no signal_completion call, OR

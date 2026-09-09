@@ -1343,6 +1343,50 @@ def unexecuted_call_error(
     }
 
 
+def session_completed_call_error(call: "FunctionCall") -> Dict[str, Any]:
+    """The tool-result payload for a call dropped by ``signal_completion``.
+
+    ``signal_completion`` is terminal by contract: once it validates, the
+    turn ends immediately and no further tool in the same batch is
+    dispatched (see ``JaatoSession._execute_tools_and_continue``).  A
+    model that emitted parallel calls -- ``store_memory`` alongside
+    ``signal_completion``, say -- therefore leaves ``tool_use`` blocks in
+    history that will never be executed, and an unanswered ``tool_use``
+    is exactly what every OpenAI/Azure-shaped upstream rejects on the
+    *next* request (#913, and #751 for the same invariant reached from
+    the output cap).
+
+    Sibling of :func:`unexecuted_call_error`, and deliberately the same
+    shape.  It differs in the remedy it gives: there the turn was cut
+    short and re-sending the call is the right move; here the session
+    reached its declared end, so re-sending it is *not* -- the model
+    should only take it up again if the conversation is reopened.
+
+    Args:
+        call: The call that was never dispatched.  Its ``name`` is quoted
+            back so the model can tell which of several parallel calls
+            was dropped.
+
+    Returns:
+        An error dict in the shape ``ToolExecutor`` results use
+        (``{"error": ...}``), with ``unexecuted`` set so a client can
+        render it the same way it renders an abandoned call.
+    """
+    return {
+        "error": (
+            f"The call to {call.name!r} was NOT executed: the session "
+            f"completed in the same batch (signal_completion is "
+            f"terminal, so nothing after it in this turn was "
+            f"dispatched).  Nothing ran and nothing changed.  Do not "
+            f"re-send it unless the conversation continues; if this "
+            f"call was needed for the task, make it BEFORE signalling "
+            f"completion next time."
+        ),
+        "unexecuted": True,
+        "finish_reason": None,
+    }
+
+
 @dataclass
 class ProviderResponse:
     """Unified response from any AI provider.

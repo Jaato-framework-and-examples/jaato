@@ -59,6 +59,9 @@ def _turn_terminates(session) -> bool:
     """Drive the continuation decision only."""
     session._executor = None
     session._provider = MagicMock()
+    # The terminal path writes the batch's results into history (#913);
+    # this harness drives the decision only, so it is stubbed out.
+    session._record_terminal_tool_results = MagicMock()
     with patch.object(JaatoSession, "_execute_function_call_group", return_value=[]):
         try:
             _, result, _ = JaatoSession._execute_tools_and_continue(
