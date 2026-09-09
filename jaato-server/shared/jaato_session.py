@@ -37,9 +37,11 @@ from .tool_result_truncation import (
     truncate_results_to_fit as _truncate_results_to_fit_impl,
 )
 from .tool_result_builder import (
+    apply_text_view_enrichment as _apply_text_view_enrichment_impl,
     extract_multimodal_attachments as _extract_multimodal_attachments_impl,
     normalize_result_dict as _normalize_result_dict_impl,
     split_executor_result as _split_executor_result_impl,
+    tool_result_text_view as _tool_result_text_view_impl,
 )
 from .instruction_budget_builder import (
     TokenCountRequest as _TokenCountRequest,
@@ -9433,9 +9435,16 @@ NOTES
         """Run tool result enrichment on tool results.
 
         Two enrichment modes:
-        1. For file-writing tools (writeNewFile, updateFile): Pass the full JSON
-           result so enrichers can extract file paths and run diagnostics.
-        2. For other tools with large text fields: Enrich individual text fields.
+        1. For file-writing tools (writeNewFile, updateFile) and tools
+           declaring ``TRAIT_GREPPABLE_CONTENT``: pass the full JSON result
+           so enrichers can extract file paths, run diagnostics, or shrink
+           a structured payload.
+        2. For every other dict result: render the dict's scalar fields as
+           a text view and run the chain once over it, writing back what
+           enrichment changed (``tool_result_text_view`` /
+           ``apply_text_view_enrichment``).  No field-name allowlist and no
+           length floor — a tool naming its text ``message`` used to be
+           silently exempt from enrichment forever (#922).
 
         Also checks enrichment metadata for preselected reference pinning
         signals and delegates to ``_check_and_pin_reference`` when detected.
@@ -9503,35 +9512,60 @@ NOTES
                 except json.JSONDecodeError:
                     # If enrichment broke JSON, keep original and append as text
                     enriched_dict['_lsp_diagnostics'] = enrichment.result
+            self._trace(
+                f"ENRICH [{tool_name}]: full-JSON path ({len(result_json)} chars), "
+                f"plugins={sorted(enrichment.metadata) if enrichment.metadata else []}"
+            )
             self._check_and_pin_reference(enrichment.metadata, result_json)
             self._emit_enrichment_telemetry(enrichment.metadata, 'tool_result')
             if enrichment.metadata:
                 combined_metadata.update(enrichment.metadata)
             return enriched_dict, combined_metadata
 
-        # For other tools: enrich large text fields
-        text_fields = ('result', 'content', 'stdout', 'output', 'text', 'data')
-        min_length = 100
+        # Every other dict result: enrich a TEXT VIEW of the whole dict.
+        #
+        # This path used to enrich only fields named one of six well-known
+        # names, and only from 100 characters up (#922).  Both filters were
+        # invisible: `store_memory` names its text `message` and the message
+        # measured 83 characters, so `memory` and `references` — the two
+        # plugins that implement tool-result enrichment — never ran on the
+        # pairing they exist for, with no error, no warning and no trace
+        # line to say why.  The session no longer guesses which key holds
+        # "the text": it renders the dict's scalar fields as text, runs the
+        # chain ONCE over the whole view, and writes back precisely what
+        # enrichment changed.
+        header, body, anchor = _tool_result_text_view_impl(enriched_dict)
+        text_view = header + body
+        if not text_view.strip():
+            self._trace(
+                f"ENRICH_SKIP [{tool_name}]: dict result carries no textual "
+                f"content (keys={sorted(enriched_dict)})"
+            )
+            return enriched_dict, combined_metadata
 
-        for field in text_fields:
-            if field in enriched_dict:
-                value = enriched_dict[field]
-                if isinstance(value, str) and len(value) >= min_length:
-                    # Pass session's callback to route notifications to correct agent panel
-                    enrichment = self._runtime.registry.enrich_tool_result(
-                        tool_name,
-                        value,
-                        output_callback=self._current_output_callback,
-                        terminal_width=self._terminal_width,
-                        tool_args=tool_args
-                    )
-                    if enrichment.result != value:
-                        enriched_dict[field] = enrichment.result
-                    # Check for pinning signal (only need first match)
-                    self._check_and_pin_reference(enrichment.metadata, value)
-                    self._emit_enrichment_telemetry(enrichment.metadata, 'tool_result')
-                    if enrichment.metadata:
-                        combined_metadata.update(enrichment.metadata)
+        # Pass session's callback to route notifications to correct agent panel
+        enrichment = self._runtime.registry.enrich_tool_result(
+            tool_name,
+            text_view,
+            output_callback=self._current_output_callback,
+            terminal_width=self._terminal_width,
+            tool_args=tool_args
+        )
+        changed = _apply_text_view_enrichment_impl(
+            enriched_dict, header, body, anchor, enrichment.result
+        )
+        self._trace(
+            f"ENRICH [{tool_name}]: text view {len(text_view)} chars, "
+            f"anchor={anchor or '-'}, changed={changed}, "
+            f"plugins={sorted(enrichment.metadata) if enrichment.metadata else []}"
+        )
+        # Pin the anchor field's own (pre-enrichment) text, not the view:
+        # what a preselected-reference read pins into the system instruction
+        # is the file's content, and the header lines are matching context.
+        self._check_and_pin_reference(enrichment.metadata, body or text_view)
+        self._emit_enrichment_telemetry(enrichment.metadata, 'tool_result')
+        if enrichment.metadata:
+            combined_metadata.update(enrichment.metadata)
 
         return enriched_dict, combined_metadata
 
