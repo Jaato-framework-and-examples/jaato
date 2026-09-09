@@ -1412,6 +1412,14 @@ plugin_configs:
 
 `pip install 'jaato-server[openai]'`.
 
+**Smoke test.**  `examples/provider_smoke_openai_azure.py` drives this
+provider on both wires, and the Azure one, against a local stand-in —
+no account, no key, no spend — and prints the requests that reached it,
+so deployment routing and the `api-version` query string are visible as
+facts.  `--live-openai` / `--live-azure` run the *same* assertions
+against the real endpoints.  A green mock run means the framework is not
+the problem; only a live run proves the vendor agrees.
+
 ### Azure OpenAI
 | Variable | Purpose |
 |----------|---------|
@@ -1458,6 +1466,10 @@ plugin_configs:
     context_length: 128000   # required — Azure reports no capacity
     model_name: gpt-4o       # what the deployment serves, so vision is detected
 ```
+
+Check the wiring before spending anything:
+`python examples/provider_smoke_openai_azure.py` (mock, then
+`--live-azure --deployment <name>` for the real resource).
 
 ### Anthropic Claude
 | Variable | Purpose |
