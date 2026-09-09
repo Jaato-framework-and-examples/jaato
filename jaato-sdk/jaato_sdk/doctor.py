@@ -231,7 +231,7 @@ def check_dependency_coherence() -> List[Check]:
     `pip` records a version at install time; an editable install keeps pointing
     at a working tree that moves. When they part company, every version-derived
     answer in the environment names a build that is not the one running — the
-    provenance stamp `jaato-scaffold install` writes, a bug report's "installed
+    provenance stamp `jaato-scaffold integration` writes, a bug report's "installed
     version", a compatibility decision.  Nothing else notices, because the
     import still succeeds.
 
@@ -266,8 +266,8 @@ def check_dependency_coherence() -> List[Check]:
                   ", ".join(seen) + " — metadata agrees with sources")]
 
 
-def check_sdk_skill() -> List[Check]:
-    """Is the agent-facing `jaato-sdk` skill installed, and does it match?
+def check_integrations() -> List[Check]:
+    """Are this build's integrations applied, and do they match it?
 
     The skill ships as package data of `jaato-server` so a copy cannot describe
     a different framework than the one running — but only if the copy on disk
@@ -281,37 +281,37 @@ def check_sdk_skill() -> List[Check]:
     that stop work.
     """
     try:
-        from shared.scaffold import install as _install
+        from shared.scaffold import integrations as _install
     except Exception:      # noqa: BLE001 — sdk installed without the server
-        return [Check("sdk skill", WARN,
+        return [Check("integrations", WARN,
                       "cannot check: `shared.scaffold` is not importable "
                       "(jaato-server not installed in this env)")]
 
     names = _install.available()
     if not names:
-        return [Check("sdk skill", WARN, "this framework build ships no skill")]
+        return [Check("integrations", WARN, "this framework build ships no integrations")]
 
     out: List[Check] = []
     for name in names:
         user = _install.target_dir(name, user=True, workspace=None)
         state, detail = _install.compare(name, user)
         if state == "current":
-            out.append(Check(f"sdk skill ({name})", PASS,
+            out.append(Check(f"integration ({name})", PASS,
                              f"{user} — from jaato-server {detail}"))
         elif state == "absent":
-            out.append(Check(f"sdk skill ({name})", WARN,
-                             f"not installed — `jaato-scaffold install {name}` "
+            out.append(Check(f"integration ({name})", WARN,
+                             f"not applied — `jaato-scaffold integration {name}` "
                              f"puts it in {user} for every repo on this machine"))
         elif state == "stale":
-            out.append(Check(f"sdk skill ({name})", WARN,
-                             f"{detail} — re-run `jaato-scaffold install {name} --force`"))
+            out.append(Check(f"integration ({name})", WARN,
+                             f"{detail} — re-run `jaato-scaffold integration {name} --force`"))
         elif state == "unstamped":
-            out.append(Check(f"sdk skill ({name})", WARN,
+            out.append(Check(f"integration ({name})", WARN,
                              f"{user} was {detail}; it may describe a different "
-                             f"build — `jaato-scaffold install {name} --force` "
+                             f"build — `jaato-scaffold integration {name} --force` "
                              f"replaces it with this one"))
         else:      # modified
-            out.append(Check(f"sdk skill ({name})", WARN,
+            out.append(Check(f"integration ({name})", WARN,
                              f"{detail} — local edits will be lost by "
                              f"`install --force`; upstream them first"))
     return out
@@ -1017,7 +1017,7 @@ def run_checks(
     checks += check_python_env()
     checks += check_premium_reactors()
     checks += check_dependency_coherence()
-    checks += check_sdk_skill()
+    checks += check_integrations()
     checks += check_socket(info, auto_start=auto_start)
     checks += check_daemon_identity(info)
     if web_socket:

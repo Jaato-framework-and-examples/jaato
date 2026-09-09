@@ -205,13 +205,14 @@ trap 2 or 3.
 
 ## Keeping this file honest
 
-This skill ships as package data of the framework it describes, so the copy you
-are reading came from a specific build and says which:
+This skill is the payload of the `claude-code` integration, shipped as package
+data of the framework it describes — so the copy you are reading came from a
+specific build and says which:
 
 ```
-cat ~/.claude/skills/jaato-sdk/.installed-from   # the build this copy came from
-jaato-scaffold install jaato-sdk --force         # replace it with the current one
-jaato-doctor                                     # reports absent / stale / edited
+cat ~/.claude/skills/jaato-sdk/.jaato-integration    # the build this copy came from
+jaato-scaffold integration claude-code --force       # replace it with the current one
+jaato-doctor                                         # reports absent / stale / edited
 ```
 
 If something here contradicts `explain`, **`explain` is right** — it reads the

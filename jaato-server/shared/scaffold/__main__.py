@@ -49,6 +49,7 @@ from . import validate as _validate
 
 #: Scopes rendered with no argument.
 _SIMPLE_SCOPES = {
+    "integrations": _explain.integrations,
     "plugins": _explain.plugins,
     "providers": _explain.providers,
     "gc": _explain.gc,
@@ -260,13 +261,19 @@ def _cmd_new(args) -> int:
 
 # ----------------------------------------------------- external verbs (plugins)
 
-def _cmd_install(args) -> int:
-    from . import install as _install
+def _cmd_integration(args) -> int:
+    from . import integrations as _install
     names = _install.available()
     if not names:
-        print("this build ships no installable assets", file=sys.stderr)
+        print("this build ships no integrations", file=sys.stderr)
         return 1
-    name = args.asset or ("jaato-sdk" if "jaato-sdk" in names else names[0])
+    if not args.name:
+        # The bare verb LISTS rather than guessing which one you meant — with
+        # more than one shipped, picking for you would be a coin toss.
+        data, text = _install.listing()
+        print(json.dumps(data, indent=2) if args.json else text)
+        return 0
+    name = args.name
     dest = _install.target_dir(name, user=not args.workspace, workspace=args.workspace)
     changed, lines = _install.install(name, dest, force=args.force, dry_run=args.dry_run)
     if args.json:
@@ -414,21 +421,24 @@ def main(argv=None) -> int:
     pn.set_defaults(func=_cmd_new)
 
     pi = sub.add_parser(
-        "install", help="install a framework-shipped asset (the jaato-sdk skill)",
-        description="Copy an asset that ships WITH this framework build to where "
-                    "tools look for it, stamped with the version it came from so "
-                    "`jaato-doctor` can tell you when it goes stale.")
-    pi.add_argument("asset", nargs="?", default=None,
-                    help="asset name (default: jaato-sdk)")
+        "integration", help="wire jaato into a tool you work in (bare: list them)",
+        description="An integration is jaato's side of a contract with another "
+                    "tool — today `claude-code`, which installs the jaato-sdk "
+                    "skill where Claude Code looks for skills.  Each copy is "
+                    "stamped with the build it came from, so `jaato-doctor` can "
+                    "say when one has gone stale.  With no name, lists what this "
+                    "build ships and where each one stands.")
+    pi.add_argument("name", nargs="?", default=None,
+                    help="integration name (omit to list)")
     pi.add_argument("--workspace", default=None,
-                    help="install into DIR/.claude/skills/ instead of ~/.claude/skills/ "
-                         "— project scope rather than user scope")
+                    help="apply to DIR instead of $HOME — project scope rather "
+                         "than user scope")
     pi.add_argument("--force", action="store_true",
                     help="overwrite an existing copy")
     pi.add_argument("--dry-run", action="store_true",
                     help="print what would be written, write nothing")
     pi.add_argument("--json", action="store_true")
-    pi.set_defaults(func=_cmd_install)
+    pi.set_defaults(func=_cmd_integration)
 
 
     # External verbs (e.g. the premium `compile` verb) — discovered via the

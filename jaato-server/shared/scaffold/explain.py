@@ -63,6 +63,8 @@ def overview() -> Rendered:
         "  jaato-scaffold explain archetypes        # what `new` WRITES\n"
         "  jaato-scaffold explain archetype <name>\n"
         "\n"
+        "  jaato-scaffold explain integrations      # tools jaato can wire into\n"
+        "\n"
         "append `dependencies` (or `deps`) to ANY of the above — it is a facet of\n"
         "every scope, not a scope of its own.  Derived by parsing what is installed,\n"
         "never from a table that could be wrong:\n"
@@ -70,11 +72,11 @@ def overview() -> Rendered:
         "  jaato-scaffold explain provider <name> deps    # what its code imports\n"
         "  jaato-scaffold explain plugin <name> deps\n"
         "\n"
-        "the agent-facing guide to building on this SDK ships WITH this build,\n"
-        "so an installed copy cannot describe a different framework:\n"
-        "  jaato-scaffold install jaato-sdk         # -> ~/.claude/skills/ (all repos)\n"
-        "  jaato-scaffold install --workspace DIR   # -> that project only\n"
-        "  jaato-doctor                             # says when a copy has gone stale\n"
+        "integrations ship WITH this build, so an installed copy cannot describe a\n"
+        "different framework than the one running:\n"
+        "  jaato-scaffold integration               # list them + their state\n"
+        "  jaato-scaffold integration claude-code   # -> ~/.claude/skills/ (all repos)\n"
+        "  jaato-doctor                             # says when one has gone stale\n"
     )
     return data, text
 
@@ -2092,3 +2094,16 @@ def prefetch() -> Rendered:
         "  (a full persona placeholder + render() pulling plugin data into the prompt).",
     ]
     return data, "\n".join(lines)
+
+
+# ---------------------------------------------------------- integrations
+
+def integrations():
+    """Tools this build can wire itself into, and where each one stands.
+
+    Delegates to the same renderer the `integration` verb uses: see-then-apply
+    is the framework's own shape (`explain archetypes` / `new <archetype>`),
+    and one source means the listing and the verb cannot drift apart.
+    """
+    from . import integrations as _int
+    return _int.listing()
