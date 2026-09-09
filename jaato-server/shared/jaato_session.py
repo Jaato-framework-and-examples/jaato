@@ -477,13 +477,19 @@ class JaatoSession:
         # subagent: end of ``_run_subagent_async``) to decide whether
         # to inject a nudge prompt back into the session asking the
         # agent to call ``signal_completion`` before terminating.
-        # ``_completion_nudges_fired`` bounds the retry budget, and unlike
-        # ``_signal_completion_called`` it is per SESSION: a nudge
-        # re-prompts, so a per-turn budget is refunded by the very turn it
-        # paid for and bounds nothing (#767).  See
-        # ``_begin_turn_completion_state``.
+        # ``_completion_nudges_fired`` bounds the retry budget.  It is
+        # per TURN, but a naive per-turn reset bounds nothing: a nudge
+        # RE-PROMPTS the session, so the turn the nudge itself creates ran
+        # the reset and handed back the token the nudge had just spent
+        # (#767).  ``_completion_nudge_turn_pending`` is the distinction
+        # that makes both true at once — it is latched by
+        # :meth:`try_completion_nudge` and consumed by
+        # :meth:`_begin_turn_completion_state`, so a NUDGE-originated turn
+        # keeps the counter (the loop terminates) while a turn the caller
+        # started clears it (a conversation is not rationed, #934).
         self._signal_completion_called: bool = False
         self._completion_nudges_fired: int = 0
+        self._completion_nudge_turn_pending: bool = False
         # Set in configure() when introspection's tools are dropped because there
         # is nothing deferred to discover — read by introspection's
         # get_system_instructions to suppress the now-mismatched discovery
@@ -1461,10 +1467,22 @@ class JaatoSession:
         don't need to do it.  Returns ``(False, current)`` otherwise
         (no counter change).
 
+        **A True answer also latches ``_completion_nudge_turn_pending``**,
+        which is what keeps the budget per TURN without making it
+        refundable (#934).  The caller's next act is to re-prompt the
+        session, and that re-prompt is a turn: without the latch,
+        :meth:`_begin_turn_completion_state` would zero the counter the
+        nudge had just spent and no nudge loop could terminate (#767).
+        The latch is consumed by that turn's start, so the turn AFTER a
+        conversation's nudge sequence begins with a full budget again.
+        This is the one place it is set — every nudge site must spend the
+        budget through this method rather than touching the counter, or
+        its re-prompt reads as caller-originated and the loop unbounds.
+
         Args:
             max_nudges: Bound on ``_completion_nudges_fired``.
-                Caller's nudge-budget knob (the existing daemon-side
-                site uses ``MAX_COMPLETION_NUDGES = 2``).  Must be
+                Caller's nudge-budget knob, resolved from the profile by
+                ``shared.completion_nudge`` (default 2).  Must be
                 non-negative; values <= 0 always yield
                 ``(False, current)``.
 
@@ -1484,6 +1502,7 @@ class JaatoSession:
             and getattr(self, "_completion_nudges_fired", 0) < max_nudges
         ):
             self._completion_nudges_fired += 1
+            self._completion_nudge_turn_pending = True
             return True, self._completion_nudges_fired
         return False, getattr(self, "_completion_nudges_fired", 0)
 
@@ -6123,8 +6142,9 @@ NOTES
           synthesizer, the subagent nudge loop, and the embedded nudge gate.
         * ``_session_quiescent_emitted`` -- the once-per-turn quiescence latch.
 
-        ``_completion_nudges_fired`` IS NOT ONE OF THEM, and clearing it here
-        cost the framework its only bound on the nudge loop (#767).  A nudge
+        ``_completion_nudges_fired`` is the third, and it is cleared here
+        CONDITIONALLY -- which is the whole of #934.  An unconditional reset
+        cost the framework its only bound on the nudge loop (#767): a nudge
         RE-PROMPTS THE SESSION, so the nudge's own turn ran this reset and
         handed the budget back the token it had just spent.  Both guards read
         the counter the same way and both were therefore unbounded: the
@@ -6133,20 +6153,39 @@ NOTES
         conformance session that never signals turned 735 times in 40
         seconds), and the subagent guard's ``while ... < MAX_COMPLETION_NUDGES``
         in ``subagent/plugin.py`` -- written on the assumption that the
-        counter only goes up -- could not terminate at all.  ``max_turns``,
-        ``budget_control`` and the caller's own wall-clock were what actually
-        stopped those sessions, at whatever they had spent by then.
+        counter only goes up -- could not terminate at all.
 
-        So the budget is per SESSION, which is what ``MAX_COMPLETION_NUDGES``
-        already claimed to be.  A session that spends it terminates
-        (``NudgeExhausted``), so "the next task on this session gets a fresh
-        budget" describes a session that no longer exists -- and a
-        completion-gated session is one-shot by construction.  The one real
-        cost is an agent that answers each nudge with more work and needs a
-        third: it is now cut off at two.  That is the declared ceiling doing
-        its job, and raising it is a knob, not a bug.
+        Never resetting fixed that, and rested on one clause: "a
+        completion-gated session is one-shot by construction", so the budget
+        being session-lifetime cost nothing.  **#913 / #915 made that false.**
+        Recording ``signal_completion``'s tool result is precisely what lets a
+        completed session be driven again, and #845 / #914 lets the next turn
+        arrive with an attachment -- so a completion-gated session is now a
+        CONVERSATION, and a bound written to stop a runaway retry loop inside
+        one turn had become a ceiling on how many turns that conversation may
+        have.  Measured on a voice agent whose model announces
+        ``signal_completion`` rather than invoking it (a documented weakness of
+        that model class, so the nudge is load-bearing on EVERY turn, not an
+        exception path): the first ``max_completion_nudges`` turns closed and
+        every turn after died ``NudgeExhausted``, for the life of the session.
+        Raising the knob only moved the wall -- 2 dies at turn 3, 40 at turn 41.
 
-        None of them is persisted, so this has no restore implications.
+        The distinction #767 actually needs is not "never reset" but "do not
+        let a nudge refund itself", so the reset asks WHO STARTED THIS TURN.
+        :meth:`try_completion_nudge` latches
+        ``_completion_nudge_turn_pending`` when it hands out a nudge, and the
+        turn that nudge creates consumes the latch and KEEPS the counter --
+        the loop still terminates, exactly as #767 requires.  Any other turn
+        is caller-originated (a user message, a ``session.wake``, a parent's
+        ``send_to_subagent``) and starts with a fresh budget, so
+        ``max_completion_nudges`` means what its name says: a per-turn retry
+        allowance.  The ceiling still terminates a session that spends it
+        (``NudgeExhausted``), at the turn that actually failed rather than at
+        every turn after some earlier one did.
+
+        None of them is persisted, so this has no restore implications.  A
+        revived session therefore begins with a full nudge budget, which is
+        the same answer this reset gives its first caller-originated turn.
 
         Invisible for a one-shot session, where turn 0 is the only turn --
         which is why it survived.  On a SUSPEND/RESUME session the agent calls
@@ -6167,6 +6206,13 @@ NOTES
         self._signal_completion_called = False
         self._session_quiescent_emitted = False
         self._truncation_recovery_count = 0
+        # WHO started this turn decides whether the nudge budget is refilled.
+        # The latch is consumed either way, so a nudge that never became a
+        # turn cannot ration the turn after it.
+        if getattr(self, "_completion_nudge_turn_pending", False):
+            self._completion_nudge_turn_pending = False
+        else:
+            self._completion_nudges_fired = 0
 
     def _resolve_use_streaming(self) -> bool:
         """Decide whether THIS turn streams.

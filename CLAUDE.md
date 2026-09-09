@@ -405,7 +405,7 @@ await client.create_session(profile="researcher")
 
 **Flow:** Client sends `session.new --profile researcher` → server discovers profiles from `.jaato/profiles/` → resolves `SubagentProfile` → `JaatoServer` applies profile overrides (model, provider, plugins, plugin_configs, GC) during `initialize()`.
 
-### The Completion-Nudge Budget (#919)
+### The Completion-Nudge Budget (#919, #934)
 
 A session whose surface carries `signal_completion` is expected to call it
 before its loop ends. When the loop settles without that call the framework
@@ -442,9 +442,8 @@ nudges on a redundant `enter_tier` (`already_at_tier`), leaving exactly one real
 attempt — announcing a tool instead of invoking it is a documented weakness of
 that model class, not something persona prose fixes.
 
-- **Per SESSION, not per turn** — the claim `_completion_nudges_fired` has
-  always made (#767): a turn start does not refund a nudge, or the subagent
-  loop's `while` could not terminate at all.
+- **Per TURN** — how many retries ONE turn gets, not how many turns a
+  conversation may have. See below; it used to be per session.
 - **Positive integer.** `0` is refused at load, not read as "never nudge": the
   give-up predicate is `nudges_fired >= max`, so a budget of 0 would report
   `NudgeExhausted` on sessions that completed **cleanly**. A deployment that
@@ -459,6 +458,57 @@ that model class, not something persona prose fixes.
   `jaato_eval.sign_off` restates the number deliberately (the eval engine must
   not import `server.*` / `shared.*`); that copy is a reporting ceiling, and is
   stale in exactly one direction against a profile that raised its own.
+
+**Whose turn spent it (#934).** The budget lives in one counter,
+`_completion_nudges_fired`, and the only question about it is when a turn start
+clears it. Both simple answers are wrong, and each was shipped:
+
+| Reset | Bounds | Breaks |
+|-------|--------|--------|
+| every turn | nothing — a nudge RE-PROMPTS, so the turn the nudge created handed back the token it had just spent. Observed: "nudge 1/2" logged three times in one session, 735 turns in 40 seconds against a live daemon, and the subagent loop's `while ... < MAX_COMPLETION_NUDGES` could not terminate at all (#767) | the runaway guard |
+| never | the SESSION | the conversation (#934) |
+| **the turns a nudge did not create** | one turn's retries | — |
+
+Never resetting was correct while one clause held: *a completion-gated session
+is one-shot by construction*, so a session-lifetime budget cost nothing.
+**#913 / #915 made that false** — recording `signal_completion`'s tool result
+is precisely what lets a completed session be driven again, and #845 / #914
+lets the next turn arrive with an attachment. A bound written to stop a runaway
+retry loop *inside one turn* had become a ceiling on how many turns a
+conversation may have.
+
+It shows up wherever the nudge is load-bearing on **every** turn rather than
+being an exception path — measured on a voice agent across 43 sessions, whose
+model announces `signal_completion` instead of invoking it (a documented
+weakness of that model class, not something persona prose fixes):
+
+```
+ 1 model text  ->   2 NUDGE  ->   3 signal_completion   ok
+13 model text  ->  14 NUDGE  ->  15 signal_completion   ok
+18 model text  ->  19 NUDGE  ->  20 signal_completion   ok
+29 model text  ->  30 NUDGE  ->  31 signal_completion   ok
+38 model text  ->  (no budget left)                     never completes
+```
+
+Deterministic, and every later turn ends `NudgeExhausted`. Raising the knob only
+moves the wall: 2 dies at turn 3, 40 at turn 41.
+
+The distinction #767 actually needs is not *never reset* but *do not let a
+nudge refund itself*, so the reset asks **who started this turn**.
+`try_completion_nudge` latches `_completion_nudge_turn_pending` in the same
+call that spends a token; `_begin_turn_completion_state` consumes the latch and
+KEEPS the counter, so the nudge loop terminates exactly as before. Any other
+turn — a user message, a `session.wake`, a parent's `send_to_subagent` — is
+caller-originated and starts with a full budget. Consequences:
+
+- **Every nudge site spends through `try_completion_nudge`.** The subagent loop
+  used to bump `_completion_nudges_fired` in place; that re-prompt now reads as
+  caller-originated, the reset refills the budget, and #767 is back. The method
+  is the only writer.
+- **Exhaustion is a verdict on the turn that failed**, not on every turn after
+  it. `NudgeExhausted` still terminates the session at the ceiling.
+- **Nothing is persisted**, so a revived session begins with a full budget —
+  the same answer the reset gives its first caller-originated turn.
 
 ### Session Revive (waking a persisted session)
 
