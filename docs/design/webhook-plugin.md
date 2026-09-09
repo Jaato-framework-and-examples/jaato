@@ -115,6 +115,13 @@ gives you the plumbing; premium gives you the recipes.
       "event_type_header": null,
       "metadata": { "source": "slack" }
     },
+    "gitlab": {
+      "path": "/webhook/gitlab",
+      "secret_header": "X-Gitlab-Token",
+      "secret_algo": "token",
+      "event_type_header": "X-Gitlab-Event",
+      "metadata": { "source": "gitlab" }
+    },
     "generic": {
       "path": "/webhook",
       "allow_unauthenticated": true,
@@ -459,7 +466,9 @@ class WebhookHTTPServer:
 3. **Body size check** — reject bodies exceeding `max_body_size` (413).
 4. **Content-Type** — must be `application/json` (415).
 5. **Secret verification** — if route has `secret_header` + `secret_algo`,
-   verify HMAC signature. Reject with 403 on mismatch.
+   verify the header against the route's shared secret in the mode
+   `secret_algo` names (`hmac-sha256` over the body, or a constant-time
+   equality against a plain `token` header). Reject with 403 on mismatch.
 6. **Parse body** — JSON-decode the body.
 7. **Extract event type** — from the header specified in `event_type_header`,
    or `"unknown"` if not configured.
@@ -477,7 +486,7 @@ Python stdlib only — no external dependencies.
 3. Route matching → 404 Not Found
 4. Body size limit → 413 Payload Too Large
 5. Content-Type check → 415 Unsupported Media Type
-6. HMAC signature verification → 403 Forbidden
+6. Shared-secret verification → 403 Forbidden
 7. JSON body parsing → 400 Bad Request
 
 **Network security:**
@@ -490,8 +499,24 @@ Python stdlib only — no external dependencies.
   normalized. Empty list (default) allows all IPs.
 
 **Application security:**
-- **HMAC verification** per-route using HMAC-SHA256. Supports GitHub's
-  `sha256=` prefix convention.
+- **HMAC verification** per-route using HMAC-SHA256 over the request body.
+  Supports GitHub's `sha256=` prefix convention. The preferred mode: the
+  secret never travels and a captured request cannot be replayed against a
+  different body.
+- **Plain shared-secret verification** (`secret_algo: "token"`) for producers
+  that do not sign bodies — GitLab's `X-Gitlab-Token` is the canonical case.
+  A constant-time equality against the route secret. **Strictly weaker than
+  HMAC**: the secret is in every request (so it is readable by any hop that
+  terminates TLS) and requests replay against any payload. It exists so that
+  such a producer is authenticated at all — the alternative was
+  `allow_unauthenticated: true`, discarding a secret the request was carrying.
+  Pair it with TLS; every `token` route logs a startup WARNING, louder when
+  TLS is off, so the weaker mode cannot be reached for silently.
+- **A secret config is a pair, fail-closed.** `secret_header` without
+  `secret_algo` (or the reverse) is a 500, and an `secret_algo` outside the
+  known vocabulary is a config-validation error and a 500 at request time —
+  never a downgrade to unsigned. Widening the vocabulary widens what
+  `secret_algo` may *say*, never what it may omit.
 - **Body size limits** to prevent memory exhaustion (default 1 MB).
 - **Per-IP rate limiting** — token-bucket algorithm. Configurable via
   `rate_limit_per_second` (default 0 = unlimited). Each source IP gets its

@@ -19,6 +19,23 @@ from ..subagent.config import expand_variables
 
 logger = logging.getLogger(__name__)
 
+# The vocabulary of ``RouteConfig.secret_algo`` — how the route's shared secret
+# is checked against the request.  Anything outside this set is a hard error at
+# validation time and a refusal at request time (see ``verify_signature``); the
+# fail-closed posture is what makes the set safe to extend.
+#
+#   'hmac-sha256' — the secret keys an HMAC over the request BODY, and the
+#                   header carries the resulting digest.  Not replayable, not
+#                   readable by anything that terminates TLS.  (GitHub, Stripe.)
+#   'token'       — the header carries the shared secret VERBATIM and is
+#                   compared for equality in constant time.  Strictly weaker:
+#                   replayable, and exposed to every hop that terminates TLS.
+#                   The only mode a producer that does not sign bodies can use
+#                   (GitLab's ``X-Gitlab-Token``, Jira, many internal senders).
+SECRET_ALGO_HMAC_SHA256 = 'hmac-sha256'
+SECRET_ALGO_TOKEN = 'token'
+SECRET_ALGOS = (SECRET_ALGO_HMAC_SHA256, SECRET_ALGO_TOKEN)
+
 
 def _as_bool_strict(value: Any) -> bool:
     """Fail-closed boolean coercion for security flags.
@@ -42,17 +59,27 @@ def _as_bool_strict(value: Any) -> bool:
 class RouteConfig:
     """Configuration for a single webhook route.
 
-    Each route maps a URL path to an event source with optional HMAC
+    Each route maps a URL path to an event source with optional shared-secret
     verification and event type extraction from headers.
 
     Attributes:
         path: URL path for this route (e.g., '/webhook/github').
-        secret_header: Header containing the HMAC signature (e.g., 'X-Hub-Signature-256').
-        secret_algo: HMAC algorithm (e.g., 'hmac-sha256'). Only 'hmac-sha256' supported.
+        secret_header: Header carrying the route's credential — an HMAC digest
+            under ``secret_algo='hmac-sha256'`` (e.g., 'X-Hub-Signature-256'),
+            or the shared secret itself under ``secret_algo='token'``
+            (e.g., 'X-Gitlab-Token').
+        secret_algo: How that header is verified — one of ``SECRET_ALGOS``.
+            ``'hmac-sha256'`` verifies a digest over the request body;
+            ``'token'`` compares the header value to the secret in constant
+            time.  ``'token'`` is the WEAKER mode (replayable, and readable by
+            anything that terminates TLS) and exists for producers that do not
+            sign bodies; pair it with TLS.  Both halves of the pair are
+            required — declaring one without the other is refused, never
+            downgraded to unsigned.
         event_type_header: Header to extract event type from (e.g., 'X-GitHub-Event').
         metadata: Static metadata merged into every event from this route.
         allow_unauthenticated: Explicit opt-in to accept UNSIGNED requests on
-            this route. Default False (fail-closed). A route without an HMAC
+            this route. Default False (fail-closed). A route without a shared
             secret is refused unless the deployment provides mutual TLS or an
             IP allowlist, or this flag is set — so an operator cannot expose an
             open ingestion endpoint by omission.
@@ -118,8 +145,10 @@ class WebhookConfig:
     Attributes:
         port: HTTP listener port (default: 9100).
         host: Bind address (default: '127.0.0.1' — localhost only).
-        secret: Global shared secret for HMAC verification. Per-route secrets
-            override this when the route's secret_header is set. Use
+        secret: Global shared secret used by whichever verification mode a
+            route declares — the HMAC key under ``'hmac-sha256'``, the expected
+            header value under ``'token'``. Per-route secrets
+            (``routes.<name>.metadata.secret``) override this. Use
             ``${ENV_VAR}`` syntax to avoid storing secrets in plain text.
         routes: Named routes mapping source names to RouteConfig.
         max_body_size: Maximum request body size in bytes (default: 1 MB).
@@ -144,7 +173,7 @@ class WebhookConfig:
     # Never print the shared secret (#721).  The config is loaded
     # from ``.jaato/webhook.json`` with ``${ENV_VAR}`` expansion, so
     # by the time it is an object the placeholder has been resolved
-    # to the real HMAC key.
+    # to the real secret.
     __repr__ = secret_safe_repr("secret")
 
     def __post_init__(self):
@@ -373,26 +402,49 @@ def validate_config(data: Dict[str, Any]) -> Tuple[bool, List[str]]:
                 except ValueError as e:
                     errors.append(f"allowed_ips[{i}] is not a valid IP/CIDR: {e}")
 
-    routes = data.get('routes')
-    if routes is not None:
-        if not isinstance(routes, dict):
-            errors.append("'routes' must be an object")
-        else:
-            for name, route in routes.items():
-                if not isinstance(route, dict):
-                    errors.append(f"routes['{name}'] must be an object")
-                    continue
-                path = route.get('path')
-                if not path or not isinstance(path, str):
-                    errors.append(f"routes['{name}'].path is required and must be a string")
-                elif not path.startswith('/'):
-                    errors.append(f"routes['{name}'].path must start with '/'")
-
-                algo = route.get('secret_algo')
-                if algo is not None and algo != 'hmac-sha256':
-                    errors.append(
-                        f"routes['{name}'].secret_algo must be 'hmac-sha256' "
-                        f"(got '{algo}')"
-                    )
+    errors.extend(_validate_routes(data.get('routes')))
 
     return len(errors) == 0, errors
+
+
+def _validate_routes(routes: Any) -> List[str]:
+    """Validate the ``routes`` block of a webhook config.
+
+    Split out of ``validate_config`` so route rules can grow without growing
+    that function (its cyclomatic-complexity baseline is a ratchet).
+
+    Args:
+        routes: The raw ``routes`` value, or None when the key is absent.
+
+    Returns:
+        A list of human-readable error strings (empty when valid).
+    """
+    if routes is None:
+        return []
+    if not isinstance(routes, dict):
+        return ["'routes' must be an object"]
+
+    errors: List[str] = []
+    for name, route in routes.items():
+        if not isinstance(route, dict):
+            errors.append(f"routes['{name}'] must be an object")
+            continue
+
+        path = route.get('path')
+        if not path or not isinstance(path, str):
+            errors.append(f"routes['{name}'].path is required and must be a string")
+        elif not path.startswith('/'):
+            errors.append(f"routes['{name}'].path must start with '/'")
+
+        # An unrecognised algo is a HARD ERROR, not a fallback: a typo must
+        # never leave a route unverified.  Widening the vocabulary widens this
+        # set and nothing else — the incomplete-pair check in
+        # ``parse_webhook_request`` is untouched by it.
+        algo = route.get('secret_algo')
+        if algo is not None and algo not in SECRET_ALGOS:
+            allowed = ' or '.join(repr(a) for a in SECRET_ALGOS)
+            errors.append(
+                f"routes['{name}'].secret_algo must be {allowed} (got '{algo}')"
+            )
+
+    return errors

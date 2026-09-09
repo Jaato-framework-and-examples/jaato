@@ -1402,10 +1402,46 @@ The webhook plugin provides an inbound HTTP listener for receiving external webh
       "secret_header": "X-Hub-Signature-256",
       "secret_algo": "hmac-sha256",
       "event_type_header": "X-GitHub-Event"
+    },
+    "gitlab": {
+      "path": "/webhook/gitlab",
+      "secret_header": "X-Gitlab-Token",
+      "secret_algo": "token",
+      "event_type_header": "X-Gitlab-Event"
     }
   }
 }
 ```
+
+**Route auth: two modes, and they are not peers (#930).** `secret_algo` names
+how the route's shared secret is checked:
+
+| Mode | Header carries | Property |
+|------|----------------|----------|
+| `hmac-sha256` | an HMAC digest over the request **body** | the secret never travels; a captured request cannot be replayed against another payload |
+| `token` | the shared secret **verbatim**, compared with `hmac.compare_digest` | **weaker**: readable by anything that terminates TLS, and replayable against any payload |
+
+`token` exists because a large class of producers signs nothing — GitLab sends
+the configured secret in `X-Gitlab-Token` and expects an equality check. Before
+it, the *only* configuration that ingested such a webhook was
+`allow_unauthenticated: true`: a secret sitting in the request, thrown away, on
+the flag whose whole purpose is to be unreachable by omission.
+
+Three properties keep the wider vocabulary from becoming a softer posture:
+
+- **A pair, still fail-closed.** `secret_header` without `secret_algo` (or the
+  reverse) is a 500, and an `secret_algo` outside `SECRET_ALGOS` is a hard
+  config-validation error *and* a 500 at request time — never a downgrade to
+  unsigned. Widening the vocabulary widens what `secret_algo` may **say**, never
+  what it may omit.
+- **No cross-mode leniency.** `token` strips no `sha256=` prefix and reads no
+  body; a valid HMAC digest does not authenticate a `token` route, and the
+  reverse. Either transformation would accept a secret nobody configured.
+- **Announced, not silent.** Every `token` route logs a WARNING at listener
+  startup naming route and header, and a louder one when TLS is off (the secret
+  is then sent in the clear). Same posture as `--ws-unsafe-no-auth` and
+  `scrub_secret_env: none` — so `token` cannot become the quiet path of least
+  resistance for a producer that *does* sign bodies. Pair it with TLS.
 
 **Corporate hardening** (all stdlib, no external deps):
 - **TLS/SSL**: HTTPS with optional mutual TLS (client certificate verification)
