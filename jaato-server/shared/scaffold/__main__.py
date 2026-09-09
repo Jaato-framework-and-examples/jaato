@@ -274,7 +274,10 @@ def _cmd_integration(args) -> int:
         print(json.dumps(data, indent=2) if args.json else text)
         return 0
     name = args.name
-    dest = _install.target_dir(name, user=not args.workspace, workspace=args.workspace)
+    # --user and --workspace are mutually exclusive, so "not --workspace" IS
+    # user scope; --user is accepted so the default can be stated out loud.
+    dest = _install.target_dir(name, user=not args.workspace,
+                               workspace=args.workspace)
     changed, lines = _install.install(name, dest, force=args.force, dry_run=args.dry_run)
     if args.json:
         state, detail = _install.compare(name, dest)
@@ -430,9 +433,13 @@ def main(argv=None) -> int:
                     "build ships and where each one stands.")
     pi.add_argument("name", nargs="?", default=None,
                     help="integration name (omit to list)")
-    pi.add_argument("--workspace", default=None,
-                    help="apply to DIR instead of $HOME — project scope rather "
-                         "than user scope")
+    scope = pi.add_mutually_exclusive_group()
+    scope.add_argument("--user", action="store_true",
+                       help="apply under $HOME — every repo on this machine "
+                            "(the default; accepted explicitly so a script can "
+                            "say what it means)")
+    scope.add_argument("--workspace", default=None,
+                       help="apply under DIR instead of $HOME — this project only")
     pi.add_argument("--force", action="store_true",
                     help="overwrite an existing copy")
     pi.add_argument("--dry-run", action="store_true",

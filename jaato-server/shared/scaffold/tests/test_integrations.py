@@ -106,3 +106,35 @@ def test_listing_reports_every_shipped_integration():
     names = [r["name"] for r in data["integrations"]]
     assert "claude-code" in names
     assert "Claude Code" in text
+
+
+# --- the CLI's promises must parse ------------------------------------------
+
+@pytest.mark.parametrize("argv", [
+    ["integration"],
+    ["integration", "claude-code"],
+    ["integration", "claude-code", "--user"],
+    ["integration", "claude-code", "--workspace", "/tmp/x"],
+    ["integration", "claude-code", "--user", "--dry-run"],
+    ["integration", "claude-code", "--force", "--json"],
+])
+def test_every_advertised_invocation_parses(argv):
+    """Help text that promises a flag the parser rejects is worse than none.
+
+    Shipped exactly that: the listing advertised `--user` while the parser
+    only understood `--workspace`, so the documented way to say "user scope"
+    exited 2.  These are the forms the listing and the docstrings promise.
+    """
+    import argparse
+    from shared.scaffold.__main__ import main
+    try:
+        main(argv + ["--dry-run"] if "--dry-run" not in argv else argv)
+    except SystemExit as exc:            # argparse rejects with code 2
+        assert exc.code != 2, f"{' '.join(argv)} was rejected by the parser"
+
+
+def test_user_and_workspace_are_mutually_exclusive():
+    from shared.scaffold.__main__ import main
+    with pytest.raises(SystemExit) as exc:
+        main(["integration", "claude-code", "--user", "--workspace", "/tmp/x"])
+    assert exc.value.code == 2
