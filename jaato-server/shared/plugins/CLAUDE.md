@@ -485,7 +485,10 @@ follow for a plugin author:
 - `initialize()` may be called again mid-life with a *different* session's
   config, because the registry — and so your instance — is shared with any
   subagent the session spawns. Keep it idempotent, and guard warm resources
-  behind the `_initialized` check the way `lsp` does.
+  behind the `_initialized` check the way `lsp` does. (`permission` is the
+  one exception: re-initializing the enforcer clobbers the parent's policy
+  and channel, so its block is installed as a session-scoped policy through
+  `set_scoped_policy` instead — #957.)
 - If your plugin DOES expose tools, `jaato-scaffold validate` warns
   `plugin_config_without_plugin` when a profile configures it and leaves it
   out of `plugins:` — the config applies, but nothing the plugin offers is on
