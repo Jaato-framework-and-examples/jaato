@@ -1614,6 +1614,55 @@ the archetypes `jaato-scaffold new` emits still carry no `budget_control`
 (picking ceilings for someone else's workload is the author's call, which is
 what the warning now asks them to make).
 
+### A Ceiling That Only Counted at Turn End (#955)
+
+The runtime half of the ladder above was wired for subagents and still did
+not hold. A `documentalista` subagent made **196 tool calls** under
+`tool_calls: 100` with `degrade: [{at: 100, action: abort}]` — the very
+ladder `validate` prescribes — and nothing aborted, degraded or logged. The
+profile reached the session (its `gc` block demonstrably applied) and
+`spawn_subagent` passed `budget_control` through; what was missing was the
+**moment of observation**. `_budget_observe_turn` was the only writer of
+`tool_calls`, `seconds` and `turns`, and it runs in the turn's `finally`.
+Every one of the 196 calls happened inside one `send_message`, so the
+tracker was handed the count only when that turn ended — and a runaway loop
+is precisely the turn that does not end. `tokens` and `usd` were exempt
+because they are fed per *response*, which is why only a `usd` ceiling
+small enough to cross within one turn had ever been seen to trip.
+
+| Dimension | Was observed | Now observed |
+|-----------|--------------|--------------|
+| `tokens`, `usd` | per response | unchanged |
+| `tool_calls` | turn end | per completed call (sequential + parts loops), per batch (parallel loop) |
+| `seconds` | turn end | with every tool-call observation, plus the tail at turn end |
+| `turns` | turn end | unchanged — a turn is the unit |
+
+`JaatoSession._budget_observe_tool_calls` is called from every path that
+records a call in `turn_data['function_calls']`, and an AST guard
+(`test_budget_mid_turn_955.py`) fails the build if a new path records
+without observing. `_budget_observe_turn` stays as the **closing entry**: it
+settles whatever was not observed mid-turn and only that, so nothing is
+counted twice and a budget is exact whichever loop produced the turn. An
+`abort` mid-turn cancels the session's token; the sequential loop checks it
+before the next call and the main chat loop before the next model round-trip,
+so the overshoot is one call, or one parallel batch. The parts loop
+(attachment-carrying turns) finishes its batch and is cancelled by the
+provider on the first chunk of the next response. A session at its
+ceiling is also no longer completion-nudged — the re-prompt would be refused
+at turn start, and each refusal spent a nudge on a turn that could not run.
+
+**A ladder that never logs is indistinguishable from one that is not wired**
+(the issue's third question). Every ceiling crossing now traces
+`BUDGET CEILING dim=... used=... limit=...` once per dimension, rung or no
+rung, and every fired rung traces `BUDGET RUNG at=...% action=...`
+(`RUNG_SKIPPED`, `EXHAUSTED`) — on the per-agent provider trace and on the
+application trace (`trace.session_log`), beside the permission DECISION lines
+(#951) an operator correlates them against.
+
+Still true: a profile with `limits` and no `abort` rung crosses in silence
+except for that trace line; `finalize` remains advice, and the subagent
+that outlives its parent is bounded only by what its own profile declares.
+
 ### Configuring a Plugin and Enabling It Are Two Decisions (#950)
 
 `plugin_configs.<name>` and `plugins:` answer different questions — *how does

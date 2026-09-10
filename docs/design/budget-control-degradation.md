@@ -325,6 +325,47 @@ with no pricing table reported `cost_usd: None` on every turn. **Verify
 `usd` advances before relying on it**; `tokens` / `turns` / `tool_calls`
 are always exact.
 
+**When each dimension is observed decides whether it can bind at all
+(#955).** ``tokens`` and ``usd`` are fed per *response*, so they cross
+inside a turn. Until #955, ``tool_calls``, ``seconds`` and ``turns`` were
+fed once, in the turn's ``finally`` — and a runaway tool loop is exactly
+the turn that does not end. A subagent made 196 tool calls under
+``tool_calls: 100`` with an ``abort`` rung at 100% and nothing fired,
+because every one of them happened inside one ``send_message``; it outlived
+its driver and was stopped by hand. Now:
+
+| Dimension | Observed | Overshoot bound |
+|---|---|---|
+| `tokens`, `usd` | per response (unchanged) | one response |
+| `tool_calls` | per completed call (sequential + parts loops), per batch (parallel loop) | one call, or one parallel batch (at most `max_parallel_tools`) |
+| `seconds` | with every tool-call observation, plus the tail at turn end | one tool call's duration |
+| `turns` | at turn end (a turn is the unit) | none |
+
+`_budget_observe_tool_calls` is called by every path that records a call in
+`turn_data['function_calls']` (an AST guard, `test_budget_mid_turn_955.py`,
+holds that invariant); `_budget_observe_turn` remains as the closing entry
+that settles whatever was not observed mid-turn, and pops its bookkeeping
+before the turn lands in `turn_accounting`. ``abort`` mid-turn cancels the
+session's token: the sequential loop checks it before the next call and the
+main chat loop before the next model round-trip, so the ceiling stops the
+run on the call that crosses it, not at the end of a turn that never comes.
+The parts loop (attachment-carrying turns) has no check of its own — it
+finishes the batch in flight and is cancelled by the provider on the first
+chunk of the next response, so its overshoot is one batch plus one request
+that returns nothing. An exhausted session is also no longer
+completion-nudged: the re-prompt would be refused at turn start, and each
+refusal spent a nudge.
+
+**Crossing a ceiling is traced whether or not a rung fires.** The reporter
+grepped the session trace for the ladder and found nothing, unable to tell
+"evaluated, did not fire" from "not wired". Every observation now writes
+`BUDGET CEILING dim=... used=... limit=...` the first time a dimension
+reaches 100%, and every fired rung writes `BUDGET RUNG at=...% action=...`
+(`RUNG_SKIPPED` for a backwards rebind the pool already passed,
+`EXHAUSTED` for the abort latch) — on both the per-agent provider trace and
+the application trace (`trace.session_log`), beside the permission
+DECISION lines an operator correlates them against.
+
 ---
 
 ### 5.1 What `abort` means
@@ -542,11 +583,12 @@ Landed (runtime):
 |---|---|
 | `BudgetTracker` + `BudgetUsage` + `overlay_tier_table` (§6.1) | `shared/budget_control.py` — pure logic, no session coupling |
 | §6.2 resolved-entry re-resolve + extracted `_is_connected_to` / `_connect_tier_entry` | `shared/jaato_session.py:switch_tier` |
-| Observation hooks (tokens+usd per response; turns+seconds+tool_calls per turn) | `jaato_session._budget_observe_response` / `_budget_observe_turn`, folded into the EXISTING `_record_token_usage` and turn-end accounting — no new measurement path |
+| Observation hooks (tokens+usd per response; tool_calls+seconds per completed call / batch (#955); turns + the unobserved remainder at turn end) | `jaato_session._budget_observe_response` / `_budget_observe_tool_calls` / `_budget_observe_turn`, folded into the EXISTING `_record_token_usage`, the three tool-execution paths and turn-end accounting — no new measurement path |
 | Rung application (brownout + `abort`) | `jaato_session._apply_budget_rungs` / `_reconnect_active_tier_if_rebound` |
 | Wire: envelope v5 `budget_control` + `to_dict`/`from_dict` round-trip | `shared/session_envelope.py`, `server/session_manager.py` |
 | Plumbing: profile → session | `server/core.py`, `server/runner/session.py`, `jaato_runtime.create_session`, `JaatoSession.configure` |
 | 17 runtime tests | `shared/tests/test_budget_runtime.py` |
+| Mid-turn binding + trace lines + AST guard (#955) | `shared/tests/test_budget_mid_turn_955.py` |
 
 Cost resolution reuses `_resolve_span_cost` (provider-reported → pricing
 table → `None`), so the budget and the telemetry span always agree, and
