@@ -1,0 +1,6 @@
+{
+  "tool": "Claude Code",
+  "target": ".claude/skills/jaato-sdk",
+  "summary": "the jaato-sdk skill — how to build on this SDK, for an agent working in Claude Code",
+  "why": "Claude Code loads skills from ~/.claude/skills (all repos) or <project>/.claude/skills (one project). Installing from here rather than copying by hand is what keeps the guide and the framework the same version."
+}

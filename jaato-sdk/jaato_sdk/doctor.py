@@ -225,6 +225,98 @@ def _premium_pyproject_reactors(spec) -> Optional[List[str]]:
     return sorted(eps.keys()) if isinstance(eps, dict) else None
 
 
+def check_dependency_coherence() -> List[Check]:
+    """Do this environment's jaato distributions agree with their own sources?
+
+    `pip` records a version at install time; an editable install keeps pointing
+    at a working tree that moves. When they part company, every version-derived
+    answer in the environment names a build that is not the one running — the
+    provenance stamp `jaato-scaffold integration` writes, a bug report's "installed
+    version", a compatibility decision.  Nothing else notices, because the
+    import still succeeds.
+
+    WARN, not FAIL: a skew misleads, it does not stop work.
+    """
+    try:
+        from shared.scaffold import dependencies as _deps
+    except Exception:      # noqa: BLE001 — sdk installed without the server
+        return [Check("dependency coherence", WARN,
+                      "cannot check: `shared.scaffold` is not importable "
+                      "(jaato-server not installed in this env)")]
+
+    skewed, seen = [], []
+    for name in _deps.JAATO_DISTS:
+        st = _deps.dist_state(name)
+        if not st["installed"]:
+            continue
+        seen.append(f"{name} {st['installed']}")
+        if st["skew"]:
+            skewed.append(f"{name}: metadata {st['installed']} vs source "
+                          f"{st['source_version']}")
+    if not seen:
+        return [Check("dependency coherence", WARN, "no jaato distributions found")]
+    if skewed:
+        return [Check("dependency coherence", WARN,
+                      "; ".join(skewed) +
+                      " — reinstall the editable distribution (`pip install -e "
+                      "<source>`) so version-derived answers stop naming a build "
+                      "that is not running. `jaato-scaffold explain dependencies` "
+                      "shows the full picture.")]
+    return [Check("dependency coherence", PASS,
+                  ", ".join(seen) + " — metadata agrees with sources")]
+
+
+def check_integrations() -> List[Check]:
+    """Are this build's integrations applied, and do they match it?
+
+    The skill ships as package data of `jaato-server` so a copy cannot describe
+    a different framework than the one running — but only if the copy on disk
+    came from THIS build.  Hand-copied skills drift silently: a survey of one
+    org found the same skill in four repos at four lengths, and user-global
+    installs 2.5 months behind the originals, with nothing detecting it.
+
+    So this reports the stamp `jaato-scaffold install` leaves against the
+    installed framework version.  WARN, never FAIL — a stale guide misleads a
+    reader but breaks no run, and the doctor's FAIL exit is a gate for things
+    that stop work.
+    """
+    try:
+        from shared.scaffold import integrations as _install
+    except Exception:      # noqa: BLE001 — sdk installed without the server
+        return [Check("integrations", WARN,
+                      "cannot check: `shared.scaffold` is not importable "
+                      "(jaato-server not installed in this env)")]
+
+    names = _install.available()
+    if not names:
+        return [Check("integrations", WARN, "this framework build ships no integrations")]
+
+    out: List[Check] = []
+    for name in names:
+        user = _install.target_dir(name, user=True, workspace=None)
+        state, detail = _install.compare(name, user)
+        if state == "current":
+            out.append(Check(f"integration ({name})", PASS,
+                             f"{user} — from jaato-server {detail}"))
+        elif state == "absent":
+            out.append(Check(f"integration ({name})", WARN,
+                             f"not applied — `jaato-scaffold integration {name}` "
+                             f"puts it in {user} for every repo on this machine"))
+        elif state == "stale":
+            out.append(Check(f"integration ({name})", WARN,
+                             f"{detail} — re-run `jaato-scaffold integration {name} --force`"))
+        elif state == "unstamped":
+            out.append(Check(f"integration ({name})", WARN,
+                             f"{user} was {detail}; it may describe a different "
+                             f"build — `jaato-scaffold integration {name} --force` "
+                             f"replaces it with this one"))
+        else:      # modified
+            out.append(Check(f"integration ({name})", WARN,
+                             f"{detail} — local edits will be lost by "
+                             f"`install --force`; upstream them first"))
+    return out
+
+
 def check_premium_reactors() -> List[Check]:
     """Catch the stale-entry-points trap: jaato-premium installed but a reactor
     entry point present in its source ``pyproject`` is MISSING from the installed
@@ -924,6 +1016,8 @@ def run_checks(
     checks: List[Check] = []
     checks += check_python_env()
     checks += check_premium_reactors()
+    checks += check_dependency_coherence()
+    checks += check_integrations()
     checks += check_socket(info, auto_start=auto_start)
     checks += check_daemon_identity(info)
     if web_socket:

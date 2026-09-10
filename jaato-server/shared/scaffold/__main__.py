@@ -49,6 +49,7 @@ from . import validate as _validate
 
 #: Scopes rendered with no argument.
 _SIMPLE_SCOPES = {
+    "integrations": _explain.integrations,
     "plugins": _explain.plugins,
     "providers": _explain.providers,
     "gc": _explain.gc,
@@ -83,10 +84,40 @@ _SCOPES_HELP = ("plugins | plugin | commands | providers | provider | gc | env |
                 "archetype")
 
 
+_DEPS_WORDS = ("dependencies", "deps")
+
+
+def _take_deps_word(scope, name, extra):
+    """Pull the optional `dependencies` word out of the query, wherever it sits.
+
+    Dependencies are a FACET of every scope rather than a scope of their own —
+    a provider imports packages, a plugin shells out, the framework is two
+    distributions that drift — so the word is appended to whatever you were
+    already asking:
+
+        explain dependencies
+        explain provider openrouter dependencies
+        explain plugin cli deps
+
+    Accepted in any position after the verb, because a reader who types it
+    first is asking the same question as one who types it last.
+    """
+    words = [w for w in (scope, name, extra) if w]
+    kept = [w for w in words if w not in _DEPS_WORDS]
+    asked = len(kept) != len(words)
+    kept += [None, None]
+    return kept[0], kept[1], asked
+
+
 def _cmd_explain(args) -> int:
-    scope = args.scope
-    name = args.name
+    scope, name, deps = _take_deps_word(
+        args.scope, args.name, getattr(args, "extra", None))
     ws = args.workspace or "."
+    if deps:
+        from . import dependencies as _deps
+        data, text = _deps.render(scope, name)
+        print(json.dumps(data, indent=2) if args.json else text)
+        return 0
     if scope is None:
         data, text = _explain.overview()
     elif scope in _SIMPLE_SCOPES:
@@ -230,6 +261,37 @@ def _cmd_new(args) -> int:
 
 # ----------------------------------------------------- external verbs (plugins)
 
+def _cmd_integration(args) -> int:
+    from . import integrations as _install
+    names = _install.available()
+    if not names:
+        print("this build ships no integrations", file=sys.stderr)
+        return 1
+    if not args.name:
+        # The bare verb LISTS rather than guessing which one you meant — with
+        # more than one shipped, picking for you would be a coin toss.
+        data, text = _install.listing()
+        print(json.dumps(data, indent=2) if args.json else text)
+        return 0
+    name = args.name
+    # --user and --workspace are mutually exclusive, so "not --workspace" IS
+    # user scope; --user is accepted so the default can be stated out loud.
+    dest = _install.target_dir(name, user=not args.workspace,
+                               workspace=args.workspace)
+    changed, lines = _install.install(name, dest, force=args.force, dry_run=args.dry_run)
+    if args.json:
+        state, detail = _install.compare(name, dest)
+        print(json.dumps({"asset": name, "dest": str(dest), "changed": changed,
+                          "state": state, "detail": detail,
+                          "version": _install.framework_version()}, indent=2))
+        return 0
+    for line in lines:
+        print(line)
+    # A refusal is not a crash: the operator asked a reasonable thing and the
+    # answer is "there is already one there".  Non-zero so a script notices.
+    return 0 if (changed or args.dry_run) else 1
+
+
 def _discover_external_verbs() -> list:
     """Load verbs contributed by external packages via entry points.
 
@@ -279,6 +341,10 @@ def main(argv=None) -> int:
     pe.add_argument("name", nargs="?",
                     help="name for plugin/provider/event/archetype scope, or a "
                          "filter for env/events")
+    pe.add_argument("extra", nargs="?",
+                    help="the optional word `dependencies` (or `deps`) — a facet "
+                         "of any scope: what it needs, what is installed, and "
+                         "whether this environment agrees with itself")
     pe.add_argument("--workspace", help="workspace dir (for `sets`)")
     pe.add_argument("--json", action="store_true")
     pe.set_defaults(func=_cmd_explain)
@@ -356,6 +422,31 @@ def main(argv=None) -> int:
                          "an appended-to one exactly as the real run would.")
     pn.add_argument("--json", action="store_true")
     pn.set_defaults(func=_cmd_new)
+
+    pi = sub.add_parser(
+        "integration", help="wire jaato into a tool you work in (bare: list them)",
+        description="An integration is jaato's side of a contract with another "
+                    "tool — today `claude-code`, which installs the jaato-sdk "
+                    "skill where Claude Code looks for skills.  Each copy is "
+                    "stamped with the build it came from, so `jaato-doctor` can "
+                    "say when one has gone stale.  With no name, lists what this "
+                    "build ships and where each one stands.")
+    pi.add_argument("name", nargs="?", default=None,
+                    help="integration name (omit to list)")
+    scope = pi.add_mutually_exclusive_group()
+    scope.add_argument("--user", action="store_true",
+                       help="apply under $HOME — every repo on this machine "
+                            "(the default; accepted explicitly so a script can "
+                            "say what it means)")
+    scope.add_argument("--workspace", default=None,
+                       help="apply under DIR instead of $HOME — this project only")
+    pi.add_argument("--force", action="store_true",
+                    help="overwrite an existing copy")
+    pi.add_argument("--dry-run", action="store_true",
+                    help="print what would be written, write nothing")
+    pi.add_argument("--json", action="store_true")
+    pi.set_defaults(func=_cmd_integration)
+
 
     # External verbs (e.g. the premium `compile` verb) — discovered via the
     # `jaato.scaffold_verbs` entry-point group.  Built-in names win on collision.

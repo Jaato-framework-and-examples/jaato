@@ -179,6 +179,14 @@ cache_google_genai = "shared.plugins.cache_google_genai:create_plugin"
 where = ["."]
 include = ["shared*", "server*", "jaato_embedded*"]
 
+# Integrations ship WITH the framework they wire into another tool, so an
+# applied copy cannot describe a different version than the one running.
+# `jaato-scaffold integration <name>` applies one; `jaato-doctor` compares
+# the stamp it leaves against this distribution's version.
+[tool.setuptools.package-data]
+"shared.scaffold" = ["integrations/*/integration.json", "integrations/*/payload/*.md",
+                     "integrations/*/payload/*.sh", "integrations/*/payload/references/*.md"]
+
 [tool.pytest.ini_options]
 # Register custom marks so pytest doesn't warn on use.  ``apparmor``
 # gates the §2.6 multitenant integration test on hosts with
