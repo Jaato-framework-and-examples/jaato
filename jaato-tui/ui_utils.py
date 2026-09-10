@@ -554,7 +554,7 @@ def _show_keybindings(display) -> None:
         "Scrolling": ["scroll_up", "scroll_down", "scroll_top", "scroll_bottom", "mouse_scroll_up", "mouse_scroll_down"],
         "Navigation": ["nav_up", "nav_down"],
         "Pager": ["pager_quit", "pager_next"],
-        "Features": ["toggle_plan", "toggle_tools", "cycle_agents", "yank", "view_full"],
+        "Features": ["toggle_plan", "toggle_tools", "toggle_thinking", "cycle_agents", "yank", "view_full"],
         "Tool Navigation": ["tool_nav_enter", "tool_expand", "tool_collapse", "tool_exit", "tool_output_up", "tool_output_down"],
     }
 

@@ -1693,6 +1693,48 @@ class JaatoSession:
             self._on_prompt_injected(msg.text)
         return msg.text
 
+    def _make_thinking_emitter(
+        self,
+        on_output: Optional[Callable[[str, str, str], None]],
+        trace_tag: str,
+    ) -> Callable[[str], None]:
+        """Build the ``on_thinking`` callback for ONE provider call.
+
+        Reasoning reaches the session the way text does — as a stream of
+        deltas on the OpenAI-shaped wires (OpenRouter, the ``_openai_compat``
+        family, GitHub Models, the Responses API), or as one whole block on
+        the wires that accumulate it (Anthropic, ``claude_cli``, Bedrock).
+        The output contract is the same one text uses: the FIRST chunk of a
+        block is a ``"write"`` (start a new block) and every later chunk an
+        ``"append"``.  Before #755 every reasoning chunk was emitted as a
+        ``"write"``, so a client honouring the contract started a new block
+        per delta and rendered a 20-character line per token — the
+        "narrow wrap" the issue reports.
+
+        The emitter is per provider call, like ``streaming_callback``: each
+        call of the tool loop starts a fresh block, so interleaved reasoning
+        between two tool rounds renders as two blocks rather than one.
+
+        Args:
+            on_output: The session's output callback, or ``None`` (the
+                emitter is then a no-op).
+            trace_tag: Prefix for the ``_trace`` line, naming the call site.
+
+        Returns:
+            A callable taking the reasoning chunk.
+        """
+        started = [False]
+
+        def thinking_callback(thinking: str) -> None:
+            if not on_output:
+                return
+            mode = "append" if started[0] else "write"
+            self._trace(f"{trace_tag} mode={mode} len={len(thinking)}")
+            on_output("thinking", thinking, mode)
+            started[0] = True
+
+        return thinking_callback
+
     def _forward_to_parent(self, event_type: str, content: str) -> None:
         """Forward an event to the parent session.
 
@@ -6487,11 +6529,10 @@ NOTES
 
                     self._trace(f"STREAMING on_usage_update={'set' if wrapped_usage_callback else 'None'}")
 
-                    # Create thinking callback to emit thinking BEFORE text
-                    def thinking_callback(thinking: str) -> None:
-                        if on_output:
-                            self._trace(f"SESSION_THINKING_CALLBACK len={len(thinking)}")
-                            on_output("thinking", thinking, "write")
+                    # Thinking callback: emits reasoning BEFORE text, as a
+                    # write-then-append stream (one block per provider call).
+                    thinking_callback = self._make_thinking_emitter(
+                        on_output, "SESSION_THINKING_CALLBACK")
 
                     with self._provider_access():
                         turn_result, _retry_stats = with_retry(
@@ -8983,11 +9024,10 @@ NOTES
                         on_output("model", chunk, mode)
                         first_chunk_after_tools[0] = True
 
-                # Create thinking callback to emit thinking BEFORE text
-                def thinking_callback(thinking: str) -> None:
-                    if on_output:
-                        self._trace(f"SESSION_TOOL_RESULT_THINKING_CALLBACK len={len(thinking)}")
-                        on_output("thinking", thinking, "write")
+                # Thinking callback: emits reasoning BEFORE text, as a
+                # write-then-append stream (one block per provider call).
+                thinking_callback = self._make_thinking_emitter(
+                    on_output, "SESSION_TOOL_RESULT_THINKING_CALLBACK")
 
                 # Path 1 quirk consumption: if signal_completion just
                 # returned validation_failed, request named-function
@@ -9158,11 +9198,10 @@ NOTES
                         on_output("model", chunk, mode)
                         first_chunk_sent[0] = True
 
-                # Create thinking callback to emit thinking BEFORE text
-                def thinking_callback(thinking: str) -> None:
-                    if on_output:
-                        self._trace(f"MID_TURN_THINKING_CALLBACK len={len(thinking)}")
-                        on_output("thinking", thinking, "write")
+                # Thinking callback: emits reasoning BEFORE text, as a
+                # write-then-append stream (one block per provider call).
+                thinking_callback = self._make_thinking_emitter(
+                    on_output, "MID_TURN_THINKING_CALLBACK")
 
                 self._trace("MID_TURN_PROMPT: Calling with_retry for streaming...")
                 with self._provider_access():
@@ -11390,10 +11429,10 @@ NOTES
                 first_chunk_sent[0] = True
             self._forward_to_parent("MODEL_OUTPUT", chunk)
 
-        def thinking_callback(thinking: str) -> None:
-            if on_output:
-                self._trace(f"SESSION_PARTS_THINKING len={len(thinking)}")
-                on_output("thinking", thinking, "write")
+        # Reasoning is a write-then-append stream, like text (one block per
+        # provider call).
+        thinking_callback = self._make_thinking_emitter(
+            on_output, "SESSION_PARTS_THINKING")
 
         with self._provider_access():
             turn_result, _retry_stats = with_retry(

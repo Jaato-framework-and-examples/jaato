@@ -3116,7 +3116,21 @@ Config files: `.jaato/keybindings.json` (project) or `~/.jaato/keybindings.json`
 
 Key syntax (prompt_toolkit): `enter`, `c-c` (Ctrl+C), `f1`, `pageup`, `["escape", "enter"]`
 
-Default keybindings: `submit`=enter, `cancel`=c-c, `exit`=c-d, `toggle_plan`=c-p, `toggle_tools`=c-t, `open_editor`=c-g, `search`=c-f
+Default keybindings: `submit`=enter, `cancel`=c-c, `exit`=c-d, `toggle_plan`=c-p, `toggle_tools`=c-t, `toggle_thinking`=c-r, `open_editor`=c-g, `search`=c-f
+
+**Reasoning blocks** (`toggle_thinking`, Ctrl+R by default): a model's
+reasoning reaches the TUI as its own output source (`thinking`) ahead of the
+answer. It renders **collapsed by default** as one summary line
+(`▸ Internal thinking (14 lines, 412 words)  ───  Ctrl+R to expand`), the
+sibling of the collapsed tool tree behind Ctrl+T; the toggle expands every
+reasoning block in the active buffer into the bordered `Internal thinking`
+box. The session bar shows a `Reasoning: ▶ collapsed [Ctrl+R]` indicator once
+the buffer holds any. Note that most sessions will show **no** reasoning at
+all: providers discard it unless the profile asks for it
+(`plugin_configs.<provider>.api_params.enable_thinking: true`), because
+reasoning costs output tokens. Reasoning is streamed like text — the first
+delta is a `write`, the rest `append` — so it lands in one block; before #755
+every delta was a `write` and each rendered on its own line.
 
 The `open_editor` keybinding (Ctrl+G) opens the current input in your external editor (`$EDITOR` or `$VISUAL`, defaults to `vi`). Useful for composing complex multi-line prompts.
 
