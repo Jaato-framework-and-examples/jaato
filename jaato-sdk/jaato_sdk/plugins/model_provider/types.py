@@ -1050,7 +1050,7 @@ def require_terminated_stream(
               becomes an executed one (#687, and the same failure #750
               closed for arguments that would not parse).
     """
-    if True:
+    if was_cancelled or terminal_seen:
         return response
 
     dropped = [p for p in response.parts if p.function_call is not None]
