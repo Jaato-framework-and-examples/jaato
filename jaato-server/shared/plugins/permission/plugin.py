@@ -42,6 +42,32 @@ if TYPE_CHECKING:
     from ..registry import PluginRegistry
 
 
+def _describe_permission_caller(context: Optional[Dict[str, Any]]) -> str:
+    """Render the asking session as a trace suffix, or ``""``.
+
+    The permission plugin is shared by every session on a registry —
+    a subagent's decisions are made by the same instance as its
+    parent's — so a ``[PERMISSION]`` trace line that names no agent
+    cannot be attributed to either.  ``ToolExecutor`` carries the
+    per-session identity in its permission context; this turns it into
+    ``" agent=subagent:documentalista session=..."``.
+
+    Module-level so it can be tested (and so the wrapper it serves
+    stays branch-free for the complexity ratchet).
+    """
+    if not context:
+        return ""
+    parts: List[str] = []
+    agent_type = context.get("agent_type")
+    agent_name = context.get("agent_name")
+    if agent_type or agent_name:
+        parts.append(f" agent={agent_type or '?'}:{agent_name or '?'}")
+    session_id = context.get("session_id")
+    if session_id:
+        parts.append(f" session={session_id}")
+    return "".join(parts)
+
+
 class PermissionPlugin(RunnerForwardingMixin):
     """Plugin that provides permission control for tool execution.
 
@@ -1410,7 +1436,32 @@ class PermissionPlugin(RunnerForwardingMixin):
         context: Optional[Dict[str, Any]] = None,
         call_id: Optional[str] = None
     ) -> Tuple[bool, Dict[str, Any]]:
-        """Check if a tool execution is permitted.
+        """Check if a tool execution is permitted, and SAY SO (issue #951).
+
+        The decision itself is made by :meth:`_check_permission_impl`,
+        which has one exit per rule kind — twenty-odd of them.  This
+        wrapper exists so the verdict is traced at ONE place that every
+        one of them passes through, because before it only the ASK
+        branch traced anything: an ALLOW and a DENY were byte-identical
+        in every log an operator can read (one ``check_permission``
+        line, then silence), and ``_log_decision``'s audit trail is an
+        in-memory list that reaches no file and no event.  A silent
+        denial is also invisible to the MODEL — it re-issues the same
+        call — so "the executor never ran" was indistinguishable from
+        "the policy said no", in a subagent especially, where
+        ``_on_permission_resolved`` is deliberately suppressed.
+
+        Tracing per-branch would have to be re-done for every branch
+        added later; wrapping cannot drift.  Recursion (the
+        policy-mutated-mid-ASK retry) re-enters here, so a re-check
+        records its own verdict rather than overwriting the first.
+
+        The trace names WHO asked, from the caller's ``context`` rather
+        than ``self._agent_name``: this plugin is a registry-shared
+        singleton whose ``_agent_name`` is whatever initialized it
+        LAST, so a subagent's spawn re-labels the parent's own
+        subsequent decisions.  ``context`` is per-session, set by
+        ``ToolExecutor.set_permission_plugin``.
 
         Args:
             tool_name: Name of the tool to execute
@@ -1425,7 +1476,48 @@ class PermissionPlugin(RunnerForwardingMixin):
                        'sanitization', 'session_whitelist', 'session_blacklist',
                        'user_approved', 'user_denied', 'allow_all', 'timeout')
         """
-        self._trace(f"check_permission: tool={tool_name} call_id={call_id}")
+        who = _describe_permission_caller(context)
+        self._trace(
+            f"check_permission: tool={tool_name} call_id={call_id}{who}"
+        )
+        try:
+            allowed, info = self._check_permission_impl(
+                tool_name, args, context, call_id
+            )
+        except Exception as exc:
+            # A raise is a third outcome the old logging could not
+            # express either.  ``ToolExecutor`` turns it into a
+            # fail-closed denial, so name it before it is translated.
+            self._trace(
+                f"check_permission: RAISED tool={tool_name} "
+                f"call_id={call_id}{who} error={type(exc).__name__}: {exc}"
+            )
+            raise
+        self._trace(
+            f"check_permission: DECISION tool={tool_name} call_id={call_id}"
+            f"{who} allowed={allowed} "
+            f"method={info.get('method', 'unknown')} "
+            f"reason={info.get('reason', '')!r}"
+        )
+        # The audit entry ``_log_decision`` wrote knows the reason but
+        # not the rule kind or the caller; stamp them on so the
+        # in-memory log (which evaluators read as
+        # ``EvalContext.execution_log``) can be reasoned over.
+        self._stamp_last_decision(tool_name, call_id, info, context)
+        return allowed, info
+
+    def _check_permission_impl(
+        self,
+        tool_name: str,
+        args: Dict[str, Any],
+        context: Optional[Dict[str, Any]] = None,
+        call_id: Optional[str] = None
+    ) -> Tuple[bool, Dict[str, Any]]:
+        """Evaluate the policy and return the verdict.
+
+        Every exit is traced by the :meth:`check_permission` wrapper —
+        do not add per-branch decision traces here.
+        """
 
         # Trusted bridge: when a plugin-provided interpreter (today only the
         # notebook plugin's Python tool bindings) wraps dispatch in
@@ -1572,6 +1664,13 @@ class PermissionPlugin(RunnerForwardingMixin):
             return True, {'reason': 'Pre-approved all requests', 'method': 'allow_all'}
 
         if not self._policy:
+            # An ALLOW, and it used to leave no audit entry at all — so a
+            # session running on a plugin whose ``initialize()`` never
+            # landed looked exactly like one running on a policy that
+            # permits everything.  Log it (issue #951).
+            self._log_decision(
+                tool_name, args, "allow", "Permission plugin not initialized"
+            )
             return True, {'reason': 'Permission plugin not initialized', 'method': 'not_initialized'}
 
         # Check if using ParentBridgedChannel (subagent mode)
@@ -1877,6 +1976,9 @@ class PermissionPlugin(RunnerForwardingMixin):
                 return self.check_permission(tool_name, args, context, call_id)
 
         # Unknown decision type, deny by default
+        self._log_decision(
+            tool_name, args, "deny", "Unknown policy decision"
+        )
         return False, {'reason': 'Unknown policy decision', 'method': 'unknown'}
 
     def _handle_channel_response(
@@ -1985,6 +2087,40 @@ class PermissionPlugin(RunnerForwardingMixin):
             "decision": decision,
             "reason": reason,
         })
+
+    def _stamp_last_decision(
+        self,
+        tool_name: str,
+        call_id: Optional[str],
+        info: Dict[str, Any],
+        context: Optional[Dict[str, Any]],
+    ) -> None:
+        """Add rule kind + caller identity to this call's audit entry.
+
+        ``_log_decision`` is called from inside the decision branches,
+        which know the reason but not the ``method`` string the caller
+        is handed, nor which session asked.  Both are known here, at
+        the single exit, so they are stamped on afterwards — the same
+        after-the-fact enrichment :meth:`_attribute_last_decision`
+        already does for approver identity (#859).
+
+        Guarded on the entry naming the same tool: a branch that
+        returned without logging would otherwise decorate a PREVIOUS
+        call's entry with this call's metadata.  Every branch logs
+        today (#951 closed the last two), so the guard is belt and
+        braces rather than load-bearing.
+        """
+        if not self._execution_log:
+            return
+        last = self._execution_log[-1]
+        if last.get("tool_name") != tool_name or "method" in last:
+            return
+        last["method"] = info.get("method", "unknown")
+        last["call_id"] = call_id
+        ctx = context or {}
+        last["agent_type"] = ctx.get("agent_type")
+        last["agent_name"] = ctx.get("agent_name")
+        last["session_id"] = ctx.get("session_id")
 
     def _attribute_last_decision(self, attribution: Dict[str, str]) -> None:
         """Stamp who decided onto the entry ``_log_decision`` just wrote.
