@@ -98,11 +98,16 @@ budget_control:
       model_tiers:
         planner:    { model: google/gemini-flash, provider: openrouter }
         dispatcher: { model: google/gemini-flash, provider: openrouter }
+    - at: 95%
+      action: finalize         # graceful: inject "wrap up and answer now".
+                               # Advice — a looping model may decline it.
     - at: 100%
-      action: finalize         # graceful terminal: inject "wrap up and answer now"
-      # alternative terminals: `abort` (ends the session: cancels the
-      #   in-flight turn AND refuses further turns, §5.1)
-      #   | `escalate` (hand to cascade owner)
+      action: abort            # the CEILING: ends the session (cancels the
+                               # in-flight turn AND refuses further turns,
+                               # §5.1).  Only `abort` stops a run; a ladder
+                               # without one is a brownout, not a ceiling
+                               # (trap 5 below).  `escalate` (hand to the
+                               # cascade owner) is the third terminal.
 ```
 
 **Field notes:**
@@ -126,8 +131,9 @@ budget_control:
 
 ### 3.0 Authoring a budgeted profile — four traps
 
-Found while authoring the first budgeted profiles; none is caught by
-`jaato-scaffold validate`, so they are documented rather than enforced.
+Found while authoring the first budgeted profiles.  Traps 1-4 are not
+caught by `jaato-scaffold validate`, so they are documented rather than
+enforced; trap 5 is, since #947.
 
 1. **`max_turns` must exceed `limits.turns`.** If both are `4` the run
    stops at turn 4 either way and the abort is *unattributable* — a
@@ -160,6 +166,21 @@ Found while authoring the first budgeted profiles; none is caught by
    `anthropic/claude-haiku-4.5` (dot), while the Anthropic-native
    spelling is `claude-haiku-4-5-20251001`. This bites hardest on a
    `fallback` tier, which may not be entered until late in a run.
+
+5. **`limits` are OBSERVED, not enforced — only an `abort` rung stops a
+   run.** The most expensive trap of the five, and the least visible,
+   because the profile looks protected. `BudgetTracker` accumulates
+   against `limits` and turns them into a percentage, and the `degrade`
+   ladder is the *only* consumer of that percentage: a profile declaring
+   `limits` and no ladder sails through 100%, 200%, 1000% in silence.
+   Of the three terminal actions only `abort` reaches `request_stop`
+   (§5.1); `finalize` and `escalate` are latched on
+   `_budget_terminal_action` for a layer above to act on, which a looping
+   model can decline — and did (#947: 35 consecutive failed tool calls
+   without ever emitting text). Since #947 `validate` says so, as
+   `budget_limits_without_abort`; and a profile with no `budget_control`
+   at all draws `budget_control_absent`, because unbounded-on-every-
+   dimension was previously something an author learned from the bill.
 
 Also note `system_instructions` is deprecated at profile level — put the
 persona in `.jaato/agents/<name>.md`.

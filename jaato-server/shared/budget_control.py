@@ -71,9 +71,13 @@ logger = logging.getLogger(__name__)
 #   seconds    -> summed turn / tool wall-clock
 #   tool_calls -> count of tool.call_completed
 #   turns      -> turn counter
-VALID_DIMENSIONS: frozenset = frozenset(
-    {"usd", "tokens", "seconds", "tool_calls", "turns"}
-)
+#
+# Ordered, because the order is presentational as well as canonical: it is
+# what ``BudgetUsage.as_dict`` and ``BudgetTracker.observe`` already use, and
+# what the validator lists back to an author who has never seen the knob
+# (#947).  The frozenset is DERIVED from it so the two cannot drift.
+DIMENSIONS: Tuple[str, ...] = ("usd", "tokens", "seconds", "tool_calls", "turns")
+VALID_DIMENSIONS: frozenset = frozenset(DIMENSIONS)
 
 # Terminal actions a rung may take instead of / alongside an overlay.
 #   finalize -> inject "wrap up and answer with what you have" (graceful)
@@ -410,6 +414,28 @@ class BudgetControlConfig:
         ``model_tiers`` — the overlay would have no table to patch.
         """
         return any(rung.model_tiers for rung in self.degrade)
+
+    @property
+    def has_abort_rung(self) -> bool:
+        """True if some rung carries ``action: abort`` — i.e. it can STOP.
+
+        The distinction the profile validator needs, and the one that is
+        easiest to get wrong from reading ``limits`` alone: a ceiling in
+        ``limits`` is **observed, never enforced**.
+        :class:`BudgetTracker` accumulates against it and
+        :meth:`BudgetTracker.usage_fraction` turns it into a percentage —
+        but the ``degrade`` ladder is the ONLY consumer of that
+        percentage, so a profile declaring ``limits`` and no ladder sails
+        through 100%, 200%, 1000% in silence.
+
+        Of the three terminal actions only ``abort`` stops the run:
+        ``JaatoSession._apply_budget_rungs`` latches
+        ``_budget_exhausted_reason`` and calls ``request_stop`` for it,
+        while ``finalize`` and ``escalate`` are latched and surfaced for a
+        layer above to act on — advice a looping model can decline, and
+        did (#947: 35 consecutive failed tool calls, no text emitted).
+        """
+        return any(rung.action == ACTION_ABORT for rung in self.degrade)
 
     @classmethod
     def from_dict(
