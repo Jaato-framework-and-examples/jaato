@@ -98,6 +98,14 @@ parsing the implementation, health by trying it. There is no table mapping a
 provider to a package, because such a table is wrong the moment someone adds an
 import, and a wrong table is worse than none: the reader stops checking.
 
+A named provider or plugin is read as its own source PLUS the shared machinery
+it imports (bounded to its family directory), because the import that fails at
+runtime is often one the unit inherits rather than writes: ten providers own no
+`import openai` at all — `_openai_compat` does. Each import is printed with the
+file that imports it, and a MISSING one with the extra that declares it, so
+"why was this not installed automatically?" is answered by the report rather
+than guessed at (`pip install 'jaato-server[azure-openai]'`).
+
 Two things it catches that nothing else does. **Version skew** — `pip` records a
 version at install time while an editable install keeps pointing at a tree that
 moves, so every version-derived answer can name a build that is not running.

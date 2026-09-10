@@ -71,6 +71,8 @@ def overview() -> Rendered:
         "  jaato-scaffold explain dependencies            # distributions, skew, extras\n"
         "  jaato-scaffold explain provider <name> deps    # what its code imports\n"
         "  jaato-scaffold explain plugin <name> deps\n"
+        "a named unit is read as its own source PLUS the shared machinery it\n"
+        "imports, and a MISSING package is printed with the extra declaring it.\n"
         "\n"
         "integrations ship WITH this build, so an installed copy cannot describe a\n"
         "different framework than the one running:\n"
