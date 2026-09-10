@@ -10,6 +10,7 @@ import os
 import re
 import tempfile
 import threading
+import uuid
 from base64 import b64encode as _b64encode
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
@@ -330,6 +331,16 @@ def _should_drop_introspection(has_deferred_to_discover, tool_names) -> bool:
     return not any(n not in _INTROSPECTION_TOOL_NAMES for n in tool_names)
 
 
+# Per-turn budget bookkeeping, kept on ``turn_data`` for the life of ONE turn
+# and popped by ``_budget_observe_turn`` before the dict is appended to
+# ``_turn_accounting`` (so nothing here is persisted or emitted).  They let
+# the mid-turn observations (#955) and the turn-end observation split
+# ``tool_calls`` and ``seconds`` between them without counting anything
+# twice, whichever chat loop produced the turn.
+_BUDGET_TOOL_CALLS_OBSERVED = "_budget_tool_calls_observed"
+_BUDGET_SECONDS_OBSERVED = "_budget_seconds_observed"
+
+
 class JaatoSession:
     """Per-agent conversation session.
 
@@ -518,6 +529,10 @@ class JaatoSession:
         # ``_budget_terminal_action`` (which also latches finalize/escalate,
         # neither of which stops anything).
         self._budget_exhausted_reason: Optional[str] = None
+        # Dimensions whose 100% crossing has been TRACED (#955).  A ceiling
+        # is announced once, whether or not any rung fires on it — a ladder
+        # that never logs is indistinguishable from one that is not wired.
+        self._budget_ceilings_traced: Set[str] = set()
         # True when the LAST send_message was refused by the budget gate
         # (no turn ran).  Read runner-side to suppress the post-turn
         # TurnCompletedEvent — see ``was_last_send_refused``.
@@ -726,6 +741,18 @@ class JaatoSession:
         # Agent type context (for permission checks)
         self._agent_type: str = "main"
         self._agent_name: Optional[str] = None
+        # This session's own ``plugin_configs.permission`` block, and the
+        # key it is judged under once installed on the shared permission
+        # plugin (#957).  ``configure()`` stashes the block;
+        # ``_apply_scoped_permission_policy`` installs it when the session
+        # is a subagent, and ``_permission_scoped`` records that it did so
+        # the executor's permission context names the scope.  See
+        # ``_permission_context`` for why the scope is minted here rather
+        # than taken from ``_agent_id`` (which is "main" until a UI hook
+        # renames it, after the first tool may already have run).
+        self._permission_config: Optional[Dict[str, Any]] = None
+        self._permission_scope: str = uuid.uuid4().hex[:12]
+        self._permission_scoped: bool = False
         self._telemetry_spans_started: bool = False
 
         # UI hooks for agent lifecycle events
@@ -1163,21 +1190,26 @@ class JaatoSession:
     ) -> None:
         """Set the agent context for permission checks and trace identification.
 
+        This is also where a session BECOMES a subagent, and so where its
+        own ``plugin_configs.permission`` block — stashed by
+        :meth:`configure` — is installed as the policy that judges it
+        (#957).  Both spawn paths in the subagent plugin call this right
+        after ``create_session`` and before the first turn, so no tool
+        call is ever judged by the parent's policy in between.
+
         Args:
             agent_type: Type of agent ("main" or "subagent").
             agent_name: Optional name for the agent (e.g., profile name).
         """
         self._agent_type = agent_type
         self._agent_name = agent_name
+        self._apply_scoped_permission_policy()
 
         # Update executor permission context if already configured
         if self._executor and self._runtime.permission_plugin:
-            context = {"agent_type": agent_type, "session_id": self._daemon_session_id}
-            if agent_name:
-                context["agent_name"] = agent_name
             self._executor.set_permission_plugin(
                 self._runtime.permission_plugin,
-                context=context
+                context=self._permission_context()
             )
 
         # Propagate agent context to provider for trace identification
@@ -1191,6 +1223,117 @@ class JaatoSession:
         # Telemetry session/agent spans are started lazily on the first
         # turn (see _ensure_telemetry_spans) because the parent session
         # reference may not be set yet when set_agent_context is called.
+
+    def _apply_plugin_configs(
+        self, plugin_configs: Optional[Dict[str, Dict[str, Any]]]
+    ) -> None:
+        """Apply this session's ``plugin_configs`` to the plugins the
+        registry knows (#950) — all but ``permission``, whose block is
+        stashed for :meth:`_apply_scoped_permission_policy` (#957).
+        The rationale for both is in the comment block at the call
+        site in :meth:`configure`.
+        """
+        if not plugin_configs or not self._runtime.registry:
+            return
+        registry = self._runtime.registry
+        known_plugins = set(registry.list_available())
+        for plugin_name, config in plugin_configs.items():
+            if plugin_name not in known_plugins:
+                continue  # a provider section, or a name nothing supplies
+            if plugin_name == "permission":
+                self._permission_config = dict(config)
+                continue
+            try:
+                # Inject agent_name into plugin config for trace logging
+                if self._agent_name and "agent_name" not in config:
+                    config = {**config, "agent_name": self._agent_name}
+                # expose_tool with new config will re-initialize
+                registry.expose_tool(plugin_name, config)
+            except Exception as e:
+                logger.warning(
+                    "Failed to configure plugin '%s': %s", plugin_name, e)
+
+    def _permission_context(self) -> Dict[str, Any]:
+        """The per-session context every permission check carries.
+
+        ``ToolExecutor`` hands it to ``PermissionPlugin.check_permission``
+        on every call, and it is the ONLY per-session thing the shared
+        plugin sees: the identity it traces (#951) and, when this session
+        installed a policy of its own, the ``permission_scope`` that
+        policy is filed under (#957).  The scope is a key minted at
+        construction rather than ``_agent_id``, because ``_agent_id`` is
+        ``"main"`` until ``set_ui_hooks`` renames it — for a subagent
+        that can be after its first tool call — and the daemon session
+        id is shared by a parent and its in-process subagents.  It is
+        put in the context only once a scoped policy exists, so a
+        session judged by the runtime policy carries exactly the
+        context it did before.
+        """
+        context: Dict[str, Any] = {
+            "agent_type": self._agent_type,
+            "session_id": self._daemon_session_id,
+        }
+        if self._agent_name:
+            context["agent_name"] = self._agent_name
+        if self._permission_scoped:
+            context["permission_scope"] = self._permission_scope
+        return context
+
+    def permission_context(self) -> Dict[str, Any]:
+        """A copy of the context this session's tool calls are judged
+        under.  Read by the permission plugin's ``askPermission`` tool,
+        which the executor dispatches WITHOUT a gate and therefore
+        without the context, so that a subagent's pre-check is answered
+        by the same policy its real call will be (#957)."""
+        if self._executor is not None:
+            return dict(self._executor._permission_context)
+        return self._permission_context()
+
+    def _apply_scoped_permission_policy(self) -> None:
+        """Install this session's own ``plugin_configs.permission`` as
+        the policy that judges it — for a subagent only (#957).
+
+        Why not for the root session too: the runtime-wide policy IS the
+        root session's, seeded from the same block at bootstrap on every
+        path (``server/core.py``, the runner's Step 8,
+        ``jaato_embedded``'s ``expose_all``), and it is the object the
+        operator's ``permissions allow|deny|default`` commands mutate.
+        Giving the root a scoped copy would detach it from those
+        commands for no gain.  A subagent's block, on the other hand,
+        had NOWHERE to land: the old route (``registry.expose_tool`` →
+        re-``initialize()``) re-initialized an unread copy on the
+        daemon and runner and clobbered the parent's enforcer in-process.
+
+        A subagent without a block installs nothing and is judged by the
+        runtime policy, as before — inheriting the parent's posture is
+        the right default for a profile that declared none.  A block with
+        neither ``policy`` nor ``evaluators`` (``agent_name`` alone, or
+        an empty dict) defines no policy and installs nothing either.
+
+        Idempotent: re-installing under the same scope replaces the
+        entry, so a session reconfigured mid-life is judged by its
+        latest block.
+        """
+        plugin = self._runtime.permission_plugin if self._runtime else None
+        block = self._permission_config
+        if plugin is None or self._agent_type != "subagent" or not block:
+            return
+        if not any(k in block for k in ("policy", "evaluators")):
+            return
+        install = getattr(plugin, "set_scoped_policy", None)
+        if install is None:
+            # A stand-in enforcer that predates the seam — nothing to
+            # install on, and re-initializing it would be the old defect.
+            self._trace(
+                "permission: this session's plugin_configs.permission "
+                "has no scoped-policy seam to land on "
+                f"({type(plugin).__name__}); the runtime policy judges it")
+            return
+        install(self._permission_scope, block)
+        self._permission_scoped = True
+        self._trace(
+            f"permission: session-scoped policy installed "
+            f"scope={self._permission_scope} agent={self._agent_name}")
 
     def set_daemon_session_id(self, session_id: str) -> None:
         """Set the daemon session manager ID for this session.
@@ -1499,6 +1642,12 @@ class JaatoSession:
         """
         if (
             not getattr(self, "_signal_completion_called", False)
+            # A session an ``abort`` rung stopped refuses every later turn
+            # (``_refuse_if_budget_exhausted``); re-prompting it spends a
+            # nudge on a turn that cannot run and prints a refusal per
+            # attempt (#955).  The ceiling is the verdict, not a missing
+            # signal_completion.
+            and not getattr(self, "_budget_exhausted_reason", None)
             and getattr(self, "_completion_nudges_fired", 0) < max_nudges
         ):
             self._completion_nudges_fired += 1
@@ -2525,33 +2674,24 @@ class JaatoSession:
         # true of every plugin a subagent DID list; this widens it to the ones
         # it only configures.
         #
-        # And one instance short of universal, for ``permission`` specifically:
-        # the daemon (``server/core.py``) and the runner
-        # (``server/runner/session.py`` Step 8) CONSTRUCT the enforcing
-        # ``PermissionPlugin`` instead of taking the registry's, so on those
-        # paths this loop re-initializes a second, unread copy and the enforcer
-        # keeps the ROOT profile's policy.  The in-process path
-        # (``jaato_embedded/client.py`` wires ``registry.get_plugin(
-        # "permission")`` as the enforcer) has one instance, and there a
-        # subagent's block applies.  Unifying that would still not give a
-        # subagent a policy of its own — ``PermissionPlugin._policy`` is a
-        # single object on a runtime-wide singleton, only the channel is
-        # thread-local — so it is a design question, not a line here.
-        if plugin_configs and self._runtime.registry:
-            registry = self._runtime.registry
-            known_plugins = set(registry.list_available())
-            for plugin_name, config in plugin_configs.items():
-                if plugin_name not in known_plugins:
-                    continue  # a provider section, or a name nothing supplies
-                try:
-                    # Inject agent_name into plugin config for trace logging
-                    if self._agent_name and "agent_name" not in config:
-                        config = {**config, "agent_name": self._agent_name}
-                    # expose_tool with new config will re-initialize
-                    registry.expose_tool(plugin_name, config)
-                except Exception as e:
-                    logger.warning(
-                        "Failed to configure plugin '%s': %s", plugin_name, e)
+        # ``permission`` is the one plugin this loop must NOT re-initialize
+        # (#957).  The enforcer is a single object judging every session on
+        # the runtime, and ``expose_tool`` with a changed config is
+        # ``shutdown()`` + ``initialize()`` on whichever instance the
+        # registry holds.  On the daemon (``server/core.py``) and the runner
+        # (``server/runner/session.py`` Step 8) that is an unread copy — the
+        # enforcer is constructed separately — so a subagent's block landed
+        # nowhere and it was judged by the ROOT profile's policy: a profile
+        # that whitelisted exactly the tools it needed was denied
+        # ``method=default`` when spawned, and only the PARENT's whitelist
+        # changed the verdict.  In-process (``jaato_embedded``) the registry's
+        # instance IS the enforcer, so the same block replaced the parent's
+        # policy with the child's and swapped the parent's in-process ASK
+        # channel for a console one.  The block is stashed here and, once
+        # the session is a subagent, installed as a policy of its own on the
+        # shared plugin — ``_apply_scoped_permission_policy``.  The root
+        # session's block was already applied at bootstrap on every path.
+        self._apply_plugin_configs(plugin_configs)
 
         # Stash provider-creation args for lazy use by ``_ensure_provider``.
         # Pre-2026-05-13 the eager ``self._provider = self._runtime.create_provider(...)``
@@ -2759,14 +2899,16 @@ class JaatoSession:
                             "deferred tools to discover, no eager tools to "
                             "re-inspect)")
 
-        # Set permission plugin with agent context
+        # Set permission plugin with agent context.  A session that is
+        # already a subagent when (re)configured — a revive, a mid-life
+        # reconfigure — installs its own policy here; a fresh spawn is
+        # still ``"main"`` at this point and installs it from
+        # ``set_agent_context`` (#957).
         if self._runtime.permission_plugin:
-            context = {"agent_type": self._agent_type, "session_id": self._daemon_session_id}
-            if self._agent_name:
-                context["agent_name"] = self._agent_name
+            self._apply_scoped_permission_policy()
             self._executor.set_permission_plugin(
                 self._runtime.permission_plugin,
-                context=context
+                context=self._permission_context()
             )
 
         # Set reliability plugin for tool failure tracking
@@ -7177,6 +7319,11 @@ NOTES
             tool_result = self._build_tool_result(fc, result.executor_result)
             tool_results.append(tool_result)
 
+            # Budget: count the call NOW, not at turn end (#955).  An abort
+            # rung cancels the token, and the check at the top of this
+            # loop stops the next call.
+            self._budget_observe_tool_calls(turn_data, 1)
+
         return tool_results
 
     def _apply_parallel_tool_cap(self, width: Optional[int]) -> None:
@@ -7354,6 +7501,12 @@ NOTES
                 })
                 tool_result = self._build_tool_result(fc, result.executor_result)
                 tool_results.append(tool_result)
+
+        # Budget: the batch is the unit here — every call in it was already
+        # in flight, so the overshoot past a ceiling is bounded by one
+        # batch (#955).  An abort rung cancels the token and the caller
+        # ends the turn before the next model round-trip.
+        self._budget_observe_tool_calls(turn_data, len(tool_results))
 
         return tool_results
 
@@ -10178,18 +10331,187 @@ NOTES
             logger.warning("budget: response observation failed: %s", exc)
 
     def _budget_observe_turn(self, turn_data: Dict[str, Any]) -> None:
-        """Feed one completed turn's wall-clock / tool-call / turn count."""
+        """Feed one completed turn: its turn count, plus whatever the
+        mid-turn observations did not already see.
+
+        Until #955 this was the ONLY writer of ``tool_calls``, ``seconds``
+        and ``turns``, and it runs in the turn's ``finally`` — so a loop
+        INSIDE one turn could not cross any of them however long it ran.  A
+        subagent made 196 tool calls under ``tool_calls: 100`` with an
+        ``abort`` rung at 100% and nothing fired, because the turn had not
+        ended; it outlived its driver and was stopped with ``kill -TERM``.
+        ``tool_calls`` and ``seconds`` are now observed AS THE TURN RUNS by
+        :meth:`_budget_observe_tool_calls`; this is the closing entry.  It
+        settles the remainder — tool calls a path recorded without
+        observing (none today; the AST guard in
+        ``test_budget_mid_turn_955.py`` keeps it that way) and the seconds
+        between the last tool call and the end of the turn — so a budget is
+        exact at turn end whichever path produced the turn, and never
+        double-counted.
+
+        The bookkeeping keys are popped here: ``turn_data`` is appended to
+        ``_turn_accounting`` right after this call, and that list is
+        persisted and emitted.
+        """
         if self._budget_tracker is None:
             return
         try:
+            recorded = len(turn_data.get("function_calls") or ())
+            observed = int(turn_data.pop(_BUDGET_TOOL_CALLS_OBSERVED, 0) or 0)
+            seconds = self._budget_unobserved_seconds(
+                turn_data, turn_data.get("duration_seconds"))
+            turn_data.pop(_BUDGET_SECONDS_OBSERVED, None)
             fired = self._budget_tracker.observe(
                 turns=1,
-                seconds=turn_data.get("duration_seconds") or 0.0,
-                tool_calls=len(turn_data.get("function_calls") or ()),
+                seconds=seconds,
+                tool_calls=max(0, recorded - observed),
             )
+            self._budget_note_ceilings()
             self._apply_budget_rungs(fired)
         except Exception as exc:  # noqa: BLE001
             logger.warning("budget: turn observation failed: %s", exc)
+
+    def _budget_observe_tool_calls(
+        self, turn_data: Dict[str, Any], count: int,
+    ) -> None:
+        """Feed tool calls to the tracker as they COMPLETE, mid-turn (#955).
+
+        Called by every path that records a call in
+        ``turn_data['function_calls']`` — the sequential loop after each
+        call, the parallel loop after each batch, the parts loop after each
+        call.  Observing here is what lets an ``abort`` rung stop a tool
+        loop on the call that crosses the ceiling rather than at the end of
+        a turn that, for a runaway loop, never comes: the abort cancels the
+        session's token, which the sequential loop checks before the next
+        call and the main chat loop before the next model round-trip, so the
+        overshoot is one call or one parallel batch.  The parts loop
+        (attachment turns) has no check of its own: it finishes the batch in
+        flight and the provider cancels the next response on its first
+        chunk.
+
+        ``seconds`` rides along: the wall clock since the last observation
+        is fed at the same time, so a ``seconds`` ceiling binds mid-turn too
+        rather than at turn end, where a stuck loop would never report it.
+
+        Never raises — budgeting is a guardrail, not part of the turn's
+        contract.
+        """
+        if self._budget_tracker is None or count <= 0:
+            return
+        try:
+            turn_data[_BUDGET_TOOL_CALLS_OBSERVED] = (
+                int(turn_data.get(_BUDGET_TOOL_CALLS_OBSERVED, 0) or 0)
+                + count
+            )
+            fired = self._budget_tracker.observe(
+                tool_calls=count,
+                seconds=self._budget_unobserved_seconds(turn_data),
+            )
+            self._budget_note_ceilings()
+            self._apply_budget_rungs(fired)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("budget: tool-call observation failed: %s", exc)
+
+    @staticmethod
+    def _budget_unobserved_seconds(
+        turn_data: Dict[str, Any], elapsed: Optional[float] = None,
+    ) -> Optional[float]:
+        """Wall-clock seconds of this turn not yet fed to the tracker.
+
+        Advances the ``_budget_seconds_observed`` mark on ``turn_data`` so
+        successive calls hand out disjoint slices of the turn's elapsed
+        time: a mid-turn observation feeds the seconds since the previous
+        one, and the turn-end observation feeds only the tail.
+
+        Args:
+            turn_data: The turn's accounting dict (``start_time`` is read
+                when *elapsed* is not supplied).
+            elapsed: Total seconds elapsed so far, when the caller already
+                knows it (turn end passes ``duration_seconds``).
+
+        Returns:
+            The unobserved delta, or ``None`` when the turn's start is not
+            readable — "no news" to the tracker, never a guess.
+        """
+        if elapsed is None:
+            start = turn_data.get("start_time")
+            if not start:
+                return None
+            try:
+                elapsed = (
+                    datetime.now() - datetime.fromisoformat(start)
+                ).total_seconds()
+            except (TypeError, ValueError):
+                return None
+        already = float(turn_data.get(_BUDGET_SECONDS_OBSERVED, 0.0) or 0.0)
+        delta = max(0.0, float(elapsed) - already)
+        turn_data[_BUDGET_SECONDS_OBSERVED] = already + delta
+        return delta
+
+    def _budget_note_ceilings(self) -> None:
+        """Trace each dimension the FIRST time it reaches its ceiling.
+
+        Independent of the ladder (#955, question 3): a profile whose rungs
+        stop short of 100%, or whose terminal action is ``finalize``, still
+        crosses its limits, and until now did so in silence — the reporter
+        grepped the session trace for the ladder and found nothing, unable
+        to tell "evaluated and did not fire" from "not wired".  Once per
+        dimension, because the tracker keeps accumulating past 100% and a
+        line per tool call would be noise.
+        """
+        tracker = self._budget_tracker
+        if tracker is None:
+            return
+        traced = getattr(self, "_budget_ceilings_traced", None)
+        if traced is None:
+            traced = self._budget_ceilings_traced = set()
+        for dim, fraction in tracker.exceeded_dimensions().items():
+            if dim in traced:
+                continue
+            traced.add(dim)
+            usage = tracker.usage.as_dict().get(dim)
+            limit = tracker.config.limits.get(dim)
+            self._budget_trace(
+                f"CEILING dim={dim} used={usage:g} limit={limit:g} "
+                f"at={fraction * 100:.0f}% pressure='{tracker.describe_pressure()}'"
+            )
+            logger.warning(
+                "budget: %s ceiling reached (%g/%g); ladder=%s",
+                dim, usage, limit,
+                [r.at_percent for r in tracker.config.degrade] or "none",
+            )
+
+    def _budget_trace_rung(
+        self, rung: 'DegradeRung', origin: str, detail: str,
+    ) -> None:
+        """One trace line per fired rung: threshold, mechanism, what it carries."""
+        action = rung.action or "none"
+        overlay = "yes" if rung.model_tiers else "no"
+        self._budget_trace(
+            f"RUNG at={rung.at_percent:.0f}% origin={origin} action={action} "
+            f"overlay={overlay} pressure='{detail}'"
+        )
+
+    def _budget_trace(self, msg: str) -> None:
+        """Record a budget decision on BOTH trace channels (#955).
+
+        ``_trace`` lands in the per-agent provider trace; the permission
+        DECISION lines (#953) an operator correlates budget events against
+        live in the application trace (``JAATO_TRACE_LOG`` / the profile's
+        ``trace.session_log``), so the same line is written there too,
+        prefixed with the session's agent identity.  Best-effort: a trace
+        failure never reaches the turn.
+        """
+        line = f"BUDGET {msg}"
+        try:
+            self._trace(line)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            from shared.trace import trace
+            trace("BUDGET", f"{self._get_trace_prefix()} {msg}")
+        except Exception:  # noqa: BLE001
+            pass
 
     def _apply_budget_rungs(
         self, fired, origin: str = "self-enforced",
@@ -10260,6 +10582,10 @@ NOTES
                     "model already degraded away from",
                     origin, rung.at_percent, self._budget_applied_rung_pct,
                 )
+                self._budget_trace(
+                    f"RUNG_SKIPPED at={rung.at_percent:.0f}% origin={origin} "
+                    f"applied={self._budget_applied_rung_pct:.0f}%"
+                )
                 continue
             self._budget_applied_rung_pct = rung.at_percent
             # A cascade rung fired on the POOL's fraction; reporting this
@@ -10270,6 +10596,10 @@ NOTES
                 if self._budget_tracker is not None else "cascade pressure"
             )
             tag = f"budget[{origin}]"
+            # Every fired rung leaves a line, whatever it goes on to do
+            # (#955): the ladder must be visibly EVALUATED, not only
+            # visible when it rebinds or aborts.
+            self._budget_trace_rung(rung, origin, detail)
             if rung.model_tiers:
                 if self._tier_config is None:
                     # Rejected by the profile validator, but a session can be
@@ -10311,6 +10641,10 @@ NOTES
                     # is not a ceiling.
                     self._budget_exhausted_reason = (
                         f"budget_exhausted ({origin}: {detail})")
+                    self._budget_trace(
+                        f"EXHAUSTED reason='{self._budget_exhausted_reason}' "
+                        "— in-flight turn cancelled, later turns refused"
+                    )
                     self.request_stop(self._budget_exhausted_reason)
 
     def apply_cascade_degrade(
@@ -11695,6 +12029,9 @@ NOTES
                     tool_result = self._build_tool_result(fc, executor_result)
                     tool_results.append(tool_result)
 
+                    # Budget: count the call now, not at turn end (#955).
+                    self._budget_observe_tool_calls(turn_data, 1)
+
                 # Send tool results back (with retry for rate limits)
                 self._pacer.pace()  # Proactive rate limiting
 
@@ -12782,7 +13119,20 @@ NOTES
             return None
 
     def close_session(self) -> None:
-        """Close the current session."""
+        """Close the current session.
+
+        Releases the session-scoped permission policy, if one was
+        installed (#957); the shared plugin also drops every scoped
+        policy on ``reset_for_next_session`` / ``shutdown``, so a
+        subagent that ends without reaching here is bounded by the
+        slot boundary rather than leaking for the daemon's life.
+        """
+        if self._permission_scoped and self._runtime is not None:
+            plugin = self._runtime.permission_plugin
+            release = getattr(plugin, "release_scoped_policy", None)
+            if release is not None:
+                release(self._permission_scope)
+            self._permission_scoped = False
         self._persistence.close()
 
 

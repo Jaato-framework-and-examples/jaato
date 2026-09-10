@@ -7,14 +7,10 @@ was ALSO named in ``plugins:``::
 
 which quietly discarded the rest.  For a top-level session it never showed:
 its configs reach the plugins through ``expose_all(plugin_configs)`` at
-bootstrap, and ``permission`` gets an explicit merge on both the daemon
-(``server/core.py``) and runner (``server/runner/session.py`` Step 8) paths.
-A **subagent** reuses the parent's already-bootstrapped registry, so this loop
-was the only place its own profile's configs could land — and a
-``documentalista`` profile whose ``plugin_configs.permission`` whitelisted
-``writeNewFile`` produced 55 permission ASKs on that pre-approved tool, with
-no diagnostic anywhere.  Adding ``permission`` to ``plugins:`` — a plugin that
-exposes no tools at all — was the whole difference.
+bootstrap.  A **subagent** reuses the parent's already-bootstrapped registry,
+so this loop was the only place its own profile's configs could land — and a
+profile that configured a plugin it did not list got nothing, with no
+diagnostic anywhere.
 
 Three properties are asserted here, each attached to a way the fix could go
 wrong:
@@ -28,6 +24,14 @@ wrong:
 3. the model's tool surface is untouched — ``configure`` records ``plugins``
    as ``_tool_plugins`` and that is what gates the wire, so configuring a
    plugin does not expose it.
+
+``permission`` — the plugin #950 was reported on — is the one exception to
+the ``expose_tool`` route, and has its own file
+(``test_subagent_own_permission_policy_957.py``): re-initializing the
+registry's permission plugin either landed on an unread copy (daemon,
+runner) or clobbered the parent's enforcer (in-process), so its block is
+stashed and installed as a session-scoped policy instead.  The one
+assertion about it here is that it does NOT take this route.
 """
 
 from unittest.mock import MagicMock
@@ -73,15 +77,20 @@ def _configured(registry):
 
 
 def test_config_for_a_plugin_absent_from_plugins_is_applied():
-    """The #950 defect: the block was dropped, so the policy never applied."""
-    reg = _Registry(["cli", "permission", "file_edit"])
+    """The #950 defect: the block was dropped, so it never applied.
+
+    ``sandbox_manager`` stands in for the toolless-plugin case the issue
+    was about: like ``permission`` it exposes no tools and so is never in
+    ``plugins:``, and unlike ``permission`` it still takes this route.
+    """
+    reg = _Registry(["cli", "sandbox_manager", "file_edit"])
     _configure(_session(reg), plugins=["cli", "file_edit"], plugin_configs={
-        "permission": {"policy": {"whitelist": {"tools": ["writeNewFile"]}}},
+        "sandbox_manager": {"allowed_paths": ["/data"]},
     })
 
-    assert "permission" in _configured(reg)
-    (_, cfg), = [e for e in reg.exposed if e[0] == "permission"]
-    assert cfg["policy"]["whitelist"]["tools"] == ["writeNewFile"]
+    assert "sandbox_manager" in _configured(reg)
+    (_, cfg), = [e for e in reg.exposed if e[0] == "sandbox_manager"]
+    assert cfg["allowed_paths"] == ["/data"]
 
 
 def test_declared_plugins_are_still_configured():
@@ -94,13 +103,13 @@ def test_declared_plugins_are_still_configured():
 
 def test_a_provider_section_is_skipped_not_attempted():
     """``plugin_configs`` also carries provider knobs; they are not plugins."""
-    reg = _Registry(["cli", "permission"])
+    reg = _Registry(["cli", "memory"])
     _configure(_session(reg), plugins=["cli"], plugin_configs={
         "openrouter": {"api_key": "sk-or-x"},
-        "permission": {"policy": {"defaultPolicy": "allow"}},
+        "memory": {"storage_type": "file"},
     })
 
-    assert _configured(reg) == {"permission"}
+    assert _configured(reg) == {"memory"}
 
 
 def test_configuring_a_plugin_does_not_expose_its_tools():
@@ -114,19 +123,19 @@ def test_configuring_a_plugin_does_not_expose_its_tools():
 
 def test_plugins_none_still_configures_everything_known():
     """``plugins=None`` (no profile) kept applying every config; it still does."""
-    reg = _Registry(["cli", "permission"])
+    reg = _Registry(["cli", "memory"])
     _configure(_session(reg), plugins=None,
-               plugin_configs={"cli": {}, "permission": {}})
+               plugin_configs={"cli": {}, "memory": {}})
 
-    assert _configured(reg) == {"cli", "permission"}
+    assert _configured(reg) == {"cli", "memory"}
 
 
 def test_agent_name_is_injected_into_an_undeclared_plugins_config():
     """The trace-logging injection applies on this path too, not just the old one."""
-    reg = _Registry(["permission"])
+    reg = _Registry(["memory"])
     session = _session(reg)
     session.set_agent_context(agent_type="subagent", agent_name="documentalista")
-    _configure(session, plugins=[], plugin_configs={"permission": {"policy": {}}})
+    _configure(session, plugins=[], plugin_configs={"memory": {"x": 1}})
 
     (_, cfg), = reg.exposed
     assert cfg["agent_name"] == "documentalista"
@@ -141,8 +150,29 @@ def test_a_failing_plugin_does_not_abort_the_rest():
         holder["reg"].exposed.append((name, config))
         return True
 
-    reg = holder["reg"] = _Registry(["cli", "permission"], expose=boom)
+    reg = holder["reg"] = _Registry(["cli", "memory"], expose=boom)
     _configure(_session(reg), plugins=["cli"],
-               plugin_configs={"cli": {}, "permission": {}})
+               plugin_configs={"cli": {}, "memory": {}})
 
-    assert _configured(reg) == {"permission"}
+    assert _configured(reg) == {"memory"}
+
+
+def test_permission_is_never_reinitialized_through_the_registry():
+    """The one plugin this loop must not ``expose_tool`` (#957).
+
+    The registry's permission plugin is either an unread copy of the
+    enforcer (daemon, runner) or the enforcer itself (in-process); a
+    re-``initialize()`` is inert on the first and destructive on the
+    second.  The block is stashed on the session for the scoped-policy
+    route instead.
+    """
+    reg = _Registry(["cli", "permission"])
+    session = _session(reg)
+    block = {"policy": {"defaultPolicy": "deny",
+                        "whitelist": {"tools": ["writeNewFile"]}}}
+    _configure(session, plugins=["cli"], plugin_configs={
+        "cli": {}, "permission": block,
+    })
+
+    assert "permission" not in _configured(reg)
+    assert session._permission_config == block

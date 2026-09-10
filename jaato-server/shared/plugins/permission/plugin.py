@@ -85,6 +85,29 @@ class PermissionPlugin(RunnerForwardingMixin):
     - Enable enforcement via: executor.set_permission_plugin(plugin)
     - Expose user commands via: registry.expose_tool("permission")
     - The middleware automatically prompts for permission when tools are called
+
+    One instance judges every session on a runtime (#957).  The plugin
+    is a registry-shared singleton: a parent and every subagent it
+    spawns are gated by the SAME object.  Two things on it are
+    therefore per-session rather than instance-wide:
+
+    - the **channel** — thread-local, set by
+      :meth:`configure_for_subagent`, so a subagent's ASK reaches its
+      parent rather than the operator's console;
+    - the **policy** — ``_policy`` is the runtime-wide policy, seeded
+      once at bootstrap from the ROOT profile's
+      ``plugin_configs.permission``; ``_scoped_policies`` holds one
+      :class:`PermissionPolicy` per session that declared a block of
+      its own, keyed by the ``permission_scope`` the session puts in
+      the executor's permission context.  :meth:`_resolve_policy`
+      picks the scoped one when the caller's context names it and
+      falls back to the runtime policy otherwise, so a session with
+      no block of its own is judged exactly as before.
+
+    Re-running :meth:`initialize` with a second session's config is
+    NOT the way to give that session a policy: it replaces the policy
+    the parent is being judged by, and it drops the channel the
+    parent's ASKs go through.  :meth:`set_scoped_policy` is.
     """
 
     # Thread-local storage for per-session channels
@@ -138,6 +161,22 @@ class PermissionPlugin(RunnerForwardingMixin):
         # policy.check recheck plus the channel.request_permission
         # call so cross-session mutations queue behind the prompt.
         self._policy_lock = threading.Lock()
+        # Per-session policies (#957), keyed by the ``permission_scope``
+        # a session stamps into its executor's permission context.  A
+        # subagent whose profile carries its own
+        # ``plugin_configs.permission`` is judged by the entry here, not
+        # by ``_policy``; see :meth:`set_scoped_policy` /
+        # :meth:`_resolve_policy`.  Mutated under ``_policy_lock``.
+        self._scoped_policies: Dict[str, PermissionPolicy] = {}
+        # Every tool name ever handed to :meth:`add_whitelist_tools` —
+        # plugin-declared auto-approvals and the session's lifecycle
+        # tools (``signal_completion``).  Those are added to ``_policy``
+        # as sessions configure, and a scoped policy installed LATER
+        # must carry them too, or a ``defaultPolicy: deny`` profile would
+        # deny its own ``signal_completion`` the moment it got its own
+        # policy.  Kept as a set so :meth:`set_scoped_policy` can seed
+        # from it.
+        self._auto_whitelisted: Set[str] = set()
         # Agent context for trace logging
         self._agent_name: Optional[str] = None
         # Workspace path for evaluator resolution and EvalContext
@@ -428,6 +467,8 @@ class PermissionPlugin(RunnerForwardingMixin):
         if self._channel:
             self._channel.shutdown()
         self._policy = None
+        self._scoped_policies.clear()
+        self._auto_whitelisted.clear()
         self._channel = None
         self._registry = None
         self._initialized = False
@@ -457,6 +498,9 @@ class PermissionPlugin(RunnerForwardingMixin):
         - ``_idle_suspended``: per-session-until-idle flag.
         - ``_execution_log``: per-session tool-execution audit log.
         - ``_agent_name``: per-session identity.
+        - ``_scoped_policies``: the per-session policies of the
+          subagents the outgoing session spawned (#957) — the next
+          stage's subagents install their own.
 
         Survives the reset:
         - ``_config``: workspace-tier policy.
@@ -477,6 +521,8 @@ class PermissionPlugin(RunnerForwardingMixin):
         self._idle_suspended = False
         self._execution_log.clear()
         self._agent_name = None
+        with self._policy_lock:
+            self._scoped_policies.clear()
 
     def get_config_schema(self) -> dict:
         """Return JSON Schema for this plugin's configuration."""
@@ -637,13 +683,112 @@ class PermissionPlugin(RunnerForwardingMixin):
         ``permission.add_rule`` arriving mid-prompt would let the
         next call for the tool bypass the prompt nondeterministically.
 
+        Reaches every policy this instance judges by (#957): the
+        runtime-wide one AND each session-scoped one already installed,
+        and — through ``_auto_whitelisted`` — every scoped policy
+        installed afterwards.  These names are plugin-declared
+        auto-approvals and lifecycle tools, safe by the plugin's own
+        claim and identical for every session on the registry, so they
+        were never something one session's policy could withhold from
+        another; a scoped policy that lacked them would deny its own
+        ``signal_completion``.
+
         Args:
             tools: List of tool names to whitelist.
         """
-        if self._policy and tools:
-            with self._policy_lock:
-                for tool in tools:
-                    self._policy.whitelist_tools.add(tool)
+        if not tools:
+            return
+        with self._policy_lock:
+            self._auto_whitelisted.update(tools)
+            for policy in self._all_policies():
+                policy.whitelist_tools.update(tools)
+
+    def _all_policies(self) -> List[PermissionPolicy]:
+        """Every policy this instance may judge by — runtime + scoped."""
+        policies = [p for p in (self._policy,) if p is not None]
+        policies.extend(self._scoped_policies.values())
+        return policies
+
+    def set_scoped_policy(self, scope: str, config: Dict[str, Any]) -> None:
+        """Install the policy that judges ONE session (#957).
+
+        The plugin is shared by every session on a registry, and its
+        ``_policy`` is seeded once, from the ROOT profile.  A subagent
+        whose profile carries its own ``plugin_configs.permission`` used
+        to be judged by that root policy anyway — so a profile that
+        whitelisted exactly the two tools it needed, and worked
+        standalone, was denied ``method=default`` when spawned, and the
+        only thing that changed the verdict was editing the PARENT's
+        whitelist.  On the in-process path the same block took the
+        opposite route through ``registry.expose_tool`` — a re-
+        ``initialize()`` — and replaced the parent's policy and channel
+        with the child's.
+
+        This is the third route: ``config`` (the session's whole
+        ``permission`` block — ``policy``, ``evaluators``) becomes a
+        :class:`PermissionPolicy` of its own, stored under ``scope`` and
+        consulted for any check whose context carries
+        ``permission_scope == scope``.  Nothing on the runtime policy
+        moves.  The new policy is seeded with every name
+        :meth:`add_whitelist_tools` has recorded, for the reason given
+        there.  Installing under an existing scope REPLACES the entry —
+        a session reconfigured mid-life is judged by its latest block,
+        and the session-level grants (``always`` answers) it had
+        collected on the old one go with it.
+
+        Args:
+            scope: The session's ``permission_scope`` — the key the
+                executor's permission context will carry.
+            config: The session's ``plugin_configs.permission`` block.
+        """
+        policy = PermissionPolicy.from_config(config.get("policy") or {})
+        evaluator_config = config.get("evaluators")
+        if evaluator_config and isinstance(evaluator_config, dict):
+            evaluators = load_evaluators(
+                evaluator_config, workspace_path=self._workspace_path)
+            if evaluators:
+                policy.set_evaluators(evaluators)
+        with self._policy_lock:
+            policy.whitelist_tools.update(self._auto_whitelisted)
+            self._scoped_policies[scope] = policy
+        self._trace(
+            f"set_scoped_policy: scope={scope} "
+            f"default={policy.default_policy} "
+            f"whitelist={sorted(policy.whitelist_tools)} "
+            f"patterns={list(policy.whitelist_patterns)} "
+            f"blacklist={sorted(policy.blacklist_tools)} "
+            f"evaluators={sorted(policy._evaluators)}"
+        )
+
+    def release_scoped_policy(self, scope: str) -> None:
+        """Drop a session's policy; later checks under ``scope`` fall
+        back to the runtime policy.  No-op for an unknown scope."""
+        with self._policy_lock:
+            if self._scoped_policies.pop(scope, None) is not None:
+                self._trace(f"release_scoped_policy: scope={scope}")
+
+    def has_scoped_policy(self, scope: str) -> bool:
+        """Whether a session-scoped policy is installed under ``scope``."""
+        return scope in self._scoped_policies
+
+    def _resolve_policy(
+        self, context: Optional[Dict[str, Any]]
+    ) -> Tuple[Optional[PermissionPolicy], str]:
+        """The policy that judges this call, and its name for the trace.
+
+        Returns ``(policy, "session")`` when the caller's context names
+        a scope with a policy installed, else ``(self._policy,
+        "runtime")``.  A scope nothing was installed under resolves to
+        the runtime policy rather than to "no policy": the session
+        declared nothing of its own, which is the pre-#957 behaviour
+        and the right default.
+        """
+        scope = context.get("permission_scope") if context else None
+        if scope is not None:
+            scoped = self._scoped_policies.get(scope)
+            if scoped is not None:
+                return scoped, "session"
+        return self._policy, "runtime"
 
     def add_framework_reserved_tools(self, tools: List[str]) -> None:
         """Record framework-machinery tool names exempt from the catch-all
@@ -1049,6 +1194,16 @@ class PermissionPlugin(RunnerForwardingMixin):
         lines.append("")
 
         # Base config
+        # Session-scoped policies (#957) — subagents judged by their own
+        # profile's block rather than by the policy shown here.
+        if self._scoped_policies:
+            n = len(self._scoped_policies)
+            lines.append(
+                f"Session-scoped policies: {n} "
+                f"(subagent{'s' if n != 1 else ''} judged by their own "
+                f"plugin_configs.permission, not by the rules above)")
+            lines.append("")
+
         lines.append("Base Config:")
         whitelist_tools = sorted(self._policy.whitelist_tools)
         whitelist_patterns = self._policy.whitelist_patterns
@@ -1318,8 +1473,14 @@ class PermissionPlugin(RunnerForwardingMixin):
         if not intent:
             return {"error": "intent is required - explain what you intend to achieve with this tool"}
 
-        # Pass intent in context for channel to display
-        context = {"intent": intent}
+        # Pass intent in context for channel to display — on top of the
+        # calling session's own permission context, so a subagent's
+        # pre-check is judged by the same policy its real call will be
+        # (#957).  ``ToolExecutor`` skips the gate for ``askPermission``
+        # itself, so nothing hands us that context; the session set
+        # itself as current before dispatching the tool.
+        context = dict(self._calling_session_permission_context())
+        context["intent"] = intent
         allowed, perm_info = self.check_permission(tool_name, tool_args, context)
 
         # Carry THIS approval to the imminent real execution so the user is
@@ -1347,6 +1508,29 @@ class PermissionPlugin(RunnerForwardingMixin):
             "method": perm_info.get('method', 'unknown'),
             "tool_name": tool_name,
         }
+
+    @staticmethod
+    def _calling_session_permission_context() -> Dict[str, Any]:
+        """The permission context of the session dispatching this tool.
+
+        ``JaatoSession`` publishes it as :meth:`permission_context` and
+        sets itself as the current session before every tool dispatch;
+        outside a session (a bare plugin under test, a user command)
+        there is none, and an empty dict resolves to the runtime
+        policy — the pre-#957 behaviour.
+        """
+        try:
+            from shared.session_context import get_current_session
+            session = get_current_session()
+        except LookupError:
+            return {}
+        getter = getattr(session, "permission_context", None)
+        if getter is None:
+            return {}
+        try:
+            return dict(getter() or {})
+        except Exception:  # a stub session — not this plugin's problem
+            return {}
 
     def _reliability_escalation_action(self, tool_name: str) -> Optional[str]:
         """Reliability Phase-2 enforcement action for ``tool_name`` in the
@@ -1461,7 +1645,11 @@ class PermissionPlugin(RunnerForwardingMixin):
         singleton whose ``_agent_name`` is whatever initialized it
         LAST, so a subagent's spawn re-labels the parent's own
         subsequent decisions.  ``context`` is per-session, set by
-        ``ToolExecutor.set_permission_plugin``.
+        ``ToolExecutor.set_permission_plugin``.  It also names WHICH
+        policy judged (#957): ``policy=session`` when the session's own
+        ``plugin_configs.permission`` did, ``policy=runtime`` when the
+        root profile's did — the distinction #957 could only infer from
+        the verdict changing when the parent's whitelist was edited.
 
         Args:
             tool_name: Name of the tool to execute
@@ -1477,6 +1665,7 @@ class PermissionPlugin(RunnerForwardingMixin):
                        'user_approved', 'user_denied', 'allow_all', 'timeout')
         """
         who = _describe_permission_caller(context)
+        _policy, policy_source = self._resolve_policy(context)
         self._trace(
             f"check_permission: tool={tool_name} call_id={call_id}{who}"
         )
@@ -1497,7 +1686,8 @@ class PermissionPlugin(RunnerForwardingMixin):
             f"check_permission: DECISION tool={tool_name} call_id={call_id}"
             f"{who} allowed={allowed} "
             f"method={info.get('method', 'unknown')} "
-            f"reason={info.get('reason', '')!r}"
+            f"reason={info.get('reason', '')!r} "
+            f"policy={policy_source}"
         )
         # The audit entry ``_log_decision`` wrote knows the reason but
         # not the rule kind or the caller; stamp them on so the
@@ -1517,7 +1707,15 @@ class PermissionPlugin(RunnerForwardingMixin):
 
         Every exit is traced by the :meth:`check_permission` wrapper —
         do not add per-branch decision traces here.
+
+        The policy is the one :meth:`_resolve_policy` picks for the
+        caller's ``context`` (#957) — the session's own when it
+        installed one, the runtime's otherwise — and every read and
+        every session-level mutation below (an ``always`` answer, an
+        evaluator's session grant) goes to that same object, so a
+        subagent's ``always`` lands on the subagent's policy.
         """
+        policy, _policy_source = self._resolve_policy(context)
 
         # Trusted bridge: when a plugin-provided interpreter (today only the
         # notebook plugin's Python tool bindings) wraps dispatch in
@@ -1554,7 +1752,7 @@ class PermissionPlugin(RunnerForwardingMixin):
         # Run evaluators before pre-approval short-circuits.
         # Evaluators can override pre-approvals (DENY overrides allow_all),
         # but FALLBACK preserves the pre-approval.
-        run_evaluators = bool(self._policy and self._policy._evaluators)
+        run_evaluators = bool(policy and policy._evaluators)
         if run_evaluators:
             # Framework-reserved tools (core infra + lifecycle terminals such
             # as ``signal_completion``) are EXEMPT from the catch-all
@@ -1569,7 +1767,7 @@ class PermissionPlugin(RunnerForwardingMixin):
             # lifecycle tools) — NOT ``registry.is_core_tool``: signal_completion
             # is session-level (not a registry core tool), and the set survives
             # ``shutdown()`` nulling ``_registry`` between sessions.
-            has_specific_evaluator = tool_name in self._policy._evaluators
+            has_specific_evaluator = tool_name in policy._evaluators
             if not has_specific_evaluator and tool_name in self._framework_reserved:
                 run_evaluators = False
                 self._trace(
@@ -1579,7 +1777,7 @@ class PermissionPlugin(RunnerForwardingMixin):
         if run_evaluators:
             from .evaluator import run_evaluator
             eval_result = run_evaluator(
-                self._policy._evaluators, tool_name, args, eval_context
+                policy._evaluators, tool_name, args, eval_context
             )
             if eval_result.decision == EvalDecision.ALLOW_WITH_COMMENT:
                 # Allow with advisory comment — proceed but inject feedback
@@ -1609,8 +1807,8 @@ class PermissionPlugin(RunnerForwardingMixin):
                         'comment': comment,
                     }
                 elif eval_result.decision == EvalDecision.DENY_SESSION:
-                    if self._policy:
-                        self._policy.add_session_blacklist(tool_name)
+                    if policy:
+                        policy.add_session_blacklist(tool_name)
                     self._log_decision(tool_name, args, "deny", "Evaluator session blacklist")
                     return False, {
                         'reason': 'Evaluator denied access',
@@ -1663,7 +1861,7 @@ class PermissionPlugin(RunnerForwardingMixin):
             self._log_decision(tool_name, args, "allow", "Pre-approved all requests")
             return True, {'reason': 'Pre-approved all requests', 'method': 'allow_all'}
 
-        if not self._policy:
+        if not policy:
             # An ALLOW, and it used to leave no audit entry at all — so a
             # session running on a plugin whose ``initialize()`` never
             # landed looked exactly like one running on a policy that
@@ -1687,8 +1885,8 @@ class PermissionPlugin(RunnerForwardingMixin):
 
         # Evaluate against policy. Pass eval_context=None if evaluators
         # already ran above (for pre-approved tools) to avoid double execution.
-        already_evaluated = bool(self._policy and self._policy._evaluators)
-        match = self._policy.check(
+        already_evaluated = bool(policy and policy._evaluators)
+        match = policy.check(
             tool_name, args,
             eval_context=None if already_evaluated else eval_context,
         )
@@ -1714,8 +1912,8 @@ class PermissionPlugin(RunnerForwardingMixin):
                     self._idle_suspended = True
                     method = 'evaluator_idle_suspension'
                 elif ed == EvalDecision.ALLOW_SESSION:
-                    if self._policy:
-                        self._policy.add_session_whitelist(tool_name)
+                    if policy:
+                        policy.add_session_whitelist(tool_name)
                     method = 'evaluator_session_whitelist'
                 elif ed == EvalDecision.ALLOW_ALL:
                     self._allow_all = True
@@ -1746,8 +1944,8 @@ class PermissionPlugin(RunnerForwardingMixin):
         elif match.decision == PermissionDecision.DENY:
             # Apply scoped side effects from evaluator decisions
             if match.eval_result and match.eval_result.decision == EvalDecision.DENY_SESSION:
-                if self._policy:
-                    self._policy.add_session_blacklist(tool_name)
+                if policy:
+                    policy.add_session_blacklist(tool_name)
                 method = 'evaluator_session_blacklist'
             elif match.rule_type == "evaluator_comment":
                 method = 'evaluator_comment'
@@ -1830,7 +2028,7 @@ class PermissionPlugin(RunnerForwardingMixin):
                 # in its own (unlocked) check, so its decision tree
                 # lands directly in ALLOW/DENY without re-acquiring
                 # the lock.
-                recheck = self._policy.check(
+                recheck = policy.check(
                     tool_name, args,
                     eval_context=None if already_evaluated else eval_context,
                 )
@@ -1941,7 +2139,7 @@ class PermissionPlugin(RunnerForwardingMixin):
                                 continue
 
                             # Final decision - exit loop
-                            allowed, info = self._handle_channel_response(tool_name, current_args, response)
+                            allowed, info = self._handle_channel_response(tool_name, current_args, response, policy)
                             # Who decided (#859): the daemon-authenticated
                             # responder and/or the approver an external
                             # system named.  Merged here, once, so the
@@ -1985,11 +2183,17 @@ class PermissionPlugin(RunnerForwardingMixin):
         self,
         tool_name: str,
         args: Dict[str, Any],
-        response: ChannelResponse
+        response: ChannelResponse,
+        policy: Optional[PermissionPolicy],
     ) -> Tuple[bool, Dict[str, Any]]:
         """Handle response from an channel.
 
-        Updates session rules if channel requests it.
+        Updates session rules if channel requests it — on ``policy``,
+        the one that judged the call (#957), so a subagent's ``always``
+        whitelists the tool for the subagent and not for its parent.
+        The caller resolves it (:meth:`_resolve_policy`); it is passed
+        rather than re-read so the grant lands on the object the ASK
+        was evaluated against.
 
         Returns:
             Tuple of (is_allowed, metadata_dict) with 'reason' and 'method'.
@@ -2003,8 +2207,8 @@ class PermissionPlugin(RunnerForwardingMixin):
         elif decision == ChannelDecision.ALLOW_SESSION:
             # Add to session whitelist
             pattern = response.remember_pattern or tool_name
-            if self._policy:
-                self._policy.add_session_whitelist(pattern)
+            if policy:
+                policy.add_session_whitelist(pattern)
             self._log_decision(tool_name, args, "allow", f"Session whitelist: {pattern}")
             return True, {'reason': response.reason, 'method': 'session_whitelist'}
 
@@ -2053,8 +2257,8 @@ class PermissionPlugin(RunnerForwardingMixin):
         elif decision == ChannelDecision.DENY_SESSION:
             # Add to session blacklist
             pattern = response.remember_pattern or tool_name
-            if self._policy:
-                self._policy.add_session_blacklist(pattern)
+            if policy:
+                policy.add_session_blacklist(pattern)
             self._log_decision(tool_name, args, "deny", f"Session blacklist: {pattern}")
             return False, {'reason': response.reason, 'method': 'session_blacklist'}
 

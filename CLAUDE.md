@@ -1614,6 +1614,55 @@ the archetypes `jaato-scaffold new` emits still carry no `budget_control`
 (picking ceilings for someone else's workload is the author's call, which is
 what the warning now asks them to make).
 
+### A Ceiling That Only Counted at Turn End (#955)
+
+The runtime half of the ladder above was wired for subagents and still did
+not hold. A `documentalista` subagent made **196 tool calls** under
+`tool_calls: 100` with `degrade: [{at: 100, action: abort}]` — the very
+ladder `validate` prescribes — and nothing aborted, degraded or logged. The
+profile reached the session (its `gc` block demonstrably applied) and
+`spawn_subagent` passed `budget_control` through; what was missing was the
+**moment of observation**. `_budget_observe_turn` was the only writer of
+`tool_calls`, `seconds` and `turns`, and it runs in the turn's `finally`.
+Every one of the 196 calls happened inside one `send_message`, so the
+tracker was handed the count only when that turn ended — and a runaway loop
+is precisely the turn that does not end. `tokens` and `usd` were exempt
+because they are fed per *response*, which is why only a `usd` ceiling
+small enough to cross within one turn had ever been seen to trip.
+
+| Dimension | Was observed | Now observed |
+|-----------|--------------|--------------|
+| `tokens`, `usd` | per response | unchanged |
+| `tool_calls` | turn end | per completed call (sequential + parts loops), per batch (parallel loop) |
+| `seconds` | turn end | with every tool-call observation, plus the tail at turn end |
+| `turns` | turn end | unchanged — a turn is the unit |
+
+`JaatoSession._budget_observe_tool_calls` is called from every path that
+records a call in `turn_data['function_calls']`, and an AST guard
+(`test_budget_mid_turn_955.py`) fails the build if a new path records
+without observing. `_budget_observe_turn` stays as the **closing entry**: it
+settles whatever was not observed mid-turn and only that, so nothing is
+counted twice and a budget is exact whichever loop produced the turn. An
+`abort` mid-turn cancels the session's token; the sequential loop checks it
+before the next call and the main chat loop before the next model round-trip,
+so the overshoot is one call, or one parallel batch. The parts loop
+(attachment-carrying turns) finishes its batch and is cancelled by the
+provider on the first chunk of the next response. A session at its
+ceiling is also no longer completion-nudged — the re-prompt would be refused
+at turn start, and each refusal spent a nudge on a turn that could not run.
+
+**A ladder that never logs is indistinguishable from one that is not wired**
+(the issue's third question). Every ceiling crossing now traces
+`BUDGET CEILING dim=... used=... limit=...` once per dimension, rung or no
+rung, and every fired rung traces `BUDGET RUNG at=...% action=...`
+(`RUNG_SKIPPED`, `EXHAUSTED`) — on the per-agent provider trace and on the
+application trace (`trace.session_log`), beside the permission DECISION lines
+(#951) an operator correlates them against.
+
+Still true: a profile with `limits` and no `abort` rung crosses in silence
+except for that trace line; `finalize` remains advice, and the subagent
+that outlives its parent is bounded only by what its own profile declares.
+
 ### Configuring a Plugin and Enabling It Are Two Decisions (#950)
 
 `plugin_configs.<name>` and `plugins:` answer different questions — *how does
@@ -1661,23 +1710,12 @@ INSTANCE — is shared with the parent and its sibling subagents, so a config
 applied here applies for all of them. That was already true of every plugin a
 subagent *did* list; this widens it to the ones it only configures.
 
-**One instance short of universal, and worth naming.** The daemon
-(`server/core.py`) and the runner (`server/runner/session.py` Step 8) each
-CONSTRUCT the enforcing `PermissionPlugin` rather than taking the registry's,
-so on those paths `registry.expose_tool("permission", …)` re-initializes a
-second, unread copy; the enforcer is seeded once, from the ROOT profile's
-block. Only the in-process path (`jaato_embedded/client.py`, which wires
-`registry.get_plugin("permission")` as the enforcer) has one instance, and
-there a subagent's permission block now applies. Which is also what
-identifies the transport the measurement above was taken on, since the
-reporter's workaround — naming `permission` in `plugins:` — reached the
-registry's instance and *worked*; on the daemon or runner it would have
-re-initialized the unread copy and changed nothing. Making that universal means giving the daemon
-and runner the registry's instance, and it still would not give a subagent a
-policy of its own: `PermissionPlugin._policy` is a single object on a
-runtime-wide singleton, and only the *channel* is thread-local
-(`configure_for_subagent`). Per-session policy is a separate design question,
-not a line in this fix.
+**`permission` is the one plugin that loop does not re-initialize.** The
+route above — `registry.expose_tool(name, config)`, a `shutdown()` +
+`initialize()` on the registry's instance — is the wrong one for the
+enforcer, on every path: see [the next section](#a-subagent-is-judged-by-its-own-profiles-policy-957).
+A session's `plugin_configs.permission` block is stashed by `configure()`
+and installed as a policy of the session's own instead.
 
 **The validator says the other half.** With the config reaching the plugin,
 "unreachable" is no longer the finding; what survives is narrower and still
@@ -1698,6 +1736,82 @@ every wire whatever `plugins:` says; and a plugin whose tools are not
 statically knowable (`mcp`) reports none offline and is read the same way —
 a false negative, and the right one, since the alternative is asserting a
 missing surface the validator cannot see.
+
+### A Subagent Is Judged by Its Own Profile's Policy (#957)
+
+The permission plugin is a registry-shared singleton: a parent and every
+subagent it spawns are gated by ONE object, and until #957 by one **policy** —
+`_policy`, seeded at bootstrap from the ROOT profile's block. A subagent
+profile that declared its own `plugin_configs.permission` was judged by the
+parent's policy anyway, so a `documentalista` that whitelisted exactly the two
+tools it needed, and worked standalone, was denied `method=default` 14 times
+when spawned. The child's profile was byte-identical throughout; the only
+edit that changed the verdict was adding `writeNewFile` to the **parent's**
+whitelist. The tools that *did* work (`selectReferences`, `retrieve_memories`)
+are auto-approved by their own plugins and resolve `whitelist` under any
+policy, which is what let the profile look correct until it reached a tool
+that was genuinely gated.
+
+The block had two routes, and both were wrong:
+
+| Path | Enforcer | What `registry.expose_tool("permission", block)` did |
+|------|----------|------------------------------------------------------|
+| daemon (`server/core.py`), runner (`runner/session.py` Step 8) | constructed separately, seeded from the root block | re-initialized the registry's **unread copy**; the enforcer kept the parent's policy — #957 as reported |
+| in-process (`jaato_embedded`) | the registry's instance | `shutdown()` + `initialize(child block)` on the enforcer: the parent was now judged by the **child's** policy, and its in-process ASK channel was replaced by a console one — the maintainer's in-tree repro "found the opposite" because it was the same defect from the other side |
+
+**Now: one enforcer, one policy per session.** `PermissionPlugin` keeps
+`_policy` as the runtime-wide policy and gains `_scoped_policies`, one
+`PermissionPolicy` per session that declared a block, keyed by a
+`permission_scope` the session minted at construction. The key travels in the
+executor's per-session permission context — the same dict #951 reads the
+caller's identity from — so `_resolve_policy(context)` picks the session's own
+policy when it installed one and the runtime policy otherwise. Every read and
+every session-level mutation in `_check_permission_impl` goes to the resolved
+object: a subagent's `always` answer whitelists the tool for the subagent, not
+for its parent. The DECISION line names it — `policy=session` /
+`policy=runtime` — the distinction the issue could only infer from the verdict
+changing when the parent's whitelist was edited.
+
+Where the session installs it decides who gets one:
+
+- **A subagent, at `set_agent_context("subagent", …)`** — the point at which a
+  session *becomes* one, called by both spawn paths right after
+  `create_session` and before the first turn. `configure()` runs inside
+  `create_session`, when the session is still `"main"`, so it only stashes the
+  block; a session that is already a subagent when configured (a revive)
+  installs from `configure()` itself.
+- **Never the root.** The runtime policy IS the root's, seeded from the same
+  block at bootstrap on every path, and it is the object the operator's
+  `permissions allow|deny|default` commands mutate. A scoped copy would detach
+  the root from those commands for no gain.
+- **A subagent with no block installs nothing** and is judged by the runtime
+  policy, as before — inheriting the parent's posture is the right default for
+  a profile that declared none. A block that defines no policy (the
+  `agent_name` injection alone) installs nothing either.
+
+Two consequences that were easy to get wrong:
+
+- **Auto-approved tools reach a scoped policy installed later.** `configure()`
+  whitelists the lifecycle tools (`signal_completion`) and each plugin's
+  `get_auto_approved_tools()` on the runtime policy *before* the session
+  becomes a subagent. `add_whitelist_tools` now records every name it is
+  handed and `set_scoped_policy` seeds from that set, or a `defaultPolicy:
+  deny` child would deny its own completion. These names are plugin-declared
+  and identical for every session on the registry; they were never something
+  one session's policy could withhold from another.
+- **`askPermission` fetches the context itself.** The executor dispatches it
+  ungated, so nothing handed it a scope and the model's pre-check answered
+  from the runtime policy while the real call was judged by the child's. It
+  now reads `JaatoSession.permission_context()` off the current session.
+
+A scoped policy is released by `close_session()`, and every scoped policy is
+dropped at `reset_for_next_session()` / `shutdown()`, so a subagent that ends
+without closing is bounded by the slot boundary.
+
+**The validator (issue ask 2).** With the child's block governing the child,
+"does the spawner's whitelist cover the spawnee's gated tools?" stops being a
+question — the cross-profile check the issue floated would now assert a
+relationship that no longer holds. Not added.
 
 ### What the Authoring Surface Would Not Say
 
