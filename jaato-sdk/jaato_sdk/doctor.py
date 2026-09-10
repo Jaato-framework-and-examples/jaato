@@ -310,10 +310,19 @@ def check_integrations() -> List[Check]:
                              f"{user} was {detail}; it may describe a different "
                              f"build — `jaato-scaffold integration {name} --force` "
                              f"replaces it with this one"))
-        else:      # modified
+        elif state == "outdated":
+            # NOT a local edit: the payload moved upstream at the same version.
+            # This case used to be reported as a local edit, which told the
+            # operator the exact opposite of the truth.
             out.append(Check(f"integration ({name})", WARN,
-                             f"{detail} — local edits will be lost by "
-                             f"`install --force`; upstream them first"))
+                             f"{detail} — `jaato-scaffold integration {name} --force`"))
+        elif state == "edited":
+            out.append(Check(f"integration ({name})", WARN,
+                             f"{detail} — `--force` would discard it"))
+        else:      # diverged
+            out.append(Check(f"integration ({name})", WARN,
+                             f"{detail} — reconcile by hand, or `--force` and "
+                             f"lose the local side"))
     return out
 
 
