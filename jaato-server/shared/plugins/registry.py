@@ -255,6 +255,44 @@ _PLUGIN_KIND_PROTOCOLS: Dict[str, type] = {
 }
 
 
+def _install_advice(missing: str) -> str:
+    """What to run to get import name *missing* into this environment.
+
+    A skip message that only names the module leaves the reader to guess the
+    distribution AND the extra.  For ``pexpect`` the answer is
+    ``pip install 'jaato-server[interactive]'`` — an extra whose name is not
+    the plugin's, not the module's, and not discoverable from the message,
+    so "install it" reliably became ``pip install pexpect`` into whatever
+    interpreter was nearest.  jaato-server ALREADY declares the requirement;
+    what was missing was saying so.
+
+    Resolved from the installed distribution metadata (the same index
+    ``jaato-scaffold explain <unit> dependencies`` reads) rather than from a
+    table here, so a new extra needs no edit in this file and a stale one
+    cannot outlive ``pyproject.toml``.  Best-effort by construction: this is
+    an error path in plugin discovery, and a diagnostic that raises is worse
+    than a vague one, so any failure falls back to the generic advice.
+
+    Args:
+        missing: The import name from ``ModuleNotFoundError.name``.
+
+    Returns:
+        A sentence naming the install target, ending in a period.
+    """
+    try:
+        from shared.scaffold.dependencies import _core_index, _extras_index
+        targets = _extras_index().get(missing) or _core_index().get(missing)
+    except Exception:              # noqa: BLE001 — diagnostics never raise
+        targets = None
+    if not targets:
+        return ("install it to enable this plugin (`jaato-scaffold explain "
+                f"plugin <name> dependencies` names what ships '{missing}').")
+    # Several extras can declare the same package; name them all rather than
+    # picking one, since any of them satisfies the import.
+    joined = " / ".join(f"pip install '{t}'" for t in sorted(targets))
+    return f"enable this plugin with: {joined}."
+
+
 def _protocol_gap(plugin: Any, plugin_kind: str) -> Optional[str]:
     """Render the protocol methods *plugin* is missing, or ``None``.
 
@@ -1167,7 +1205,7 @@ class PluginRegistry:
                 missing = exc.name or str(exc)
                 _trace(
                     f" Plugin '{name}' skipped: missing dependency "
-                    f"'{missing}' — install it to enable this plugin.",
+                    f"'{missing}' — {_install_advice(missing)}",
                     warning=True,
                 )
             except Exception as exc:

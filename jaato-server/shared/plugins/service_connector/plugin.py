@@ -625,8 +625,21 @@ class ServiceConnectorPlugin(RunnerForwardingMixin):
             ToolSchema(
                 name="configure_service_auth",
                 description=(
-                    "Configure authentication for a service. "
-                    "Credentials are read from environment variables."
+                    "Configure authentication for a discovered service, so "
+                    "later call_service(service=...) calls carry it. "
+                    "Credentials are NEVER passed here: every field below "
+                    "names an ENVIRONMENT VARIABLE the value is read from at "
+                    "request time. The fields `auth` needs depend on its "
+                    "`type`: "
+                    "apiKey -> in ('header'|'query'), name (the header or "
+                    "query-param name), value_env; "
+                    "bearer -> token_env; "
+                    "basic -> username_env, password_env; "
+                    "oauth2_client -> token_url, client_id_env, "
+                    "client_secret_env, and optionally scope; "
+                    "none -> nothing else. "
+                    'Example: {"type": "apiKey", "in": "header", '
+                    '"name": "PRIVATE-TOKEN", "value_env": "GITLAB_TOKEN"}.'
                 ),
                 parameters={
                     "type": "object",
@@ -637,22 +650,37 @@ class ServiceConnectorPlugin(RunnerForwardingMixin):
                         },
                         "auth": {
                             "type": "object",
-                            "description": "Auth configuration",
+                            "description": (
+                                "Auth configuration. Which fields apply is "
+                                "decided by 'type'; every *_env field names "
+                                "an environment variable, never a secret."
+                            ),
                             "properties": {
                                 "type": {
                                     "type": "string",
-                                    "enum": ["none", "apiKey", "bearer", "basic", "oauth2_client"]
+                                    "enum": ["none", "apiKey", "bearer", "basic", "oauth2_client"],
+                                    "description": "Which scheme — decides which other fields apply"
                                 },
-                                "in": {"type": "string", "enum": ["header", "query"]},
-                                "name": {"type": "string"},
-                                "value_env": {"type": "string"},
-                                "token_env": {"type": "string"},
-                                "username_env": {"type": "string"},
-                                "password_env": {"type": "string"},
-                                "token_url": {"type": "string"},
-                                "client_id_env": {"type": "string"},
-                                "client_secret_env": {"type": "string"},
-                                "scope": {"type": "string"}
+                                "in": {"type": "string", "enum": ["header", "query"],
+                                       "description": "apiKey: where to put the key"},
+                                "name": {"type": "string",
+                                         "description": "apiKey: header or query-param name, e.g. PRIVATE-TOKEN"},
+                                "value_env": {"type": "string",
+                                              "description": "apiKey: env var holding the key"},
+                                "token_env": {"type": "string",
+                                              "description": "bearer: env var holding the token"},
+                                "username_env": {"type": "string",
+                                                 "description": "basic: env var holding the username"},
+                                "password_env": {"type": "string",
+                                                 "description": "basic: env var holding the password"},
+                                "token_url": {"type": "string",
+                                              "description": "oauth2_client: token endpoint URL"},
+                                "client_id_env": {"type": "string",
+                                                  "description": "oauth2_client: env var holding the client id"},
+                                "client_secret_env": {"type": "string",
+                                                      "description": "oauth2_client: env var holding the client secret"},
+                                "scope": {"type": "string",
+                                          "description": "oauth2_client: requested scope (optional)"}
                             },
                             "required": ["type"]
                         }

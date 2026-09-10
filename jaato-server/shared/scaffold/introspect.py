@@ -56,7 +56,7 @@ _PROVIDER_NS = {
 }
 
 _WANTED_CONSTS = ("PROVIDER_CAPABILITIES", "PROVIDER_KNOBS", "PROVIDER_QUIRKS",
-                  "PROVIDER_AUTH_RESOLUTION")
+                  "PROVIDER_AUTH_RESOLUTION", "PROVIDER_NOTES")
 
 
 # -------------------------------------------------------------------- models
@@ -70,6 +70,14 @@ class ProviderInfo:
     knobs: Optional[_pbase.ProviderKnobs] = None
     quirks: frozenset = field(default_factory=frozenset)
     auth: tuple = ()                    # ordered AuthSource credential chain
+    #: Free-text caveats this provider declares about ITSELF, in
+    #: ``PROVIDER_NOTES``.  For facts no other contract field can carry —
+    #: notably what the profile's ``model:`` field MEANS here, which for
+    #: Azure is a DEPLOYMENT name, not a catalog model id.  Declared beside
+    #: the capabilities and knobs so the note cannot drift from the
+    #: provider it describes; empty for a provider with nothing unusual
+    #: to say.
+    notes: tuple = ()
 
     def normalized_names(self) -> set:
         """Names a profile's ``provider:`` field might use for this provider.
@@ -285,6 +293,7 @@ def providers() -> Dict[str, ProviderInfo]:
             knobs=consts.get("PROVIDER_KNOBS"),
             quirks=consts.get("PROVIDER_QUIRKS") or frozenset(),
             auth=consts.get("PROVIDER_AUTH_RESOLUTION") or (),
+            notes=tuple(consts.get("PROVIDER_NOTES") or ()),
         )
     return out
 

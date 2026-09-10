@@ -1614,6 +1614,129 @@ the archetypes `jaato-scaffold new` emits still carry no `budget_control`
 (picking ceilings for someone else's workload is the author's call, which is
 what the warning now asks them to make).
 
+### What the Authoring Surface Would Not Say
+
+Six findings from one workspace bring-up, each the same shape: the framework
+already held the answer and no surface a session reads would state it. The
+fix in every case is to make the existing fact reachable, never to invent a
+new source of truth.
+
+**`explain agents` and `explain services` — two directories nothing named.**
+`.jaato/agents/` (the PERSONA layer) appeared in no `explain` scope, while
+`explain profile` listed `system_instructions` — marked DEPRECATED, and the
+only instruction-shaped key on the page. An author who never found the agents
+directory reached for the deprecated key, which works, so nothing corrected
+them. `.jaato/services/` had the same problem with a different fallback: the
+`service_connector` caches OpenAPI specs and auth there and calls an API by
+alias, and unnamed, the path of least resistance is a raw URL with the base
+URL, auth header and pagination re-derived by hand on every call. Both topics
+READ their search order from the runtime's own helpers (`agent_search_dirs`,
+the schema store's tier constants) rather than restating it — a documented
+order that disagrees with the loaded one is worse than none — and both report
+what is actually on disk in the workspace. They are the first entries in a
+`_WORKSPACE_SCOPES` table, which is what turned `sets`' lone `elif` into the
+table this CLI's docstring already asked for.
+
+**A nested parameter is not describable by a signature.**
+`explain plugin service_connector` rendered `configure_service_auth(service,
+auth)` — accurate, and useless, because `auth` is an object whose five accepted
+shapes ARE the tool. `--json` carried the schema all along; the human page
+showed neither the shapes nor the `*_env` field each wants, so the only route
+to a correct call was the plugin source. The page now expands any parameter
+carrying an `enum`, and any `object` parameter's own properties, **one level
+deep** — deeper is a schema dump, which is what `--json` is for. The tool's own
+description was the other half: *"Credentials are read from environment
+variables"* is true and does not say that `bearer` wants `token_env` while
+`apiKey` wants `in` + `name` + `value_env`. The model reads that string.
+
+**`PROVIDER_NOTES` — a caveat no contract field could carry.** On Azure
+OpenAI, a profile's `model:` is the DEPLOYMENT name from your resource, not a
+catalog model id; get it wrong and the failure is a runtime `DeploymentNotFound`
+with nothing earlier naming the cause. The provider module's docstring said so
+and `explain provider azure_openai` did not. `PROVIDER_NOTES` is a tuple of
+prose declared beside `PROVIDER_CAPABILITIES` / `PROVIDER_KNOBS` — co-located so
+it cannot drift from the provider it describes — rendered as a `read this
+first:` block ABOVE the knob table, because a knob table read under the wrong
+premise is still read wrong. Empty for a provider with nothing unusual to say.
+
+**Where the `api_params` check stops.** `validate` checks an `api_params` key
+against the PROVIDER's allow-list, which is the only thing it can check: which
+values a given MODEL accepts is declared nowhere in this tree and moves whenever
+a vendor ships. So `temperature: 0.0` validates clean and is a `400` on a
+reasoning model that accepts only its default. Every provider page with an
+`api_params` layer now says so, and says the thing that is always true —
+omitting a parameter is never the cause of a 400. Deliberately NOT a per-model
+incompatibility table: a stale row would reject what the vendor accepts or pass
+what it rejects, and either beats silence only by accident. `jaato-scaffold new
+profile-set` stopped emitting `temperature: 0.0` live for the same reason; it is
+a commented example now, **header included**, because a live `api_params:` over
+nothing but comments parses as a YAML null that `validate` correctly reports as
+`unknown_knob` — the generator would have failed the file it just wrote.
+
+**Two things a profile says about ITSELF.** `description` is required
+(no default on `SubagentProfile`, `(required)` in `explain profile`) and the
+loader is lenient, so a missing key becomes `""`. Inheritance does not rescue
+it — the merge takes `description=child.description`, so a tier-2 set profile
+that omits it OVERRIDES its base's with the empty string — and every profile
+`new profile-set` emitted was in that state. What breaks is the one line
+`spawn_subagent` advertises to the model, `- worker:  (tools: cli)`: the prose a
+delegate is chosen from. `system_instructions` is the second, deprecated and
+unflagged. Both are `missing_description` / `deprecated_system_instructions`,
+**warn** — either profile loads and runs, and an error would fail existing
+workspaces wholesale, the posture `unknown_knob` and `budget_control_absent`
+already take.
+
+**A skip that names the module but not the install.** `pexpect` IS declared —
+`jaato-server[interactive]`, an extra named after neither the plugin nor the
+module — and the registry's skip line said only *"install it to enable this
+plugin"*, so the reliable next move was `pip install pexpect` into whatever
+interpreter was nearest, and the gap read as an undeclared dependency. The line
+now resolves the install target from installed distribution metadata (the same
+index `explain <unit> dependencies` reads), so a new extra needs no edit and a
+stale one cannot outlive `pyproject.toml`. Best-effort by construction: it runs
+inside discovery's error path, and a diagnostic that raises is worse than a
+vague one.
+
+### The MCP SDK Moved Its Decode Seam (mcp 2.x)
+
+`mcp[cli]` is an unpinned dependency, so a fresh `pip install` resolves
+whatever is current — and on any `mcp>=2` install, EVERY MCP server in the
+workspace was unreachable. `_ensure_mcp_patch` read
+`types.JSONRPCMessage.model_validate_json` to install the filter that keeps a
+server's own stdout log lines from being decoded as JSON-RPC; mcp 2.x turned
+`JSONRPCMessage` into a PEP 604 `UnionType`, which has no such method, and the
+`AttributeError` escaped the MCP thread's `run_until_complete`. The only
+evidence was a traceback in that thread's log — printed, incidentally, on top
+of every `jaato-scaffold` invocation in the same environment.
+
+The client beneath it was never the problem: driven against a real mcp 2.x
+stdio server, `connect` → `list_tools` → `call_tool` all work unchanged. So the
+fix is to find the seam, not to pin the SDK back:
+
+| Generation | `JSONRPCMessage` | Decode seam | Silenced by |
+|------------|------------------|-------------|-------------|
+| mcp 1.x | Pydantic model | `JSONRPCMessage.model_validate_json` | wrapping `traceback` / `builtins.print` (1.x *prints* the failure) |
+| mcp 2.x | PEP 604 union | `types.jsonrpc_message_adapter.validate_json` | a logging filter on `mcp.client.stdio`'s own logger |
+
+`detect_jsonrpc_seam(mcp_types)` is module-level and separate from installing
+anything, so `jaato-doctor` can ASK the question cold — the `mcp sdk` check
+reports the version and the seam in use, and WARNs when a build exposes
+neither. Three properties follow from what went wrong:
+
+- **`SkipMessage` is a `ValueError`.** mcp 2.x's `_parse_line` catches exactly
+  `ValueError` and hands it to the session as a value; a sentinel outside that
+  hierarchy escapes the stdout reader and takes the connection down — the
+  opposite of what the filter is for. 1.x catches `Exception` there, so the
+  narrower base serves both.
+- **No seam is not a failure.** The filter is a convenience and MCP works
+  without it, so an unrecognised shape is announced once at WARNING and left
+  unfiltered. The install is wrapped too: this method used to be able to kill
+  the MCP thread, and no future SDK shape may cost an operator their servers
+  again.
+- **The 2.x silencer is scoped to one logger object.** A filter installed on
+  an ancestor logger is not consulted for records propagating up from a child,
+  and every parse failure that is not our sentinel still reaches the operator.
+
 ### Secret Env Scrubbing (#863)
 
 The runner legitimately holds secrets in its own `os.environ` — the

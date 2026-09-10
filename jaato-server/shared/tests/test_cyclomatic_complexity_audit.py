@@ -462,7 +462,6 @@ BASELINE: Dict[str, int] = {
     "jaato-server/shared/scaffold/explain.py::event": 21,
     "jaato-server/shared/scaffold/explain.py::events": 17,
     "jaato-server/shared/scaffold/explain.py::profile_cost": 23,
-    "jaato-server/shared/scaffold/explain.py::provider": 16,
     "jaato-server/shared/scaffold/explain.py::sets": 17,
     "jaato-server/shared/scaffold/introspect.py::events": 32,
     "jaato-server/shared/scaffold/introspect.py::plugins": 21,

@@ -111,6 +111,19 @@ PROVIDER_KNOBS = ProviderKnobs(layers=(
                  "voice/format companion of api_params.modalities"),
     ), description="OpenAI Chat Completions params (filtered allow-list)"),
 ))
+# --- Provider caveats (things no other contract field can carry) ---
+PROVIDER_NOTES = (
+    "`model:` in a profile is the DEPLOYMENT name from your Azure resource "
+    "(Azure AI Foundry -> Deployments), NOT a catalog model id. A catalog id "
+    "that happens to be spelled like one fails at request time with "
+    "DeploymentNotFound, and nothing earlier says why.",
+    "`plugin_configs.azure_openai.model_name` carries the model the "
+    "deployment actually serves (e.g. gpt-4o). It is what makes the "
+    "input-modality table applicable — a deployment name identifies nothing.",
+    "`api_version` is required and has no default: the date decides which "
+    "request fields exist, so the framework must not pick one for you.",
+)
+
 PROVIDER_QUIRKS = frozenset({
     # Inherited from the shared OpenAI-compat transport.
     "prose_tool_calls",

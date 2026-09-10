@@ -139,6 +139,9 @@ def validate_profile(
 
     provider_name = getattr(profile, "provider", None)
 
+    # --- what the profile says about ITSELF ------------------------------
+    _check_profile_identity(profile, add)
+
     # --- provider --------------------------------------------------------
     pinfo = _resolve_and_check_provider(profile, provider_name, providers, add)
     # model present? (a resolved, runnable profile should bind one; a pure
@@ -310,6 +313,51 @@ def _load_spawn_schema(profile, config_root: str):
             except (OSError, ValueError):
                 return None
     return None
+
+
+def _check_profile_identity(profile: Any, add) -> None:
+    """The two things a profile says about ITSELF, and both went unchecked.
+
+    ``description`` is REQUIRED — it has no default on ``SubagentProfile``, and
+    ``explain profile`` prints ``(required)`` beside it.  The YAML loader is
+    lenient (a missing key becomes ``""``) and inheritance does NOT rescue it:
+    the merge takes ``description=child.description``, so a tier-2 set profile
+    that omits it OVERRIDES its base's with the empty string.  Nothing fails —
+    it just becomes the empty half of the line the subagent plugin advertises
+    to the model, ``- worker:  (tools: cli)``, which is the one piece of prose
+    a model chooses a delegate from.  Every profile ``jaato-scaffold new
+    profile-set`` emitted was in exactly that state.
+
+    ``system_instructions`` is DEPRECATED in favour of a persona in
+    ``.jaato/agents/<name>.md``.  ``explain profile`` said so and ``validate``
+    did not, so the field kept working and nothing corrected an author who had
+    never found the agents directory.
+
+    Both WARN.  A profile with either is loadable and runnable, and an error
+    would fail existing workspaces wholesale — the posture ``unknown_knob``
+    and ``budget_control_absent`` already take.
+    """
+    if not (getattr(profile, "description", "") or "").strip():
+        add("warn", "missing_description",
+            "no `description` — it is a required profile field, and the "
+            "subagent tool advertises it to the model verbatim as the prose a "
+            "delegate is chosen from (an empty one renders as `- <name>:  "
+            "(tools: ...)`).  NOTE inheritance does not supply it: a child's "
+            "description REPLACES its parents', so an omitted key overrides "
+            "the base's with the empty string.",
+            where="description")
+
+    if getattr(profile, "system_instructions", None):
+        add("warn", "deprecated_system_instructions",
+            "`system_instructions` is DEPRECATED — define the persona in "
+            ".jaato/agents/<name>.md and bind it with `default_agent: <name>` "
+            "(or pass agent=\"<name>\" when creating the session).  A persona "
+            "is one LAYER of the prompt, survives "
+            "`suppress_base_instructions`, and is reusable across profiles; "
+            "this key is none of those.  See `jaato-scaffold explain agents`."
+            "  (Inherited: the value may come from a parent profile — "
+            "`system_instructions` concatenates down the inherits chain.)",
+            where="system_instructions")
 
 
 def _check_spawn_schema_wire_types(profiles, config_root: str, out) -> None:

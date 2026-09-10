@@ -1307,6 +1307,42 @@ def _base_profile_yaml(agent: str) -> str:
     )
 
 
+def _temperature_example(provider: str) -> List[str]:
+    """The determinism knob, emitted COMMENTED OUT — and why.
+
+    ``temperature`` is a valid knob of every provider that declares it, so
+    ``validate`` passes it: the allow-list it checks belongs to the PROVIDER,
+    and which values a given MODEL accepts is not declared anywhere in this
+    tree (see ``explain provider <name>``, "scope of the check").
+
+    The template used to emit ``temperature: 0.0`` live, as a determinism
+    knob.  Reasoning models — the o-series, the thinking GPT-5.x variants and
+    their peers — accept only their DEFAULT temperature and answer an explicit
+    value with ``400 BadRequest``, so a generated profile bound to one of them
+    could not make a single request, and the validator that just approved it
+    had nothing to say about why.
+
+    Commented out, the knob is still discoverable (that is what earns it the
+    space) and costs nothing when it does not apply.  Omitting an ``api_params``
+    key is never the cause of a 400; setting one can be.
+
+    The ``api_params:`` HEADER is commented out too, and has to be: a live
+    header over nothing but comments parses as a YAML null, which ``validate``
+    correctly reports as ``unknown_knob`` (``api_params`` is a LAYER, and a
+    layer that is not a dict falls through to the top-level check).  The
+    generator would have emitted a set it then failed itself on.
+    """
+    return [
+        "    # api_params:",
+        "    #   temperature: 0.0  # determinism knob — UNCOMMENT BOTH LINES ONLY IF",
+        "    #                     # this MODEL takes it.  Reasoning models commonly",
+        "    #                     # accept only the DEFAULT and answer an explicit",
+        "    #                     # value with 400; `validate` checks the PROVIDER's",
+        "    #                     # allow-list, not the model's.  See",
+        f"    #                     # `explain provider {provider}`.",
+    ]
+
+
 def _set_profile_yaml(agent: str, provider: str, model: str,
                       kind: str = _SECRETS_DEFAULT, scheme: Optional[str] = None,
                       secret_path: str = _SECRET_PATH_DEFAULT) -> str:
@@ -1336,6 +1372,14 @@ def _set_profile_yaml(agent: str, provider: str, model: str,
     lines = [
         f"# {agent} — {provider} set: {model}.",
         f"name: {agent}",
+        # REQUIRED, and NOT rescued by `inherits`: the merge takes
+        # description=child.description, so omitting it here overrides the
+        # base's with "" -- which is the prose the subagent tool advertises to
+        # the model as what a delegate is chosen from.  Every generated set
+        # profile used to ship in that state (`validate` now reports it as
+        # `missing_description`).
+        f"description: {agent} stage on {provider} ({model}) — "
+        f"replace with what this stage is FOR.",
         f"inherits: [_base_{agent}]",
         "plugins: []  # empty keeps the inherited _base surface",
         f"model: {model}",
@@ -1373,15 +1417,23 @@ def _set_profile_yaml(agent: str, provider: str, model: str,
     knobs = info.knobs if info else None
     if knobs is not None:
         cfg = [f"plugin_configs:", f"  {provider}:"]
+        live = 0                       # uncommented keys under the provider
         if knobs.accepts("top_level", "api_key"):
             key_line = _api_key_line(provider, info, kind, scheme, secret_path)
             if key_line is not None:
                 cfg.append(key_line)
+                live += 1
         if knobs.accepts("api_params", "temperature"):
-            cfg.append("    api_params:")
-            cfg.append("      temperature: 0.0  # determinism knob")
-        if len(cfg) > 2:
+            cfg.extend(_temperature_example(provider))
+        if live:
             lines.extend(cfg)
+        elif len(cfg) > 2:
+            # Nothing in the section is actually SET (e.g. --secrets none), so
+            # a live `plugin_configs:` header would map the provider to a YAML
+            # null.  Comment the headers too rather than dropping the worked
+            # example: the knob it documents is exactly as hard to discover
+            # under --secrets none as anywhere else.
+            lines.extend([f"# {line}" for line in cfg[:2]] + cfg[2:])
     return "\n".join(lines) + "\n"
 
 

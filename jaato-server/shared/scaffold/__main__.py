@@ -78,10 +78,20 @@ _NAMED_SCOPES = {
 #: Scopes taking an OPTIONAL filter as the name argument.
 _FILTER_SCOPES = {"env": _explain.env, "events": _explain.events}
 
+#: Scopes rendered AGAINST A WORKSPACE — they report on files on disk, so the
+#: ``--workspace`` value is the argument.  ``sets`` sat in the if/elif chain
+#: this module's docstring warns about; adding ``agents`` and ``services``
+#: beside it is what turned that rung into a table.
+_WORKSPACE_SCOPES = {
+    "sets": _explain.sets,
+    "agents": _explain.agents,
+    "services": _explain.services,
+}
+
 _SCOPES_HELP = ("plugins | plugin | commands | providers | provider | gc | env | events | "
-                "event | transports | clients | runtime | tiers | sets | "
-                "profile [<name>] | paths | prefetch | completion | archetypes | "
-                "archetype")
+                "event | transports | clients | runtime | tiers | sets | agents | "
+                "services | profile [<name>] | paths | prefetch | completion | "
+                "archetypes | archetype")
 
 
 _DEPS_WORDS = ("dependencies", "deps")
@@ -133,8 +143,8 @@ def _cmd_explain(args) -> int:
         if isinstance(data, dict) and "error" in data:
             print(text, file=sys.stderr)
             return 2
-    elif scope == "sets":
-        data, text = _explain.sets(ws)
+    elif scope in _WORKSPACE_SCOPES:
+        data, text = _WORKSPACE_SCOPES[scope](ws)
     elif scope == "profile":
         # ``profile`` alone is the SCHEMA; ``profile <name>`` is what that
         # named profile INHERITS and what it costs per turn.  A profile file

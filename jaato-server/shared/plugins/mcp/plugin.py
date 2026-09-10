@@ -47,6 +47,66 @@ LOG_WARN = 'WARN'
 MAX_LOG_ENTRIES = 500
 
 
+#: The mcp 1.x decode seam — ``types.JSONRPCMessage.model_validate_json``.
+SEAM_MODEL = "model"
+#: The mcp 2.x decode seam — ``types.jsonrpc_message_adapter.validate_json``.
+SEAM_ADAPTER = "adapter"
+
+
+def detect_jsonrpc_seam(mcp_types) -> Optional[str]:
+    """Which JSON-RPC decode entry point does this ``mcp.types`` expose?
+
+    The SDK moved the decode between generations, and the plugin's stdout
+    noise filter has to wrap whichever one this build has:
+
+    ============ =========================================================
+    ``"model"``   mcp 1.x — ``JSONRPCMessage`` is a Pydantic model and
+                  decodes through its ``model_validate_json`` classmethod.
+    ``"adapter"`` mcp 2.x — ``JSONRPCMessage`` became a PEP 604 union (no
+                  ``model_validate_json`` on it AT ALL) and decoding moved
+                  to the ``jsonrpc_message_adapter`` TypeAdapter.
+    ``None``      neither — a shape this build does not know.
+    ============ =========================================================
+
+    Kept separate from installing the filter, and module-level, so
+    ``jaato-doctor`` can ASK the question without patching anything: reading
+    the 1.x seam off a 2.x union is what took the whole MCP thread down with
+    an ``AttributeError``, and the check that would have caught it early has
+    to be able to run cold.
+
+    Args:
+        mcp_types: The ``mcp.types`` module (or a stand-in shaped like one).
+
+    Returns:
+        :data:`SEAM_MODEL`, :data:`SEAM_ADAPTER`, or ``None``.
+    """
+    message_cls = getattr(mcp_types, "JSONRPCMessage", None)
+    if (isinstance(message_cls, type)
+            and getattr(message_cls, "model_validate_json", None) is not None):
+        return SEAM_MODEL
+    adapter = getattr(mcp_types, "jsonrpc_message_adapter", None)
+    if getattr(adapter, "validate_json", None) is not None:
+        return SEAM_ADAPTER
+    return None
+
+
+class SkipMessage(ValueError):
+    """Sentinel: a stdout line that is not a JSON-RPC message, and never was.
+
+    Raised by the decode filter installed in
+    :meth:`MCPToolPlugin._install_jsonrpc_filter` INSTEAD of letting Pydantic
+    fail on a server's own log output.  It carries the offending line so a
+    debug trace can show it.
+
+    ``ValueError`` on purpose: mcp 2.x's ``_parse_line`` catches exactly
+    ``ValueError`` and hands it to the session as a value, so a sentinel
+    outside that hierarchy would escape the stdout reader and take the
+    connection down — the opposite of what the filter is for.  mcp 1.x
+    catches ``Exception`` there, so the narrower base is compatible with
+    both.
+    """
+
+
 @dataclass
 class LogEntry:
     """A single log entry for MCP interactions."""
@@ -1286,54 +1346,178 @@ class MCPToolPlugin(RunnerForwardingMixin):
             return f"Failed to save configuration to {path}: {exc}"
 
     def _ensure_mcp_patch(self):
-        """Lazily import mcp and apply the JSON-RPC validation patch."""
+        """Lazily import mcp and install the non-JSON-RPC stdout filter.
+
+        MCP servers routinely write log lines to stdout, which is also the
+        JSON-RPC channel.  Left alone, every such line is decoded, fails, and
+        surfaces as a parse error the operator reads as a crash.  The filter
+        recognises them *before* decoding and skips them quietly.
+
+        **Two SDK generations, one filter.**  Where the decode happens moved
+        between mcp 1.x and 2.x, and reading only the 1.x seam is what took
+        the whole MCP thread down on a default install:
+
+        ==========  ==================================================
+        mcp 1.x     ``types.JSONRPCMessage`` is a Pydantic model; the
+                    seam is its ``model_validate_json`` classmethod.
+        mcp 2.x     ``JSONRPCMessage`` became a PEP 604 ``UnionType``
+                    (so it has no ``model_validate_json`` AT ALL, and
+                    reading one raised ``AttributeError`` out of the
+                    thread's ``run_until_complete``); decoding moved to
+                    the ``types.jsonrpc_message_adapter`` TypeAdapter.
+        ==========  ==================================================
+
+        :func:`_install_jsonrpc_filter` finds whichever seam this build has.
+        A build with NEITHER — a future rename — is announced once at WARNING
+        and left unfiltered: the client itself is version-agnostic (verified
+        end to end against mcp 2.x), so losing the noise filter must not cost
+        the operator their MCP servers.
+
+        Silencing differs by generation for the same reason.  1.x *printed*
+        the failure from its stdout reader, so 1.x is silenced by wrapping
+        ``traceback``/``print``; 2.x reports it through ``logger.exception``
+        on its own module logger, so 2.x is silenced with a logging filter on
+        exactly that logger — a record carrying our sentinel is dropped, and
+        every other parse failure still reaches the operator.
+        """
         if self._mcp_patch_applied:
             return
 
+        # Set FIRST: a build we cannot patch must not re-probe on every
+        # connect, and a raising probe must not be retried forever either.
+        self._mcp_patch_applied = True
+
         from mcp import types as mcp_types
 
-        # Store original
-        _original_validate_json = mcp_types.JSONRPCMessage.model_validate_json.__func__
+        try:
+            seam = self._install_jsonrpc_filter(mcp_types)
+        except Exception as exc:                   # noqa: BLE001
+            # The filter is a CONVENIENCE; MCP works without it.  This whole
+            # method used to be able to kill the MCP thread — and did, on
+            # every mcp>=2 install — so no shape this SDK grows may cost the
+            # operator their servers again.
+            self._log_event(
+                LOG_WARN,
+                f"MCP: could not install the stdout noise filter ({exc}) — "
+                "servers that log to stdout will report parse errors.  "
+                "MCP itself is unaffected.",
+            )
+            return
 
-        # Capture self for logging in the closure
+        if seam is None:
+            import importlib.metadata as _md
+            try:
+                version = _md.version("mcp")
+            except Exception:                      # noqa: BLE001 — diagnostic only
+                version = "unknown"
+            self._log_event(
+                LOG_WARN,
+                "MCP: cannot locate this SDK's JSON-RPC decode seam "
+                f"(mcp {version}) — servers that log to stdout will report "
+                "parse errors.  MCP itself is unaffected.",
+            )
+            return
+
+        if seam == SEAM_MODEL:
+            self._silence_1x_print_path()
+
+    def _install_jsonrpc_filter(self, mcp_types) -> Optional[str]:
+        """Wrap this SDK's JSON-RPC decode entry point; return which seam won.
+
+        Args:
+            mcp_types: The imported ``mcp.types`` module.
+
+        Returns:
+            ``"model"`` (mcp 1.x ``JSONRPCMessage.model_validate_json``),
+            ``"adapter"`` (mcp 2.x ``jsonrpc_message_adapter.validate_json``),
+            or ``None`` when this build exposes neither — the caller then
+            leaves decoding unfiltered rather than failing the plugin.
+        """
         log_event = self._log_event
 
-        class SkipMessage(Exception):
-            """Raised to signal a non-JSON-RPC message that should be skipped."""
-            pass
-
-        @classmethod
-        def filtered_validate_json(cls, json_data, *args, **kwargs):
-            """Wrapper that filters out non-JSON-RPC messages before validation."""
-            if isinstance(json_data, bytes):
-                json_data = json_data.decode('utf-8', errors='replace')
-
-            line = json_data.strip()
+        def should_skip(json_data) -> bool:
+            """Is this line something other than a JSON-RPC 2.0 message?"""
+            if isinstance(json_data, (bytes, bytearray)):
+                json_data = bytes(json_data).decode("utf-8", errors="replace")
+            line = json_data.strip() if isinstance(json_data, str) else ""
 
             # Quick checks before expensive parsing
-            if not line or not line.startswith('{'):
+            if not line or not line.startswith("{"):
                 log_event(LOG_DEBUG, "Filtered non-JSON message", details=line[:100])
-                raise SkipMessage(line)
-
-            # Validate it's actually JSON-RPC 2.0
+                return True
             try:
                 data = json.loads(line)
-                if not isinstance(data, dict) or data.get('jsonrpc') != '2.0':
-                    log_event(LOG_DEBUG, "Filtered non-JSONRPC message", details=line[:100])
-                    raise SkipMessage(line)
             except json.JSONDecodeError:
                 log_event(LOG_DEBUG, "Filtered invalid JSON", details=line[:100])
-                raise SkipMessage(line)
+                return True
+            if not isinstance(data, dict) or data.get("jsonrpc") != "2.0":
+                log_event(LOG_DEBUG, "Filtered non-JSONRPC message", details=line[:100])
+                return True
+            return False
 
-            # It's valid JSON-RPC, let Pydantic parse it properly
-            return _original_validate_json(cls, json_data, *args, **kwargs)
+        seam = detect_jsonrpc_seam(mcp_types)
+        if seam == SEAM_MODEL:
+            unbound = mcp_types.JSONRPCMessage.model_validate_json.__func__
 
-        # Apply validation patch
-        mcp_types.JSONRPCMessage.model_validate_json = filtered_validate_json
+            @classmethod
+            def filtered_validate_json(cls, json_data, *args, **kwargs):
+                """1.x seam: skip non-JSON-RPC lines, else defer to Pydantic."""
+                if should_skip(json_data):
+                    raise SkipMessage(json_data)
+                return unbound(cls, json_data, *args, **kwargs)
 
-        # Patch traceback printing to suppress SkipMessage error logging
-        # This prevents "Failed to parse JSONRPC message from server" errors
-        # that appear in PowerShell when MCP servers output non-JSONRPC log messages
+            mcp_types.JSONRPCMessage.model_validate_json = filtered_validate_json
+            return SEAM_MODEL
+
+        if seam == SEAM_ADAPTER:
+            adapter = mcp_types.jsonrpc_message_adapter
+            original = adapter.validate_json
+
+            def filtered_adapter_validate_json(data, *args, **kwargs):
+                """2.x seam: ``SkipMessage`` IS a ``ValueError``.
+
+                mcp 2.x's ``_parse_line`` catches ``ValueError`` and returns
+                it to the session as a value, so the sentinel has to be one —
+                anything else escapes the reader and kills the connection.
+                """
+                if should_skip(data):
+                    raise SkipMessage(data)
+                return original(data, *args, **kwargs)
+
+            adapter.validate_json = filtered_adapter_validate_json
+            self._silence_2x_logger()
+            return SEAM_ADAPTER
+
+        return None
+
+    def _silence_2x_logger(self) -> None:
+        """Drop mcp 2.x's ``logger.exception`` for lines we deliberately skipped.
+
+        Scoped to ``mcp.client.stdio``'s own logger object, because a filter
+        installed on an ancestor is NOT consulted for records propagating up
+        from a child.  Every parse failure that is not our sentinel still
+        reaches the operator.
+        """
+        try:
+            import mcp.client.stdio as _stdio
+        except Exception:                          # noqa: BLE001 — best-effort
+            return
+
+        def _drop_skipped(record) -> bool:
+            exc = (record.exc_info or (None,))[0]
+            return not (exc is not None and issubclass(exc, SkipMessage))
+
+        logging.getLogger(_stdio.__name__).addFilter(_drop_skipped)
+
+    def _silence_1x_print_path(self) -> None:
+        """Suppress mcp 1.x's printed traceback for a skipped line.
+
+        1.x's stdout reader ``print``s "Failed to parse JSONRPC message from
+        server" and a traceback rather than logging it, so the only place to
+        intercept is ``traceback``/``builtins.print``.  Unchanged behaviour,
+        moved out of :meth:`_ensure_mcp_patch` and no longer reached on 2.x,
+        where the logging filter does the job without touching builtins.
+        """
         import traceback as tb_module
         _original_print_exception = tb_module.print_exception
         _original_print_exc = tb_module.print_exc
@@ -1383,8 +1567,6 @@ class MCPToolPlugin(RunnerForwardingMixin):
             _original_print(*args, **kwargs)
 
         builtins.print = filtered_print
-
-        self._mcp_patch_applied = True
 
     def _load_mcp_registry(self, registry_path: Optional[str] = None) -> Dict[str, Any]:
         """Load MCP registry from specified path or default locations.
