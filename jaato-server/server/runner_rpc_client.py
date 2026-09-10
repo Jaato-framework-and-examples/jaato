@@ -52,9 +52,16 @@ if TYPE_CHECKING:  # pragma: no cover — types only
     from shared.session_envelope import SessionInitEnvelope
 
 from shared.framing import (
+    MAX_MESSAGE_SIZE,
     FrameTooLargeError,
     read_frame,
     write_frame,
+)
+
+from server.runner.json_codec import (
+    dumps as _json_dumps,
+    frame_size,
+    loads as _json_loads,
 )
 
 from server.runner.envelope import (
@@ -607,7 +614,7 @@ class RunnerRPCClient:
                     break
 
                 try:
-                    payload = json.loads(raw)
+                    payload = _json_loads(raw)
                 except json.JSONDecodeError as exc:
                     logger.error(
                         "RunnerRPCClient: malformed JSON frame: %s", exc,
@@ -762,6 +769,36 @@ class RunnerRPCClient:
         """
         return self._rpc_server
 
+    async def _write_frame_json(self, payload: Dict[str, Any]) -> None:
+        """Encode *payload* and write it as one frame (#920).
+
+        The single daemon→runner write path.  Encoding goes through
+        :mod:`server.runner.json_codec`, so ``bytes`` anywhere in the
+        payload crosses as base64 and arrives as ``bytes`` — where a
+        bare ``json.dumps`` raised ``TypeError`` and the runner's
+        ``default=str`` produced a 4.2x-larger Python repr that never
+        decoded back.
+
+        Raises:
+            FrameTooLargeError: when the encoded frame exceeds
+                ``MAX_MESSAGE_SIZE``.  The peer cannot skip an
+                oversized frame — it reads the length prefix, not the
+                body, so the stream desynchronises and the whole
+                channel dies with every call on it.  Failing the one
+                write is the cheaper outcome.
+        """
+        if self._writer is None:
+            raise RuntimeError("RunnerRPCClient: no writer")
+        encoded = _json_dumps(payload)
+        size = frame_size(encoded)
+        if size > MAX_MESSAGE_SIZE:
+            raise FrameTooLargeError(
+                f"RunnerRPCClient: refusing to send oversized frame "
+                f"(kind={payload.get('kind')} id={payload.get('id')}): "
+                f"{size} bytes (cap {MAX_MESSAGE_SIZE})"
+            )
+        await write_frame(self._writer, encoded)
+
     async def _handle_runner_request(self, env: RequestEnvelope) -> None:
         """Dispatch one runner → daemon request and write the response.
 
@@ -781,7 +818,7 @@ class RunnerRPCClient:
             )
             return
         try:
-            await write_frame(self._writer, json.dumps(response.to_dict()))
+            await self._write_frame_json(response.to_dict())
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "RunnerRPCClient: failed to write response for id=%d: %s",
@@ -823,6 +860,12 @@ class RunnerRPCClient:
         Raises:
             RunnerCallError: transport-level failure (peer
                 disconnect, malformed frame, etc).
+            FrameTooLargeError: the encoded request exceeded the frame
+                cap (#920).  Raised BEFORE anything is written, and
+                the call is deregistered, so this one request fails
+                while the channel and every other in-flight call live
+                on — the pre-#920 outcome was a desynchronised stream
+                and a dead session.
         """
         if self._closed:
             raise RunnerCallError("RunnerRPCClient is closed")
@@ -868,8 +911,17 @@ class RunnerRPCClient:
                     await self._send_cancel(request_id)
             self._loop.create_task(_waiter(), name=f"cancel-waiter-{request_id}")
 
-        # Send the request.
-        await write_frame(self._writer, json.dumps(env.to_dict()))
+        # Send the request.  An oversized frame raises here (#920) —
+        # BEFORE it reaches the socket — so the caller gets a typed
+        # error for its own call instead of the runner reading a frame
+        # it cannot skip and closing the channel on every other one.
+        try:
+            await self._write_frame_json(env.to_dict())
+        except FrameTooLargeError:
+            self._in_flight.pop(request_id, None)
+            self._stream_cbs.pop(request_id, None)
+            self._notification_cbs.pop(request_id, None)
+            raise
 
         try:
             return await fut
@@ -885,9 +937,8 @@ class RunnerRPCClient:
         if request_id not in self._in_flight:
             return  # already finished
         try:
-            await write_frame(
-                self._writer,
-                json.dumps(CancelFrame(id=request_id).to_dict()),
+            await self._write_frame_json(
+                CancelFrame(id=request_id).to_dict(),
             )
         except Exception as exc:  # noqa: BLE001
             logger.debug(

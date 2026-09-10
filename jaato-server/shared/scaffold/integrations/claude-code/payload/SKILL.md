@@ -191,6 +191,11 @@ a 60 s `SessionNotConfirmed` saying the session *may* have been created — for
 this cause it never is. Type them `string`, add a `pattern`, parse in the
 prefetch. Validator code: `spawn_schema_type_unreachable`.
 
+#883 ratified this as the contract rather than a daemon quirk, so the
+in-process `spawn_subagent` boundary now refuses a typed value the same way —
+it used to accept one the wire could never deliver — and the refusal names the
+PROFILE as the cause instead of the value you passed.
+
 **3. A prefetch that touches the network.** `{{!py:...}}` runs inside the runner
 at session-prep, inside `session.bootstrap`'s RPC budget. A slow fetch is a
 FAILED session, not a slow one — the driver sees `create_session: no answer

@@ -20,7 +20,7 @@ import time
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from typing import Any, Callable, Dict, List, Optional, Union
 
-from .config import RouteConfig, WebhookConfig
+from .config import SECRET_ALGO_TOKEN, RouteConfig, WebhookConfig
 from .routes import match_route, parse_webhook_request
 
 logger = logging.getLogger(__name__)
@@ -111,25 +111,7 @@ class WebhookHTTPServer:
             logger.warning("Webhook HTTP server already running")
             return
 
-        # Fail-loud on posture: no routes at all, or routes that accept unsigned
-        # requests, are surfaced at startup so the operator can't miss them.
-        if not self.config.routes:
-            logger.warning(
-                "Webhook listener on %s:%d has NO routes configured — every "
-                "request will 404. Declare routes in the webhook config.",
-                self.config.host, self.config.port,
-            )
-        transport_auth = self.transport_authenticated()
-        for name, route in self.config.routes.items():
-            has_hmac = bool(route.secret_header and route.secret_algo)
-            if not has_hmac and not transport_auth and route.allow_unauthenticated:
-                logger.warning(
-                    "Webhook route '%s' (%s) accepts UNSIGNED requests "
-                    "(allow_unauthenticated=true, no mutual-TLS / IP-allowlist) "
-                    "— anyone who can reach %s:%d can inject events into agent "
-                    "sessions.",
-                    name, route.path, self.config.host, self.config.port,
-                )
+        self._warn_on_weak_posture()
 
         handler = _create_handler(self)
         self._server = HTTPServer((self.config.host, self.config.port), handler)
@@ -177,6 +159,77 @@ class WebhookHTTPServer:
         finally:
             self.is_running = False
 
+    def _warn_on_weak_posture(self) -> None:
+        """Announce weak authentication postures at listener startup.
+
+        Called once from :meth:`start`, before the socket is bound, so an
+        operator sees the posture in the same place they see the listener come
+        up.  Three cases, each the framework's standing "announce, never
+        silently accept" rule (cf. ``--ws-unsafe-no-auth`` and
+        ``scrub_secret_env: none``):
+
+        * **No routes at all** — the listener 404s everything.
+        * **An unsigned route** (``allow_unauthenticated`` with no transport
+          auth) — anyone who can reach the port can drive agent sessions.
+        * **A plain-token route** (``secret_algo='token'``) — weaker than an
+          HMAC over the body: the secret is in every request, so it is readable
+          by anything that terminates TLS, and requests replay against any
+          payload.  Louder when TLS is off, since the secret is then sent in
+          the clear.  Announcing it is what stops ``token`` from becoming the
+          quiet path of least resistance for a producer that DOES sign bodies.
+        """
+        if not self.config.routes:
+            logger.warning(
+                "Webhook listener on %s:%d has NO routes configured — every "
+                "request will 404. Declare routes in the webhook config.",
+                self.config.host, self.config.port,
+            )
+            return
+
+        transport_auth = self.transport_authenticated()
+        for name, route in self.config.routes.items():
+            has_secret = bool(route.secret_header and route.secret_algo)
+            if not has_secret and not transport_auth and route.allow_unauthenticated:
+                logger.warning(
+                    "Webhook route '%s' (%s) accepts UNSIGNED requests "
+                    "(allow_unauthenticated=true, no mutual-TLS / IP-allowlist) "
+                    "— anyone who can reach %s:%d can inject events into agent "
+                    "sessions.",
+                    name, route.path, self.config.host, self.config.port,
+                )
+            elif has_secret and route.secret_algo == SECRET_ALGO_TOKEN:
+                self._warn_plain_token_route(name, route)
+
+    def _warn_plain_token_route(self, name: str, route: RouteConfig) -> None:
+        """Warn that one route authenticates with a plain shared secret.
+
+        Split from :meth:`_warn_on_weak_posture` so the TLS-on / TLS-off
+        wording can differ without nesting another branch in the route loop.
+
+        Args:
+            name: The route's config key, so the operator can find it.
+            route: The route declaring ``secret_algo='token'``.
+        """
+        if self.config.tls.enabled:
+            logger.warning(
+                "Webhook route '%s' (%s) authenticates with a PLAIN shared "
+                "secret (secret_algo='token', header %s). The secret travels in "
+                "every request and is readable by anything that terminates TLS; "
+                "requests are replayable against any payload. Use "
+                "secret_algo='hmac-sha256' if the producer signs request bodies.",
+                name, route.path, route.secret_header,
+            )
+        else:
+            logger.warning(
+                "Webhook route '%s' (%s) authenticates with a PLAIN shared "
+                "secret (secret_algo='token', header %s) over PLAINTEXT HTTP on "
+                "%s:%d — the secret is sent in the clear and anyone who observes "
+                "one request can replay it forever. Enable tls.enabled, or use "
+                "secret_algo='hmac-sha256' if the producer signs request bodies.",
+                name, route.path, route.secret_header,
+                self.config.host, self.config.port,
+            )
+
     def stop(self) -> None:
         """Stop the HTTP server and join the thread."""
         if self._server:
@@ -189,11 +242,11 @@ class WebhookHTTPServer:
         logger.info("Webhook HTTP server stopped")
 
     def transport_authenticated(self) -> bool:
-        """True when the deployment authenticates callers below the HMAC layer.
+        """True when the deployment authenticates callers below the secret layer.
 
         Either mutual TLS (``tls.enabled`` with a ``ca_certfile``, so clients
         must present a valid client certificate) or a non-empty IP allowlist.
-        A route without an HMAC secret may accept requests only when this is
+        A route without a shared secret may accept requests only when this is
         True or the route sets ``allow_unauthenticated`` — otherwise the request
         is refused (fail-closed).
         """
@@ -323,7 +376,8 @@ def _create_handler(server_instance: WebhookHTTPServer):
             2. Rate limit (if configured)
             3. Route matching
             4. Body size limit
-            5. HMAC signature verification (per-route)
+            5. Shared-secret verification (per-route: HMAC over the body, or a
+               constant-time compare of a plain token header)
             """
             config = server_instance.config
 

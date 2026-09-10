@@ -1419,6 +1419,15 @@ class SubagentProfile:
         provider: Optional provider override (e.g., 'anthropic', 'google_genai').
                   Allows subagents to use a different provider than the parent.
         max_turns: Maximum conversation turns before returning (default: 10).
+        max_completion_nudges: How many times the framework re-prompts a
+            session that settled without calling ``signal_completion``
+            before giving up and emitting ``NudgeExhausted`` (#919).
+            Per TURN — a conversation's later turns each get the same
+            allowance rather than inheriting what an earlier one spent
+            (#934).  ``None`` means the framework default of 2
+            (:data:`shared.completion_nudge.DEFAULT_MAX_COMPLETION_NUDGES`).
+            Inheritance follows ``max_turns``: child-override, else the
+            minimum across parents that declared one.
         gc: Optional garbage collection configuration for this subagent.
         trace: Optional diagnostic trace-log paths (``session_log`` /
             ``provider_log``).  The typed, validated sibling of
@@ -1540,6 +1549,45 @@ class SubagentProfile:
         "profile binds exactly one provider + model."})
     max_turns: int = field(default=10, metadata={
         "description": "Max conversation turns before the (sub)agent returns."})
+    # The completion-nudge budget (#919).  How many times the framework
+    # re-prompts a session that settled without calling
+    # ``signal_completion`` before giving up and producing the
+    # ``NudgeExhausted`` terminal.
+    #
+    # ``None`` (absent) means the framework default
+    # (``shared.completion_nudge.DEFAULT_MAX_COMPLETION_NUDGES`` = 2),
+    # which is deliberately unchanged: 2 is right for a strong
+    # tool-caller, and raising it globally would make weak models loop
+    # longer for everyone.  What this field adds is the ability for a
+    # deployment that KNOWS its model needs more attempts to say so --
+    # the sibling of ``max_turns`` and of a processor's ``max_refusals``,
+    # and previously the one bound in the completion path that was a
+    # function-local constant in three files rather than a profile knob.
+    #
+    # Read by :func:`shared.completion_nudge.resolve_max_completion_nudges`
+    # at every nudge site (the daemon's top-level guard, the embedded
+    # lead, the subagent loop) rather than by the sites themselves, so a
+    # profile object predating the field resolves to the default.
+    #
+    # The budget is spent PER TURN.  It used to be per session, which was
+    # invisible while a completion-gated session was one-shot and became a
+    # ceiling on the whole conversation once #913 let such a session be
+    # driven again -- raising this field then only moved the wall (2 dies
+    # at turn 3, 40 at turn 41).  See ``JaatoSession._begin_turn_
+    # completion_state`` for how a nudge's own re-prompt is kept from
+    # refunding itself (#934).
+    #
+    # Inheritance is child-override / min-across-parents, exactly like
+    # ``max_turns`` -- see :func:`_merge_profiles`.
+    max_completion_nudges: Optional[int] = field(default=None, metadata={
+        "description": "How many times the framework re-prompts a session "
+        "that ended without calling signal_completion before giving up "
+        "(NudgeExhausted). Per turn. None = the framework default, 2. "
+        "Raise it for a "
+        "model that reliably does the work and unreliably reports it done "
+        "(audio models routinely burn a nudge on a redundant enter_tier). "
+        "Positive integer; the sibling of max_turns and a processor's "
+        "max_refusals."})
     cache: Optional['CacheProfileConfig'] = field(default=None, metadata={
         "description": "Prompt-cache defaults, cross-provider. "
         "{enabled: auto|true|false, ttl: 5m|1h, history: bool}. "
@@ -1575,14 +1623,19 @@ class SubagentProfile:
     spawn_payload_schema: Optional[Union[str, Dict[str, Any]]] = field(
         default=None, metadata={
         "description": "JSON Schema constraining the spawn-time payload "
-        "(input boundary), mirror of completion_payload_schema. Inline dict or "
-        "a .jaato/completion_schemas/ path. TYPE EVERY PROPERTY `string`: "
-        "agent_params cross the IPC wire as `key=value` argv tokens, so the "
-        "daemon validates strings and a property typed integer/number/boolean/"
-        "object/array is refused on EVERY spawn (add a `pattern` for shape and "
-        "parse in the prefetch). The refusal is logged daemon-side and not "
-        "answered, so the caller sees a 60s SessionNotConfirmed rather than the "
-        "reason — `jaato-scaffold validate` reports it as "
+        "(input boundary), mirror of completion_payload_schema in everything "
+        "but the type system. Inline dict or a .jaato/spawn_schemas/ "
+        "path (spawn_schema_loader resolves it; the field previously named "
+        "completion_schemas/ here, which is the OTHER schema's root). "
+        "TYPE EVERY PROPERTY `string`: agent_params cross the IPC wire "
+        "as `key=value` argv tokens, so the daemon validates strings and a "
+        "property typed integer/number/boolean/object/array is refused on "
+        "EVERY spawn (add a `pattern` for shape and parse in the prefetch). "
+        "#883 ratified that as the contract, so BOTH boundaries — this one "
+        "and the model-driven spawn_subagent call, where a model emitting "
+        "`{\"n\": 1}` used to hand the validator a real int — validate the "
+        "wire's string view, and a refusal caused by the schema says so. "
+        "`jaato-scaffold validate` reports it before a spawn as "
         "spawn_schema_type_unreachable."})
     # Unified completion-processor surface (server 0.6.125+).  Replaces
     # the prior split between ``completion_artifacts`` (renderers that
@@ -2401,6 +2454,7 @@ def build_inline_profile(
         model=data.get('model'),
         provider=data.get('provider'),
         max_turns=data.get('max_turns', 10),
+        max_completion_nudges=data.get('max_completion_nudges'),
         gc=gc_config,
             cache=cache_config,
             trace=trace_config,
@@ -2558,6 +2612,8 @@ def profile_to_snapshot(profile: 'SubagentProfile') -> Dict[str, Any]:
         "model": profile.model,
         "provider": profile.provider,
         "max_turns": profile.max_turns,
+        "max_completion_nudges": getattr(
+            profile, "max_completion_nudges", None),
         "cache": _block(getattr(profile, "cache", None)),
         "trace": _block(getattr(profile, "trace", None)),
         "gc": _block(getattr(profile, "gc", None)),
@@ -2679,6 +2735,7 @@ def profile_from_snapshot(data: Dict[str, Any]) -> 'SubagentProfile':
         model=data.get("model"),
         provider=data.get("provider"),
         max_turns=data.get("max_turns", 10),
+        max_completion_nudges=data.get("max_completion_nudges"),
         cache=blocks["cache"],
         trace=blocks["trace"],
         gc=blocks["gc"],
@@ -3079,6 +3136,39 @@ def _merge_completion_processors(
     return kept + list(child.completion_processors), None
 
 
+def _merge_max_completion_nudges(child, parents) -> Optional[int]:
+    """Resolve ``max_completion_nudges`` across an inheritance chain (#919).
+
+    The same rule :func:`_merge_profiles` applies to ``max_turns``, spelled
+    against ``None`` rather than a sentinel value: the child overrides
+    outright, else the minimum across the parents that declared one, else
+    ``None`` — left unresolved deliberately, so
+    :func:`shared.completion_nudge.resolve_max_completion_nudges` and not
+    this merge owns what the framework default IS.
+
+    Min-across-parents rather than max because two bases disagreeing about
+    a retry budget is not a conflict worth refusing a profile over, and the
+    safer reading of that disagreement is the one that loops less — the
+    direction ``max_turns`` and ``budget_control.limits`` already take.  A
+    child that wants the looser budget says so, which is the whole point of
+    the knob.
+
+    Args:
+        child: The inheriting profile.
+        parents: Its resolved parents, in declaration order.
+
+    Returns:
+        The effective budget, or ``None`` when no layer declared one.
+    """
+    if getattr(child, 'max_completion_nudges', None) is not None:
+        return child.max_completion_nudges
+    declared = [
+        p.max_completion_nudges for p in parents
+        if getattr(p, 'max_completion_nudges', None) is not None
+    ]
+    return min(declared) if declared else None
+
+
 def _merge_profiles(
     child_name: str,
     parents: List['SubagentProfile'],
@@ -3224,6 +3314,8 @@ def _merge_profiles(
         merged_max_turns = min(parent_max_turns)
     else:
         merged_max_turns = 10
+
+    merged_max_completion_nudges = _merge_max_completion_nudges(child, parents)
 
     # gc: agreement-or-override (compare as dicts for equality)
     merged_cache = _resolve_scalar('cache', child.cache)
@@ -3393,6 +3485,7 @@ def _merge_profiles(
         model=merged_model,
         provider=merged_provider,
         max_turns=merged_max_turns,
+        max_completion_nudges=merged_max_completion_nudges,
         gc=merged_gc,
         cache=merged_cache,
         trace=merged_trace,
@@ -3628,6 +3721,7 @@ def _scan_profiles_dir(
             model=data.get('model'),
             provider=data.get('provider'),
             max_turns=data.get('max_turns', 10),
+            max_completion_nudges=data.get('max_completion_nudges'),
             gc=gc_config,
             cache=cache_config,
             trace=trace_config,
@@ -4047,6 +4141,7 @@ def _discover_premium_profiles() -> Dict[str, 'SubagentProfile']:
             model=data.get('model'),
             provider=data.get('provider'),
             max_turns=data.get('max_turns', 10),
+            max_completion_nudges=data.get('max_completion_nudges'),
             gc=gc_config,
             cache=cache_config,
             trace=trace_config,
@@ -4074,6 +4169,35 @@ def _discover_premium_profiles() -> Dict[str, 'SubagentProfile']:
             len(profiles), ", ".join(profiles.keys())
         )
     return profiles
+
+
+def _max_completion_nudges_errors(data: Dict[str, Any]) -> List[str]:
+    """Validate a profile's ``max_completion_nudges`` (#919).
+
+    A positive integer, or absent.  Zero is REFUSED rather than read as
+    "never nudge": the give-up predicate at every nudge site is
+    ``nudges_fired >= max``, so a budget of 0 would report
+    ``NudgeExhausted`` on sessions that completed cleanly.  A deployment
+    that wants no nudging at all keeps ``signal_completion`` out of the
+    session's tool surface, which the framework already honours.
+
+    Args:
+        data: The raw profile mapping.
+
+    Returns:
+        Zero or one error string.
+    """
+    declared = data.get("max_completion_nudges")
+    if declared is None:
+        return []
+    if not isinstance(declared, int) or isinstance(declared, bool):
+        return ["'max_completion_nudges' must be an integer"]
+    if declared <= 0:
+        return [
+            "'max_completion_nudges' must be a positive integer "
+            "(omit the key for the framework default of 2)"
+        ]
+    return []
 
 
 def validate_profile(data: Any) -> Tuple[bool, List[str], List[str]]:
@@ -4128,6 +4252,8 @@ def validate_profile(data: Any) -> Tuple[bool, List[str], List[str]]:
             errors.append("'max_turns' must be an integer")
         elif max_turns <= 0:
             errors.append("'max_turns' must be a positive integer")
+
+    errors.extend(_max_completion_nudges_errors(data))
 
     # model: string or null
     model = data.get("model")
@@ -4343,6 +4469,7 @@ class SubagentConfig:
                 model=profile_data.get('model'),
                 provider=profile_data.get('provider'),
                 max_turns=profile_data.get('max_turns', 10),
+                max_completion_nudges=profile_data.get('max_completion_nudges'),
                 gc=gc_config,
             cache=cache_config,
             trace=trace_config,

@@ -58,6 +58,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Protocol
 
 from shared.framing import (
+    MAX_MESSAGE_SIZE,
     FrameTooLargeError,
     read_frame_sync,
     write_frame_sync,
@@ -68,6 +69,8 @@ from jaato_sdk.plugins.model_provider.types import (
     DISCOVERABILITY_EAGER,
     DISCOVERABILITY_DEFERRED,
 )
+
+from .json_codec import dumps as _json_dumps, frame_size, loads as _json_loads
 
 from .envelope import (
     KIND_CANCEL,
@@ -293,7 +296,7 @@ class RunnerRPC:
 
     # --------------------------- write paths ---------------------------
 
-    def _write(self, payload: Dict[str, Any]) -> None:
+    def _write(self, payload: Dict[str, Any]) -> bool:
         """Serialize *payload* to the wire under the write lock.
 
         The lock prevents partial-frame interleave when stream frames
@@ -301,12 +304,42 @@ class RunnerRPC:
         swallowed — a write failure usually means the daemon went
         away (§6.7), which the reader loop will surface cleanly via
         EOF on its next read.
+
+        Serialization goes through :mod:`server.runner.json_codec`, so
+        ``bytes`` anywhere in *payload* crosses as base64 and decodes
+        back to ``bytes`` daemon-side.  The pre-#920 ``default=str``
+        turned it into a Python repr instead: 4.2x the size, and not
+        decodable at the other end.
+
+        A frame over ``MAX_MESSAGE_SIZE`` is **not written**.  The peer
+        cannot skip an oversized frame (the length prefix is read, the
+        body is not, so the stream is desynchronised) and therefore
+        closes the whole transport — one bad frame used to take down
+        every in-flight call and end the session.  Dropping it here
+        costs that one frame; :meth:`_emit_response` turns the drop
+        into a typed error for the call it belonged to.
+
+        Returns:
+            ``True`` when the frame reached the socket, ``False`` when
+            it was dropped (oversized) or the peer is gone.
         """
-        encoded = json.dumps(payload, default=str)
+        encoded = _json_dumps(payload)
+        size = frame_size(encoded)
+        if size > MAX_MESSAGE_SIZE:
+            logger.error(
+                "runner RPC: refusing to write oversized frame "
+                "(kind=%s id=%s, %d bytes, cap %d) — dropping it rather "
+                "than desynchronising the channel",
+                payload.get("kind"), payload.get("id"),
+                size, MAX_MESSAGE_SIZE,
+            )
+            return False
         try:
             with self._write_lock:
-                if not self._closed:
-                    write_frame_sync(self._sock, encoded)
+                if self._closed:
+                    return False
+                write_frame_sync(self._sock, encoded)
+                return True
         except (OSError, BrokenPipeError) as exc:
             # Peer gone; mark closed so subsequent attempts no-op.
             logger.info(
@@ -314,6 +347,7 @@ class RunnerRPC:
                 "shutting down writer", exc,
             )
             self._closed = True
+            return False
 
     def _emit_stream(
         self,
@@ -408,7 +442,31 @@ class RunnerRPC:
             error=error,
             telemetry=telemetry,
         )
-        self._write(env.to_dict())
+        if self._write(env.to_dict()):
+            return
+        # #920: the frame was refused (oversized) rather than sent, so
+        # the daemon's in-flight future would hang until its timeout —
+        # or forever, since ``session.send_message`` has none.  Answer
+        # the same id with a typed error instead: the caller learns its
+        # result did not fit, and the channel survives to serve the
+        # next call.  A result carrying megabytes of tool output is the
+        # realistic case; the substitute is small by construction.
+        if not ok or self._closed:
+            # An error frame that did not fit will not fit a second
+            # time, and a closed channel has nowhere to put either.
+            return
+        self._write(ResponseEnvelope(
+            id=request_id,
+            ok=False,
+            result=None,
+            error=ErrorPayload(
+                type="FrameTooLargeError",
+                message=(
+                    "runner RPC: response exceeded the "
+                    f"{MAX_MESSAGE_SIZE}-byte frame cap and was dropped"
+                ),
+            ),
+        ).to_dict())
 
     # --------------------------- request paths -------------------------
 
@@ -1618,19 +1676,7 @@ class RunnerRPC:
                 "stage": "read",
             }
 
-        history_dicts: list = []
-        for msg in messages:
-            try:
-                history_dicts.append(_serialize_message_for_wire(msg))
-            except Exception:  # noqa: BLE001 — boundary
-                # Single-message serialization failure must not
-                # drop the whole history — substitute a
-                # placeholder so the count stays accurate and
-                # the daemon can log the issue.
-                history_dicts.append(
-                    {"role": "system", "content": "<unserialisable>"},
-                )
-        return True, {"history": history_dicts}
+        return True, {"history": _serialize_history_for_wire(messages)}
 
     def _handle_session_get_context_limit(self) -> "tuple[bool, Any]":
         """Read-only context-window size in tokens (Phase 3 §7b.1
@@ -4812,7 +4858,7 @@ class RunnerRPC:
                     return
 
                 try:
-                    payload = json.loads(raw)
+                    payload = _json_loads(raw)
                 except json.JSONDecodeError as exc:
                     logger.error(
                         "runner RPC: malformed JSON frame: %s — closing", exc,
@@ -4988,7 +5034,17 @@ class RunnerRPC:
             self._outgoing_calls[request_id] = fut
 
         env = RequestEnvelope(id=request_id, method=method, args=args or {})
-        self._write(env.to_dict())
+        if not self._write(env.to_dict()):
+            # #920: the request never left (oversized, or the peer is
+            # gone).  Waiting on a future nothing can complete would
+            # block this worker thread for the whole timeout — and
+            # forever where the caller passed none — so fail now.
+            with self._outgoing_lock:
+                self._outgoing_calls.pop(request_id, None)
+            raise RuntimeError(
+                f"runner RPC: {method!r} request was not sent "
+                f"(frame refused or channel closed)"
+            )
 
         try:
             return fut.result(timeout=timeout)
@@ -5506,10 +5562,21 @@ class _AgentUIHooksNotificationShim:
         stores the snapshot under ``server._agents[agent_id].history``
         for the persist/restore + session-inspector paths.
 
-        ``history`` is an opaque snapshot — passed through to the
-        daemon verbatim.  Pydantic JSON serialization happens at
-        ``emit_notification`` time; the daemon-side demuxer just
-        forwards the deserialized payload.
+        ``history`` is a list of :class:`Message` objects, and it is
+        serialized HERE — with the canonical session serializer, the
+        same wire shape ``session.get_history`` uses — rather than
+        being handed to the frame encoder as opaque objects (#920).
+
+        That was the shape of the reported crash.  A ``Message`` is not
+        JSON-serializable, so the encoder's catch-all rendered each one
+        as its **Python repr**, including the repr of any audio bytes it
+        carried: a 3.83 MB utterance became a 16.7 MB frame, over the
+        10 MB cap, and the daemon closed the transport mid-turn.  The
+        canonical serializer base64s ``inline_data`` instead (1.33x),
+        and — the half that was failing silently — the daemon gets
+        ``Message`` objects back rather than a list of repr strings it
+        stores as ``AgentState.history`` and replays to reconnecting
+        clients.
         """
         try:
             self._rpc.emit_notification(
@@ -5517,7 +5584,7 @@ class _AgentUIHooksNotificationShim:
                 event_type=self._rpc._NOTIF_AGENT_HISTORY_UPDATED,
                 payload={
                     "agent_id": str(agent_id or ""),
-                    "history": history,
+                    "history": _serialize_history_for_wire(history or ()),
                 },
             )
         except Exception:  # noqa: BLE001
@@ -5539,7 +5606,9 @@ def _serialize_message_for_wire(msg: Any) -> Any:
     """JSON-friendly serialization of a conversation Message
     (Phase 3 §3.3c precursor).
 
-    Used by the runner-side ``session.get_history`` handler.  Tries
+    Used by :func:`_serialize_history_for_wire`, and through it by
+    both history-carrying wire paths — the ``session.get_history``
+    handler and the ``agent_history_updated`` notification.  Tries
     in order:
 
     1. ``msg.to_dict()`` if defined — custom message types (test
@@ -5580,6 +5649,32 @@ def _serialize_message_for_wire(msg: Any) -> Any:
     if dataclasses.is_dataclass(msg) and not isinstance(msg, type):
         return _coerce_for_json(dataclasses.asdict(msg))
     return msg
+
+
+def _serialize_history_for_wire(messages: Any) -> List[Any]:
+    """Serialize a whole conversation history for the RPC wire.
+
+    Wraps :func:`_serialize_message_for_wire` per message so a single
+    unserialisable one cannot drop the rest: the failure is replaced by
+    a placeholder, keeping the message count — which several daemon-side
+    consumers read — accurate.
+
+    Used by BOTH history-carrying wire paths: the ``session.get_history``
+    handler and the ``agent_history_updated`` notification.  The
+    notification used to pass raw ``Message`` objects to the frame
+    encoder, whose catch-all stringified them (#920) — sharing this
+    helper is what keeps the two paths from drifting apart again.
+    """
+    out: List[Any] = []
+    for msg in messages or ():
+        try:
+            out.append(_serialize_message_for_wire(msg))
+        except Exception:  # noqa: BLE001 — boundary
+            # Single-message serialization failure must not drop the
+            # whole history — substitute a placeholder so the count
+            # stays accurate and the daemon can log the issue.
+            out.append({"role": "system", "content": "<unserialisable>"})
+    return out
 
 
 def _coerce_for_json(value: Any) -> Any:

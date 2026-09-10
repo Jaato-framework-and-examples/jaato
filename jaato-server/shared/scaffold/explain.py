@@ -755,6 +755,31 @@ def tiers() -> Rendered:
 
 # ----------------------------------------------------------------- plugins
 
+def _tier_missing_note(PL: Dict[str, Any]) -> str:
+    """The footer explaining ``[no PLUGIN_TIER]``, or ``""`` when clean.
+
+    Printed only when at least one listed plugin lacks the annotation,
+    so a healthy workspace's table is unchanged.  The text names the fix
+    rather than the rule, because the author reading it has just been
+    told their plugin will not load and needs the next action, not the
+    history of §3.3.5.
+
+    Split out of :func:`plugins` deliberately: that function is near the
+    complexity ceiling and radon counts the generator below as a
+    decision point (see ``test_cyclomatic_complexity_audit``).
+    """
+    if not any(getattr(pi, "tier_missing", False) for pi in PL.values()):
+        return ""
+    return (
+        "\n  `[no PLUGIN_TIER - will not load in the runner]` marks a "
+        "plugin discovered\n  here but EXCLUDED by the runner's tier "
+        "filter: sessions naming it come up\n  without its tools. Add "
+        "`PLUGIN_TIER = \"runner\"` to the plugin package's\n  "
+        "__init__.py (\"daemon\" for daemon-side only, "
+        "\"daemon_callable\" for both)."
+    )
+
+
 def plugins() -> Rendered:
     PL = introspect.plugins()
     rows = []
@@ -769,13 +794,24 @@ def plugins() -> Rendered:
             # Provenance (issue #684) — which distribution supplied this
             # plugin, and whether that is the framework itself.
             "source": pi.source, "builtin": pi.builtin,
+            # Tier reachability (issue #917) — this walk discovers with
+            # NO tier filter, so an unannotated plugin appears here and
+            # is nonetheless dropped by the runner.  A consumer reading
+            # ``--json`` needs the same fact the table renders.
+            "tier_missing": pi.tier_missing,
         }
         tools = "dynamic" if pi.dynamic else f"{len(pi.tools)} ({core} core/{disc} disc)"
         # Built-ins render bare; anything else is named, so a plugin
         # supplied by an installed distribution stands out in the table.
         src = "" if pi.builtin else f"   <- {pi.source}"
+        # An unannotated plugin is listed but WILL NOT LOAD in the
+        # runner, so the row has to say so — silently listing it is the
+        # defect (#917): this is the surface an author consults to
+        # confirm the plugin is wired, and it was answering "yes" for a
+        # plugin the session would come up without.
+        warn = "  [no PLUGIN_TIER - will not load in the runner]" if pi.tier_missing else ""
         rows.append(
-            f"  {name:22} {pi.kind:10} {str(pi.tier or '-'):8} {tools}{src}"
+            f"  {name:22} {pi.kind:10} {str(pi.tier or '-'):8} {tools}{src}{warn}"
         )
     text = (f"{'plugin':24}{'kind':12}{'tier':10}tools\n"
             + "  " + "-" * 56 + "\n" + "\n".join(rows)
@@ -784,7 +820,8 @@ def plugins() -> Rendered:
               "with `<plugin>(preload)` in a profile)"
             + "\n  `<- dist (module)` marks a plugin supplied by an "
               "installed distribution\n  rather than the built-in "
-              "package — see JAATO_PLUGIN_ENTRY_POINT_ALLOWLIST")
+              "package — see JAATO_PLUGIN_ENTRY_POINT_ALLOWLIST"
+            + _tier_missing_note(PL))
     return data, text
 
 
@@ -845,6 +882,27 @@ def _command_block(commands: List[Any]) -> List[str]:
     return out
 
 
+def _config_block(settings) -> List[str]:
+    """Render one ``plugin_configs.<plugin>.*`` knob per line.
+
+    The declared ``enum`` is rendered because it is CHECKED: ``validate``
+    reports a value outside it as ``invalid_knob_value`` (#925), and this
+    listing is where an author reads the permitted set.  It sits beside the
+    type rather than after the description because it IS type information,
+    and a knob's description can run to several lines.  ``type`` may be a
+    union (``string|array``), which is why the column is wider than the
+    single JSON-Schema token it used to hold.
+    """
+    out: List[str] = []
+    for s in settings:
+        dflt = f"  (default {s.default!r})" if s.default is not None else ""
+        desc = f"  {s.description}" if s.description else ""
+        enum = ("  one of: " + ", ".join(repr(c) for c in s.enum)
+                if s.enum else "")
+        out.append(f"    {s.name:22} {s.type:12}{enum}{desc}{dflt}")
+    return out
+
+
 def plugin(name: str) -> Rendered:
     PL = introspect.plugins()
     pi = PL.get(name)
@@ -873,10 +931,7 @@ def plugin(name: str) -> Rendered:
     lines.extend(_command_block(pi.commands))
     if pi.config_settings:
         lines.append(f"  config (plugin_configs.{name}.*):")
-        for s in pi.config_settings:
-            dflt = f"  (default {s.default!r})" if s.default is not None else ""
-            d = f"  {s.description}" if s.description else ""
-            lines.append(f"    {s.name:22} {s.type:8}{d}{dflt}")
+        lines.extend(_config_block(pi.config_settings))
     data = {"description": pi.description,
             "kind": pi.kind, "tier": pi.tier, "dynamic": pi.dynamic,
             "commands": _commands_json(pi.commands),
@@ -890,7 +945,8 @@ def plugin(name: str) -> Rendered:
                        "description": t.description,
                        "parameters": t.parameters} for t in pi.tools],
             "config": [{"name": s.name, "type": s.type, "default": s.default,
-                        "description": s.description} for s in pi.config_settings]}
+                        "description": s.description, "enum": s.enum}
+                       for s in pi.config_settings]}
     return data, "\n".join(lines)
 
 
@@ -1963,8 +2019,9 @@ def completion() -> Rendered:
         "  it goes: an observed run spent SEVEN refusals in 156 seconds on",
         "  the same two errors, with no work in between, and ended with its",
         "  budget gone and no verdict.  Nothing upstream catches this —",
-        "  MAX_COMPLETION_NUDGES bounds the opposite direction (an agent",
-        "  that stops WITHOUT signalling).  Declare a ceiling:",
+        "  the completion-nudge budget bounds the opposite direction (an",
+        "  agent that stops WITHOUT signalling; `max_completion_nudges:`,",
+        "  default 2).  Declare a ceiling:",
         "",
         "    completion_processors:",
         "      - script: scripts/processors/acceptance.py",
@@ -1981,6 +2038,26 @@ def completion() -> Rendered:
         "  Both are real choices.  The counter lives on the framework's",
         "  per-session LoadedProcessor, so a module-level global in your",
         "  script is no longer the place for it.",
+        "",
+        "  THE OTHER DIRECTION IS `max_completion_nudges` (#919).  Where",
+        "  `max_refusals` bounds how many times a processor may BLOCK a",
+        "  completion, this bounds how many times the framework re-prompts",
+        "  an agent that ended its loop without calling signal_completion",
+        "  at all, before giving up with NudgeExhausted:",
+        "",
+        "    max_completion_nudges: 4      # profile top level; default 2",
+        "",
+        "  Two is right for a strong tool-caller and is unchanged.  Raise",
+        "  it for a model that reliably does the work and unreliably",
+        "  reports it done — an audio tier that hands off, writes, narrates",
+        "  the write, and burns one of its two nudges on a redundant",
+        "  enter_tier has exactly one real attempt left.  Per TURN — every",
+        "  turn of a conversation gets the same allowance, rather than",
+        "  inheriting what an earlier turn spent (#934).  Positive integer",
+        "  (0 is refused — the give-up test is `fired >= max`, so a budget",
+        "  of 0 would report NudgeExhausted on sessions that completed",
+        "  cleanly).  Inherits like max_turns: child overrides, else the",
+        "  minimum across parents.",
         "",
         "  SEPARATE A WRONG ANSWER FROM AN ENVIRONMENT FAULT.  A missing",
         "  acceptance script, an absent agent_param, a checks timeout: no fix",

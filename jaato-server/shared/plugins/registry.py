@@ -82,8 +82,11 @@ def _tier_filter_matches(
     ``_discover_via_entry_points`` and ``_discover_via_directory``
     share one implementation.  Plugins lacking a ``PLUGIN_TIER``
     annotation are excluded under ANY filter (the "annotate or be
-    excluded" contract from §3.3.5) — silent exclusion is what the
-    build-fail gate in ``test_plugin_tier_partition`` catches.
+    excluded" contract from §3.3.5).  In-tree, that exclusion is caught
+    at build time by ``test_plugin_tier_partition``; out of tree there
+    is no such gate, so the exclusion itself is announced at WARNING by
+    :func:`_report_tier_skip` (issue #917) rather than left to a debug
+    trace nobody reads.
 
     Args:
         plugin_tier: Declared ``PLUGIN_TIER`` value, or ``None`` if
@@ -129,6 +132,118 @@ def _trace(msg: str, include_traceback: bool = False, warning: bool = False) -> 
         logger.warning(msg)
     else:
         logger.debug(msg)
+
+
+def _tier_fix_location(module_name: str) -> str:
+    """Where an entry-point plugin's ``PLUGIN_TIER`` belongs, as a path hint.
+
+    ``_lookup_module_tier`` reads the annotation off the factory's own
+    module OR its parent package, so the fix has two valid homes and the
+    warning must name a real one rather than a generic "somewhere in
+    your package".  We name the parent package's ``__init__.py``, which
+    is where every in-tree plugin declares it and where the entry-point
+    convention ``<package>.<plugin>.plugin:create_plugin`` puts it.
+
+    Args:
+        module_name: The factory's ``__module__``, e.g.
+            ``jaato_m365.plugin``.  Empty when the factory carries none.
+
+    Returns:
+        ``"the jaato_m365 package's __init__.py"``, or a generic phrase
+        when the module name gives nothing to point at.
+    """
+    package = module_name.rsplit(".", 1)[0] if "." in module_name else module_name
+    if not package:
+        return "your plugin package's __init__.py"
+    return f"the {package} package's __init__.py"
+
+
+def _describe_entry_point(ep: Any, origin: Any) -> str:
+    """Identify an entry point for a diagnostic: name, target, distribution.
+
+    All three, because each answers a different question the reader has.
+    The ``ep.name`` is what a profile writes; the ``ep.value`` is the
+    factory to go and edit; the **distribution** is who to fix it in --
+    and on a machine with several plugin packages installed, that last
+    one is what turns "some plugin is broken" into "this dependency is".
+    The trust gate has already resolved it (:class:`PluginOrigin`), so
+    the diagnostic costs nothing to include it.
+
+    The distribution is omitted rather than rendered as ``None`` when
+    the entry point carries no ``dist`` -- a synthesised or
+    locally-registered one.
+    """
+    value = getattr(ep, "value", "<unknown>")
+    dist = getattr(origin, "distribution", None)
+    suffix = f", from {dist}" if dist else ""
+    return f"Entry point '{getattr(ep, 'name', '?')}' ({value}{suffix})"
+
+
+def _report_tier_skip(
+    *,
+    what: str,
+    plugin_tier: Optional[str],
+    tier_filter: str,
+    fix_location: str,
+) -> None:
+    """Record a tier-filter skip, loudly iff the author made a mistake.
+
+    The one ``_trace`` this replaces conflated two different events
+    (issue #917):
+
+    - **A mismatched annotation is correct partitioning.**  A
+      ``PLUGIN_TIER = "daemon"`` plugin not loading under
+      ``tier_filter="runner"`` is the partition working; it stays at
+      debug, because saying it out loud would print a line for every
+      daemon-tier plugin on every runner bootstrap.
+    - **A MISSING annotation is a mistake**, and the only one an
+      out-of-tree author can make without knowing the concept exists.
+      ``_tier_filter_matches`` excludes an unannotated plugin under ANY
+      filter, and the in-tree build gate
+      (``test_plugin_tier_partition``) that catches this cannot see a
+      distribution outside ``shared/plugins/``.  So the plugin is
+      discovered, listed by ``jaato-scaffold plugins``, accepted by the
+      trust gate — and silently absent from the session that was
+      supposed to use it.
+
+    Warning on the second is the same promotion the protocol-gap check
+    got at PR #171, for the same reason and the same audience: a plugin
+    vanishing from the registry with no operator-visible signal.
+
+    Args:
+        what: Human-readable identity of the skipped plugin, already
+            including how it was declared (entry point vs directory
+            module) — this is the string the author greps for.
+        plugin_tier: The declared ``PLUGIN_TIER``, or ``None`` when the
+            annotation is absent (the case that warns).
+        tier_filter: The filter in force (``"runner"`` / ``"daemon"``).
+        fix_location: Where to add the annotation, phrased for this
+            discovery path (a distribution's package ``__init__.py``, or
+            an in-tree plugin's).
+    """
+    if plugin_tier is not None:
+        _trace(
+            f" {what}: PLUGIN_TIER={plugin_tier!r} not accepted by "
+            f"filter={tier_filter!r}; skipping"
+        )
+        return
+    logger.warning(
+        "%s declares no PLUGIN_TIER, so it will NOT be loaded by the "
+        "%s tier — its tools will be missing from sessions that name "
+        "it, with no further warning. Fix: add a module-level "
+        "PLUGIN_TIER = \"%s\" to %s. (Valid values: \"runner\" — "
+        "loaded in the session runner, the right answer for a plugin "
+        "that provides tools; \"daemon\" — daemon-side only; "
+        "\"daemon_callable\" — discovered on both sides.)",
+        what,
+        tier_filter,
+        tier_filter,
+        fix_location,
+    )
+    _trace(
+        f" {what}: PLUGIN_TIER missing; skipped under "
+        f"filter={tier_filter!r}",
+    )
 
 
 #: Which Protocol a discovered plugin must satisfy, per plugin kind.
@@ -612,8 +727,11 @@ class PluginRegistry:
             plugin_kind: Kind of plugin to discover ('tool', 'gc', etc.).
             tier_filter: Optional tier restriction (Phase 3 §3.3.5).
                 When set, the loaded plugin's module-level
-                ``PLUGIN_TIER`` must match; mismatched plugins are
-                skipped (a debug trace records the skip reason).
+                ``PLUGIN_TIER`` must match.  A *mismatched*
+                annotation is correct partitioning and is skipped at
+                debug; a *missing* one is an authoring mistake and is
+                skipped at WARNING (issue #917) -- see
+                :func:`_report_tier_skip`.
 
         Returns:
             List of discovered plugin names.
@@ -655,10 +773,11 @@ class PluginRegistry:
                         ep_module = getattr(create_plugin, "__module__", "")
                         ep_tier = self._lookup_module_tier(ep_module)
                         if not _tier_filter_matches(ep_tier, tier_filter):
-                            _trace(
-                                f" Entry point '{ep.name}': PLUGIN_TIER "
-                                f"={ep_tier!r} not accepted by "
-                                f"filter={tier_filter!r}; skipping"
+                            _report_tier_skip(
+                                what=_describe_entry_point(ep, origin),
+                                plugin_tier=ep_tier,
+                                tier_filter=tier_filter,
+                                fix_location=_tier_fix_location(ep_module),
                             )
                             continue
 
@@ -900,7 +1019,9 @@ class PluginRegistry:
                 When set, the module's ``PLUGIN_TIER`` must match;
                 missing or mismatched annotations are skipped.  Read
                 directly from the imported module so the pre-§3.3.5
-                "annotate or be excluded" contract holds.
+                "annotate or be excluded" contract holds.  A missing
+                annotation is announced at WARNING, a mismatched one at
+                debug -- see :func:`_report_tier_skip`.
 
         Returns:
             List of discovered plugin names.
@@ -953,10 +1074,11 @@ class PluginRegistry:
                 if tier_filter is not None:
                     module_tier = getattr(module, 'PLUGIN_TIER', None)
                     if not _tier_filter_matches(module_tier, tier_filter):
-                        _trace(
-                            f" Plugin '{name}': PLUGIN_TIER={module_tier!r} "
-                            f"not accepted by filter={tier_filter!r}; "
-                            f"skipping"
+                        _report_tier_skip(
+                            what=f"Plugin '{name}' ({module.__name__})",
+                            plugin_tier=module_tier,
+                            tier_filter=tier_filter,
+                            fix_location=f"{name}/__init__.py",
                         )
                         continue
 

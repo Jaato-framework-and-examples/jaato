@@ -381,6 +381,13 @@ completion_processors:
     phase: finalization       # finalization (default) | completeness
     max_refusals: 3           # unset = unbounded (the pre-#768 behaviour)
     on_exhausted: allow       # allow (default) | fail
+# max_completion_nudges: the OTHER direction — how many times the framework
+#   re-prompts an agent that ended its loop without calling
+#   signal_completion at all, before giving up with NudgeExhausted.  Where
+#   `max_refusals` bounds how many times the gate may BLOCK a completion,
+#   this bounds how many chances the model gets to CALL it (#919).
+#   Unset = 2, which is right for a strong tool-caller and is unchanged.
+max_completion_nudges: 4
 ```
 
 **SDK API:**
@@ -397,6 +404,111 @@ await client.create_session(profile="researcher")
 - `session.profiles` — list available profiles (→ `SessionProfilesEvent`)
 
 **Flow:** Client sends `session.new --profile researcher` → server discovers profiles from `.jaato/profiles/` → resolves `SubagentProfile` → `JaatoServer` applies profile overrides (model, provider, plugins, plugin_configs, GC) during `initialize()`.
+
+### The Completion-Nudge Budget (#919, #934)
+
+A session whose surface carries `signal_completion` is expected to call it
+before its loop ends. When the loop settles without that call the framework
+re-prompts the model — a **nudge** — and re-enters the loop; the budget bounds
+how many times, before it gives up and emits `NudgeExhausted`.
+
+That budget was a function-local `MAX_COMPLETION_NUDGES = 2` in **three**
+files — `server/core.py` (the daemon's top-level guard),
+`jaato_embedded/client.py` (the in-process lead) and
+`shared/plugins/subagent/plugin.py` (the subagent loop). Nothing kept the three
+equal, and none was reachable from a profile — which made it the one bound in
+the completion path a deployment could not express:
+
+| bound | configurable? |
+|---|---|
+| completion-processor refusals | `max_refusals` + `on_exhausted`, per processor |
+| turns before the (sub)agent returns | `max_turns` |
+| session resource caps | `runtime_limits` |
+| **completion nudges** | **`max_completion_nudges`** |
+
+`try_completion_nudge(max_nudges)` always took the bound as an argument, so the
+plumbing was already there; what was missing was a value to pass.
+
+```yaml
+# .jaato/profiles/<agent>.yaml
+max_completion_nudges: 4      # default 2, unchanged when unset
+```
+
+**Two stays the default.** For a strong tool-caller it is right, and raising it
+globally would make weak models loop longer for everyone. The number belongs to
+the deployment: a voice agent whose audio tier hands off, writes to memory,
+narrates the write and never calls the tool routinely burns one of its two
+nudges on a redundant `enter_tier` (`already_at_tier`), leaving exactly one real
+attempt — announcing a tool instead of invoking it is a documented weakness of
+that model class, not something persona prose fixes.
+
+- **Per TURN** — how many retries ONE turn gets, not how many turns a
+  conversation may have. See below; it used to be per session.
+- **Positive integer.** `0` is refused at load, not read as "never nudge": the
+  give-up predicate is `nudges_fired >= max`, so a budget of 0 would report
+  `NudgeExhausted` on sessions that completed **cleanly**. A deployment that
+  wants no nudging keeps `signal_completion` out of the surface.
+- **Inheritance follows `max_turns`**: child overrides outright, else the
+  minimum across the parents that declared one.
+- **One definition.** `shared/completion_nudge.py` owns
+  `DEFAULT_MAX_COMPLETION_NUDGES` and the resolver every site now calls, so the
+  three paths cannot drift again. A profile predating the field — an older
+  session snapshot, or no profile at all — resolves to the default rather than
+  raising, so an unconfigured deployment behaves exactly as before.
+  `jaato_eval.sign_off` restates the number deliberately (the eval engine must
+  not import `server.*` / `shared.*`); that copy is a reporting ceiling, and is
+  stale in exactly one direction against a profile that raised its own.
+
+**Whose turn spent it (#934).** The budget lives in one counter,
+`_completion_nudges_fired`, and the only question about it is when a turn start
+clears it. Both simple answers are wrong, and each was shipped:
+
+| Reset | Bounds | Breaks |
+|-------|--------|--------|
+| every turn | nothing — a nudge RE-PROMPTS, so the turn the nudge created handed back the token it had just spent. Observed: "nudge 1/2" logged three times in one session, 735 turns in 40 seconds against a live daemon, and the subagent loop's `while ... < MAX_COMPLETION_NUDGES` could not terminate at all (#767) | the runaway guard |
+| never | the SESSION | the conversation (#934) |
+| **the turns a nudge did not create** | one turn's retries | — |
+
+Never resetting was correct while one clause held: *a completion-gated session
+is one-shot by construction*, so a session-lifetime budget cost nothing.
+**#913 / #915 made that false** — recording `signal_completion`'s tool result
+is precisely what lets a completed session be driven again, and #845 / #914
+lets the next turn arrive with an attachment. A bound written to stop a runaway
+retry loop *inside one turn* had become a ceiling on how many turns a
+conversation may have.
+
+It shows up wherever the nudge is load-bearing on **every** turn rather than
+being an exception path — measured on a voice agent across 43 sessions, whose
+model announces `signal_completion` instead of invoking it (a documented
+weakness of that model class, not something persona prose fixes):
+
+```
+ 1 model text  ->   2 NUDGE  ->   3 signal_completion   ok
+13 model text  ->  14 NUDGE  ->  15 signal_completion   ok
+18 model text  ->  19 NUDGE  ->  20 signal_completion   ok
+29 model text  ->  30 NUDGE  ->  31 signal_completion   ok
+38 model text  ->  (no budget left)                     never completes
+```
+
+Deterministic, and every later turn ends `NudgeExhausted`. Raising the knob only
+moves the wall: 2 dies at turn 3, 40 at turn 41.
+
+The distinction #767 actually needs is not *never reset* but *do not let a
+nudge refund itself*, so the reset asks **who started this turn**.
+`try_completion_nudge` latches `_completion_nudge_turn_pending` in the same
+call that spends a token; `_begin_turn_completion_state` consumes the latch and
+KEEPS the counter, so the nudge loop terminates exactly as before. Any other
+turn — a user message, a `session.wake`, a parent's `send_to_subagent` — is
+caller-originated and starts with a full budget. Consequences:
+
+- **Every nudge site spends through `try_completion_nudge`.** The subagent loop
+  used to bump `_completion_nudges_fired` in place; that re-prompt now reads as
+  caller-originated, the reset refills the budget, and #767 is back. The method
+  is the only writer.
+- **Exhaustion is a verdict on the turn that failed**, not on every turn after
+  it. `NudgeExhausted` still terminates the session at the ceiling.
+- **Nothing is persisted**, so a revived session begins with a full budget —
+  the same answer the reset gives its first caller-originated turn.
 
 ### Session Revive (waking a persisted session)
 
@@ -899,6 +1011,27 @@ completeness for a stream), everything else is **essential** and is queued past
 the bound rather than desynchronising the client. `dropped_chunk_count()`
 reports what was lost.
 
+**Bytes on the runner RPC wire (#920).** The daemon ↔ runner channel is
+length-prefixed JSON, and JSON has no `bytes`. The runner encoded with
+`json.dumps(payload, default=str)`, so a binary payload was serialised as its
+**Python repr** — every non-printable byte becoming `\xNN`, which JSON then
+escaped again. A 120 s utterance (3.84 MB, what `MAX_UTTERANCE_SECONDS`
+legally produces) crossed as a **16.13 MB** frame: over the 10 MB
+`MAX_MESSAGE_SIZE`, so the peer refused it, closed the transport, and every
+in-flight call died with it — including the `session.send_message` that WAS
+the turn. Size was the lesser half: `str(b'\x00\xff')` does not round-trip,
+so a payload small enough to pass the cap (an image, a short clip, a PDF)
+delivered a repr string nothing would ever decode. The cap failing loudly on
+size before it could fail quietly on content was luck, not design.
+
+Three fixes, one per layer:
+
+| Layer | Before | Now |
+|-------|--------|-----|
+| encoding | `default=str` reached bytes | `server/runner/json_codec.py` — bytes become `{"__bytes_b64__": ...}` and decode back to bytes; `str` stays the fallback for genuinely diagnostic objects (a datetime, an enum). Used by **both** ends, so daemon→runner bytes stop raising `TypeError` too |
+| the payload that broke | `agent_history_updated` handed raw `Message` objects to that encoder, which stringified each whole message | serialised with the canonical session serializer — the shape `session.get_history` already used (1.33x, and `AgentState.history` holds `Message`s again instead of repr strings the reconnect replay reads `msg.role` off) |
+| the blast radius | an oversized frame was written, and the reader — which consumes the length prefix but not the body — could only close the channel | oversized frames are refused at the **write** side: the runner answers that one call with `FrameTooLargeError` and keeps serving, the daemon raises it to that one caller before anything reaches the socket |
+
 **Client renderability.** `PresentationContext.renderable_media` declares the
 MIME types a viewer can play (`can_render_media()` honours `type/*` wildcards
 and ignores parameters). This is the CLIENT axis and is kept strictly apart
@@ -1054,6 +1187,56 @@ Tools can declare semantic **traits** on their `ToolSchema` via the `traits` fie
 1. Add a `TRAIT_*` constant in `shared/plugins/model_provider/types.py` with a docstring documenting the contract
 2. Update consumers (session, plugins) to query `get_tool_traits()` for the new trait
 
+### Tool-Result Enrichment Reaches Every Dict Result (#922)
+
+`enrich_tool_result` speaks **strings**, and most tools return a **dict**, so
+something has to decide what text an enricher sees. That decision used to be
+a guess: the session enriched fields named one of six well-known names
+(`result`, `content`, `stdout`, `output`, `text`, `data`) and only from 100
+characters up. Both filters were invisible, and `store_memory` fails both —
+its text lives in `message`, and the message measured **83 characters**. So
+`memory` and `references`, the only two plugins that implement tool-result
+enrichment, never ran on the pairing they exist for (*"the agent just wrote
+down something about X; surface what we know about X"*). A catalogued
+reference matching a memory's tags 3/3 was never offered, and there was no
+error, no warning and not one trace line to say why — the plugin looked
+correctly written and simply never fired. More generally, every dict-returning
+tool had to happen to name its text one of six ways or be exempt forever.
+
+The session no longer guesses which key holds "the text":
+
+| Result shape | What the chain receives |
+|--------------|-------------------------|
+| a **string** result | the string, verbatim (unchanged) |
+| a dict from a tool declaring `TRAIT_FILE_WRITER` / `TRAIT_GREPPABLE_CONTENT` | the whole JSON (unchanged) |
+| **any other dict** | a *text view*: one `key: value` line per scalar field, then the **anchor** field's raw value |
+
+The **anchor** is the field an enriched view is written back to — the first
+present name from the conventional six (so tools already using one keep
+receiving hints exactly where they did), else the **wordiest** string field.
+Wordiest rather than longest is what stops a one-word `status: "success"`
+out-weighing a short sentence. `tool_result_text_view` /
+`apply_text_view_enrichment` (`shared/tool_result_builder.py`) are the two
+halves, and the write-back is what makes one text view serve both enricher
+shapes: whatever still carries the header is the anchor's new value, so an
+appended hint block (`memory`) and an in-place `@ref-id` expansion
+(`references`) both land on the field the tool actually used, and the header
+fields are context for matching only — never written back. A dict with no
+string field at all takes its addition under `_enrichment`.
+
+Three properties follow, each attached to a way the old path went wrong:
+
+- **No length floor.** A tag match does not need 100 characters of context to
+  be valid; the floor was aimed at semantic matching.
+- **One chain invocation per result.** The old loop ran once per matching
+  field, so a dict with both `content` and `output` collected two hint blocks.
+- **A skip is audible.** A dict carrying no text at all traces `ENRICH_SKIP`
+  naming its keys, and a run traces `ENRICH` with the anchor and the plugins
+  that contributed. Silence was half the defect.
+
+Nested payloads are deliberately not rendered into the view — handing an
+enricher a whole structured result is what the two traits above are for.
+
 ### Plugin-Level Traits
 
 Plugins themselves can declare **plugin-level traits** via a `plugin_traits` class attribute (`FrozenSet[str]`). These work like tool traits but identify *plugin* capabilities rather than individual tool behaviors.
@@ -1113,6 +1296,147 @@ registers (`get_plugin_source(name)` / `get_plugin_sources()`), so a
 shadow is visible without reading logs.  `jaato-scaffold plugins` marks
 any plugin not supplied by the built-in package with
 `<- <distribution> (<module>)`.
+
+### Out-of-Tree Plugin Authoring (#917, #918)
+
+Passing the trust gate is not the same as being loaded, and building
+against the SDK is not the same as being able to read a credential.
+Both gaps hit exactly one audience — a third party writing a plugin
+against the documented entry-point surface, which is what that
+extension point is *for* — and both failed silently.
+
+**`PLUGIN_TIER` decides whether the session ever sees the plugin.**
+Discovery is tier-filtered and the filter is not the same on both
+sides: the runner, the runner's `__main__` and `jaato_embedded` pass
+`tier_filter="runner"`; the daemon-side registry and
+`shared/scaffold/introspect.py` pass none.  A plugin whose package
+declares no `PLUGIN_TIER` is excluded under **any** filter — the
+deliberate "annotate or be excluded" contract — so the split ran
+straight through the diagnostic: the author installed the
+distribution, ran `jaato-scaffold plugins`, saw the plugin listed with
+its provenance line, wrote `plugins: [m365]` in a profile, and the
+session came up without the tools.  No error, no warning, one debug
+`_trace`.  `test_plugin_tier_partition` fails the build on this, but
+its walk is an AST scan of `shared/plugins/` and cannot see a
+distribution outside that path; nothing in the third party's own repo
+knows the rule exists.  Worse than a trust refusal, which at least
+avoids executing code: `ep.load()` has already run when the tier is
+read, so the module is imported and *then* discarded.
+
+Three surfaces now say it, and each distinguishes the mistake from the
+mechanism working — a **mismatched** tier (`daemon` under a `runner`
+filter) is correct partitioning and stays at debug; only a **missing**
+one is announced:
+
+| Surface | Signal |
+|---|---|
+| `PluginRegistry` | `logger.WARNING` naming the entry point, its `ep.value`, the filter, and the package `__init__.py` to edit — the same PR #171 promotion the protocol-gap check got, for the same audience |
+| `jaato-scaffold explain plugins` | the row is marked `[no PLUGIN_TIER - will not load in the runner]`, with a footer naming the fix.  This walk must keep discovering unfiltered (it is an inventory, not a session); what it must not do is imply the plugin works |
+| `jaato-scaffold validate` | `plugin_missing_tier`, severity **error** — the profile is valid by every other measure and the session is already broken |
+
+The entry-point path never reads `PLUGIN_KIND` either, so a package
+missing **both** constants is registered by that path and dropped by
+every filter.  The in-tree `calculator` plugin shipped in exactly that
+state, listed in this repo's own
+`[project.entry-points."jaato.plugins"]` table and reachable from no
+session; it is annotated now, and the gate covers every package that
+table names rather than only those declaring `PLUGIN_KIND`.
+
+**`get_session_env` is the credential read, and it is on the SDK
+surface.**  The plugin contract is otherwise cleanly SDK-shaped —
+`ToolPlugin` / `UserCommand` / `TRAIT_*` from `jaato_sdk.plugins.base`,
+`ToolSchema` from `jaato_sdk.plugins.model_provider.types`, and
+`jaato-sdk` never imports `shared` — with one hole, sitting where a
+connector's credential handling goes.  The session-scoped read lived
+only in `shared/session_context.py`, so a third-party plugin either
+took a hard dependency on jaato-server or wrote `os.environ.get(...)`.
+
+That is not a missed abstraction.  `JaatoServer._with_session_env()`
+overlays each session's `env:` map onto the daemon's `os.environ` for
+the duration of a turn, so on a daemon serving two tenants a plain read
+can return **another session's token** — non-deterministically, with no
+error.  It works on the author's machine and in every single-session
+test.
+
+```python
+from jaato_sdk.session_env import get_session_env    # also jaato_sdk,
+                                                     # jaato_sdk.plugins.base
+token = get_session_env("GRAPH_CLIENT_SECRET")
+```
+
+`shared/session_context.py` imports the three functions back, so every
+in-tree caller keeps its import path and — the part that makes the fix
+real rather than cosmetic — there is exactly **one `ContextVar`
+object**: the one the daemon sets is the one the plugin reads.  A
+second var declared in the SDK would read empty, fall through to
+`os.environ`, and reproduce the leak wearing the fix as a disguise, so
+the test asserts object identity rather than behaviour.
+`get_current_session` is deliberately **not** exported — it hands back
+a `JaatoSession`, and a plugin reaching into `session._runtime` is not
+something to make easier from out of tree.
+
+### A Knob's Value, Not Only Its Name (#925)
+
+`jaato-scaffold validate` already read every plugin's `get_config_schema()`,
+and already kept each knob's declared `type` — then checked the knob **names**
+and threw the rest away. So a knob violating the plugin's own declared `enum`
+validated clean and exited 0:
+
+```yaml
+plugin_configs:
+  todo:
+    storage_type: sqlite        # declared enum: [memory, file, hybrid]
+```
+
+Nothing fails at runtime either, which is the point: `create_storage` raises,
+`todo/plugin.py` catches, prints two lines to daemon stdout, and installs
+`InMemoryStorage()`. An operator who asked for persistent storage gets none,
+and the only signal is a bare `print()` nobody is reading. That is exactly the
+silent-ignore class `validate` exists to catch — rename the knob to
+`storage_typo` and `unknown_knob` fired immediately, so the schema *was* being
+read.
+
+`ConfigSetting` now carries `enum` alongside `type` (JSON Schema spells the
+closed set `enum`, the `PluginSetting` object form spells it `choices`; both
+land on the one field), and `_validate_plugin_knobs` reads
+`config_settings` rather than `config_keys`:
+
+| Finding | Severity | Why that severity |
+|---------|----------|-------------------|
+| `invalid_knob_value` | **error** | a plugin that spells out `["memory","file","hybrid"]` has left no incompleteness to be generous about |
+| `knob_type_mismatch` | **warn** | YAML scalar typing is easy to trip over, a plugin may coerce, and a declared type can be an incomplete summary |
+| `unknown_knob` | warn (unchanged) | a plugin may accept free-form keys it did not enumerate |
+
+The generosity that makes an unknown **name** a warning is a claim about
+schema *completeness*, and it does not carry over to a **value** the schema
+explicitly closed.
+
+Three properties, each attached to a way the check could go wrong:
+
+- **A deferred value is not judged.** `${VAR}` and `pass://` / `vault://` are
+  resolved later, against an environment the validator does not have, and
+  their literal form is a `str` whatever the knob declares — so
+  `timeout: ${HTTP_TIMEOUT}` is not a type error and
+  `lookup_strategy: ${STRATEGY}` is not an enum violation. `None` is "unset",
+  not "wrongly typed".
+- **`True` is not an integer.** Python makes `bool` a subclass of `int`, so
+  `timeout: true` would otherwise satisfy a knob declared `integer` on a
+  technicality — the same silent shape the check exists to catch. Both type
+  vocabularies are understood (JSON Schema's `integer`/`boolean`/`array`, the
+  object form's `int`/`bool`/`dict`), a union renders as `string|array` rather
+  than a Python repr, and a token in **neither** table asserts nothing: the
+  table is a source of findings, never of guesses.
+- **It reaches out of tree.** `_PLUGIN_VALUE_CHECKS` is a hardcoded
+  jaato-server dict keyed by plugin name, so a third-party distribution had
+  **no** route to value validation even though its `get_config_schema()`
+  already declared the constraint in machine-readable form. The generic path
+  needs no registration. That dict stays for genuinely *structural* knobs
+  (`template.file_conventions`), which no declared type can describe.
+
+Still not descended: nested and free-form sub-structures (`permission.policy`,
+`permission.evaluators`) — only a top-level knob's own shape is judged.
+`jaato-scaffold explain plugins <name>` now prints the permitted set beside
+each knob, because it is the set `validate` enforces.
 
 ### Secret Env Scrubbing (#863)
 
@@ -1269,10 +1593,46 @@ The webhook plugin provides an inbound HTTP listener for receiving external webh
       "secret_header": "X-Hub-Signature-256",
       "secret_algo": "hmac-sha256",
       "event_type_header": "X-GitHub-Event"
+    },
+    "gitlab": {
+      "path": "/webhook/gitlab",
+      "secret_header": "X-Gitlab-Token",
+      "secret_algo": "token",
+      "event_type_header": "X-Gitlab-Event"
     }
   }
 }
 ```
+
+**Route auth: two modes, and they are not peers (#930).** `secret_algo` names
+how the route's shared secret is checked:
+
+| Mode | Header carries | Property |
+|------|----------------|----------|
+| `hmac-sha256` | an HMAC digest over the request **body** | the secret never travels; a captured request cannot be replayed against another payload |
+| `token` | the shared secret **verbatim**, compared with `hmac.compare_digest` | **weaker**: readable by anything that terminates TLS, and replayable against any payload |
+
+`token` exists because a large class of producers signs nothing — GitLab sends
+the configured secret in `X-Gitlab-Token` and expects an equality check. Before
+it, the *only* configuration that ingested such a webhook was
+`allow_unauthenticated: true`: a secret sitting in the request, thrown away, on
+the flag whose whole purpose is to be unreachable by omission.
+
+Three properties keep the wider vocabulary from becoming a softer posture:
+
+- **A pair, still fail-closed.** `secret_header` without `secret_algo` (or the
+  reverse) is a 500, and an `secret_algo` outside `SECRET_ALGOS` is a hard
+  config-validation error *and* a 500 at request time — never a downgrade to
+  unsigned. Widening the vocabulary widens what `secret_algo` may **say**, never
+  what it may omit.
+- **No cross-mode leniency.** `token` strips no `sha256=` prefix and reads no
+  body; a valid HMAC digest does not authenticate a `token` route, and the
+  reverse. Either transformation would accept a secret nobody configured.
+- **Announced, not silent.** Every `token` route logs a WARNING at listener
+  startup naming route and header, and a louder one when TLS is off (the secret
+  is then sent in the clear). Same posture as `--ws-unsafe-no-auth` and
+  `scrub_secret_env: none` — so `token` cannot become the quiet path of least
+  resistance for a producer that *does* sign bodies. Pair it with TLS.
 
 **Corporate hardening** (all stdlib, no external deps):
 - **TLS/SSL**: HTTPS with optional mutual TLS (client certificate verification)
@@ -2486,8 +2846,8 @@ This is not optional cleanup — treat missing or inaccurate docstrings as a def
 - [Daemon Extensions](docs/design/daemon-extensions.md) - Extension points for external packages (session hooks, WS interceptors, custom aspects, remote handlers)
 - [Application Identity](docs/design/app-identity.md) - Naming the application an integrator built, rather than reporting every SDK-based harness upstream as "jaato". `AppIdentity` + the four-tier precedence (provider knob → provider env → `JaatoRuntime(app_identity=)` → `JAATO_APP_*`), the `(powered by jaato)` suffix, header-safety sanitisation, and why the env vars are `host`-scoped.
 - [Env Vars vs Profile Keys](docs/design/env-vars-vs-profile-keys.md) - Which of the 186 env vars earned a typed profile/`plugin_configs` key, and which are correctly env-only. The tagged catalog lives in `shared/env_scope.py` (scope: `session` / `host` / `ambient` / `internal`, plus the typed key where one exists) and is enforced by `test_env_scope_catalog.py`; 38 session-scoped knobs with no typed key sit in a may-only-shrink ratchet, each carrying a tier and a **proposed** key (`explain env untyped` prints both). Includes the credential policy for the three providers whose peers expose an `api_key` knob and they don't.
-- [The Self-Bounding Completion Gate](docs/design/completion-gate.md) - What `completion_processors` is for and the seven rules a working one had to get right, each attached to the incident that produced it. Covers `max_refusals:` / `on_exhausted:` (the gate's own refusal ceiling, distinct from `max_turns`, which is and remains the retry budget), the `faults[]` channel that keeps an unfixable environment fault from burning the retry budget, why a broken gate must never read as a passing one, and the load-once-per-session caching the counter used to depend on as folklore. Start from `jaato-scaffold explain completion` and `jaato-scaffold new processor` — both are computed from the framework, so they cannot drift the way the prose can. §9 covers why the gate is three files rather than one: `jaato-scaffold new sweep` emits the checks (`acceptance.sh`, shared with the post-hoc graders), the processor, and the profile's `completion_processors:` + `completion_payload_schema:` as ONE set (`--no-gate` opts out), because a profile carrying processors and no schema has no lenient gate — `_should_hide_signal_completion` removes `signal_completion` entirely, so the agent cannot signal and the gate never runs.
-- [Payload-Schema Conventions](docs/design/payload-schema-conventions.md) - Symmetric authoring guide for `spawn_payload_schema` (input boundary) and `completion_payload_schema` (output boundary). Mirror prefetch required-keys; always carry `warnings[]` / `errors[]` escape hatches; persona ↔ schema consistency check; canonical-hash strip rules; `agent_params` interaction with agent-continuity (§6).
+- [The Self-Bounding Completion Gate](docs/design/completion-gate.md) - What `completion_processors` is for and the seven rules a working one had to get right, each attached to the incident that produced it. Covers `max_refusals:` / `on_exhausted:` (the gate's own refusal ceiling, distinct from `max_turns`, which is and remains the retry budget), the `faults[]` channel that keeps an unfixable environment fault from burning the retry budget, why a broken gate must never read as a passing one, and the load-once-per-session caching the counter used to depend on as folklore. Start from `jaato-scaffold explain completion` and `jaato-scaffold new processor` — both are computed from the framework, so they cannot drift the way the prose can. §9 covers why the gate is three files rather than one: `jaato-scaffold new sweep` emits the checks (`acceptance.sh`, shared with the post-hoc graders), the processor, and the profile's `completion_processors:` + `completion_payload_schema:` as ONE set (`--no-gate` opts out), because a profile carrying processors and no schema has no lenient gate — `_should_hide_signal_completion` removes `signal_completion` entirely, so the agent cannot signal and the gate never runs. §11 covers why a session that completed is still drivable: `signal_completion` ends the TURN, and the continuation it skips was also the only writer of that batch's results into history, so a completed conversation used to end on a `tool_calls` block nothing answered and every later request — `send_message` and `session.wake` alike — was rejected by the provider (#913). `_record_terminal_tool_results` writes them without the round-trip, which is what makes "complete every turn to enforce a contract, then keep talking" usable.
+- [Payload-Schema Conventions](docs/design/payload-schema-conventions.md) - Symmetric authoring guide for `spawn_payload_schema` (input boundary) and `completion_payload_schema` (output boundary) — symmetric in everything but the type system: a completion payload is JSON the model emitted, a spawn payload crosses the IPC wire as `key=value` argv tokens, so **every spawn property is a `string`** (`pattern` carries the shape, the consumer parses). #883 ratified that rather than reopening the transport, and both spawn boundaries now validate the same string view — the in-process `spawn_subagent` call used to accept a typed value the wire could never deliver, so one profile meant two things. A refusal caused by the schema names the profile; `jaato-scaffold validate` catches it before any spawn as `spawn_schema_type_unreachable`. Mirror prefetch required-keys; always carry `warnings[]` / `errors[]` escape hatches; persona ↔ schema consistency check; canonical-hash strip rules; `agent_params` interaction with agent-continuity (§6).
 - [Competitor Memory Systems](docs/design/competitor-memory-systems.md) - Survey of nine agent-memory products, sorted by what a *framework* owes: pattern (nothing) / seam (an extension point) / fidelity (a fix) / not ours. Records which items were already expressible as cascade patterns, which memory hot paths are not pluggable, and why the pattern corpus needs `certify/`-style contract tests run against `main`.
 - [Agent Continuity Pattern](docs/design/agent-continuity.md) - `{{continuity_scope}}` + memory plugin enrichment + raw/curated lifecycle: persona-level continuity across sessions composed from existing primitives, no new framework code. Reference impl in `jaato-knowledge-manager/.jaato.example/`.
 - [Model Tiers × Prompt Caching](docs/design/model-tier-prompt-cache.md) - What `enter_tier` costs when prompt caching is on: cache is keyed per model, so an in-place tier switch re-reads the whole prefix cold (break-even ~6 consecutive calls at the new tier). Covers the `_wire_cache_plugin` gap that made profile cache knobs inert, the system-block tier line that invalidates BP1, and the per-provider knob divergence + proposed common `cache:` field.

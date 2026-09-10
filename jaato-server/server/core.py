@@ -272,6 +272,7 @@ class AgentState:
         self.pending_formatter_feedback: Optional[str] = None
 
 
+from shared.completion_nudge import resolve_max_completion_nudges
 from shared.model_tiers import (bound_model_for_profile,
                                 bound_provider_for_profile)
 
@@ -308,6 +309,38 @@ def _runtime_limit_session_kwargs(profile: Any) -> Dict[str, Any]:
         getattr(profile, "runtime_limits", None), "max_parallel_tools", None,
     )
     return {} if width is None else {"max_parallel_tools": width}
+
+
+def _deserialize_wire_history(history: Any) -> List[Any]:
+    """Turn a runner ``agent_history_updated`` payload into ``Message``s.
+
+    The runner serializes the snapshot with the canonical session
+    serializer (#920), the same wire shape ``session.get_history``
+    uses, so this is the symmetric read: ``AgentState.history`` holds
+    ``Message`` objects, which is what every consumer of it expects —
+    ``emit_current_state``'s transcript replay for a reconnecting
+    client, and the disk-restore path that assigns ``list(state.history)``
+    into the same slot.
+
+    Before #920 the notification carried raw ``Message`` objects into a
+    JSON encoder that stringified them, so this slot quietly held a list
+    of Python reprs.  Falls back to the payload as received if it isn't
+    the serialized shape — a rolling upgrade where the runner predates
+    the fix leaves the field exactly as it was rather than dropping it.
+    """
+    if not history:
+        return []
+    if not all(isinstance(m, dict) for m in history):
+        return list(history)
+    try:
+        from shared.plugins.session.serializer import deserialize_history
+        return deserialize_history(history)
+    except Exception:  # noqa: BLE001 — display/persistence path, never fatal
+        logger.warning(
+            "agent_history_updated: history deserialize failed; "
+            "keeping the wire form", exc_info=True,
+        )
+        return list(history)
 
 
 def _dispatch_tool_output(hooks, payload, default_agent_id: str) -> None:
@@ -5134,7 +5167,9 @@ class JaatoServer:
                     if hooks is not None:
                         hooks.on_agent_history_updated(
                             agent_id=payload.get("agent_id") or server._main_agent_id,
-                            history=payload.get("history"),
+                            history=_deserialize_wire_history(
+                                payload.get("history"),
+                            ),
                         )
                     return
 
@@ -5565,7 +5600,19 @@ class JaatoServer:
                 # tool was filtered preserves the user's expected
                 # contract: TUI / web / chat sessions stay alive across
                 # turns until the user disconnects.
-                MAX_COMPLETION_NUDGES = 2
+                #
+                # The BUDGET is the profile's (#919).  It was a
+                # function-local ``= 2`` here and in two other files,
+                # which made it the one bound in this path a deployment
+                # could not express -- ``max_turns``, ``runtime_limits``
+                # and a processor's ``max_refusals`` all are.  The number
+                # now lives once, in ``shared.completion_nudge``, and the
+                # resolver falls back to it for a session with no profile
+                # or a profile predating the field, so an unconfigured
+                # deployment is byte-identical to before.
+                MAX_COMPLETION_NUDGES = resolve_max_completion_nudges(
+                    server._profile,
+                )
                 # Phase 3 §7c step 6.6.4.3b: completion-nudge
                 # guard now goes through the runner-RPC
                 # ``session.try_completion_nudge`` handler (shipped

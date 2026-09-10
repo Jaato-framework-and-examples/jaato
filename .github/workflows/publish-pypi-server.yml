@@ -1,0 +1,97 @@
+name: "Publish jaato-server to PyPI"
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    # Measured: the suite is 9m30s and `.[all]` adds a few minutes of install
+    # (gssapi compiles from sdist; this job has no pip cache). 30 leaves room
+    # on a slow runner without letting a hung gate hold a release for
+    # GitHub's default six hours.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      # This job runs `shared/tests/`, which is what ci-tests' `shared/tests`
+      # leg runs — and that leg installs `.[all]`. Anything narrower here is a
+      # SECOND environment for the same suite, kept in sync by hand, and it
+      # drifted twice in one evening: `.[dev]` failed collection on a
+      # module-level `import openai`, and `.[dev,openrouter]` then failed 13
+      # tests on `import pexpect` — a LAZY import inside production code
+      # (interactive_shell/session.py), which no scan of the test files can
+      # predict. So the gate installs what the suite is written against
+      # instead of a hand-picked subset.
+      #
+      # `.[all]` pulls gssapi (needs libkrb5 headers) and the diagrams plugin
+      # (graphviz), hence the apt step; and `apt-get update` exits 100 if any
+      # configured source is broken, so the unused google-chrome source is
+      # dropped first, exactly as ci-tests does.
+      - name: Drop the unused third-party apt sources
+        run: sudo rm -f /etc/apt/sources.list.d/google-chrome.list
+                        /etc/apt/sources.list.d/google-chrome.sources
+
+      - name: System build deps (gssapi / diagrams)
+        run: sudo apt-get update && sudo apt-get install -y libkrb5-dev graphviz
+
+      - name: Install dependencies
+        run: pip install -e jaato-sdk/ && pip install -e "jaato-server/.[all]"
+
+      - name: Run tests
+        run: pytest jaato-server/shared/tests/ jaato-server/server/test_client.py jaato-server/server/test_workspace_command.py
+
+  build-and-publish:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    environment: pypi-server
+    steps:
+      # fetch-depth: 0 — scripts/build_readme.py derives the changelog that
+      # becomes the package's PyPI long description from `git log` since the
+      # previous "Bump <pkg>" commit.  checkout's default depth of 1 leaves it
+      # a single commit to look at, so the published changelog was whatever
+      # that one commit happened to be.
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install build
+        run: pip install build
+
+      - name: Check version not already on PyPI
+        run: |
+          version=$(python -c "
+          import tomllib, pathlib
+          data = tomllib.loads(pathlib.Path('jaato-server/pyproject.toml').read_text())
+          print(data['project']['version'])
+          ")
+          echo "Package version: $version"
+          status=$(curl -s -o /dev/null -w '%{http_code}' \
+            "https://pypi.org/pypi/jaato-server/${version}/json")
+          if [ "$status" = "200" ]; then
+            echo "::error::Version ${version} of jaato-server already exists on PyPI"
+            exit 1
+          fi
+          echo "Version ${version} is available for publishing"
+
+      - name: Generate combined README
+        run: python scripts/build_readme.py --dir jaato-server
+
+      - name: Build package
+        run: python -m build jaato-server/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: jaato-server/dist/

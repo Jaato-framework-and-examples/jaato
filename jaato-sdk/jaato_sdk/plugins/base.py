@@ -5,6 +5,13 @@ from dataclasses import dataclass, field
 from typing import Protocol, List, Dict, Any, Callable, FrozenSet, Optional, NamedTuple, runtime_checkable
 
 from .model_provider.types import ToolSchema
+# Re-exported beside the protocol it serves (issue #918): a plugin that
+# needs a credential reads it with ``get_session_env``, NOT with
+# ``os.environ.get`` -- on a daemon serving concurrent sessions the
+# global dict carries whichever session's ``env:`` map was overlaid
+# last, so a plain read can return another tenant's token.  See
+# :mod:`jaato_sdk.session_env` for the full hazard.
+from ..session_env import get_session_env  # noqa: F401  (re-exported)
 
 
 # ---------------------------------------------------------------------------
@@ -872,6 +879,20 @@ class ToolPlugin(Protocol):
     #
     #     Called only if subscribes_to_tool_result_enrichment() returns True.
     #     The plugin receives the tool name and its result string.
+    #
+    #     A tool that returned a *string* is passed through verbatim.  A tool
+    #     that returned a dict is passed as text: either the whole JSON (when
+    #     the tool declares TRAIT_FILE_WRITER / TRAIT_GREPPABLE_CONTENT), or
+    #     a text view of its scalar fields — one `key: value` line per field,
+    #     ending with the field holding the tool's own prose.  Every dict
+    #     result reaches this hook regardless of what its fields are named or
+    #     how short they are; the session used to enrich only six well-known
+    #     field names, from 100 characters up, which silently exempted most
+    #     dict-returning tools (#922).
+    #
+    #     What is returned is written back to that field: append to add a
+    #     hint, return the string rewritten to replace it, or return it
+    #     unchanged to opt out of this result.
     #
     #     Args:
     #         tool_name: Name of the tool that produced the result.

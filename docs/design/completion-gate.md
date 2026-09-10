@@ -48,8 +48,14 @@ apart, every one reporting the same two errors, with no work in between. The arm
 BLOCKED having spent its budget on the loop, where the run before it had reached a
 graded verdict.
 
-Nothing upstream catches this. `MAX_COMPLETION_NUDGES` bounds the *opposite* direction
-(an agent that stops **without** signalling), and was itself unbounded until #767.
+Nothing upstream catches this. The completion-nudge budget bounds the *opposite*
+direction (an agent that stops **without** signalling), and was itself unbounded until
+#767 — and until #919 it was not a profile knob either, but a function-local
+`MAX_COMPLETION_NUDGES = 2` in three files. It is now `max_completion_nudges:` at the
+profile top level (default 2, unchanged when unset), with one definition in
+`shared/completion_nudge.py`, and it is spent **per turn** — a session-lifetime budget
+became a ceiling on the whole conversation once #913 let a completed session be driven
+again (#934). See the CLAUDE.md section of the same name.
 
 **Now:** a processor entry declares its own ceiling.
 
@@ -236,6 +242,47 @@ crosses a process boundary, so neither could see a boundary that dropped
 fields. #770 asked for the ceiling to be watched *at the session loop* rather
 than at the invocation, and that instruction is what turned up a defect instead
 of confirming a working feature.
+
+## 11. Completing a turn does not end the conversation (#913)
+
+`signal_completion` is terminal for the **turn**, and the loop reflects that:
+once the tool validates, `_execute_tools_and_continue` returns without sending
+the results back for a continuation. That is right, and the reason is measured
+— a strong model answers the task-completion spur with prose, a weak one calls
+`signal_completion` again with the same payload, forever.
+
+What it must not be is terminal for the **history**. The continuation it skips
+was also the only writer of the batch's results into the conversation, so a
+completed session ended on an assistant message whose `tool_calls` nothing
+answered. Every OpenAI/Azure-shaped upstream enforces the pairing on the *next*
+request:
+
+```
+An assistant message with 'tool_calls' must be followed by tool messages
+responding to those tool_call_ids
+```
+
+So the session was dead from its next model call — by `send_message`, and
+equally by the `session.wake` revive path the framework ships for exactly this
+purpose. Nothing failed at wake time; the 400 arrived one call later. The
+cost was a whole legitimate pattern: **complete every turn to enforce a
+contract, then keep talking.** A completion processor is the only way to
+*make* a model call a tool (prose does not achieve it), so enforcement and
+multi-turn were mutually exclusive, and the workaround was to declare no
+`completion_payload_schema` at all on any conversational profile.
+
+`JaatoSession._record_terminal_tool_results` writes them instead. The
+round-trip stays skipped; the history is well-formed whether or not another
+turn ever happens. Calls the terminal batch never dispatched — a
+`store_memory` the model emitted in parallel with `signal_completion` — are
+answered in the same tool message with `session_completed_call_error`, whose
+remedy deliberately differs from an abandoned call's (§ `_reconcile_unanswered_calls`,
+#751): after a truncation, re-sending the call is right; after a completion it
+is not.
+
+This is the same invariant #751 states, reached from a different exit. Both
+say the turn may end wherever it likes, and history must still be a
+conversation somebody can continue.
 
 ---
 

@@ -144,7 +144,7 @@ BASELINE: Dict[str, int] = {
     "jaato-server/server/session_manager.py::SessionManager._build_isolated_envelope": 21,
     "jaato-server/server/session_manager.py::SessionManager._build_session_info_event": 22,
     "jaato-server/server/session_manager.py::SessionManager._cascade_teardown_isolated_subagents": 20,
-    "jaato-server/server/session_manager.py::SessionManager._create_session_impl": 61,
+    "jaato-server/server/session_manager.py::SessionManager._create_session_impl": 52,
     "jaato-server/server/session_manager.py::SessionManager._expand_prompt_references": 18,
     "jaato-server/server/session_manager.py::SessionManager._handle_turn_tracking_event": 21,
     "jaato-server/server/session_manager.py::SessionManager._intercept_prompt_help_refs": 17,
@@ -202,9 +202,11 @@ BASELINE: Dict[str, int] = {
     # loop gained that decision but handed both of its provider calls to
     # _complete_parts_turn and its two text emissions to
     # _emit_batched_response_text, so it came down rather than up
-    # (36 -> 31).
+    # (36 -> 31).  Down one more in #913, which moved the parts loop's
+    # cap-gate-append onto the shared _append_tool_results_to_history so
+    # the terminal signal_completion path writes history the same way.
     "jaato-server/shared/jaato_session.py::JaatoSession._run_chat_loop": 86,
-    "jaato-server/shared/jaato_session.py::JaatoSession._run_chat_loop_with_parts": 31,
+    "jaato-server/shared/jaato_session.py::JaatoSession._run_chat_loop_with_parts": 30,
     "jaato-server/shared/jaato_session.py::JaatoSession._send_tool_results_and_continue": 27,
     "jaato-server/shared/jaato_session.py::JaatoSession._track_activated_tools_in_budget": 20,
     "jaato-server/shared/jaato_session.py::JaatoSession._update_conversation_budget": 37,
@@ -421,7 +423,7 @@ BASELINE: Dict[str, int] = {
     "jaato-server/shared/plugins/subagent/config.py::resolve_agent": 25,
     "jaato-server/shared/plugins/subagent/config.py::validate_profile": 53,
     "jaato-server/shared/plugins/subagent/plugin.py::SubagentPlugin._dispatch_isolated_spawn": 22,
-    "jaato-server/shared/plugins/subagent/plugin.py::SubagentPlugin._execute_spawn_subagent": 64,
+    "jaato-server/shared/plugins/subagent/plugin.py::SubagentPlugin._execute_spawn_subagent": 51,
     "jaato-server/shared/plugins/subagent/plugin.py::SubagentPlugin._run_subagent_async": 75,
     "jaato-server/shared/plugins/subagent/plugin.py::SubagentPlugin.initialize": 17,
     "jaato-server/shared/plugins/subagent/plugin.py::SubagentPlugin.restore_persistence_state": 29,
@@ -449,7 +451,7 @@ BASELINE: Dict[str, int] = {
     "jaato-server/shared/plugins/web_fetch/plugin.py::WebFetchPlugin._fetch_url": 30,
     "jaato-server/shared/plugins/web_fetch/plugin.py::WebFetchPlugin._html_to_markdown": 36,
     "jaato-server/shared/plugins/web_fetch/plugin.py::WebFetchPlugin.initialize": 18,
-    "jaato-server/shared/plugins/webhook/config.py::validate_config": 40,
+    "jaato-server/shared/plugins/webhook/config.py::validate_config": 31,
     "jaato-server/shared/retry_utils.py::classify_error": 17,  # -5 (#687): the redundant "TUPLE and isinstance(exc, TUPLE)" guards went
     "jaato-server/shared/retry_utils.py::is_context_limit_error": 22,
     "jaato-server/shared/retry_utils.py::with_retry": 23,
@@ -459,17 +461,16 @@ BASELINE: Dict[str, int] = {
     "jaato-server/shared/scaffold/build.py::_new_profile_set": 26,
     "jaato-server/shared/scaffold/explain.py::event": 21,
     "jaato-server/shared/scaffold/explain.py::events": 17,
-    "jaato-server/shared/scaffold/explain.py::plugin": 17,
     "jaato-server/shared/scaffold/explain.py::profile_cost": 23,
     "jaato-server/shared/scaffold/explain.py::provider": 16,
     "jaato-server/shared/scaffold/explain.py::sets": 17,
     "jaato-server/shared/scaffold/introspect.py::_env_reads": 21,
     "jaato-server/shared/scaffold/introspect.py::events": 32,
-    "jaato-server/shared/scaffold/introspect.py::plugins": 24,
+    "jaato-server/shared/scaffold/introspect.py::plugins": 21,
     "jaato-server/shared/scaffold/validate.py::_check_prefetch_directives": 18,
     # 70 -> 68: the provider branch moved out to
     # `_resolve_and_check_provider`.  Ratcheted down, per the guard.
-    "jaato-server/shared/scaffold/validate.py::validate_profile": 68,
+    "jaato-server/shared/scaffold/validate.py::validate_profile": 66,
     "jaato-server/shared/session_envelope.py::SessionInitEnvelope.from_dict": 19,
     "jaato-server/shared/subprocess_runner.py::run_command": 28,
     "jaato-server/shared/tests/test_session_envelope.py::test_bootstrap_envelope_minimal_construction": 20,
