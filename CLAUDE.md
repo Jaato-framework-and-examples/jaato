@@ -1614,6 +1614,91 @@ the archetypes `jaato-scaffold new` emits still carry no `budget_control`
 (picking ceilings for someone else's workload is the author's call, which is
 what the warning now asks them to make).
 
+### Configuring a Plugin and Enabling It Are Two Decisions (#950)
+
+`plugin_configs.<name>` and `plugins:` answer different questions — *how does
+this plugin behave* and *which tools reach the model* — and `permission` is
+the case that separates them: `PermissionPlugin.get_tool_schemas()` returns
+`[]` **on purpose**, so it is never in a `plugins:` list, and its whole
+configuration is a `policy` block.
+
+`JaatoSession.configure` collapsed the two:
+
+```python
+if plugins is None or plugin_name in plugins:      # the block, or nothing
+```
+
+A top-level session never noticed — its configs reach the plugins through
+`expose_all(plugin_configs)` at bootstrap, and `permission` gets an explicit
+merge on both the daemon (`server/core.py`) and runner
+(`server/runner/session.py` Step 8) paths. **A subagent reuses the parent's
+already-bootstrapped registry**, so that loop was the only place its own
+profile's configs could land. A `documentalista` profile whose
+`plugin_configs.permission` whitelisted `writeNewFile` therefore produced 55
+permission ASKs on that pre-approved tool — under a headless `ClientType.API`
+driver an ASK has no channel to reach, so 56 write attempts at one path wrote
+nothing, silently. Adding the toolless `permission` to `plugins:` was the
+entire difference.
+
+Three other places in the tree already stated the opposite intent —
+`SessionInitEnvelope.plugin_configs` ("carries configs for **all** plugins …
+including ones the runner auto-loads without them appearing in `plugins`"),
+the runner's Phase 4 §C merge, and `PluginRegistry._ALWAYS_INITIALIZE_PLUGINS`
+("`permission` … is wired even when not in profile.plugins"). The gate was the
+one dissenter, and the runner docstring claiming the overrides "aren't
+currently in the envelope" had been stale since §C shipped.
+
+The loop now applies a config for every plugin **the registry knows**, and two
+properties make that safe:
+
+| Property | Why it is load-bearing |
+|----------|------------------------|
+| names the registry does not know are **skipped, not attempted** | `plugin_configs` also carries the PROVIDER sections (`openrouter`, `anthropic`, …), read by `create_provider` and by no plugin. `expose_tool` raises `ValueError` on each; the old gate filtered them out only as a side effect of them never being in `plugins:` |
+| the model's tool surface is **untouched** | bootstrap's `expose_all` already exposed every discovered plugin; what the model sees is filtered per session from `plugins`, which this loop does not write |
+
+Worth knowing, and unchanged in kind: the registry — and so each plugin
+INSTANCE — is shared with the parent and its sibling subagents, so a config
+applied here applies for all of them. That was already true of every plugin a
+subagent *did* list; this widens it to the ones it only configures.
+
+**One instance short of universal, and worth naming.** The daemon
+(`server/core.py`) and the runner (`server/runner/session.py` Step 8) each
+CONSTRUCT the enforcing `PermissionPlugin` rather than taking the registry's,
+so on those paths `registry.expose_tool("permission", …)` re-initializes a
+second, unread copy; the enforcer is seeded once, from the ROOT profile's
+block. Only the in-process path (`jaato_embedded/client.py`, which wires
+`registry.get_plugin("permission")` as the enforcer) has one instance, and
+there a subagent's permission block now applies. Which is also what
+identifies the transport the measurement above was taken on, since the
+reporter's workaround — naming `permission` in `plugins:` — reached the
+registry's instance and *worked*; on the daemon or runner it would have
+re-initialized the unread copy and changed nothing. Making that universal means giving the daemon
+and runner the registry's instance, and it still would not give a subagent a
+policy of its own: `PermissionPlugin._policy` is a single object on a
+runtime-wide singleton, and only the *channel* is thread-local
+(`configure_for_subagent`). Per-session policy is a separate design question,
+not a line in this fix.
+
+**The validator says the other half.** With the config reaching the plugin,
+"unreachable" is no longer the finding; what survives is narrower and still
+worth saying — the plugin is configured and **none of its tools are on the
+wire**:
+
+| Finding | Severity | Fires when |
+|---------|----------|-----------|
+| `plugin_config_without_plugin` | warn | `plugin_configs.<X>` for an installed, tool-bearing plugin absent from `plugins:` |
+
+Warn rather than error, for the reason the whole silent-config family (#910,
+#925, #947) warns: a base profile in an `inherits` chain may legitimately
+carry a config its children enable, and validation runs on every discovered
+profile including those bases. Three exemptions keep it from being noise:
+a plugin that exposes **no tools at all** (`permission`, `sandbox_manager`) is
+configured-only by construction; `introspection`'s tools are core and reach
+every wire whatever `plugins:` says; and a plugin whose tools are not
+statically knowable (`mcp`) reports none offline and is read the same way —
+a false negative, and the right one, since the alternative is asserting a
+missing surface the validator cannot see.
+
 ### Secret Env Scrubbing (#863)
 
 The runner legitimately holds secrets in its own `os.environ` — the
