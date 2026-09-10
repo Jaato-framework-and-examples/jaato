@@ -64,7 +64,12 @@ def test_validate_accepts_well_formed_budget_control(tmp_path):
         "      model_tiers:\n"
         "        planner: {model: google/gemini-flash, provider: openrouter}\n"
         "    - at: 100\n"
-        "      action: finalize\n")
+        # The terminal rung aborts, not finalizes: a ladder ending in
+        # finalize is now flagged (budget_limits_without_abort, #947) —
+        # limits are observed, and only abort reaches request_stop.  This
+        # fixture is the "well-formed" exemplar, so it must model a ceiling
+        # that actually stops rather than one that asks nicely.
+        "      action: abort\n")
     budget_codes = {d.code for d in diags if "budget" in d.code
                     or d.code in ("parse_error", "unknown_provider")}
     assert budget_codes == set(), f"unexpected findings: {[d.message for d in diags]}"
@@ -115,13 +120,18 @@ def test_validate_warns_on_overlay_of_undeclared_tier(tmp_path):
 
 def test_action_only_ladder_needs_no_tiers(tmp_path):
     """A single-model profile may still budget — only OVERLAY rungs require
-    model_tiers."""
+    model_tiers.
+
+    Terminal action is ``abort`` for the reason above (#947): ``finalize``
+    alone would draw ``budget_limits_without_abort``, which is a true
+    finding about this ladder and not what this test is asserting.
+    """
     diags = _write_set(tmp_path, "setA", "a",
         "model: some-model\nprovider: openrouter\n"
         "budget_control:\n"
         "  limits: {usd: 1.0, seconds: 60}\n"
         "  degrade:\n"
-        "    - at: 100\n      action: finalize\n")
+        "    - at: 100\n      action: abort\n")
     assert not [d for d in diags if "budget" in d.code or d.code == "parse_error"]
 
 

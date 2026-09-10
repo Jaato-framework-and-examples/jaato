@@ -469,7 +469,7 @@ BASELINE: Dict[str, int] = {
     "jaato-server/shared/scaffold/validate.py::_check_prefetch_directives": 18,
     # 70 -> 68: the provider branch moved out to
     # `_resolve_and_check_provider`.  Ratcheted down, per the guard.
-    "jaato-server/shared/scaffold/validate.py::validate_profile": 66,
+    "jaato-server/shared/scaffold/validate.py::validate_profile": 53,
     "jaato-server/shared/session_envelope.py::SessionInitEnvelope.from_dict": 19,
     "jaato-server/shared/subprocess_runner.py::run_command": 28,
     "jaato-server/shared/tests/test_session_envelope.py::test_bootstrap_envelope_minimal_construction": 20,

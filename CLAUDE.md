@@ -1540,6 +1540,80 @@ Still not descended: nested and free-form sub-structures (`permission.policy`,
 `jaato-scaffold explain plugins <name>` now prints the permitted set beside
 each knob, because it is the set `validate` enforces.
 
+### A Ceiling Nobody Declared, and One That Cannot Stop (#947)
+
+`budget_control` is complete — five dimensions of `limits`, a `degrade`
+ladder, `CascadeBudgetPool` — fully wired into the profile, parsed at load,
+and validated for internal consistency. That validation runs **only when the
+key is present**. Absent, there was nothing: no warning, no default, no
+mention in `validate` output. So the failure mode was silent by construction
+— an unbudgeted profile behaves identically to a budgeted one right up until
+something loops.
+
+Something did. A `documentalista` subagent whose `file_edit` plugin had
+failed to initialise retried `writeNewFile` **127 times** over four and a
+half minutes, ~800 tokens heavier each cycle (each rejected attempt is
+appended to the conversation) until every request carried ~57k tokens. Its
+parent had ended two minutes in:
+
+```
+Subagent plugin shutdown (running subagents preserved)
+```
+
+which is the *correct* behaviour for a backgrounded subagent, and is exactly
+what makes an unbudgeted one dangerous — the loop outlived the session that
+could have noticed, and stopping it took `kill -TERM` on the pool slot pid.
+
+Two findings, and the second is the one that makes the first honest:
+
+| Code | Severity | Fires when |
+|------|----------|-----------|
+| `budget_control_absent` | warn | no `budget_control` at all — unbounded on `usd`, `tokens`, `seconds`, `tool_calls`, `turns`. The message names all five, because "missing `budget_control`" teaches nothing to an author who has never seen the knob |
+| `budget_limits_without_abort` | warn | `limits` declared and no rung stops the run |
+
+**`limits` are observed, never enforced.** `BudgetTracker` accumulates
+against them and `usage_fraction()` turns them into a percentage — and the
+`degrade` ladder is the *only* consumer of that percentage. A profile
+declaring `limits` and no ladder crosses 100%, 200%, 1000% in silence. Of
+the three terminal actions only `abort` reaches `request_stop`; `finalize`
+and `escalate` are latched on `_budget_terminal_action` for a layer above,
+which is advice a looping model can decline — and did, through 35
+consecutive failures without ever emitting text.
+
+That is why the second check is load-bearing rather than a refinement:
+without it the first one is **actively misleading**. An author told "you
+have no budget" writes `limits: {usd: 5}`, the warning clears, and the loop
+is still unbounded. The pair only works together:
+
+```yaml
+budget_control:
+  limits: {tool_calls: 200, usd: 5.0}
+  degrade:
+    - at: 95
+      action: finalize     # advice
+    - at: 100
+      action: abort        # the ceiling
+```
+
+**Warnings, not errors.** An unbudgeted profile is a legitimate choice for a
+short-lived local agent, and an error would fail every existing workspace at
+once. Surfacing a knob must not break the people who need it — the same
+posture `unknown_knob` takes.
+
+**The danger is not uniform, and the discriminator is used one way.** A
+profile spawned as a subagent outlives the thing that would have noticed, so
+those deserve a stronger message. Every discovered profile is reachable by
+name through `spawn_subagent`, which makes "is it spawnable" useless as a
+separator; a profile that names its own `default_agent` is one built to be
+spawned by profile name alone (#944). So `default_agent` **strengthens** a
+message that fires regardless, and never weakens or suppresses one — its
+absence proves nothing.
+
+Not addressed here: `limits` still do not enforce themselves at runtime, and
+the archetypes `jaato-scaffold new` emits still carry no `budget_control`
+(picking ceilings for someone else's workload is the author's call, which is
+what the warning now asks them to make).
+
 ### Secret Env Scrubbing (#863)
 
 The runner legitimately holds secrets in its own `os.environ` — the

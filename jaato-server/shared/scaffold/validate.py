@@ -164,56 +164,8 @@ def validate_profile(
     _check_model_tiers(getattr(profile, "model_tiers", None) or {}, add,
                        getattr(profile, "provider", None))
 
-    # --- budget_control --------------------------------------------------
-    # The block is already parsed + structurally validated at profile-load
-    # time (BudgetControlConfig.from_dict; a malformed one surfaces as
-    # parse_error, so it never reaches here).  What load time CANNOT know is
-    # (a) which providers are installed and (b) how the ladder relates to the
-    # profile's own model_tiers — both checked here, reusing the exact same
-    # resolve_provider / tier-name machinery the model_tiers branch above uses
-    # (an overlay IS a tier table, so it inherits the same defect classes).
-    budget = getattr(profile, "budget_control", None)
-    if budget is not None:
-        # Local import: the model_tiers branch above imports these inside its
-        # own `if`, which may not have run (a profile can declare a budget
-        # ladder with no tiers — exactly the case flagged below).
-        from shared.model_tiers import RESERVED_KEYS
-        declared_tiers = {
-            k for k in (getattr(profile, "model_tiers", None) or {})
-            if k not in RESERVED_KEYS
-        }
-        for i, rung in enumerate(getattr(budget, "degrade", ()) or ()):
-            overlay = getattr(rung, "model_tiers", None) or {}
-            if overlay and not declared_tiers:
-                # An overlay patches the session's tier table; with no
-                # model_tiers there is no table to patch, so the rung would
-                # silently do nothing at runtime.
-                add("error", "budget_overlay_without_tiers",
-                    f"budget_control.degrade[{i}] overlays model_tiers "
-                    f"({', '.join(sorted(overlay))}) but the profile declares no "
-                    "model_tiers — the overlay would have no table to rebind. "
-                    "Declare model_tiers, or use an action-only rung "
-                    "(finalize / abort / escalate).",
-                    where=f"budget_control.degrade[{i}].model_tiers")
-                continue
-            for tier_name, entry in overlay.items():
-                if tier_name not in declared_tiers:
-                    add("warn", "budget_overlay_undeclared_tier",
-                        f"budget_control.degrade[{i}] rebinds tier "
-                        f"'{tier_name}', which the profile's model_tiers does "
-                        f"not declare (has: {', '.join(sorted(declared_tiers))})"
-                        " — degrading would ADD a tier the agent could not "
-                        "reach before.",
-                        where=f"budget_control.degrade[{i}].model_tiers.{tier_name}")
-                tprov = getattr(entry, "provider", None)
-                if tprov and introspect.resolve_provider(tprov) is None:
-                    add("error", "unknown_provider",
-                        f"budget_control.degrade[{i}].model_tiers.{tier_name} "
-                        f"provider '{tprov}' is not installed (a degrade overlay "
-                        "may cross providers, but must name a real one — see "
-                        "`jaato-scaffold explain providers`)",
-                        where=f"budget_control.degrade[{i}].model_tiers."
-                              f"{tier_name}.provider")
+    # --- budget_control (incl. its ABSENCE, #947) -----------------------
+    _check_budget_control(profile, add)
 
     # --- per-plugin tool allow-lists (tool_scopes) -----------------------
     for plug, tools in (getattr(profile, "tool_scopes", None) or {}).items():
@@ -716,6 +668,194 @@ def _check_modality_direction(key, kind, direction, where, add,
                if value == DIRECTION_BIDIRECTIONAL
                and _carries_inbound_modality(provider_name, kind) else ""),
             where=where)
+
+
+def _check_budget_control(profile: Any, add) -> None:
+    """Check a profile's ``budget_control`` — starting with its ABSENCE (#947).
+
+    ``budget_control`` is fully implemented and entirely opt-in, and nothing
+    told an author their profile had no ceiling.  The failure mode is silent
+    by construction: an unbudgeted profile behaves identically to a budgeted
+    one right up until something loops, and then it does not stop.  Observed
+    as a subagent retrying a tool whose result never reached its history —
+    127 identical calls, ~57k tokens a request, killed by hand.
+
+    Two findings here, ordered by how protected the profile LOOKS while it
+    is not.  The second is the load-bearing one:
+
+    ``budget_control_absent``
+        no block at all, so every dimension is unbounded.
+
+    ``budget_limits_without_abort``
+        ``limits`` are declared and nothing enforces them.  A ceiling in
+        ``limits`` is observed, never enforced — the ``degrade`` ladder is
+        the only consumer of :meth:`BudgetTracker.usage_fraction`, so a
+        profile with ceilings and no ``abort`` rung crosses them in
+        silence.  Without this check the fix for the first finding is
+        actively misleading: an author warned "you have no budget" writes
+        ``limits: {usd: 5}``, the warning goes away, and the loop is still
+        unbounded.
+
+    **Warnings, not errors**, on the reasoning the issue sets out: an
+    unbudgeted profile is a legitimate choice for a short-lived local
+    agent, and these would otherwise fail every existing workspace at
+    once.  Surfacing the knob must not break the people who need it.
+
+    The ladder's own shape checks (``budget_overlay_*``) live in
+    :func:`_check_budget_overlays`, called from here — split so neither
+    function approaches the complexity ceiling, and so that
+    :func:`validate_profile` (baselined far above it) gets smaller rather
+    than larger.
+
+    Args:
+        profile: The resolved profile object.
+        add: The per-profile diagnostic sink from :func:`validate_profile`.
+    """
+    from shared.budget_control import DIMENSIONS
+
+    budget = getattr(profile, "budget_control", None)
+    if budget is None:
+        add("warn", "budget_control_absent",
+            "declares no budget_control, so this session is unbounded on "
+            f"every dimension ({', '.join(DIMENSIONS)}) — nothing stops a "
+            "tool-call loop, and the first sign is the provider bill. "
+            "Declare a ceiling AND a rung that enforces it, e.g. "
+            "budget_control: {limits: {tool_calls: 200, usd: 5.0}, "
+            "degrade: [{at: 100, action: abort}]}."
+            + _backgrounded_profile_note(profile),
+            where="budget_control")
+        return
+
+    # getattr, like every other read in this module: a validator that raises
+    # tells the author nothing at all.  The default is the fail-LOUD direction
+    # — an object that cannot answer "do you abort?" is treated as one that
+    # does not, so an unrecognised shape draws the warning rather than a
+    # clean bill.
+    if not getattr(budget, "has_abort_rung", False):
+        limits = getattr(budget, "limits", None) or {}
+        add("warn", "budget_limits_without_abort",
+            f"budget_control declares limits ({', '.join(sorted(limits))}) "
+            f"but {_ladder_shape(budget)} — the ceilings are observed, never "
+            "enforced. The degrade ladder is the only consumer of the usage "
+            "fraction, so this run crosses 100% in silence; of the three "
+            "actions only 'abort' stops it (finalize and escalate are latched "
+            "for a layer above and are advice a looping model can decline). "
+            "Add a terminal rung: degrade: [{at: 100, action: abort}]."
+            + _backgrounded_profile_note(profile),
+            where="budget_control.degrade")
+
+    _check_budget_overlays(profile, budget, add)
+
+
+def _ladder_shape(budget: Any) -> str:
+    """Describe what the ladder does instead of aborting, for the message.
+
+    "no degrade ladder at all" and "a ladder that ends in finalize" are the
+    same defect and want the same code, but not the same sentence — telling
+    an author who wrote a three-rung ladder that they have none reads as a
+    validator bug and gets the finding dismissed.
+    """
+    rungs = tuple(getattr(budget, "degrade", ()) or ())
+    if not rungs:
+        return "declares no degrade ladder at all"
+    last = rungs[-1]
+    # Ladder order, deduped — not sorted: the message reads as a description
+    # of the author's own ladder, and re-alphabetising it ("escalate/finalize"
+    # for a finalize-then-escalate ladder) reads as a different ladder.
+    actions = list(dict.fromkeys(r.action for r in rungs if r.action))
+    if not actions:
+        return (f"its {len(rungs)}-rung ladder only rebinds tiers (a brownout, "
+                f"never a stop)")
+    return (f"its ladder ends at {last.at_percent:g}% with "
+            f"{'/'.join(actions)}, and no rung aborts")
+
+
+def _backgrounded_profile_note(profile: Any) -> str:
+    """Extra sentence for a profile that is bound to a persona (#947).
+
+    The danger is not uniform.  A profile spawned as a subagent outlives
+    the thing that would have noticed: ``spawn_subagent`` backgrounds it,
+    and the parent's shutdown deliberately preserves it ("Subagent plugin
+    shutdown (running subagents preserved)") — correct behaviour, and
+    exactly what leaves an unbudgeted loop with nothing left in the
+    session to stop it.  In the incident the parent had been gone for two
+    minutes and the child was still spending.
+
+    ``default_agent`` is the honest discriminator available here.  Every
+    discovered profile is reachable by name through ``spawn_subagent``, so
+    "is it spawnable" cannot separate anything; a profile that names its
+    own persona is one built to be spawned by profile name alone, which is
+    what #944 added ``default_agent`` for.  The signal is therefore used
+    ONE WAY — to strengthen a message that fires regardless — never to
+    weaken or suppress one, because its absence proves nothing.
+
+    Returns a leading-space sentence, or ``""``.
+    """
+    if not getattr(profile, "default_agent", None):
+        return ""
+    return (" This profile binds a default_agent, so it is built to be spawned "
+            "by name — and a subagent is deliberately preserved when its "
+            "parent shuts down, so an unbounded loop here outlives the "
+            "session that could have noticed it.")
+
+
+def _check_budget_overlays(profile: Any, budget: Any, add) -> None:
+    """Check a degrade ladder's tier overlays against the profile's tiers.
+
+    The block is already parsed + structurally validated at profile-load
+    time (``BudgetControlConfig.from_dict``; a malformed one surfaces as
+    ``parse_error``, so it never reaches here).  What load time CANNOT know
+    is (a) which providers are installed and (b) how the ladder relates to
+    the profile's own ``model_tiers`` — both checked here, reusing the exact
+    same resolve_provider / tier-name machinery :func:`_check_model_tiers`
+    uses (an overlay IS a tier table, so it inherits the same defect
+    classes).
+
+    Args:
+        profile: The resolved profile object.
+        budget: Its non-``None`` :class:`~shared.budget_control.BudgetControlConfig`.
+        add: The per-profile diagnostic sink from :func:`validate_profile`.
+    """
+    # Local import: _check_model_tiers imports these inside its own body,
+    # which may not have run (a profile can declare a budget ladder with no
+    # tiers — exactly the case flagged below).
+    from shared.model_tiers import RESERVED_KEYS
+    declared_tiers = {
+        k for k in (getattr(profile, "model_tiers", None) or {})
+        if k not in RESERVED_KEYS
+    }
+    for i, rung in enumerate(getattr(budget, "degrade", ()) or ()):
+        overlay = getattr(rung, "model_tiers", None) or {}
+        if overlay and not declared_tiers:
+            # An overlay patches the session's tier table; with no
+            # model_tiers there is no table to patch, so the rung would
+            # silently do nothing at runtime.
+            add("error", "budget_overlay_without_tiers",
+                f"budget_control.degrade[{i}] overlays model_tiers "
+                f"({', '.join(sorted(overlay))}) but the profile declares no "
+                "model_tiers — the overlay would have no table to rebind. "
+                "Declare model_tiers, or use an action-only rung "
+                "(finalize / abort / escalate).",
+                where=f"budget_control.degrade[{i}].model_tiers")
+            continue
+        for tier_name, entry in overlay.items():
+            if tier_name not in declared_tiers:
+                add("warn", "budget_overlay_undeclared_tier",
+                    f"budget_control.degrade[{i}] rebinds tier "
+                    f"'{tier_name}', which the profile's model_tiers does "
+                    f"not declare (has: {', '.join(sorted(declared_tiers))})"
+                    " — degrading would ADD a tier the agent could not "
+                    "reach before.",
+                    where=f"budget_control.degrade[{i}].model_tiers.{tier_name}")
+            tprov = getattr(entry, "provider", None)
+            if tprov and introspect.resolve_provider(tprov) is None:
+                add("error", "unknown_provider",
+                    f"budget_control.degrade[{i}].model_tiers.{tier_name} "
+                    f"provider '{tprov}' is not installed (a degrade overlay "
+                    "may cross providers, but must name a real one — see "
+                    "`jaato-scaffold explain providers`)",
+                    where=f"budget_control.degrade[{i}].model_tiers."
+                          f"{tier_name}.provider")
 
 
 def _check_model_tiers(mt_cfg, add, provider_name=None):
