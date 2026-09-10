@@ -49,7 +49,7 @@ role provider.
 |-------|-------|
 | Image-input conversion in adapters | ✅ every provider that declares `user_message_images` — all but `chrome_ai`, `claude_cli` and `github_models`. The OpenAI-compatible fleet shares one converter path (`model_provider/_attachments.py`), which is how the "0 of the local fleet" row above closed in one change rather than ten |
 | Input source | 🟡 `readFile` MIME-detects files, and a client attaches media on `SendMessageRequest.attachments` — an attachment with no text is a valid turn (#838). Still no paste/URL/drag-drop |
-| Modality breadth | 🟡 PDF input where the wire declares `pdf_input` (`anthropic`, `google_genai`, `openai`, `openrouter`); audio input where it declares `audio_input` (`google_genai`, `openai`, `openrouter`; #830). `openai` is the native first-party wire (#508); the Azure provider shares its request shape but gates both extensions on api-version and on the deployment, so it declares neither. Video: no wire carries it |
+| Modality breadth | 🟡 PDF input where the wire declares `pdf_input` (`anthropic`, `bedrock`, `google_genai`, `openai`, `openrouter`); audio input where it declares `audio_input` (`bedrock`, `google_genai`, `openai`, `openrouter`; #830). `openai` is the native first-party wire (#508); the Azure provider shares its request shape but gates both extensions on api-version and on the deployment, so it declares neither. `bedrock` (#508) is the first wire whose document block is not an OpenAI `file` block at all, and the first to carry **video** — Converse names a video format vocabulary and `bedrock/converters.py` emits it, reachable for a model whose `modalities` say `video`. There is still no `video_input` capability column, so that half stays unguarded and undeclared rather than asserted |
 | Output (model→media) | ✅ model-emitted audio streams as `MediaDelta` and reaches clients as `CLIENT`-audience chunks (#824); declared by `output_media` on `azure_openai`, `doubleword`, `kimi`, `mimo`, `minimax`, `nebius`, `nim`, `openai`, `openrouter`, `ovhcloud` and `zhipuai_openai` — the native `openai` provider decodes it on both of its wires, the Responses events being the same split (bytes, then words) under different names |
 | Capability awareness | ✅ `modalities()` / `resolve_modalities` for input and `output_modalities()` for output, per provider; `supports_modality()` is the framework's one answer to "can this model consume that?" |
 | Media in history | ✅ replay is gated per request by the *active* model (#847); consumed audio is evicted after its turn and GC sizes media in tokens and in bytes (#850) |
@@ -277,7 +277,9 @@ backstop when the agent forgets.
   *Partly closed since:* PDF landed with `pdf_input` and audio with
   `audio_input` (#829, #830) — both as per-wire opt-ins in
   `model_provider/_attachments.py`, both guarded in each direction by
-  `test_provider_capability_conformance`. Video remains open, and remains
+  `test_provider_capability_conformance`. #508's `bedrock` adds a wire that
+  carries a video block too, which is what makes the missing column visible
+  rather than theoretical. Video remains open, and remains
   deliberately unchecked by `jaato-scaffold validate`: with no capability
   column there is nothing to check, and a warning would be inventing a
   verdict. The prediction in this section held — the gate, the validator and

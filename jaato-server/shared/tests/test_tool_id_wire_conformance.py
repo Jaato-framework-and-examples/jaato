@@ -46,6 +46,7 @@ def _tool_schema_fn(message_fn: str) -> str:
     """The tool-schema converter fn that pairs with a message converter."""
     return {
         "message_to_anthropic": "tool_schemas_to_anthropic",
+        "message_to_bedrock": "tool_schemas_to_bedrock",
         # chrome_ai has no wire tools array — its "tools surface" is the
         # prompt-injected section, rendered (and hashed) by this fn.
         "message_to_prompt_api": "tool_schemas_to_prompt",
@@ -76,7 +77,7 @@ def test_tools_array_never_leaks_human_tool_names(provider):
 
 # Providers whose provider.py forwards a tool_choice to the wire.
 _TOOL_CHOICE_FORWARDERS = {"nebius", "openrouter", "vllm", "tensorrt_llm",
-                           "triton", "anthropic"}
+                           "triton", "anthropic", "bedrock"}
 
 # Of those, the ones not YET routing through tool_choice_to_wire.  nebius +
 # tensorrt_llm are migrated onto the OpenAICompat base (which maps); the rest
@@ -89,6 +90,20 @@ def _provider_src(provider: str) -> str:
     return p.read_text(encoding="utf-8") if p.exists() else ""
 
 
+def _provider_converters_src(provider: str) -> str:
+    """The provider's own ``converters.py``, or ``""``.
+
+    Read alongside ``provider.py`` because a provider whose wire shape is
+    neither OpenAI's nor Anthropic's must TRANSLATE the mapped choice as well
+    as map it (Bedrock spells it ``{"tool": {"name": ...}}``), and that
+    translation belongs with the rest of its wire knowledge.  What the guard
+    cares about is that the package routes the name through the one mapper,
+    not which of its two files does so.
+    """
+    p = PROVIDER_DIR / provider / "converters.py"
+    return p.read_text(encoding="utf-8") if p.exists() else ""
+
+
 def _maps_tool_choice(provider: str) -> bool:
     """Does this forwarder route tool_choice through the wire-id mapper?
 
@@ -97,7 +112,7 @@ def _maps_tool_choice(provider: str) -> bool:
     the whole fleet.  As providers migrate onto the base, the inheritance arm
     is what lets them leave ``_TOOL_CHOICE_MAPPING_PENDING``.
     """
-    src = _provider_src(provider)
+    src = _provider_src(provider) + _provider_converters_src(provider)
     return (
         "tool_choice_to_wire" in src
         or "OpenAICompatProvider" in src

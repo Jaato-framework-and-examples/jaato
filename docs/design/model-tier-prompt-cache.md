@@ -900,16 +900,16 @@ cross-cutting concern with no first-class home in a profile.
 `ProviderCapabilities.prompt_caching`
 (`model_provider/base.py:321,351`) is already a canonical, CI-guarded
 declaration of *whether* a provider can cache — `anthropic`,
-`google_genai` and `openrouter` declare `True`. There is no matching
-declaration of *whether it should*. Instead:
+`google_genai`, `openrouter` and `bedrock` declare `True`. There is no
+matching declaration of *whether it should*. Instead:
 
-| | anthropic | google_genai | openrouter |
-|---|---|---|---|
-| on/off key | `enable_caching` (bool) | `enable_caching` (bool) | `cache_prompt` (`auto`/true/false) |
-| layer | top-level | top-level | `api_params` |
-| TTL units | `5m` / `1h` | `3600s` | `5m` / `1h` |
-| default | off | off | **on** (`auto`) |
-| delivery | cache plugin | cache plugin | provider-internal |
+| | anthropic | google_genai | openrouter | bedrock |
+|---|---|---|---|---|
+| on/off key | `enable_caching` (bool) | `enable_caching` (bool) | `cache_prompt` (`auto`/true/false) | `enable_caching` (bool) |
+| layer | top-level | top-level | `api_params` | top-level |
+| TTL units | `5m` / `1h` | `3600s` | `5m` / `1h` | `5m` / `1h` |
+| default | off | off | **on** (`auto`) | off |
+| delivery | cache plugin | cache plugin | provider-internal | provider-internal (`cachePoint` blocks) |
 
 The mechanisms genuinely differ — breakpoints, a server-side object, and
 a gateway annotation are not the same thing. But "on or off", "how long",
@@ -957,12 +957,20 @@ new caching provider therefore cannot land with the common field silently
 inert for it — which is this document's own §4 failure, in the shape it
 would next take.
 
-| | anthropic | google_genai | openrouter |
-|---|---|---|---|
-| `enabled: true` | `enable_caching: true` | `enable_caching: true` | `api_params.cache_prompt: true` |
-| `ttl: 1h` | `cache_ttl: "1h"` | `cache_ttl: "3600s"` | `api_params.cache_ttl: "1h"` |
-| `history: false` | `cache_history: false` | *(no history breakpoint)* | *(not exposed)* |
-| `enabled: auto` | *(emits nothing)* | *(emits nothing)* | `cache_prompt: "auto"` |
+| | anthropic | google_genai | openrouter | bedrock |
+|---|---|---|---|---|
+| `enabled: true` | `enable_caching: true` | `enable_caching: true` | `api_params.cache_prompt: true` | `enable_caching: true` |
+| `ttl: 1h` | `cache_ttl: "1h"` | `cache_ttl: "3600s"` | `api_params.cache_ttl: "1h"` | `cache_ttl: "1h"` |
+| `history: false` | `cache_history: false` | *(no history breakpoint)* | *(not exposed)* | *(no history breakpoint)* |
+| `enabled: auto` | *(emits nothing)* | *(emits nothing)* | `cache_prompt: "auto"` | *(emits nothing)* |
+
+`bedrock` is the fourth mechanism and the one that shows the table was
+worth building: Converse's `cachePoint` is a *block in the content array*
+rather than an annotation on one (`cache_control`) or a server-side object
+(`CachedContent`), and the provider emits it itself rather than through a
+cache plugin — yet the same three questions ("on or off", "how long", "how
+much history") map onto it unchanged, and the third answers *there is no
+third breakpoint* the same way Google's does.
 
 `auto` emits nothing for the enable key because it means "leave the
 provider's default alone" — writing a value would invert it. OpenRouter

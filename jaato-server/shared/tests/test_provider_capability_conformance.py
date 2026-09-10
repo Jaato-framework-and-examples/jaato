@@ -75,6 +75,7 @@ _CONVERTERS: Dict[str, Tuple[str, str]] = {
     "kimi":           ("_openai_compat/converters.py",        "message_to_openai"),
     "minimax":        ("_openai_compat/converters.py",        "message_to_openai"),
     "anthropic":      ("anthropic/converters.py",  "message_to_anthropic"),
+    "bedrock":        ("bedrock/converters.py",    "message_to_bedrock"),
     "chrome_ai":      ("chrome_ai/converters.py",  "message_to_prompt_api"),
     "ollama":         ("anthropic/converters.py",  "message_to_anthropic"),
     "zhipuai":        ("anthropic/converters.py",  "message_to_anthropic"),
@@ -84,12 +85,37 @@ _CONVERTERS: Dict[str, Tuple[str, str]] = {
 # full-suite follow-up; pinned so a new provider can't join silently.
 _CONFORMANCE_PENDING = {"google_genai", "antigravity", "github_models", "claude_cli"}
 
-_PNG = b"\x89PNG\r\n\x1a\nCONFORMANCE-IMAGE-PAYLOAD-1234567890"
+_IMAGE_MARK = "CONFORMANCE-IMAGE-PAYLOAD-1234567890"
+_PDF_MARK = "CONFORMANCE-PDF-PAYLOAD-1234567890"
+_AUDIO_MARK = "CONFORMANCE-AUDIO-PAYLOAD-1234567890"
+
+_PNG = b"\x89PNG\r\n\x1a\n" + _IMAGE_MARK.encode()
 _B64 = base64.b64encode(_PNG).decode("utf-8")
-_PDF = b"%PDF-1.4 CONFORMANCE-PDF-PAYLOAD-1234567890 %%EOF"
+_PDF = b"%PDF-1.4 " + _PDF_MARK.encode() + b" %%EOF"
 _PDF_B64 = base64.b64encode(_PDF).decode("utf-8")
-_WAV = b"RIFF\x00\x00\x00\x00WAVEfmt CONFORMANCE-AUDIO-PAYLOAD-1234567890"
+_WAV = b"RIFF\x00\x00\x00\x00WAVEfmt " + _AUDIO_MARK.encode()
 _WAV_B64 = base64.b64encode(_WAV).decode("utf-8")
+
+
+def _on_wire(wire, b64: str, marker: str) -> bool:
+    """Did this payload reach the wire, in either encoding a converter may use?
+
+    Most wires carry an attachment base64-encoded inside JSON, so the base64
+    is the natural thing to scan for.  A wire whose SDK takes raw ``bytes``
+    blob members and does the base64 itself -- Bedrock's Converse
+    ``source: {"bytes": ...}`` -- carries the identical content without the
+    base64 ever appearing, so the raw payload counts as well; it is
+    recognised by the ASCII marker each fixture embeds, which survives the
+    ``bytes`` repr ``json.dumps(..., default=str)`` produces.
+
+    Broadening detection STRENGTHENS both halves of every capability
+    contract rather than relaxing either: the positive tests stop demanding
+    one particular encoding, and the negative tests ("a provider that did
+    not declare this must not send it") now also catch a raw-bytes leak they
+    were blind to.
+    """
+    blob = json.dumps(wire, default=str)
+    return b64 in blob or marker in blob
 
 
 def _load_converter(relpath: str, fn: str) -> Callable:
@@ -101,8 +127,8 @@ def _load_converter(relpath: str, fn: str) -> Callable:
 
 
 def _wire_has_image(wire) -> bool:
-    """Did the image base64 reach the wire (any role/block shape)?"""
-    return _B64 in json.dumps(wire, default=str)
+    """Did the image reach the wire (any role/block shape, either encoding)?"""
+    return _on_wire(wire, _B64, _IMAGE_MARK)
 
 
 def _user_image_msg() -> Message:
@@ -162,7 +188,7 @@ def test_declared_pdf_input_user_message_is_marshalled(provider):
     relpath, fn = _CONVERTERS[provider]
     convert = _load_converter(relpath, fn)
     wire = convert(_user_pdf_msg())
-    assert _PDF_B64 in json.dumps(wire, default=str), (
+    assert _on_wire(wire, _PDF_B64, _PDF_MARK), (
         f"{provider} declares pdf_input=True but {fn} did NOT put the PDF on the "
         f"wire. Fix the converter or set pdf_input=False."
     )
@@ -175,7 +201,7 @@ def test_declared_pdf_input_tool_result_is_marshalled(provider):
     relpath, fn = _CONVERTERS[provider]
     convert = _load_converter(relpath, fn)
     wire = convert(_tool_pdf_msg())
-    assert _PDF_B64 in json.dumps(wire, default=str), (
+    assert _on_wire(wire, _PDF_B64, _PDF_MARK), (
         f"{provider} declares pdf_input=True but {fn} did NOT surface the "
         f"tool-result PDF to the model. Fix the converter or set pdf_input=False."
     )
@@ -214,7 +240,7 @@ def _assert_undeclared_pdf_absent(provider, wire, what):
     still be marshalling it, so a fix surfaces as a stale entry instead of
     lingering as permanent permission.
     """
-    on_wire = _PDF_B64 in json.dumps(wire, default=str)
+    on_wire = _on_wire(wire, _PDF_B64, _PDF_MARK)
     if provider in _PDF_DECLARATION_VIOLATIONS:
         assert on_wire, (
             f"{provider} is listed in _PDF_DECLARATION_VIOLATIONS but no longer "
@@ -318,7 +344,7 @@ def test_declared_audio_input_user_message_is_marshalled(provider):
     relpath, fn = _CONVERTERS[provider]
     convert = _load_converter(relpath, fn)
     wire = convert(_user_audio_msg())
-    assert _WAV_B64 in json.dumps(wire, default=str), (
+    assert _on_wire(wire, _WAV_B64, _AUDIO_MARK), (
         f"{provider} declares audio_input=True but {fn} did NOT put the audio "
         f"on the wire. Fix the converter or set audio_input=False."
     )
@@ -331,7 +357,7 @@ def test_declared_audio_input_tool_result_is_marshalled(provider):
     relpath, fn = _CONVERTERS[provider]
     convert = _load_converter(relpath, fn)
     wire = convert(_tool_audio_msg())
-    assert _WAV_B64 in json.dumps(wire, default=str), (
+    assert _on_wire(wire, _WAV_B64, _AUDIO_MARK), (
         f"{provider} declares audio_input=True but {fn} did NOT surface the "
         f"tool-result audio to the model. Fix the converter or set "
         f"audio_input=False."
@@ -354,7 +380,7 @@ def test_undeclared_audio_input_is_not_marshalled(provider, build, what):
         pytest.skip(f"{provider} declares audio_input — covered by the positive test")
     relpath, fn = _CONVERTERS[provider]
     convert = _load_converter(relpath, fn)
-    assert _WAV_B64 not in json.dumps(convert(build()), default=str), (
+    assert not _on_wire(convert(build()), _WAV_B64, _AUDIO_MARK), (
         f"{provider} declares audio_input=False but its converter put the "
         f"{what} audio on the wire anyway — the declaration and the code "
         f"disagree. Withhold it, or set audio_input=True if the wire really "

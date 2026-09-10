@@ -128,6 +128,7 @@ Four plugin types:
 - `model_provider/google_genai/`: Google GenAI/Vertex AI
 - `model_provider/openai/`: OpenAI, natively — **two wires in one plugin**: Chat Completions (the shared `_openai_compat` transport, with PDF `file` blocks and `input_audio` enabled because OpenAI's own endpoint carries them) and the **Responses API** (`api: responses` — flat `input` items, typed SSE events, reasoning summaries). `context_length` must be set: OpenAI's catalog reports no window for any model
 - `model_provider/azure_openai/`: Azure OpenAI — deployment-name routing (`model:` carries the *deployment*, not the model id), a required `api_version`, and resource-key **or** Microsoft Entra ID auth (`auth: aad`, via `azure-identity`); `context_length` must be set
+- `model_provider/bedrock/`: **AWS Bedrock** — Anthropic, Amazon Nova, Meta, Mistral, Cohere, AI21 and DeepSeek behind ONE message-shaped API (`Converse` / `ConverseStream`) in the customer's own AWS account. The only provider here that resolves **no credential of its own**: SigV4 signing is botocore's, so `initialize()` builds a `boto3.Session` and asks it what it found (env / profile / SSO / instance role). `context_length` must be set — Bedrock's catalog reports no capacity
 - `model_provider/anthropic/`: Anthropic Claude API
 - `model_provider/claude_cli/`: Claude Code CLI wrapper (uses subscription, not API credits)
 - `model_provider/github_models/`: GitHub Models API (uses `azure-ai-inference` SDK)
@@ -1883,6 +1884,85 @@ plugin_configs:
 Check the wiring before spending anything:
 `python examples/provider_smoke_openai_azure.py` (mock, then
 `--live-azure --deployment <name>` for the real resource).
+
+### AWS Bedrock
+| Variable | Purpose |
+|----------|---------|
+| `JAATO_BEDROCK_REGION` | AWS region (**required** — via this, `AWS_REGION`, `AWS_DEFAULT_REGION`, the named profile, or the `region` knob) |
+| `AWS_REGION` | The vendor's documented region variable. Read by jaato because Python's botocore maps `region` to `AWS_DEFAULT_REGION` **alone**, so a host configured the documented way resolves nothing through boto3 |
+| `JAATO_BEDROCK_MODEL` | Default model id / inference-profile id |
+| `JAATO_BEDROCK_CONTEXT_LENGTH` | Context window (**required in practice** — see below) |
+| `JAATO_BEDROCK_PROFILE` | Named AWS profile for this session (the per-session override of boto3's `AWS_PROFILE`) |
+| `JAATO_BEDROCK_ENDPOINT_URL` | `bedrock-runtime` endpoint override (a VPC endpoint) |
+
+**Authentication: jaato resolves nothing.**  Every other provider in this
+tree resolves an API key.  SigV4 signing belongs to botocore, and so does
+the chain behind it, so `initialize()` builds a `boto3.Session` and reads
+`get_credentials()` — env vars, a named profile, IAM Identity Center, an
+ECS/EKS task role, an EC2 instance role, in boto3's own order.  There is no
+`api_key` knob and no interactive login (AWS's own is `aws sso login`, run
+outside the process).  The practical consequence: **a confined runner on EC2
+or EKS needs no provider credential in its environment at all** — which also
+means `scrub_secret_env` has nothing of Bedrock's to strip.
+
+Bedrock is one endpoint over many vendors, so the wire is Amazon's rather
+than OpenAI's, and three things follow from what its catalog does *not*
+report:
+
+- **You must set a context window.**  `ListFoundationModels` describes
+  modalities and streaming support, never capacity, so
+  `plugin_configs.bedrock.context_length` (or the env var) is required and
+  `connect()` fails loud without it — as with the native OpenAI and Azure
+  providers.  A guessed window truncates a session without saying so.
+- **Input modalities come from a documented per-family table**, not from
+  detection.  The catalog's vocabulary is `TEXT | IMAGE | EMBEDDING`, which
+  cannot express the `document` and `audio` blocks Converse plainly carries;
+  an incomplete source wearing the authoritative *detect* tier would withhold
+  every PDF from a model that reads PDFs.  `plugin_configs.bedrock.modalities`
+  is above the table for a model it does not name.  Cross-region inference
+  profiles (`us.` / `eu.` / `apac.` prefixes) are matched with the prefix
+  stripped: it routes the request and says nothing about the model.
+- **Every media block names a format from a CLOSED vocabulary** — `png`,
+  `jpeg`, `gif`, `webp` for images; `pdf`, `csv`, `doc`, `docx`, `xls`,
+  `xlsx`, `html`, `txt`, `md` for documents; a fixed audio list; a fixed
+  video list.  A mime outside a vocabulary is **withheld with a note**, never
+  relabelled into one that is inside it (that is #829).  Raw PCM is accepted
+  only when its parameters agree with Bedrock's `pcm` (s16le); `audio/L16` is
+  refused outright, because RFC 2586 makes it big-endian.
+
+**Extended thinking is extraction-only by default, and deliberately.**
+Converse's `reasoningContent` block carries the upstream's `signature` beside
+the text, and the Anthropic-family models require that block back — signature
+included — on the next request of a tool-call loop.  `Part.thought` has
+nowhere to put a signature, so replaying the text alone would be rejected by
+the very models that produced it.  The provider therefore reads reasoning out
+(it reaches the UI and `ProviderResponse.thinking`) and does not write it
+back; `api_params.enable_thinking` exists and **WARNS at connect** that a
+thinking turn which also calls tools may be refused.  Wiring it properly
+needs a signature-carrying part — the reasoning-replay seam's next step,
+which is why `reasoning_replay` is declared `False` rather than fudged.
+
+```yaml
+# profile example: Claude on Bedrock, cross-region, cached, no secret anywhere
+provider: bedrock
+model: us.anthropic.claude-sonnet-4-5-20250929-v1:0   # an inference profile
+plugin_configs:
+  bedrock:
+    region: us-east-1
+    context_length: 200000        # required — the catalog reports none
+    enable_caching: true          # Converse cachePoint blocks
+    cache_ttl: "1h"               # 5m | 1h; anything else is dropped
+    api_params:
+      max_tokens: 8192
+      temperature: 0.0
+```
+
+`pip install 'jaato-server[bedrock]'`.
+
+> **Not covered here:** the `InvokeModel` wire (Converse supersedes it for
+> every text model), Bedrock Agents / Knowledge Bases (a different service
+> shape), and the batch inference API (submit → poll → collect, the same
+> follow-up shape Doubleword's batch tier is).
 
 ### Anthropic Claude
 | Variable | Purpose |
