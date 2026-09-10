@@ -69,6 +69,9 @@ azure-openai = [
     "openai>=1.66",  # Azure OpenAI provider: the SDK's AzureOpenAI client (deployment routing + api-version)
     "azure-identity>=1.15.0",  # Microsoft Entra ID auth (auth: aad); not needed for resource-key auth
 ]
+bedrock = [
+    "boto3>=1.35",  # Amazon Bedrock provider: the Converse API client, and botocore's SigV4 signer + credential-resolution chain (jaato holds no AWS credential of its own)
+]
 openrouter = [
     "openai>=1.0",  # OpenRouter model provider: OpenAI-compatible SDK
 ]
@@ -117,7 +120,7 @@ telemetry = [
     "opentelemetry-exporter-otlp-proto-http>=1.20.0",  # OTLP HTTP exporter
 ]
 all = [
-    "jaato-server[dev,google,github-models,nim,openai,azure-openai,openrouter,ovhcloud,web,interactive,ast,notebook,diagrams,templates,kaggle,kerberos,telemetry]",
+    "jaato-server[dev,google,github-models,nim,openai,azure-openai,bedrock,openrouter,ovhcloud,web,interactive,ast,notebook,diagrams,templates,kaggle,kerberos,telemetry]",
 ]
 
 [project.scripts]

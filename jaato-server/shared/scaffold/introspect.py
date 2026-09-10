@@ -738,39 +738,90 @@ def _env_doc_comments(source: str) -> Dict[int, str]:
     return out
 
 
-def _env_reads(node: ast.AST, const_map: Dict[str, str]):
-    """Yield (name, default_node_or_None, lineno) for each os.environ read.
+#: The session-scoped read.  ``get_session_env`` checks the per-session
+#: ``ContextVar`` before falling back to ``os.environ`` and is what
+#: ``test_session_env_audit`` tells authors to migrate TO -- so a scan that
+#: only knew ``os.environ`` went blind exactly where the framework's own rule
+#: was followed.  Measured: every ``JAATO_CHROME_AI_*`` var, and
+#: ``JAATO_PROFILE_SET`` itself, were read by the installed tree, documented
+#: in CLAUDE.md, and absent from ``explain env``.
+_SESSION_ENV_READERS = frozenset({"get_session_env"})
 
-    Matches ``os.getenv``/``os.environ.get``/``environ.get`` (call) and
-    ``os.environ[...]``/``environ[...]`` (subscript).  Keys may be string
-    literals OR same-file string constants (resolved via ``const_map``).
-    ``lineno`` is the read site's line, for `# env:` doc-comment lookup.
+
+def _session_env_read(n: ast.AST, const_map: Dict[str, str]):
+    """``get_session_env("X")`` -> ``(name, default_node, lineno)``, else None.
+
+    The session-scoped read, which ``test_session_env_audit`` tells authors
+    to migrate TO -- so a scan that knew only ``os.environ`` went blind
+    exactly where the framework's own rule was followed.
+    """
+    if not (isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+            and n.func.id in _SESSION_ENV_READERS and n.args):
+        return None
+    key = _key_of(n.args[0], const_map)
+    if key is None:
+        return None
+    return key, (n.args[1] if len(n.args) >= 2 else None), getattr(n, "lineno", 0)
+
+
+def _os_environ_call_read(n: ast.AST, const_map: Dict[str, str]):
+    """``os.getenv(...)`` / ``os.environ.get(...)`` / ``environ.get(...)``."""
+    if not (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+            and n.args):
+        return None
+    attr, v = n.func.attr, n.func.value
+    is_getenv = attr == "getenv" and isinstance(v, ast.Name) and v.id == "os"
+    is_environ_get = attr == "get" and (
+        (isinstance(v, ast.Attribute) and v.attr == "environ")
+        or (isinstance(v, ast.Name) and v.id == "environ")
+    )
+    if not (is_getenv or is_environ_get):
+        return None
+    key = _key_of(n.args[0], const_map)
+    if key is None:
+        return None
+    return key, (n.args[1] if len(n.args) >= 2 else None), getattr(n, "lineno", 0)
+
+
+def _os_environ_subscript_read(n: ast.AST, const_map: Dict[str, str]):
+    """``os.environ["X"]`` / ``environ["X"]``."""
+    if not isinstance(n, ast.Subscript):
+        return None
+    v = n.value
+    if not ((isinstance(v, ast.Attribute) and v.attr == "environ")
+            or (isinstance(v, ast.Name) and v.id == "environ")):
+        return None
+    key = _key_of(n.slice, const_map)
+    if key is None:
+        return None
+    return key, None, getattr(n, "lineno", 0)
+
+
+#: The read shapes, in the order they are tried.  A node matches at most
+#: one, so the first hit wins and the rest are skipped.
+_ENV_READ_SHAPES = (
+    _session_env_read,
+    _os_environ_call_read,
+    _os_environ_subscript_read,
+)
+
+
+def _env_reads(node: ast.AST, const_map: Dict[str, str]):
+    """Yield (name, default_node_or_None, lineno) for each env read.
+
+    Covers the session-scoped ``get_session_env(...)`` and both
+    ``os.environ`` shapes; each is recognised by its own helper in
+    :data:`_ENV_READ_SHAPES` so adding a fourth shape is a new function
+    rather than another branch here.  Keys may be string literals OR
+    same-file string constants (resolved via ``const_map``).  ``lineno`` is
+    the read site's line, for `# env:` doc-comment lookup.
     """
     for n in ast.walk(node):
-        # Call forms: os.getenv / os.environ.get / environ.get
-        if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute):
-            attr = n.func.attr
-            v = n.func.value
-            is_getenv = attr == "getenv" and isinstance(v, ast.Name) and v.id == "os"
-            is_environ_get = (
-                attr == "get" and (
-                    (isinstance(v, ast.Attribute) and v.attr == "environ")
-                    or (isinstance(v, ast.Name) and v.id == "environ")
-                )
-            )
-            if (is_getenv or is_environ_get) and n.args:
-                key = _key_of(n.args[0], const_map)
-                if key is not None:
-                    default = n.args[1] if len(n.args) >= 2 else None
-                    yield key, default, getattr(n, "lineno", 0)
-        # Subscript form: os.environ["X"] / environ["X"]
-        elif isinstance(n, ast.Subscript):
-            v = n.value
-            if (isinstance(v, ast.Attribute) and v.attr == "environ") or \
-               (isinstance(v, ast.Name) and v.id == "environ"):
-                key = _key_of(n.slice, const_map)
-                if key is not None:
-                    yield key, None, getattr(n, "lineno", 0)
+        for shape in _ENV_READ_SHAPES:
+            hit = shape(n, const_map)
+            if hit is not None:
+                yield hit
+                break
 
 
 def _categorize(name: str, rel_path: str) -> str:

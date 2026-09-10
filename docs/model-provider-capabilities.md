@@ -9,6 +9,7 @@ Each cell is a **wire-level** behavior the CI conformance guard asserts, not a l
 | `anthropic` | ✅ | ✅ | ✅ | — | — | ✅ | ✅ | ✅ | ✅ | — | — |
 | `antigravity` | ✅ | — | — | — | — | ✅ | — | ✅ | ✅ | — | — |
 | `azure_openai` | ✅ | ✅ | — | — | ✅ | — | — | ✅ | ✅ | ✅ | — |
+| `bedrock` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | — | — |
 | `chrome_ai` | — | — | — | — | — | — | — | ✅ | ✅ | — | — |
 | `claude_cli` | — | — | — | — | — | ✅ | — | ✅ | — | — | — |
 | `doubleword` | ✅ | ✅ | — | — | ✅ | ✅ | — | ✅ | ✅ | ✅ | — |

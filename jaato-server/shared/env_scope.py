@@ -199,11 +199,58 @@ CATALOG: Dict[str, EnvClass] = {
         "name; this is only its default"),
     "JAATO_AZURE_OPENAI_ENDPOINT": EnvClass(SESSION, "plugin_configs.azure_openai.endpoint",
         "the resource URL; azure_openai exposes the knob"),
+    # Bedrock reads NO AWS CREDENTIAL variable of its own: SigV4 signing is
+    # botocore's and so is the chain behind it, so AWS_ACCESS_KEY_ID and
+    # friends are read by boto3 and never by this tree -- which is why they
+    # are absent from this catalog rather than tagged `ambient`.  What jaato
+    # resolves is where the request goes and how to size it.
+    "AWS_REGION": EnvClass(SESSION, "plugin_configs.bedrock.region",
+        "the vendor's documented region variable, read by the bedrock "
+        "provider because Python's botocore maps `region` to "
+        "AWS_DEFAULT_REGION alone -- so a host configured the documented way "
+        "resolves nothing through boto3"),
+    "JAATO_BEDROCK_CONTEXT_LENGTH": EnvClass(SESSION, "plugin_configs.bedrock.context_length",
+        "required window; Bedrock's catalog reports no capacity, and bedrock "
+        "exposes the knob"),
+    "JAATO_BEDROCK_ENDPOINT_URL": EnvClass(SESSION, "plugin_configs.bedrock.endpoint_url",
+        "bedrock-runtime endpoint override (VPC endpoint); bedrock exposes "
+        "the knob"),
+    "JAATO_BEDROCK_MODEL": EnvClass(SESSION, "model",
+        "the profile's own `model` field carries the Bedrock model or "
+        "inference-profile id; this is only its default"),
+    "JAATO_BEDROCK_PROFILE": EnvClass(SESSION, "plugin_configs.bedrock.profile",
+        "which AWS profile signs the request -- session-scoped precisely so "
+        "two sessions can bill two accounts; bedrock exposes the knob"),
+    "JAATO_BEDROCK_REGION": EnvClass(SESSION, "plugin_configs.bedrock.region",
+        "Bedrock is regional and model availability differs by region; "
+        "bedrock exposes the knob"),
     "JAATO_BOOTSTRAP_TIMING": EnvClass(HOST, None,
         "prints a bootstrap timing report; a developer toggle, not agent "
         "behaviour"),
     "JAATO_CGROUPS_ROOT": EnvClass(HOST, None,
         "where the host delegated cgroup v2 subtree_control; one per host"),
+    # chrome_ai reads its knobs through get_session_env, which is the
+    # framework's own recommended API -- and until the scan learned to see
+    # that call (#508) these seven were read by the installed tree,
+    # documented in CLAUDE.md, and absent from `explain env` entirely.
+    "JAATO_CHROME_AI_BINARY": EnvClass(SESSION, "plugin_configs.chrome_ai.binary",
+        "which browser binary to launch; chrome_ai exposes the knob"),
+    "JAATO_CHROME_AI_CDP_URL": EnvClass(SESSION, "plugin_configs.chrome_ai.cdp_url",
+        "attach to an already-running browser instead of launching one; "
+        "chrome_ai exposes the knob"),
+    "JAATO_CHROME_AI_CONTEXT_LENGTH": EnvClass(SESSION, "plugin_configs.chrome_ai.context_length",
+        "manual context-window override; chrome_ai exposes the knob"),
+    "JAATO_CHROME_AI_HEADLESS": EnvClass(SESSION, "plugin_configs.chrome_ai.headless",
+        "headless vs headed launch; chrome_ai exposes the knob"),
+    "JAATO_CHROME_AI_MODEL": EnvClass(SESSION, "model",
+        "the profile's own `model` field is the typed equivalent; the "
+        "Prompt API has no model selection, so this is nominal"),
+    "JAATO_CHROME_AI_PAGE_URL": EnvClass(SESSION, "plugin_configs.chrome_ai.page_url",
+        "the page the Prompt API calls are made from; chrome_ai exposes "
+        "the knob"),
+    "JAATO_CHROME_AI_USER_DATA_DIR": EnvClass(SESSION, "plugin_configs.chrome_ai.user_data_dir",
+        "the browser profile the model download is bound to; chrome_ai "
+        "exposes the knob"),
     "JAATO_CONFIG_ROOT": EnvClass(SESSION, "client.config_root",
         "per-connection config search root; typed on the handshake, not "
         "the profile"),
@@ -317,6 +364,10 @@ CATALOG: Dict[str, EnvClass] = {
     "JAATO_PARALLEL_TOOLS": EnvClass(SESSION, None,
         "tool-loop behaviour; today one host-wide setting for "
         "every agent"),
+    "JAATO_PROFILE_SET": EnvClass(SESSION, None,
+        "which profile-set directory this workspace resolves profiles "
+        "from -- emphatically per-session, and read through "
+        "get_session_env for exactly that reason"),
     "JAATO_PROVIDER": EnvClass(SESSION, "provider",
         "the profile's own `provider` field is the typed equivalent"),
     "JAATO_SSL_VERIFY": EnvClass(HOST, None,
@@ -778,6 +829,12 @@ AWAITING_TYPED_KEY: Dict[str, Awaiting] = {
     ),
     "JAATO_PARALLEL_TOOLS": Awaiting(
         "A", "tools.parallel",
+    ),
+    "JAATO_PROFILE_SET": Awaiting(
+        "A", "client.profile_set",
+        "cannot live IN a profile -- it selects WHICH profile file is "
+        "read, so it belongs on the handshake beside client.config_root "
+        "rather than in the thing it selects",
     ),
     "JAATO_TELEMETRY_BACKEND": Awaiting(
         "A", "plugin_configs.telemetry.backend",

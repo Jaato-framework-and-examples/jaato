@@ -242,6 +242,15 @@ CACHE_FIELD_DELIVERY: Dict[str, Dict[str, Any]] = {
         "layer": "api_params",
         "enabled": "cache_prompt", "ttl": "cache_ttl",
     },
+    "bedrock": {
+        # Converse's ``cachePoint`` block is Bedrock's spelling of
+        # Anthropic's ``cache_control``, and the provider places one after
+        # the system prompt and one after the tool list -- so the knobs
+        # match Anthropic's names but there is no ``history`` control to
+        # map: no third breakpoint exists to switch on.
+        "layer": None,
+        "enabled": "enable_caching", "ttl": "cache_ttl",
+    },
 }
 
 #: ``cache.ttl`` in the profile vocabulary -> seconds, for providers whose
