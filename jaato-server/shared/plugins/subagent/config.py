@@ -12,6 +12,10 @@ from pathlib import Path
 from typing import Any, Callable, Dict, FrozenSet, List, Optional, Protocol, Tuple, Union
 from typing import runtime_checkable
 
+from jaato_sdk.trace import (
+    TRACE_PATH_PLACEHOLDERS,
+    unknown_trace_placeholders,
+)
 from shared.runtime_limits import RuntimeLimits
 from shared.budget_control import BudgetControlConfig, merge_limits
 from shared.instruction_suppression import normalize_suppression
@@ -534,6 +538,45 @@ def parse_plugin_list(
     return clean_names, preloaded, tool_scopes
 
 
+#: The context variables :func:`expand_variables` supplies on top of the
+#: process environment -- name -> what it resolves to, for humans.
+#:
+#: Hoisted out of the function so ``jaato-scaffold explain`` can RENDER the
+#: vocabulary instead of restating it.  Before this, the only complete list of
+#: what ``${...}`` accepts lived inside a function body, which is why the
+#: reference doc's table has been missing ``jdtlsStateRoot`` since it was
+#: added.  ``test_expansion_context_vars_are_declared`` asserts that the keys
+#: here are exactly the keys the function builds, so the next one cannot be
+#: added without appearing in the docs.
+#:
+#: NOT a superset of what a profile may write: every process env var is also
+#: expandable, and undefined names are left literal.
+EXPANSION_CONTEXT_VARS: Dict[str, str] = {
+    'cwd': "the session's workspace root, else the resolving process's cwd",
+    'workspaceRoot': "the workspace root detected from .git / .jaato",
+    'jdtlsStateRoot': ("the framework-managed jdtls state directory, a sibling "
+                       "of the workspace (Eclipse forbids it inside the "
+                       "project)"),
+    'HOME': "the resolving process's $HOME",
+    'USER': "the resolving process's $USER",
+}
+
+#: Env vars whose value is a PATH, keyed to the typed profile key that
+#: supersedes them (``None`` where none exists yet).
+#:
+#: The set a profile's untyped ``env:`` map is checked against: these are the
+#: vars where a boolean-shaped value is not merely odd but destructive, because
+#: something downstream will happily create a file or directory named ``1``
+#: (#775).  ``JAATO_SESSION_LOG_DIR`` has no typed sibling and is included
+#: anyway -- the check is about the VALUE being a switch, and a log directory
+#: named ``1`` is the same defect wearing a different variable.
+PATH_TYPED_ENV_VARS: Dict[str, Optional[str]] = {
+    "JAATO_TRACE_LOG": "trace.session_log",
+    "JAATO_PROVIDER_TRACE": "trace.provider_log",
+    "JAATO_SESSION_LOG_DIR": None,
+}
+
+
 def expand_variables(
     value: Any,
     context: Optional[Dict[str, str]] = None,
@@ -572,6 +615,10 @@ def expand_variables(
     from shared.session_context import get_workspace_root
     effective_cwd = workspace_root_override or get_workspace_root() or os.getcwd()
     workspace_root = _find_workspace_root(workspace_root_override)
+    # Keys here MUST match EXPANSION_CONTEXT_VARS -- that declaration is what
+    # `jaato-scaffold explain` renders, and a var added here alone would be
+    # undocumented by construction (guarded by
+    # test_expansion_context_vars_are_declared).
     default_context = {
         'cwd': effective_cwd,
         'workspaceRoot': workspace_root,
@@ -1021,10 +1068,37 @@ class TraceProfileConfig:
                            else _validate_trace_path(key, value))
         return cls(**values)
 
-    def as_env(self) -> Dict[str, str]:
-        """The env vars this block seeds, omitting the keys left unset."""
+    def as_env(self, workspace_root_override: Optional[str] = None) -> Dict[str, str]:
+        """The env vars this block seeds, expanded, omitting keys left unset.
+
+        EXPANDS, because the sibling route does.  A profile's ``env:`` map is
+        run through :func:`expand_variables`, so ``${HOME}/t.log`` there
+        becomes a real path; this block was applied verbatim, so the same
+        string became a *relative* path and ``jaato_sdk.trace`` created a
+        directory literally named ``${HOME}`` inside the workspace.  Two typed
+        routes to one variable disagreeing about their own value syntax is the
+        #775 shape a second time, and the block that outranks the map must not
+        be the one that understands less.
+
+        The per-agent ``{agent}`` / ``{agent_suffix}`` placeholders are a
+        different vocabulary with a different resolution TIME and pass through
+        untouched -- ``expand_variables`` only ever reads ``${...}``.  See
+        :data:`jaato_sdk.trace.TRACE_PATH_PLACEHOLDERS`.
+
+        Args:
+            workspace_root_override: Explicit workspace root for
+                ``${workspaceRoot}`` / ``${cwd}``, for callers that know the
+                session's own (the subagent spawn path does; the daemon's
+                main-session path does not, which is why
+                ``jaato-scaffold validate`` warns about those two vars in a
+                trace path).
+
+        Returns:
+            ``{env var: expanded value}`` for the keys that are set.
+        """
         return {
-            TRACE_ENV_VARS[key]: value
+            TRACE_ENV_VARS[key]: expand_variables(
+                value, workspace_root_override=workspace_root_override)
             for key, value in (("session_log", self.session_log),
                                ("provider_log", self.provider_log))
             if value
@@ -1059,7 +1133,60 @@ def _validate_trace_path(key: str, value: Any) -> str:
             f"trace FILE. Append a filename "
             f"(e.g. {text.rstrip('/')}/{key}.jsonl).")
 
+    unknown = unknown_trace_placeholders(text)
+    if unknown:
+        raise ValueError(
+            f"trace.{key}={value!r} names {', '.join(unknown)}, which nothing "
+            f"substitutes. Known placeholders: "
+            f"{', '.join(sorted(TRACE_PATH_PLACEHOLDERS))} (resolved per agent "
+            f"when the line is written). A token nobody resolves survives into "
+            f"the path and is CREATED as a literal directory -- the #775 shape "
+            f"this block exists to stop. For an env var use ${{VAR}}, which is "
+            f"expanded when the profile resolves.")
+
     return text
+
+
+def validate_profile_env_paths(env: Dict[str, str]) -> None:
+    """Refuse a switch written into a path-valued var in a profile ``env:`` map.
+
+    THE OTHER HALF OF #775.  ``TraceProfileConfig`` refuses
+    ``trace: {provider_log: '1'}``, and the untyped map right beside it
+    accepted the identical mistake -- which is the spelling that actually
+    caused the incident, since ``env:`` was the only route that existed at the
+    time.  Closing one and leaving the other open makes the typed block a
+    suggestion rather than a rule: an author who hits the refusal can satisfy
+    it by moving the same value one key over.
+
+    Scoped to the PROFILE, deliberately.  The workspace ``.env`` is the
+    operator's own file, is lower precedence, and is not part of the validated
+    surface; a profile is jaato's own schema and is where a contract can be
+    enforced without taking a file's ownership away from the person who wrote
+    it.
+
+    Args:
+        env: The profile's resolved ``env:`` map (raw values -- run this
+            BEFORE expansion, so the literal the author typed is what gets
+            judged).
+
+    Raises:
+        ValueError: naming the variable, the value, and the typed key that
+            supersedes it where one exists.
+    """
+    for var, typed_key in PATH_TYPED_ENV_VARS.items():
+        value = env.get(var)
+        if not isinstance(value, str) or value.strip().lower() not in _TRACE_BOOLEAN_TOKENS:
+            continue
+        better = (f"Use the typed `{typed_key}` key, which validates the value"
+                  if typed_key else
+                  "Give a path")
+        raise ValueError(
+            f"env.{var}={value!r} is a switch, not a path. {var} is the FILE "
+            f"(or directory) the log is written to, so {value!r} produces one "
+            f"literally named {value!r} in every session using this profile "
+            f"(issue #775). {better}: an absolute path is shared by every such "
+            f"session, a relative one resolves against each session's own "
+            f"workspace.")
 
 
 def _scrub_secret_env_errors(data: Dict[str, Any]) -> List[str]:
@@ -2374,6 +2501,38 @@ def parse_trace_block(data: Dict[str, Any]) -> Optional['TraceProfileConfig']:
     return TraceProfileConfig.from_dict(block)
 
 
+def parse_profile_env(data: Dict[str, Any], key: str = 'env') -> Dict[str, str]:
+    """Parse and check a profile dict's ``env:`` map.
+
+    Fourth sibling of :func:`parse_trace_block` / :func:`parse_cache_block` /
+    :func:`parse_gc_block`, and for the reason all of those exist: FOUR
+    ingresses build a ``SubagentProfile`` from a dict, each of them previously
+    inlining the same two-line dict comprehension, so a rule added to one of
+    them would be silently absent from the other three.  The stringify is
+    unchanged; what it now carries with it is
+    :func:`validate_profile_env_paths`.
+
+    Args:
+        data: The raw profile dict.
+        key: The mapping key to read (``env`` everywhere today; named so a
+            caller reading a differently-nested block cannot be forced to
+            reimplement the check).
+
+    Returns:
+        The map with keys and values stringified.  A non-mapping value yields
+        ``{}``, as it always has.
+
+    Raises:
+        ValueError: from :func:`validate_profile_env_paths`, when a
+            path-valued variable was given a switch.
+    """
+    raw = data.get(key, {})
+    env = ({str(k): str(v) for k, v in raw.items()}
+           if isinstance(raw, dict) else {})
+    validate_profile_env_paths(env)
+    return env
+
+
 def build_inline_profile(
     data: Dict[str, Any],
     name: str = "<inline>",
@@ -2445,11 +2604,7 @@ def build_inline_profile(
     raw_plugins = data['plugins']
     clean_plugins, preloaded, tool_scopes = parse_plugin_list(raw_plugins)
 
-    raw_env = data.get('env', {})
-    env = (
-        {str(k): str(v) for k, v in raw_env.items()}
-        if isinstance(raw_env, dict) else {}
-    )
+    env = parse_profile_env(data)
 
     raw_model_tiers = data.get('model_tiers') or {}
     model_tiers = (
@@ -3664,10 +3819,25 @@ def _scan_profiles_dir(
         if name in profiles:
             continue  # higher-precedence source already registered this name
 
-        cache_config = parse_cache_block(data)
-
-        gc_config = parse_gc_block(data)
-        trace_config = parse_trace_block(data)
+        # The validating block parsers, guarded TOGETHER: each raises
+        # ValueError on an unusable value, and an escaping raise takes the
+        # whole SCAN down -- so one profile with a bad `trace:` path would
+        # leave a workspace with no profiles at all, at daemon startup, with
+        # the other files blamed by their absence.  Recorded per file like
+        # every other parse failure, which is also what lets
+        # `jaato-scaffold validate` report it against the profile that owns
+        # it rather than dying.
+        try:
+            cache_config = parse_cache_block(data)
+            gc_config = parse_gc_block(data)
+            trace_config = parse_trace_block(data)
+            env = parse_profile_env(data)
+        except ValueError as exc:
+            err = f"Invalid profile '{name}': {exc}"
+            logger.warning(err)
+            if name not in errors:
+                errors[name] = err
+            continue
 
         runtime_limits = None
         if 'runtime_limits' in data and data['runtime_limits']:
@@ -3722,9 +3892,7 @@ def _scan_profiles_dir(
         raw_plugins = data['plugins']
         clean_plugins, preloaded, tool_scopes = parse_plugin_list(raw_plugins)
 
-        # Parse env: must be a flat dict of string→string
-        raw_env = data.get('env', {})
-        env = {str(k): str(v) for k, v in raw_env.items()} if isinstance(raw_env, dict) else {}
+        # `env` was parsed (and checked) with the other blocks above.
 
         raw_model_tiers = data.get('model_tiers') or {}
         model_tiers = (
@@ -4159,10 +4327,15 @@ def _discover_premium_profiles() -> Dict[str, 'SubagentProfile']:
         if name is None or data is None:
             continue
 
-        cache_config = parse_cache_block(data)
-
-        gc_config = parse_gc_block(data)
-        trace_config = parse_trace_block(data)
+        # Guarded together — see _scan_profiles_dir for why an escaping
+        # ValueError here is worse than skipping one profile.
+        try:
+            cache_config = parse_cache_block(data)
+            gc_config = parse_gc_block(data)
+            trace_config = parse_trace_block(data)
+        except ValueError as exc:
+            logger.warning("Skipping premium profile '%s': %s", name, exc)
+            continue
 
         runtime_limits = None
         if 'runtime_limits' in data and data['runtime_limits']:
@@ -4200,8 +4373,7 @@ def _discover_premium_profiles() -> Dict[str, 'SubagentProfile']:
         raw_plugins = data['plugins']
         clean_plugins, preloaded, tool_scopes = parse_plugin_list(raw_plugins)
 
-        raw_env = data.get('env', {})
-        env = {str(k): str(v) for k, v in raw_env.items()} if isinstance(raw_env, dict) else {}
+        env = parse_profile_env(data)
 
         raw_model_tiers = data.get('model_tiers') or {}
         model_tiers = (
@@ -4545,8 +4717,7 @@ class SubagentConfig:
             raw_plugins = profile_data.get('plugins', [])
             clean_plugins, preloaded, tool_scopes = parse_plugin_list(raw_plugins)
 
-            raw_env = profile_data.get('env', {})
-            env = {str(k): str(v) for k, v in raw_env.items()} if isinstance(raw_env, dict) else {}
+            env = parse_profile_env(profile_data)
 
             raw_model_tiers = profile_data.get('model_tiers') or {}
             model_tiers = (

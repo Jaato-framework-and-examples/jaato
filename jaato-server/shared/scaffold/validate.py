@@ -20,6 +20,7 @@ exists to surface.
 from __future__ import annotations
 
 import json
+import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -190,12 +191,21 @@ def validate_profile(
     providers: Dict[str, introspect.ProviderInfo],
     plugins: Dict[str, introspect.PluginInfo],
     gc_names: List[str],
+    env_keys: Optional[set] = None,
 ) -> List[Diagnostic]:
     """Validate one RESOLVED profile against the introspected framework.
 
     ``profile`` is a flattened ``SubagentProfile`` (inherits already merged).
     The introspect maps are passed in so a whole workspace is introspected
     once, not per profile.
+
+    Args:
+        env_keys: Variable names the session's environment will carry, from
+            the workspace ``.env``.  Only ``${VAR}``-reference checks read it,
+            and only to avoid reporting a variable the author DID define as
+            undefined; omitted (a single-file validation, which has no
+            workspace) it degrades to the framework context vars plus the
+            validator's own environment.
     """
     name = getattr(profile, "name", "?")
     out: List[Diagnostic] = []
@@ -235,6 +245,9 @@ def validate_profile(
 
     # --- budget_control (incl. its ABSENCE, #947) -----------------------
     _check_budget_control(profile, add)
+
+    # --- diagnostic log paths (trace: and the two env vars) -------------
+    _check_trace_paths(profile, env_keys, add)
 
     # --- per-plugin tool allow-lists (tool_scopes) -----------------------
     for plug, tools in (getattr(profile, "tool_scopes", None) or {}).items():
@@ -1076,6 +1089,131 @@ def _effective_scrub_value(profile, surface):
     return getattr(profile, "scrub_secret_env", None), "scrub_secret_env"
 
 
+#: ``${VAR}`` reference, matching what ``_expand_string`` substitutes.  The
+#: ``(?<!\\$)`` in the trace-placeholder regex has no counterpart here: a
+#: ``$${X}`` is not a thing this codebase produces.
+_VAR_REF_RE = re.compile(r"\$\{([a-zA-Z_][a-zA-Z0-9_]*)\}")
+
+#: The two context vars that resolve to the DAEMON's notion of a workspace on
+#: the main-session path (``JaatoServer._resolve_session_env`` has no session
+#: workspace yet).  Legal, and almost never what someone writing a per-session
+#: log path means -- so a finding, not a refusal.
+_DAEMON_SCOPED_CONTEXT_VARS = ("workspaceRoot", "cwd")
+
+
+def _trace_path_sources(profile) -> List[tuple]:
+    """Every trace path this profile sets, as ``(value, where)`` pairs.
+
+    Both routes, because both reach ``jaato_sdk.trace`` and an author may use
+    either: the typed ``trace:`` block and the ``env:`` map's two trace vars.
+    The block wins where they collide, which is itself a finding
+    (``trace_env_shadowed``) rather than something to silently prefer here.
+    """
+    from shared.plugins.subagent.config import TRACE_ENV_VARS
+
+    out: List[tuple] = []
+    trace = getattr(profile, "trace", None)
+    for key in TRACE_ENV_VARS:
+        value = getattr(trace, key, None) if trace else None
+        if value:
+            out.append((value, f"trace.{key}"))
+    env = getattr(profile, "env", None) or {}
+    for key, var in TRACE_ENV_VARS.items():
+        if env.get(var):
+            out.append((env[var], f"env.{var}"))
+    return out
+
+
+def _check_one_trace_path(value: str, where: str, known_vars, add) -> None:
+    """Report what is wrong with ONE trace path that already loaded.
+
+    Only the soft cases live here.  A switch, a directory and an unknown
+    ``{token}`` are refused at profile LOAD by ``_validate_trace_path`` /
+    ``validate_profile_env_paths``, so a profile carrying one never reaches
+    ``validate_profile`` — it surfaces as ``parse_error`` with the loader's own
+    message.  The exception is the ``env:`` route, where only the switch is
+    refused; an unknown placeholder there is caught right here, which is why
+    this check is not redundant with the loader.
+
+    Args:
+        value: The raw path as the author wrote it.
+        where: Dotted field path for the finding.
+        known_vars: Names ``${VAR}`` may legitimately reference — the
+            framework context vars plus every key the session's environment
+            will actually carry.
+        add: The diagnostic sink.
+    """
+    from jaato_sdk.trace import (TRACE_PATH_PLACEHOLDERS,
+                                 unknown_trace_placeholders)
+
+    for token in unknown_trace_placeholders(value):
+        add("error", "trace_path_placeholder_unknown",
+            f"{where}={value!r} names {token}, which nothing substitutes — it "
+            f"survives into the path and is CREATED as a literal directory "
+            f"(#775). Known: {', '.join(sorted(TRACE_PATH_PLACEHOLDERS))}",
+            where=where)
+
+    for var in _VAR_REF_RE.findall(value):
+        if var in _DAEMON_SCOPED_CONTEXT_VARS:
+            add("warn", "trace_path_daemon_scoped_var",
+                f"{where}={value!r} uses ${{{var}}}, which expands to the "
+                f"DAEMON's workspace on the main-session path (the session's "
+                f"is not known yet) — every session using this profile then "
+                f"shares one file. A RELATIVE path is the per-session idiom: "
+                f"jaato_sdk.trace resolves it against each session's own "
+                f"workspace",
+                where=where)
+        elif var not in known_vars:
+            add("warn", "trace_path_unexpanded_var",
+                f"{where}={value!r} references ${{{var}}}, which nothing in "
+                f"this workspace defines — an undefined name is left LITERAL, "
+                f"so the path gains a directory called '${{{var}}}'",
+                where=where)
+
+
+def _check_trace_paths(profile, env_keys, add) -> None:
+    """Validate the profile's diagnostic log paths (both routes).
+
+    ``validate`` knew nothing about ``trace:`` at all, which made it the one
+    profile block whose silent-ignore failures had no reporter — the family
+    #910 / #925 / #947 / #950 each closed for a different knob.
+
+    Args:
+        profile: The resolved profile.
+        env_keys: Keys the workspace ``.env`` defines (``None`` for a
+            single-file validation, which has no workspace).  Unioned here
+            with the profile's own ``env:`` keys, so a ``${VAR}`` the author
+            legitimately defined is not reported as undefined.
+        add: The diagnostic sink.
+    """
+    from shared.plugins.subagent.config import (EXPANSION_CONTEXT_VARS,
+                                                TRACE_ENV_VARS)
+
+    sources = _trace_path_sources(profile)
+    if not sources:
+        return
+
+    known_vars = (set(EXPANSION_CONTEXT_VARS)
+                  | set(env_keys or ())
+                  | set(getattr(profile, "env", None) or {})
+                  | set(os.environ))
+    for value, where in sources:
+        _check_one_trace_path(value, where, known_vars, add)
+
+    # Both routes set for one var: the typed block outranks the map, so the
+    # map's value is DEAD.  Exactly the shape `plugin_config_without_plugin`
+    # and `unknown_knob` exist to make audible.
+    trace = getattr(profile, "trace", None)
+    env = getattr(profile, "env", None) or {}
+    for key, var in TRACE_ENV_VARS.items():
+        if getattr(trace, key, None) and env.get(var):
+            add("warn", "trace_env_shadowed",
+                f"env.{var}={env[var]!r} is never used: the typed "
+                f"`trace.{key}` outranks it and is set to "
+                f"{getattr(trace, key)!r}. Drop one",
+                where=f"env.{var}")
+
+
 def _check_secret_scrub(profile, add):
     """Flag a subprocess surface that runs with the runner's full environment.
 
@@ -1746,6 +1884,13 @@ def validate_workspace(
     plugins = introspect.plugins()
     gc_names = list(introspect.gc_strategies().keys())
 
+    # Names the workspace .env defines, so a trace path referencing one is not
+    # reported as an undefined ${VAR}.  Read here rather than per profile —
+    # every profile in the workspace resolves against the same file.
+    env_path = ws / ".env"
+    ws_env_keys = set(_parse_env(env_path.read_text(encoding="utf-8", errors="replace"))
+                      ) if env_path.is_file() else set()
+
     items = result.profiles.items()
     for pname, profile in sorted(items):
         if only and pname != only:
@@ -1753,6 +1898,7 @@ def validate_workspace(
         tier = _tier(pname)
         for d in validate_profile(
             profile, providers=providers, plugins=plugins, gc_names=gc_names,
+            env_keys=ws_env_keys,
         ):
             d.tier = tier
             out.append(d)

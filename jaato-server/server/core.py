@@ -1251,6 +1251,15 @@ class JaatoServer:
         # still reaches for `env:` gets the old stringly-typed
         # behaviour; the env vars stay the lower-precedence default and
         # nothing downstream changed.
+        #
+        # `as_env()` expands ${VAR} exactly as the `env:` map above does --
+        # the two typed routes to one variable must not disagree about their
+        # own value syntax.  No workspace_root_override here on purpose: the
+        # daemon does not know the session's workspace at this point, which
+        # is why ${workspaceRoot} / ${cwd} in a TRACE path are reported by
+        # `jaato-scaffold validate` rather than silently resolving to the
+        # daemon's.  The per-agent {agent} placeholders are a different
+        # vocabulary and pass through to jaato_sdk.trace untouched.
         if self._profile and getattr(self._profile, 'trace', None):
             self._session_env.update(self._profile.trace.as_env())
 
