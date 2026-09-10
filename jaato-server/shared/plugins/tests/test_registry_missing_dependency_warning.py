@@ -121,3 +121,50 @@ def test_non_import_error_still_logs_full_traceback_error() -> None:
     assert not mock_logger.warning.called, (
         "A non-ModuleNotFoundError must not be softened to a WARNING."
     )
+
+
+# ------------------------------------------------------------- install advice
+#
+# Naming the module is only half an answer.  ``pexpect`` is ALREADY declared by
+# jaato-server — under the extra ``interactive``, a name that is neither the
+# plugin's nor the module's — so "install it to enable this plugin" reliably
+# became ``pip install pexpect`` into whatever interpreter was nearest, and the
+# gap read as an undeclared dependency.  The advice is resolved from installed
+# metadata, so it cannot outlive ``pyproject.toml``.
+
+def test_install_advice_names_the_extra_that_ships_the_module():
+    from shared.plugins.registry import _install_advice
+
+    advice = _install_advice("pexpect")
+    assert "jaato-server[interactive]" in advice
+    assert advice.startswith("enable this plugin with: pip install ")
+
+
+def test_install_advice_names_the_distribution_for_a_core_requirement():
+    """A core requirement is a BROKEN install, not a narrow one — still named."""
+    from shared.plugins.registry import _install_advice
+
+    assert "jaato-server" in _install_advice("yaml")
+
+
+def test_install_advice_falls_back_when_nothing_declares_the_module():
+    """An undeclared import gets a pointer, never a fabricated install target."""
+    from shared.plugins.registry import _install_advice
+
+    advice = _install_advice("no_such_module_anywhere")
+    assert "pip install '" not in advice
+    assert "dependencies" in advice          # points at the tool that can answer
+
+
+def test_install_advice_never_raises(monkeypatch):
+    """This runs inside discovery's error path; a raising diagnostic is worse."""
+    import shared.scaffold.dependencies as deps
+    from shared.plugins.registry import _install_advice
+
+    def boom():
+        raise RuntimeError("metadata unreadable")
+
+    monkeypatch.setattr(deps, "_extras_index", boom)
+    advice = _install_advice("pexpect")
+    assert isinstance(advice, str) and advice.endswith(".")
+    assert "pip install '" not in advice     # degraded to the generic pointer

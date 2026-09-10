@@ -3805,6 +3805,45 @@ def _scan_profiles_dir(
         )
 
 
+#: The filenames a persona may take inside one search directory, in the order
+#: :func:`find_agent_file` tries them.  ``<name>.md`` is the normal form; the
+#: directory forms let a persona ship alongside its own assets.
+AGENT_FILE_FORMS = ("<name>.md", "<name>/PROMPT.md", "<name>/SKILL.md")
+
+
+def agent_search_dirs(
+    workspace_path: Optional[str],
+    config_root: Optional[str] = None,
+) -> List[Path]:
+    """Directories searched for a persona, highest precedence first.
+
+    Split out of :func:`find_agent_file` so a DOCUMENTATION surface can report
+    the order without resolving a name — ``jaato-scaffold explain agents``
+    prints exactly this list.  Restating it in prose is how a documented
+    search order comes to disagree with the one the runtime walks.
+
+    ``config_root``, when given, REPLACES the workspace tier rather than
+    adding to it: it is the workspace tier, relocated.
+
+    Args:
+        workspace_path: The session's workspace, or ``None``.
+        config_root: Override for the workspace tier (``<config_root>/``).
+
+    Returns:
+        Existing or not, every directory that would be consulted, in order.
+    """
+    dirs: List[Path] = []
+    if config_root:
+        cr = Path(config_root).expanduser().resolve()
+        dirs += [cr / "agents", cr / "prompts"]
+    elif workspace_path:
+        ws = Path(workspace_path) / ".jaato"
+        dirs += [ws / "agents", ws / "prompts"]
+    home = Path.home() / ".jaato"
+    dirs += [home / "agents", home / "prompts"]
+    return dirs
+
+
 def find_agent_file(
     agent_name: str,
     workspace_path: Optional[str],
@@ -3832,18 +3871,7 @@ def find_agent_file(
     Returns:
         The resolved path, or ``None`` when no tier carries the agent.
     """
-    search_dirs = []
-    if config_root:
-        cr = Path(config_root).expanduser().resolve()
-        search_dirs.append(cr / "agents")
-        search_dirs.append(cr / "prompts")
-    elif workspace_path:
-        search_dirs.append(Path(workspace_path) / ".jaato" / "agents")
-        search_dirs.append(Path(workspace_path) / ".jaato" / "prompts")
-    search_dirs.append(Path.home() / ".jaato" / "agents")
-    search_dirs.append(Path.home() / ".jaato" / "prompts")
-
-    for search_dir in search_dirs:
+    for search_dir in agent_search_dirs(workspace_path, config_root):
         if not search_dir.is_dir():
             continue
         # Single file: agents/gen-references.md

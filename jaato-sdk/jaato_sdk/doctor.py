@@ -266,6 +266,54 @@ def check_dependency_coherence() -> List[Check]:
                   ", ".join(seen) + " — metadata agrees with sources")]
 
 
+def check_mcp_sdk() -> List[Check]:
+    """Can the MCP plugin still find the installed SDK's JSON-RPC decode seam?
+
+    ``mcp[cli]`` is an unpinned dependency, so this environment's version is
+    whatever pip resolved.  The plugin filters a server's own stdout log lines
+    out before decoding them, and the SDK moved that decode between
+    generations: 1.x decodes through ``JSONRPCMessage.model_validate_json``,
+    2.x through a ``jsonrpc_message_adapter`` TypeAdapter, because
+    ``JSONRPCMessage`` became a PEP 604 union with no such method.
+
+    Reading only the 1.x seam raised ``AttributeError: 'types.UnionType'
+    object has no attribute 'model_validate_json'`` out of the MCP thread and
+    took every MCP server in the workspace with it — visible only as a
+    traceback in that thread's log.  Both seams are handled now, so this check
+    exists for the NEXT move: a shape the plugin does not recognise.
+
+    WARN, not FAIL: with no seam the plugin logs a warning and leaves decoding
+    unfiltered, so MCP still works and only the noise filter is lost.
+    """
+    import importlib.util as _u
+    if _u.find_spec("mcp") is None:
+        return [Check("mcp sdk", WARN,
+                      "the `mcp` package is not importable — the MCP plugin "
+                      "will be skipped at discovery")]
+    try:
+        import importlib.metadata as _md
+        version = _md.version("mcp")
+    except Exception:                    # noqa: BLE001 — diagnostic only
+        version = "unknown"
+    try:
+        from mcp import types as mcp_types
+        from shared.plugins.mcp.plugin import detect_jsonrpc_seam
+    except Exception as exc:             # noqa: BLE001 — sdk without the server
+        return [Check("mcp sdk", WARN,
+                      f"mcp {version} installed, but the plugin is not "
+                      f"importable here ({exc}) — cannot check the decode seam")]
+    seam = detect_jsonrpc_seam(mcp_types)
+    if seam is None:
+        return [Check("mcp sdk", WARN,
+                      f"mcp {version} exposes neither known JSON-RPC decode "
+                      "seam — MCP still works, but a server that logs to "
+                      "stdout will report parse errors.  Pin a version the "
+                      "plugin knows, or teach `detect_jsonrpc_seam` this one.")]
+    return [Check("mcp sdk", PASS,
+                  f"mcp {version} — stdout noise filter wired to the "
+                  f"'{seam}' decode seam")]
+
+
 def check_integrations() -> List[Check]:
     """Are this build's integrations applied, and do they match it?
 
@@ -1027,6 +1075,7 @@ def run_checks(
     checks += check_premium_reactors()
     checks += check_dependency_coherence()
     checks += check_integrations()
+    checks += check_mcp_sdk()
     checks += check_socket(info, auto_start=auto_start)
     checks += check_daemon_identity(info)
     if web_socket:

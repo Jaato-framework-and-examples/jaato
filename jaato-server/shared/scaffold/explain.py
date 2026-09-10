@@ -56,7 +56,9 @@ def overview() -> Rendered:
         "  jaato-scaffold explain runtime\n"
         "  jaato-scaffold explain tiers\n"
         "  jaato-scaffold explain sets [--workspace DIR]\n"
-        "  jaato-scaffold explain profile\n"
+        "  jaato-scaffold explain profile           # a session's CAPABILITIES\n"
+        "  jaato-scaffold explain agents            # ... and its PERSONA\n"
+        "  jaato-scaffold explain services          # named HTTP APIs (.jaato/services/)\n"
         "  jaato-scaffold explain paths\n"
         "  jaato-scaffold explain prefetch\n"
         "  jaato-scaffold explain completion       # the OUTPUT-side hook\n"
@@ -849,6 +851,89 @@ def _signature(parameters: "Optional[Dict[str, Any]]") -> str:
         p if p in required else f"{p}=..." for p in props) + ")"
 
 
+def _spec_summary(spec: "Dict[str, Any]") -> str:
+    """One column of type facts for a parameter: its type and its closed set.
+
+    ``enum`` is rendered because it is the difference between a parameter a
+    caller can guess and one they cannot: ``{"type": "string"}`` invites any
+    string, ``one of: header, query`` is the whole contract.  Union types
+    (``["string", "null"]``) render joined rather than as a Python repr.
+    """
+    if not isinstance(spec, dict):
+        return ""
+    t = spec.get("type")
+    if isinstance(t, list):
+        t = "|".join(str(x) for x in t)
+    parts = [str(t)] if t else []
+    enum = spec.get("enum")
+    if isinstance(enum, (list, tuple)) and enum:
+        parts.append("one of: " + ", ".join(str(e) for e in enum))
+    return "  ".join(parts)
+
+
+def _nested_params(parameters: "Optional[Dict[str, Any]]") -> List[str]:
+    """Expand the parameters a flat signature cannot describe.
+
+    :func:`_signature` renders ``configure_service_auth(service, auth)`` — true,
+    and useless, because ``auth`` is an object whose shape IS the tool.  Its
+    five accepted forms (``apiKey`` in a header or a query, ``bearer``,
+    ``basic``, ``oauth2_client``) and the ``*_env`` field each one wants were
+    declared in the schema and rendered nowhere, so the only way to call the
+    tool correctly was to read the plugin source — for a page whose entire job
+    is to make that unnecessary.  (``--json`` carried the schema all along;
+    what was missing was a HUMAN rendering of it.)
+
+    Expanded here: any parameter carrying an ``enum``, and any ``object``
+    parameter's own properties.  Deliberately ONE level deep — deeper nesting
+    is a schema dump, which is what ``--json`` is for.
+
+    Args:
+        parameters: A tool's JSON-Schema ``parameters`` block, or ``None``.
+
+    Returns:
+        Indented lines, or ``[]`` when nothing needs expanding (the common
+        case: a tool whose arguments are all plain scalars).
+    """
+    props = (parameters or {}).get("properties")
+    if not isinstance(props, dict):
+        return []
+    required = set((parameters or {}).get("required") or ())
+    out: List[str] = []
+    for pname, spec in props.items():
+        if not isinstance(spec, dict):
+            continue
+        if isinstance(spec.get("properties"), dict):
+            out.extend(_object_param_block(pname, spec, pname in required))
+        elif spec.get("enum"):
+            out.append(f"           {pname:20} {_spec_summary(spec)}")
+    return out
+
+
+def _object_param_block(pname: str, spec: "Dict[str, Any]",
+                        is_required: bool) -> List[str]:
+    """One ``object`` parameter's own properties, as an indented block.
+
+    Split from :func:`_nested_params` to keep both under the complexity
+    ceiling: radon counts the ``or``-defaults and the width arithmetic here as
+    decision points, and the caller is a loop over every parameter.
+
+    ``*`` marks a property required WITHIN the object — a different question
+    from whether the object itself is required, which the header states.
+    """
+    req = "required" if is_required else "optional"
+    sub_req = set(spec.get("required") or ())
+    out = [f"           {pname} (object, {req}):"]
+    for k, ks in spec["properties"].items():
+        mark = "*" if k in sub_req else " "
+        desc = (ks.get("description") or "") if isinstance(ks, dict) else ""
+        tail = f"   {desc}" if desc else ""
+        pad = max(0, 18 - len(k))
+        out.append(f"             {k}{mark:<2}{'':<{pad}}{_spec_summary(ks)}{tail}")
+    if sub_req:
+        out.append("             (* = required within this object)")
+    return out
+
+
 def _commands_json(commands: List[Any]) -> List[Dict[str, Any]]:
     """The ``--json`` view of a plugin's user commands.
 
@@ -923,6 +1008,7 @@ def plugin(name: str) -> Rendered:
             lines.append(f"    [{badge}] {t.name}{_signature(t.parameters)}")
             if t.description:
                 lines.append(f"           {t.description}")
+            lines.extend(_nested_params(t.parameters))
         if any(t.discoverability != DISCOVERABILITY_EAGER for t in pi.tools):
             lines.append(
                 f"  note: [core] tools are in the model's INITIAL schema; [disc] "
@@ -1048,6 +1134,47 @@ def _resolution_order(info, EV) -> list:
     return lines
 
 
+#: The caveat every provider page owes an ``api_params`` author.
+#:
+#: ``validate`` checks an ``api_params`` key against the PROVIDER's declared
+#: allow-list, which is the only thing it can check: the layer is a property of
+#: the wire, and which values a given MODEL on that wire accepts is not
+#: declared anywhere in the tree and moves whenever a vendor ships.  So
+#: ``temperature: 0.0`` validates clean against every OpenAI-shaped provider
+#: and is a ``400`` on the reasoning models that accept only their default.
+#:
+#: The framework will not grow a per-model incompatibility table to close
+#: that: a stale row would reject a parameter the vendor accepts, or pass one
+#: it rejects, and either is worse than the honest statement that this check
+#: stops at the provider boundary.  What IS always true is the escape hatch —
+#: an omitted parameter is never the cause of a 400.
+_API_PARAMS_CAVEAT = (
+    "  api_params — scope of the check:\n"
+    "    `validate` checks these against THIS PROVIDER's allow-list, not against\n"
+    "    the model you named: a key can be a valid provider knob and still be a\n"
+    "    400 on one model (reasoning models commonly accept only the DEFAULT\n"
+    "    temperature / top_p, and reject an explicit 0.0).  Which values a model\n"
+    "    takes is the vendor's documentation, not a fact this framework holds.\n"
+    "    OMITTING a parameter is always safe — it is never the cause of a 400."
+)
+
+
+def _provider_notes(info) -> List[str]:
+    """The provider's own declared caveats, if it has any.
+
+    Rendered FIRST — above capabilities and knobs — because these are the
+    facts that make the rest of the page readable: on Azure, every knob below
+    is described correctly and still misleads anyone who read ``model:`` as a
+    catalog model id.
+    """
+    if not getattr(info, "notes", ()):
+        return []
+    out = ["  read this first:"]
+    for note in info.notes:
+        out.extend(_wrap_bullet(note, indent=4, glyph="!"))
+    return out
+
+
 def provider(name: str) -> Rendered:
     info = introspect.resolve_provider(name)
     if info is None:
@@ -1060,25 +1187,42 @@ def provider(name: str) -> Rendered:
             "quirks": sorted(info.quirks), "knobs": knobs,
             "auth": [{"kind": a.kind, "name": a.name, "note": a.note}
                      for a in info.auth],
+            "notes": list(getattr(info, "notes", ())),
             "resolution_order": res}
 
     lines = [f"provider: {info.dir_name}"]
+    lines.extend(_provider_notes(info))
     lines.append("  capabilities: "
                  + ", ".join(k for k, v in caps.items() if v) or "  (none)")
     lines.append("  quirks: " + (", ".join(sorted(info.quirks)) or "(none)"))
     lines.append("  resolution order:")
     lines.extend(res)
     lines.append("  knobs (plugin_configs.%s.*):" % info.dir_name)
-    if info.knobs:
-        for layer in info.knobs.layers:
-            tag = " (opaque pass-through)" if layer.opaque else ""
-            desc = f"  — {layer.description}" if layer.description else ""
-            lines.append(f"    [{layer.layer}]{tag}{desc}")
-            for k in layer.knobs:
-                dflt = f"  (default {k.default!r})" if k.default is not None else ""
-                d = f"  {k.description}" if k.description else ""
-                lines.append(f"      {k.name:22} {k.type:6}{d}{dflt}")
+    lines.extend(_knob_layers(info.knobs))
     return data, "\n".join(lines)
+
+
+def _knob_layers(knobs) -> List[str]:
+    """Every ``plugin_configs.<provider>.*`` knob, grouped by layer.
+
+    Split out of :func:`provider`, which is frozen in the complexity baseline —
+    so the ``api_params`` caveat below had to land in a helper rather than grow
+    it (see ``test_cyclomatic_complexity_audit``).
+    """
+    if not knobs:
+        return []
+    out: List[str] = []
+    for layer in knobs.layers:
+        tag = " (opaque pass-through)" if layer.opaque else ""
+        desc = f"  — {layer.description}" if layer.description else ""
+        out.append(f"    [{layer.layer}]{tag}{desc}")
+        for k in layer.knobs:
+            dflt = f"  (default {k.default!r})" if k.default is not None else ""
+            d = f"  {k.description}" if k.description else ""
+            out.append(f"      {k.name:22} {k.type:6}{d}{dflt}")
+    if any(l.layer == "api_params" for l in knobs.layers):
+        out.append(_API_PARAMS_CAVEAT)
+    return out
 
 
 # ---------------------------------------------------------------------- gc
@@ -1494,6 +1638,215 @@ def event(name: str) -> Rendered:
 
 
 
+# ------------------------------------------------------------------ agents
+
+def agents(workspace: str = ".") -> Rendered:
+    """Where an agent's PERSONA lives, and why it is not a profile field.
+
+    The gap this closes: nothing under ``explain`` named ``.jaato/agents/`` at
+    all, while ``explain profile`` listed ``system_instructions`` — marked
+    DEPRECATED, and still the only instruction-shaped key on the page.  An
+    author who never found the agents directory reached for the deprecated key,
+    which works, so nothing corrected them.
+
+    The search order is read from :func:`agent_search_dirs`, the function the
+    runtime itself walks, rather than restated here — a documented order that
+    disagrees with the loaded one is worse than none.
+    """
+    from shared.plugins.subagent.config import (
+        AGENT_FILE_FORMS, agent_search_dirs)
+
+    ws = Path(workspace).expanduser().resolve()
+    dirs = agent_search_dirs(str(ws))
+    found: List[Dict[str, Any]] = []
+    for d in dirs:
+        if not d.is_dir():
+            continue
+        for f in sorted(d.glob("*.md")):
+            found.append({"name": f.stem, "path": str(f)})
+
+    data = {
+        "search_order": [str(d) for d in dirs],
+        "file_forms": list(AGENT_FILE_FORMS),
+        "frontmatter": ["description", "default_profile", "params"],
+        "discovered": found,
+        "profile_field": "default_agent",
+        "deprecated": "system_instructions",
+    }
+
+    lines = [
+        "agents — the PERSONA layer (.jaato/agents/<name>.md)",
+        "",
+        "  A profile says what a session CAN DO (plugins, model, limits).",
+        "  An agent says WHO IT IS (instructions, voice, task framing).  They are",
+        "  orthogonal and compose: the same persona runs on a cheap profile and an",
+        "  expensive one; the same profile serves several personas.",
+        "",
+        "  WHERE — searched in this order, first hit wins:",
+    ]
+    for d in dirs:
+        mark = "  (exists)" if d.is_dir() else ""
+        lines.append(f"    {d}{mark}")
+    lines += [
+        "    In each, the name may take any of these forms:",
+    ]
+    lines += [f"      {form}" for form in AGENT_FILE_FORMS]
+    lines += [
+        "    `config_root` REPLACES the workspace tier — it IS that tier, moved.",
+        "",
+        "  FORMAT — optional YAML frontmatter, then markdown:",
+        "    ---",
+        "    description: what this agent is for   # shown when listing agents",
+        "    default_profile: researcher           # profile to pair it with",
+        "    params:",
+        "      topic: {default: 'anything'}        # default for {{topic}}",
+        "    ---",
+        "    You are a research agent working on {{topic}}.",
+        "    Budget: {{max_sources:5}} sources.    # inline default, no frontmatter",
+        "",
+        "    {{param}} substitution: a value from `agent_params`, else the inline",
+        "    default, else the frontmatter default.  An unresolved placeholder is",
+        "    left LITERAL on purpose (a visible debugging signal) and reported in",
+        "    `missing_params` — it is not silently blanked.",
+        "    {{!py:scripts/<f>.py}} runs a prefetch script at session-prep —",
+        "    see `jaato-scaffold explain prefetch`.",
+        "",
+        "  HOW A SESSION GETS ONE — three routes, in precedence order:",
+        "    1. explicit          client.create_session(agent='researcher',",
+        "                                               agent_params={'topic': 'x'})",
+        "                         spawn_subagent(profile='...', agent='researcher')",
+        "    2. the profile's own default_agent: researcher   (#944)",
+        "                         — a profile supplies plugins, an agent supplies",
+        "                         instructions; this binds the two so spawning by",
+        "                         profile name alone yields a subagent that has",
+        "                         both.  An explicit agent= still wins.",
+        "    3. neither           the session runs with no persona layer at all.",
+        "",
+        "  WHY NOT IN THE PROFILE YAML:",
+        "    `system_instructions:` is DEPRECATED and describes the wrong thing —",
+        "    a persona is not 'the session's system instructions'.  The rendered",
+        "    prompt LAYERS: .jaato/instructions/ base + THIS persona + plugin",
+        "    instructions + framework constants + the untrusted-content boundary.",
+        "    `suppress_base_instructions` can drop every layer EXCEPT the persona",
+        "    and its plugins — which is what makes the persona the durable half.",
+        "    Markdown also travels: it is reviewable, diffable, and reusable across",
+        "    profiles in a way a YAML block scalar is not.",
+        "",
+        "  NEVER PASS A CREDENTIAL AS AN agent_param.  Params are substituted INTO",
+        "  the persona, so they already reach the model in its system prompt — and",
+        "  the rendered persona is PERSISTED with the session (#787).  Secrets go in",
+        "  the profile's `env:` as a pass:// / vault:// URI, resolved daemon-side.",
+        "",
+        "  See also: `explain prefetch` (scripted session-start context),",
+        "  `explain profile` (the capability half), `explain paths` (config_root).",
+    ]
+    if found:
+        lines += ["", f"  IN THIS WORKSPACE ({ws}) — {len(found)} agent(s):"]
+        lines += [f"    {a['name']:24} {a['path']}" for a in found]
+    else:
+        lines += ["", f"  IN THIS WORKSPACE ({ws}): no agent files found.",
+                  "    `jaato-scaffold explain agents --workspace <dir>` to look elsewhere."]
+    return data, "\n".join(lines)
+
+
+# ---------------------------------------------------------------- services
+
+def services(workspace: str = ".") -> Rendered:
+    """The ``service_connector`` managed-service flow, and where it stores things.
+
+    The gap this closes: ``.jaato/services/`` appeared in no ``explain`` topic,
+    so a session that needed an HTTP API reached for a raw URL — passing the
+    base URL, the auth header and the pagination by hand on every call, and
+    re-deriving all three next session.  The managed path (discover once, name
+    it, call it by alias) was already there and simply invisible.
+    """
+    from shared.plugins.service_connector.schema_store import (
+        DEFAULT_SERVICES_DIR, DISCOVERED_DIR, SERVICE_CONFIG_FILE)
+
+    ws = Path(workspace).expanduser().resolve()
+    tiers = [("workspace", ws / DEFAULT_SERVICES_DIR),
+             ("user", Path.home() / DEFAULT_SERVICES_DIR)]
+    known: List[Dict[str, Any]] = []
+    for label, root in tiers:
+        if not root.is_dir():
+            continue
+        disc = root / DISCOVERED_DIR
+        if disc.is_dir():
+            for f in sorted(disc.glob("*.y*ml")):
+                known.append({"tier": label, "service": f.stem,
+                              "kind": "discovered", "path": str(f)})
+        for d in sorted(x for x in root.iterdir() if x.is_dir()):
+            if d.name == DISCOVERED_DIR:
+                continue
+            known.append({"tier": label, "service": d.name,
+                          "kind": "defined", "path": str(d)})
+
+    data = {"tiers": [{"tier": t, "path": str(p), "exists": p.is_dir()}
+                      for t, p in tiers],
+            "writable_tier": "workspace",
+            "discovered_dir": DISCOVERED_DIR,
+            "service_config_file": SERVICE_CONFIG_FILE,
+            "known": known}
+
+    lines = [
+        "services — named HTTP APIs the model calls by alias "
+        "(.jaato/services/, service_connector plugin)",
+        "",
+        "  THE FLOW — three calls, then the API has a name:",
+        "    1. discover_service(source='https://host/openapi.json', alias='gitlab')",
+        "         parses the OpenAPI/Swagger spec, caches it, learns every",
+        "         endpoint's parameters and response schema.",
+        "    2. configure_service_auth(service='gitlab', auth={...})",
+        "         binds a scheme + the ENV VARS its credentials come from, once.",
+        "         (`explain plugin service_connector` prints the auth shapes.)",
+        "    3. call_service(service='gitlab', method='GET', path='/projects')",
+        "         base URL, auth and request validation all come from the alias.",
+        "    list_endpoints / get_endpoint_schema browse it in between;",
+        "    preview_request dry-runs a call and prints the equivalent curl.",
+        "",
+        "  WHERE IT IS STORED — two tiers, workspace shadows home:",
+    ]
+    for label, root in tiers:
+        mark = "  (exists)" if root.is_dir() else ""
+        note = "  writable" if label == "workspace" else "  read-only here"
+        lines.append(f"    [{label:9}] {root}{note}{mark}")
+    lines += [
+        "    Per tier:",
+        f"      {DISCOVERED_DIR + '/<service>.yaml':30} auto-cached OpenAPI specs",
+        f"      {'<service>/' + SERVICE_CONFIG_FILE:30} hand-written service config",
+        f"      {'<service>/<endpoint>.yaml':30} hand-written endpoint schemas",
+        "    The user tier is populated out of band (copy a service you want in",
+        "    every workspace); writes always land in the workspace tier.",
+        "",
+        "  MANAGED ALIAS vs RAW URL — call_service takes either.  Prefer the alias",
+        "  when any of these hold:",
+        "    - the API needs auth        the scheme is configured ONCE, and the",
+        "                                credential stays an env-var NAME on disk",
+        "    - it is paginated or wide   the cached schema is what makes",
+        "                                list_endpoints / get_endpoint_schema able",
+        "                                to answer without another round trip",
+        "    - requests get validated    a body is checked against the spec before",
+        "                                it is sent, so a typo is a local error",
+        "    - more than one call        the alias survives the session; a raw URL",
+        "                                is re-derived by hand every time",
+        "  A raw `url=` is right for a one-shot unauthenticated fetch, and for an",
+        "  API that publishes no spec (save_schema / import_bruno_collection give",
+        "  those one by hand).",
+        "",
+        "  Under confinement the user tier is granted READ only",
+        "  (~/.jaato/services/**), so a service the workspace must WRITE belongs",
+        "  in the workspace tier.  See `explain paths`.",
+    ]
+    if known:
+        lines += ["", f"  KNOWN HERE — {len(known)}:"]
+        lines += [f"    [{k['tier']:9}] {k['service']:24} {k['kind']}"
+                  for k in known]
+    else:
+        lines += ["", "  KNOWN HERE: none — nothing has been discovered yet.",
+                  f"    (looked in {tiers[0][1]} and {tiers[1][1]})"]
+    return data, "\n".join(lines)
+
+
 # -------------------------------------------------------------------- sets
 
 def sets(workspace: str) -> Rendered:
@@ -1858,8 +2211,19 @@ def paths() -> Rendered:
         "       per-session workspace, NOT $HOME.",
         "",
         "  config_root   = <workspace>/.jaato by default — the resolution root for",
-        "    profiles / instructions / agents.  Override per-profile (config_root:)",
-        "    or per-client (working_dir / env_file).",
+        "    profiles / instructions / agents.  It is a CLIENT knob, not a profile",
+        "    key: pass `config_root=` to IPCClient / WSClient / InProcessClient",
+        "    (all three default it to <workspace>/.jaato).  The default is applied",
+        "    client-side, and that matters because the value has two consumers:",
+        "      - the config SEARCH PATH falls back to <workspace>/.jaato daemon-side",
+        "        whether or not the value is set, so profiles and agents resolve",
+        "        either way;",
+        "      - a plugin that WRITES under the root reads the VALUE — file_edit",
+        "        puts backups in <config_root>/sessions/<id>/backups/ and REFUSES",
+        "        to initialize without one, so a session that reached the daemon",
+        "        with config_root unset came up with no writeNewFile at all.",
+        "    A plugin the profile asked for that fails to initialize is now named",
+        "    at WARNING (registry.get_failed_plugins() is the programmatic read).",
         "    -> FRAMEWORK-OWNED.  Everything under it is either config jaato READS",
         "       (profiles, agents, instructions, schemas, scripts, templates) or",
         "       runtime state jaato WRITES (logs/, sessions/, cache/, memory/,",
@@ -1988,6 +2352,32 @@ def completion() -> Rendered:
         "      tool_calls — the paired ledger of every function_call and its",
         "      response, for cross-checking a payload's claims against what",
         "      the session ACTUALLY did.",
+        "",
+        "  TWO WAYS TO CHECK A CLAIM, AND THE SECOND IS STRONGER.",
+        "    The ledger (`context.tool_calls`) proves the agent CALLED a tool.",
+        "    The filesystem proves the tool LEFT SOMETHING BEHIND — and that is",
+        "    the claim a downstream stage actually depends on.  A `validate` may",
+        "    read the workspace, so an agent that reports `output_file:` can be",
+        "    held to it:",
+        "",
+        "      def validate(payload, context):",
+        "          out = Path(context.workspace_path) / payload['output_file']",
+        "          if not out.is_file():",
+        "              return {'errors': [f\"{payload['output_file']} does not \"",
+        "                                 f'exist — write it, then signal again']}",
+        "          if out.stat().st_size == 0:",
+        "              return {'errors': [f\"{payload['output_file']} is empty\"]}",
+        "          return {}",
+        "",
+        "    That turns the payload into a VERIFIABLE contract between driver and",
+        "    agent rather than a report taken on trust, and it costs one stat().",
+        "    Two rules make it behave:",
+        "      - a path from the payload is MODEL-supplied.  Resolve it under",
+        "        workspace_path and reject one that escapes (`..`, an absolute",
+        "        path) — a processor runs with the session's own file access.",
+        "      - report the miss as `errors` (retryable — the agent can still",
+        "        write the file within max_turns), NOT as `faults`, which is for",
+        "        an environment the agent cannot fix.",
         "",
         "  THE RETRY BUDGET IS max_turns.  A blocked completion is retried",
         "  inside the session's own max_turns; there is no second attempts",

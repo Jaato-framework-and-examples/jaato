@@ -255,6 +255,44 @@ _PLUGIN_KIND_PROTOCOLS: Dict[str, type] = {
 }
 
 
+def _install_advice(missing: str) -> str:
+    """What to run to get import name *missing* into this environment.
+
+    A skip message that only names the module leaves the reader to guess the
+    distribution AND the extra.  For ``pexpect`` the answer is
+    ``pip install 'jaato-server[interactive]'`` — an extra whose name is not
+    the plugin's, not the module's, and not discoverable from the message,
+    so "install it" reliably became ``pip install pexpect`` into whatever
+    interpreter was nearest.  jaato-server ALREADY declares the requirement;
+    what was missing was saying so.
+
+    Resolved from the installed distribution metadata (the same index
+    ``jaato-scaffold explain <unit> dependencies`` reads) rather than from a
+    table here, so a new extra needs no edit in this file and a stale one
+    cannot outlive ``pyproject.toml``.  Best-effort by construction: this is
+    an error path in plugin discovery, and a diagnostic that raises is worse
+    than a vague one, so any failure falls back to the generic advice.
+
+    Args:
+        missing: The import name from ``ModuleNotFoundError.name``.
+
+    Returns:
+        A sentence naming the install target, ending in a period.
+    """
+    try:
+        from shared.scaffold.dependencies import _core_index, _extras_index
+        targets = _extras_index().get(missing) or _core_index().get(missing)
+    except Exception:              # noqa: BLE001 — diagnostics never raise
+        targets = None
+    if not targets:
+        return ("install it to enable this plugin (`jaato-scaffold explain "
+                f"plugin <name> dependencies` names what ships '{missing}').")
+    # Several extras can declare the same package; name them all rather than
+    # picking one, since any of them satisfies the import.
+    joined = " / ".join(f"pip install '{t}'" for t in sorted(targets))
+    return f"enable this plugin with: {joined}."
+
+
 def _protocol_gap(plugin: Any, plugin_kind: str) -> Optional[str]:
     """Render the protocol methods *plugin* is missing, or ``None``.
 
@@ -1167,7 +1205,7 @@ class PluginRegistry:
                 missing = exc.name or str(exc)
                 _trace(
                     f" Plugin '{name}' skipped: missing dependency "
-                    f"'{missing}' — install it to enable this plugin.",
+                    f"'{missing}' — {_install_advice(missing)}",
                     warning=True,
                 )
             except Exception as exc:
@@ -1760,6 +1798,61 @@ class PluginRegistry:
                 f"expose_all: skipped initialize for {len(skipped)} "
                 f"plugins not requested by session: {sorted(skipped)}"
             )
+        self._report_requested_but_failed(requested_plugins)
+
+    def _report_requested_but_failed(self, requested_plugins) -> None:
+        """Announce plugins the session ASKED FOR that did not initialize.
+
+        ``expose_tool`` already refuses to let one broken plugin take the
+        session down: it logs the failure, records it in
+        :attr:`_failed_plugins`, and carries on.  That is right — and until
+        now ``_failed_plugins`` was WRITE-ONLY, recorded in four places and
+        read in none, so the recovery had no audience.
+
+        The session then starts looking healthy while a plugin the PROFILE
+        named is simply absent.  Neither the model nor the driver is told:
+        the model discovers it by calling ``list_tools`` and not finding what
+        it was asked to use, and the driver sees a task that quietly did
+        nothing.  ``file_edit`` is the canonical case — it requires a
+        ``config_root`` and raises at ``initialize()`` without one, so a
+        session whose client supplied none comes up with `writeNewFile` and
+        friends missing and no line in the transcript saying why.
+
+        A failure to initialize a plugin the session did not request is not
+        reported: only the profile's own list is a promise to the author.
+        Nothing raises here — this is a diagnostic, at the end of a method
+        whose whole contract is to survive a broken plugin.
+        """
+        if not self._failed_plugins:
+            return
+        wanted = (set(requested_plugins) if requested_plugins is not None
+                  else set(self._plugins))
+        broken = sorted(n for n in wanted if n in self._failed_plugins)
+        if not broken:
+            return
+        detail = "; ".join(
+            f"{n} ({self._failed_plugins[n][0]}: {self._failed_plugins[n][1]})"
+            for n in broken)
+        _trace(
+            f" {len(broken)} plugin(s) this session REQUESTED are not "
+            f"available — their tools are missing from the model's surface: "
+            f"{detail}",
+            warning=True,
+        )
+
+    def get_failed_plugins(self) -> Dict[str, tuple]:
+        """Plugins that raised during a lifecycle call, ``{name: (phase, error)}``.
+
+        ``phase`` is one of ``initialize`` / ``re-initialize`` / ``shutdown``.
+        A copy, so a caller iterating it cannot be tripped by a concurrent
+        spawn (see the snapshot rule in :meth:`get_plugin_for_tool`).
+
+        The read half of :attr:`_failed_plugins`, which had none — a plugin
+        the profile named could fail to initialize and no surface could ask
+        about it.  ``jaato-doctor`` and a driver checking whether the session
+        it built is the session it asked for are the intended callers.
+        """
+        return dict(self._failed_plugins)
 
     def unexpose_all(self) -> None:
         """Stop exposing all plugins' tools."""

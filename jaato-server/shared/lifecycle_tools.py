@@ -226,8 +226,9 @@ class LifecycleTools:
 
     def __init__(self, session: 'JaatoSession') -> None:
         self._session = session
+        declared = getattr(session, '_completion_payload_schema', None)
         self._payload_schema: Optional[Dict[str, Any]] = resolve_completion_schema(
-            getattr(session, '_completion_payload_schema', None),
+            declared,
             workspace_path=getattr(session, 'workspace_path', None),
             # JaatoSession adopts the runtime's config_root via
             # ``runtime._config_root``; honor it here so a profile that
@@ -238,6 +239,29 @@ class LifecycleTools:
                 getattr(session, 'runtime', None), '_config_root', None,
             ),
         )
+        # DECLARED-BUT-UNRESOLVED is a different fact from NOT DECLARED, and
+        # only one of them is a mistake.  ``_should_hide_signal_completion``
+        # reads ``_payload_schema is None`` and cannot tell them apart, so a
+        # profile whose schema path was wrong got the same treatment as one
+        # that never wanted the tool: ``signal_completion`` vanished from the
+        # surface, the model hunted for it through ``list_tools``, the
+        # framework spent its nudges re-prompting, and the driver was handed
+        # ``None`` by a session that looked like it ran.  The only trace was a
+        # WARNING from the resolver about a path — nothing connecting that path
+        # to the tool that disappeared because of it.
+        self._schema_declared_but_unresolved = bool(
+            declared is not None and self._payload_schema is None)
+        if self._schema_declared_but_unresolved:
+            logger.warning(
+                "completion_payload_schema %r is declared but did not resolve "
+                "— signal_completion is HIDDEN from this session's tool "
+                "surface, so the agent cannot complete and the session will "
+                "end without a payload.  A relative path is joined onto the "
+                "config root, so it must NOT start with '.jaato/'; "
+                "`jaato-scaffold validate <workspace>` reports both mistakes "
+                "before a run.",
+                declared,
+            )
         # Lazy-loaded completion processors (kb-authored Python).  None
         # until the first ``signal_completion`` call resolves the
         # configured entries via
@@ -512,6 +536,12 @@ class LifecycleTools:
         # Gate 1 (2026-06-07+): no schema → hide.  Applies to root
         # AND subagent.  If you want signal_completion, declare a
         # completion_payload_schema in your profile.
+        #
+        # A schema that was DECLARED and failed to resolve reaches this line
+        # looking identical to one that was never declared, which is why the
+        # constructor logs that case by name: the outcome is the same tool
+        # surface, but one of the two is an author mistake and the other is
+        # the documented way to opt out.
         if self._payload_schema is None:
             return True
 
