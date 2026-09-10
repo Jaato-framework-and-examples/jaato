@@ -331,6 +331,16 @@ def _should_drop_introspection(has_deferred_to_discover, tool_names) -> bool:
     return not any(n not in _INTROSPECTION_TOOL_NAMES for n in tool_names)
 
 
+# Per-turn budget bookkeeping, kept on ``turn_data`` for the life of ONE turn
+# and popped by ``_budget_observe_turn`` before the dict is appended to
+# ``_turn_accounting`` (so nothing here is persisted or emitted).  They let
+# the mid-turn observations (#955) and the turn-end observation split
+# ``tool_calls`` and ``seconds`` between them without counting anything
+# twice, whichever chat loop produced the turn.
+_BUDGET_TOOL_CALLS_OBSERVED = "_budget_tool_calls_observed"
+_BUDGET_SECONDS_OBSERVED = "_budget_seconds_observed"
+
+
 class JaatoSession:
     """Per-agent conversation session.
 
@@ -519,6 +529,10 @@ class JaatoSession:
         # ``_budget_terminal_action`` (which also latches finalize/escalate,
         # neither of which stops anything).
         self._budget_exhausted_reason: Optional[str] = None
+        # Dimensions whose 100% crossing has been TRACED (#955).  A ceiling
+        # is announced once, whether or not any rung fires on it — a ladder
+        # that never logs is indistinguishable from one that is not wired.
+        self._budget_ceilings_traced: Set[str] = set()
         # True when the LAST send_message was refused by the budget gate
         # (no turn ran).  Read runner-side to suppress the post-turn
         # TurnCompletedEvent — see ``was_last_send_refused``.
@@ -1628,6 +1642,12 @@ class JaatoSession:
         """
         if (
             not getattr(self, "_signal_completion_called", False)
+            # A session an ``abort`` rung stopped refuses every later turn
+            # (``_refuse_if_budget_exhausted``); re-prompting it spends a
+            # nudge on a turn that cannot run and prints a refusal per
+            # attempt (#955).  The ceiling is the verdict, not a missing
+            # signal_completion.
+            and not getattr(self, "_budget_exhausted_reason", None)
             and getattr(self, "_completion_nudges_fired", 0) < max_nudges
         ):
             self._completion_nudges_fired += 1
@@ -7299,6 +7319,11 @@ NOTES
             tool_result = self._build_tool_result(fc, result.executor_result)
             tool_results.append(tool_result)
 
+            # Budget: count the call NOW, not at turn end (#955).  An abort
+            # rung cancels the token, and the check at the top of this
+            # loop stops the next call.
+            self._budget_observe_tool_calls(turn_data, 1)
+
         return tool_results
 
     def _apply_parallel_tool_cap(self, width: Optional[int]) -> None:
@@ -7476,6 +7501,12 @@ NOTES
                 })
                 tool_result = self._build_tool_result(fc, result.executor_result)
                 tool_results.append(tool_result)
+
+        # Budget: the batch is the unit here — every call in it was already
+        # in flight, so the overshoot past a ceiling is bounded by one
+        # batch (#955).  An abort rung cancels the token and the caller
+        # ends the turn before the next model round-trip.
+        self._budget_observe_tool_calls(turn_data, len(tool_results))
 
         return tool_results
 
@@ -10300,18 +10331,187 @@ NOTES
             logger.warning("budget: response observation failed: %s", exc)
 
     def _budget_observe_turn(self, turn_data: Dict[str, Any]) -> None:
-        """Feed one completed turn's wall-clock / tool-call / turn count."""
+        """Feed one completed turn: its turn count, plus whatever the
+        mid-turn observations did not already see.
+
+        Until #955 this was the ONLY writer of ``tool_calls``, ``seconds``
+        and ``turns``, and it runs in the turn's ``finally`` — so a loop
+        INSIDE one turn could not cross any of them however long it ran.  A
+        subagent made 196 tool calls under ``tool_calls: 100`` with an
+        ``abort`` rung at 100% and nothing fired, because the turn had not
+        ended; it outlived its driver and was stopped with ``kill -TERM``.
+        ``tool_calls`` and ``seconds`` are now observed AS THE TURN RUNS by
+        :meth:`_budget_observe_tool_calls`; this is the closing entry.  It
+        settles the remainder — tool calls a path recorded without
+        observing (none today; the AST guard in
+        ``test_budget_mid_turn_955.py`` keeps it that way) and the seconds
+        between the last tool call and the end of the turn — so a budget is
+        exact at turn end whichever path produced the turn, and never
+        double-counted.
+
+        The bookkeeping keys are popped here: ``turn_data`` is appended to
+        ``_turn_accounting`` right after this call, and that list is
+        persisted and emitted.
+        """
         if self._budget_tracker is None:
             return
         try:
+            recorded = len(turn_data.get("function_calls") or ())
+            observed = int(turn_data.pop(_BUDGET_TOOL_CALLS_OBSERVED, 0) or 0)
+            seconds = self._budget_unobserved_seconds(
+                turn_data, turn_data.get("duration_seconds"))
+            turn_data.pop(_BUDGET_SECONDS_OBSERVED, None)
             fired = self._budget_tracker.observe(
                 turns=1,
-                seconds=turn_data.get("duration_seconds") or 0.0,
-                tool_calls=len(turn_data.get("function_calls") or ()),
+                seconds=seconds,
+                tool_calls=max(0, recorded - observed),
             )
+            self._budget_note_ceilings()
             self._apply_budget_rungs(fired)
         except Exception as exc:  # noqa: BLE001
             logger.warning("budget: turn observation failed: %s", exc)
+
+    def _budget_observe_tool_calls(
+        self, turn_data: Dict[str, Any], count: int,
+    ) -> None:
+        """Feed tool calls to the tracker as they COMPLETE, mid-turn (#955).
+
+        Called by every path that records a call in
+        ``turn_data['function_calls']`` — the sequential loop after each
+        call, the parallel loop after each batch, the parts loop after each
+        call.  Observing here is what lets an ``abort`` rung stop a tool
+        loop on the call that crosses the ceiling rather than at the end of
+        a turn that, for a runaway loop, never comes: the abort cancels the
+        session's token, which the sequential loop checks before the next
+        call and the main chat loop before the next model round-trip, so the
+        overshoot is one call or one parallel batch.  The parts loop
+        (attachment turns) has no check of its own: it finishes the batch in
+        flight and the provider cancels the next response on its first
+        chunk.
+
+        ``seconds`` rides along: the wall clock since the last observation
+        is fed at the same time, so a ``seconds`` ceiling binds mid-turn too
+        rather than at turn end, where a stuck loop would never report it.
+
+        Never raises — budgeting is a guardrail, not part of the turn's
+        contract.
+        """
+        if self._budget_tracker is None or count <= 0:
+            return
+        try:
+            turn_data[_BUDGET_TOOL_CALLS_OBSERVED] = (
+                int(turn_data.get(_BUDGET_TOOL_CALLS_OBSERVED, 0) or 0)
+                + count
+            )
+            fired = self._budget_tracker.observe(
+                tool_calls=count,
+                seconds=self._budget_unobserved_seconds(turn_data),
+            )
+            self._budget_note_ceilings()
+            self._apply_budget_rungs(fired)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("budget: tool-call observation failed: %s", exc)
+
+    @staticmethod
+    def _budget_unobserved_seconds(
+        turn_data: Dict[str, Any], elapsed: Optional[float] = None,
+    ) -> Optional[float]:
+        """Wall-clock seconds of this turn not yet fed to the tracker.
+
+        Advances the ``_budget_seconds_observed`` mark on ``turn_data`` so
+        successive calls hand out disjoint slices of the turn's elapsed
+        time: a mid-turn observation feeds the seconds since the previous
+        one, and the turn-end observation feeds only the tail.
+
+        Args:
+            turn_data: The turn's accounting dict (``start_time`` is read
+                when *elapsed* is not supplied).
+            elapsed: Total seconds elapsed so far, when the caller already
+                knows it (turn end passes ``duration_seconds``).
+
+        Returns:
+            The unobserved delta, or ``None`` when the turn's start is not
+            readable — "no news" to the tracker, never a guess.
+        """
+        if elapsed is None:
+            start = turn_data.get("start_time")
+            if not start:
+                return None
+            try:
+                elapsed = (
+                    datetime.now() - datetime.fromisoformat(start)
+                ).total_seconds()
+            except (TypeError, ValueError):
+                return None
+        already = float(turn_data.get(_BUDGET_SECONDS_OBSERVED, 0.0) or 0.0)
+        delta = max(0.0, float(elapsed) - already)
+        turn_data[_BUDGET_SECONDS_OBSERVED] = already + delta
+        return delta
+
+    def _budget_note_ceilings(self) -> None:
+        """Trace each dimension the FIRST time it reaches its ceiling.
+
+        Independent of the ladder (#955, question 3): a profile whose rungs
+        stop short of 100%, or whose terminal action is ``finalize``, still
+        crosses its limits, and until now did so in silence — the reporter
+        grepped the session trace for the ladder and found nothing, unable
+        to tell "evaluated and did not fire" from "not wired".  Once per
+        dimension, because the tracker keeps accumulating past 100% and a
+        line per tool call would be noise.
+        """
+        tracker = self._budget_tracker
+        if tracker is None:
+            return
+        traced = getattr(self, "_budget_ceilings_traced", None)
+        if traced is None:
+            traced = self._budget_ceilings_traced = set()
+        for dim, fraction in tracker.exceeded_dimensions().items():
+            if dim in traced:
+                continue
+            traced.add(dim)
+            usage = tracker.usage.as_dict().get(dim)
+            limit = tracker.config.limits.get(dim)
+            self._budget_trace(
+                f"CEILING dim={dim} used={usage:g} limit={limit:g} "
+                f"at={fraction * 100:.0f}% pressure='{tracker.describe_pressure()}'"
+            )
+            logger.warning(
+                "budget: %s ceiling reached (%g/%g); ladder=%s",
+                dim, usage, limit,
+                [r.at_percent for r in tracker.config.degrade] or "none",
+            )
+
+    def _budget_trace_rung(
+        self, rung: 'DegradeRung', origin: str, detail: str,
+    ) -> None:
+        """One trace line per fired rung: threshold, mechanism, what it carries."""
+        action = rung.action or "none"
+        overlay = "yes" if rung.model_tiers else "no"
+        self._budget_trace(
+            f"RUNG at={rung.at_percent:.0f}% origin={origin} action={action} "
+            f"overlay={overlay} pressure='{detail}'"
+        )
+
+    def _budget_trace(self, msg: str) -> None:
+        """Record a budget decision on BOTH trace channels (#955).
+
+        ``_trace`` lands in the per-agent provider trace; the permission
+        DECISION lines (#953) an operator correlates budget events against
+        live in the application trace (``JAATO_TRACE_LOG`` / the profile's
+        ``trace.session_log``), so the same line is written there too,
+        prefixed with the session's agent identity.  Best-effort: a trace
+        failure never reaches the turn.
+        """
+        line = f"BUDGET {msg}"
+        try:
+            self._trace(line)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            from shared.trace import trace
+            trace("BUDGET", f"{self._get_trace_prefix()} {msg}")
+        except Exception:  # noqa: BLE001
+            pass
 
     def _apply_budget_rungs(
         self, fired, origin: str = "self-enforced",
@@ -10382,6 +10582,10 @@ NOTES
                     "model already degraded away from",
                     origin, rung.at_percent, self._budget_applied_rung_pct,
                 )
+                self._budget_trace(
+                    f"RUNG_SKIPPED at={rung.at_percent:.0f}% origin={origin} "
+                    f"applied={self._budget_applied_rung_pct:.0f}%"
+                )
                 continue
             self._budget_applied_rung_pct = rung.at_percent
             # A cascade rung fired on the POOL's fraction; reporting this
@@ -10392,6 +10596,10 @@ NOTES
                 if self._budget_tracker is not None else "cascade pressure"
             )
             tag = f"budget[{origin}]"
+            # Every fired rung leaves a line, whatever it goes on to do
+            # (#955): the ladder must be visibly EVALUATED, not only
+            # visible when it rebinds or aborts.
+            self._budget_trace_rung(rung, origin, detail)
             if rung.model_tiers:
                 if self._tier_config is None:
                     # Rejected by the profile validator, but a session can be
@@ -10433,6 +10641,10 @@ NOTES
                     # is not a ceiling.
                     self._budget_exhausted_reason = (
                         f"budget_exhausted ({origin}: {detail})")
+                    self._budget_trace(
+                        f"EXHAUSTED reason='{self._budget_exhausted_reason}' "
+                        "— in-flight turn cancelled, later turns refused"
+                    )
                     self.request_stop(self._budget_exhausted_reason)
 
     def apply_cascade_degrade(
@@ -11816,6 +12028,9 @@ NOTES
 
                     tool_result = self._build_tool_result(fc, executor_result)
                     tool_results.append(tool_result)
+
+                    # Budget: count the call now, not at turn end (#955).
+                    self._budget_observe_tool_calls(turn_data, 1)
 
                 # Send tool results back (with retry for rate limits)
                 self._pacer.pace()  # Proactive rate limiting

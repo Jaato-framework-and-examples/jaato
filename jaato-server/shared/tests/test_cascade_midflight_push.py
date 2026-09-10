@@ -57,10 +57,14 @@ def _session(budget=None):
         _budget_applied_rung_pct=0.0,
         _current_output_callback=lambda src, txt, mode: notices.append(txt),
         _ui_hooks=None, _connects=connects, _notices=notices,
+        # #955: every fired rung leaves a trace line on both channels.
+        _trace=lambda *a, **k: None,
+        _get_trace_prefix=lambda: "session:main",
     )
     for n in ("_is_connected_to", "_connect_tier_entry",
               "_reconnect_active_tier_if_rebound", "_apply_budget_rungs",
-              "_surface_budget_event", "apply_cascade_degrade"):
+              "_surface_budget_event", "apply_cascade_degrade",
+              "_budget_trace", "_budget_trace_rung"):
         setattr(s, n, (lambda nm: (lambda *a, **k:
                 getattr(JaatoSession, nm)(s, *a, **k)))(n))
     s.request_stop = lambda reason="": s.__setattr__("_stopped", reason) or True

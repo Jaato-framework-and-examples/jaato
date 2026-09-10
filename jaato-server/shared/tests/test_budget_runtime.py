@@ -133,6 +133,7 @@ def _session(active="planner", model="opus", budget=None):
         _instruction_budget=None,
         _runtime=None,
         _trace=lambda *a, **k: None,
+        _get_trace_prefix=lambda: "session:main",
         _budget_tracker=BudgetTracker(budget) if budget else None,
         _budget_terminal_action=None,
         _budget_exhausted_reason=None,
@@ -145,6 +146,8 @@ def _session(active="planner", model="opus", budget=None):
     for name in ("_is_connected_to", "_connect_tier_entry",
                  "_reconnect_active_tier_if_rebound", "_apply_budget_rungs",
                  "_surface_budget_event", "_refuse_if_budget_exhausted",
+                 # #955: every fired rung and ceiling leaves a trace line.
+                 "_budget_trace", "_budget_trace_rung", "_budget_note_ceilings",
                  # Post-connect bookkeeping, bound so the double exercises
                  # the real ones rather than silently skipping them.
                  "_wire_cache_plugin", "_retarget_reliability_model",
