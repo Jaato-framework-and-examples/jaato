@@ -141,7 +141,11 @@ def _apply_trace_env(profile: Any, saved: Dict[str, Optional[str]]) -> None:
     trace = getattr(profile, 'trace', None)
     if not trace:
         return
-    for key, value in trace.as_env().items():
+    # workspace_root_override: this path knows the subagent's own workspace,
+    # so ${workspaceRoot} in a trace path resolves to the session's rather
+    # than the daemon's (the main-session path in core.py cannot).
+    for key, value in trace.as_env(
+            workspace_root_override=os.environ.get("JAATO_WORKSPACE_ROOT")).items():
         if key not in saved:
             saved[key] = os.environ.get(key)
         os.environ[key] = value

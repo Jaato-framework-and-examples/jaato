@@ -364,11 +364,14 @@ gc:
 #   lower-precedence default (the block outranks both the workspace .env
 #   and this profile's own `env:` map).  Absolute = one file shared by
 #   every session using the profile; relative = one file per session,
-#   resolved against the workspace by jaato_sdk.trace.  Refuses a switch
-#   written into a path field — `env: {JAATO_PROVIDER_TRACE: '1'}` is a
-#   valid str and wrote every session's trace to a file named `1` (#775).
+#   resolved against the workspace by jaato_sdk.trace.  Takes ${VAR}
+#   expansion like `env:` does, and the per-agent {agent} /
+#   {agent_suffix} placeholders.  Refuses a switch written into a path
+#   field — `env: {JAATO_PROVIDER_TRACE: '1'}` wrote every session's
+#   trace to a file named `1` (#775), and is now refused on BOTH routes.
+#   `jaato-scaffold explain profile` prints the whole vocabulary.
 trace:
-  provider_log: .jaato/logs/provider_trace.jsonl
+  provider_log: .jaato/logs/provider{agent_suffix}.jsonl
   session_log: .jaato/logs/session_trace.jsonl
 # completion_processors: kb Python that gates signal_completion — the
 #   OUTPUT-side script hook (the input-side one is the persona's
@@ -3008,6 +3011,69 @@ Auth: `oauth_login()` from `shared.plugins.model_provider.antigravity`
 Available Models:
 - Antigravity quota: `antigravity-gemini-3-pro/flash`, `antigravity-claude-sonnet-4-5[-thinking]`
 - Gemini CLI quota: `gemini-2.5-flash/pro`, `gemini-3-flash/pro-preview`
+
+### Substitution in Config Values (two vocabularies, two resolution times)
+
+A value an author writes into a profile may carry placeholders. There are
+**two** sets, they use different syntax, and the distinction that matters is
+**when** each is resolved — a token resolved daemon-side cannot carry a value
+that does not exist until a subagent thread writes a line.
+
+| Syntax | Resolved by | When | Honoured in |
+|--------|-------------|------|-------------|
+| `${workspaceRoot}` `${cwd}` `${jdtlsStateRoot}` `${HOME}` `${USER}` `${ANY_ENV_VAR}`, plus `pass://` / `vault://` secret URIs | `expand_variables` (daemon) | once, while the profile resolves | `env:`, `plugin_configs:`, `trace:`, and the plugins that expand (lsp, webhook, web_fetch, service_connector, references) |
+| `{agent}` `{agent_suffix}` | `jaato_sdk.trace` (the writer) | per line written | `trace.session_log` / `trace.provider_log` and their env vars |
+
+The two are told apart by the `$`: `${agent}` is an env var nobody sets,
+`{agent}` is the per-agent token. `jaato-scaffold explain profile` and
+`explain env` render both tables from the live registries
+(`EXPANSION_CONTEXT_VARS`, `TRACE_PATH_PLACEHOLDERS`), so a token added to
+either appears in the docs without anyone writing it down.
+
+**The `trace:` block used to be the one typed route that expanded nothing.**
+A profile's `env:` map has always been run through `expand_variables`, while
+`TraceProfileConfig.as_env()` was applied verbatim — so `${HOME}/t.log` in
+the *validated* block was not absolute, was joined onto the workspace, and
+`trace_write`'s `os.makedirs` created a directory literally named `${HOME}`
+inside it. That is the #775 shape inside the block written to stop #775, and
+the asymmetry is the defect: the route that outranks the other must not
+understand less than it.
+
+**A provider trace splits per agent whether or not you ask.** With no
+placeholder the agent id is appended before the extension
+(`provider.jsonl` → `provider_subagent_1.jsonl`) — unchanged, and what every
+existing deployment gets. Naming a placeholder puts the id where you want it
+instead (`logs/{agent}/provider.jsonl`), suppresses the implicit suffix, and
+is the **only** way to split a *session* trace, which never splits on its own.
+For the main agent the two forms differ deliberately: implicit leaves the path
+alone, explicit renders `{agent}` as `main`, because an author who asked for
+the id wants it on every file rather than one anonymous file among named
+siblings.
+
+**What is refused, where.** A path-valued knob given a *switch* is refused at
+profile **load** on both routes — the typed block always did, and the `env:`
+map (the spelling that actually caused #775, since it was the only route that
+existed then) now does too, for `JAATO_TRACE_LOG`, `JAATO_PROVIDER_TRACE` and
+`JAATO_SESSION_LOG_DIR`. Closing one and leaving the other open made the block
+a suggestion: an author who hit the refusal satisfied it by moving the same
+value one key over. The workspace `.env` is deliberately **not** covered — it
+is the operator's own file, lower precedence, and outside the validated
+surface. An unknown `{token}` is refused too, because unresolved it becomes a
+literal directory.
+
+`jaato-scaffold validate` reports the cases that load fine and are still
+probably wrong:
+
+| Finding | Severity | Fires when |
+|---------|----------|-----------|
+| `trace_path_placeholder_unknown` | error | a `{token}` nothing substitutes, reaching via the `env:` route (the `trace:` route is refused at load) |
+| `trace_path_daemon_scoped_var` | warn | `${workspaceRoot}` / `${cwd}` in a trace path — on the main-session path these expand to the **daemon's** workspace, so every session shares one file. A relative path is the per-session idiom |
+| `trace_path_unexpanded_var` | warn | a `${VAR}` nothing in the workspace defines — an undefined name stays **literal**, so the path gains a `${VAR}` directory |
+| `trace_env_shadowed` | warn | both routes set for one variable: the block wins, so the `env:` value is dead |
+
+Before this, `validate.py` contained the string `trace` **zero** times — the
+one profile block whose silent-ignore failures had no reporter, the family
+#910 / #925 / #947 / #950 each closed for a different knob.
 
 ### General
 

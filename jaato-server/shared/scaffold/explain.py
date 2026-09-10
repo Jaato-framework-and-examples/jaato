@@ -1149,7 +1149,48 @@ PROFILE_ENV_FACTS = (
     "outranks the workspace .env, per key",
     "takes ${VAR} expansion + secret URIs (pass://, vault://, ...)",
     "is applied verbatim — a relative path is resolved by its READER",
+    "refuses a SWITCH (1/true/off) in a path var — #775, at profile load",
 )
+
+
+def _placeholder_table(indent: str = "    ") -> List[str]:
+    """The substitution vocabulary, grouped by WHEN each token resolves.
+
+    Rendered from :func:`introspect.placeholders` — i.e. from the two live
+    registries — wherever placeholders are documented, which is currently
+    ``explain env`` and ``explain profile``.  Grouped by resolver rather than
+    listed flat because the resolution TIME is the whole distinction: an
+    author reaching for ``${agent}`` is asking a daemon-side expander for a
+    value that does not exist until a subagent thread writes a line, and a
+    flat list invites exactly that.
+
+    Args:
+        indent: Left padding for the rendered rows.
+
+    Returns:
+        Rendered lines, ready to extend a topic's output.
+    """
+    groups: Dict[str, list] = {}
+    for ph in introspect.placeholders():
+        groups.setdefault(ph.resolved_by, []).append(ph)
+
+    lines: List[str] = []
+    for resolver, phs in groups.items():
+        lines.append(f"{indent}resolved by {resolver}:")
+        width = max(len(ph.name) for ph in phs)
+        for ph in phs:
+            lines.append(f"{indent}  {ph.name:{width}}  {ph.meaning}")
+        lines.append(f"{indent}  → honoured in: {phs[0].applies_to}")
+        lines.append("")
+    lines.append(f"{indent}The two vocabularies are told apart by the `$`, and "
+                 f"do NOT overlap:")
+    lines.append(f"{indent}`${{agent}}` is an env var nobody sets; `{{agent}}` "
+                 f"is the per-agent token.")
+    lines.append(f"{indent}A `{{token}}` the framework does not know is "
+                 f"REFUSED in `trace:` at profile")
+    lines.append(f"{indent}load and reported by `validate` — unresolved, it "
+                 f"becomes a literal directory.")
+    return lines
 
 
 def _profile_env_note() -> List[str]:
@@ -1214,12 +1255,17 @@ def _profile_env_note() -> List[str]:
         "  better route than `env:`: the typed one is validated, and `env:` is",
         "  not.  The two trace vars are the worked example in both directions —",
         "  `env: {JAATO_PROVIDER_TRACE: 1}` is a valid str and wrote every",
-        "  session's trace to a file named `1` (#775); the block refuses it:",
+        "  session's trace to a file named `1` (#775).  BOTH routes refuse that",
+        "  now, and the typed block additionally checks the path's vocabulary:",
         "",
         "        trace:",
         f"          provider_log: {ENV_EXAMPLE_VALUE}"
         "   # same resolution, checked",
+        "",
+        "  SUBSTITUTION — what a value may contain, and when it is resolved:",
+        "",
     ]
+    lines += _placeholder_table()
     return lines
 
 
@@ -1538,6 +1584,45 @@ def sets(workspace: str) -> Rendered:
 
 # ----------------------------------------------------------------- profile
 
+def _trace_block_note() -> List[str]:
+    """The ``trace:`` block's own section for ``explain profile``.
+
+    Its own function for the reason :func:`_profile_env_note` is: the field
+    row above prints one description line, and the three things an author
+    actually has to know about a trace path — where a relative one lands, what
+    may be substituted into it, and which of the two vocabularies resolves
+    when — do not fit there.  They were previously written down nowhere, which
+    is how ``${HOME}/t.log`` came to be created as a directory named
+    ``${HOME}``.
+
+    Returns:
+        Rendered lines, blank-line separated from the schema listing.
+    """
+    return [
+        "",
+        "  trace: — the two diagnostic log paths, and the ONE knob whose value",
+        "  is a path the framework writes to.  Both keys take the same rules:",
+        "    absolute   one file, shared by every session using this profile",
+        "    relative   resolved against each session's own workspace by the",
+        "               READER (jaato_sdk/trace.py) — one file per session",
+        "    refused    a switch (1 / true / off), a directory, an unknown",
+        "               {token} — each fails at profile LOAD, by name",
+        "",
+        "        trace:",
+        "          provider_log: .jaato/logs/provider{agent_suffix}.jsonl",
+        "          session_log:  .jaato/logs/session.jsonl",
+        "",
+        "  A PROVIDER trace splits per agent whether or not you ask: with no",
+        "  placeholder the agent id is appended before the extension",
+        "  (provider.jsonl -> provider_subagent_1.jsonl).  Naming a placeholder",
+        "  puts it where you want it instead, and is the only way to split a",
+        "  SESSION trace, which never splits on its own.",
+        "",
+        "  SUBSTITUTION — what a value may contain, and when it is resolved:",
+        "",
+    ] + _placeholder_table()
+
+
 def profile() -> Rendered:
     """The ``SubagentProfile`` schema — every knob a profile author can set.
 
@@ -1562,6 +1647,7 @@ def profile() -> Rendered:
             lines.append(f"      allowed → {f.allowed}")
         if f.description:
             lines.append(f"      {f.description}")
+    lines += _trace_block_note()
     lines.append(
         "\n  AppArmor — add client-side extra rules via the profile:\n"
         "    apparmor: true              opt the session into kernel-enforced confinement\n"

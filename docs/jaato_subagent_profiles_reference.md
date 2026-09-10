@@ -899,13 +899,36 @@ Profile values support two-phase expansion:
 | Variable | Source | Example |
 |---|---|---|
 | `${workspaceRoot}` | Auto-detected from `.git` or `.jaato` directory | `/home/user/project` |
-| `${cwd}` | Current working directory | `/home/user/project` |
+| `${cwd}` | Session workspace root, else the resolving process's cwd | `/home/user/project` |
+| `${jdtlsStateRoot}` | Framework-managed jdtls state dir, a sibling of the workspace | `/home/user/.project-jdtls-state` |
 | `${HOME}` | Environment variable | `/home/user` |
 | `${USER}` | Environment variable | `user` |
 | `${projectPath}` | Context variable (passed by caller) | `/app/my-project` |
 | `${ANY_ENV_VAR}` | `os.environ` lookup | (any env var) |
 
+The framework-supplied names are declared in
+`shared.plugins.subagent.config.EXPANSION_CONTEXT_VARS` and rendered by
+`jaato-scaffold explain profile` / `explain env`, which is the copy that
+cannot go stale — this table can, and did (it was missing `jdtlsStateRoot`).
+
 **Undefined variables** are kept as-is (literal `${UNKNOWN}` stays in the string).
+This is harmless in most values and destructive in a **path**: nothing creates
+`${UNKNOWN}` for you, so a log path containing one is created as a directory
+with that literal name. `jaato-scaffold validate` reports it for trace paths
+(`trace_path_unexpanded_var`).
+
+**Applies to** `env:`, `plugin_configs:`, `trace:`, and the plugin configs that
+expand (lsp, webhook, web_fetch, service_connector, references) — not to every
+profile field.
+
+> **A second, separate vocabulary exists for trace paths.** `{agent}` and
+> `{agent_suffix}` are resolved by `jaato_sdk.trace` when a line is *written*,
+> not by `expand_variables` when the profile *resolves*, because the agent
+> writing a given line is not known until then and differs between concurrent
+> threads of one session. They are told apart from the table above by the `$`:
+> `${agent}` is an env var nobody sets, `{agent}` is the per-agent token. A
+> `{token}` the framework does not know is **refused** at profile load — left
+> alone it would be created as a literal directory.
 
 Expansion works recursively in dicts and lists:
 ```json

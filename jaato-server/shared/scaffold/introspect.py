@@ -314,6 +314,86 @@ def gc_strategies() -> Dict[str, List[str]]:
     return {name: fields for name in sorted(discover_gc_plugins().keys())}
 
 
+# ------------------------------------------------------------- placeholders
+
+@dataclasses.dataclass
+class Placeholder:
+    """One substitution token an author may write into a config value.
+
+    NOT called ``token``, which is what it is: ``token`` is in
+    ``shared.secret_repr.SECRET_FIELD_NAMES``, so
+    ``test_credential_hygiene`` reads any dataclass carrying that field as
+    credential-bearing and requires a redacting ``__repr__``.  Redacting a
+    substitution placeholder would empty the very table this type exists to
+    print.  ``name`` matches every sibling here (``EnvVar``, ``ProfileField``,
+    ``PluginInfo``) and collides with nothing.
+
+    Attributes:
+        name: What the author writes, verbatim, syntax included
+            (``${workspaceRoot}``, ``{agent}``).
+        meaning: What it resolves to, for humans.
+        resolved_by: The component that substitutes it — used as the grouping
+            key, because WHEN a token resolves is the property authors get
+            wrong (a per-agent value cannot be supplied by a daemon-side
+            expander, and a daemon-side value is already fixed by the time the
+            reader sees it).
+        applies_to: Where the token is honoured, for humans.
+    """
+
+    name: str
+    meaning: str
+    resolved_by: str
+    applies_to: str
+
+
+def placeholders() -> List[Placeholder]:
+    """Every substitution token the installed framework honours in a config value.
+
+    Computed from the two registries rather than restated, so a token added to
+    either appears here — and therefore in ``jaato-scaffold explain`` — without
+    anyone remembering to write it down.  That is not hypothetical: the
+    reference doc's table has been missing ``${jdtlsStateRoot}`` since it was
+    added, because the only complete list lived inside a function body.
+
+    Returns:
+        The ``${...}`` context vars first (profile-resolution time), then the
+        ``{...}`` trace placeholders (write time).
+    """
+    from shared.plugins.subagent.config import EXPANSION_CONTEXT_VARS
+    from jaato_sdk.trace import TRACE_PATH_PLACEHOLDERS
+
+    out = [
+        Placeholder(
+            name=f"${{{name}}}",
+            meaning=meaning,
+            resolved_by="expand_variables (daemon, at profile resolution)",
+            applies_to="env:, plugin_configs:, trace:, and plugin configs "
+                       "that expand (lsp, webhook, web_fetch, "
+                       "service_connector, references)",
+        )
+        for name, meaning in EXPANSION_CONTEXT_VARS.items()
+    ]
+    out.append(Placeholder(
+        name="${ANY_ENV_VAR}",
+        meaning="any process / session env var; an UNDEFINED name is left "
+                "literal, and a literal ${...} in a path is created as a "
+                "directory",
+        resolved_by="expand_variables (daemon, at profile resolution)",
+        applies_to="same as above",
+    ))
+    out += [
+        Placeholder(
+            name=token,
+            meaning=meaning,
+            resolved_by="jaato_sdk.trace (the writer, per line)",
+            applies_to="trace.session_log / trace.provider_log and their env "
+                       "vars",
+        )
+        for token, meaning in TRACE_PATH_PLACEHOLDERS.items()
+    ]
+    return out
+
+
 # ------------------------------------------------------------------ profile
 
 def _type_name(t) -> str:
