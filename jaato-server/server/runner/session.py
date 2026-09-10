@@ -310,10 +310,13 @@ def _configure_runtime_plugins(
     3. No ``on_progress`` callback on ``expose_all`` — runner has no
        client event sink for per-plugin init progress (the daemon's
        ``_emit_init_progress`` doesn't apply).
-    4. ``permission_plugin`` initialized with the daemon-side default
-       policy (``defaultPolicy: "ask"``).  Profile-supplied
-       ``plugin_configs["permission"]`` overrides aren't currently in
-       the envelope (filed: backlog §3.3c.X).
+    4. ``permission_plugin`` is constructed here rather than taken
+       from the registry, seeded with the same daemon-side default
+       policy (``defaultPolicy: "ask"``) and then updated from
+       ``envelope.plugin_configs["permission"]`` — which Phase 4 §C
+       put on the wire (schema v2), closing backlog §3.3c.X.  The
+       profile's permission block therefore applies whether or not
+       ``permission`` appears in ``profile.plugins``; see Step 8.
 
     Bootstrap timing (2026-05-14): wraps every step with a sibling
     :class:`BootstrapTimer` instance.  When

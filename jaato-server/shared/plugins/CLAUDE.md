@@ -474,6 +474,23 @@ neither vocabulary asserts nothing, so an exotic one is not a false positive
 alone, since it is resolved later against an environment the validator does
 not have.
 
+**A config reaches your plugin whether or not the profile lists it (#950).**
+`plugin_configs.<you>` is applied by `JaatoSession.configure` for every plugin
+the registry knows; `plugins:` decides only which tools reach the model. The
+two are separate on purpose — a plugin whose `get_tool_schemas()` returns
+`[]` (`permission`, `sandbox_manager`) is configured-only by construction and
+would otherwise have to be named in `plugins:` as pure ceremony. Two things
+follow for a plugin author:
+
+- `initialize()` may be called again mid-life with a *different* session's
+  config, because the registry — and so your instance — is shared with any
+  subagent the session spawns. Keep it idempotent, and guard warm resources
+  behind the `_initialized` check the way `lsp` does.
+- If your plugin DOES expose tools, `jaato-scaffold validate` warns
+  `plugin_config_without_plugin` when a profile configures it and leaves it
+  out of `plugins:` — the config applies, but nothing the plugin offers is on
+  the wire.
+
 ## Critical: Model-Supplied Paths Go Through `path_safety`
 
 A plugin that reads or writes a path the **model** chose must not use the

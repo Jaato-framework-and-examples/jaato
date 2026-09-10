@@ -211,7 +211,7 @@ BASELINE: Dict[str, int] = {
     "jaato-server/shared/jaato_session.py::JaatoSession._track_activated_tools_in_budget": 20,
     "jaato-server/shared/jaato_session.py::JaatoSession._update_conversation_budget": 37,
     "jaato-server/shared/jaato_session.py::JaatoSession.activate_discovered_tools": 21,
-    "jaato-server/shared/jaato_session.py::JaatoSession.configure": 87,
+    "jaato-server/shared/jaato_session.py::JaatoSession.configure": 86,
     "jaato-server/shared/jaato_session.py::JaatoSession.resolve_fork_point": 17,
     "jaato-server/shared/jaato_session.py::JaatoSession.send_message": 29,
     "jaato-server/shared/lifecycle_tools.py::LifecycleTools._describe_pending_field": 28,

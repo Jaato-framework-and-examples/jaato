@@ -118,6 +118,72 @@ def _check_plugins(names: Any, plugins: Dict[str, Any], add) -> None:
                 where=f"plugins.{plug}")
 
 
+def _check_plugin_configs_expose_tools(profile: Any, plugins, add) -> None:
+    """Flag ``plugin_configs.<name>`` for a plugin the profile does not enable.
+
+    Configuring a plugin and exposing its tools are two decisions, and only
+    the second is spelled ``plugins:``.  Since #950 a config block IS applied
+    to the plugin either way — that is the point of
+    ``SessionInitEnvelope.plugin_configs`` carrying the whole map — so this is
+    NOT a "the block does nothing" finding.  What it says is narrower and
+    still worth saying: the plugin was configured and none of its tools are on
+    the model's wire, which for a tool-bearing plugin is almost always the
+    author having written half of the pair.
+
+    The shapes that are deliberately silent:
+
+    ``permission``, ``sandbox_manager``, … — plugins whose
+        ``get_tool_schemas()`` returns ``[]``.  These are configured-only by
+        construction (``permission/plugin.py``: "askPermission is not exposed
+        to the model"), so there is no tool surface to be missing and naming
+        them in ``plugins:`` would be pure ceremony.
+
+    ``introspection`` — in
+        :attr:`~shared.plugins.registry.PluginRegistry._ALWAYS_INITIALIZE_PLUGINS`,
+        and its ``list_tools`` / ``get_tool_schemas`` are core: they reach
+        every session's wire whatever ``plugins:`` says.
+
+    A plugin whose tools are not statically knowable — ``mcp``, whose tools
+    come from the servers a live session connects to — reports none offline
+    and is read the same way.  A false negative, and the right one: the
+    alternative is asserting a missing tool surface the validator cannot see.
+
+    A ``warn`` rather than an error, for the reason the whole family is warned
+    rather than failed: a base profile in an ``inherits`` chain may legitimately
+    carry a config its children enable, and validation runs on every discovered
+    profile including those bases.
+
+    Args:
+        profile: The resolved profile.
+        plugins: The introspected inventory, keyed by plugin name.
+        add: The per-profile diagnostic sink from :func:`validate_profile`.
+    """
+    from shared.plugins.registry import PluginRegistry
+
+    enabled = set(getattr(profile, "plugins", None) or ())
+    for cfg_name in (getattr(profile, "plugin_configs", None) or {}):
+        if cfg_name in enabled:
+            continue
+        if cfg_name in PluginRegistry._ALWAYS_INITIALIZE_PLUGINS:
+            continue
+        if introspect.resolve_provider(cfg_name) is not None:
+            continue  # a provider section — never named in plugins:
+        pinfo = plugins.get(cfg_name)
+        if pinfo is None:
+            continue  # not an installed plugin; nothing reliable to say
+        if not pinfo.tools and not pinfo.dynamic:
+            continue  # exposes no tools at all — configured-only by design
+        names = sorted(t.name for t in pinfo.tools)
+        preview = ", ".join(names[:4]) + (" …" if len(names) > 4 else "")
+        surface = f" ({preview})" if preview else ""
+        add("warn", "plugin_config_without_plugin",
+            f"'{cfg_name}' is configured but not enabled: the config applies, "
+            f"and none of the plugin's tools{surface} reach the model, because "
+            f"'{cfg_name}' is not in plugins:.  Add it to plugins: if the "
+            f"agent should be able to call them.",
+            where=f"plugin_configs.{cfg_name}")
+
+
 def validate_profile(
     profile: Any,
     *,
@@ -212,6 +278,7 @@ def validate_profile(
             where="plugins")
 
     # --- plugin_configs knobs (the silent-ignore class) ------------------
+    _check_plugin_configs_expose_tools(profile, plugins, add)
     plugin_configs = getattr(profile, "plugin_configs", None) or {}
     for cfg_name, cfg in plugin_configs.items():
         cfg_provider = introspect.resolve_provider(cfg_name)
