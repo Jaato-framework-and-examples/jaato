@@ -1799,6 +1799,73 @@ on `SessionInitEnvelope.created_by` — `set_client_user_id` previously had
 no caller, so runner-tier telemetry was anonymous too.  Related: #507 is
 the integrity half (tamper evidence); this is the identity half.
 
+### Observable Permission Decisions (#951)
+
+`check_permission` traced two things: that a check had **started**, and — on
+the ASK branch only — that it was about to prompt. Every terminal decision went
+to `_log_decision`, which appends to `_execution_log`, an in-memory list that
+reaches no file and no event. So an ALLOW and a DENY were **byte-identical in
+every log an operator can read**: one `check_permission: tool=X` line, then
+silence.
+
+A silent denial is invisible to the model too — no error to react to, so it
+re-issues the same call. #951 reports a subagent whose `writeNewFile` was
+checked 38 times and never ran; re-running the same profile with
+`defaultPolicy: deny` instead of `ask` produced *the same* logs and the same
+~10-token tool result. A genuine policy DENY and a call vanishing after the
+gate were indistinguishable, from the operator's side and the model's, so the
+symptom could be described exactly and the verdict could not be named. (#947 is
+the cost: 127 attempts at ~57k tokens each, outliving the parent session.)
+
+Two stages now say what they did.
+
+**The gate.** `check_permission` is a thin **single-exit wrapper** around
+`_check_permission_impl`, which keeps its twenty-odd rule-specific exits:
+
+```
+[PERMISSION] check_permission: tool=writeNewFile call_id=call_1 agent=subagent:documentalista session=20260910_115239
+[PERMISSION] check_permission: DECISION tool=writeNewFile call_id=call_1 agent=subagent:documentalista allowed=False method=default reason='Denied by default policy'
+```
+
+Structural rather than per-branch, deliberately: a branch added later is traced
+whether or not its author remembers to, which is the one property per-branch
+tracing does not have. `test_decision_observability_951.py` carries an AST
+guard that the wrapper stays single-exit, and a second that no exit of the impl
+returns a verdict without recording one — the two that did
+(`not_initialized`, `unknown`) are closed. A **raise** is traced too: it is a
+third outcome the old logging could not express, and `ToolExecutor` converts it
+into a fail-closed denial that reads downstream like a policy decision.
+
+`agent=` comes from the **caller's** per-session context, never from
+`self._agent_name`: the plugin is a registry-shared singleton whose
+`_agent_name` is whatever initialized it last, so a subagent's spawn re-labels
+the parent's own later decisions. (#951's traces show exactly that — the
+subagent's lines carrying the parent's `@escriba`.) The audit entry gains
+`method` / `call_id` / the caller, stamped at the single exit the way approver
+identity already was (#859), so `EvalContext.execution_log` can be reasoned
+over; the ledger's `permission-check` record gains the same three.
+
+**The stage after it.** `ToolExecutor._execute_impl` has three exits that end a
+tool call without running its body, and none left a mark — which is why "the
+call disappears between the permission gate and `file_edit`'s executor" had
+nowhere to look:
+
+```
+[TOOL_RUNNER] permission: tool=writeNewFile call_id=call_1 verdict=DENY method=default reason='Denied by default policy'
+[TOOL_RUNNER] resolve: tool=writeNewFile call_id=call_1 executor=shared.plugins.file_edit.plugin._execute_write_new_file
+[TOOL_RUNNER] result: tool=writeNewFile call_id=call_1 ok=True dict(keys=_permission,_telemetry,lines,path,size,success)
+```
+
+| Line | Says |
+|------|------|
+| `resolve: ... executor=MISSING — refused before the permission check` | no executor resolvable, so the gate was never consulted (`No executor registered for X` — roughly the same ten tokens a denial is) |
+| `permission: ... verdict=DENY\|ALLOW method=...` | the **consumer's** record of the verdict, so a policy plugin that traces nothing of its own (a stub, a wrapper, an out-of-tree engine) is still recorded where its decision takes effect |
+| `auto-background: ... — execution leaves this path` | approved, and its body runs elsewhere |
+| `resolve: ... executor=MISSING` after an ALLOW | the shape that reads, from outside, as a call vanishing after the gate |
+| `result: ... ok=... dict(keys=...)` | what the model was handed — **keys and the error string only**; a trace file is not the place for the file a tool just wrote |
+
+Both stages write to `JAATO_TRACE_LOG` / the profile's `trace.session_log`.
+
 ### Interactive Shell Sessions (`shared/plugins/interactive_shell/`)
 
 The `interactive_shell` plugin lets the model drive any user-interactive command by spawning persistent PTY sessions. Unlike `cli/` (which uses `subprocess` and can only run non-interactive commands), this plugin uses `pexpect` to provide a real pseudo-terminal where the model can read output and send input back and forth.
