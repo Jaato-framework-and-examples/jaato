@@ -414,7 +414,6 @@ BASELINE: Dict[str, int] = {
     "jaato-server/shared/plugins/service_connector/plugin.py::ServiceConnectorPlugin._execute_call_service": 69,
     "jaato-server/shared/plugins/service_connector/plugin.py::ServiceConnectorPlugin._execute_discover_service": 16,
     "jaato-server/shared/plugins/service_connector/plugin.py::ServiceConnectorPlugin._execute_list_endpoints": 19,
-    "jaato-server/shared/plugins/service_connector/plugin.py::ServiceConnectorPlugin._execute_preview_request": 17,
     "jaato-server/shared/plugins/service_connector/validation.py::_validate_schema": 44,
     "jaato-server/shared/plugins/subagent/config.py::_discover_premium_profiles": 27,
     "jaato-server/shared/plugins/subagent/config.py::_merge_profiles": 44,

@@ -12,7 +12,7 @@ import os
 import tempfile
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
+from typing import Any, Callable, Dict, List, Optional, Tuple, TYPE_CHECKING
 
 from jaato_sdk.plugins.base import TRAIT_SESSION_PERSISTENT
 
@@ -2176,6 +2176,55 @@ class ServiceConnectorPlugin(RunnerForwardingMixin):
             "elapsed_ms": response.elapsed_ms,
         }
 
+    def _resolve_service_for_request(
+        self, service_name: str, method: str, path: str,
+    ) -> Tuple[Optional[Any], Optional[Any]]:
+        """The service config + endpoint schema a request should be built from.
+
+        **Stored config first, in-memory discovered cache second** — the
+        precedence ``call_service`` documents and applies.  ``preview_request``
+        used to do the opposite, which made the dry run describe a different
+        request from the real one: ``configure_service_auth`` writes the
+        corrected auth to ``<service>/_service.yaml``, so a preview reading the
+        cache showed the auth the OpenAPI spec was PARSED with — an invented
+        ``<scheme>_API_KEY`` env var, since a spec declares the header name and
+        never the credential.  An inverted dry run is worse than no dry run:
+        the verb an agent uses to check its work was the one that lied.
+
+        A hand-curated ``_service.yaml`` also beats a model-discovered entry by
+        design, which is the same reason the order is this way round.
+
+        Args:
+            service_name: The alias to resolve.
+            method: HTTP method, for matching a discovered endpoint.
+            path: Request path, or ``""`` when the caller has none.
+
+        Returns:
+            ``(service_config, endpoint_schema)``; the config is ``None`` when
+            no tier knows the name, and the schema is ``None`` when nothing
+            matches ``method``/``path``.
+        """
+        service_config = None
+        endpoint_schema = None
+
+        if self._schema_store:
+            service_config = self._schema_store.load_service_config(service_name)
+            if service_config and path:
+                endpoint_schema = self._schema_store.find_endpoint(
+                    service_name, method, path)
+
+        if service_config:
+            return service_config, endpoint_schema
+
+        discovered = self._get_service(service_name)
+        if not discovered:
+            return None, None
+        for ep in discovered.endpoints:
+            if path and ep.method == method and ep.path == path:
+                endpoint_schema = ep
+                break
+        return discovered.config, endpoint_schema
+
     def _execute_preview_request(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Execute preview_request tool."""
         service_name = args.get("service", "").strip()
@@ -2194,23 +2243,10 @@ class ServiceConnectorPlugin(RunnerForwardingMixin):
         if not url and not service_name:
             return {"error": "Either url or service is required"}
 
-        # Get service config
-        service_config = None
-        endpoint_schema = None
-
+        service_config = endpoint_schema = None
         if service_name:
-            discovered = self._get_service(service_name)
-            if discovered:
-                service_config = discovered.config
-                if path:
-                    for ep in discovered.endpoints:
-                        if ep.method == method and ep.path == path:
-                            endpoint_schema = ep
-                            break
-
-            if not service_config and self._schema_store:
-                service_config = self._schema_store.load_service_config(service_name)
-
+            service_config, endpoint_schema = self._resolve_service_for_request(
+                service_name, method, path)
             if not service_config:
                 return {"error": f"Service not found: {service_name}"}
 
@@ -2361,6 +2397,17 @@ class ServiceConnectorPlugin(RunnerForwardingMixin):
             # Save
             if self._schema_store:
                 self._schema_store.save_service_config(service_config)
+
+            # Keep the in-memory discovered entry in step with what was just
+            # written.  ``discover_service`` caches the config PARSED from the
+            # OpenAPI spec — including an invented ``<scheme>_API_KEY`` env
+            # name for an apiKey scheme, since a spec declares the header but
+            # never the credential — and every reader that consults the cache
+            # would otherwise keep serving that stale auth for the life of the
+            # session, after this call reported success.
+            cached = self._discovered_services.get(service_name)
+            if cached is not None:
+                cached.config.auth = auth_config
 
             # Check credentials
             cred_check = self._auth_manager.check_credentials(auth_config)

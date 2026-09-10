@@ -1697,6 +1697,110 @@ stale one cannot outlive `pyproject.toml`. Best-effort by construction: it runs
 inside discovery's error path, and a diagnostic that raises is worse than a
 vague one.
 
+### Five Ways a Session Came Up Wrong and Said Nothing
+
+The findings above are about surfaces that would not TELL you something. These
+are about a running session that was already broken and reported success. Each
+was traced from a live cascade that returned `None`.
+
+**A plugin the profile named that did not load.** `expose_tool` deliberately
+refuses to let one broken plugin take the session down: it logs, records the
+failure in `PluginRegistry._failed_plugins`, and carries on. That recovery had
+no audience — `_failed_plugins` was written in four places and read in **none**
+— so the session came up looking healthy with a plugin the profile asked for
+simply absent from the model's surface. `get_failed_plugins()` is the read, and
+`expose_all` now names, at WARNING, every REQUESTED plugin that failed. A
+failure in a plugin the session did **not** request stays quiet: only the
+profile's own list is a promise to the author.
+
+**`config_root` was documented as defaulting and did not.** The contract is
+written down three times — the SDK parameter's own docstring,
+`shared/config_resolver.py`, `explain paths` — and applied in one place: the
+in-process client, whose comment names the reason ("config-rooted plugins like
+`file_edit` fail to init without a config_root"). The daemon transports left it
+`None`, so the same driver got a different session depending on how it
+connected, and every scaffolded driver was on the wrong side of that.
+
+The asymmetry that hid it is worth stating, because it is why the failure looks
+unrelated to its cause. `config_root` has two consumers and only one falls
+back:
+
+| Consumer | With the value unset |
+|---|---|
+| the config SEARCH PATH (`resolve_config_search_path`) | appends `<workspace>/.jaato` anyway — profiles, agents, schemas all resolve, and the session looks fine |
+| a plugin that WRITES under the root | reads the VALUE. `file_edit` puts backups in `<config_root>/sessions/<id>/backups/` and raises at `initialize()` without one |
+
+So the session started, `writeNewFile` was gone, and the only trace was one
+daemon-side ERROR. `IPCClient` (and thus `WSClient` / both recovery clients)
+now derives `<workspace_path>/.jaato` when a workspace is given. Derived, not
+required: an explicit value still wins, so rooting config elsewhere to keep it
+out of the agent's filesystem tools works exactly as before, and with no
+workspace there is nothing to derive from.
+
+**A completion asset that resolved nowhere.** Nothing checked that a profile's
+`completion_payload_schema` or `completion_processors[].script` exists. An
+unresolvable one is a WARNING in the runner log and nothing else — and the
+consequence is total: with no schema `_should_hide_signal_completion` removes
+`signal_completion` from the surface entirely, so the agent hunts for it
+through `list_tools`, the framework spends its nudge budget re-prompting, and
+the driver gets `None` from a session that looked like it ran. `validate` now
+reports `completion_asset_missing` (**error**, matching
+`prefetch_script_missing`) and locates paths without loading them, since
+importing a processor would execute it.
+
+**...usually because the path carried the prefix the resolver adds.** Every
+relative reference is joined onto the config root, so
+`.jaato/completion_schemas/x.json` resolves to
+`<ws>/.jaato/.jaato/completion_schemas/x.json`. It is an easy mistake — every
+other path an author writes is spelled from the workspace root — and it gets
+its own code, `redundant_config_root_prefix`, so the message names the fix
+instead of sending someone to look on disk for a file that is exactly where
+they put it.
+
+**A hidden `signal_completion` that could not be told from an intentional
+one.** `_should_hide_signal_completion` reads `_payload_schema is None`, which
+is true both when a profile declared no schema (the documented way to opt out)
+and when it declared one that failed to resolve (a mistake). `LifecycleTools`
+now distinguishes them at construction and logs the second by name — the
+runtime backstop for a session that never went through `validate`.
+
+### `configure_service_auth` Configured Auth That Never Reached the Wire
+
+Reported from a live cascade: an `apiKey`/header scheme was configured, the
+call returned `env_vars_present: ["GITLAB_TOKEN"]`, and `preview_request`
+showed the request going out with no `PRIVATE-TOKEN` header. Every reasonable
+auth spelling was tried; the workaround was passing the header by hand on every
+`call_service`. Three defects in one chain, and a fourth that only became
+reachable once they were fixed:
+
+1. **`preview_request` had the config precedence backwards.** `call_service`
+   reads the stored `<service>/_service.yaml` first and falls back to the
+   in-memory discovered cache — with a comment explaining why. `preview_request`
+   did the opposite. Since `configure_service_auth` writes to disk, the preview
+   kept showing the auth the OpenAPI spec was PARSED with: an invented
+   `<scheme>_API_KEY` env var, because a spec declares the header name and never
+   the credential. The two verbs disagreed about the request, and the one that
+   lied was the one an agent uses to check its work.
+2. **The in-memory entry was never refreshed**, so that stale config outlived
+   the call meant to replace it, for the rest of the session.
+3. **`build_request` swallowed the resulting `AuthError`** — "for preview, we
+   can skip auth errors" — and returned a request with no auth header, which
+   reads as *this endpoint needs none*: the one answer a caller acts on and the
+   one that is wrong. A preview still must not raise, so it now carries
+   `auth_unresolved` naming the env var that did not resolve.
+4. **The credential then reaches a preview that is returned to the MODEL**, and
+   `redact_headers` matched a hardcoded four names (`authorization`,
+   `x-api-key`, `api-key`, `apikey`). No operator-chosen header is in that list
+   and none could be — an `apiKey` scheme's header name belongs to the API.
+   Redaction is now by **provenance**: the caller passes the header names the
+   auth manager actually resolved a credential into on this request, and the
+   name list stays for headers a caller supplied by hand, which have no
+   provenance to read.
+
+`explain plugin service_connector` now prints the whole `auth` object (see
+above), and the tool's own description names the fields each `type` needs — the
+thing a model reads before it guesses.
+
 ### The MCP SDK Moved Its Decode Seam (mcp 2.x)
 
 `mcp[cli]` is an unpinned dependency, so a fresh `pip install` resolves

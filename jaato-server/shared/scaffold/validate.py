@@ -1488,6 +1488,104 @@ def _check_prefetch_directives(
                         f"`render(context, args)` (2)", where=where))
 
 
+#: Every completion-asset path is resolved by joining it onto the config root
+#: (``<config_root>/<path>``, i.e. ``<workspace>/.jaato/<path>`` by default),
+#: so writing the prefix yourself asks for ``<ws>/.jaato/.jaato/...``.
+_REDUNDANT_PATH_PREFIXES = (".jaato/", "./.jaato/")
+
+
+def _redundant_prefix(ref: str) -> Optional[str]:
+    """The ``.jaato/`` prefix a path should not carry, or ``None``.
+
+    ``resolve_completion_schema`` / ``resolve_script_path`` join a relative
+    reference onto the CONFIG ROOT — which is ``<workspace>/.jaato`` unless a
+    client overrode it — so ``.jaato/completion_schemas/x.json`` resolves to
+    ``<ws>/.jaato/.jaato/completion_schemas/x.json``.  That path never exists,
+    the resolver returns ``None``, and the consequence is silent: with no
+    schema the gate is dropped, ``signal_completion`` is hidden from the model,
+    and the session ends without ever completing.
+
+    The prefix is easy to write precisely because every OTHER path a profile
+    author touches — the workspace paths in tool calls, the paths in
+    ``explain paths`` — is spelled from the workspace root.
+    """
+    for prefix in _REDUNDANT_PATH_PREFIXES:
+        if ref.startswith(prefix):
+            return prefix
+    return None
+
+
+def _check_completion_assets(profiles, ws: Path, config_root: str, out) -> None:
+    """Every file a profile's completion gate names must RESOLVE.
+
+    Nothing checked these.  A ``completion_payload_schema`` or a
+    ``completion_processors[].script`` that does not resolve is a WARNING in
+    the runner log and nothing else: the schema-less gate hides
+    ``signal_completion`` entirely (``_should_hide_signal_completion``), so the
+    agent cannot signal, the framework spends its nudges re-prompting a model
+    that is hunting for a tool it will never find, and the driver gets ``None``
+    back from a session that looks like it ran.
+
+    Two findings, and the first is the cheap one:
+
+    ``redundant_config_root_prefix`` (**error**) — the path starts ``.jaato/``,
+    which the resolver adds itself.  Deterministically unresolvable, and named
+    separately because "file not found" sends an author looking on disk for a
+    file that is sitting exactly where they put it.
+
+    ``completion_asset_missing`` (**error**) — it resolves nowhere.  Error, not
+    warn, for the same reason ``prefetch_script_missing`` is one: this is a
+    declared asset the session cannot start correctly without, not a knob
+    somebody might be ignoring on purpose.
+
+    Side-effect free, like the rest of ``validate``: paths are LOCATED, never
+    loaded — importing a processor would execute it.
+    """
+    from shared.script_loader import resolve_script_path
+    from shared.completion_schema_loader import _resolve_schema_path
+
+    for pname, profile in sorted(profiles.items()):
+        # (reference, where, resolver, what an unresolved one COSTS)
+        _SCHEMA_COST = ("signal_completion is then HIDDEN from the model "
+                        "entirely, so the agent cannot signal and the session "
+                        "never completes")
+        _SCRIPT_COST = ("the gate then fails to load, and a processor that "
+                        "cannot load blocks every completion it was meant to "
+                        "check")
+        refs = []
+        schema = getattr(profile, "completion_payload_schema", None)
+        if isinstance(schema, str) and schema:
+            refs.append((schema, "completion_payload_schema",
+                         _resolve_schema_path, _SCHEMA_COST))
+        for i, entry in enumerate(getattr(profile, "completion_processors", None) or ()):
+            script = getattr(entry, "script", None)
+            if isinstance(script, str) and script:
+                refs.append((script, f"completion_processors[{i}].script",
+                             resolve_script_path, _SCRIPT_COST))
+
+        for ref, where, resolver, cost in refs:
+            prefix = _redundant_prefix(ref)
+            if prefix is not None:
+                out.append(Diagnostic(
+                    "error", "redundant_config_root_prefix",
+                    f"{ref!r} starts with {prefix!r} — the resolver joins this "
+                    f"path onto the config root (<workspace>/.jaato by "
+                    f"default), so it resolves to "
+                    f"<config_root>/{prefix}{ref[len(prefix):]}, which does not "
+                    f"exist.  Drop the prefix: {ref[len(prefix):]!r}.  Nothing "
+                    f"fails loudly: {cost}.",
+                    profile=pname, where=where))
+                continue
+            if Path(ref).is_absolute():
+                continue     # an absolute path is the author's own business
+            if resolver(ref, str(ws), config_root) is None:
+                out.append(Diagnostic(
+                    "error", "completion_asset_missing",
+                    f"{ref!r} resolves in no tier (tried <config_root>/{ref} "
+                    f"then ~/.jaato/{ref}).  Nothing fails loudly: {cost}.",
+                    profile=pname, where=where))
+
+
 def _check_default_agent_exists(profiles, ws: Path, config_root: str, out) -> None:
     """Flag a profile whose ``default_agent`` is not on disk (#944).
 
@@ -1599,6 +1697,7 @@ def validate_workspace(
     _before = len(out)
     _check_prefetch_directives(ws, config_root, out)
     _check_spawn_schema_wire_types(result.profiles, config_root, out)
+    _check_completion_assets(result.profiles, ws, config_root, out)
     _check_default_agent_exists(result.profiles, ws, config_root, out)
     for d in out[_before:]:
         d.tier = "workspace"

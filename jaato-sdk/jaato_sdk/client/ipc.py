@@ -272,13 +272,27 @@ class IPCClient:
                 absolutised, because ``../proj`` and ``~/proj`` both look
                 relative and mean different things; resolve it yourself
                 (e.g. ``Path(p).expanduser().resolve()``).
-            config_root: Optional override for where the daemon reads
-                read-only framework config (profiles, agents, prompts,
-                references, completion_schemas, instructions, scripts,
-                services).  When unset, the daemon falls back to
-                ``<workspace_path>/.jaato/``; when set, that
-                workspace-anchored search is replaced with this path.
-                The ``~/.jaato/`` user-tier fallback is always honored.
+            config_root: Where the daemon reads read-only framework config
+                (profiles, agents, prompts, references, completion_schemas,
+                instructions, scripts, services) — and the root plugins
+                WRITE framework state under (``file_edit`` puts its backups
+                in ``<config_root>/sessions/<id>/backups/``).
+                **Defaults to ``<workspace_path>/.jaato``** when a workspace
+                is given; pass a path to root it elsewhere.  The
+                ``~/.jaato/`` user-tier fallback is always honored.
+
+                The default is applied HERE, client-side, and that is the
+                fix for a real asymmetry: the config SEARCH PATH falls back
+                to ``<workspace>/.jaato`` on the daemon side whether or not
+                this is set, so profiles and agents always resolved — but a
+                plugin that writes under the root reads the VALUE, and
+                ``file_edit`` raises at ``initialize()`` without one.  A
+                session that omitted this came up with no ``writeNewFile``
+                at all, logged at ERROR in the daemon and reported to
+                neither the model nor the driver.  The in-process client has
+                defaulted it since it shipped; the daemon transports did
+                not, so the same driver got a different session depending on
+                how it connected.
                 Pair with a ``workspace_path`` that does **not** contain
                 a ``.jaato/`` symlink to give the agent's filesystem
                 tools no visibility into the framework config.  See
@@ -367,6 +381,31 @@ class IPCClient:
             config_root, field="config_root",
             origin="the daemon boundary",
         )
+        # ``config_root`` DEFAULTS to ``<workspace_path>/.jaato`` — the value
+        # this parameter's contract, ``shared/config_resolver.py`` and
+        # ``jaato-scaffold explain paths`` have all named all along, and which
+        # the in-process client has applied since it shipped ("config-rooted
+        # plugins like file_edit fail to init without a config_root").  The
+        # daemon transports did not, so the SAME driver got a different session
+        # depending on how it connected.
+        #
+        # The gap is not cosmetic: ``config_root`` has TWO consumers and only
+        # one of them falls back.  The config SEARCH PATH does
+        # (``resolve_config_search_path`` appends ``<workspace>/.jaato`` when
+        # the override is absent), which is why profiles and agents resolve
+        # fine; but a plugin that WRITES under the root reads the VALUE, and
+        # ``file_edit`` raises at ``initialize()`` without one.  The session
+        # then comes up with no ``writeNewFile`` at all — a core plugin, absent
+        # from the model's surface, over an unset optional argument.
+        #
+        # Derived, not required: an explicit value still wins, and pairing an
+        # elsewhere-rooted ``config_root`` with a ``.jaato``-free workspace to
+        # hide framework config from the agent works exactly as before.  It is
+        # absolute by construction (``workspace_path`` is validated absolute
+        # just above), so it satisfies the #742 boundary rule; with no
+        # workspace there is nothing to derive from and it stays ``None``.
+        if config_root is None and workspace_path:
+            config_root = str(Path(workspace_path) / ".jaato")
         self.socket_path = socket_path
         self.auto_start = auto_start
         self.env_file = env_file

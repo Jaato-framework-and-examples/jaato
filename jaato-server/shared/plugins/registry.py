@@ -1798,6 +1798,61 @@ class PluginRegistry:
                 f"expose_all: skipped initialize for {len(skipped)} "
                 f"plugins not requested by session: {sorted(skipped)}"
             )
+        self._report_requested_but_failed(requested_plugins)
+
+    def _report_requested_but_failed(self, requested_plugins) -> None:
+        """Announce plugins the session ASKED FOR that did not initialize.
+
+        ``expose_tool`` already refuses to let one broken plugin take the
+        session down: it logs the failure, records it in
+        :attr:`_failed_plugins`, and carries on.  That is right — and until
+        now ``_failed_plugins`` was WRITE-ONLY, recorded in four places and
+        read in none, so the recovery had no audience.
+
+        The session then starts looking healthy while a plugin the PROFILE
+        named is simply absent.  Neither the model nor the driver is told:
+        the model discovers it by calling ``list_tools`` and not finding what
+        it was asked to use, and the driver sees a task that quietly did
+        nothing.  ``file_edit`` is the canonical case — it requires a
+        ``config_root`` and raises at ``initialize()`` without one, so a
+        session whose client supplied none comes up with `writeNewFile` and
+        friends missing and no line in the transcript saying why.
+
+        A failure to initialize a plugin the session did not request is not
+        reported: only the profile's own list is a promise to the author.
+        Nothing raises here — this is a diagnostic, at the end of a method
+        whose whole contract is to survive a broken plugin.
+        """
+        if not self._failed_plugins:
+            return
+        wanted = (set(requested_plugins) if requested_plugins is not None
+                  else set(self._plugins))
+        broken = sorted(n for n in wanted if n in self._failed_plugins)
+        if not broken:
+            return
+        detail = "; ".join(
+            f"{n} ({self._failed_plugins[n][0]}: {self._failed_plugins[n][1]})"
+            for n in broken)
+        _trace(
+            f" {len(broken)} plugin(s) this session REQUESTED are not "
+            f"available — their tools are missing from the model's surface: "
+            f"{detail}",
+            warning=True,
+        )
+
+    def get_failed_plugins(self) -> Dict[str, tuple]:
+        """Plugins that raised during a lifecycle call, ``{name: (phase, error)}``.
+
+        ``phase`` is one of ``initialize`` / ``re-initialize`` / ``shutdown``.
+        A copy, so a caller iterating it cannot be tripped by a concurrent
+        spawn (see the snapshot rule in :meth:`get_plugin_for_tool`).
+
+        The read half of :attr:`_failed_plugins`, which had none — a plugin
+        the profile named could fail to initialize and no surface could ask
+        about it.  ``jaato-doctor`` and a driver checking whether the session
+        it built is the session it asked for are the intended callers.
+        """
+        return dict(self._failed_plugins)
 
     def unexpose_all(self) -> None:
         """Stop exposing all plugins' tools."""
