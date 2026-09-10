@@ -67,7 +67,8 @@ def _version_at(sha: str, rel_pyproject: str, repo_root: Path) -> str | None:
         return None
 
 
-def _find_release_anchors(pkg_dir: Path, repo_root: Path) -> tuple[str | None, str | None]:
+def _find_release_anchors(pkg_dir: Path, repo_root: Path,
+                          declared_version: str) -> tuple[str | None, str | None]:
     """Return ``(current_sha, previous_sha)`` for this package.
 
     Both name the commit that *set* a version -- the OLDEST commit of a run
@@ -86,6 +87,16 @@ def _find_release_anchors(pkg_dir: Path, repo_root: Path) -> tuple[str | None, s
       * a shallow clone, where the walk hits an unreadable commit before it
         has seen two versions.  CI passes ``fetch-depth: 0`` on the publish
         jobs precisely so this does not happen there.
+
+    ``declared_version`` is what the WORKING TREE says, and the walk starts
+    from it rather than from whatever the newest commit happens to declare.
+    That is the difference between a preview and a release: when the bump is
+    committed the two agree and nothing changes, but run against an
+    uncommitted bump the newest commit still declares the PREVIOUS version,
+    and starting from it would treat that as "current" and anchor a release
+    too early.  Observed doing exactly that: previewing 0.10.0 anchored on
+    the 0.8.0 commit and listed 0.9.0's entries again.  ``current_sha`` is
+    then None, which is honest -- no commit has set this version yet.
     """
     rel = (pkg_dir.resolve().relative_to(repo_root.resolve())
            / "pyproject.toml").as_posix()
@@ -93,7 +104,7 @@ def _find_release_anchors(pkg_dir: Path, repo_root: Path) -> tuple[str | None, s
 
     current_sha: str | None = None
     previous_sha: str | None = None
-    seen: str | None = None
+    seen: str | None = declared_version
     groups = 0
 
     for sha in shas:                        # newest first
@@ -104,9 +115,7 @@ def _find_release_anchors(pkg_dir: Path, repo_root: Path) -> tuple[str | None, s
                       f"shallow; changelog will cover everything reachable",
                       file=sys.stderr)
             break
-        if seen is None:
-            seen = version
-        elif version != seen:
+        if version != seen:
             groups += 1
             seen = version
             if groups == 2:                 # two transitions is all we need
@@ -204,7 +213,7 @@ def main() -> None:
     # Find repo root
     repo_root = Path(_git("rev-parse", "--show-toplevel", cwd=pkg_dir))
 
-    current_sha, previous_sha = _find_release_anchors(pkg_dir, repo_root)
+    current_sha, previous_sha = _find_release_anchors(pkg_dir, repo_root, version)
     commits = _collect_commits(previous_sha, current_sha, pkg_dir, repo_root)
     changelog = _build_changelog(version, commits)
 

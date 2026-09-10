@@ -76,6 +76,11 @@ class _Repo:
         _run("git", "commit", "-q", "-m", subject, cwd=self.root)
         return _run("git", "rev-parse", "HEAD", cwd=self.root).strip()
 
+    def set_version_uncommitted(self, version: str) -> None:
+        """Bump pyproject in the WORKING TREE only, as a human previewing a
+        release does before committing anything."""
+        (self.pkg / "pyproject.toml").write_text(_pyproject(version))
+
     def changelog(self) -> list[str]:
         """Run the real script and return its changelog bullet lines."""
         done = subprocess.run(
@@ -173,3 +178,27 @@ def test_a_first_release_includes_everything(repo: _Repo) -> None:
     entries = repo.changelog()
 
     assert entries == ["second: more work", "first: initial import"], entries
+
+
+def test_an_uncommitted_bump_still_anchors_on_the_previous_release(
+    repo: _Repo,
+) -> None:
+    """Previewing a release before committing the bump must not anchor one
+    release too early.
+
+    The walk reads committed history, so with the bump uncommitted the newest
+    commit still declares the PREVIOUS version.  Starting the walk from that
+    commit treats it as "current" and anchors on the one before -- observed
+    live: previewing jaato-server 0.10.0 anchored on the 0.8.0 commit and
+    re-listed everything that had already shipped in 0.9.0.  The walk starts
+    from the working tree's declared version instead.
+    """
+    repo.commit("old: shipped in 1.0.0", version="0.9.0")
+    repo.commit("Bump demo-pkg 1.0.0", version="1.0.0", touch=False)
+    repo.commit("feature: after 1.0.0", version="1.0.0")
+    repo.set_version_uncommitted("1.1.0")        # not committed
+
+    entries = repo.changelog()
+
+    assert entries == ["feature: after 1.0.0"], entries
+    assert not any("old:" in e for e in entries)
