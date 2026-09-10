@@ -283,7 +283,7 @@ plugin.initialize({
             'max_turns': 15,
         }
     },
-    'allow_inline': True,                 # Allow inline_config (default: True)
+    'allow_inline': False,                # Allow profile-less spawns (default: False, #944)
     'inline_allowed_plugins': [],         # Restrict inline plugins (empty = all allowed)
     'auto_discover_profiles': True,       # Auto-discover from profiles_dir (default: True)
     'profiles_dir': '.jaato/profiles',    # Directory to scan for profiles

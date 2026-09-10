@@ -1131,8 +1131,8 @@ delegate(
 | `location` | `string` | `""` | Vertex AI region. |
 | `default_model` | `string \| null` | `null` | Default model for subagents. `null` = inherit from parent. |
 | `default_provider` | `string \| null` | `null` | Default provider. Must match `default_model`'s provider if set. |
-| `allow_inline` | `bool` | `true` | Whether inline subagent creation is permitted. |
-| `inline_allowed_plugins` | `string[]` | `[]` | Plugins available for inline delegation. |
+| `allow_inline` | `bool` | `false` | Whether `spawn_subagent` may be called WITHOUT a `profile`. Such a subagent inherits the parent's entire plugin set and gets no system instructions, so it is off by default (#944): while off, `profile` is a **required** parameter of `spawn_subagent`, `inline_config` is rejected, and the `server=` (remote) path is bound by the same rule. Enabling it is announced at WARNING. |
+| `inline_allowed_plugins` | `string[]` | `[]` | Plugins an inline subagent may hold. Enforced on the **inherited** set as well as on an explicit `inline_config.plugins` (#944) — it used to bind only a caller that passed `inline_config`. Empty = no restriction. |
 | `auto_discover_profiles` | `bool` | `true` | Whether to scan `profiles_dir` for profile files at startup. |
 | `profiles_dir` | `string` | `".jaato/profiles"` | Directory to scan for profile files. |
 | `profiles` | `object` | `{}` | Inline profile definitions (alternative to file-based). |

@@ -60,7 +60,8 @@ def test_runner_side_forwards_with_parent_session_id_stamped():
     plugin = _make_plugin(runner_rpc_client=rpc, remote_handler=None)
     set_current_session(SimpleNamespace(_daemon_session_id="sess-A"))
 
-    result = plugin._execute_spawn_subagent({"task": "do it", "server": "peer1"})
+    result = plugin._execute_spawn_subagent(
+        {"task": "do it", "server": "peer1", "profile": "remote-worker"})
 
     rpc.daemon_plugin_execute.assert_called_once()
     kwargs = rpc.daemon_plugin_execute.call_args.kwargs
@@ -80,7 +81,8 @@ def test_runner_side_no_current_session_stamps_none():
     plugin = _make_plugin(runner_rpc_client=rpc, remote_handler=None)
     # autouse fixture leaves the ContextVar at None → get returns None.
 
-    plugin._execute_spawn_subagent({"task": "do it", "server": "peer1"})
+    plugin._execute_spawn_subagent(
+        {"task": "do it", "server": "peer1", "profile": "remote-worker"})
 
     args = rpc.daemon_plugin_execute.call_args.kwargs["args"]
     assert args["parent_session_id"] is None
@@ -98,11 +100,13 @@ def test_daemon_side_calls_handler_with_parent_session_id_kwarg():
 
     plugin = _make_plugin(runner_rpc_client=None, remote_handler=handler)
     result = plugin._execute_spawn_subagent({
-        "task": "do it", "server": "peer1", "parent_session_id": "sess-A",
+        "task": "do it", "server": "peer1", "profile": "remote-worker",
+        "parent_session_id": "sess-A",
     })
 
     assert captured["server"] == "peer1"
     assert captured["task"] == "do it"
+    assert captured["profile_name"] == "remote-worker"
     assert captured["parent_session_id"] == "sess-A"
     assert result == _OK
 
@@ -111,6 +115,25 @@ def test_no_premium_and_no_channel_returns_install_error():
     """Neither a registered handler nor a runner→daemon channel →
     premium genuinely absent → actionable install error."""
     plugin = _make_plugin(runner_rpc_client=None, remote_handler=None)
-    result = plugin._execute_spawn_subagent({"task": "do it", "server": "peer1"})
+    result = plugin._execute_spawn_subagent(
+        {"task": "do it", "server": "peer1", "profile": "remote-worker"})
     assert result["success"] is False
     assert "jaato-premium" in result["error"]
+
+
+def test_remote_spawn_without_profile_is_refused_before_forwarding():
+    """The inline gate (#944) binds the ``server=`` path too.
+
+    The remote branch forwards ``profile_name or ''`` and returns, so a
+    gate placed with the local profile resolution would have let an
+    unprofiled spawn cross to the peer — where it means the same thing it
+    means here: the parent's whole plugin set and no persona.
+    """
+    rpc = MagicMock()
+    plugin = _make_plugin(runner_rpc_client=rpc, remote_handler=None)
+
+    result = plugin._execute_spawn_subagent({"task": "do it", "server": "peer1"})
+
+    assert result["success"] is False
+    assert "requires a 'profile'" in result["error"]
+    rpc.daemon_plugin_execute.assert_not_called()

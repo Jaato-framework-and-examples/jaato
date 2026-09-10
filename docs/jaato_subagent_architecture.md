@@ -402,14 +402,15 @@ delegate(
 )
 ```
 
-Creates a one-off subagent with tools from the `inline_allowed_plugins` list. Requires `allow_inline: true` in the subagent config.
+Creates a one-off subagent with tools from the `inline_allowed_plugins` list. **Requires `allow_inline: true`** in the subagent config, which is NOT the default (#944): with it off, `spawn_subagent` declares `profile` as a required parameter, refuses `inline_config`, and applies the same rule to the remote (`server=`) path. Where the list is set, it now bounds the *inherited* plugin set too — before #944 a spawn that simply omitted `inline_config` inherited the parent's whole set unvalidated.
 
 ### Comparison
 
 | Aspect | Profile-Based | Inline |
 |--------|--------------|--------|
 | Configuration | Pre-defined, version-controlled | Ad-hoc per request |
-| Tools available | Profile's plugin list | `inline_allowed_plugins` whitelist |
+| Tools available | Profile's plugin list | `inline_allowed_plugins` whitelist (or the parent's whole set when unset) |
+| Instructions | The profile's `default_agent`, or an explicit `agent=` | **None**, unless `inline_config.system_instructions` supplies them |
 | Auto-approval | Configurable per profile | Follows default policy |
 | Model override | Per-profile setting | Inherits parent's model |
 | GC strategy | Per-profile configuration | Parent's default |

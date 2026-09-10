@@ -1415,6 +1415,12 @@ class SubagentProfile:
         system_instructions: **Deprecated.** Use agents (``.jaato/agents/``) instead.
             When an agent is specified via ``--agent``, its rendered markdown
             replaces this field.  Profiles should contain runtime config only.
+        default_agent: Name of the agent definition (``.jaato/agents/<name>.md``)
+            whose persona this profile spawns with when the caller names no
+            ``agent``.  A profile supplies plugins; an agent supplies
+            instructions — this binds the two, so ``spawn_subagent(profile=...)``
+            alone yields a subagent that has both (#944).  An explicit
+            ``agent=`` argument always wins.  Inheritance: scalar-override.
         model: Optional model override (uses parent's model if not specified).
         provider: Optional provider override (e.g., 'anthropic', 'google_genai').
                   Allows subagents to use a different provider than the parent.
@@ -1521,6 +1527,29 @@ class SubagentProfile:
         "description": "DEPRECATED — use agents (.jaato/agents/<name>.md) "
         "instead; an `--agent`'s rendered markdown replaces this. Profiles "
         "should carry runtime config only."})
+    # The persona this profile belongs to (#944).
+    #
+    # A profile supplies PLUGINS; an agent definition supplies the
+    # PERSONA.  ``spawn_subagent(profile="documentalista")`` used to yield
+    # a correctly-tooled subagent with no instructions at all, because the
+    # binding between the two lived nowhere but in the caller's memory —
+    # every spawn site had to repeat the pair, and omitting ``agent`` was
+    # silent.  Naming the persona HERE puts the binding in the profile
+    # that already knows which one belongs to it.
+    #
+    # Resolved by ``spawn_subagent`` exactly like an explicit ``agent``
+    # argument (same ``SessionManager._resolve_agent`` call, same
+    # ``.jaato/agents/`` lookup), and only when the caller named none —
+    # an explicit ``agent=`` always wins, so a profile can carry a default
+    # persona without forbidding a specialised one.
+    #
+    # Inheritance is scalar-override, like ``model`` / ``provider``.
+    default_agent: Optional[str] = field(default=None, metadata={
+        "description": "Agent definition (.jaato/agents/<name>.md) whose "
+        "persona this profile spawns with when the caller names no `agent`. "
+        "A profile supplies plugins, an agent supplies instructions — this "
+        "binds the two so `spawn_subagent(profile=...)` alone yields a "
+        "subagent that has both. An explicit `agent=` wins."})
     # When True, drop the framework's BASE instructions layer (the
     # "Principle 1: Transparency Mandate" and other always-on framework
     # instructions) from this profile's system prompt.  Plugin-contributed
@@ -2450,6 +2479,7 @@ def build_inline_profile(
         tool_scopes=tool_scopes,
         plugin_configs=data.get('plugin_configs', {}),
         system_instructions=data.get('system_instructions'),
+        default_agent=data.get('default_agent'),
         suppress_base_instructions=data.get('suppress_base_instructions', False),
         model=data.get('model'),
         provider=data.get('provider'),
@@ -2606,6 +2636,7 @@ def profile_to_snapshot(profile: 'SubagentProfile') -> Dict[str, Any]:
         "plugins": plugins,
         "plugin_configs": dict(profile.plugin_configs or {}),
         "system_instructions": profile.system_instructions,
+        "default_agent": getattr(profile, "default_agent", None),
         "suppress_base_instructions": sorted(
             profile.suppress_base_instructions or ()
         ),
@@ -2729,6 +2760,7 @@ def profile_from_snapshot(data: Dict[str, Any]) -> 'SubagentProfile':
         tool_scopes=tool_scopes,
         plugin_configs=data.get("plugin_configs") or {},
         system_instructions=data.get("system_instructions"),
+        default_agent=data.get("default_agent"),
         suppress_base_instructions=data.get(
             "suppress_base_instructions", False
         ),
@@ -3373,6 +3405,11 @@ def _merge_profiles(
         'spawn_payload_schema', child.spawn_payload_schema
     )
 
+    # default_agent: scalar-override, like ``model`` / ``provider``.  A
+    # child that names its own persona wins; otherwise the parents' — and
+    # two parents naming different personas is a conflict, not a coin toss.
+    merged_default_agent = _resolve_scalar('default_agent', child.default_agent)
+
     # completion_processors: concatenation across parent → child, minus
     # whatever the child declines by name in
     # ``suppress_inherited_processors``.  Each processor is independent
@@ -3481,6 +3518,7 @@ def _merge_profiles(
         tool_scopes=merged_tool_scopes,
         plugin_configs=merged_configs,
         system_instructions=merged_instructions,
+        default_agent=merged_default_agent,
         suppress_base_instructions=merged_suppress_base,
         model=merged_model,
         provider=merged_provider,
@@ -3717,6 +3755,7 @@ def _scan_profiles_dir(
             tool_scopes=tool_scopes,
             plugin_configs=data.get('plugin_configs', {}),
             system_instructions=data.get('system_instructions'),
+            default_agent=data.get('default_agent'),
             suppress_base_instructions=data.get('suppress_base_instructions', False),
             model=data.get('model'),
             provider=data.get('provider'),
@@ -3766,6 +3805,61 @@ def _scan_profiles_dir(
         )
 
 
+def find_agent_file(
+    agent_name: str,
+    workspace_path: Optional[str],
+    config_root: Optional[str] = None,
+) -> Optional[Path]:
+    """Locate an agent definition's markdown file, without reading it.
+
+    The lookup half of :func:`resolve_agent`, split out so a caller that
+    only needs to know whether a persona EXISTS — ``jaato-scaffold
+    validate`` checking a profile's ``default_agent`` (#944) — can ask
+    without rendering the markdown, which would execute the persona's
+    ``{{!py:...}}`` prefetch scripts.  ``validate`` must stay side-effect
+    free.
+
+    Search order: the workspace tier (``<config_root>/`` when given, else
+    ``<workspace_path>/.jaato/``) then the user tier (``~/.jaato/``), each
+    checked for ``agents/<name>.md``, ``prompts/<name>.md``, and the
+    directory forms ``<name>/PROMPT.md`` / ``<name>/SKILL.md``.
+
+    Args:
+        agent_name: Agent name (filename stem).
+        workspace_path: Workspace directory for agent resolution.
+        config_root: Optional override for the workspace tier.
+
+    Returns:
+        The resolved path, or ``None`` when no tier carries the agent.
+    """
+    search_dirs = []
+    if config_root:
+        cr = Path(config_root).expanduser().resolve()
+        search_dirs.append(cr / "agents")
+        search_dirs.append(cr / "prompts")
+    elif workspace_path:
+        search_dirs.append(Path(workspace_path) / ".jaato" / "agents")
+        search_dirs.append(Path(workspace_path) / ".jaato" / "prompts")
+    search_dirs.append(Path.home() / ".jaato" / "agents")
+    search_dirs.append(Path.home() / ".jaato" / "prompts")
+
+    for search_dir in search_dirs:
+        if not search_dir.is_dir():
+            continue
+        # Single file: agents/gen-references.md
+        candidate = search_dir / f"{agent_name}.md"
+        if candidate.is_file():
+            return candidate
+        # Directory: agents/gen-references/PROMPT.md
+        candidate_dir = search_dir / agent_name
+        if candidate_dir.is_dir():
+            for entry_name in ("PROMPT.md", "SKILL.md"):
+                entry = candidate_dir / entry_name
+                if entry.is_file():
+                    return entry
+    return None
+
+
 def resolve_agent(
     agent_name: str,
     params: Optional[Dict[str, str]],
@@ -3798,38 +3892,7 @@ def resolve_agent(
         Dict with ``system_instructions``, ``description``, ``default_profile``,
         ``missing_params``, ``source_path``, or ``None`` if not found.
     """
-    search_dirs = []
-    if config_root:
-        cr = Path(config_root).expanduser().resolve()
-        search_dirs.append(cr / "agents")
-        search_dirs.append(cr / "prompts")
-    elif workspace_path:
-        search_dirs.append(Path(workspace_path) / ".jaato" / "agents")
-        search_dirs.append(Path(workspace_path) / ".jaato" / "prompts")
-    search_dirs.append(Path.home() / ".jaato" / "agents")
-    search_dirs.append(Path.home() / ".jaato" / "prompts")
-
-    # Find the agent file
-    agent_path = None
-    for search_dir in search_dirs:
-        if not search_dir.is_dir():
-            continue
-        # Single file: agents/gen-references.md
-        candidate = search_dir / f"{agent_name}.md"
-        if candidate.is_file():
-            agent_path = candidate
-            break
-        # Directory: agents/gen-references/PROMPT.md
-        candidate_dir = search_dir / agent_name
-        if candidate_dir.is_dir():
-            for entry_name in ("PROMPT.md", "SKILL.md"):
-                entry = candidate_dir / entry_name
-                if entry.is_file():
-                    agent_path = entry
-                    break
-            if agent_path:
-                break
-
+    agent_path = find_agent_file(agent_name, workspace_path, config_root)
     if not agent_path:
         return None
 
@@ -4137,6 +4200,7 @@ def _discover_premium_profiles() -> Dict[str, 'SubagentProfile']:
             tool_scopes=tool_scopes,
             plugin_configs=data.get('plugin_configs', {}),
             system_instructions=data.get('system_instructions'),
+            default_agent=data.get('default_agent'),
             suppress_base_instructions=data.get('suppress_base_instructions', False),
             model=data.get('model'),
             provider=data.get('provider'),
@@ -4369,8 +4433,18 @@ class SubagentConfig:
         default_provider: Default provider for subagents. None = inherit from parent.
                          If set, MUST match default_model's provider.
         profiles: Dict of named subagent profiles.
-        allow_inline: Whether to allow inline subagent creation.
-        inline_allowed_plugins: Plugins allowed for inline subagent creation.
+        allow_inline: Whether ``spawn_subagent`` may be called WITHOUT a
+            ``profile`` — the "inline" path, where the subagent inherits the
+            parent's entire plugin set and gets no system instructions.
+            Defaults to ``False`` (#944): the omitted-profile spawn used to
+            succeed silently with the wrong tools and no persona, which is
+            indistinguishable from a correct delegation at the call site.
+            Set ``true`` to opt back in; the plugin announces that at
+            WARNING, and ``spawn_subagent``'s schema stops requiring
+            ``profile``.
+        inline_allowed_plugins: Plugins an inline subagent may hold. Enforced
+            on BOTH inline paths — an explicit ``inline_config.plugins`` and
+            the inherit-the-parent's-set default (#944).
         auto_discover_profiles: Whether to auto-discover profiles from profiles_dir.
         profiles_dir: Directory to scan for profile files (default: .jaato/profiles).
     """
@@ -4379,7 +4453,7 @@ class SubagentConfig:
     default_model: Optional[str] = None  # None = inherit from parent
     default_provider: Optional[str] = None  # None = inherit from parent
     profiles: Dict[str, SubagentProfile] = field(default_factory=dict)
-    allow_inline: bool = True
+    allow_inline: bool = False
     inline_allowed_plugins: List[str] = field(default_factory=list)
     auto_discover_profiles: bool = True
     profiles_dir: str = ".jaato/profiles"
@@ -4493,7 +4567,7 @@ class SubagentConfig:
             default_model=data.get('default_model'),  # None = inherit from parent
             default_provider=data.get('default_provider'),  # None = inherit from parent
             profiles=profiles,
-            allow_inline=data.get('allow_inline', True),
+            allow_inline=data.get('allow_inline', False),
             inline_allowed_plugins=data.get('inline_allowed_plugins', []),
             auto_discover_profiles=data.get('auto_discover_profiles', True),
             profiles_dir=data.get('profiles_dir', '.jaato/profiles'),
