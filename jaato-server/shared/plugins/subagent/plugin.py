@@ -3830,26 +3830,34 @@ class SubagentPlugin(DaemonForwardingMixin):
             # THE BOUND IS THE COUNTER GOING UP, which is a claim on
             # ``JaatoSession`` and not on this loop: ``send_message``
             # below starts a turn, and while a turn start cleared
-            # ``_completion_nudges_fired`` this ``while`` could not
-            # terminate at all -- each pass refunded the token it had
-            # just spent (#767).
+            # ``_completion_nudges_fired`` unconditionally this ``while``
+            # could not terminate at all -- each pass refunded the token
+            # it had just spent (#767).  A turn start now clears it only
+            # when the turn is NOT the one a nudge created (#934), and
+            # ``try_completion_nudge`` is what marks the turn: it spends
+            # the budget and latches ``_completion_nudge_turn_pending`` in
+            # one step.  So this loop must go through that method rather
+            # than incrementing the counter itself -- an in-place bump
+            # leaves the re-prompt looking caller-originated, the reset
+            # refills the budget, and the ``while`` unbounds again.
             # The flag ``session._signal_completion_called`` is flipped
             # in ``LifecycleTools._execute_signal_completion`` on
-            # successful invocation.
+            # successful invocation, and is read by the same method.
             #
             # The budget is this subagent's PROFILE's (#919), resolved
             # through the one shared default so this loop, the daemon's
             # top-level guard and the embedded lead cannot drift.
             MAX_COMPLETION_NUDGES = resolve_max_completion_nudges(profile)
-            while (
-                not getattr(session, '_signal_completion_called', False)
-                and getattr(session, '_completion_nudges_fired', 0) < MAX_COMPLETION_NUDGES
-            ):
-                session._completion_nudges_fired += 1
+            while True:
+                should_nudge, nudges_fired = session.try_completion_nudge(
+                    MAX_COMPLETION_NUDGES,
+                )
+                if not should_nudge:
+                    break
                 logger.info(
                     "COMPLETION_NUDGE [%s]: agent ended its loop without "
                     "signal_completion (nudge %d/%d) — re-prompting",
-                    agent_id, session._completion_nudges_fired, MAX_COMPLETION_NUDGES,
+                    agent_id, nudges_fired, MAX_COMPLETION_NUDGES,
                 )
                 nudge = (
                     "Your session is about to end without calling "

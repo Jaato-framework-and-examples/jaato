@@ -361,3 +361,51 @@ class TestTheProfileLayer:
         )
         result = discover_profiles(str(profiles_dir), config_root=str(tmp_path))
         assert result.profiles["voz"].max_completion_nudges == 5
+
+
+# ---------------------------------------------------------------------------
+# 5. One writer, so the loop stays bounded (#934)
+# ---------------------------------------------------------------------------
+
+class TestOneWriter:
+    """Every site must SPEND the budget through ``try_completion_nudge``.
+
+    The budget is per turn, and a turn start refills it -- unless the turn is
+    the one a nudge created, which ``try_completion_nudge`` marks by latching
+    ``_completion_nudge_turn_pending`` in the same call that spends the token
+    (#934).  A site that bumps ``_completion_nudges_fired`` itself skips the
+    latch, so its re-prompt reads as caller-originated, the reset refills the
+    budget, and the loop is unbounded again -- which is exactly #767, the
+    subagent loop's ``while`` included.  The method is the only writer.
+    """
+
+    @pytest.mark.parametrize("site", NUDGE_SITES, ids=lambda p: p.name)
+    def test_no_site_increments_the_counter_itself(self, site):
+        tree = ast.parse(site.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            target = None
+            if isinstance(node, ast.AugAssign):
+                target = node.target
+            elif isinstance(node, ast.Assign) and len(node.targets) == 1:
+                target = node.targets[0]
+            if (
+                isinstance(target, ast.Attribute)
+                and target.attr == "_completion_nudges_fired"
+            ):
+                pytest.fail(
+                    f"{site.name} writes _completion_nudges_fired directly "
+                    f"(line {node.lineno}) — spend the budget through "
+                    f"session.try_completion_nudge(), which also marks the "
+                    f"turn the nudge is about to start (#934/#767)"
+                )
+
+    def test_the_method_is_a_writer(self):
+        """Anchor: without it the guard above passes on a framework that
+        stopped counting nudges at all."""
+        import inspect
+
+        from shared.jaato_session import JaatoSession
+
+        source = inspect.getsource(JaatoSession.try_completion_nudge)
+        assert "self._completion_nudges_fired += 1" in source
+        assert "self._completion_nudge_turn_pending = True" in source

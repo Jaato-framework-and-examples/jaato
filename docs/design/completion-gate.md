@@ -53,7 +53,9 @@ direction (an agent that stops **without** signalling), and was itself unbounded
 #767 — and until #919 it was not a profile knob either, but a function-local
 `MAX_COMPLETION_NUDGES = 2` in three files. It is now `max_completion_nudges:` at the
 profile top level (default 2, unchanged when unset), with one definition in
-`shared/completion_nudge.py`; see the CLAUDE.md section of the same name.
+`shared/completion_nudge.py`, and it is spent **per turn** — a session-lifetime budget
+became a ceiling on the whole conversation once #913 let a completed session be driven
+again (#934). See the CLAUDE.md section of the same name.
 
 **Now:** a processor entry declares its own ceiling.
 

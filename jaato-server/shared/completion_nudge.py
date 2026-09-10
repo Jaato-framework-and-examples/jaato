@@ -26,9 +26,20 @@ say so:
     # .jaato/profiles/<agent>.yaml
     max_completion_nudges: 4      # default 2, unchanged when unset
 
-The value is per SESSION, not per turn — the same claim ``_completion_nudges_
-fired`` has always made (#767): a turn start does not refund a nudge, or the
-subagent loop's ``while`` could not terminate at all.
+The value is per TURN: it is how many retries ONE turn gets, not how many
+turns a conversation may have.  That distinction is load-bearing and was got
+wrong in both directions.  A turn start that refunded the budget bounded
+nothing, because a nudge re-prompts and the re-prompt is itself a turn — the
+subagent loop's ``while`` could not terminate at all (#767).  Never refunding
+bounded the wrong thing: #913 / #915 made a completion-gated session survive
+its own completion, so the budget became a ceiling on the conversation and
+every turn past the ``max_completion_nudges``-th died ``NudgeExhausted``,
+whatever the knob was set to (#934).  So the reset asks who started the turn:
+:meth:`shared.jaato_session.JaatoSession.try_completion_nudge` latches
+``_completion_nudge_turn_pending`` when it spends a token, the turn that nudge
+creates keeps the counter, and a caller-started turn begins with a full budget.
+Every nudge site must spend the budget through that method — an in-place
+increment of ``_completion_nudges_fired`` re-opens #767.
 """
 
 from __future__ import annotations

@@ -1422,7 +1422,9 @@ class SubagentProfile:
         max_completion_nudges: How many times the framework re-prompts a
             session that settled without calling ``signal_completion``
             before giving up and emitting ``NudgeExhausted`` (#919).
-            ``None`` means the framework default of 2
+            Per TURN — a conversation's later turns each get the same
+            allowance rather than inheriting what an earlier one spent
+            (#934).  ``None`` means the framework default of 2
             (:data:`shared.completion_nudge.DEFAULT_MAX_COMPLETION_NUDGES`).
             Inheritance follows ``max_turns``: child-override, else the
             minimum across parents that declared one.
@@ -1567,12 +1569,21 @@ class SubagentProfile:
     # lead, the subagent loop) rather than by the sites themselves, so a
     # profile object predating the field resolves to the default.
     #
+    # The budget is spent PER TURN.  It used to be per session, which was
+    # invisible while a completion-gated session was one-shot and became a
+    # ceiling on the whole conversation once #913 let such a session be
+    # driven again -- raising this field then only moved the wall (2 dies
+    # at turn 3, 40 at turn 41).  See ``JaatoSession._begin_turn_
+    # completion_state`` for how a nudge's own re-prompt is kept from
+    # refunding itself (#934).
+    #
     # Inheritance is child-override / min-across-parents, exactly like
     # ``max_turns`` -- see :func:`_merge_profiles`.
     max_completion_nudges: Optional[int] = field(default=None, metadata={
         "description": "How many times the framework re-prompts a session "
         "that ended without calling signal_completion before giving up "
-        "(NudgeExhausted). None = the framework default, 2. Raise it for a "
+        "(NudgeExhausted). Per turn. None = the framework default, 2. "
+        "Raise it for a "
         "model that reliably does the work and unreliably reports it done "
         "(audio models routinely burn a nudge on a redundant enter_tier). "
         "Positive integer; the sibling of max_turns and a processor's "
