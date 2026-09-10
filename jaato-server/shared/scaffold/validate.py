@@ -1300,6 +1300,43 @@ def _check_prefetch_directives(
                         f"`render(context, args)` (2)", where=where))
 
 
+def _check_default_agent_exists(profiles, ws: Path, config_root: str, out) -> None:
+    """Flag a profile whose ``default_agent`` is not on disk (#944).
+
+    ``default_agent`` binds a profile's persona to the profile, so
+    ``spawn_subagent(profile=...)`` alone yields a subagent that has both
+    tools and instructions.  A name that resolves to no file fails at the
+    spawn — the one moment the caller can do nothing about it, since the
+    caller passed no agent at all.  This is the cheap half: it fires
+    without a spawn, like :func:`_check_spawn_schema_wire_types`.
+
+    Lookup only (:func:`find_agent_file`), never a render: rendering a
+    persona executes its ``{{!py:...}}`` prefetch scripts, and validate is
+    side-effect free.
+
+    Args:
+        profiles: Mapping of profile name -> resolved profile object.
+        ws: Workspace root.
+        config_root: Directory that the workspace agent tier resolves against.
+        out: Diagnostic list to append to.
+    """
+    from shared.plugins.subagent.config import find_agent_file
+
+    for pname, profile in sorted((profiles or {}).items()):
+        agent_name = getattr(profile, "default_agent", None)
+        if not agent_name:
+            continue
+        if find_agent_file(agent_name, str(ws), config_root) is not None:
+            continue
+        out.append(Diagnostic(
+            "error", "default_agent_missing",
+            f"profile declares default_agent '{agent_name}', which resolves "
+            f"to no file under <config_root>/agents|prompts/ or "
+            f"~/.jaato/agents|prompts/ — every spawn_subagent(profile="
+            f"'{pname}') that names no agent will fail",
+            profile=pname, where="default_agent"))
+
+
 def validate_workspace(
     workspace: str,
     *,
@@ -1374,6 +1411,7 @@ def validate_workspace(
     _before = len(out)
     _check_prefetch_directives(ws, config_root, out)
     _check_spawn_schema_wire_types(result.profiles, config_root, out)
+    _check_default_agent_exists(result.profiles, ws, config_root, out)
     for d in out[_before:]:
         d.tier = "workspace"
     return out

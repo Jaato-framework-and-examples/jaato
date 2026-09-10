@@ -27,6 +27,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from ..config import SubagentConfig
 from ..plugin import SubagentPlugin, _is_isolated_optin
 
 
@@ -101,9 +102,15 @@ def _make_initialized_plugin() -> SubagentPlugin:
       arg is set).
     - The §4.3.1 detection branch runs fifth — and that's the branch
       under test.
+
+    These spawns name no ``profile``, which the #944 gate refuses by
+    default, so the config here opts into inline spawning: the branch
+    under test is the isolation routing, not the gate (which
+    ``test_inline_spawn_gate.py`` covers).
     """
     plugin = SubagentPlugin()
     plugin._initialized = True
+    plugin._config = SubagentConfig(project="", location="", allow_inline=True)
     return plugin
 
 

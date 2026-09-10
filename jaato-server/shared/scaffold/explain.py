@@ -1582,7 +1582,7 @@ def profile() -> Rendered:
         "    plugin_configs, quirks       the parent's other keys survive.\n"
         "    model, provider, gc, cache,  child REPLACES — the child's value wins outright\n"
         "    model_tiers, runtime_limits, (this is how a child scopes DOWN, unlike plugins).\n"
-        "    scrub_secret_env,\n"
+        "    scrub_secret_env, default_agent,\n"
         "    apparmor_fragments,          For the two payload schemas an empty dict `{}` IS a\n"
         "    completion_payload_schema,   value and overrides; `null`/absent reads as unset and\n"
         "    spawn_payload_schema         inherits.\n"

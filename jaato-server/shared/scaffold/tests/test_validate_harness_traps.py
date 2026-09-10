@@ -121,3 +121,65 @@ def test_a_profile_without_a_spawn_schema_is_quiet(tmp_path):
     out: list = []
     _check_spawn_schema_wire_types({"p": SimpleNamespace()}, str(tmp_path), out)
     assert out == []
+
+
+# ------------------------------------------------------- default_agent (#944)
+#
+# ``default_agent`` binds a profile's persona to the profile, so a spawn
+# naming only the profile still gets instructions.  A name that resolves to
+# no file fails at the spawn — the one moment the caller can do nothing
+# about it, having passed no agent at all.
+
+def _default_agent(tmp_path: Path, agent_name, *, on_disk=None, layout="file"):
+    from shared.scaffold.validate import _check_default_agent_exists
+
+    cr = tmp_path / ".jaato"
+    (cr / "agents").mkdir(parents=True, exist_ok=True)
+    if on_disk:
+        if layout == "file":
+            (cr / "agents" / f"{on_disk}.md").write_text("hi", encoding="utf-8")
+        else:
+            d = cr / "agents" / on_disk
+            d.mkdir(parents=True, exist_ok=True)
+            (d / "PROMPT.md").write_text("hi", encoding="utf-8")
+    prof = SimpleNamespace(default_agent=agent_name)
+    out: list = []
+    _check_default_agent_exists({"documentalista": prof}, tmp_path, str(cr), out)
+    return out
+
+
+def test_default_agent_naming_no_file_is_an_error(tmp_path):
+    out = _default_agent(tmp_path, "gone")
+    assert [d.code for d in out] == ["default_agent_missing"]
+    assert out[0].severity == "error"
+    assert out[0].profile == "documentalista"
+    # The message must name the consequence, not just the missing file.
+    assert "spawn_subagent(profile='documentalista')" in out[0].message
+
+
+def test_default_agent_present_on_disk_is_quiet(tmp_path):
+    assert _default_agent(tmp_path, "writer", on_disk="writer") == []
+
+
+def test_default_agent_as_a_directory_persona_is_quiet(tmp_path):
+    assert _default_agent(tmp_path, "writer", on_disk="writer",
+                          layout="dir") == []
+
+
+def test_a_profile_without_a_default_agent_is_quiet(tmp_path):
+    assert _default_agent(tmp_path, None) == []
+
+
+def test_the_check_does_not_render_the_persona(tmp_path):
+    """Rendering runs the persona's ``{{!py:...}}`` prefetch scripts, and
+    validate is side-effect free — so a persona whose prefetch would blow
+    up must still validate clean."""
+    cr = tmp_path / ".jaato"
+    (cr / "agents").mkdir(parents=True)
+    (cr / "agents" / "writer.md").write_text(
+        "{{!py:scripts/does_not_exist.py}}", encoding="utf-8")
+    from shared.scaffold.validate import _check_default_agent_exists
+    out: list = []
+    _check_default_agent_exists(
+        {"p": SimpleNamespace(default_agent="writer")}, tmp_path, str(cr), out)
+    assert out == []

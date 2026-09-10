@@ -319,6 +319,11 @@ plugin_configs: {}
 # Agent identity and instructions belong in .jaato/agents/<name>.md (persona)
 # layered on top of .jaato/instructions/ base instructions.
 # system_instructions: DEPRECATED — use agents instead.
+# default_agent: the persona THIS profile spawns with when the caller names
+#   no `agent` (#944).  A profile supplies plugins, an agent supplies
+#   instructions — this binds the two, so spawn_subagent(profile=...) alone
+#   yields a subagent that has both.  An explicit `agent=` still wins.
+default_agent: researcher
 # suppress_base_instructions: drop framework-injected instruction layers
 #   (persona + plugin instructions are ALWAYS kept). Accepts a bool or a
 #   granular map over three pieces:
@@ -590,6 +595,74 @@ being unexposed or miss one being exposed — both were already true of any
 unsynchronized read here, and both are recoverable where a lost turn is not.
 `test_registry_iteration_snapshots.py` carries an AST guard over `registry.py`
 so the next read path cannot reintroduce the shape silently.
+
+### Spawning Requires a Profile (#944)
+
+`spawn_subagent` let the model omit `profile`. The subagent then inherited the
+parent's **entire** plugin set with **no system instructions**, and the call
+returned `success: true` — indistinguishable, from the caller's side, from a
+correct delegation. A voice agent told to delegate document-writing to a
+`documentalista` profile spawned that instead: no `file_edit`, no persona,
+nothing written, and the person was told a document was on its way.
+
+The knob against it, `allow_inline`, was declared, documented, and **advertised
+to the model** by `list_subagent_profiles` — and read nowhere. Setting
+`allow_inline: false` changed nothing, so a profile could tell an agent "inline
+is not allowed" and then allow it. The dataclass said `True`; the config schema
+every consumer reads said `False`. The advertised contract was already the
+right one — what was missing was the implementation.
+
+**`allow_inline` now defaults to `false`, and enabling it is the explicit,
+WARNING-announced act** — the posture `scrub_secret_env` (#863) and
+`--ws-unsafe-no-auth` already take. A workspace that genuinely spawns inline
+sets `plugin_configs.subagent.allow_inline: true`; every other workspace gets
+the safe default without editing anything.
+
+Four surfaces answer to the knob, and the **schema is the load-bearing one**:
+
+| Surface | With inline denied (default) |
+|---------|------------------------------|
+| `spawn_subagent`'s `required` | `["task", "profile"]` — the bad call is *unrepresentable*, enforced by the provider's function-calling validator, not corrected after the fact |
+| the tool + `profile` descriptions | stop offering "EITHER a profile OR a descriptive name"; models read descriptions, and leaving that in place while `required` says otherwise reproduces the same mismatch one layer up |
+| `inline_config` | absent from the wire body, and refused at execution |
+| the executor's gate | an omitted `profile` is an error listing what IS available — the wording a *wrong* profile name has always produced |
+
+A runtime error alone would be a retry loop that spends turns and can exhaust
+the completion-nudge budget; a `required` field is a contract the model cannot
+step outside of. The schema is rebuilt **per exposure** — subagents share the
+parent's `PluginRegistry`, so a memoised one would leak one agent's knob into
+another's tool list.
+
+The gate sits **before** the remote-spawn branch, which forwards
+`profile_name or ''` and returns: unprofiled means the same thing on a peer as
+it does here.
+
+**`inline_allowed_plugins` binds both inline paths.** Its only enforcement site
+was nested inside `if inline_config:` → `if 'plugins' in inline_config:`, so a
+profile saying "inline subagents may hold only `cli` and `todo`" delivered the
+parent's whole set to any spawn that simply did not mention `inline_config` —
+the restriction bound only an agent that opted into being restricted.
+
+**A profile can name its own persona: `default_agent:`.** `profile` supplies
+plugins; `agent` supplies instructions, and requiring only the first yields a
+correctly-tooled subagent with nothing to tell it what to do. The binding
+belongs in the profile that already knows which persona is its own, rather than
+in every caller:
+
+```yaml
+# .jaato/profiles/documentalista.yaml
+plugins: [file_edit, memory]
+default_agent: documentalista      # .jaato/agents/documentalista.md
+```
+
+`spawn_subagent(profile="documentalista")` then resolves that persona through
+the same `_resolve_agent` path an explicit `agent=` uses — and an explicit
+`agent=` still wins, so the profile's binding is a default, not a ceiling. A
+`default_agent` naming a file that is not on disk fails by blaming the
+*profile*, not the caller who passed no agent, and `jaato-scaffold validate`
+reports it as `default_agent_missing` (**error**) before any spawn — by
+locating the file, never by rendering it, since rendering runs the persona's
+`{{!py:...}}` prefetch and `validate` is side-effect free.
 
 ### MCP Server Configuration
 
