@@ -497,10 +497,10 @@ BASELINE: Dict[str, int] = {
     "jaato-tui/output_buffer.py::OutputBuffer._finalize_completed_tools": 16,
     "jaato-tui/output_buffer.py::OutputBuffer._measure_display_lines": 16,
     "jaato-tui/output_buffer.py::OutputBuffer._render_active_tools_inline": 79,
-    "jaato-tui/output_buffer.py::OutputBuffer._render_impl": 117,
+    "jaato-tui/output_buffer.py::OutputBuffer._render_impl": 108,
     "jaato-tui/output_buffer.py::OutputBuffer._render_single_notebook_row": 17,
     "jaato-tui/output_buffer.py::OutputBuffer._render_tool_block": 53,
-    "jaato-tui/output_buffer.py::OutputBuffer._scroll_to_selected_tool": 21,
+    "jaato-tui/output_buffer.py::OutputBuffer._scroll_to_selected_tool": 20,
     "jaato-tui/output_buffer.py::OutputBuffer.add_active_tool": 31,
     # 47 since the tool-tree finalize stopped being gated on
     # ``mode == "write"`` — one fewer decision point, and prose of any
