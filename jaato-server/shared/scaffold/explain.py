@@ -867,6 +867,27 @@ def _command_block(commands: List[Any]) -> List[str]:
     return out
 
 
+def _config_block(settings) -> List[str]:
+    """Render one ``plugin_configs.<plugin>.*`` knob per line.
+
+    The declared ``enum`` is rendered because it is CHECKED: ``validate``
+    reports a value outside it as ``invalid_knob_value`` (#925), and this
+    listing is where an author reads the permitted set.  It sits beside the
+    type rather than after the description because it IS type information,
+    and a knob's description can run to several lines.  ``type`` may be a
+    union (``string|array``), which is why the column is wider than the
+    single JSON-Schema token it used to hold.
+    """
+    out: List[str] = []
+    for s in settings:
+        dflt = f"  (default {s.default!r})" if s.default is not None else ""
+        desc = f"  {s.description}" if s.description else ""
+        enum = ("  one of: " + ", ".join(repr(c) for c in s.enum)
+                if s.enum else "")
+        out.append(f"    {s.name:22} {s.type:12}{enum}{desc}{dflt}")
+    return out
+
+
 def plugin(name: str) -> Rendered:
     PL = introspect.plugins()
     pi = PL.get(name)
@@ -895,10 +916,7 @@ def plugin(name: str) -> Rendered:
     lines.extend(_command_block(pi.commands))
     if pi.config_settings:
         lines.append(f"  config (plugin_configs.{name}.*):")
-        for s in pi.config_settings:
-            dflt = f"  (default {s.default!r})" if s.default is not None else ""
-            d = f"  {s.description}" if s.description else ""
-            lines.append(f"    {s.name:22} {s.type:8}{d}{dflt}")
+        lines.extend(_config_block(pi.config_settings))
     data = {"description": pi.description,
             "kind": pi.kind, "tier": pi.tier, "dynamic": pi.dynamic,
             "commands": _commands_json(pi.commands),
@@ -912,7 +930,8 @@ def plugin(name: str) -> Rendered:
                        "description": t.description,
                        "parameters": t.parameters} for t in pi.tools],
             "config": [{"name": s.name, "type": s.type, "default": s.default,
-                        "description": s.description} for s in pi.config_settings]}
+                        "description": s.description, "enum": s.enum}
+                       for s in pi.config_settings]}
     return data, "\n".join(lines)
 
 

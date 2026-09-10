@@ -1375,6 +1375,69 @@ the test asserts object identity rather than behaviour.
 a `JaatoSession`, and a plugin reaching into `session._runtime` is not
 something to make easier from out of tree.
 
+### A Knob's Value, Not Only Its Name (#925)
+
+`jaato-scaffold validate` already read every plugin's `get_config_schema()`,
+and already kept each knob's declared `type` — then checked the knob **names**
+and threw the rest away. So a knob violating the plugin's own declared `enum`
+validated clean and exited 0:
+
+```yaml
+plugin_configs:
+  todo:
+    storage_type: sqlite        # declared enum: [memory, file, hybrid]
+```
+
+Nothing fails at runtime either, which is the point: `create_storage` raises,
+`todo/plugin.py` catches, prints two lines to daemon stdout, and installs
+`InMemoryStorage()`. An operator who asked for persistent storage gets none,
+and the only signal is a bare `print()` nobody is reading. That is exactly the
+silent-ignore class `validate` exists to catch — rename the knob to
+`storage_typo` and `unknown_knob` fired immediately, so the schema *was* being
+read.
+
+`ConfigSetting` now carries `enum` alongside `type` (JSON Schema spells the
+closed set `enum`, the `PluginSetting` object form spells it `choices`; both
+land on the one field), and `_validate_plugin_knobs` reads
+`config_settings` rather than `config_keys`:
+
+| Finding | Severity | Why that severity |
+|---------|----------|-------------------|
+| `invalid_knob_value` | **error** | a plugin that spells out `["memory","file","hybrid"]` has left no incompleteness to be generous about |
+| `knob_type_mismatch` | **warn** | YAML scalar typing is easy to trip over, a plugin may coerce, and a declared type can be an incomplete summary |
+| `unknown_knob` | warn (unchanged) | a plugin may accept free-form keys it did not enumerate |
+
+The generosity that makes an unknown **name** a warning is a claim about
+schema *completeness*, and it does not carry over to a **value** the schema
+explicitly closed.
+
+Three properties, each attached to a way the check could go wrong:
+
+- **A deferred value is not judged.** `${VAR}` and `pass://` / `vault://` are
+  resolved later, against an environment the validator does not have, and
+  their literal form is a `str` whatever the knob declares — so
+  `timeout: ${HTTP_TIMEOUT}` is not a type error and
+  `lookup_strategy: ${STRATEGY}` is not an enum violation. `None` is "unset",
+  not "wrongly typed".
+- **`True` is not an integer.** Python makes `bool` a subclass of `int`, so
+  `timeout: true` would otherwise satisfy a knob declared `integer` on a
+  technicality — the same silent shape the check exists to catch. Both type
+  vocabularies are understood (JSON Schema's `integer`/`boolean`/`array`, the
+  object form's `int`/`bool`/`dict`), a union renders as `string|array` rather
+  than a Python repr, and a token in **neither** table asserts nothing: the
+  table is a source of findings, never of guesses.
+- **It reaches out of tree.** `_PLUGIN_VALUE_CHECKS` is a hardcoded
+  jaato-server dict keyed by plugin name, so a third-party distribution had
+  **no** route to value validation even though its `get_config_schema()`
+  already declared the constraint in machine-readable form. The generic path
+  needs no registration. That dict stays for genuinely *structural* knobs
+  (`template.file_conventions`), which no declared type can describe.
+
+Still not descended: nested and free-form sub-structures (`permission.policy`,
+`permission.evaluators`) — only a top-level knob's own shape is judged.
+`jaato-scaffold explain plugins <name>` now prints the permitted set beside
+each knob, because it is the set `validate` enforces.
+
 ### Secret Env Scrubbing (#863)
 
 The runner legitimately holds secrets in its own `os.environ` — the

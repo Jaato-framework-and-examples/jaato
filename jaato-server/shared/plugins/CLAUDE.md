@@ -448,6 +448,32 @@ def get_config_schema(self) -> List[PluginSetting]:
 **Registry access:** `registry.get_plugin_config_schema("cli")` returns the list
 of `PluginSetting` for a plugin, or `[]` if unimplemented.
 
+**A declared constraint is enforced (#925).** `choices` and `type` are not
+documentation — `jaato-scaffold validate` checks a profile's values against
+them, and this is the only route to value validation an out-of-tree plugin
+has (`_PLUGIN_VALUE_CHECKS` in `scaffold/validate.py` is a hardcoded dict
+keyed by plugin name, which a third-party distribution cannot register into):
+
+| Profile value | Finding | Severity |
+|---|---|---|
+| outside `choices` / JSON Schema `enum` | `invalid_knob_value` | **error** |
+| not of the declared `type` | `knob_type_mismatch` | warn |
+| a name the schema does not declare | `unknown_knob` | warn |
+
+So declare `choices` whenever the set really is closed. The alternative is
+what `todo.storage_type` did before the check existed: an unrecognised value
+raised inside the backend factory, the plugin caught it, printed to daemon
+stdout and installed the in-memory fallback — an operator who asked for
+persistence got none, and nothing failed.
+
+Both schema shapes are read: a list of `PluginSetting` (whose closed set is
+`choices` and whose types are Python-ish — `int` / `bool` / `dict`) and a raw
+JSON-Schema dict (`enum`, and `integer` / `boolean` / `object`). A `type` in
+neither vocabulary asserts nothing, so an exotic one is not a false positive
+— but it buys no checking either. A `${VAR}` or `pass://` value is left
+alone, since it is resolved later against an environment the validator does
+not have.
+
 ## Critical: Model-Supplied Paths Go Through `path_safety`
 
 A plugin that reads or writes a path the **model** chose must not use the

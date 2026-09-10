@@ -120,11 +120,27 @@ class CommandInfo:
 
 @dataclass
 class ConfigSetting:
-    """One configurable plugin setting (from ``get_config_schema``)."""
+    """One configurable plugin setting (from ``get_config_schema``).
+
+    ``type`` and ``enum`` are the plugin's OWN machine-readable declaration
+    of what a knob may hold, normalized across the two schema shapes the
+    tree carries (a JSON-Schema ``properties`` dict, or a list of
+    :class:`~jaato_sdk.plugins.base.PluginSetting` objects).  They are what
+    lets :mod:`shared.scaffold.validate` check a knob's VALUE and not only
+    its name (#925) — a knob violating its own declared enum validated
+    clean and then fell back silently at runtime.
+
+    ``type`` is a lowercase token, or ``"a|b"`` for a JSON-Schema union
+    (``"type": ["string", "array"]``, as ``cli.scrub_secret_env`` declares).
+    ``enum`` is the declared closed value set (JSON Schema ``enum``, or a
+    ``PluginSetting.choices`` list) — ``None`` when the knob declares none,
+    which is not the same as an empty one.
+    """
     name: str
     type: str = ""
     default: Any = None
     description: str = ""
+    enum: Optional[List[Any]] = None
 
 
 @dataclass
@@ -545,6 +561,33 @@ def _stamp_kind_and_tier(info: "PluginInfo", module_name: str) -> None:
         pass
 
 
+def _schema_type(declared: Any) -> str:
+    """Render a declared knob type as one lowercase token, or ``"a|b"``.
+
+    JSON Schema allows a union (``"type": ["string", "array"]`` —
+    ``cli.scrub_secret_env`` and ``mcp.scrub_secret_env`` both declare one),
+    and ``str()`` on that list yields a Python repr (``"['string', 'array']"``)
+    that is wrong in the ``explain plugins`` type column and useless to a
+    value check.  Members are joined with ``|`` instead, which both read.
+    """
+    if isinstance(declared, (list, tuple)):
+        return "|".join(str(x) for x in declared if x)
+    return str(declared or "")
+
+
+def _schema_enum(declared: Any) -> Optional[List[Any]]:
+    """The declared closed value set, or ``None`` when there is none.
+
+    ``None`` and an empty list mean different things — "this knob declares
+    no enum" vs "this knob permits nothing" — and only the former occurs in
+    practice, so an empty/none-list declaration is normalized to ``None``
+    rather than becoming a rule that rejects every value.
+    """
+    if isinstance(declared, (list, tuple)) and declared:
+        return list(declared)
+    return None
+
+
 def plugins() -> Dict[str, PluginInfo]:
     """All tool/enrichment plugins, best-effort offline.
 
@@ -585,7 +628,9 @@ def plugins() -> Dict[str, PluginInfo]:
         # plugin-level description (class docstring, first line)
         doc = (type(plugin).__doc__ or "").strip()
         info.description = doc.split("\n", 1)[0].strip() if doc else ""
-        # config schema (best-effort) — names + descriptions / types / defaults.
+        # config schema (best-effort) — names + descriptions / types /
+        # defaults / enums.  The last three are what let validate check a
+        # knob's VALUE and not only its name (#925).
         # Two shapes exist in the wild; normalize BOTH into ConfigSetting so
         # explain/validate see the knobs either way:
         #   - a list of ``PluginSetting`` objects (``.name`` / ``.type`` / …),
@@ -603,18 +648,23 @@ def plugins() -> Dict[str, PluginInfo]:
                         spec = spec if isinstance(spec, dict) else {}
                         settings.append(ConfigSetting(
                             name=str(knob),
-                            type=str(spec.get("type", "") or ""),
+                            type=_schema_type(spec.get("type")),
                             default=spec.get("default", None),
                             description=str(spec.get("description", "") or ""),
+                            enum=_schema_enum(spec.get("enum")),
                         ))
             else:
                 for s in schema:
                     if hasattr(s, "name"):
                         settings.append(ConfigSetting(
                             name=s.name,
-                            type=str(getattr(s, "type", "") or ""),
+                            type=_schema_type(getattr(s, "type", None)),
                             default=getattr(s, "default", None),
                             description=getattr(s, "description", "") or "",
+                            # The object form spells the closed set
+                            # ``choices``; JSON Schema spells it ``enum``.
+                            # Both land on ConfigSetting.enum.
+                            enum=_schema_enum(getattr(s, "choices", None)),
                         ))
             info.config_keys = [s.name for s in settings]
             info.config_settings = settings
