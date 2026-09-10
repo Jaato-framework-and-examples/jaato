@@ -562,6 +562,34 @@ Subagents share the parent's `JaatoRuntime` but get their own `JaatoSession`:
 - **Fast spawning** - `create_session()` is lightweight
 - **Resource sharing** - registry, permissions, ledger shared
 
+**A shared registry is a shared mutable object (#938).** The last bullet is
+also a concurrency contract: `spawn_subagent` exposes the child's plugins —
+`self._exposed.add(...)` on the `PluginRegistry` — from the spawning thread
+while the parent's model thread is part-way through a read that walks the same
+set. `registry.get_plugin_for_tool` iterated it live, so a spawn could raise
+`RuntimeError: Set changed size during iteration` inside the parent's model
+loop and terminate the parent's turn — reaching the caller as an opaque
+`RunnerCallError`, indistinguishable from a provider failure.
+
+Two things made it routine rather than theoretical: it is the **cache-miss**
+path, which a profile that subsets tools (`plugins: ["memory(tools:[...])"]`)
+is in constantly because it is resolving names the cache has not seen, and
+`_apply_tool_scopes` runs on **every** provider call — so the parent is in that
+loop for the whole round trip that follows the `spawn_subagent` result.
+
+The registry takes **no lock**: every read path calls into plugin code, and
+holding a lock across those callbacks invites deadlock. The invariant is
+cheaper — **every read path iterates a snapshot** (`list(self._exposed)`,
+`list(self._plugins.items())`, ...), never the live container, and looks each
+name up inside the `try`/`except` that already wraps these loops, which is what
+absorbs a plugin that vanished between the snapshot and the lookup. Removals
+use `dict.pop(key, None)` rather than `del` for the same reason. A snapshot
+buys consistency-of-iteration, not a consistent view: a reader may see a plugin
+being unexposed or miss one being exposed — both were already true of any
+unsynchronized read here, and both are recoverable where a lost turn is not.
+`test_registry_iteration_snapshots.py` carries an AST guard over `registry.py`
+so the next read path cannot reintroduce the shape silently.
+
 ### MCP Server Configuration
 
 MCP servers are configured in `.mcp.json`:
