@@ -211,7 +211,7 @@ BASELINE: Dict[str, int] = {
     "jaato-server/shared/jaato_session.py::JaatoSession._track_activated_tools_in_budget": 20,
     "jaato-server/shared/jaato_session.py::JaatoSession._update_conversation_budget": 37,
     "jaato-server/shared/jaato_session.py::JaatoSession.activate_discovered_tools": 21,
-    "jaato-server/shared/jaato_session.py::JaatoSession.configure": 87,
+    "jaato-server/shared/jaato_session.py::JaatoSession.configure": 86,
     "jaato-server/shared/jaato_session.py::JaatoSession.resolve_fork_point": 17,
     "jaato-server/shared/jaato_session.py::JaatoSession.send_message": 29,
     "jaato-server/shared/lifecycle_tools.py::LifecycleTools._describe_pending_field": 28,
@@ -341,9 +341,11 @@ BASELINE: Dict[str, int] = {
     "jaato-server/shared/plugins/notebook/plugin.py::NotebookPlugin.execute_streaming": 18,
     "jaato-server/shared/plugins/notebook/plugin.py::NotebookPlugin.format_permission_request": 17,
     "jaato-server/shared/plugins/permission/channels.py::ConsoleChannel.request_permission": 16,
+    # #951: the twenty-odd-exit policy evaluation, unchanged; the public
+    # ``check_permission`` is now a thin single-exit tracing wrapper.
+    "jaato-server/shared/plugins/permission/plugin.py::PermissionPlugin._check_permission_impl": 88,
     "jaato-server/shared/plugins/permission/plugin.py::PermissionPlugin._get_tool_completions": 16,
     "jaato-server/shared/plugins/permission/plugin.py::PermissionPlugin._handle_channel_response": 16,
-    "jaato-server/shared/plugins/permission/plugin.py::PermissionPlugin.check_permission": 88,
     "jaato-server/shared/plugins/permission/plugin.py::PermissionPlugin.execute_permissions": 17,
     "jaato-server/shared/plugins/permission/policy.py::PermissionPolicy.check": 18,
     "jaato-server/shared/plugins/permission/runner_rpc_channel.py::RunnerRPCChannel.request_permission": 17,
@@ -493,10 +495,10 @@ BASELINE: Dict[str, int] = {
     "jaato-tui/output_buffer.py::OutputBuffer._finalize_completed_tools": 16,
     "jaato-tui/output_buffer.py::OutputBuffer._measure_display_lines": 16,
     "jaato-tui/output_buffer.py::OutputBuffer._render_active_tools_inline": 79,
-    "jaato-tui/output_buffer.py::OutputBuffer._render_impl": 117,
+    "jaato-tui/output_buffer.py::OutputBuffer._render_impl": 108,
     "jaato-tui/output_buffer.py::OutputBuffer._render_single_notebook_row": 17,
     "jaato-tui/output_buffer.py::OutputBuffer._render_tool_block": 53,
-    "jaato-tui/output_buffer.py::OutputBuffer._scroll_to_selected_tool": 21,
+    "jaato-tui/output_buffer.py::OutputBuffer._scroll_to_selected_tool": 20,
     "jaato-tui/output_buffer.py::OutputBuffer.add_active_tool": 31,
     # 47 since the tool-tree finalize stopped being gated on
     # ``mode == "write"`` — one fewer decision point, and prose of any

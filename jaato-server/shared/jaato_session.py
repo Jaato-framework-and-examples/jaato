@@ -1693,6 +1693,48 @@ class JaatoSession:
             self._on_prompt_injected(msg.text)
         return msg.text
 
+    def _make_thinking_emitter(
+        self,
+        on_output: Optional[Callable[[str, str, str], None]],
+        trace_tag: str,
+    ) -> Callable[[str], None]:
+        """Build the ``on_thinking`` callback for ONE provider call.
+
+        Reasoning reaches the session the way text does — as a stream of
+        deltas on the OpenAI-shaped wires (OpenRouter, the ``_openai_compat``
+        family, GitHub Models, the Responses API), or as one whole block on
+        the wires that accumulate it (Anthropic, ``claude_cli``, Bedrock).
+        The output contract is the same one text uses: the FIRST chunk of a
+        block is a ``"write"`` (start a new block) and every later chunk an
+        ``"append"``.  Before #755 every reasoning chunk was emitted as a
+        ``"write"``, so a client honouring the contract started a new block
+        per delta and rendered a 20-character line per token — the
+        "narrow wrap" the issue reports.
+
+        The emitter is per provider call, like ``streaming_callback``: each
+        call of the tool loop starts a fresh block, so interleaved reasoning
+        between two tool rounds renders as two blocks rather than one.
+
+        Args:
+            on_output: The session's output callback, or ``None`` (the
+                emitter is then a no-op).
+            trace_tag: Prefix for the ``_trace`` line, naming the call site.
+
+        Returns:
+            A callable taking the reasoning chunk.
+        """
+        started = [False]
+
+        def thinking_callback(thinking: str) -> None:
+            if not on_output:
+                return
+            mode = "append" if started[0] else "write"
+            self._trace(f"{trace_tag} mode={mode} len={len(thinking)}")
+            on_output("thinking", thinking, mode)
+            started[0] = True
+
+        return thinking_callback
+
     def _forward_to_parent(self, event_type: str, content: str) -> None:
         """Forward an event to the parent session.
 
@@ -2322,7 +2364,15 @@ class JaatoSession:
                    per-tool allow-lists live in ``tool_scopes``.)
             system_instructions: Optional additional system instructions.
             plugin_configs: Optional per-plugin configuration overrides.
-                           Plugins will be re-initialized with these configs.
+                           Every named plugin the registry knows is
+                           re-initialized with its config — INCLUDING plugins
+                           absent from ``plugins`` (#950): configuring a plugin
+                           and exposing its tools are separate decisions, and
+                           ``permission`` is the case that matters (it exposes
+                           no tools at all, so it is never in ``plugins``).
+                           Keys naming a provider rather than a plugin
+                           (``openrouter``, ``anthropic``, …) are skipped here
+                           — ``create_provider`` reads those.
             skip_provider: If True, skip provider creation (for auth-pending mode).
                           User commands will be available but model calls won't work.
             preloaded_plugins: Optional set of plugin names that should bypass
@@ -2438,18 +2488,70 @@ class JaatoSession:
         # Store tool plugin names
         self._tool_plugins = plugins
 
-        # Re-initialize plugins with session-specific configs if provided
+        # Re-initialize plugins with session-specific configs if provided.
+        #
+        # A config is applied for every plugin the REGISTRY knows, whether or
+        # not the session lists it in ``plugins`` (#950).  The old gate —
+        # ``if plugins is None or plugin_name in plugins`` — silently dropped
+        # the rest, which contradicted the framework's own intent in three
+        # other places (``SessionInitEnvelope.plugin_configs`` "carries configs
+        # for **all** plugins", the runner's Phase 4 §C merge, and
+        # ``PluginRegistry._ALWAYS_INITIALIZE_PLUGINS``) and made a profile's
+        # ``plugin_configs.permission`` inert for any session that did not also
+        # name ``permission`` in ``plugins``.  Measured: 55 permission ASKs on
+        # a tool the profile had whitelisted, with no diagnostic anywhere.
+        #
+        # A top-level session never saw this — its configs reach the plugins
+        # through ``expose_all(plugin_configs)`` at bootstrap.  A subagent
+        # reuses the parent's already-bootstrapped registry, so THIS loop was
+        # the only place its own profile's configs could land.
+        #
+        # Two properties the loop depends on:
+        #
+        # * **Names the registry does not know are skipped**, not attempted.
+        #   ``plugin_configs`` also carries the PROVIDER sections
+        #   (``openrouter``, ``anthropic``, …), which are read by
+        #   ``create_provider``, not by any plugin; ``expose_tool`` would raise
+        #   ``ValueError`` on each one and the old gate happened to filter them
+        #   out by way of them not being in ``plugins``.
+        # * **This does not widen the model's tool surface.**  Bootstrap's
+        #   ``expose_all`` already exposed every discovered plugin; what the
+        #   model sees is filtered per session from ``self._tool_plugins``
+        #   (``plugins``), which this loop does not touch.
+        #
+        # Consequence worth knowing: the registry — and therefore each plugin
+        # INSTANCE — is shared with the parent and its other subagents, so a
+        # config applied here is applied for all of them.  That was already
+        # true of every plugin a subagent DID list; this widens it to the ones
+        # it only configures.
+        #
+        # And one instance short of universal, for ``permission`` specifically:
+        # the daemon (``server/core.py``) and the runner
+        # (``server/runner/session.py`` Step 8) CONSTRUCT the enforcing
+        # ``PermissionPlugin`` instead of taking the registry's, so on those
+        # paths this loop re-initializes a second, unread copy and the enforcer
+        # keeps the ROOT profile's policy.  The in-process path
+        # (``jaato_embedded/client.py`` wires ``registry.get_plugin(
+        # "permission")`` as the enforcer) has one instance, and there a
+        # subagent's block applies.  Unifying that would still not give a
+        # subagent a policy of its own — ``PermissionPlugin._policy`` is a
+        # single object on a runtime-wide singleton, only the channel is
+        # thread-local — so it is a design question, not a line here.
         if plugin_configs and self._runtime.registry:
+            registry = self._runtime.registry
+            known_plugins = set(registry.list_available())
             for plugin_name, config in plugin_configs.items():
-                if plugins is None or plugin_name in plugins:
-                    try:
-                        # Inject agent_name into plugin config for trace logging
-                        if self._agent_name and "agent_name" not in config:
-                            config = {**config, "agent_name": self._agent_name}
-                        # expose_tool with new config will re-initialize
-                        self._runtime.registry.expose_tool(plugin_name, config)
-                    except Exception as e:
-                        print(f"Warning: Failed to configure plugin '{plugin_name}': {e}")
+                if plugin_name not in known_plugins:
+                    continue  # a provider section, or a name nothing supplies
+                try:
+                    # Inject agent_name into plugin config for trace logging
+                    if self._agent_name and "agent_name" not in config:
+                        config = {**config, "agent_name": self._agent_name}
+                    # expose_tool with new config will re-initialize
+                    registry.expose_tool(plugin_name, config)
+                except Exception as e:
+                    logger.warning(
+                        "Failed to configure plugin '%s': %s", plugin_name, e)
 
         # Stash provider-creation args for lazy use by ``_ensure_provider``.
         # Pre-2026-05-13 the eager ``self._provider = self._runtime.create_provider(...)``
@@ -6427,11 +6529,10 @@ NOTES
 
                     self._trace(f"STREAMING on_usage_update={'set' if wrapped_usage_callback else 'None'}")
 
-                    # Create thinking callback to emit thinking BEFORE text
-                    def thinking_callback(thinking: str) -> None:
-                        if on_output:
-                            self._trace(f"SESSION_THINKING_CALLBACK len={len(thinking)}")
-                            on_output("thinking", thinking, "write")
+                    # Thinking callback: emits reasoning BEFORE text, as a
+                    # write-then-append stream (one block per provider call).
+                    thinking_callback = self._make_thinking_emitter(
+                        on_output, "SESSION_THINKING_CALLBACK")
 
                     with self._provider_access():
                         turn_result, _retry_stats = with_retry(
@@ -8923,11 +9024,10 @@ NOTES
                         on_output("model", chunk, mode)
                         first_chunk_after_tools[0] = True
 
-                # Create thinking callback to emit thinking BEFORE text
-                def thinking_callback(thinking: str) -> None:
-                    if on_output:
-                        self._trace(f"SESSION_TOOL_RESULT_THINKING_CALLBACK len={len(thinking)}")
-                        on_output("thinking", thinking, "write")
+                # Thinking callback: emits reasoning BEFORE text, as a
+                # write-then-append stream (one block per provider call).
+                thinking_callback = self._make_thinking_emitter(
+                    on_output, "SESSION_TOOL_RESULT_THINKING_CALLBACK")
 
                 # Path 1 quirk consumption: if signal_completion just
                 # returned validation_failed, request named-function
@@ -9098,11 +9198,10 @@ NOTES
                         on_output("model", chunk, mode)
                         first_chunk_sent[0] = True
 
-                # Create thinking callback to emit thinking BEFORE text
-                def thinking_callback(thinking: str) -> None:
-                    if on_output:
-                        self._trace(f"MID_TURN_THINKING_CALLBACK len={len(thinking)}")
-                        on_output("thinking", thinking, "write")
+                # Thinking callback: emits reasoning BEFORE text, as a
+                # write-then-append stream (one block per provider call).
+                thinking_callback = self._make_thinking_emitter(
+                    on_output, "MID_TURN_THINKING_CALLBACK")
 
                 self._trace("MID_TURN_PROMPT: Calling with_retry for streaming...")
                 with self._provider_access():
@@ -11330,10 +11429,10 @@ NOTES
                 first_chunk_sent[0] = True
             self._forward_to_parent("MODEL_OUTPUT", chunk)
 
-        def thinking_callback(thinking: str) -> None:
-            if on_output:
-                self._trace(f"SESSION_PARTS_THINKING len={len(thinking)}")
-                on_output("thinking", thinking, "write")
+        # Reasoning is a write-then-append stream, like text (one block per
+        # provider call).
+        thinking_callback = self._make_thinking_emitter(
+            on_output, "SESSION_PARTS_THINKING")
 
         with self._provider_access():
             turn_result, _retry_stats = with_retry(

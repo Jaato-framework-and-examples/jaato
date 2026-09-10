@@ -21,6 +21,7 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple, TYPE_CHECKIN
 
 logger = logging.getLogger(__name__)
 
+from shared.trace import trace as _trace_write
 from shared.token_accounting import TokenLedger
 from jaato_sdk.plugins.base import OutputCallback
 from jaato_sdk.plugins.model_provider.types import (
@@ -53,6 +54,92 @@ BACKGROUND_READER_TOOL = 'getBackgroundTask'
 # imposes no wall-clock timeout unless RuntimeLimits sets one, and a
 # genuinely hung command must not wedge the session forever.
 DEFAULT_NO_READER_TIMEOUT_SECONDS = 300.0
+
+
+def _trace_runner(msg: str) -> None:
+    """Write one ``[TOOL_RUNNER]`` trace line.
+
+    This is the stage issue #951 could not see into.  ``[PERMISSION]``
+    said a check happened, ``[FILE_EDIT]`` said nothing, and between
+    them sat the executor lookup, the auto-background branch and the
+    deny short-circuit — three ways for a tool call to end without
+    running, none of which left a mark.  The lines below name the
+    outcome of each.
+    """
+    _trace_write("TOOL_RUNNER", msg)
+
+
+def _trace_permission_outcome(
+    name: str,
+    call_id: Optional[str],
+    allowed: bool,
+    perm_info: Dict[str, Any],
+) -> None:
+    """Trace what the gate answered, and what the runner will do about it.
+
+    Distinct from the permission plugin's own DECISION line: this one
+    is the *consumer's* view, so a decision made by a plugin that
+    somehow traces nothing (a stub, a wrapper, jaato-premium) is still
+    recorded at the point it takes effect.
+    """
+    verdict = "ALLOW" if allowed else "DENY"
+    _trace_runner(
+        f"permission: tool={name} call_id={call_id} verdict={verdict} "
+        f"method={perm_info.get('method', 'unknown')} "
+        f"reason={perm_info.get('reason', '')!r}"
+    )
+
+
+def _describe_executor(fn: Optional[Callable]) -> str:
+    """Name the resolved executor, or say plainly that there is none."""
+    if fn is None:
+        return "MISSING"
+    module = getattr(fn, "__module__", "?")
+    return f"{module}.{getattr(fn, '__name__', '?')}"
+
+
+def _trace_executor_resolution(
+    name: str,
+    call_id: Optional[str],
+    fn: Optional[Callable],
+) -> None:
+    """Trace whether an executor was found for an ALREADY-APPROVED call.
+
+    The pair "permission verdict=ALLOW" + "executor=MISSING" is the
+    shape that reads, from outside, as a call vanishing after the gate.
+    """
+    _trace_runner(
+        f"resolve: tool={name} call_id={call_id} "
+        f"executor={_describe_executor(fn)}"
+    )
+
+
+def _summarize_result(result: Any) -> str:
+    """Describe a tool result without putting its payload in the log.
+
+    Keys and the error string only: a trace file is not the place for
+    file contents, and the operator question this answers ("did it run,
+    and did it fail?") needs neither.
+    """
+    if isinstance(result, dict):
+        keys = ",".join(sorted(str(k) for k in result))
+        error = result.get("error")
+        suffix = f" error={error!r}" if error is not None else ""
+        return f"dict(keys={keys}){suffix}"
+    return type(result).__name__
+
+
+def _trace_tool_outcome(
+    name: str,
+    call_id: Optional[str],
+    ok: bool,
+    result: Any,
+) -> None:
+    """Trace the result the model is about to be handed."""
+    _trace_runner(
+        f"result: tool={name} call_id={call_id} ok={ok} "
+        f"{_summarize_result(result)}"
+    )
 
 
 def get_current_tool_output_callback() -> Optional[ToolOutputCallback]:
@@ -170,6 +257,25 @@ def _permission_attribution(perm_info: Dict[str, Any]) -> Dict[str, str]:
         key: perm_info[key]
         for key in ('user_id', 'approver')
         if perm_info.get(key)
+    }
+
+
+def _permission_caller_fields(
+    context: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """The asking session's identity keys, for the ledger (#951).
+
+    Read from the executor's per-session permission context, not from
+    the permission plugin: one plugin instance serves a parent and
+    every subagent sharing its registry, so only the caller knows who
+    the caller is.  Absent keys are omitted rather than recorded as
+    ``None``, matching :func:`_permission_attribution`.
+    """
+    ctx = context or {}
+    return {
+        key: ctx[key]
+        for key in ('agent_type', 'agent_name', 'session_id')
+        if ctx.get(key)
     }
 
 
@@ -1226,6 +1332,10 @@ class ToolExecutor:
         # This avoids asking the user to approve a tool call that will
         # unconditionally fail with "No executor registered".
         if not self._can_resolve_executor(name):
+            _trace_runner(
+                f"resolve: tool={name} call_id={call_id} executor=MISSING "
+                f"— refused before the permission check"
+            )
             if debug:
                 print(f"[ai_tool_runner] no executor resolvable for {name}, "
                       f"skipping permission check")
@@ -1241,6 +1351,7 @@ class ToolExecutor:
                 allowed, perm_info = self._permission_plugin.check_permission(
                     name, args, self._permission_context, call_id
                 )
+                _trace_permission_outcome(name, call_id, allowed, perm_info)
                 # Build permission metadata for result injection
                 permission_meta = {
                     'decision': 'allowed' if allowed else 'denied',
@@ -1261,6 +1372,11 @@ class ToolExecutor:
                         'allowed': allowed,
                         'reason': perm_info.get('reason', ''),
                         'method': perm_info.get('method', 'unknown'),
+                        # WHICH session asked (#951).  One shared plugin
+                        # decides for a parent and every subagent under
+                        # it, so a ledger row naming only the tool
+                        # cannot be attributed to either.
+                        **_permission_caller_fields(self._permission_context),
                         **_permission_attribution(perm_info),
                     })
                 if not allowed:
@@ -1274,7 +1390,9 @@ class ToolExecutor:
                         error_msg = reason
                     else:
                         error_msg = f"Permission denied: {reason}"
-                    return False, {'error': error_msg, '_permission': permission_meta}
+                    denial = {'error': error_msg, '_permission': permission_meta}
+                    _trace_tool_outcome(name, call_id, False, denial)
+                    return False, denial
                 # Use edited arguments if the user modified them during permission
                 if perm_info.get('was_edited') and perm_info.get('modified_args'):
                     args = perm_info['modified_args']
@@ -1283,6 +1401,11 @@ class ToolExecutor:
                 if debug:
                     print(f"[ai_tool_runner] permission granted for {name}: {perm_info.get('reason', '')}")
             except Exception as perm_exc:
+                _trace_runner(
+                    f"permission: tool={name} call_id={call_id} verdict=DENY "
+                    f"method=check_failed "
+                    f"error={type(perm_exc).__name__}: {perm_exc}"
+                )
                 logger.error(f"Permission check failed for {name}", exc_info=True)
                 if debug:
                     print(f"[ai_tool_runner] permission check failed for {name}: {perm_exc}")
@@ -1307,6 +1430,11 @@ class ToolExecutor:
                         if debug:
                             print(f"[ai_tool_runner] using auto-background for {name} "
                                   f"(threshold={threshold}s)")
+                        _trace_runner(
+                            f"auto-background: tool={name} call_id={call_id} "
+                            f"plugin={bg_plugin.name} threshold={threshold}s "
+                            f"— execution leaves this path"
+                        )
                         return self._execute_with_auto_background(
                             name, args, bg_plugin, threshold, permission_meta
                         )
@@ -1343,6 +1471,7 @@ class ToolExecutor:
                     self._map[name] = fn
                     if debug:
                         print(f"[ai_tool_runner] execute: found executor for {name} via core executors")
+        _trace_executor_resolution(name, call_id, fn)
         if not fn:
             if debug:
                 print(f"[ai_tool_runner] execute: no executor registered for {name}, attempting generic execution")
@@ -1439,12 +1568,15 @@ class ToolExecutor:
                 except Exception as e:
                     logger.debug(f"Reliability plugin on_tool_result failed: {e}")
 
+            _trace_tool_outcome(name, call_id, ok, result)
             return ok, result
         except CancelledException:
             # Tool was cancelled via CancelToken — not an error, not retried.
             # Return a structured result so the session can record it in history.
             logger.debug(f"Tool {name} was cancelled")
-            return False, {'error': 'cancelled'}
+            cancelled = {'error': 'cancelled'}
+            _trace_tool_outcome(name, call_id, False, cancelled)
+            return False, cancelled
         except Exception as exc:
             logger.error(f"Tool execution failed for {name}", exc_info=True)
             if debug:
@@ -1460,6 +1592,7 @@ class ToolExecutor:
                 except Exception as e:
                     logger.debug(f"Reliability plugin on_tool_result failed: {e}")
 
+            _trace_tool_outcome(name, call_id, False, error_result)
             return False, error_result
 
 

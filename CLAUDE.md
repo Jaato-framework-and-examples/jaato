@@ -1614,6 +1614,91 @@ the archetypes `jaato-scaffold new` emits still carry no `budget_control`
 (picking ceilings for someone else's workload is the author's call, which is
 what the warning now asks them to make).
 
+### Configuring a Plugin and Enabling It Are Two Decisions (#950)
+
+`plugin_configs.<name>` and `plugins:` answer different questions — *how does
+this plugin behave* and *which tools reach the model* — and `permission` is
+the case that separates them: `PermissionPlugin.get_tool_schemas()` returns
+`[]` **on purpose**, so it is never in a `plugins:` list, and its whole
+configuration is a `policy` block.
+
+`JaatoSession.configure` collapsed the two:
+
+```python
+if plugins is None or plugin_name in plugins:      # the block, or nothing
+```
+
+A top-level session never noticed — its configs reach the plugins through
+`expose_all(plugin_configs)` at bootstrap, and `permission` gets an explicit
+merge on both the daemon (`server/core.py`) and runner
+(`server/runner/session.py` Step 8) paths. **A subagent reuses the parent's
+already-bootstrapped registry**, so that loop was the only place its own
+profile's configs could land. A `documentalista` profile whose
+`plugin_configs.permission` whitelisted `writeNewFile` therefore produced 55
+permission ASKs on that pre-approved tool — under a headless `ClientType.API`
+driver an ASK has no channel to reach, so 56 write attempts at one path wrote
+nothing, silently. Adding the toolless `permission` to `plugins:` was the
+entire difference.
+
+Three other places in the tree already stated the opposite intent —
+`SessionInitEnvelope.plugin_configs` ("carries configs for **all** plugins …
+including ones the runner auto-loads without them appearing in `plugins`"),
+the runner's Phase 4 §C merge, and `PluginRegistry._ALWAYS_INITIALIZE_PLUGINS`
+("`permission` … is wired even when not in profile.plugins"). The gate was the
+one dissenter, and the runner docstring claiming the overrides "aren't
+currently in the envelope" had been stale since §C shipped.
+
+The loop now applies a config for every plugin **the registry knows**, and two
+properties make that safe:
+
+| Property | Why it is load-bearing |
+|----------|------------------------|
+| names the registry does not know are **skipped, not attempted** | `plugin_configs` also carries the PROVIDER sections (`openrouter`, `anthropic`, …), read by `create_provider` and by no plugin. `expose_tool` raises `ValueError` on each; the old gate filtered them out only as a side effect of them never being in `plugins:` |
+| the model's tool surface is **untouched** | bootstrap's `expose_all` already exposed every discovered plugin; what the model sees is filtered per session from `plugins`, which this loop does not write |
+
+Worth knowing, and unchanged in kind: the registry — and so each plugin
+INSTANCE — is shared with the parent and its sibling subagents, so a config
+applied here applies for all of them. That was already true of every plugin a
+subagent *did* list; this widens it to the ones it only configures.
+
+**One instance short of universal, and worth naming.** The daemon
+(`server/core.py`) and the runner (`server/runner/session.py` Step 8) each
+CONSTRUCT the enforcing `PermissionPlugin` rather than taking the registry's,
+so on those paths `registry.expose_tool("permission", …)` re-initializes a
+second, unread copy; the enforcer is seeded once, from the ROOT profile's
+block. Only the in-process path (`jaato_embedded/client.py`, which wires
+`registry.get_plugin("permission")` as the enforcer) has one instance, and
+there a subagent's permission block now applies. Which is also what
+identifies the transport the measurement above was taken on, since the
+reporter's workaround — naming `permission` in `plugins:` — reached the
+registry's instance and *worked*; on the daemon or runner it would have
+re-initialized the unread copy and changed nothing. Making that universal means giving the daemon
+and runner the registry's instance, and it still would not give a subagent a
+policy of its own: `PermissionPlugin._policy` is a single object on a
+runtime-wide singleton, and only the *channel* is thread-local
+(`configure_for_subagent`). Per-session policy is a separate design question,
+not a line in this fix.
+
+**The validator says the other half.** With the config reaching the plugin,
+"unreachable" is no longer the finding; what survives is narrower and still
+worth saying — the plugin is configured and **none of its tools are on the
+wire**:
+
+| Finding | Severity | Fires when |
+|---------|----------|-----------|
+| `plugin_config_without_plugin` | warn | `plugin_configs.<X>` for an installed, tool-bearing plugin absent from `plugins:` |
+
+Warn rather than error, for the reason the whole silent-config family (#910,
+#925, #947) warns: a base profile in an `inherits` chain may legitimately
+carry a config its children enable, and validation runs on every discovered
+profile including those bases. Three exemptions keep it from being noise:
+a plugin that exposes **no tools at all** (`permission`, `sandbox_manager`) is
+configured-only by construction; `introspection`'s tools are core and reach
+every wire whatever `plugins:` says; and a plugin whose tools are not
+statically knowable (`mcp`) reports none offline and is read the same way —
+a false negative, and the right one, since the alternative is asserting a
+missing surface the validator cannot see.
+
 ### What the Authoring Surface Would Not Say
 
 Six findings from one workspace bring-up, each the same shape: the framework
@@ -1940,6 +2025,73 @@ answered".  The session's own user reaches the runner-side `JaatoSession`
 on `SessionInitEnvelope.created_by` — `set_client_user_id` previously had
 no caller, so runner-tier telemetry was anonymous too.  Related: #507 is
 the integrity half (tamper evidence); this is the identity half.
+
+### Observable Permission Decisions (#951)
+
+`check_permission` traced two things: that a check had **started**, and — on
+the ASK branch only — that it was about to prompt. Every terminal decision went
+to `_log_decision`, which appends to `_execution_log`, an in-memory list that
+reaches no file and no event. So an ALLOW and a DENY were **byte-identical in
+every log an operator can read**: one `check_permission: tool=X` line, then
+silence.
+
+A silent denial is invisible to the model too — no error to react to, so it
+re-issues the same call. #951 reports a subagent whose `writeNewFile` was
+checked 38 times and never ran; re-running the same profile with
+`defaultPolicy: deny` instead of `ask` produced *the same* logs and the same
+~10-token tool result. A genuine policy DENY and a call vanishing after the
+gate were indistinguishable, from the operator's side and the model's, so the
+symptom could be described exactly and the verdict could not be named. (#947 is
+the cost: 127 attempts at ~57k tokens each, outliving the parent session.)
+
+Two stages now say what they did.
+
+**The gate.** `check_permission` is a thin **single-exit wrapper** around
+`_check_permission_impl`, which keeps its twenty-odd rule-specific exits:
+
+```
+[PERMISSION] check_permission: tool=writeNewFile call_id=call_1 agent=subagent:documentalista session=20260910_115239
+[PERMISSION] check_permission: DECISION tool=writeNewFile call_id=call_1 agent=subagent:documentalista allowed=False method=default reason='Denied by default policy'
+```
+
+Structural rather than per-branch, deliberately: a branch added later is traced
+whether or not its author remembers to, which is the one property per-branch
+tracing does not have. `test_decision_observability_951.py` carries an AST
+guard that the wrapper stays single-exit, and a second that no exit of the impl
+returns a verdict without recording one — the two that did
+(`not_initialized`, `unknown`) are closed. A **raise** is traced too: it is a
+third outcome the old logging could not express, and `ToolExecutor` converts it
+into a fail-closed denial that reads downstream like a policy decision.
+
+`agent=` comes from the **caller's** per-session context, never from
+`self._agent_name`: the plugin is a registry-shared singleton whose
+`_agent_name` is whatever initialized it last, so a subagent's spawn re-labels
+the parent's own later decisions. (#951's traces show exactly that — the
+subagent's lines carrying the parent's `@escriba`.) The audit entry gains
+`method` / `call_id` / the caller, stamped at the single exit the way approver
+identity already was (#859), so `EvalContext.execution_log` can be reasoned
+over; the ledger's `permission-check` record gains the same three.
+
+**The stage after it.** `ToolExecutor._execute_impl` has three exits that end a
+tool call without running its body, and none left a mark — which is why "the
+call disappears between the permission gate and `file_edit`'s executor" had
+nowhere to look:
+
+```
+[TOOL_RUNNER] permission: tool=writeNewFile call_id=call_1 verdict=DENY method=default reason='Denied by default policy'
+[TOOL_RUNNER] resolve: tool=writeNewFile call_id=call_1 executor=shared.plugins.file_edit.plugin._execute_write_new_file
+[TOOL_RUNNER] result: tool=writeNewFile call_id=call_1 ok=True dict(keys=_permission,_telemetry,lines,path,size,success)
+```
+
+| Line | Says |
+|------|------|
+| `resolve: ... executor=MISSING — refused before the permission check` | no executor resolvable, so the gate was never consulted (`No executor registered for X` — roughly the same ten tokens a denial is) |
+| `permission: ... verdict=DENY\|ALLOW method=...` | the **consumer's** record of the verdict, so a policy plugin that traces nothing of its own (a stub, a wrapper, an out-of-tree engine) is still recorded where its decision takes effect |
+| `auto-background: ... — execution leaves this path` | approved, and its body runs elsewhere |
+| `resolve: ... executor=MISSING` after an ALLOW | the shape that reads, from outside, as a call vanishing after the gate |
+| `result: ... ok=... dict(keys=...)` | what the model was handed — **keys and the error string only**; a trace file is not the place for the file a tool just wrote |
+
+Both stages write to `JAATO_TRACE_LOG` / the profile's `trace.session_log`.
 
 ### Interactive Shell Sessions (`shared/plugins/interactive_shell/`)
 
@@ -3191,7 +3343,21 @@ Config files: `.jaato/keybindings.json` (project) or `~/.jaato/keybindings.json`
 
 Key syntax (prompt_toolkit): `enter`, `c-c` (Ctrl+C), `f1`, `pageup`, `["escape", "enter"]`
 
-Default keybindings: `submit`=enter, `cancel`=c-c, `exit`=c-d, `toggle_plan`=c-p, `toggle_tools`=c-t, `open_editor`=c-g, `search`=c-f
+Default keybindings: `submit`=enter, `cancel`=c-c, `exit`=c-d, `toggle_plan`=c-p, `toggle_tools`=c-t, `toggle_thinking`=c-r, `open_editor`=c-g, `search`=c-f
+
+**Reasoning blocks** (`toggle_thinking`, Ctrl+R by default): a model's
+reasoning reaches the TUI as its own output source (`thinking`) ahead of the
+answer. It renders **collapsed by default** as one summary line
+(`▸ Internal thinking (14 lines, 412 words)  ───  Ctrl+R to expand`), the
+sibling of the collapsed tool tree behind Ctrl+T; the toggle expands every
+reasoning block in the active buffer into the bordered `Internal thinking`
+box. The session bar shows a `Reasoning: ▶ collapsed [Ctrl+R]` indicator once
+the buffer holds any. Note that most sessions will show **no** reasoning at
+all: providers discard it unless the profile asks for it
+(`plugin_configs.<provider>.api_params.enable_thinking: true`), because
+reasoning costs output tokens. Reasoning is streamed like text — the first
+delta is a `write`, the rest `append` — so it lands in one block; before #755
+every delta was a `write` and each rendered on its own line.
 
 The `open_editor` keybinding (Ctrl+G) opens the current input in your external editor (`$EDITOR` or `$VISUAL`, defaults to `vi`). Useful for composing complex multi-line prompts.
 

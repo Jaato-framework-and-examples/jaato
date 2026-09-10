@@ -920,7 +920,8 @@ class PTDisplay:
             ])
 
         # Add tools expansion indicator (use active buffer, same as keybinding)
-        tools_expanded = self._get_active_buffer().tools_expanded
+        active_buffer = self._get_active_buffer()
+        tools_expanded = active_buffer.tools_expanded
         tools_indicator = "▼ expanded" if tools_expanded else "▶ collapsed"
         result.extend([
             ("class:session-bar.separator", "  │  "),
@@ -928,6 +929,20 @@ class PTDisplay:
             ("class:session-bar.value", tools_indicator),
             ("class:session-bar.dim", " [Ctrl+T]"),
         ])
+
+        # Reasoning-block indicator (#755) — only once the buffer holds
+        # reasoning, so a session whose model never thinks aloud (the common
+        # case: reasoning is gated on enable_thinking) is not shown a toggle
+        # with nothing to act on.
+        if active_buffer.has_thinking():
+            thinking_indicator = "▼ expanded" if active_buffer.thinking_expanded else "▶ collapsed"
+            thinking_key = format_key_for_display(self._keybinding_config.toggle_thinking)
+            result.extend([
+                ("class:session-bar.separator", "  │  "),
+                ("class:session-bar.label", "Reasoning: "),
+                ("class:session-bar.value", thinking_indicator),
+                ("class:session-bar.dim", f" [{thinking_key}]"),
+            ])
 
         # Add permission status indicator
         result.extend([
@@ -2613,6 +2628,19 @@ class PTDisplay:
             """Handle Ctrl+T - toggle tool view between collapsed/expanded."""
             buffer = self._get_active_buffer()
             buffer.toggle_tools_expanded()
+            self._app.invalidate()
+
+        @kb.add(*keys.get_key_args("toggle_thinking"), filter=not_in_search_mode)
+        def handle_toggle_thinking(event):
+            """Handle Ctrl+R - toggle reasoning blocks between collapsed/expanded (#755).
+
+            The sibling of ``toggle_tools``: reasoning blocks are collapsed
+            to one summary line by default, and this expands every one in
+            the active buffer back into the bordered ``Internal thinking``
+            box (and collapses them again).
+            """
+            buffer = self._get_active_buffer()
+            buffer.toggle_thinking_expanded()
             self._app.invalidate()
 
         @kb.add(*keys.get_key_args("toggle_budget"), filter=not_in_search_mode)

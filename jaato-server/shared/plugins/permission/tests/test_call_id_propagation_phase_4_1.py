@@ -135,16 +135,20 @@ def test_prompt_payload_to_dict_call_id_is_none_when_unset() -> None:
 
 
 def test_check_permission_source_populates_call_id_in_context() -> None:
-    """Pin via AST: ``check_permission`` body contains
+    """Pin via AST: the policy evaluation body contains
     ``request_context["call_id"] = call_id``.
 
     Catches accidental deletion of the §4.1 context population —
     without it, RunnerRPCChannel can't read call_id from
     request.context and the propagation chain breaks.
+
+    Reads ``_check_permission_impl``: since #951 the public
+    ``check_permission`` is a single-exit tracing wrapper and the
+    branches (this one included) live in the impl.
     """
     from shared.plugins.permission.plugin import PermissionPlugin
 
-    src = inspect.getsource(PermissionPlugin.check_permission)
+    src = inspect.getsource(PermissionPlugin._check_permission_impl)
     src = textwrap.dedent(src)
     tree = ast.parse(src)
 
@@ -167,7 +171,7 @@ def test_check_permission_source_populates_call_id_in_context() -> None:
                 break
 
     assert found, (
-        "Phase 4 §4.1 regression: PermissionPlugin.check_permission "
+        "Phase 4 §4.1 regression: PermissionPlugin._check_permission_impl "
         "missing ``request_context['call_id'] = call_id`` assignment.  "
         "Without it, call_id never reaches the runner-RPC channel "
         "and J.A regression returns."

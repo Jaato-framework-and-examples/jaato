@@ -73,11 +73,78 @@ def test_stale_when_the_stamp_names_another_build(dest):
     assert state == "stale" and "0.0.1-old" in detail
 
 
-def test_modified_when_edited_at_the_same_version(dest):
+def test_edited_when_the_INSTALLED_copy_changed(dest):
+    """Local edit: --force would discard it, so it must not be recommended."""
     I.install("claude-code", dest)
     (dest / "SKILL.md").write_text("edited locally\n")
     state, detail = I.compare("claude-code", dest)
-    assert state == "modified" and "differ" in detail
+    assert state == "edited"
+    assert "upstream it before re-applying" in detail
+
+
+def test_outdated_when_the_PAYLOAD_changed_upstream(dest, monkeypatch, tmp_path):
+    """The case that produced confidently wrong advice in production.
+
+    The payload moved at the SAME version — which happens whenever the skill is
+    edited without a version bump — and the previous implementation reported it
+    as a local edit, telling the operator to upstream a change they had never
+    made and warning them off the `--force` that was in fact correct.
+    """
+    I.install("claude-code", dest)
+    fake_src = tmp_path / "moved"; fake_src.mkdir()
+    for f in I.payload_dir("claude-code").rglob("*"):
+        if f.is_file():
+            t = fake_src / f.relative_to(I.payload_dir("claude-code"))
+            t.parent.mkdir(parents=True, exist_ok=True)
+            t.write_bytes(f.read_bytes())
+    (fake_src / "SKILL.md").write_text("upstream gained a paragraph\n")
+    monkeypatch.setattr(I, "payload_dir", lambda n: fake_src)
+
+    state, detail = I.compare("claude-code", dest)
+    assert state == "outdated"
+    assert "nothing local is lost" in detail
+    # The operator must not be told to upstream a change they never made —
+    # that instruction is what made the old message wrong.  ("changed upstream"
+    # is fine: an adverb about the payload, not an imperative about them.)
+    assert "upstream it" not in detail and "upstream them" not in detail
+
+
+def test_diverged_when_both_sides_moved(dest, monkeypatch, tmp_path):
+    I.install("claude-code", dest)
+    (dest / "SKILL.md").write_text("edited locally\n")
+    fake_src = tmp_path / "moved"; fake_src.mkdir()
+    for f in I.payload_dir("claude-code").rglob("*"):
+        if f.is_file():
+            t = fake_src / f.relative_to(I.payload_dir("claude-code"))
+            t.parent.mkdir(parents=True, exist_ok=True)
+            t.write_bytes(f.read_bytes())
+    (fake_src / "SKILL.md").write_text("upstream moved too\n")
+    monkeypatch.setattr(I, "payload_dir", lambda n: fake_src)
+    state, detail = I.compare("claude-code", dest)
+    assert state == "diverged" and "discards the local side" in detail
+
+
+def test_a_change_under_references_is_seen(dest):
+    """The predecessor compared only the TOP level, so an edit confined to
+    references/ — where most of the prose lives — was invisible."""
+    I.install("claude-code", dest)
+    ref = dest / "references" / "profiles.md"
+    assert ref.is_file(), "the payload should carry references/"
+    ref.write_text(ref.read_text() + "\nlocal note\n")
+    assert I.compare("claude-code", dest)[0] == "edited"
+
+
+def test_a_stamp_without_a_digest_does_not_guess(dest):
+    """Applied before digests existed: which side moved is genuinely unknown,
+    and saying so beats picking one and sounding certain."""
+    import json
+    I.install("claude-code", dest)
+    f = dest / I.STAMP
+    d = json.loads(f.read_text()); d.pop("digest"); f.write_text(json.dumps(d))
+    assert I.compare("claude-code", dest)[0] == "current"      # content still matches
+    (dest / "SKILL.md").write_text("something else\n")
+    state, detail = I.compare("claude-code", dest)
+    assert state == "diverged" and "unknown" in detail
 
 
 def test_unstamped_is_reported_not_treated_as_absent(dest):

@@ -36,7 +36,7 @@ drift above.
 """
 from __future__ import annotations
 
-import filecmp
+import hashlib
 import json
 import shutil
 from pathlib import Path
@@ -48,6 +48,31 @@ STAMP = ".jaato-integration"
 Read by ``jaato-doctor``.  Its presence is what makes a stale copy detectable
 instead of merely wrong.
 """
+
+
+def payload_digest(root: Path) -> str:
+    """A content digest of every file under ``root``, excluding the stamp.
+
+    Exists because "same version, files differ" cannot say WHICH side moved,
+    and the two causes want opposite advice: a payload edited locally must not
+    be overwritten, while a payload that changed upstream at the same version
+    should be.  Recording this at apply time makes the question answerable
+    instead of guessed.
+
+    Walks recursively.  The predecessor compared with ``filecmp.dircmp``, which
+    only inspects the TOP level — so a change confined to ``references/`` was
+    invisible, and an installed copy could drift arbitrarily far in the one
+    place most of the prose lives.
+    """
+    h = hashlib.sha256()
+    if not root.is_dir():
+        return ""
+    for f in sorted(p for p in root.rglob("*") if p.is_file() and p.name != STAMP):
+        h.update(f.relative_to(root).as_posix().encode())
+        h.update(b"\0")
+        h.update(f.read_bytes())
+        h.update(b"\0")
+    return h.hexdigest()
 
 
 def framework_version() -> str:
@@ -118,8 +143,24 @@ def read_stamp(installed: Path) -> Dict[str, str]:
 def compare(name: str, installed: Path) -> Tuple[str, str]:
     """``(state, detail)`` for an installed copy against what this build ships.
 
-    States: ``absent``, ``current``, ``stale`` (a different framework version),
-    ``modified`` (same version, edited on disk), ``unstamped``.
+    States:
+
+        absent      never applied
+        current     stamp and content both match
+        stale       a different framework version
+        outdated    same version, but the PAYLOAD moved upstream — re-apply,
+                    nothing of yours is lost
+        edited      same version, but the INSTALLED copy was changed — do not
+                    overwrite it; upstream the change first
+        diverged    both moved; re-applying discards the local side
+        unstamped   hand-applied, provenance unknown
+
+    `outdated` and `edited` were one state (`modified`) until this told an
+    operator "local edits will be lost, upstream them first" about a payload
+    that had simply changed upstream at the same version — confidently wrong
+    advice, and the reverse of the truth.  The digest recorded at apply time
+    is what separates them: it says what the payload looked like when it was
+    applied, so either side can be compared against that fixed point.
     """
     src = payload_dir(name)
     if not installed.is_dir():
@@ -132,11 +173,28 @@ def compare(name: str, installed: Path) -> Tuple[str, str]:
         return "stale", f"installed from {got}, framework is {want}"
     if not src.is_dir():
         return "current", got
-    diff = filecmp.dircmp(str(src), str(installed))
-    changed = list(diff.diff_files) + list(diff.left_only)
-    if changed:
-        return "modified", f"{len(changed)} file(s) differ from {got}"
-    return "current", got
+
+    applied = stamp.get("digest")
+    here, there = payload_digest(installed), payload_digest(src)
+    if not applied:
+        # A stamp from before digests existed: the version matches and there is
+        # no fixed point to compare against, so say exactly that rather than
+        # pick one of the two answers and sound sure.
+        if here == there:
+            return "current", got
+        return "diverged", (f"content differs from {got} and the stamp predates "
+                            f"content tracking, so which side moved is unknown "
+                            f"— re-apply to resync, losing any local change")
+    if here == applied and there == applied:
+        return "current", got
+    if here == applied:
+        return "outdated", (f"the payload changed upstream at {got}; "
+                            f"re-applying is safe, nothing local is lost")
+    if there == applied:
+        return "edited", (f"the installed copy was changed since it was applied "
+                          f"from {got}; upstream it before re-applying")
+    return "diverged", (f"both the installed copy and the payload changed since "
+                        f"{got}; re-applying discards the local side")
 
 
 def install(name: str, dest: Path, *, force: bool = False,
@@ -167,7 +225,8 @@ def install(name: str, dest: Path, *, force: bool = False,
     shutil.copytree(src, dest)
     (dest / STAMP).write_text(json.dumps(
         {"integration": name, "tool": manifest(name).get("tool", name),
-         "version": framework_version(), "source": str(src)},
+         "version": framework_version(), "source": str(src),
+         "digest": payload_digest(dest)},
         indent=2) + "\n", encoding="utf-8")
     return True, [f"integrated {manifest(name).get('tool', name)}: {dest}  (from jaato-server {framework_version()})"] \
         + [f"  + {f}" for f in files]
@@ -194,8 +253,8 @@ def listing() -> Tuple[Dict[str, Any], str]:
 
     lines = ["integrations — jaato's side of a contract with another tool", ""]
     for r in rows:
-        mark = {"current": "✔", "absent": "·", "stale": "!", "modified": "~",
-                "unstamped": "?"}.get(r["state"], "?")
+        mark = {"current": "✔", "absent": "·", "stale": "!", "outdated": "!",
+                "edited": "~", "diverged": "~", "unstamped": "?"}.get(r["state"], "?")
         lines.append(f"  {mark} {r['name']:14} {r['tool']}")
         if r["summary"]:
             lines.append(f"    {'':14} {r['summary']}")
