@@ -354,6 +354,34 @@ class PluginRegistry:
                 def set_workspace_path(self, path: str) -> None:
                     self._workspace_path = path
                     self._sandbox.set_root(path)
+
+    Concurrency (issue #938):
+        A registry is SHARED, and it is read from one thread while another
+        mutates it.  Subagents share the parent's registry by design (see
+        "Subagent Architecture"), so ``spawn_subagent`` exposes the child's
+        plugins — ``self._exposed.add(...)`` — on the spawning thread while
+        the parent's model thread is part-way through a read that walks the
+        same set.  The observed casualty was
+        :meth:`get_plugin_for_tool`, reached from ``_apply_tool_scopes`` on
+        every provider call: ``RuntimeError: Set changed size during
+        iteration`` escaped the model loop and terminated the parent's turn.
+
+        The registry takes no lock — every read path calls into plugin code,
+        and holding a lock across those callbacks invites deadlock.  The
+        invariant is weaker and cheaper instead:
+
+        **Every read path iterates a snapshot** (``list(self._exposed)``,
+        ``list(self._plugins.items())``, ...), never the live container, and
+        looks each name up defensively — the ``try``/``except`` already
+        wrapping these loops is what absorbs a plugin that disappeared
+        between the snapshot and the lookup.  Removals likewise use
+        ``dict.pop(key, None)`` rather than ``del``, so a concurrent clear
+        cannot turn a removal into a ``KeyError``.
+
+        A snapshot buys consistency-of-iteration, not a consistent view: a
+        reader may see a plugin that is being unexposed, or miss one being
+        exposed.  Both are already true of any un-synchronized read here, and
+        both are recoverable — a lost turn is not.
     """
 
     def __init__(self, model_name: Optional[str] = None):
@@ -1479,12 +1507,12 @@ class PluginRegistry:
             # the subagent's session-tier config file).
             prev_authorized = {
                 path: (src, access)
-                for path, (src, access) in self._authorized_external_paths.items()
+                for path, (src, access) in list(self._authorized_external_paths.items())
                 if src == name
             }
             prev_denied = {
                 path: src
-                for path, src in self._denied_external_paths.items()
+                for path, src in list(self._denied_external_paths.items())
                 if src == name
             }
 
@@ -1678,7 +1706,7 @@ class PluginRegistry:
 
         # Identify plugins that opt into parallel init (I/O-heavy, like MCP)
         parallel_names = [
-            name for name, plugin in self._plugins.items()
+            name for name, plugin in list(self._plugins.items())
             if getattr(plugin, 'PARALLEL_INIT', False)
             and name not in self._exposed
             and (target_names is None or name in target_names)
@@ -1707,7 +1735,7 @@ class PluginRegistry:
         # initialized (their initialize() is idempotent) and skip the
         # initialization step.
         skipped: List[str] = []
-        for name in self._plugins:
+        for name in list(self._plugins):
             if target_names is not None and name not in target_names:
                 # Plugin is discovered + registered but not requested
                 # by this session — skip both initialize() and tool
@@ -1896,7 +1924,7 @@ class PluginRegistry:
         # subprocess backend that spawns kernels rooted at the workspace).  The
         # exposed-only scope was a #344-class propagation gap: registered-but-
         # unexposed plugins silently kept their init-time (launch-dir) default.
-        for name, plugin in self._plugins.items():
+        for name, plugin in list(self._plugins.items()):
             if plugin and hasattr(plugin, 'set_workspace_path'):
                 try:
                     plugin.set_workspace_path(path)
@@ -1930,7 +1958,7 @@ class PluginRegistry:
 
         # Parity with set_workspace_path: broadcast to ALL registered plugins,
         # not just exposed ones (same #344-class propagation gap).
-        for name, plugin in self._plugins.items():
+        for name, plugin in list(self._plugins.items()):
             if plugin and hasattr(plugin, 'set_config_root'):
                 try:
                     plugin.set_config_root(path)
@@ -1962,7 +1990,7 @@ class PluginRegistry:
             session_id: Session identifier, or ``None`` to clear.
         """
         self._session_id = session_id
-        for name, plugin in self._plugins.items():
+        for name, plugin in list(self._plugins.items()):
             if plugin is None or not hasattr(plugin, 'set_session_id'):
                 continue
             try:
@@ -2132,7 +2160,7 @@ class PluginRegistry:
         """
         schemas = []
         # Add plugin tool schemas
-        for name in self._exposed:
+        for name in list(self._exposed):
             if exclude_runner_tier:
                 plugin = self._plugins.get(name)
                 tier = self._lookup_module_tier(
@@ -2152,7 +2180,7 @@ class PluginRegistry:
         """Get executor callables from all exposed plugins and core tools."""
         executors = {}
         # Add plugin executors
-        for name in self._exposed:
+        for name in list(self._exposed):
             try:
                 executors.update(self._plugins[name].get_executors())
             except Exception as exc:
@@ -2170,7 +2198,7 @@ class PluginRegistry:
             List of all tool names (regardless of enabled/disabled state).
         """
         names = []
-        for name in self._exposed:
+        for name in list(self._exposed):
             try:
                 schemas = self._plugins[name].get_tool_schemas()
                 names.extend(schema.name for schema in schemas)
@@ -2191,7 +2219,7 @@ class PluginRegistry:
         Returns:
             The tool's declared traits, or ``frozenset()`` if not found.
         """
-        for name in self._exposed:
+        for name in list(self._exposed):
             try:
                 schemas = self._plugins[name].get_tool_schemas()
                 for schema in schemas:
@@ -2272,7 +2300,7 @@ class PluginRegistry:
             List of dicts with 'name', 'description', 'enabled', 'plugin' keys.
         """
         status = []
-        for plugin_name in self._exposed:
+        for plugin_name in list(self._exposed):
             try:
                 schemas = self._plugins[plugin_name].get_tool_schemas()
                 for schema in schemas:
@@ -2297,7 +2325,7 @@ class PluginRegistry:
             List of ToolSchema objects for enabled tools only.
         """
         schemas = []
-        for name in self._exposed:
+        for name in list(self._exposed):
             try:
                 plugin = self._plugins[name]
                 plugin_schemas = plugin.get_tool_schemas()
@@ -2316,7 +2344,7 @@ class PluginRegistry:
                 _trace(f" Error getting tool schemas from '{name}': {exc}", include_traceback=True)
 
         # Add core tool schemas (excluding disabled)
-        for name, schema in self._core_tools.items():
+        for name, schema in list(self._core_tools.items()):
             if name not in self._disabled_tools:
                 schemas.append(schema)
 
@@ -2369,7 +2397,7 @@ class PluginRegistry:
             List of ToolSchema objects for core tools only.
         """
         schemas = []
-        for name in self._exposed:
+        for name in list(self._exposed):
             try:
                 plugin = self._plugins[name]
                 plugin_schemas = plugin.get_tool_schemas()
@@ -2392,7 +2420,7 @@ class PluginRegistry:
                 _trace(f" Error getting tool schemas from '{name}': {exc}", include_traceback=True)
 
         # Add core tool schemas that have discoverability='core' (excluding disabled)
-        for name, schema in self._core_tools.items():
+        for name, schema in list(self._core_tools.items()):
             if name not in self._disabled_tools:
                 if getattr(schema, 'discoverability', DISCOVERABILITY_DEFERRED) == DISCOVERABILITY_EAGER:
                     schemas.append(schema)
@@ -2406,7 +2434,7 @@ class PluginRegistry:
             Dict mapping tool names to executor callables for enabled tools only.
         """
         executors = {}
-        for name in self._exposed:
+        for name in list(self._exposed):
             try:
                 plugin_executors = self._plugins[name].get_executors()
                 # Filter out disabled tools
@@ -2417,7 +2445,7 @@ class PluginRegistry:
                 _trace(f" Error getting executors from '{name}': {exc}", include_traceback=True)
 
         # Add core tool executors (excluding disabled)
-        for tool_name, executor in self._core_executors.items():
+        for tool_name, executor in list(self._core_executors.items()):
             if tool_name not in self._disabled_tools:
                 executors[tool_name] = executor
 
@@ -2468,7 +2496,7 @@ class PluginRegistry:
         """
         base_name = self.get_base_tool_name(tool_name)
 
-        for plugin_name in self._exposed:
+        for plugin_name in list(self._exposed):
             try:
                 plugin = self._plugins[plugin_name]
                 if base_name in plugin.get_executors():
@@ -2486,7 +2514,7 @@ class PluginRegistry:
             List of base tool names (without :stream suffix) that support streaming.
         """
         streaming_tools = []
-        for plugin_name in self._exposed:
+        for plugin_name in list(self._exposed):
             try:
                 plugin = self._plugins[plugin_name]
                 if isinstance(plugin, StreamingCapable):
@@ -2547,7 +2575,7 @@ class PluginRegistry:
             or None if no plugins have instructions.
         """
         instructions = []
-        for name in self._exposed:
+        for name in list(self._exposed):
             try:
                 if skip_discoverable_only and not self.plugin_has_core_tools(name):
                     continue
@@ -2579,7 +2607,7 @@ class PluginRegistry:
         # Include core auto-approved tools
         tools.extend(self._core_auto_approved)
         # Include plugin auto-approved tools
-        for name in self._exposed:
+        for name in list(self._exposed):
             try:
                 if hasattr(self._plugins[name], 'get_auto_approved_tools'):
                     auto_approved = self._plugins[name].get_auto_approved_tools()
@@ -2604,7 +2632,7 @@ class PluginRegistry:
             List of UserCommand objects from all exposed plugins.
         """
         commands: List[UserCommand] = []
-        for name in self._exposed:
+        for name in list(self._exposed):
             try:
                 if hasattr(self._plugins[name], 'get_user_commands'):
                     user_commands = self._plugins[name].get_user_commands()
@@ -2637,11 +2665,19 @@ class PluginRegistry:
             if tool_name in cached.get_executors():
                 return cached
             # Stale entry — evict and fall through to full scan
-            del self._tool_plugin_cache[tool_name]
+            self._tool_plugin_cache.pop(tool_name, None)
 
-        # Slow path: scan all exposed plugins
-        _trace(f" get_plugin_for_tool: cache miss for '{tool_name}', scanning {len(self._exposed)} plugins")
-        for name in self._exposed:
+        # Slow path: scan a SNAPSHOT of the exposed plugins.  Iterating
+        # ``self._exposed`` directly is what issue #938 reported: a
+        # subagent spawn adds to the same set from another thread, and the
+        # resulting ``RuntimeError: Set changed size during iteration``
+        # escaped the model loop and killed the parent's turn.  This is the
+        # cache-MISS path, which a session that subsets tools
+        # (``plugins: ["memory(tools:[...])"]``) is in constantly, so the
+        # window is reliably reachable rather than theoretical.
+        exposed = list(self._exposed)
+        _trace(f" get_plugin_for_tool: cache miss for '{tool_name}', scanning {len(exposed)} plugins")
+        for name in exposed:
             try:
                 plugin = self._plugins[name]
                 executors = plugin.get_executors()
@@ -2730,7 +2766,7 @@ class PluginRegistry:
         normalized = os.path.realpath(os.path.abspath(path))
         entry = self._authorized_external_paths.get(normalized)
         if entry and entry[0] == source_plugin:
-            del self._authorized_external_paths[normalized]
+            self._authorized_external_paths.pop(normalized, None)
             _trace(f"deauthorize_external_path: {normalized} (from {source_plugin})")
             return True
         return False
@@ -2771,7 +2807,7 @@ class PluginRegistry:
             return _access_sufficient(entry_access)
 
         # Check if any authorized path is a parent directory
-        for authorized_path, (_, entry_access) in self._authorized_external_paths.items():
+        for authorized_path, (_, entry_access) in list(self._authorized_external_paths.items()):
             # Check if normalized path is under an authorized directory
             auth_with_sep = authorized_path.rstrip(os.sep) + os.sep
             if normalized.startswith(auth_with_sep):
@@ -2799,7 +2835,7 @@ class PluginRegistry:
             return source
 
         # Check parent directories
-        for authorized_path, (source, _access) in self._authorized_external_paths.items():
+        for authorized_path, (source, _access) in list(self._authorized_external_paths.items()):
             auth_with_sep = authorized_path.rstrip(os.sep) + os.sep
             if normalized.startswith(auth_with_sep):
                 return source
@@ -2826,7 +2862,7 @@ class PluginRegistry:
             return access
 
         # Check parent directories
-        for authorized_path, (_source, access) in self._authorized_external_paths.items():
+        for authorized_path, (_source, access) in list(self._authorized_external_paths.items()):
             auth_with_sep = authorized_path.rstrip(os.sep) + os.sep
             if normalized.startswith(auth_with_sep):
                 return access
@@ -2851,11 +2887,11 @@ class PluginRegistry:
 
         # Clear only paths from the specified plugin
         to_remove = [
-            path for path, (source, _access) in self._authorized_external_paths.items()
+            path for path, (source, _access) in list(self._authorized_external_paths.items())
             if source == source_plugin
         ]
         for path in to_remove:
-            del self._authorized_external_paths[path]
+            self._authorized_external_paths.pop(path, None)
 
         _trace(f"clear_authorized_paths: cleared {len(to_remove)} paths from {source_plugin}")
         return len(to_remove)
@@ -2870,7 +2906,7 @@ class PluginRegistry:
             For backward compatibility this returns source plugin names as values.
             Use list_authorized_paths_detailed() to get access mode info.
         """
-        return {path: source for path, (source, _access) in self._authorized_external_paths.items()}
+        return {path: source for path, (source, _access) in list(self._authorized_external_paths.items())}
 
     def list_authorized_paths_detailed(self) -> Dict[str, Dict[str, str]]:
         """List all authorized external paths with access mode details.
@@ -2880,7 +2916,7 @@ class PluginRegistry:
         """
         return {
             path: {"source": source, "access": access}
-            for path, (source, access) in self._authorized_external_paths.items()
+            for path, (source, access) in list(self._authorized_external_paths.items())
         }
 
     # ==================== External Path Denial ====================
@@ -2936,7 +2972,7 @@ class PluginRegistry:
             return True
 
         # Check if any denied path is a parent directory
-        for denied_path in self._denied_external_paths:
+        for denied_path in list(self._denied_external_paths):
             # Check if normalized path is under a denied directory
             denied_with_sep = denied_path.rstrip(os.sep) + os.sep
             if normalized.startswith(denied_with_sep):
@@ -2963,7 +2999,7 @@ class PluginRegistry:
             return self._denied_external_paths[normalized]
 
         # Check parent directories
-        for denied_path, source in self._denied_external_paths.items():
+        for denied_path, source in list(self._denied_external_paths.items()):
             denied_with_sep = denied_path.rstrip(os.sep) + os.sep
             if normalized.startswith(denied_with_sep):
                 return source
@@ -2988,11 +3024,11 @@ class PluginRegistry:
 
         # Clear only paths from the specified plugin
         to_remove = [
-            path for path, source in self._denied_external_paths.items()
+            path for path, source in list(self._denied_external_paths.items())
             if source == source_plugin
         ]
         for path in to_remove:
-            del self._denied_external_paths[path]
+            self._denied_external_paths.pop(path, None)
 
         _trace(f"clear_denied_paths: cleared {len(to_remove)} paths from {source_plugin}")
         return len(to_remove)
