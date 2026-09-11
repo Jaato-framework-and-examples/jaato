@@ -36,9 +36,27 @@ from .models import (
     VALID_SCOPES,
     Memory,
 )
+from .similarity import (
+    DEFAULT_DUPLICATE_THRESHOLD,
+    DuplicateMatch,
+    content_tokens,
+    duplicate_fields,
+    duplicate_note,
+    duplicate_telemetry,
+    find_near_duplicate,
+    recent_store_window,
+    resolve_threshold,
+)
 from .storage import MemoryStorage
 from shared.plugins.runner_forwarding import RunnerForwardingMixin
 from shared.trace import trace as _trace_write
+
+
+#: How many of this session's own writes are kept for near-duplicate
+#: comparison (#973).  Large enough to cover a runaway store loop — the
+#: reported incident wrote 83 memories in one turn — and small enough that
+#: the per-store scan stays trivial.
+RECENT_STORE_CACHE_SIZE = 200
 
 
 class MemoryPlugin(RunnerForwardingMixin):
@@ -98,6 +116,23 @@ class MemoryPlugin(RunnerForwardingMixin):
         # call when the same memory keeps matching.  Cleared by
         # on_history_cleared() when the session history is wiped.
         self._surfaced_memory_ids: Set[str] = set()
+        # ── Near-duplicate reporting (#973) ──────────────────────────
+        # Score at or above which a new memory is reported as a
+        # near-duplicate of one already stored.  Resolved from config in
+        # initialize(); see ``similarity`` for the measurement behind the
+        # default.
+        self._duplicate_threshold: float = DEFAULT_DUPLICATE_THRESHOLD
+        # OFF by default, deliberately.  Reporting a duplicate costs an
+        # advisory field; REJECTING one on a mistuned threshold silently
+        # discards a real memory, which for this plugin is the worst
+        # available failure.  Opting in is the explicit act.
+        self._reject_duplicates: bool = False
+        # What THIS plugin instance has written, oldest first.  The pool
+        # that catches a runaway store loop on a store with nothing
+        # curated yet — the incident in #973 was 83 writes inside a single
+        # turn — at zero I/O.  Capped because the plugin deliberately
+        # survives ``reset_for_next_session``, so nothing else bounds it.
+        self._recent_stores: List[Memory] = []
 
     def _trace(self, msg: str) -> None:
         """Write trace message to log file for debugging."""
@@ -266,10 +301,20 @@ class MemoryPlugin(RunnerForwardingMixin):
                   A legacy ``*.jsonl`` path still resolves to the
                   sibling directory named after its stem.
                 - enrichment_limit: Max hints to show in prompt (default: 5)
+                - duplicate_threshold: Similarity at or above which a new
+                  memory is REPORTED as a near-duplicate (default: 0.75).
+                - reject_duplicates: Refuse the write instead of reporting
+                  it (default: False).
         """
         config = config or {}
         self._agent_name = config.get("agent_name")
         self._allowed_scopes = self._resolve_allowed_scopes(config.get("allowed_scopes"))
+        self._duplicate_threshold = resolve_threshold(
+            config.get("duplicate_threshold"))
+        self._reject_duplicates = bool(config.get("reject_duplicates", False))
+        self._trace(
+            f"initialize: duplicate_threshold={self._duplicate_threshold}, "
+            f"reject_duplicates={self._reject_duplicates}")
         self._trace(f"initialize: allowed_scopes={sorted(self._allowed_scopes)}")
         # Server 0.6.168+ (real Bug B-class fix): read session_id
         # from config.  The registry's _augment_plugin_config
@@ -328,6 +373,10 @@ class MemoryPlugin(RunnerForwardingMixin):
     def _safe_load_curated(self, storage: "MemoryStorage", tier: str) -> List["Memory"]:
         """Load a tier's curated memories, tolerating an inaccessible store.
 
+        Called from ``initialize`` (to build the index) and from
+        ``_duplicate_pools`` (to scan for near-duplicates), so ``tier``
+        names both the tier and the caller's purpose.
+
         Memory has two tiers: a per-session WORKSPACE store (the priority,
         wired by set_workspace_path) and an OPTIONAL global HOME store.  At
         global registry init neither is guaranteed reachable — a confined
@@ -341,7 +390,7 @@ class MemoryPlugin(RunnerForwardingMixin):
             return storage.load_curated()
         except OSError as e:
             self._trace(
-                f"initialize: {tier} memory tier not loadable here ({e}); "
+                f"{tier} memory tier not loadable here ({e}); "
                 f"degrading to empty — the workspace tier is wired by "
                 f"set_workspace_path()")
             return []
@@ -411,6 +460,34 @@ class MemoryPlugin(RunnerForwardingMixin):
                         "a disallowed scope is hard-rejected back to the model."
                     ),
                 },
+                "duplicate_threshold": {
+                    "type": "number",
+                    "minimum": 0.0,
+                    "maximum": 1.0,
+                    "default": DEFAULT_DUPLICATE_THRESHOLD,
+                    "description": (
+                        "Token-overlap score at or above which store_memory "
+                        "reports the new memory as a near-duplicate of one "
+                        "already stored (fields duplicate_of / "
+                        "duplicate_similarity / duplicate_source, plus a note "
+                        "on `message`). Reporting only — the store still "
+                        "succeeds unless reject_duplicates is set. Raise it to "
+                        "report less, lower it to report more."
+                    ),
+                },
+                "reject_duplicates": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": (
+                        "Refuse a near-duplicate write instead of storing it "
+                        "and reporting. OFF by default: a threshold that is "
+                        "wrong in the rejecting direction silently discards "
+                        "real memories, and an agent legitimately re-storing "
+                        "a fact with better wording is a real pattern. Turn "
+                        "this on only with duplicate_threshold tuned against "
+                        "your own store."
+                    ),
+                },
             },
         }
 
@@ -444,7 +521,11 @@ class MemoryPlugin(RunnerForwardingMixin):
                     'or useful insight that would help in future conversations about this topic. '
                     'Only store substantial, reusable information - not ephemeral responses. '
                     'Memories are created as "raw" and will later be reviewed by the advisor '
-                    'agent for potential promotion to permanent knowledge.'
+                    'agent for potential promotion to permanent knowledge. '
+                    'If the result carries `duplicate_of`, the store already held '
+                    'essentially this fact under that memory ID: STOP re-storing it '
+                    'and retrieve that ID instead if you need it. Rephrasing a fact '
+                    'you have already stored does not make it a new memory.'
                 ),
                 parameters={
                     "type": "object",
@@ -518,7 +599,12 @@ class MemoryPlugin(RunnerForwardingMixin):
                     'reconstruct tag queries per bullet. '
                     'Use `tags` only when exploring or when no IDs are known. '
                     'By default searches both workspace-local and global '
-                    '(cross-session) memories.'
+                    '(cross-session) memories. '
+                    'The result reports `matched` (how many memories matched '
+                    'in total) beside `count` (how many are in this result). '
+                    'When `truncated` is true you are seeing a SUBSET: call '
+                    'again with a larger `limit` before answering as though '
+                    'this were everything you know.'
                 ),
                 parameters={
                     "type": "object",
@@ -543,7 +629,15 @@ class MemoryPlugin(RunnerForwardingMixin):
                         },
                         "limit": {
                             "type": "integer",
-                            "description": "Max number of memories to retrieve (default: 3, ignored when `ids` is used)"
+                            "description": (
+                                "Max number of memories to retrieve "
+                                "(default: 3, ignored when `ids` is used). "
+                                "The default suits a targeted lookup; for "
+                                "'what do you know about X' pass a larger "
+                                "value. The result's `matched` and "
+                                "`truncated` fields tell you whether this "
+                                "limit cut anything off."
+                            )
                         },
                         "scope": {
                             "type": "string",
@@ -1046,6 +1140,115 @@ class MemoryPlugin(RunnerForwardingMixin):
 
     # ===== Tool Executors =====
 
+    # ===== Near-duplicate reporting (#973) =====
+
+    def _duplicate_pools(self) -> List[tuple]:
+        """Assemble the pools a new memory is compared against.
+
+        Two pools, ordered so the nearest-in-time evidence is named first
+        when scores tie:
+
+        1. ``session`` — what THIS plugin instance has written.  Catches a
+           runaway store loop on a store with nothing curated yet, which
+           every deployment's first session is, at zero I/O.
+        2. ``curated`` — both curated stores, workspace and global.  This
+           is the pool that would have caught the reported incident: all
+           three repeated facts were already in ``curated.jsonl``.  Both
+           tiers are scanned regardless of the new memory's scope, because
+           "you already know this" does not become false when the fact is
+           filed under the other scope, and because ``retrieve_memories``
+           searches both by default.
+
+        THE RAW QUEUE IS DELIBERATELY NOT A POOL.  Three reasons, and the
+        third is the one that makes the omission safe rather than merely
+        cheap:
+
+        - Raw is unindexed **by design** (see ``_execute_store``: new
+          memories are not added to the indexer because the indexer mirrors
+          the curated store).  Scanning it per write would add a second,
+          hidden read path into the curator's private queue and make every
+          store O(queue) in file opens — growing precisely when curation
+          has fallen behind, i.e. when the system is already unhealthy.
+        - Holding un-consolidated near-duplicates until someone merges them
+          is what the queue is FOR.  "Is this a duplicate of something
+          awaiting curation?" is the curator's question, asked once per
+          drain, not the producer's, asked once per write.
+        - The raw-versus-raw case that actually bites — a loop — happens
+          inside one session, and pool 1 covers it without touching disk.
+
+        What is therefore NOT caught: a memory duplicating a raw one left
+        by an *earlier* session that the curator has not yet drained.  That
+        is one duplicate per session rather than 83 per turn, and it is
+        material the curator is about to consolidate anyway.
+
+        Returns:
+            ``(source_label, memories)`` pairs for
+            :func:`~.similarity.find_near_duplicate`.
+        """
+        pools: List[tuple] = [("session", list(self._recent_stores))]
+        curated: List[Memory] = []
+        for storage, tier in (
+            (self._storage, "workspace (duplicate scan)"),
+            (self._global_storage, "global (duplicate scan)"),
+        ):
+            if storage is not None:
+                curated.extend(self._safe_load_curated(storage, tier=tier))
+        pools.append(("curated", curated))
+        return pools
+
+    def _duplicate_verdict(
+        self, memory: Memory,
+    ) -> tuple:
+        """Decide what a new memory's resemblance to the store means.
+
+        Args:
+            memory: The memory about to be written.  Not yet saved, so it
+                cannot match itself.
+
+        Returns:
+            ``(match, rejection)``.  ``match`` is the
+            :class:`~.similarity.DuplicateMatch` found, or ``None``.
+            ``rejection`` is a complete tool-result dict to return INSTEAD
+            of storing — non-``None`` only when a match was found and the
+            deployment opted into ``reject_duplicates``.  The pair shape
+            keeps the decision (here) separate from the two things the
+            caller does with it, and keeps ``_execute_store`` to one
+            branch.
+        """
+        match = find_near_duplicate(
+            content_tokens(memory.description, memory.content),
+            self._duplicate_pools(),
+            threshold=self._duplicate_threshold,
+        )
+        if match is not None:
+            self._trace(
+                f"store_memory: near-duplicate of {match.memory_id} "
+                f"(similarity={match.similarity}, source={match.source}, "
+                f"reject={self._reject_duplicates})")
+        if match is None or not self._reject_duplicates:
+            return match, None
+        return match, {
+            "status": "rejected",
+            "error": (
+                f"Not stored: this is a near-duplicate (similarity "
+                f"{match.similarity:.2f}) of {match.memory_id}, which is "
+                f"already stored: {match.description!r}. This deployment "
+                f"rejects duplicate memories. Retrieve that memory instead, "
+                f"or store genuinely new information."
+            ),
+            **duplicate_fields(match),
+        }
+
+    def _remember_store(self, memory: Memory) -> None:
+        """Record a successful write in this session's own-writes pool.
+
+        Args:
+            memory: The memory just saved.
+        """
+        self._recent_stores.append(memory)
+        self._recent_stores = recent_store_window(
+            self._recent_stores, RECENT_STORE_CACHE_SIZE)
+
     def _execute_store(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Execute store_memory tool.
 
@@ -1058,7 +1261,36 @@ class MemoryPlugin(RunnerForwardingMixin):
                 confidence, scope, evidence)
 
         Returns:
-            Result dict with status and memory_id
+            On success, a dict carrying ``status="success"``, ``memory_id``,
+            ``message``, ``tags``, ``maturity``, ``confidence`` and
+            ``scope``.
+
+            **Near-duplicate reporting (#973).**  When the new memory
+            closely resembles one already stored, three further keys are
+            present — and they are *absent*, not ``None``, otherwise, so
+            ``"duplicate_of" in result`` is the whole test and a clean
+            store keeps exactly the shape it has always had:
+
+            - ``duplicate_of`` — the id of the memory it resembles, usable
+              directly as ``retrieve_memories(ids=[…])``;
+            - ``duplicate_similarity`` — the score, ``0.0``–``1.0``;
+            - ``duplicate_source`` — ``"session"`` (this same session wrote
+              it) or ``"curated"`` (it is in the curated store).
+
+            ``message`` carries the same finding as prose, because it is the
+            anchor field tool-result enrichment writes back to (#922) and
+            the part a model reads most reliably.
+
+            **The store still succeeds.**  The result describes what is
+            true, and what is true is that the memory was written *and*
+            that the store already held something very like it.  A
+            deployment that would rather fail the call sets
+            ``reject_duplicates``, and then gets ``status="rejected"`` with
+            the same three keys and nothing written.
+
+            Failure shapes are unchanged: ``status="rejected"`` for a
+            disallowed scope and ``status="error"`` for an uninitialized
+            plugin or unusable tags.
         """
         description = args.get("description", "")
         tags = args.get("tags", [])
@@ -1130,6 +1362,13 @@ class MemoryPlugin(RunnerForwardingMixin):
             source_session=self._get_session_id(),
         )
 
+        # Is this something we already know?  Asked BEFORE the write, so
+        # the candidate cannot match itself.  Reporting never blocks the
+        # write; ``rejection`` is non-None only under the opt-in knob.
+        duplicate, rejection = self._duplicate_verdict(memory)
+        if rejection is not None:
+            return rejection
+
         # Route to the appropriate store based on scope.  New memories
         # always land in the raw queue — they are NOT added to the
         # indexer because the indexer mirrors the curated store only.
@@ -1138,11 +1377,16 @@ class MemoryPlugin(RunnerForwardingMixin):
             self._global_storage.save(memory)
         else:
             self._storage.save(memory)
+        self._remember_store(memory)
 
         return {
             "status": "success",
             "memory_id": memory.id,
-            "message": f"Stored memory: {memory.description}",
+            "message": (
+                f"Stored memory: {memory.description}"
+                f"{duplicate_note(duplicate)}"
+            ),
+            **duplicate_fields(duplicate),
             "tags": memory.tags,
             "maturity": memory.maturity,
             "confidence": memory.confidence,
@@ -1157,8 +1401,158 @@ class MemoryPlugin(RunnerForwardingMixin):
                 "jaato.memory.has_evidence": memory.evidence is not None,
                 "jaato.memory.source_agent": memory.source_agent or "",
                 "jaato.memory.tag_count": len(memory.tags),
+                **duplicate_telemetry(duplicate),
             },
         }
+
+    @staticmethod
+    def _retrieval_message(returned: int, matched: int, limit: int) -> str:
+        """Say in prose how much of the match set this result carries.
+
+        A field is what a caller reads; prose is what a MODEL reads, and
+        #982's whole failure was a model reasoning correctly from a result
+        that did not mention the 23 memories it was not shown.  The
+        sentence is also the anchor field this result is enriched through
+        (#922) — the wordiest string in the dict — which is why it is
+        always present rather than only on a truncated result.
+
+        Args:
+            returned: How many memories the payload carries.
+            matched: How many matched in total.
+            limit: The ``limit`` that produced the truncation.
+
+        Returns:
+            A complete sentence.  On a truncated result it names both
+            numbers and the remedy; otherwise it states plainly that this
+            is everything, because "3 of 3" and "3 of 26" must not be the
+            same sentence.
+        """
+        if returned >= matched:
+            return (
+                f"Returned all {matched} matching "
+                f"{'memory' if matched == 1 else 'memories'}."
+            )
+        return (
+            f"Returned {returned} of {matched} matching memories — "
+            f"truncated by limit={limit}. Call retrieve_memories again "
+            f"with a larger `limit` to see the rest."
+        )
+
+    def _search_stores_for(
+        self,
+        tags: List[str],
+        scope: Optional[str],
+        maturity: Optional[str],
+    ) -> List[Memory]:
+        """Query both stores for every match, without truncating either.
+
+        Args:
+            tags: Tags to search for (ignored on the maturity path).
+            scope: ``"project"`` / ``"universal"`` to query one store, or
+                ``None`` for both.
+            maturity: A maturity to query, or ``None`` for the active
+                tag search.
+
+        Returns:
+            The concatenated matches, unordered and possibly holding the
+            same id twice when both stores carry it.  Ranking, de-duping
+            and truncation belong to :meth:`_search_both_stores`.
+        """
+        found: List[Memory] = []
+        stores = (
+            self._storage if scope != SCOPE_UNIVERSAL else None,
+            self._global_storage if scope != SCOPE_PROJECT else None,
+        )
+        for store in stores:
+            if store is None:
+                continue
+            if maturity is not None:
+                # MATURITY QUERIES GO TO THE MATURITY STORE.
+                #
+                # ``search_by_tags`` reads ``self._curated.load_all()`` only.
+                # Since 3f019999 split the raw queue (a folder) from the
+                # curated store (a file), NO tag-search query can return a raw
+                # memory however well tagged -- the store that path reads no
+                # longer contains any.  ``search_by_maturity`` was added in
+                # that same commit to source ``raw`` from the raw queue, and
+                # the tool handler was never repointed at it: it had zero
+                # production callers, only its own test.
+                #
+                # So ``retrieve_memories(maturity="raw")`` -- which the
+                # shipped memory-advisor persona opens Pass 2 with, and which
+                # this plugin's own docstring and the tool schema both promise
+                # -- returned nothing, always.  Two curator sessions concluded
+                # their store was empty with twelve files on disk.
+                found.extend(store.search_by_maturity({maturity}, limit=None))
+            else:
+                # Tagless/active search keeps the legacy path: no maturity was
+                # asked for, so the curated store is the right source.
+                found.extend(
+                    store.search_by_tags(tags, limit=None, active_only=True))
+        return found
+
+    def _search_both_stores(
+        self,
+        tags: List[str],
+        scope: Optional[str],
+        maturity: Optional[str],
+    ) -> List[Memory]:
+        """Rank every match across both stores, ready to be truncated once.
+
+        Args:
+            tags: Tags to search for (ignored on the maturity path).
+            scope: ``"project"`` / ``"universal"`` / ``None`` for both.
+            maturity: A maturity to query, or ``None`` for active search.
+
+        Returns:
+            Every matching memory, de-duplicated by id, ordered by tag
+            overlap (descending) then recency.  **Not truncated** — the
+            length IS the ``matched`` figure the caller reports, and the
+            caller slices it to ``limit``.
+
+        WHY THIS IS ONE FUNCTION AND NOT TWO CALLS (#982).  This used to
+        be ``search_by_tags(tags, limit=limit)`` against each store
+        separately, merged, re-sorted by timestamp and truncated to
+        ``limit`` again.  Two things were wrong with that, and only the
+        first was reported:
+
+        - **The total was unrecoverable.**  Each store had already thrown
+          away its own count, so nothing downstream could say whether 3
+          results meant 3 matches or 26.  A complete answer and a
+          12%-complete answer were byte-identical, both stamped
+          ``success``.
+        - **The page was the wrong page.**  With 26 matches split across
+          two stores and ``limit=3``, each store returned ITS top 3 by tag
+          overlap, and the merged 6 were then ranked by TIMESTAMP alone —
+          so the surviving 3 were the newest of an arbitrary sample, not
+          the best 3 overall, and a highly-relevant older memory could not
+          be returned however well it matched.
+
+        Ranking here by ``(overlap, timestamp)`` is not a new ordering: it
+        is exactly what ``search_by_tags`` computes per store, applied
+        across both for the first time.  The overlap is recomputed rather
+        than propagated because it is a set intersection on data already
+        in hand, and threading a score through the return type would buy
+        nothing.
+        """
+        found = self._search_stores_for(tags, scope, maturity)
+
+        # Scope filter BEFORE counting: `matched` must mean "what an
+        # unlimited call would have returned", and an unlimited call
+        # filters too.
+        if scope is not None:
+            found = [m for m in found if m.scope == scope]
+
+        unique: Dict[str, Memory] = {}
+        for mem in found:
+            unique.setdefault(mem.id, mem)
+
+        wanted = set(tags)
+        return sorted(
+            unique.values(),
+            key=lambda m: (len(set(m.tags) & wanted), m.timestamp),
+            reverse=True,
+        )
 
     def _execute_retrieve(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Execute retrieve_memories tool.
@@ -1179,7 +1573,26 @@ class MemoryPlugin(RunnerForwardingMixin):
                 ``maturity``.
 
         Returns:
-            Result dict with memories list including lifecycle metadata.
+            On success, a dict carrying ``status="success"``, the
+            ``memories`` list with lifecycle metadata, and **four fields
+            about completeness** (#982):
+
+            - ``count`` — how many memories this payload carries
+              (unchanged: it has always been the RETURNED count);
+            - ``matched`` — how many matched in total, before ``limit``.
+              On the ``ids`` path nothing is truncated, so it equals
+              ``count``;
+            - ``truncated`` — whether ``matched > count``;
+            - ``message`` — the same fact in prose, always present.
+
+            ``matched`` exists because ``count`` alone cannot distinguish
+            "3 is all there was" from "3 is the maximum you asked for",
+            and an agent reading the second as the first states a subset
+            of what it knows with full confidence.  A ``no_results``
+            result carries ``count``/``matched`` of 0 and
+            ``truncated=False``, so a caller can read the same four fields
+            on every non-error outcome instead of branching on status
+            first.
         """
         if not self._storage:
             return {
@@ -1209,6 +1622,9 @@ class MemoryPlugin(RunnerForwardingMixin):
             if not memories:
                 return {
                     "status": "no_results",
+                    "count": 0,
+                    "matched": 0,
+                    "truncated": False,
                     "message": f"No memories found for ids: {ids}"
                 }
             # Preserve requested order so the agent receives results in
@@ -1217,56 +1633,28 @@ class MemoryPlugin(RunnerForwardingMixin):
             memories.sort(key=lambda m: order.get(m.id, len(order)))
             # Skip the tags/maturity/scope filtering and limit truncation
             # — the agent asked for these specific memories explicitly.
+            # So nothing was dropped: everything found IS everything
+            # returned, and `matched` says so rather than being omitted.
+            matched = len(memories)
+            truncated = False
 
         # ── Tag search path (legacy) ────────────────────────────────
         else:
             self._trace(f"retrieve_memories: tags={tags}, limit={limit}, scope={scope}, maturity={maturity}")
-            memories = []
-            if maturity is not None:
-                # MATURITY QUERIES GO TO THE MATURITY STORE.
-                #
-                # ``search_by_tags`` reads ``self._curated.load_all()`` only.
-                # Since 3f019999 split the raw queue (a folder) from the
-                # curated store (a file), NO tag-search query can return a raw
-                # memory however well tagged -- the store that path reads no
-                # longer contains any.  ``search_by_maturity`` was added in
-                # that same commit to source ``raw`` from the raw queue, and
-                # the tool handler was never repointed at it: it had zero
-                # production callers, only its own test.
-                #
-                # So ``retrieve_memories(maturity="raw")`` -- which the
-                # shipped memory-advisor persona opens Pass 2 with, and which
-                # this plugin's own docstring and the tool schema both promise
-                # -- returned nothing, always.  Two curator sessions concluded
-                # their store was empty with twelve files on disk.
-                for store in (
-                    self._storage if scope != SCOPE_UNIVERSAL else None,
-                    self._global_storage if scope != SCOPE_PROJECT else None,
-                ):
-                    if store is not None:
-                        memories.extend(
-                            store.search_by_maturity({maturity}, limit=limit)
-                        )
-            else:
-                # Tagless/active search keeps the legacy path: no maturity was
-                # asked for, so the curated store is the right source.
-                active_only = True   # only active (raw, validated)
-                if scope != SCOPE_UNIVERSAL and self._storage:
-                    memories.extend(self._storage.search_by_tags(tags, limit=limit, active_only=active_only))
-                if scope != SCOPE_PROJECT and self._global_storage:
-                    memories.extend(self._global_storage.search_by_tags(tags, limit=limit, active_only=active_only))
-
-            # Filter by specific scope if requested
-            if scope is not None:
-                memories = [m for m in memories if m.scope == scope]
-
-            # Sort by recency (newest first) and truncate to limit
-            memories.sort(key=lambda m: m.timestamp, reverse=True)
+            # EVERY match, from both stores, ranked once.  `matched` is
+            # meaningless if either store truncated on the way here (#982),
+            # and so is the page: see _search_both_stores.
+            memories = self._search_both_stores(tags, scope, maturity)
+            matched = len(memories)
+            truncated = matched > limit
             memories = memories[:limit]
 
             if not memories:
                 return {
                     "status": "no_results",
+                    "count": 0,
+                    "matched": 0,
+                    "truncated": False,
                     "message": f"No memories found for tags: {tags}"
                 }
 
@@ -1303,6 +1691,9 @@ class MemoryPlugin(RunnerForwardingMixin):
         return {
             "status": "success",
             "count": len(memories),
+            "matched": matched,
+            "truncated": truncated,
+            "message": self._retrieval_message(len(memories), matched, limit),
             "memories": [
                 {
                     "id": m.id,
@@ -1320,6 +1711,8 @@ class MemoryPlugin(RunnerForwardingMixin):
             "_telemetry": {
                 "jaato.memory.operation": "retrieve",
                 "jaato.memory.count_retrieved": len(memories),
+                "jaato.memory.count_matched": matched,
+                "jaato.memory.truncated": truncated,
                 "jaato.memory.maturities_retrieved": maturities_retrieved,
                 "jaato.memory.scopes_retrieved": scopes_retrieved,
                 "jaato.memory.avg_confidence": round(avg_confidence, 3),

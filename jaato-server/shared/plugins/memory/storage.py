@@ -553,7 +553,7 @@ class MemoryStore:
     def search_by_tags(
         self,
         tags: List[str],
-        limit: int = 3,
+        limit: Optional[int] = 3,
         *,
         active_only: bool = True,
     ) -> List[Memory]:
@@ -561,6 +561,30 @@ class MemoryStore:
 
         Raw memories are intentionally excluded — agents only see
         curator-vetted material as hints / via retrieval.
+
+        Args:
+            tags: Tags to match against.  A memory matches when it shares
+                at least one.
+            limit: Maximum memories to return, **or ``None`` for every
+                match**.  Truncation is the last step, after the whole
+                store has already been loaded and scored, so ``None``
+                costs nothing extra — see below.
+            active_only: Restrict to ``raw`` / ``validated`` maturity.
+
+        Returns:
+            Matches ordered by tag overlap, then recency, truncated to
+            ``limit``.
+
+        ``None`` exists because the count this method computes and
+        discarded was the answer to "did that truncate?" (#982).  A caller
+        that returns results to a model needs BOTH the page and the total,
+        and there is no honest way to derive the total from a truncated
+        page — least of all when two stores are queried and merged, where
+        per-store truncation also decides the wrong three.  Asking for
+        everything and slicing once at the top is what makes both numbers
+        true, and the scan is identical either way: this method already
+        calls ``load_all()`` and scores every memory, and ``limit`` only
+        ever sliced the finished list.
         """
         memories = self._curated.load_all()
         scored = []
@@ -571,17 +595,27 @@ class MemoryStore:
             if overlap > 0:
                 scored.append((overlap, mem))
         scored.sort(key=lambda x: (x[0], x[1].timestamp), reverse=True)
-        return [mem for _, mem in scored[:limit]]
+        ordered = [mem for _, mem in scored]
+        return ordered if limit is None else ordered[:limit]
 
     def search_by_maturity(
         self,
         maturities: Iterable[str],
-        limit: int = 50,
+        limit: Optional[int] = 50,
     ) -> List[Memory]:
         """Curator-facing maturity query.
 
         ``raw`` is sourced from the raw queue; everything else from
         the curated store.  Mixed queries combine both.
+
+        Args:
+            maturities: Maturity states to include.
+            limit: Maximum memories to return, or ``None`` for every
+                match — see :meth:`search_by_tags` for why the unlimited
+                form exists and why it is not more expensive.
+
+        Returns:
+            Matches, newest first, truncated to ``limit``.
         """
         target = set(maturities)
         result: List[Memory] = []
@@ -593,7 +627,7 @@ class MemoryStore:
                 m for m in self._curated.load_all() if m.maturity in non_raw
             )
         result.sort(key=lambda m: m.timestamp, reverse=True)
-        return result[:limit]
+        return result if limit is None else result[:limit]
 
     def get_pending_curation(self, limit: int = 50) -> List[Memory]:
         """Convenience: return all raw memories awaiting curator review."""
