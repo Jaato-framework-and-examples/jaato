@@ -77,7 +77,7 @@ logger = logging.getLogger(__name__)
 from jaato_sdk.events import MODEL_MEDIA_CALL_ID       # noqa: F401  (re-export)
 
 from .ai_tool_runner import ToolExecutor
-from .runtime_limits import DEFAULT_MAX_PARALLEL_TOOLS
+from .runtime_limits import DEFAULT_MAX_PARALLEL_TOOLS, RuntimeLimits
 from .session_context import set_current_session
 from .tool_id_map import StreamScrubber
 from .retry_utils import with_retry, RequestPacer, RetryCallback, RetryConfig, is_context_limit_error
@@ -339,6 +339,33 @@ def _should_drop_introspection(has_deferred_to_discover, tool_names) -> bool:
 # twice, whichever chat loop produced the turn.
 _BUDGET_TOOL_CALLS_OBSERVED = "_budget_tool_calls_observed"
 _BUDGET_SECONDS_OBSERVED = "_budget_seconds_observed"
+
+
+def _resolve_parallel_width(
+    explicit: Optional[int],
+    limits: Optional["RuntimeLimits"],
+) -> Optional[int]:
+    """The tool-pool ceiling a session should install (#862, #735).
+
+    Two callers can supply it and they must not be allowed to disagree.
+    ``max_parallel_tools=`` is the standalone kwarg envelope v6 carries
+    and every pre-#735 caller passes; ``runtime_limits.max_parallel_tools``
+    is the same number read off the whole block envelope v7 carries.  The
+    explicit kwarg wins so a v6 daemon talking to a v7 runner keeps
+    working, and so an in-process caller can narrow one session without
+    synthesising a whole ``RuntimeLimits``.
+
+    Args:
+        explicit: The standalone ``max_parallel_tools`` kwarg, or ``None``.
+        limits: The resolved block, or ``None``.
+
+    Returns:
+        The width to install, or ``None`` when nobody declared one (the
+        session then applies :data:`DEFAULT_MAX_PARALLEL_TOOLS`).
+    """
+    if explicit is not None:
+        return explicit
+    return getattr(limits, "max_parallel_tools", None)
 
 
 class JaatoSession:
@@ -2502,6 +2529,7 @@ class JaatoSession:
         completion_processors: Optional[List[Any]] = None,
         tool_scopes: Optional[Dict[str, List[str]]] = None,
         max_parallel_tools: Optional[int] = None,
+        runtime_limits: Optional['RuntimeLimits'] = None,
         tools: Optional[List[str]] = None,  # DEPRECATED alias for ``plugins``
     ) -> None:
         """Configure the session with plugins and instructions.
@@ -2554,6 +2582,19 @@ class JaatoSession:
                 applies :data:`shared.runtime_limits.DEFAULT_MAX_PARALLEL_TOOLS`.
                 Orthogonal to ``JAATO_PARALLEL_TOOLS``, which decides
                 WHETHER to go parallel at all; this decides how wide.
+            runtime_limits: The profile's whole resolved
+                :class:`~shared.runtime_limits.RuntimeLimits` block
+                (#735).  This is THE application point for the
+                application-enforced caps: ``tool_timeout_seconds`` and
+                ``max_output_bytes`` are forwarded from here to the
+                subprocess plugins (cli, interactive_shell), and
+                ``max_parallel_tools`` is read from here when the
+                standalone kwarg above is absent.  ``None`` leaves
+                whatever the plugins already carry untouched — see
+                :meth:`_apply_runtime_limits` for why absence is not
+                the same as "no limits".  The kernel-enforced trio in
+                the same block is NOT consumed here: it is written to
+                the cgroup before the runner process is forked.
             tools: DEPRECATED alias for ``plugins`` (it always took plugin
                 names, never tool names). Pass ``plugins=`` instead; ``tools=``
                 still works with a one-time deprecation warning. ``plugins``
@@ -2615,8 +2656,11 @@ class JaatoSession:
                 dict(budget_control.limits), len(budget_control.degrade),
             )
 
-        # Tool-pool width (#862).
-        self._apply_parallel_tool_cap(max_parallel_tools)
+        # Tool-pool width (#862), from whichever of the two vehicles
+        # carries it (#735).
+        self._apply_parallel_tool_cap(
+            _resolve_parallel_width(max_parallel_tools, runtime_limits)
+        )
 
         if tier_config is not None:
             self._tier_config = tier_config
@@ -2736,6 +2780,11 @@ class JaatoSession:
         # Set registry for auto-background support
         if self._runtime.registry:
             self._executor.set_registry(self._runtime.registry)
+
+        # Arm the subprocess caps.  MUST come after ``set_registry``:
+        # the executor forwards them by walking ``registry.list_exposed()``
+        # (#735).
+        self._apply_runtime_limits(runtime_limits)
 
         # Initialize stream manager for streaming tool support
         self._stream_manager = StreamManager()
@@ -7325,6 +7374,81 @@ NOTES
             self._budget_observe_tool_calls(turn_data, 1)
 
         return tool_results
+
+    def _apply_runtime_limits(
+        self, limits: Optional['RuntimeLimits'],
+    ) -> None:
+        """Arm this session's subprocess caps, and say so (#735).
+
+        The ONE place a :class:`~shared.runtime_limits.RuntimeLimits`
+        becomes effective for the tools a model drives.  Every route a
+        session can be built by converges here — the runner's
+        ``session.bootstrap`` (pool-served and cold-spawned alike, via
+        ``SessionInitEnvelope.runtime_limits``), the isolated
+        sub-runner, and an in-process ``runtime.create_session`` — so
+        the pool path and the cold-spawn path cannot end up enforcing
+        different things, which is precisely what they did while the
+        caps travelled as process-startup env.
+
+        ``ToolExecutor.set_runtime_limits`` forwards the block to every
+        exposed plugin implementing the receiver (``cli``,
+        ``interactive_shell``); those plugins are what actually apply
+        ``tool_timeout_seconds`` as a wall clock and
+        ``max_output_bytes`` as an output cap.  Nothing is enforced
+        here — this method only delivers, and then states what was
+        delivered, because a cap that silently does not apply is worse
+        than no cap: the operator believes they are protected.
+
+        ``attach_callback`` is ``None`` deliberately.  Kernel-enforced
+        limits are applied to the runner PROCESS at fork time
+        (``Popen(preexec_fn=...)`` in ``RunnerSpawner.spawn``) and its
+        children inherit the cgroup, so a per-plugin ``preexec_fn``
+        would be redundant; nothing else in the runner tier writes that
+        slot, so passing ``None`` clobbers nothing.
+
+        ``limits=None`` is a NO-OP rather than a clear.  The plugin
+        registry — and therefore the ``cli`` instance — is shared by
+        every session on one runtime, so a limit-less in-process
+        subagent calling ``set_runtime_limits(None, None)`` would strip
+        the cap off its parent's tools.  "Nobody declared limits" must
+        not be able to disarm somebody who did.
+
+        Args:
+            limits: The resolved block, or ``None`` when the profile
+                declared none.
+        """
+        if limits is None:
+            return
+        self._executor.set_runtime_limits(None, limits)
+        logger.info(
+            "runtime_limits armed: tool_timeout=%ss max_output_bytes=%s "
+            "max_parallel_tools=%s; receivers=%s",
+            limits.tool_timeout_seconds,
+            limits.max_output_bytes,
+            limits.max_parallel_tools,
+            sorted(self._runtime_limit_receivers()) or "(none)",
+        )
+
+    def _runtime_limit_receivers(self) -> List[str]:
+        """Names of exposed plugins that actually took the caps.
+
+        The same predicate ``ToolExecutor.set_runtime_limits`` forwards
+        on, evaluated again so the log line states a FACT rather than an
+        intention.  An empty list next to a declared
+        ``tool_timeout_seconds`` is the visible form of "this profile
+        enables no subprocess plugin, so the cap bounds nothing" — the
+        condition #735 says must never be silent.
+
+        Returns:
+            Plugin names implementing ``set_runtime_limits``.
+        """
+        registry = self._runtime.registry
+        if registry is None:
+            return []
+        return [
+            name for name in registry.list_exposed()
+            if hasattr(registry.get_plugin(name), "set_runtime_limits")
+        ]
 
     def _apply_parallel_tool_cap(self, width: Optional[int]) -> None:
         """Install the profile's tool-pool ceiling (#862).

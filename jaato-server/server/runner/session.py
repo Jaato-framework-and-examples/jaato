@@ -1181,6 +1181,48 @@ def _validate_envelope(envelope: SessionInitEnvelope) -> None:
     # (inline-spec sessions don't carry a profile name).
 
 
+def _runtime_limits_from_envelope(
+    envelope: SessionInitEnvelope,
+) -> Optional[Any]:
+    """Rebuild ``RuntimeLimits`` from the v7 wire block, or ``None``.
+
+    The envelope carries the block as a plain dict (the same shape
+    ``profile_to_snapshot`` persists) so the daemon and the runner do
+    not have to agree on a dataclass across the socketpair.  The runner
+    re-parses it here, which is also where it is re-validated:
+    ``RuntimeLimits.__post_init__`` raises on a bad value.
+
+    A parse failure degrades to ``None`` — "nobody declared limits" —
+    rather than aborting the bootstrap.  The block was already
+    validated at profile-load time daemon-side, so anything that fails
+    here came from a NEWER daemon whose vocabulary this runner does not
+    share; refusing to bootstrap over it would turn a forward-compat
+    skew into a session that cannot start at all.  The failure is
+    logged at WARNING because an unarmed cap must never be silent
+    (#735).
+
+    Args:
+        envelope: The bootstrap envelope.
+
+    Returns:
+        The parsed limits, or ``None`` when the envelope carried none.
+    """
+    raw = getattr(envelope, "runtime_limits", None)
+    if not raw:
+        return None
+    from shared.runtime_limits import RuntimeLimits
+    try:
+        return RuntimeLimits.from_dict(raw)
+    except (ValueError, TypeError) as exc:
+        logging.getLogger(__name__).warning(
+            "session.bootstrap: envelope runtime_limits %r is not "
+            "parseable by this runner (%s); the session will run with "
+            "framework defaults and NO tool wall-clock or output cap",
+            raw, exc,
+        )
+        return None
+
+
 def _processors_from_envelope(
     envelope: SessionInitEnvelope,
 ) -> List[Any]:
@@ -1365,6 +1407,17 @@ def _build_session(
         # from an older daemon, or from a profile that declares no
         # ``runtime_limits``, leaves the framework default in charge.
         max_parallel_tools=envelope.max_parallel_tools,
+        # Envelope v7 (#735): the whole resolved ``runtime_limits``.
+        # ``JaatoSession.configure`` is the ONE place that arms the
+        # subprocess plugins with ``tool_timeout_seconds`` /
+        # ``max_output_bytes``; before this the caps reached the runner
+        # only as process-startup env, which configures the Phase-2
+        # cli-only executor a bootstrapped session never dispatches
+        # through -- so the caps were inert on the pool path AND on
+        # cold-spawn.  Built here rather than in the envelope so a
+        # malformed block from a future daemon degrades to "nobody
+        # declared limits" instead of refusing the bootstrap.
+        runtime_limits=_runtime_limits_from_envelope(envelope),
         # Per-plugin tool allow-lists (profile ``tools:[...]`` modifier),
         # threaded from the envelope so scoped-out tools are absent from
         # this runner session's wire body + grammar surface.

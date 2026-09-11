@@ -759,12 +759,21 @@ class ToolExecutor:
     ) -> None:
         """Install per-session cgroup attach + app-layer limits + event reader.
 
-        Called by the server layer after the cgroup has been provisioned
-        (or, for sessions without kernel limits, with ``attach_callback``
-        set to a no-op).  Subprocess-launching plugins read attach +
-        limits via :meth:`get_cgroup_attach` and :meth:`get_runtime_limits`,
-        OR via the forwarded ``set_runtime_limits`` method on the plugin
-        if it implements one — same pattern as ``set_tool_output_callback``.
+        Called by :meth:`shared.jaato_session.JaatoSession._apply_runtime_limits`
+        during ``configure()``, right after ``set_registry`` — the
+        forwarding loop below walks ``registry.list_exposed()``, so a
+        caller that ran earlier would arm nothing.  That is the ONE
+        caller (#735): every route a session can be built by converges
+        on ``configure()``, so the pool-served, cold-spawned, isolated
+        sub-runner and in-process paths cannot arm different caps.
+        Until #735 this method had no non-test caller at all, which is
+        why ``CliPlugin._runtime_limits`` was ``None`` on every path and
+        a profile's ``tool_timeout_seconds`` bounded nothing.
+
+        Subprocess-launching plugins read attach + limits via
+        :meth:`get_cgroup_attach` and :meth:`get_runtime_limits`, OR via
+        the forwarded ``set_runtime_limits`` method on the plugin if it
+        implements one — same pattern as ``set_tool_output_callback``.
 
         The ``event_reader`` is consumed *here* in :meth:`execute` rather
         than forwarded to plugins: snapshotting before/after each tool
@@ -777,7 +786,10 @@ class ToolExecutor:
             attach_callback: Zero-argument callable suitable for use as
                 ``Popen(preexec_fn=...)``.  Migrates the forked child
                 into the session's cgroup before ``exec``.  ``None``
-                means no attach (host defaults).
+                means no attach (host defaults) — which is what the
+                session passes, because the runner PROCESS is already
+                migrated into the cgroup at fork time and its children
+                inherit it.
             limits: :class:`RuntimeLimits` carrying the app-layer caps
                 (``tool_timeout_seconds``, ``max_output_bytes``).  May
                 be ``None`` when no profile-level runtime_limits is set.

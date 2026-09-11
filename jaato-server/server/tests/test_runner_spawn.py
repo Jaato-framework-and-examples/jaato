@@ -318,14 +318,29 @@ class _ProfileWithLimits:
         self.runtime_limits = runtime_limits
 
 
-def test_app_layer_fields_forwarded_when_profile_sets_them(
+def test_phase2_executor_env_still_carries_the_profile_values(
     daemon_loop, tmp_path,
 ) -> None:
-    """Phase 5 §5.1b: profile carrying ``runtime_limits`` with
-    ``tool_timeout_seconds`` + ``max_output_bytes`` set must
-    propagate those values into ``RunnerSpawner.spawn``'s
-    matching kwargs, which the spawner forwards as
-    ``JAATO_RUNNER_*`` env vars."""
+    """The cold-spawn env pair still forwards — to the PHASE-2 executor.
+
+    Replaces ``test_app_layer_fields_forwarded_when_profile_sets_them``
+    (#735), which asserted the same two kwargs while claiming they were
+    the session's enforcement path.  They are not, and never were: the
+    env vars they become configure
+    ``server/runner/tool_executor.ToolExecutor`` — the cli-only
+    ``execute_fn`` that ``RunnerRPC`` bypasses whenever a session host
+    exists, i.e. on every path that dispatches ``session.bootstrap``.
+    Measured against ``main`` @ ``2bd2456``, a profile declaring
+    ``tool_timeout_seconds: 2`` ran a ``sleep 60`` for 60.02 s on
+    cold-spawn WITH these kwargs correctly set, so the old test was
+    green over a feature that did nothing.
+
+    What survives is a narrower, true claim: these kwargs keep bounding
+    the session-less fallback surface, which is why #735 kept the env
+    pair instead of deleting it.  The SESSION's caps are asserted in
+    ``test_envelope_carries_runtime_limits.py`` — on the envelope, and
+    on the cli plugin the envelope ends up arming.
+    """
     from server.runner_spawn import spawn_session_runner
     from shared.runtime_limits import RuntimeLimits
 

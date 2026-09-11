@@ -31,6 +31,7 @@ if TYPE_CHECKING:
     from .plugins.reliability import ReliabilityPlugin
     from .plugins.model_provider.base import ModelProviderPlugin
     from .model_tiers import ModelTierConfig
+    from .runtime_limits import RuntimeLimits
 
 logger = logging.getLogger(__name__)
 
@@ -1182,6 +1183,7 @@ class JaatoRuntime:
         agent_id: str = "main",
         tool_scopes: Optional[Dict[str, List[str]]] = None,
         max_parallel_tools: Optional[int] = None,
+        runtime_limits: Optional['RuntimeLimits'] = None,
         tools: Optional[List[str]] = None,  # DEPRECATED alias for ``plugins``
     ) -> 'JaatoSession':
         """Create a new session from this runtime.
@@ -1237,6 +1239,17 @@ class JaatoRuntime:
                 #862).  ``None`` applies the framework default.  Sessions
                 sharing a runtime may each carry their own — a narrow
                 subagent under a wide parent is the point.
+            runtime_limits: The profile's whole resolved
+                :class:`~shared.runtime_limits.RuntimeLimits` block
+                (#735), forwarded to ``configure()`` — the one place
+                that arms the subprocess plugins with
+                ``tool_timeout_seconds`` / ``max_output_bytes``.  Also
+                supplies ``max_parallel_tools`` when the standalone
+                kwarg above is absent.  NOTE for in-process callers:
+                sessions on one runtime SHARE the plugin registry, so
+                the subprocess caps land on plugin instances a sibling
+                session also uses.  ``None`` is therefore a no-op, not
+                a clear — see ``JaatoSession._apply_runtime_limits``.
             tools: DEPRECATED alias for ``plugins`` (it always took plugin
                 names, never tool names). Pass ``plugins=`` instead; ``tools=``
                 still works with a one-time deprecation warning. ``plugins``
@@ -1301,6 +1314,7 @@ class JaatoRuntime:
             completion_processors=completion_processors,
             tool_scopes=tool_scopes,
             max_parallel_tools=max_parallel_tools,
+            runtime_limits=runtime_limits,
         )
         session_configure_ms = (time.perf_counter() - t1) * 1000
 

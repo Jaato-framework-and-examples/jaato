@@ -48,6 +48,11 @@ from server.egress_proxy.errors import (
     EgressEnforcementError as _EgressEnforcementError,
 )
 
+# Named at import time because ``_profile_runtime_limits`` type-CHECKS the
+# profile's declared block (#735) rather than duck-typing it, and a lazy
+# import inside a per-session helper would pay the lookup on every spawn.
+from shared.runtime_limits import RuntimeLimits
+
 
 if TYPE_CHECKING:  # pragma: no cover — types only
     from shared.session_envelope import SessionInitEnvelope
@@ -253,20 +258,29 @@ def spawn_session_runner(
     if spawned is None:
         spawner = RunnerSpawner()
 
-        # Phase 5 §5.1b: forward the app-layer ``RuntimeLimits`` fields
-        # via ``RunnerSpawner.spawn``'s ``max_output_chars`` /
-        # ``tool_timeout_seconds`` kwargs.  The spawner translates them
-        # into the ``JAATO_RUNNER_MAX_OUTPUT_CHARS`` /
-        # ``JAATO_RUNNER_TOOL_TIMEOUT_SECONDS`` env vars the runner-side
-        # cli plugin reads at startup.  Source of truth is
-        # ``server._profile.runtime_limits`` — same field the WS path
-        # consults for cgroup provision (see
-        # ``server/websocket.py:620-624``).  No defaulting on the
-        # mainline path: a profile that omits ``runtime_limits`` keeps
-        # the runner's compile-time defaults (§5.1's
-        # ``apply_isolated_defaults`` is specific to
-        # ``agent_params.isolated=true``).  See
-        # docs/design/phase5_5_1b_mainline_runtime_limits_passthrough_audit.md.
+        # Phase 5 §5.1b, re-scoped by #735: these two kwargs become the
+        # ``JAATO_RUNNER_MAX_OUTPUT_CHARS`` /
+        # ``JAATO_RUNNER_TOOL_TIMEOUT_SECONDS`` env vars, and those
+        # configure ``server/runner/tool_executor.ToolExecutor`` — the
+        # PHASE-2, cli-only ``execute_fn`` surface.  They are NOT this
+        # session's enforcement path and never were: ``RunnerRPC``
+        # routes to ``host.session._executor`` whenever a session host
+        # exists, which is on every path that dispatches
+        # ``session.bootstrap`` (all of them).  The measured consequence
+        # was a ``tool_timeout_seconds: 2`` profile running a
+        # ``sleep 60`` for 60.02 s on cold-spawn as well as on the pool.
+        #
+        # They are kept, not deleted, because the Phase-2 executor is a
+        # LIVE fallback for a runner with no session host (cli-only
+        # runners, harnesses, tests) and deleting them would silently
+        # drop that surface back to its compile-time defaults — the same
+        # class of regression, in the same direction.  Both values come
+        # from the one source of truth, ``server._profile.runtime_limits``,
+        # so the two surfaces cannot disagree about a number; they simply
+        # bound different executors.  The session's own caps ride
+        # ``SessionInitEnvelope.runtime_limits`` (v7), built above in
+        # ``build_session_envelope`` and applied in
+        # ``JaatoSession.configure``.
         profile = getattr(server, "_profile", None)
         runtime_limits = getattr(profile, "runtime_limits", None) if profile else None
         max_output_chars = (
@@ -338,6 +352,34 @@ def spawn_session_runner(
         not disable_confine,
         pool_served,
     )
+
+
+def _profile_runtime_limits(profile: Any) -> Optional[RuntimeLimits]:
+    """A profile's ``runtime_limits``, but only if it really is one.
+
+    ``build_session_envelope`` accepts whatever object the daemon stashed
+    on ``server._profile``, which in practice is a ``SubagentProfile``
+    and in tests is sometimes a ``MagicMock``.  ``_runtime_limits_to_dict``
+    calls ``dataclasses.asdict``, which raises ``TypeError`` on anything
+    else -- and an exception here aborts the whole envelope build, so a
+    stand-in profile would take the session down rather than the one
+    field it cannot describe.
+
+    Type-checking rather than catching is deliberate: the attribute is
+    DECLARED ``Optional[RuntimeLimits]``, so anything else is "nobody
+    declared limits", which is exactly what the framework defaults mean.
+
+    A free function because ``build_session_envelope`` sits on its
+    cyclomatic-complexity baseline and may not grow.
+
+    Args:
+        profile: The resolved profile, a stand-in, or ``None``.
+
+    Returns:
+        The declared limits, or ``None``.
+    """
+    limits = getattr(profile, "runtime_limits", None)
+    return limits if isinstance(limits, RuntimeLimits) else None
 
 
 def _apply_cache_field(
@@ -499,6 +541,7 @@ def build_session_envelope(
     model_tiers_dict: Optional[Dict[str, Any]] = None
     budget_control_dict: Optional[Dict[str, Any]] = None
     max_parallel_tools: Optional[int] = None
+    runtime_limits_dict: Optional[Dict[str, Any]] = None
 
     if profile is not None:
         # Same source the bootstrap gate uses (core._profile_binds_a_model):
@@ -543,15 +586,21 @@ def build_session_envelope(
         # The profile holds a parsed ``BudgetControlConfig``; the wire
         # carries its re-serialised dict (runner re-parses + revalidates).
         _budget = getattr(profile, "budget_control", None)
-        # Envelope v6 (#862): the tool-pool width.  The sibling app-layer
-        # caps travel by env var on the cold-spawn path below, which a
-        # pool slot -- forked before this session existed -- never sees;
-        # this one rides the envelope so pool-served and cold-spawned
-        # sessions get the same ceiling.
-        max_parallel_tools = getattr(
-            getattr(profile, "runtime_limits", None),
-            "max_parallel_tools", None,
-        )
+        # Envelope v6 (#862) / v7 (#735): the resolved ``runtime_limits``.
+        # The width rides its own field for daemon/runner skew; the whole
+        # block rides ``runtime_limits`` so the runner-side session can
+        # ARM the subprocess plugins with ``tool_timeout_seconds`` /
+        # ``max_output_bytes``.  Built HERE, outside the cold-spawn
+        # branch in ``spawn_session_runner``, because that branch is the
+        # one a pool slot -- forked before this session existed -- never
+        # reaches, and pool-served is the default path.  The env pair the
+        # cold-spawn branch still writes configures the Phase-2 cli-only
+        # executor, which no bootstrapped session dispatches through; see
+        # ``SessionInitEnvelope`` v7's note.
+        from shared.plugins.subagent.config import _runtime_limits_to_dict
+        _limits = _profile_runtime_limits(profile)
+        max_parallel_tools = getattr(_limits, "max_parallel_tools", None)
+        runtime_limits_dict = _runtime_limits_to_dict(_limits)
         # Cascade clamp (design note §3.1/§8b).  When this session belongs to
         # a cascade with a declared cap, its EFFECTIVE ceiling is
         # min(profile, cascade_remaining) per dimension — a child may only
@@ -814,6 +863,7 @@ def build_session_envelope(
         model_tiers=model_tiers_dict,
         budget_control=budget_control_dict,
         max_parallel_tools=max_parallel_tools,
+        runtime_limits=runtime_limits_dict,
         # Phase 2 cascade-sharing (envelope v4): forward the cascade
         # tenant ID stashed on the server by
         # ``SessionManager._construct_and_initialize_server``.  Runner

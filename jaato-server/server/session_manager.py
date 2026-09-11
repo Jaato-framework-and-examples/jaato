@@ -678,6 +678,41 @@ _DELIVERY_FAILURE_REASON = {
 }
 
 
+def _isolated_limits(
+    effective: Optional[RuntimeLimits],
+    profile: Any,
+) -> Optional[RuntimeLimits]:
+    """The ``runtime_limits`` an isolated sub-runner should be armed with.
+
+    The EFFECTIVE block when the caller resolved one, because the
+    isolated path runs a profile's limits through
+    :func:`~shared.runtime_limits.apply_isolated_defaults` first and the
+    session must be armed with what it actually runs under -- not with
+    what the profile happened to declare.  Falls back to the profile's
+    own block so a caller that passes nothing behaves as it did before
+    #735.  The fallback is type-CHECKED for the same reason
+    ``server.runner_spawn._profile_runtime_limits`` is: the profile here
+    is reconstructed from a snapshot and may be a stand-in, and
+    ``_runtime_limits_to_dict`` raises ``TypeError`` on anything that is
+    not the dataclass -- taking the whole envelope down over one field.
+
+    A free function rather than an inline conditional because
+    ``_build_isolated_envelope`` sits on its cyclomatic-complexity
+    baseline and may not grow.
+
+    Args:
+        effective: The caller's post-``apply_isolated_defaults`` block.
+        profile: The reconstructed ``SubagentProfile``.
+
+    Returns:
+        The limits to stamp on the envelope, or ``None``.
+    """
+    if effective is not None:
+        return effective
+    declared = getattr(profile, "runtime_limits", None)
+    return declared if isinstance(declared, RuntimeLimits) else None
+
+
 def _delivery_failure_reason(status: str) -> str:
     """Render *status* for a sender.  Unknown statuses are NOT guessed at."""
     return _DELIVERY_FAILURE_REASON.get(
@@ -2333,6 +2368,9 @@ class SessionManager:
             agent_params=agent_params,
             # #859: a subagent acts for the user who owns its parent.
             created_by=self._creator_of(parent_session_id),
+            # #735: the post-``apply_isolated_defaults`` block, so the
+            # sub-runner's session is armed with the caps it runs under.
+            effective_runtime_limits=effective_runtime_limits,
         )
         bootstrap_ok = self._dispatch_isolated_session_bootstrap(
             sub_handle, envelope,
@@ -2488,6 +2526,7 @@ class SessionManager:
         sub_apparmor_profile: str,
         agent_params: Optional[Dict[str, Any]],
         created_by: Optional[str] = None,
+        effective_runtime_limits: Optional[RuntimeLimits] = None,
     ) -> Any:
         """Build a :class:`SessionInitEnvelope` for an isolated
         subagent's runner-side bootstrap (Phase 4 §4.3.6c).
@@ -2495,6 +2534,16 @@ class SessionManager:
         ``created_by`` is the parent session's authenticated user; it is
         ferried so the isolated runner's telemetry and ledger name the
         same person as the parent's (#859).
+
+        ``effective_runtime_limits`` is the caller's POST-
+        ``apply_isolated_defaults`` block — the limits this subagent
+        actually runs under, which is not the same object as
+        ``profile.runtime_limits`` (the isolated path fills in defaults
+        the profile omitted).  Envelope v7 (#735) carries it so the
+        sub-runner's session arms its subprocess plugins with the caps;
+        before that the block reached the sub-runner only as the
+        spawner's env pair, which configures the Phase-2 cli-only
+        executor a bootstrapped session never dispatches through.
 
         Mirrors ``server.runner_spawn.build_session_envelope`` but
         sources fields from the reconstructed SubagentProfile
@@ -2592,16 +2641,25 @@ class SessionManager:
         _iso_budget = getattr(profile, "budget_control", None)
         # #862: the one ``runtime_limits`` field the runner-side session
         # enforces itself.  Its kernel siblings are provisioned onto this
-        # subagent's own cgroup by the caller, and the two subprocess caps
-        # ride the spawner's env; the pool width has to arrive here.
-        _iso_width = getattr(
-            getattr(profile, "runtime_limits", None),
-            "max_parallel_tools", None,
-        )
+        # subagent's own cgroup by the caller; the pool width has to
+        # arrive here.  (The claim that once stood here -- that the two
+        # subprocess caps "ride the spawner's env" -- was true of the
+        # values and false of the effect: that env configures the
+        # Phase-2 cli-only executor, which a bootstrapped sub-runner
+        # session never dispatches through.  #735.)
+        #
+        # v7 (#735) widens this to the whole block; ``_isolated_limits``
+        # picks which one and is a helper rather than an inline
+        # conditional because this builder sits on its complexity
+        # baseline.
+        from shared.plugins.subagent.config import _runtime_limits_to_dict
+        _iso_limits = _isolated_limits(effective_runtime_limits, profile)
+        _iso_width = getattr(_iso_limits, "max_parallel_tools", None)
         return SessionInitEnvelope(
             session_id=isolated_session_id,
             budget_control=_iso_budget.to_dict() if _iso_budget else None,
             max_parallel_tools=_iso_width,
+            runtime_limits=_runtime_limits_to_dict(_iso_limits),
             workspace_path=workspace_path,
             profile_name=sub_apparmor_profile,
             provider_name=provider_name,
