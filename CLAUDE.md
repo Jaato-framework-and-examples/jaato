@@ -60,7 +60,7 @@ The framework uses a server-first architecture where the server runs as a daemon
   - `--ipc-socket PATH`: Unix domain socket for local clients
   - `--web-socket [HOST:]PORT`: WebSocket for remote clients
   - `--socket-mode MODE`: Octal file permissions for the IPC socket (default: `660`, owner and group only). The IPC transport is unauthenticated, so any principal that can open the socket can fully drive the agent. Pass `666` to opt into world-accessible (e.g. cross-user containers on a trusted host).
-  - `--ws-token TOKEN` / `--ws-token-file PATH`: bearer token clients must present in the WS Upgrade. Token-file mode 0600 enforced. When neither flag is passed (and `--web-socket` is set), the daemon reads `~/.jaato/ws.token`; if the file doesn't exist, it generates a 32-byte token and persists it there with mode 0600. Local clients can read the same default path for zero-config auth.
+  - `--ws-token TOKEN` / `--ws-token-file PATH`: bearer token clients must present in the WS Upgrade. Token-file mode 0600 enforced. When neither flag is passed (and `--web-socket` is set), the daemon reads `~/.jaato/ws.token`; if the file doesn't exist, it generates a 32-byte token and persists it there with mode 0600. Local clients can read the same default path for zero-config auth. **Prefer `--ws-token-file`, or neither flag.** A token passed as `--ws-token TOKEN` sits in the daemon's `argv` and is therefore served by `/proc/<daemon_pid>/cmdline` to anything on the host that can read it. AppArmor template v30 denies that read from inside a confined session (#712), but the exposure to everything else on the box is a property of the flag, not of the profile.
   - `--ws-unsafe-no-auth`: explicit opt-out of WS bearer auth (legacy open-accept). Logs a startup WARNING. Required to keep the historical behaviour.
   - `--daemon`: Run as background process
   - `--status`/`--stop`: Server management
@@ -2131,8 +2131,7 @@ defined `DEFAULT_SECRET_ENV_PATTERNS` and applied it nowhere, so a profile
 with `cli` or `mcp` and no scrub configuration passed the daemon's full
 environment, provider keys included, to every command the model ran.  The
 reason was real — `gh`, `git push`, cloud CLIs need their tokens — but the
-failure was silent and the default was the unsafe one, and #712 notes that
-AppArmor gives this scrub no kernel-level backstop.  Now the default set
+failure was silent and the default was the unsafe one.  Now the default set
 applies when nothing is declared, and opting *out* is the explicit,
 WARNING-announced act, like `--ws-unsafe-no-auth`.
 
@@ -2187,9 +2186,43 @@ Rules the implementation holds to:
   `jaato-doctor` preflight WARNs naming each such profile in the
   workspace, and the plugin logs at WARNING when it applies the opt-out.
 
+**The scrub's one bypass now has a backstop (#712).**  The paragraph above
+is precise about what the scrub does *not* cover: the runner's own
+`os.environ` stays intact by design, so anything that can read
+`/proc/<pid>/environ` reads the unscrubbed store — every provider key and
+OAuth token the session holds — and the more the scrub is relied on, the
+more that one path matters.  Two layers close it, deliberately with
+different reach:
+
+| Layer | Covers | Applies when |
+|-------|--------|--------------|
+| AppArmor template **v30** — `audit deny` on `/proc/*/{environ,mem,pagemap,auxv,cmdline}` and each `task/<tid>/` twin, in base, `tool_hat`, `//child` and the isolated sub-runner | every read from a confined process, in-process tool or subprocess alike | AppArmor is available and the session is confined |
+| `is_sensitive_proc_path` in `shared/plugins/sandbox_utils.py` — the same set plus `maps` / `smaps`, minus `cmdline` | a path handed to a model-driven **file** tool (`readFile`, `glob_files`, `file_edit`) | always, including `workspace_root` unset and the degraded posture of #504 |
+
+The rules are written `/proc/*/...` and never `/proc/self/...`: AppArmor
+resolves that symlink to `/proc/<pid>/` **before** matching, so a
+`/proc/self/environ` deny would never fire against the read it exists to
+stop — the same finding the v15 template note records, and the reason the
+old `/proc/self/** r,` grant was inert rather than generous.  The two
+layers' sets differ on purpose.  `cmdline` is denied only at the kernel
+layer (the `--ws-token TOKEN` exposure; a file-tool read of it is a
+narrower leak than the `ps` workflows a denial would break), and
+`maps` / `smaps` only at the application layer (they leak address layout
+rather than credentials, and the distro's `abstractions/base` may grant
+them for the C library's own use — a deny there would override an
+abstraction on hosts this change could not be tested against).
+
+Known cost of the `cmdline` deny: `ps` / `top` / `pgrep` run by a confined
+agent show empty command columns, and **there is no fragment-level escape
+hatch** — a deny beats an allow at any specificity, including one granted
+from `~/.jaato/apparmor-fragments/*.rules`.  `JAATO_APPARMOR_COMPLAIN=1`
+is the diagnostic route.
+
 Not covered here: the eventual TLS-terminating broker (#505) that keeps a
-credential out of the runner environment entirely, and the `/proc`
-hardening in #712 that would give this app-layer scrub a kernel backstop.
+credential out of the runner environment entirely, and `/proc/*/fd/*`,
+which stays readable for any pid because CPython's `close_fds` path
+enumerates it at every subprocess spawn and AppArmor has no rule form for
+"my own pid only".
 
 ### Approver Identity (#859)
 

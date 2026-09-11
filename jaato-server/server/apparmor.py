@@ -5,6 +5,15 @@ available, provides kernel-enforced filesystem isolation so that CLI and
 interactive-shell commands executed by one session cannot access files
 belonging to another session.
 
+The profile also confines a second thing the filename does not suggest:
+the RUNNER'S OWN SECRETS.  A confined session's process legitimately holds
+provider API keys and OAuth tokens in its environment —
+``shared/secret_scrub.py`` scrubs the environment handed to a model-driven
+subprocess and deliberately leaves the runner's intact — so every profile
+body denies the procfs entries that serve them back
+(``/proc/*/environ`` and siblings; see the template v30 note on
+``_TEMPLATE_VERSION`` for the full set and the reasoning).
+
 When AppArmor is not available (non-Linux, not installed, or insufficient
 privileges), all methods are no-ops and ``is_available()`` returns False.
 Callers should check availability and fall back to directory-level sandboxing
@@ -292,7 +301,83 @@ class AppArmorManager:
     # table ``.jaato/template_routing.yaml`` — which decides where a
     # rendered template lands — is denied alongside it, being read-only
     # to the plugin and of the same class.
-    _TEMPLATE_VERSION = 29
+    #  30 — (2026-09-11) procfs credential hardening (#712).  Every
+    #       profile body — base, ``tool_hat``, ``//child`` and the
+    #       isolated sub-runner — gains an ``audit deny`` block on the
+    #       procfs entries that leak a process's secrets:
+    #       ``environ``, ``mem``, ``pagemap``, ``auxv`` and
+    #       ``cmdline``, each with its ``task/<tid>/`` twin.
+    #
+    #       The runner legitimately holds provider keys and OAuth
+    #       tokens in its own ``os.environ`` — ``shared/secret_scrub.py``
+    #       strips them from the environment handed to a model-driven
+    #       SUBPROCESS and deliberately leaves the runner's own intact.
+    #       #863 turned that scrub on by default, which makes its one
+    #       bypass matter more, not less: anything that can read
+    #       ``/proc/<pid>/environ`` reads the unscrubbed store.  Before
+    #       v30 the only control on that path was application-layer
+    #       workspace containment, and #668 establishes that layer is
+    #       porous.  These rules are the kernel backstop.
+    #
+    #       ``cmdline`` is denied for the ``--ws-token TOKEN`` exposure:
+    #       a token passed that way sits in the daemon's argv, which
+    #       every confined session could otherwise read.
+    #       ``--ws-token-file`` is the spelling that avoids it.
+    #
+    #       Written in the ``/proc/*/`` form, NEVER ``/proc/self/``:
+    #       AppArmor resolves the ``/proc/self`` symlink to
+    #       ``/proc/<pid>/`` before matching (see the v15 note below),
+    #       so a ``/proc/self/environ`` deny would never match the read
+    #       it is meant to stop.  The ``*`` form is also what covers
+    #       the sibling case — reading ANOTHER process's environ.
+    #
+    #       ``maps`` / ``smaps`` are deliberately NOT denied here: they
+    #       leak address layout rather than credentials, and the
+    #       distro's ``abstractions/base`` may grant them for the C
+    #       library's own use, which a deny would override on a host
+    #       this change was not able to test against.  The
+    #       application-layer denylist in
+    #       ``shared/plugins/sandbox_utils.py`` — which gates only
+    #       model-driven path-taking tools, and so can afford to be
+    #       stricter — does cover them.
+    #  31 — (2026-09-11) ``#include <tunables/global>`` added to the
+    #       ISOLATED sub-runner profile body
+    #       (``_render_sub_profile``).  Pre-existing defect, surfaced by
+    #       the v30 work rather than caused by it: that body references
+    #       ``@{{HOME}}`` in two rules and declared the variable nowhere,
+    #       so ``apparmor_parser`` refused it with
+    #
+    #           Found reference to variable HOME, but is never declared
+    #
+    #       ``_provision_sub_profile_impl`` writes this body to its OWN
+    #       file and runs ``apparmor_parser -r <file>`` on it — no
+    #       ``-I`` include path, no concatenation with the parent's
+    #       file — so the parse it gets is the same one a standalone
+    #       compile gets.  Verified against ``origin/main``: the
+    #       isolated body fails and the base body (which has carried
+    #       the include since v1) compiles; delete the include from the
+    #       base and it fails identically.
+    #
+    #       Effect until now: EVERY isolated-subagent spawn was refused.
+    #       ``SessionManager._spawn_isolated_runner`` is fail-closed by
+    #       design — a failed provision returns
+    #       ``ok=False, stage='sub_profile'`` and there is no
+    #       unconfined fallback — so this was a dead feature, NOT a
+    #       confinement hole.  It went unnoticed because every existing
+    #       test of the path mocks ``subprocess.run``; the first thing
+    #       in the tree to hand this body to a real parser was
+    #       ``test_apparmor_proc_hardening_712.py``.
+    #
+    #       The include itself grants NOTHING — every file under
+    #       ``/etc/apparmor.d/tunables/`` is variable declarations and
+    #       further includes, with no rule of any kind.  What it changes
+    #       is that the two ``@{{HOME}}/.jaato/{{keybindings,theme}}.json r,``
+    #       rules already in this body can now compile and therefore
+    #       take effect.  Both are a strict subset of what the PARENT
+    #       profile already grants (it carries the same two plus
+    #       ``@{{HOME}}/.jaato/themes/**``), so no access appears here
+    #       that the session did not already have.
+    _TEMPLATE_VERSION = 31
 
     # AppArmor profile template.  Placeholders are filled per-session by
     # ``_render_profile()``.
@@ -471,6 +556,46 @@ profile jaato-ws-{session_id} flags=({profile_flags}) {{
   /dev/null            rw,
   /dev/urandom         r,
   /dev/pts/*           rw,
+
+  # ---- procfs credential + memory hardening (template v30, #712) ----
+  # The runner's own os.environ is a live credential store: provider API
+  # keys, OAuth tokens — exactly what shared/secret_scrub.py strips from
+  # the environment handed to a model-driven SUBPROCESS while
+  # deliberately leaving the runner's own intact.  A process that can
+  # read /proc/<pid>/environ walks straight around that scrub, so the
+  # scrub gets its kernel backstop here.
+  #
+  # These are ``/proc/*/`` and never ``/proc/self/``: AppArmor resolves
+  # the /proc/self symlink to /proc/<pid>/ BEFORE matching rules (the
+  # v15 note below records the empirical finding), so a
+  # ``/proc/self/environ`` deny would never match the read it is meant
+  # to stop.  The ``*`` form also covers reading ANOTHER process's
+  # entry, which is the same leak from the sibling direction.
+  #
+  # A deny beats an allow at any specificity (the v13 note below), so
+  # these hold over the broad ``/proc/self/** r`` grant above, over the
+  # ``#include`` abstractions, and over any extension or plugin
+  # fragment spliced in below.  There is therefore no fragment-level
+  # escape hatch for a deployment that needs one of these back; the
+  # diagnostic route is ``JAATO_APPARMOR_COMPLAIN=1``, which puts the
+  # whole profile chain in complain mode and logs instead of enforcing.
+  #
+  # ``audit`` so a violation lands in dmesg, matching the .jaato rules.
+  audit deny /proc/*/environ            r,
+  audit deny /proc/*/task/*/environ     r,
+  audit deny /proc/*/mem                rw,
+  audit deny /proc/*/task/*/mem         rw,
+  audit deny /proc/*/pagemap            r,
+  audit deny /proc/*/task/*/pagemap     r,
+  audit deny /proc/*/auxv               r,
+  audit deny /proc/*/task/*/auxv        r,
+  # cmdline: ``--ws-token TOKEN`` is a documented way to start the
+  # daemon, and a token passed that way sits in the daemon's argv where
+  # every confined session could read it.  ``--ws-token-file`` is the
+  # spelling that avoids the exposure.  Known cost: ``ps`` / ``top``
+  # run by an agent show empty command columns for every process.
+  audit deny /proc/*/cmdline            r,
+  audit deny /proc/*/task/*/cmdline     r,
 
   # ---- network: outbound only ----
   network inet  stream,
@@ -1415,6 +1540,18 @@ profile jaato-ws-{session_id} flags=({profile_flags}) {{
 # Standalone profile with a //-prefixed name per Audit 6.
 # Loaded as a separate kernel-level profile; the sub-runner
 # self-confines to this profile via change_profile.
+#
+# ``tunables/global`` declares the @{{...}} variables this body
+# references (template v31).  It is REQUIRED, not decorative: this
+# profile is written to its own file and parsed standalone by
+# ``_provision_sub_profile_impl``'s ``apparmor_parser -r <file>``,
+# with no ``-I`` include path and no concatenation with the parent's
+# file — so nothing else declares them.  Without it the parser stops
+# at "Found reference to variable HOME, but is never declared" and
+# the profile never loads.  The main PROFILE_TEMPLATE has carried
+# this line from the beginning; this body did not, and was the one
+# renderer no test had ever run through the parser.
+#include <tunables/global>
 
 profile "{sub_profile_name}" flags=(attach_disconnected) {{
   #include <abstractions/base>
@@ -1497,13 +1634,37 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
   /tmp/jaato-*/**           rwkl,
 
   # ---- self-introspection ----
+  # ``/proc/*/cmdline r,`` was here until template v30 and is now denied
+  # below (#712): this block grants for ANY pid, so it handed every
+  # isolated sub-runner the daemon's argv — which carries the bearer
+  # token whenever the operator started the daemon with
+  # ``--ws-token TOKEN``.  Nothing in the tree reads cmdline from a
+  # confined scope; the readers (server/__main__.py's socket-owner
+  # check, jaato_sdk.doctor) are unconfined operator-side code.
+  #
+  # ``/proc/*/fd/`` is kept: CPython's close_fds path enumerates it at
+  # every subprocess spawn.  It is granted for any pid for the same
+  # reason as the rest of this block — AppArmor has no "my own pid"
+  # rule form — which is a smaller version of the same exposure and is
+  # left as is deliberately rather than broken silently.
   /proc/*/                  r,
   /proc/*/status            r,
   /proc/*/stat              r,
-  /proc/*/cmdline           r,
   /proc/*/comm              r,
   /proc/*/fd/               r,
   /proc/*/fd/*              r,
+
+  # ---- procfs credential + memory hardening (mirrors base, #712) ----
+  audit deny /proc/*/environ            r,
+  audit deny /proc/*/task/*/environ     r,
+  audit deny /proc/*/mem                rw,
+  audit deny /proc/*/task/*/mem         rw,
+  audit deny /proc/*/pagemap            r,
+  audit deny /proc/*/task/*/pagemap     r,
+  audit deny /proc/*/auxv               r,
+  audit deny /proc/*/task/*/auxv        r,
+  audit deny /proc/*/cmdline            r,
+  audit deny /proc/*/task/*/cmdline     r,
   # Read-only access to attr/current — required by the sub-runner's
   # confine_to_profile.read_current_profile verify-after-write step
   # (server/runner/bootstrap.py:188).  ``owner`` qualifier matches the
@@ -2287,6 +2448,22 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
     /dev/urandom         r,
     /dev/pts/*           rw,
 
+    # ---- procfs credential + memory hardening (mirrors base, #712) ----
+    # Sub-profiles do NOT inherit base rules, so the deny block has to
+    # be restated here or tool execution — the one scope that is
+    # entirely model-driven — would be the one scope without it.
+    # ``/proc/*/`` form, not ``/proc/self/``: see the base profile.
+    audit deny /proc/*/environ            r,
+    audit deny /proc/*/task/*/environ     r,
+    audit deny /proc/*/mem                rw,
+    audit deny /proc/*/task/*/mem         rw,
+    audit deny /proc/*/pagemap            r,
+    audit deny /proc/*/task/*/pagemap     r,
+    audit deny /proc/*/auxv               r,
+    audit deny /proc/*/task/*/auxv        r,
+    audit deny /proc/*/cmdline            r,
+    audit deny /proc/*/task/*/cmdline     r,
+
     # ---- network (mirrors base) ----
     network inet  stream,
     network inet6 stream,
@@ -2482,6 +2659,23 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
     /dev/null            rw,
     /dev/urandom         r,
     /dev/pts/*           rw,
+
+    # ---- procfs credential + memory hardening (mirrors tool_hat, #712) ----
+    # //child is where a model-controlled SUBPROCESS runs — the exact
+    # process shared/secret_scrub.py scrubs the environment of.  Without
+    # this block that subprocess could read back through
+    # /proc/<runner_pid>/environ what the scrub just removed from its
+    # own.  ``/proc/*/`` form, not ``/proc/self/``: see the base profile.
+    audit deny /proc/*/environ            r,
+    audit deny /proc/*/task/*/environ     r,
+    audit deny /proc/*/mem                rw,
+    audit deny /proc/*/task/*/mem         rw,
+    audit deny /proc/*/pagemap            r,
+    audit deny /proc/*/task/*/pagemap     r,
+    audit deny /proc/*/auxv               r,
+    audit deny /proc/*/task/*/auxv        r,
+    audit deny /proc/*/cmdline            r,
+    audit deny /proc/*/task/*/cmdline     r,
 
     # ---- network (mirrors tool_hat) ----
     network inet  stream,
