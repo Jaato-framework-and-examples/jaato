@@ -395,3 +395,72 @@ def test_a_headless_create_is_exempt(monkeypatch: pytest.MonkeyPatch) -> None:
 
     mgr.create_session(None, "s", request_id="rq-1")
     assert recorder.events == []
+
+
+def test_an_emitter_with_a_second_audience_stays_off_the_funnel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The cascade refusal answers once WITHOUT going through the funnel.
+
+    ``_emit_cascade_refusal`` has two audiences — the requester and every
+    observer of the cid — and a defensive ``except Exception`` wrapping
+    both, so a dependency added inside it becomes a silent no-emit for
+    BOTH. Routing it through the funnel did exactly that: an
+    ``AttributeError`` on the first line of ``_answer_session_new`` aborted
+    the method before the cid dispatch and the refusal reached nobody
+    (``test_cascade_refusal_reaches_observers.py``, 7 of 8 red).
+
+    So it keeps its own emit and its own ``request_id`` stamp, and settles
+    the invariant with ``_note_session_new_answered`` at the CALL SITE.
+    This asserts the settlement: one frame, not two — the last-resort
+    backstop must not fire on top of a refusal that already answered.
+    """
+    from server.session_manager import SessionManager
+    from jaato_sdk.events import ErrorEvent
+
+    recorder = _Recorder()
+    mgr = _manager(monkeypatch, recorder)
+
+    def _broadcasts_then_counts(self, client_id, *a, **k):
+        # What the real call site does: a self-stamping broadcast, then the
+        # count.  Deliberately NOT self._answer_session_new.
+        self._emit_to_client(client_id, ErrorEvent(
+            error="cascade has no headroom left on tokens",
+            error_type="CascadeExhaustedError",
+            recoverable=False,
+            request_id="rq-11",
+        ))
+        self._note_session_new_answered()
+        return ""
+
+    monkeypatch.setattr(
+        SessionManager, "_create_session_impl",
+        _broadcasts_then_counts, raising=True)
+    mgr.create_session("client_1", "s", request_id="rq-11")
+
+    answers = recorder.answers("rq-11")
+    assert len(answers) == 1, (
+        "a self-stamping emitter that counted its frame was answered again "
+        "by the last-resort backstop -- the invariant is ONE correlated "
+        "frame to the requester, and this path produced two"
+    )
+    assert answers[0].error_type == "CascadeExhaustedError"
+
+
+def test_the_record_readers_tolerate_a_bare_manager() -> None:
+    """A ``SessionManager`` built by ``__new__`` must not make them raise.
+
+    Several suites build the manager as a bare shell and set only the
+    attributes they need, so ``_session_new_answer`` is absent. Two of the
+    three readers are reached from methods with a defensive
+    ``except Exception``, where a raise becomes a silent no-emit -- which is
+    how funnelling the cascade refusal took down its whole delivery. Read
+    tolerantly; the behavioural tests above construct the attribute for
+    real.
+    """
+    from server.session_manager import SessionManager
+
+    bare = SessionManager.__new__(SessionManager)
+    assert bare._open_session_new_answer() is None
+    bare._note_session_new_answered()        # must not raise
+    bare._latch_created_session("sid")       # must not raise

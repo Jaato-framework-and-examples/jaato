@@ -5204,6 +5204,43 @@ class SessionManager:
         The event is stamped with the refused ``session_id`` (protocol 1.2+),
         because on a shared cascade stream "a spawn was refused" is not
         actionable without knowing WHICH one.
+
+        AND IT IS NOT A ``session.new`` ANSWER FUNNEL.  #882/#975 made
+        :meth:`_answer_session_new` the single emitter of a create's one
+        correlated frame, and routing this method's requester emit through
+        it looked like tidiness.  It is not: this method serves TWO
+        audiences, and the funnel serves one.  Funnelling it put a new
+        dependency inside the ``except Exception`` below -- exactly what the
+        paragraph above forbids -- and the resulting ``AttributeError`` was
+        swallowed, so the refusal reached the requester AND every observer
+        as nothing at all.  A fix for "refusals do not reach the caller"
+        must not stop refusals reaching the cascade.
+
+        The two audiences keep different rules, and only one is the
+        invariant's:
+
+        ==========  =============================================
+        audience    rule
+        ==========  =============================================
+        requester   at most one frame, correlated.  This method
+                    already stamps ``request_id`` itself, so all
+                    it owes the invariant is the COUNT -- taken
+                    by the caller, ``_create_session_impl``, via
+                    :meth:`_note_session_new_answered`.
+        observers   every observer of the cid, always, including
+                    when the requester is the synthetic headless
+                    id and the cascade stream is the ONLY audience
+                    there is.
+        ==========  =============================================
+
+        Args:
+            client_id: The requesting client, or ``None`` / the synthetic
+                headless id for a spawn with no real requester.
+            session_id: The session that was refused.
+            exc: The refusal, normally a ``CascadeExhaustedError``.
+            request_id: Correlation id of the originating ``session.new``,
+                when there was one.  Stamped here rather than by the funnel,
+                for the reason above.
         """
         from jaato_sdk.events import ErrorEvent
         try:
@@ -5241,14 +5278,18 @@ class SessionManager:
                 session_id=session_id,
                 request_id=request_id,
             )
+            # NOT ``_answer_session_new``.  This method has TWO audiences and
+            # the funnel serves one of them; routing the requester emit
+            # through it added a dependency INSIDE the defensive catch below,
+            # which is the failure the paragraph above already warns about --
+            # the first attempt raised ``AttributeError`` before the cid
+            # dispatch and delivered the refusal to NOBODY, requester and
+            # observers alike.  The frame this emit represents is counted by
+            # the CALLER (``_create_session_impl``, via
+            # ``_note_session_new_answered``), which is where the create's
+            # answer record actually lives.  See the docstring above.
             if client_id:
-                # Through the answer funnel, so a refusal raised during a
-                # ``session.new`` counts as THE answer (#882/#975) and the
-                # last-resort frame does not fire on top of it.  Called
-                # from the spawn path too, where no answer record is open
-                # -- the funnel then emits exactly as ``_emit_to_client``
-                # did.
-                self._answer_session_new(client_id, event)
+                self._emit_to_client(client_id, event)
             cid = getattr(exc, "cascade_driver_id", None) or payload.get(
                 "cascade_driver_id")
             if cid:
@@ -5665,6 +5706,40 @@ class SessionManager:
             recoverable=True,
         ))
 
+    def _open_session_new_answer(self) -> Optional["_SessionNewAnswer"]:
+        """The answer record for the ``session.new`` running on this thread.
+
+        ``None`` outside a :meth:`create_session` call — which is the
+        ordinary case for the spawn, disk-restore and headless paths, and
+        also for a ``SessionManager`` built by ``__new__`` in a test, where
+        ``_session_new_answer`` is not among the attributes the fixture
+        sets.  Tolerating that second case is not laxity: the three readers
+        below are reached from methods whose defensive ``except Exception``
+        would turn a missing attribute into a silent no-emit, which is the
+        one outcome worse than not counting a frame.
+        """
+        holder = getattr(self, "_session_new_answer", None)
+        return getattr(holder, "record", None) if holder is not None else None
+
+    def _note_session_new_answered(self) -> None:
+        """Count a frame this create's caller emitted outside the funnel.
+
+        The invariant is *one correlated frame to the REQUESTER*, never *one
+        recipient in the system*, so an emitter with a second audience is
+        allowed to stay off :meth:`_answer_session_new` and settle up here
+        instead.  One caller today: the cascade-budget refusal, which stamps
+        its own ``request_id`` and must broadcast to cascade observers from
+        inside a defensive catch the funnel must not be reachable from
+        (see :meth:`_emit_cascade_refusal`).
+
+        Without the count the last-resort frame in
+        :meth:`_answer_session_new_last_resort` would fire on top of a
+        refusal that already answered, and the caller would get two.
+        """
+        record = self._open_session_new_answer()
+        if record is not None:
+            record.frames += 1
+
     def _latch_created_session(self, session_id: str) -> None:
         """Record that this ``session.new`` has produced a real session.
 
@@ -5676,7 +5751,7 @@ class SessionManager:
         A no-op outside a ``create_session`` call (no open record), which is
         how the headless and disk-restore paths reach it harmlessly.
         """
-        record = getattr(self._session_new_answer, "record", None)
+        record = self._open_session_new_answer()
         if record is not None:
             record.created_session_id = session_id
 
@@ -5718,7 +5793,7 @@ class SessionManager:
                 a failure answer.  Also latched onto the record, so a later
                 last-resort frame inherits it.
         """
-        record = getattr(self._session_new_answer, "record", None)
+        record = self._open_session_new_answer()
         if created_session_id and record is not None:
             record.created_session_id = created_session_id
         if record is not None:
@@ -6811,8 +6886,16 @@ class SessionManager:
                         getattr(server, "_profile", None)
                         and getattr(server._profile, "budget_control", None))
                 except CascadeExhaustedError as exc:
+                    # WHERE THE TWO AUDIENCES MEET.  The refusal is a
+                    # broadcast (requester + every observer of the cid) and
+                    # it stamps its own ``request_id``, so it stays OFF the
+                    # answer funnel -- see ``_emit_cascade_refusal``'s
+                    # docstring for why funnelling it delivered the refusal
+                    # to nobody.  All it owes the invariant is the count,
+                    # and the count belongs here, where the record is.
                     self._emit_cascade_refusal(
                         client_id, session_id, exc, request_id=request_id)
+                    self._note_session_new_answered()
                     self._release_session_id(session_id)
                     try:
                         server.shutdown()
