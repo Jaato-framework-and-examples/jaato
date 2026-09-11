@@ -246,6 +246,8 @@ boundary to confine. It reaches a runner-served session on the **envelope**
 (v6), not by env var: `JAATO_RUNNER_MAX_OUTPUT_CHARS` and friends are set at
 cold spawn, and a pre-warm pool slot is forked before the session exists, so a
 knob delivered that way would be inert exactly where the default path runs.
+**Its two subprocess siblings now ride the same envelope** (v7) for a stronger
+version of that reason — see below.
 
 Inheritance is **most-restrictive-wins** — the minimum across every layer that
 declares it, like `max_turns` and `budget_control.limits`, and unlike the rest
@@ -253,6 +255,76 @@ of `runtime_limits`, which is child-REPLACES. A child may narrow the pool,
 never widen it; two parents differing only in the width are resolved by `min()`
 rather than reported as a conflict. `jaato-scaffold explain runtime` prints the
 whole block with the effective value.
+
+### A Cap Nobody Was Wearing (#735)
+
+`explain runtime` said `tool_timeout_seconds → cli/shell →
+subprocess.run(timeout=) per tool call`, and `cli/plugin.py` does exactly that
+— when it has been handed a `RuntimeLimits`. Nothing ever handed it one. On a
+real daemon, a profile declaring `tool_timeout_seconds: 2` ran a `sleep 60`
+for **60.02 s**, and `max_output_bytes: 1000` truncated at the compile-time
+50 000:
+
+| path | cap declared | observed |
+|---|---|---|
+| pool-served (the default) | `tool_timeout_seconds: 2` | tool ran **60.02 s** |
+| cold-spawn | `tool_timeout_seconds: 2` | tool ran **60.02 s** |
+| both | `max_output_bytes: 1000` | truncated at **50 000** |
+| control: `plugin_configs.cli.max_output_chars: 1000` | — | truncated at **1 000** ✅ |
+
+The control run is what locates the defect: the enforcement point was always
+fine, and only the **delivery** of `runtime_limits` was broken.
+
+**The env pair was never the session's enforcement path.**
+`JAATO_RUNNER_TOOL_TIMEOUT_SECONDS` / `JAATO_RUNNER_MAX_OUTPUT_CHARS` arrive
+correctly — the runner's own startup line prints them — and configure
+`server/runner/tool_executor.ToolExecutor`, the **Phase-2, cli-only**
+`execute_fn`. `RunnerRPC._dispatch_method` uses that object only as a fallback
+and routes to `host.session._executor` whenever a session host exists, which
+is on every path that dispatches `session.bootstrap` — all of them. A
+session's tools run through `shared.ai_tool_runner.ToolExecutor`, whose
+`set_runtime_limits` had **no non-test caller**, so `CliPlugin._runtime_limits`
+was `None` everywhere. The issue's own table marked cold-spawn ✅ for
+forwarding the values; it forwarded them to an executor the session does not
+use.
+
+**One vehicle, one application point.**
+
+| Seat | What it does |
+|------|--------------|
+| `build_session_envelope` + the isolated sub-runner builder | stamp the whole resolved block onto `SessionInitEnvelope.runtime_limits` (**envelope v7**), outside any spawn branch, so pool-served and cold-spawned sessions carry the same thing |
+| `server/runner/session.py` | `_runtime_limits_from_envelope` re-parses it; a block this runner cannot parse degrades to "nobody declared limits" with a WARNING rather than refusing the bootstrap |
+| `JaatoSession.configure()` | `_apply_runtime_limits` calls `executor.set_runtime_limits(None, limits)` **after** `set_registry` — the forwarding loop walks `registry.list_exposed()`, so a caller that ran earlier would arm nothing |
+
+`configure()` rather than the runner bootstrap is what makes it *one*
+mechanism: the in-process lead and in-process subagents reach the same code
+with no second call site. Two properties the implementation holds to:
+
+- **`limits=None` is a no-op, not a clear.** Sessions on one runtime SHARE the
+  plugin registry, so a limitless in-process subagent calling
+  `set_runtime_limits(None, None)` would strip the cap off its parent's tools.
+- **`attach_callback` is `None` deliberately.** The runner PROCESS is migrated
+  into its cgroup at fork time and its children inherit it, so a per-plugin
+  `preexec_fn` would be redundant. The kernel trio still rides the cgroup, not
+  the envelope.
+
+**The env pair is kept, and relabelled.** It is the only configuration the
+Phase-2 executor has, and that surface is still live for a runner with no
+session host (cli-only runners, harnesses, tests); deleting it would silently
+drop those back to compile-time defaults — the same class of regression, in
+the same direction. Both surfaces read the one source of truth
+(`server._profile.runtime_limits`), so they cannot disagree about a number;
+they bound different executors. What changed is that the comments no longer
+claim the env pair enforces a session's caps — including the slot-mode
+docstring in `runner/__main__.py` and the `JaatoServer.set_runtime_limits`
+stub, both of which asserted a mechanism that did not exist.
+
+**A cap that silently does not apply is worse than no cap**, so `configure()`
+logs the effective block and **names the plugins that took it**
+(`runtime_limits armed: tool_timeout=120.0s max_output_bytes=8192
+max_parallel_tools=None; receivers=['cli', 'interactive_shell']`). An empty
+receiver list beside a declared timeout is the visible form of "this profile
+enables no subprocess plugin, so the cap bounds nothing".
 
 ### Application Identity (naming the app, not the framework)
 

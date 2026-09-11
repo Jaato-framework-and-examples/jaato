@@ -72,6 +72,9 @@ def echo_workspace(root: Path, *, usage: Optional[dict] = None,
                    retry_tool_call: bool = False,
                    processor: Optional[str] = None,
                    processor_entry: Optional[dict] = None,
+                   plugins: Optional[list] = None,
+                   runtime_limits: Optional[dict] = None,
+                   plugin_configs: Optional[dict] = None,
                    name: str = "conformance") -> Path:
     """Write a workspace with one echo-backed profile and return its path.
 
@@ -96,6 +99,18 @@ def echo_workspace(root: Path, *, usage: Optional[dict] = None,
     profiles all end in prose never reaches it and reports everything healthy;
     that is not hypothetical, it is how the first repro of that defect
     exonerated the daemon.
+
+    ``plugins`` / ``runtime_limits`` / ``plugin_configs`` are what let a
+    profile drive a REAL tool rather than only the lifecycle surface.
+    They exist for jaato #735, where the question is whether a declared
+    ``runtime_limits.tool_timeout_seconds`` bounds an actual subprocess:
+    that cannot be asked of a profile carrying ``plugins: []``, and it
+    cannot be answered by any amount of wire assertion, because on the
+    pre-fix tree the value travelled correctly and landed on an executor
+    the session never used.  ``plugin_configs`` merges UNDER the echo
+    section this function writes, so a caller can tune ``cli`` (notably
+    ``auto_background_threshold`` — see that test) without having to
+    reproduce the echo wiring.
     """
     profiles = root / ".jaato" / "profiles"
     profiles.mkdir(parents=True, exist_ok=True)
@@ -113,12 +128,17 @@ def echo_workspace(root: Path, *, usage: Optional[dict] = None,
         "description": "echo-backed profile for live conformance",
         "model": "echo",
         "provider": "echo",
-        "plugins": [],
+        "plugins": list(plugins or []),
     }
+    if runtime_limits is not None:
+        profile["runtime_limits"] = dict(runtime_limits)
     if retry_tool_call:
         echo_cfg["retry_tool_call"] = True
+    configs: dict = dict(plugin_configs or {})
     if echo_cfg:
-        profile["plugin_configs"] = {"echo": echo_cfg}
+        configs["echo"] = {**configs.get("echo", {}), **echo_cfg}
+    if configs:
+        profile["plugin_configs"] = configs
     if completion_schema is not None:
         profile["completion_payload_schema"] = completion_schema
     if processor is not None:

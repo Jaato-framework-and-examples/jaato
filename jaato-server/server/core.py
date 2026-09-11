@@ -293,22 +293,32 @@ def _runtime_limit_session_kwargs(profile: Any) -> Dict[str, Any]:
     """Session-level ``create_session`` kwargs a profile's ``runtime_limits``
     contributes.
 
-    Today that is ``max_parallel_tools`` alone (#862) — the one field in
-    the block the SESSION enforces rather than the kernel or the
-    subprocess plugins.  Returns an EMPTY dict when the profile declares
-    none, so a caller merging this into an overrides bag does not turn an
-    empty bag into a non-empty one.
+    Both of them, since #735: ``max_parallel_tools`` (the field the
+    SESSION enforces, #862) and the whole ``runtime_limits`` block, which
+    ``JaatoSession.configure`` forwards to the subprocess plugins that
+    enforce ``tool_timeout_seconds`` / ``max_output_bytes``.  The width is
+    sent separately as well as inside the block, so a caller reading that
+    key sees exactly what it saw before.
+
+    Returns an EMPTY dict when the profile declares none, so a caller
+    merging this into an overrides bag does not turn an empty bag into a
+    non-empty one.
 
     Args:
         profile: The resolved :class:`SubagentProfile`, or ``None``.
 
     Returns:
-        ``{"max_parallel_tools": <int>}`` or ``{}``.
+        ``{}``, or a dict carrying ``runtime_limits`` and — when one was
+        declared — ``max_parallel_tools``.
     """
-    width = getattr(
-        getattr(profile, "runtime_limits", None), "max_parallel_tools", None,
-    )
-    return {} if width is None else {"max_parallel_tools": width}
+    limits = getattr(profile, "runtime_limits", None)
+    if limits is None:
+        return {}
+    width = getattr(limits, "max_parallel_tools", None)
+    kwargs: Dict[str, Any] = {"runtime_limits": limits}
+    if width is not None:
+        kwargs["max_parallel_tools"] = width
+    return kwargs
 
 
 def _deserialize_wire_history(history: Any) -> List[Any]:
@@ -987,28 +997,34 @@ class JaatoServer:
         limits: Optional[Any] = None,
         event_reader: Optional[Callable[[], Optional[Any]]] = None,
     ) -> None:
-        """Install per-session cgroup attach + app-layer caps + event reader.
+        """No-op retained for the WS caller.  Installs NOTHING (#735).
 
-        Mirrors :meth:`set_apparmor_confinement` on the runtime-limits
-        axis: AppArmor controls *what's reachable*, this controls *how
-        much can be consumed*.
+        Historically this wired the daemon-side ``ToolExecutor`` with a
+        cgroup attach callback, the app-layer caps and a cgroup event
+        reader.  Since the §7c seat-flip there is no daemon-side
+        executor to wire — tool execution happens in the runner
+        subprocess.  ``server/websocket.py`` still calls this on every
+        cgroup-provisioned session, so the method stays; it is called
+        for its signature, not for any effect.
 
-        Called by the WebSocket server after :class:`CgroupsManager`
-        provisions the session's cgroup.  Subprocess-launching plugins
-        (cli, interactive_shell) read attach + limits via the executor's
-        accessors:
+        Where each argument's job actually lives now:
 
-        * ``attach_callback`` is passed as ``Popen(preexec_fn=...)``,
-          migrating each forked child into the session's cgroup before
-          ``exec``.
-        * ``limits`` carries application-layer caps
-          (``tool_timeout_seconds``, ``max_output_bytes``) that have no
-          cgroup equivalent — plugins apply them at the Python layer.
-        * ``event_reader`` is consumed by ``ToolExecutor.execute`` (not
-          forwarded to plugins) — snapshots ``cgroup.events`` before /
-          after each tool call and injects deltas into the result's
-          ``_telemetry`` dict, where the session's tool span picks
-          them up as OTel attributes.
+        * ``attach_callback`` — superseded.  The runner PROCESS is
+          migrated into the session's cgroup at fork time
+          (``Popen(preexec_fn=...)`` in ``RunnerSpawner.spawn``) and its
+          children inherit it, so no per-plugin ``preexec_fn`` is
+          needed.
+        * ``limits`` — superseded by ``SessionInitEnvelope.runtime_limits``
+          (envelope v7).  The runner rebuilds the block and
+          :meth:`shared.jaato_session.JaatoSession._apply_runtime_limits`
+          arms the subprocess plugins with it.  Before #735 the text
+          here claimed the runner received its ``RuntimeLimits`` "at
+          spawn time"; it received them on no path at all, and a
+          profile declaring ``tool_timeout_seconds: 2`` ran a
+          ``sleep 60`` to completion.
+        * ``event_reader`` — genuinely unconsumed.  Nothing reads cgroup
+          events since the seat-flip; §7d may reintroduce a runner RPC
+          that streams them back for OTel.
 
         Args:
             attach_callback: Zero-arg callable for ``preexec_fn``, or
@@ -1019,25 +1035,14 @@ class JaatoServer:
                 ``cgroup.events`` snapshot dict, or ``None`` when
                 cgroups are unavailable.
         """
-        # Phase 3 §7c step 6.2: this method is now a no-op kept
-        # for back-compat with WS callers (websocket.py:721) that
-        # still invoke it on every WS-provisioned session.  The
-        # daemon-side ``ToolExecutor`` is dead post-§7b.2 (tool
-        # execution flows through the runner subprocess); the
-        # runner-side cgroup attach is set via env vars at
-        # spawn time (``JAATO_RUNNER_CGROUP_PATH`` etc., see
-        # ``server/runner_spawner.py``), and the runner-side
-        # executor reads its app-layer ``RuntimeLimits`` from the
-        # bootstrap envelope's ``env_overrides`` mechanism +
-        # provider config — neither of which travels through this
-        # method.  The pre-§7c daemon-side wiring this method
-        # installed had no effect post-§7b.2 even when called.
-        #
-        # Future cleanup: §7d (cgroup attach migration) may
-        # introduce a runner-RPC for streaming live-cgroup-events
-        # back to daemon for OTel; until then the
-        # ``event_reader`` argument simply isn't consumed by
-        # anyone post-seat-flip.
+        # Phase 3 §7c step 6.2: a no-op kept for back-compat with the
+        # WS caller that still invokes it on every WS-provisioned
+        # session.  See the docstring for where each argument's job
+        # moved to.  #735 removed the claim that used to sit here --
+        # that the runner-side executor "reads its app-layer
+        # RuntimeLimits from the bootstrap envelope's env_overrides
+        # mechanism + provider config".  It read them from neither: the
+        # envelope carried no such field until v7.
         if attach_callback is not None or limits is not None:
             logger.debug(
                 "set_runtime_limits called (no-op since §7c step 6.2; "
