@@ -31,6 +31,16 @@ jobs:
   # pure-Python, in the `dev` extra) rather than a behavioural test, so it
   # adds ~6s and no new failure mode to a job that must stay reliable.
   #
+  # And the CI-coverage ratchet: every test_*.py on disk must be named by
+  # a step of a workflow that fires on a COMMIT, with a commented
+  # UNCOVERED allowlist for deliberate exclusions. The recurring failure
+  # it closes is that nothing asserted the mapping between test files and
+  # the paths CI hands to pytest -- eight directories and ~1560 tests
+  # accumulated outside it, 31 of them already red, and each of the five
+  # earlier instances was found by someone noticing (#736). It is a
+  # source + YAML scan that imports none of the tree, so it costs ~5s and
+  # adds no new failure mode here.
+  #
   # Kept deliberately light + reliable: the only optional backend any of
   # these guards imports is the interactive_shell plugin's `pexpect`
   # (.[interactive]). No system-dependency extras (notably `kerberos`,
@@ -76,6 +86,7 @@ jobs:
             jaato-server/shared/tests/test_a_dead_stream_is_not_a_finished_turn.py \
             jaato-server/shared/tests/test_env_scope_catalog.py \
             jaato-server/shared/tests/test_docs_do_not_contradict_the_tree.py \
+            jaato-server/shared/tests/test_ci_runs_every_test_file.py \
             jaato-server/shared/tests/test_every_guard_detects_its_own_reversion.py
 
   # ---------------------------------------------------------------
