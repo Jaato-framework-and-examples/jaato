@@ -120,23 +120,19 @@ def _callee_name(call: ast.Call) -> str:
     return ""
 
 
-def test_create_path_answers_only_through_the_funnel() -> None:
-    """No answer-shaped event is emitted from the create path unfunnelled.
+def _funnelled_node_ids(impl: ast.AST) -> set[int]:
+    """Ids of every node that reaches :data:`ANSWER_FUNNEL`.
 
-    Walks every ``Call`` in ``_create_session_impl``.  A construction of
-    ``SessionInfoEvent`` / ``ErrorEvent`` is allowed only when it reaches
-    ``_answer_session_new`` — the call that stamps the correlation id and
-    counts the frame — either as a direct argument, or as the value of a
-    local the funnel is then handed.  The second shape is the success
-    path's: the confirmation is built inside a ``try`` and the fallback
-    inside its ``except``, and both land on one funnel call afterwards.
+    Two shapes count as funnelled: a construction passed straight to
+    ``_answer_session_new(...)``, and one assigned to a local the funnel
+    is handed later -- the success path's shape, where the confirmation
+    is built inside a ``try`` and the fallback inside its ``except``,
+    both landing on one funnel call afterwards.
+
+    Deliberately name-based rather than a dataflow analysis: the point
+    is to force construction through ONE emitter, and a local that is
+    never passed to it still fails.
     """
-    impl = _create_impl_node()
-
-    # Names the funnel is handed, so `_info = SessionInfoEvent(...)` up the
-    # function counts as funnelled.  Deliberately name-based rather than a
-    # dataflow analysis: the point is to force the construction through ONE
-    # emitter, and a local that is never passed to it still fails below.
     funnelled: set[int] = set()
     funnelled_names: set[str] = set()
     for node in ast.walk(impl):
@@ -154,7 +150,15 @@ def test_create_path_answers_only_through_the_funnel() -> None:
         if targets & funnelled_names:
             for inner in ast.walk(node.value):
                 funnelled.add(id(inner))
+    return funnelled
 
+
+def _unfunnelled_answer_calls(impl: ast.AST, funnelled: set[int]) -> List[str]:
+    """Answer-shaped constructions in ``impl`` that bypass the funnel.
+
+    Returns one ``"ErrorEvent() at line N"`` string per offender, which is
+    what the assertion reports; empty means the invariant holds.
+    """
     offenders: List[str] = []
     for node in ast.walk(impl):
         if not isinstance(node, ast.Call):
@@ -164,6 +168,22 @@ def test_create_path_answers_only_through_the_funnel() -> None:
         if id(node) in funnelled:
             continue
         offenders.append(f"{_callee_name(node)}() at line {node.lineno}")
+    return offenders
+
+
+def test_create_path_answers_only_through_the_funnel() -> None:
+    """No answer-shaped event is emitted from the create path unfunnelled.
+
+    Walks every ``Call`` in ``_create_session_impl``.  A construction of
+    ``SessionInfoEvent`` / ``ErrorEvent`` is allowed only when it reaches
+    ``_answer_session_new`` — the call that stamps the correlation id and
+    counts the frame — either as a direct argument, or as the value of a
+    local the funnel is then handed.  The second shape is the success
+    path's: the confirmation is built inside a ``try`` and the fallback
+    inside its ``except``, and both land on one funnel call afterwards.
+    """
+    impl = _create_impl_node()
+    offenders = _unfunnelled_answer_calls(impl, _funnelled_node_ids(impl))
 
     assert not offenders, (
         "session.new answer-shaped events built outside the "
