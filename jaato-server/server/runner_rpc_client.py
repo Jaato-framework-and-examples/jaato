@@ -2110,6 +2110,7 @@ class RunnerRPCClient:
         source_id: Optional[str] = None,
         source_type: Optional[str] = None,
         require_idle: bool = False,
+        attachments: Optional[List[Dict[str, Any]]] = None,
         timeout: Optional[float] = 5.0,
     ) -> str:
         """Ask the SESSION to queue this message, or to say a turn is needed.
@@ -2138,6 +2139,24 @@ class RunnerRPCClient:
             cannot start its own turn, which is why the answer comes back
             here rather than being acted on runner-side.
 
+        AN ATTACHMENT-BEARING OFFER IS IDLE-ONLY (#877, from #845's rule).
+
+        *attachments* does NOT travel on the wire and is not enqueued -- the
+        session's ``_message_queue`` stores strings, and a queued message is
+        folded into the running turn as TEXT (a tool result's model suffix,
+        or a replayed user text message), neither of which has anywhere to
+        put an ``inline_data`` part.  Passing it here forces *require_idle*,
+        so a busy session answers ``"busy"`` with NOTHING enqueued and the
+        caller must drive a turn with the bytes instead of trading them for a
+        ``"queued"``.  The parameter lives on the verb rather than at each
+        call site so the rule holds for every caller: cloning a
+        queue-or-drive decision per caller is what produced #877 in the first
+        place, exactly as ``shared.message_delivery`` records for #612.
+
+        Passing *attachments* alongside an explicit ``require_idle=False`` is
+        not a way to opt out: the flag can only be raised here, never
+        lowered.
+
         Raises:
             RunnerCallError: on transport failure or a malformed response --
             an undelivered message must never be reported as delivered.
@@ -2152,6 +2171,10 @@ class RunnerRPCClient:
             body["source_id"] = source_id
         if source_type is not None:
             body["source_type"] = source_type
+        if attachments:
+            # Not a caller preference: the queue cannot carry bytes, so the
+            # only delivery that keeps them is a drive.  See the docstring.
+            require_idle = True
         if require_idle:
             body["require_idle"] = True
         result = await self._call_named(
@@ -2174,14 +2197,21 @@ class RunnerRPCClient:
         source_id: Optional[str] = None,
         source_type: Optional[str] = None,
         require_idle: bool = False,
+        attachments: Optional[List[Dict[str, Any]]] = None,
         timeout: Optional[float] = 5.0,
     ) -> str:
+        """Thread-safe wrapper around :meth:`session_offer_message`.
+
+        Same contract, including the idle-only rule *attachments* imposes --
+        see that method.
+        """
         return self._run_threadsafe(
             self.session_offer_message(
                 text,
                 source_id=source_id,
                 source_type=source_type,
                 require_idle=require_idle,
+                attachments=attachments,
                 timeout=timeout,
             ),
             timeout=timeout,
