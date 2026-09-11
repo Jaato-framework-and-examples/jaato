@@ -343,7 +343,10 @@ BASELINE: Dict[str, int] = {
     "jaato-server/shared/plugins/permission/channels.py::ConsoleChannel.request_permission": 16,
     # #951: the twenty-odd-exit policy evaluation, unchanged; the public
     # ``check_permission`` is now a thin single-exit tracing wrapper.
-    "jaato-server/shared/plugins/permission/plugin.py::PermissionPlugin._check_permission_impl": 88,
+    # 88 -> 84: #968 routed every resolved-hook call site through
+    # ``_emit_resolved``, which absorbed the four
+    # ``and self._on_permission_resolved`` conjunctions radon was counting.
+    "jaato-server/shared/plugins/permission/plugin.py::PermissionPlugin._check_permission_impl": 84,
     "jaato-server/shared/plugins/permission/plugin.py::PermissionPlugin._get_tool_completions": 16,
     "jaato-server/shared/plugins/permission/plugin.py::PermissionPlugin._handle_channel_response": 16,
     "jaato-server/shared/plugins/permission/plugin.py::PermissionPlugin.execute_permissions": 17,

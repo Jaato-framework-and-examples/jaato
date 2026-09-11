@@ -2210,6 +2210,52 @@ nowhere to look:
 
 Both stages write to `JAATO_TRACE_LOG` / the profile's `trace.session_log`.
 
+**The line is a contract, and it says whether anybody was asked (#968).**
+The trace is the ONE artefact every deployment gets: the ledger's
+`permission-check` row needs a ledger, `_execution_log` never leaves the
+process, and the event (below) is opt-in. So the DECISION line is
+machine-readable by construction — scalar `key=value` fields first, the
+free-text `reason=` **last**, read back by
+`shared.plugins.permission.plugin.parse_decision_trace`:
+
+```
+[PERMISSION] check_permission: DECISION tool=writeNewFile call_id=call_1 \
+  agent=subagent:documentalista session=20260910_115239 allowed=True \
+  method=allow_all asked=False policy=runtime reason='Pre-approved all requests'
+```
+
+`asked=` is the field `method` could not supply, and the one #797 needed:
+`allow_all`, `turn_suspension` and `idle_suspension` are each produced BOTH
+by a pre-approval short-circuit that consulted nobody and by a human
+answering `a` / `t` / `i` at a prompt. It is recorded where the call
+actually reaches the channel, so it is a fact rather than an inference.
+`user_id=` / `approver=` (#859) are written **only when present** — their
+absence is how "nobody was asked" stays distinguishable from "somebody
+answered", so they are never rendered as `None`.
+
+**The event carries every decision only if you ask for it.** Most terminal
+decisions announce nothing on `PermissionResolvedEvent` — suspensions,
+`allow_all`, the trusted bridge, an `askPermission` grant, an evaluator's
+early exit, an uninitialized plugin — and in subagent mode *nothing at
+all*, which is #951's blind spot. `plugin_configs.permission.emit_decision_events:
+true` makes `check_permission`'s single exit emit one for any decision no
+branch announced (never a second for one that did):
+
+```yaml
+plugin_configs:
+  permission:
+    emit_decision_events: true      # default false
+    policy: {defaultPolicy: ask}
+```
+
+Off by default because it is per-tool-call cost on the hot path, and
+measured rather than assumed: the record's own bookkeeping is **~0.7 µs**
+per decision against a ~36 µs baseline the trace write dominates, while the
+fallback emission adds **~9 µs** with a *no-op* hook — and the daemon's real
+hook emits two events (`PermissionResolvedEvent` plus the
+`PermissionStatusEvent` `emit_permission_status()` appends) and serialises
+both to every connected client. A trace line is cheap; an event is not.
+
 ### Interactive Shell Sessions (`shared/plugins/interactive_shell/`)
 
 The `interactive_shell` plugin lets the model drive any user-interactive command by spawning persistent PTY sessions. Unlike `cli/` (which uses `subprocess` and can only run non-interactive commands), this plugin uses `pexpect` to provide a real pseudo-terminal where the model can read output and send input back and forth.
