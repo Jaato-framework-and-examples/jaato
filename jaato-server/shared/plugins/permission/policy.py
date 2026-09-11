@@ -1,7 +1,15 @@
 """Permission policy evaluation engine.
 
 This module provides the core logic for evaluating tool execution permissions
-based on blacklist/whitelist rules. The blacklist always takes priority.
+based on blacklist/whitelist rules. The blacklist always takes priority —
+over the whitelist, and (since #679) over an evaluator ALLOW as well.
+
+Evaluators are the one rule source that is NOT the operator's: they are
+Python loaded from the *workspace* through the ``script_loader`` chain, so
+a repository can ship one. An evaluator DENY short-circuiting is fine —
+deny-wins is the safe direction, and overriding a pre-approval is what
+evaluators are for. An evaluator ALLOW means "no objection from me", never
+"final": it must still survive :meth:`PermissionPolicy.blacklist_veto`.
 
 Optionally includes sanitization checks for:
 - Shell injection prevention
@@ -72,18 +80,49 @@ class PolicyMatch:
     eval_result: Optional['EvalResult'] = None  # Evaluator result for scoped decisions
 
 
+#: Appended to a blacklist match's ``reason`` when the match is what stopped
+#: an evaluator ALLOW.  The audit record must say that an evaluator wanted
+#: this call to run, or "denied by blacklist" reads as though nobody asked.
+EVALUATOR_ALLOW_OVERRIDDEN = (
+    "evaluator ALLOW does not override the blacklist"
+)
+
+
+def overridden_evaluator_allow(veto: PolicyMatch) -> PolicyMatch:
+    """Annotate a blacklist veto that overrode an evaluator ALLOW (#679).
+
+    ``rule_type`` is deliberately left as the blacklist's own
+    (``blacklist`` / ``session_blacklist``): the rule that DECIDED is the
+    operator's, and ``rule_type`` is what #797/#968 read to report the
+    deciding rule.  ``eval_result`` is deliberately NOT attached — the
+    plugin renders an ``eval_result``'s comment into the result payload,
+    and an evaluator's *allow* comment has no business riding on a denial.
+
+    Args:
+        veto: The freshly-built match returned by
+            :meth:`PermissionPolicy.blacklist_veto`.  Mutated in place and
+            returned; it is never a shared object.
+    """
+    veto.reason = f"{veto.reason} ({EVALUATOR_ALLOW_OVERRIDDEN})"
+    return veto
+
+
 @dataclass
 class PermissionPolicy:
     """Policy engine for evaluating tool execution permissions.
 
     Evaluation order:
     1. Sanitization checks (if enabled) -> DENY if violations found
-    2. Permission evaluators (if configured) -> ALLOW/DENY/FALLBACK
-    3. Check blacklist (tools, patterns, arguments) -> DENY if matched
-    4. Check whitelist (tools, patterns, arguments) -> ALLOW if matched
+    2. Permission evaluators (if configured) -> DENY/FALLBACK, or a
+       *provisional* ALLOW that must still clear step 3
+    3. Check blacklist (session, then static: tools, patterns, arguments)
+       -> DENY if matched.  This is ``blacklist_veto`` and it runs both
+       for an evaluator ALLOW and for the normal fall-through.
+    4. Check whitelist (session, then static) -> ALLOW if matched
     5. Apply default_policy
 
-    Blacklist ALWAYS takes priority over whitelist.
+    Blacklist ALWAYS takes priority — over the whitelist, and over an
+    evaluator ALLOW (#679).  Evaluator DENY still short-circuits above it.
     """
 
     default_policy: str = "deny"  # "allow" or "deny"
@@ -113,8 +152,19 @@ class PermissionPolicy:
     def set_evaluators(self, evaluators: Dict[str, Callable]) -> None:
         """Set runtime permission evaluators.
 
-        Evaluators run after sanitization but before blacklist/whitelist checks.
-        They can return ALLOW, DENY, or FALLBACK (continue to normal policy).
+        Evaluators run after sanitization and before the whitelist / default
+        policy.  They can return ALLOW, DENY, or FALLBACK (continue to normal
+        policy):
+
+        - **DENY** short-circuits immediately, overriding whitelist,
+          ``allow_all`` and any other pre-approval.  Deny-wins is the safe
+          direction and tightening a decision is what evaluators are for.
+        - **ALLOW** is provisional.  It skips the whitelist and the default
+          policy, but it does NOT skip the blacklist: the decision is still
+          put to :meth:`blacklist_veto` before it is returned (#679).
+          Evaluators are workspace-supplied code; the blacklist is the
+          operator's.
+        - **FALLBACK** continues to the normal blacklist/whitelist chain.
 
         Args:
             evaluators: Dict mapping tool names (or "default") to evaluate callables.
@@ -141,7 +191,9 @@ class PermissionPolicy:
             if sanitization_match:
                 return sanitization_match
 
-        # 0.5. Run permission evaluators (after sanitization, before blacklist)
+        # 0.5. Run permission evaluators (after sanitization).  A DENY here
+        # short-circuits; an ALLOW is provisional and is put to the blacklist
+        # below before it is honored (#679).
         if self._evaluators and eval_context is not None:
             eval_result = run_evaluator(self._evaluators, tool_name, args, eval_context)
             decision = eval_result.decision
@@ -173,6 +225,11 @@ class PermissionPolicy:
                 EvalDecision.ALLOW_ALL,
                 EvalDecision.ALLOW_WITH_COMMENT,
             ):
+                # #679: an evaluator ALLOW is "no objection from me", not
+                # "final".  The operator's deny tiers still decide.
+                veto = self.blacklist_veto(tool_name, args, signature)
+                if veto is not None:
+                    return overridden_evaluator_allow(veto)
                 return PolicyMatch(
                     decision=PermissionDecision.ALLOW,
                     reason="Evaluator granted access",
@@ -180,16 +237,8 @@ class PermissionPolicy:
                     eval_result=eval_result,
                 )
 
-        # 1. Check session blacklist first (highest priority)
-        if self._matches_session_blacklist(tool_name, signature):
-            return PolicyMatch(
-                decision=PermissionDecision.DENY,
-                reason=f"Tool '{tool_name}' is blacklisted for this session",
-                rule_type="session_blacklist"
-            )
-
-        # 2. Check static blacklist
-        blacklist_match = self._check_blacklist(tool_name, args, signature)
+        # 1-2. Session blacklist, then static blacklist (highest priority)
+        blacklist_match = self.blacklist_veto(tool_name, args, signature)
         if blacklist_match:
             return blacklist_match
 
@@ -227,6 +276,45 @@ class PermissionPolicy:
                 reason="No matching rule, requires channel approval",
                 rule_type="default"
             )
+
+    def blacklist_veto(
+        self,
+        tool_name: str,
+        args: Dict[str, Any],
+        signature: Optional[str] = None,
+    ) -> Optional[PolicyMatch]:
+        """The operator's deny tiers, asked as one question.
+
+        Returns the :class:`PolicyMatch` of the first blacklist that refuses
+        this call — the **session** blacklist (``rule_type`` ==
+        ``"session_blacklist"``), then the **static** one (``"blacklist"``) —
+        or ``None`` when neither does.
+
+        Public, and the name is the point: this is the veto an evaluator
+        ALLOW has to survive (#679).  :meth:`check` calls it for the normal
+        fall-through *and* for a provisional evaluator ALLOW, and
+        ``PermissionPlugin._check_permission_impl`` calls it from the one
+        evaluator branch that returns without reaching :meth:`check` at all
+        (``ALLOW_WITH_COMMENT``) — so the tiers are written once and every
+        ALLOW path asks the same object.
+
+        Args:
+            tool_name: Name of the tool being called.
+            args: Arguments being passed to the tool.
+            signature: Pre-built command signature; computed from
+                ``tool_name``/``args`` when omitted.
+        """
+        if signature is None:
+            signature = self._build_signature(tool_name, args)
+
+        if self._matches_session_blacklist(tool_name, signature):
+            return PolicyMatch(
+                decision=PermissionDecision.DENY,
+                reason=f"Tool '{tool_name}' is blacklisted for this session",
+                rule_type="session_blacklist"
+            )
+
+        return self._check_blacklist(tool_name, args, signature)
 
     def _check_sanitization(
         self, tool_name: str, args: Dict[str, Any], signature: str

@@ -354,7 +354,7 @@ BASELINE: Dict[str, int] = {
     # 88 -> 84: #968 routed every resolved-hook call site through
     # ``_emit_resolved``, which absorbed the four
     # ``and self._on_permission_resolved`` conjunctions radon was counting.
-    "jaato-server/shared/plugins/permission/plugin.py::PermissionPlugin._check_permission_impl": 84,
+    "jaato-server/shared/plugins/permission/plugin.py::PermissionPlugin._check_permission_impl": 83,
     "jaato-server/shared/plugins/permission/plugin.py::PermissionPlugin._get_tool_completions": 16,
     "jaato-server/shared/plugins/permission/plugin.py::PermissionPlugin._handle_channel_response": 16,
     "jaato-server/shared/plugins/permission/plugin.py::PermissionPlugin.execute_permissions": 17,
