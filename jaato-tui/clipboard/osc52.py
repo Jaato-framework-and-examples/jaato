@@ -16,8 +16,11 @@ OSC52_SCREEN_MAX_BYTES = 16384
 def _truncate_utf8_safe(text: str, max_bytes: int) -> str:
     """Truncate text to fit within max_bytes when UTF-8 encoded.
 
-    Ensures truncation doesn't corrupt UTF-8 by splitting multi-byte characters.
-    Uses a safe approach that backs up past any incomplete sequences.
+    Ensures truncation doesn't corrupt UTF-8 by splitting multi-byte
+    characters, while spending every byte of the budget that a WHOLE
+    character fits into.  A cut that lands exactly on a character
+    boundary keeps that character; only a genuinely split sequence is
+    dropped.
 
     Args:
         text: The text to truncate.
@@ -33,21 +36,29 @@ def _truncate_utf8_safe(text: str, max_bytes: int) -> str:
     # Truncate at byte boundary
     truncated = encoded[:max_bytes]
 
-    # Back up past any UTF-8 continuation bytes (10xxxxxx pattern)
-    # This handles the case where we cut in the middle of a multi-byte char
-    while truncated and (truncated[-1] & 0xC0) == 0x80:
-        truncated = truncated[:-1]
+    # Walk back to the lead byte of the FINAL sequence.  Continuation
+    # bytes are 10xxxxxx; a lead byte is not.
+    i = len(truncated) - 1
+    while i >= 0 and (truncated[i] & 0xC0) == 0x80:
+        i -= 1
 
-    # If last byte is a multi-byte start (11xxxxxx), check if sequence is complete
-    if truncated:
-        last = truncated[-1]
-        if last >= 0xF0:  # 4-byte sequence start
-            # Would need 3 continuation bytes, but we backed up past them
-            truncated = truncated[:-1]
-        elif last >= 0xE0:  # 3-byte sequence start
-            truncated = truncated[:-1]
-        elif last >= 0xC0:  # 2-byte sequence start
-            truncated = truncated[:-1]
+    # Drop that final sequence ONLY if the cut actually split it.  The
+    # pre-fix code stripped the continuation bytes and then the lead
+    # byte unconditionally, so a cut landing exactly on a character
+    # boundary still lost the whole last character: `"日本語"` at 6
+    # bytes returned `"日"`, spending 3 of its 6 permitted bytes on
+    # nothing.  Silently lossy, at a size boundary, for non-ASCII users
+    # only -- which is why it shipped green (#736).
+    if i >= 0:
+        lead = truncated[i]
+        need = (
+            4 if lead >= 0xF0
+            else 3 if lead >= 0xE0
+            else 2 if lead >= 0xC0
+            else 1
+        )
+        if len(truncated) - i < need:
+            truncated = truncated[:i]
 
     return truncated.decode("utf-8") if truncated else ""
 

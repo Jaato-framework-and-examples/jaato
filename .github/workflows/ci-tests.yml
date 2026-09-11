@@ -31,6 +31,16 @@ jobs:
   # pure-Python, in the `dev` extra) rather than a behavioural test, so it
   # adds ~6s and no new failure mode to a job that must stay reliable.
   #
+  # And the CI-coverage ratchet: every test_*.py on disk must be named by
+  # a step of a workflow that fires on a COMMIT, with a commented
+  # UNCOVERED allowlist for deliberate exclusions. The recurring failure
+  # it closes is that nothing asserted the mapping between test files and
+  # the paths CI hands to pytest -- eight directories and ~1560 tests
+  # accumulated outside it, 31 of them already red, and each of the five
+  # earlier instances was found by someone noticing (#736). It is a
+  # source + YAML scan that imports none of the tree, so it costs ~5s and
+  # adds no new failure mode here.
+  #
   # Kept deliberately light + reliable: the only optional backend any of
   # these guards imports is the interactive_shell plugin's `pexpect`
   # (.[interactive]). No system-dependency extras (notably `kerberos`,
@@ -76,6 +86,7 @@ jobs:
             jaato-server/shared/tests/test_a_dead_stream_is_not_a_finished_turn.py \
             jaato-server/shared/tests/test_env_scope_catalog.py \
             jaato-server/shared/tests/test_docs_do_not_contradict_the_tree.py \
+            jaato-server/shared/tests/test_ci_runs_every_test_file.py \
             jaato-server/shared/tests/test_every_guard_detects_its_own_reversion.py
 
   # ---------------------------------------------------------------
@@ -201,10 +212,59 @@ jobs:
           # three files had not been touched since May while the code moved on
           # through August, and 4 of the 7 budget_control test files had never
           # executed in CI at all.
-          - name: server/tests (daemon tier)
+          #
+          # The daemon tier is SIX trees, not one. This leg was named
+          # "daemon tier" while its path named a single subdirectory of it,
+          # and the other five gated nothing -- #736. A reader checking "is
+          # the daemon covered?" saw a step whose NAME said yes.
+          #
+          # Each tree keeps its OWN pytest process, for the
+          # process-global-state reason documented at the top of this matrix;
+          # `rc` collects the verdicts so one red tree does not hide the
+          # others' failure lists. Same shape as the SDK leg below, and the
+          # same reason.
+          #
+          # Measured locally: +30s on top of this leg's ~114s (runner/tests
+          # 712 tests / 7.6s, runner_rpc_handlers 199 / 1.4s, egress_proxy
+          # 57 / 10.6s, root-level server/test_*.py 178 / 7.9s,
+          # jaato-server/tests 3 passed + 1 apparmor-gated skip / 2.2s,
+          # test_safe_pool 5 / 0.5s). 1154 tests that gated nothing -- and
+          # 28 of them were RED, which is what the fix commits preceding
+          # this one were for. No new runner, no install change: all six
+          # run under the `.[all]` install this job already does.
+          # egress_proxy is the only one with environment surface (it binds
+          # loopback sockets) and is the one to watch on the first real CI
+          # run.
+          #
+          # test_safe_pool.py is a shared-tier FILE parked on this leg
+          # deliberately: it is 0.5s, and the `shared/tests` leg is the one
+          # already sitting near the 20-minute cap.
+          #
+          # jaato-server/tests/ is directory-shaped on purpose. It holds only
+          # integration/ today, and a directory-shaped path cannot silently
+          # miss a file the way a hand-listed one can -- which is also why
+          # the root-level files below are a GLOB rather than a list. They
+          # sit directly in jaato-server/server/ rather than in
+          # server/tests/; moving them there would make this line
+          # unnecessary, and is left as its own change.
+          - name: server (daemon tier)
             run: |
+              rc=0
               pytest -q --continue-on-collection-errors \
-                jaato-server/server/tests/
+                jaato-server/server/tests/ || rc=1
+              pytest -q --continue-on-collection-errors \
+                jaato-server/server/runner/tests/ || rc=1
+              pytest -q --continue-on-collection-errors \
+                jaato-server/server/runner_rpc_handlers/tests/ || rc=1
+              pytest -q --continue-on-collection-errors \
+                jaato-server/server/egress_proxy/tests/ || rc=1
+              pytest -q --continue-on-collection-errors \
+                jaato-server/server/test_*.py || rc=1
+              pytest -q --continue-on-collection-errors \
+                jaato-server/tests/ || rc=1
+              pytest -q --continue-on-collection-errors \
+                jaato-server/shared/test_safe_pool.py || rc=1
+              exit $rc
 
           - name: shared/plugins (plugin tier)
             run: |
@@ -218,10 +278,23 @@ jobs:
           # (~2s of tests), and the client is where #704 shipped — a daemon
           # event that no handler on the other end ever answered, which hung
           # the turn behind it.
+          #
+          # jaato-tui/clipboard/tests is a SECOND directory in the same
+          # package that no workflow ran (#736), and the one that proves
+          # the cost is not only rot: its three failures were a real,
+          # user-visible defect in `_truncate_utf8_safe`, which discarded a
+          # whole UTF-8 character that fit whenever the byte limit landed
+          # on a character boundary. Silently lossy, for non-ASCII users
+          # only -- so it shipped green-looking behind a suite nobody ran.
+          # Own `pytest` call + `rc`, per the isolation note above.
           - name: jaato-tui (client tier)
             run: |
+              rc=0
               pytest -q --continue-on-collection-errors \
-                jaato-tui/tests/
+                jaato-tui/tests/ || rc=1
+              pytest -q --continue-on-collection-errors \
+                jaato-tui/clipboard/tests/ || rc=1
+              exit $rc
 
           # Three directories that no workflow ran, plus live conformance.
           #
