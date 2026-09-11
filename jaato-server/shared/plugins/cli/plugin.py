@@ -31,6 +31,10 @@ from jaato_sdk.plugins.model_provider.types import CancelledException
 from shared.path_utils import msys2_to_windows_path
 from shared.subprocess_runner import run_command, requires_shell, RunResult
 from shared.secret_scrub import DEFAULT_SECRET_ENV_PATTERNS, resolve_scrub_patterns
+from shared.cli_path_policy import (
+    CLI_EXE_NOT_FOUND_HINT,
+    precheck_cli_args,
+)
 from shared.trace import trace as _trace_write
 from shared.command_analysis import (
     Segment,
@@ -203,7 +207,12 @@ class CLIToolPlugin(BackgroundCapableMixin, RunnerForwardingMixin):
     automatically converted to background tasks.
 
     Configuration:
-        extra_paths: List of additional paths to add to PATH when executing commands.
+        extra_paths: Additional directories APPENDED to PATH when executing
+            commands.  Operator-only (#697): a caller-supplied ``extra_paths``
+            in a tool call is refused, never merged, because extending PATH
+            changes which binary a command name resolves to while the
+            permission decision is keyed on the command text alone.  See
+            :mod:`shared.cli_path_policy`.
         max_output_chars: Maximum characters to return from stdout/stderr (default: 50000).
         auto_background_threshold: Seconds before auto-backgrounding (default: 10.0).
         background_max_workers: Max concurrent background tasks (default: 4).
@@ -295,7 +304,9 @@ class CLIToolPlugin(BackgroundCapableMixin, RunnerForwardingMixin):
 
         Args:
             config: Optional dict with:
-                - extra_paths: Additional PATH entries
+                - extra_paths: Additional PATH entries, appended (#697).  This
+                  operator surface is the ONLY one: the same key in a tool
+                  call is refused.
                 - max_output_chars: Max characters to return (default: 50000)
                 - auto_background_threshold: Seconds before auto-backgrounding (default: 10.0)
                 - background_max_workers: Max concurrent background tasks (default: 4)
@@ -529,7 +540,16 @@ class CLIToolPlugin(BackgroundCapableMixin, RunnerForwardingMixin):
                     "type": "array",
                     "items": {"type": "string"},
                     "default": [],
-                    "description": "Additional PATH entries to prepend",
+                    "description": (
+                        "Additional PATH entries, APPENDED to the inherited "
+                        "PATH so they can supply a command name the base PATH "
+                        "lacks but can never shadow a system binary. The "
+                        "ordering is a security property (#697), not "
+                        "formatting. Operator-only: a value passed in a tool "
+                        "call is refused, because extending PATH changes "
+                        "which binary a command resolves to and the "
+                        "permission decision is keyed on the command text."
+                    ),
                 },
                 "max_output_chars": {
                     "type": "integer",
@@ -880,7 +900,10 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
         incrementally and route them to the provided callbacks.
 
         Args:
-            args: Dict containing 'command' and optionally 'args'.
+            args: Dict containing 'command' and optionally 'args'.  A caller-
+                supplied ``extra_paths`` is REFUSED, not honoured (#697); the
+                refusal is reported through ``on_stderr`` / ``on_returncode``
+                like any other pre-spawn refusal, and nothing is executed.
             on_stdout: Callback for stdout data chunks.
             on_stderr: Callback for stderr data chunks.
             on_returncode: Callback for exit code.
@@ -889,12 +912,23 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
             Dict containing stdout, stderr and returncode.
         """
         try:
+            # Is this call runnable as given?  Refuses a caller-supplied
+            # ``extra_paths`` — PATH extension decides which binary a command
+            # name resolves to, and the permission decision is keyed on the
+            # command TEXT, so a per-call value would let an approval for
+            # ``deploy --prod`` cover whatever ``deploy`` resolves to under a
+            # PATH the model chose in the same call (#697) — and an absent
+            # command, as before.  Nothing is spawned either way.
+            refusal = precheck_cli_args(args, surface='cli plugin')
+            if refusal is not None:
+                self._trace(f"execute_streaming: refused — {refusal['error']}")
+                on_stderr(refusal['error'].encode('utf-8'))
+                on_returncode(1)
+                return refusal
+
             command = args.get('command')
             arg_list = args.get('args')
-            extra_paths = args.get('extra_paths', self._extra_paths)
-
-            if not command:
-                return {'error': 'cli_based_tool: command must be provided'}
+            extra_paths = self._extra_paths
 
             cmd_preview = command[:100] + "..." if len(command) > 100 else command
             self._trace(f"execute_streaming: {cmd_preview}")
@@ -909,7 +943,11 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
                 on_returncode(refusal['returncode'])
                 return refusal
 
-            # Prepare environment
+            # Prepare environment.  APPEND_ORDER_RATIONALE: extra_paths are
+            # appended, never prepended, so a configured directory can supply
+            # a command name the base PATH lacks but can never shadow an
+            # existing binary.  The ordering is a security property, not
+            # formatting — do not "fix" it to match a docstring.
             env = os.environ.copy()
             if extra_paths:
                 path_sep = os.pathsep
@@ -951,7 +989,7 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
                 else:
                     return {
                         'error': f"cli_based_tool: executable '{exe}' not found in PATH",
-                        'hint': 'Configure extra_paths or provide full path to the executable.'
+                        'hint': CLI_EXE_NOT_FOUND_HINT
                     }
 
             # Start process with pipes.
@@ -1469,18 +1507,28 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
         the wrapper falls through to this in-process path.
 
         Args:
-            args: Dict containing 'command' and optionally 'args' and 'extra_paths'.
+            args: Dict containing 'command' and optionally 'args'.  A caller-
+                supplied ``extra_paths`` is REFUSED, not honoured (#697): PATH
+                extension decides which binary a command name resolves to and
+                is operator-configured via ``plugin_configs.cli.extra_paths``.
 
         Returns:
-            Dict containing stdout, stderr and returncode; on failure contains error.
+            Dict containing stdout, stderr and returncode; on failure contains
+            error — including the ``extra_paths`` refusal, which returns
+            ``error`` + ``hint`` without spawning anything.
         """
         try:
+            # Is this call runnable as given?  A caller-supplied
+            # ``extra_paths`` is refused (#697) and an absent command is an
+            # error, as before — see _execute_streaming for the reasoning.
+            refusal = precheck_cli_args(args, surface='cli plugin')
+            if refusal is not None:
+                self._trace(f"execute: refused — {refusal['error']}")
+                return refusal
+
             command = args.get('command')
             arg_list = args.get('args')
-            extra_paths = args.get('extra_paths', self._extra_paths)
-
-            if not command:
-                return {'error': 'cli_based_tool: command must be provided'}
+            extra_paths = self._extra_paths
 
             # Truncate command for logging (avoid huge commands in trace)
             cmd_preview = command[:100] + "..." if len(command) > 100 else command
@@ -1500,7 +1548,8 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
                     [shlex.quote(command)] + [shlex.quote(a) for a in arg_list]
                 )
 
-            # Build extra env for PATH extension
+            # Build extra env for PATH extension.  APPEND_ORDER_RATIONALE:
+            # appended, never prepended — see _execute_streaming.
             extra_env: Optional[Dict[str, str]] = None
             if extra_paths:
                 path_sep = os.pathsep
@@ -1563,7 +1612,7 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
             if r.returncode == 127 and "not found in PATH" in r.stderr:
                 return {
                     'error': f"cli_based_tool: {r.stderr}",
-                    'hint': 'Configure extra_paths or provide full path to the executable.'
+                    'hint': CLI_EXE_NOT_FOUND_HINT
                 }
 
             result: Dict[str, Any] = {

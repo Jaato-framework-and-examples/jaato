@@ -355,6 +355,30 @@ class PermissionPolicy:
 
         For CLI tools, this extracts the command string.
         For other tools, it creates a representation like "tool_name(arg1=val1, ...)".
+
+        **The signature is the whole decision.**  Every tier below —
+        sanitization, both blacklists, both whitelists — matches against
+        this string and nothing else, and it is what the #951/#968 DECISION
+        trace line reports as the thing that was judged.  For
+        ``cli_based_tool`` it is the command text, so an argument that
+        changes *what actually runs* without appearing in that text is
+        invisible to every rule an operator wrote.
+
+        That is the contract a caller-supplied ``extra_paths`` broke (#697):
+        it altered ``PATH``, and therefore which binary ``shutil.which``
+        resolved a command name to, while producing a signature identical to
+        the call without it.  The fix keeps this method as-is and closes the
+        hole at the other end — ``shared.cli_path_policy`` refuses the
+        argument at every execution site, so PATH extension is
+        operator-configured and cannot vary between approval and execution.
+        Adding it here instead would have prompted a human to authorize a
+        call that is refused regardless.
+
+        **So the invariant for anyone adding a ``cli_based_tool`` argument
+        is:** it must either be reflected in this signature, or be refused
+        when it comes from the caller.  An argument that is honoured and
+        unsignatured means the approved string and the executed thing are
+        decided by two different inputs.
         """
         if tool_name == "cli_based_tool":
             command = args.get("command", "")
