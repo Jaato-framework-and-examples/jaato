@@ -7,9 +7,35 @@ prompts, wizards, debuggers, SSH sessions, etc.
 Design philosophy: the model reads whatever the process outputs and makes
 its own decisions about what to type next. No expect patterns required —
 the intelligence is in the model, not the tool.
+
+Containment (#722, #503)
+========================
+This plugin spawns a real PTY and is strictly more capable than ``cli``,
+which has always refused paths outside the session workspace.  Until #722
+it refused nothing, so ``shell_spawn("cat /etc/hostname")`` read a file
+``cli`` had just declined.  Three layers answer that now, and they are
+deliberately not equal:
+
+1. **The spawn command** is a shell command by construction, so it is
+   checked exactly as ``cli`` checks one — same analyzer, same workspace
+   rules (:mod:`shared.plugins.command_containment`) — and **fails closed**
+   on a command the analyzer cannot model.
+2. **Text sent to a live session** is checked too, but **fails open** on a
+   parse failure: that text may be Python, SQL or a password, and refusing
+   everything the shell grammar cannot parse would refuse most legitimate
+   input.  It catches the direct attempt (``cat /etc/shadow``) and claims
+   nothing more.
+3. **Kernel confinement** is the only real boundary for a live PTY, whose
+   working directory drifts under ``cd`` and which can name paths through
+   channels no string check sees.  When the runner installed an AppArmor
+   child-profile transition the spawned child enters it; when it did not,
+   the plugin says so at WARNING once per session rather than running
+   unconfined in silence, and ``require_confinement: true`` makes that
+   posture fail closed instead.
 """
 
 import json
+import logging
 import os
 import tempfile
 import threading
@@ -28,9 +54,13 @@ from .ansi import strip_ansi
 from shared.ai_tool_runner import get_current_tool_output_callback
 from shared.plugins.runner_forwarding import RunnerForwardingMixin
 from shared.secret_scrub import DEFAULT_SECRET_ENV_PATTERNS, resolve_scrub_patterns
+from shared.command_analysis import UnanalyzableCommand
+from ..command_containment import first_denied_path
 from ..workspace_venv import (
     resolve_venv_path, ensure_workspace_venv, pip_apparmor_rules,
 )
+
+logger = logging.getLogger(__name__)
 
 
 # Maximum concurrent interactive sessions
@@ -61,12 +91,23 @@ class InteractiveShellPlugin(RunnerForwardingMixin):
     The active backend is exposed as ``session._BACKEND`` and logged in
     the plugin's trace output at ``initialize()`` and ``spawn()`` time.
 
+    Containment: every spawn command, and every text sent to a live
+    session, is checked against the session workspace before it reaches
+    the PTY (see the module docstring for the three layers and why the
+    two string checks fail in opposite directions).  ``workspace_root``
+    is both the check's boundary and the spawn ``cwd``; with no workspace
+    root configured there is no sandbox and nothing is refused, exactly
+    as in ``cli``.
+
     Configuration:
         max_sessions: Maximum concurrent sessions (default: 8).
         max_lifetime: Max session lifetime in seconds (default: 600).
         max_idle: Max idle time before reaping in seconds (default: 300).
         idle_timeout: Seconds of silence for output settling (default: 0.5).
-        workspace_root: Working directory for spawned processes.
+        workspace_root: Working directory for spawned processes, and the
+            containment boundary their commands are checked against.
+        require_confinement: Refuse to spawn at all when no AppArmor
+            child-profile transition is installed (default: False).
     """
 
     def __init__(self):
@@ -89,6 +130,21 @@ class InteractiveShellPlugin(RunnerForwardingMixin):
         # ON by default — the framework set applies until ``initialize``
         # resolves the operator's ``scrub_secret_env`` knob.
         self._scrub_secret_env: List[str] = list(DEFAULT_SECRET_ENV_PATTERNS)
+        # Confinement posture (#722).  A PTY child is a separate process,
+        # the same risk class as a ``cli`` subprocess, so the default is
+        # ``cli``'s: run, with the string containment below, and ANNOUNCE
+        # that the kernel boundary is absent rather than inheriting the
+        # old answer ("unconfined, silently").  ``require_confinement``
+        # takes the notebook plugin's posture instead and fails closed.
+        # ``_unconfined_announced`` keeps the WARNING to once per
+        # initialize() — it is a property of the deployment, not of the
+        # spawn, and one line per spawn would be noise nobody reads.
+        self._require_confinement = False
+        self._unconfined_announced = False
+        # Plugin registry, for the operator's authorized / denied external
+        # paths.  Wired by set_plugin_registry(); None means "no grants,
+        # no denials", not an error.
+        self._plugin_registry = None
         self._agent_name: Optional[str] = None
         self._initialized = False
         self._tool_output_callback: Optional[Callable[[str], None]] = None
@@ -148,7 +204,13 @@ class InteractiveShellPlugin(RunnerForwardingMixin):
                 - max_lifetime: Session lifetime ceiling in seconds (default: 600)
                 - max_idle: Max idle seconds before reaping (default: 300)
                 - idle_timeout: Output settling time in seconds (default: 0.5)
-                - workspace_root: Working directory for spawned processes
+                - workspace_root: Working directory for spawned processes,
+                  and the boundary their commands are contained to (#722).
+                  Absent/empty = no sandboxing, as in ``cli``.
+                - require_confinement: Refuse every spawn when the runner
+                  installed no AppArmor child-profile transition (default
+                  False — announce at WARNING and run, which is ``cli``'s
+                  posture for the same class of subprocess)
                 - agent_name: Agent context for trace logging
                 - scrub_secret_env: env-var name globs stripped from every
                   spawned session's inherited environment ('default' /
@@ -174,6 +236,8 @@ class InteractiveShellPlugin(RunnerForwardingMixin):
                     )
             if 'workspace_venv' in config:
                 self._workspace_venv = config['workspace_venv']
+            if 'require_confinement' in config:
+                self._require_confinement = bool(config['require_confinement'])
 
         # Secrets-broker scrub (#503's second gap, closed by #863): absent
         # means the framework set; ``none`` is the announced opt-out; a
@@ -183,12 +247,14 @@ class InteractiveShellPlugin(RunnerForwardingMixin):
         ))
 
         self._initialized = True
+        self._unconfined_announced = False
         self._start_reaper()
         self._trace(
             f"initialize: max_sessions={self._max_sessions}, "
             f"max_lifetime={self._max_lifetime}, "
             f"max_idle={self._max_idle}, "
             f"workspace_root={self._workspace_root}, "
+            f"require_confinement={self._require_confinement}, "
             f"backend={_BACKEND or 'NONE'}, "
             f"msys2={IS_MSYS2}"
         )
@@ -232,7 +298,13 @@ class InteractiveShellPlugin(RunnerForwardingMixin):
         Survives the reset:
         - ``_max_sessions``, ``_max_idle``, ``_max_lifetime``,
           ``_idle_timeout``: workspace-tier config.
-        - ``_workspace_root``: constant within cascade.
+        - ``_workspace_root``: constant within cascade.  It is also the
+          containment boundary (#722), and the next session's
+          ``initialize()`` re-states it.
+        - ``_require_confinement``, ``_unconfined_announced``: the
+          confinement posture is workspace-tier config like the caps
+          above; the announcement latch is re-armed by the next
+          ``initialize()``, so each session says it once.
         - ``_initialized``: stays True (reaper still running).
         - Reaper thread + control flags: keep alive between sessions.
         - ``_cgroup_attach``, ``_runtime_limits``,
@@ -292,6 +364,21 @@ class InteractiveShellPlugin(RunnerForwardingMixin):
                         "scrub_secret_env for this surface."
                     ),
                 },
+                "require_confinement": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": (
+                        "Refuse every shell_spawn when the runner installed "
+                        "no AppArmor child-profile transition, i.e. when the "
+                        "spawned PTY would run without a kernel-enforced "
+                        "boundary. Default false: the plugin spawns and "
+                        "announces the absence at WARNING (a PTY child is a "
+                        "separate process, the same risk class as a cli "
+                        "subprocess, which does not fail closed either). Set "
+                        "true on hosts where the workspace boundary must be "
+                        "kernel-enforced or not offered at all."
+                    ),
+                },
                 "workspace_venv": {
                     "type": "string",
                     "default": "",
@@ -336,6 +423,25 @@ class InteractiveShellPlugin(RunnerForwardingMixin):
         else:
             self._workspace_root = None
         self._trace(f"set_workspace_path: {self._workspace_root}")
+
+    def set_plugin_registry(self, registry) -> None:
+        """Receive the plugin registry, for external-path authorization.
+
+        Called by ``PluginRegistry.expose_tool`` during plugin wiring (see
+        "Plugin Auto-Wiring" in the root ``CLAUDE.md``).  The registry
+        carries the operator's ``sandbox add`` grants and explicit denials,
+        which
+        :func:`~shared.plugins.command_containment.path_within_workspace`
+        consults — so a path the operator authorised outside the workspace
+        is reachable from a shell exactly as it is from ``cli``, and a
+        denied one is refused in both.  ``None`` until this is called,
+        which the containment check reads as "no grants, no denials"
+        rather than as an error.
+
+        Args:
+            registry: The ``PluginRegistry`` instance.
+        """
+        self._plugin_registry = registry
 
     def set_runtime_limits(self, attach_callback, limits) -> None:
         """Receive per-session cgroup attach + app-layer caps from the executor.
@@ -418,6 +524,130 @@ class InteractiveShellPlugin(RunnerForwardingMixin):
             cgroup_cb()
 
         return _composite
+
+    # --- Path containment (#722, #503) ---
+
+    def _containment_refusal(
+        self,
+        command: str,
+        tool: str,
+        on_parse_error: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Refuse *command* when it names a path outside the workspace.
+
+        The plugin-side half of #722.  ``cli`` has always checked the paths
+        in a command against the session workspace; this is the same check,
+        on the same analyzer, applied at the two points where a string this
+        plugin controls reaches a shell (``shell_spawn``'s command and
+        ``shell_input``'s text).
+
+        Args:
+            command: The string about to reach the PTY.
+            tool: Tool name, used only to prefix the refusal so the model
+                can tell which call was refused.
+            on_parse_error: ``"deny"`` or ``"allow"`` — what an unparseable
+                string means.  ``shell_spawn`` passes ``"deny"`` (its
+                command IS a shell command, so a string the analyzer cannot
+                model is refused, as in ``cli``); ``shell_input`` passes
+                ``"allow"`` (its text is whatever the running program
+                reads — Python, SQL, a password — and a shell-grammar
+                failure there is the normal case, not an evasion).
+
+        Returns:
+            ``None`` when the command may run; otherwise a ready-to-return
+            executor result whose ``error`` names the offending path and
+            the boundary, because a refusal the model cannot distinguish
+            from a broken environment costs it a turn guessing (see the
+            ``/dev/null`` lesson in :mod:`shared.plugins.sandbox_utils`).
+        """
+        if not self._workspace_root or not command:
+            return None
+
+        try:
+            denied = first_denied_path(
+                command,
+                self._workspace_root,
+                self._plugin_registry,
+                on_parse_error=on_parse_error,
+            )
+        except UnanalyzableCommand as exc:
+            self._trace(f"containment: {tool} unparseable, refused ({exc})")
+            return {
+                'error': (
+                    f'{tool}: refused — this command cannot be parsed as a '
+                    f'shell command ({exc}), so its paths cannot be checked '
+                    f'against the workspace. Rewrite it with balanced '
+                    f'quotes and complete redirections.'
+                ),
+            }
+
+        if denied is None:
+            return None
+
+        path, mode = denied
+        self._trace(
+            f"containment: {tool} blocked path={path!r} mode={mode} "
+            f"workspace={self._workspace_root}"
+        )
+        return {
+            'error': (
+                f'{tool}: refused — {path!r} is outside the session '
+                f'workspace ({self._workspace_root}), which this session '
+                f'may not {mode}. Use a path inside the workspace.'
+            ),
+        }
+
+    def _confinement_refusal(self) -> Optional[Dict[str, Any]]:
+        """Apply the confinement posture to one spawn.
+
+        A live PTY cannot be contained by reading strings — its working
+        directory drifts under ``cd`` and a program inside it can name
+        paths through channels no analyzer sees — so the kernel boundary
+        is the real one, and whether it is present is worth stating
+        (#722).  The plugin's evidence for it is
+        ``_apparmor_child_transition``: the runner installs that callback
+        only when it is itself confined, and it is what puts the forked
+        child into the per-session ``//child`` profile.
+
+        Returns:
+            ``None`` when the spawn may proceed (confined, or unconfined
+            and permitted).  Otherwise an executor result refusing the
+            spawn, which happens only under ``require_confinement``.
+
+        Side effects:
+            Announces the unconfined posture once per ``initialize()``, at
+            WARNING — the same treatment ``scrub_secret_env: none`` and
+            ``--ws-unsafe-no-auth`` get, so running without the kernel
+            boundary is never silent.
+        """
+        if self._apparmor_child_transition is not None:
+            return None
+
+        if self._require_confinement:
+            self._trace("spawn: refused — require_confinement and no AppArmor transition")
+            return {
+                'error': (
+                    'shell_spawn: refused — this deployment requires '
+                    'kernel-enforced confinement for interactive shells '
+                    '(plugin_configs.interactive_shell.require_confinement) '
+                    'and no AppArmor child profile is active for this '
+                    'session.'
+                ),
+            }
+
+        if not self._unconfined_announced:
+            self._unconfined_announced = True
+            logger.warning(
+                "interactive_shell: spawning PTY sessions WITHOUT kernel "
+                "confinement (no AppArmor child-profile transition is "
+                "installed). Commands and typed input are checked against "
+                "the workspace (%s), but a live PTY can reach paths that "
+                "check cannot see. Set "
+                "plugin_configs.interactive_shell.require_confinement: true "
+                "to refuse spawning instead.",
+                self._workspace_root or "no workspace root configured",
+            )
+        return None
 
     # --- Tool schemas ---
 
@@ -666,6 +896,13 @@ COMMON MISTAKES:
 - Losing track of the session_id. Note the session_id from shell_spawn
   and reuse it consistently.
 
+WORKSPACE BOUNDARY:
+Sessions are confined to the session workspace, exactly as cli_based_tool
+is. A spawn command or typed input naming a path outside it is REFUSED
+with an error naming that path — the command does not run and nothing is
+sent to the session. Re-issuing it unchanged will be refused again; use a
+path inside the workspace, or ask the user to authorize the outside path.
+
 ENVIRONMENT VARIABLES:
 Spawned processes inherit session environment variables. When a command
 needs credentials, use shell variable references — do NOT attempt to
@@ -692,6 +929,38 @@ IMPORTANT NOTES:
 
     # --- Executors ---
 
+    def _allocate_session_id(self, session_name: Optional[str]) -> str:
+        """Pick an unused id for a new session.
+
+        **Caller must hold ``self._lock``** — this reads ``_sessions`` and
+        writes ``_session_counter``, and the id it returns is only unique
+        for as long as that lock is held.  ``_exec_spawn`` is the single
+        caller and registers the session under the returned id inside the
+        same critical section.
+
+        Args:
+            session_name: The caller's preferred name, or ``None`` for an
+                auto-generated ``session_<n>``.  A name already in use
+                gains the lowest free ``_<suffix>``, so a model that
+                re-uses a name gets a second session rather than an error
+                (and the returned id tells it which it got).
+
+        Returns:
+            An id not currently present in ``self._sessions``.
+        """
+        if not session_name:
+            session_id = f"session_{self._session_counter}"
+            self._session_counter += 1
+            return session_id
+
+        if session_name not in self._sessions:
+            return session_name
+
+        suffix = 1
+        while f"{session_name}_{suffix}" in self._sessions:
+            suffix += 1
+        return f"{session_name}_{suffix}"
+
     def _exec_spawn(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Execute shell_spawn: start a new interactive session.
 
@@ -700,10 +969,34 @@ IMPORTANT NOTES:
         ``popen_spawn`` backend the child process has no PTY — ``isatty()``
         returns ``False`` and terminal dimensions are not forwarded.  Most
         REPLs and debuggers still work; password prompts may not hide input.
+
+        Two gates run before anything is spawned (#722), in this order:
+
+        1. :meth:`_confinement_refusal` — the deployment's posture on
+           running a PTY with no kernel boundary.  First, because under
+           ``require_confinement`` no command is acceptable, and because
+           its WARNING should be emitted before a refusal that looks like
+           an ordinary path error.
+        2. :meth:`_containment_refusal` with ``on_parse_error="deny"`` —
+           the same workspace check ``cli`` applies to a command, failing
+           closed on a command that cannot be parsed.
+
+        The session's working directory is the workspace root and is not
+        model-controllable; ``ShellSession`` re-asserts that (#503).
         """
         command = args.get('command')
         if not command:
             return {'error': 'shell_spawn: command is required'}
+
+        refusal = self._confinement_refusal()
+        if refusal is not None:
+            return refusal
+
+        refusal = self._containment_refusal(
+            command, 'shell_spawn', on_parse_error="deny"
+        )
+        if refusal is not None:
+            return refusal
 
         session_name = args.get('session_name')
         rows = args.get('rows', 24)
@@ -727,18 +1020,7 @@ IMPORTANT NOTES:
                     ],
                 }
 
-            # Generate session ID
-            if session_name:
-                session_id = session_name
-                # Deduplicate
-                if session_id in self._sessions:
-                    suffix = 1
-                    while f"{session_id}_{suffix}" in self._sessions:
-                        suffix += 1
-                    session_id = f"{session_id}_{suffix}"
-            else:
-                session_id = f"session_{self._session_counter}"
-                self._session_counter += 1
+            session_id = self._allocate_session_id(session_name)
 
         # AppArmor confinement (if any) is inherited from the parent
         # thread via fork+exec — see ToolExecutor.set_apparmor_context.
@@ -777,6 +1059,11 @@ IMPORTANT NOTES:
                 preexec_fn=self._build_subprocess_preexec_fn(),
                 workspace_venv=venv_path,
                 scrub_env=self._scrub_secret_env or None,
+                # Same value as cwd, passed as the boundary rather than
+                # assumed from it (#503): ShellSession verifies one
+                # against the other, so the invariant survives a future
+                # caller that computes cwd some other way.
+                workspace_root=self._workspace_root,
             )
 
             # Read initial output (program banner, first prompt, etc.)
@@ -820,7 +1107,24 @@ IMPORTANT NOTES:
             return {'error': f'shell_spawn: {exc}'}
 
     def _exec_input(self, args: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute shell_input: send text and return response."""
+        """Execute shell_input: send text and return response.
+
+        The typed text is run through the same workspace containment as a
+        spawn command, with one deliberate difference: it fails **open**
+        on a parse failure (``on_parse_error="allow"``).  What reaches a
+        live session is whatever the running program reads — Python, SQL,
+        a password, a menu choice — so a string the shell grammar cannot
+        model is the normal case here, where for a spawn command it is an
+        evasion.  The check therefore catches the direct attempt
+        (``cat /etc/shadow``) and claims nothing beyond it; the boundary
+        that holds for a live PTY is kernel confinement (see the module
+        docstring).
+
+        Ordering: containment is checked **after** the session lookup, so
+        a text aimed at a session that does not exist still reports the
+        missing session — the fact the caller needs — rather than a path
+        refusal about a session it never had.
+        """
         session_id = args.get('session_id')
         text = args.get('input', '')
 
@@ -830,6 +1134,13 @@ IMPORTANT NOTES:
         session = self._get_session(session_id)
         if session is None:
             return self._session_not_found(session_id)
+
+        refusal = self._containment_refusal(
+            text, 'shell_input', on_parse_error="allow"
+        )
+        if refusal is not None:
+            refusal['is_alive'] = session.is_alive
+            return refusal
 
         if not session.is_alive:
             return {

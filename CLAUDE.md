@@ -2356,6 +2356,61 @@ The `interactive_shell` plugin lets the model drive any user-interactive command
 
 **Use cases:** Database REPLs (`psql`, `mysql`), SSH sessions, debuggers (`gdb`, `pdb`), package manager wizards (`npm init`), interactive installers, language REPLs (`python`, `node`), container shells (`docker exec -it`).
 
+#### Path Containment (#722, absorbing the `cwd` half of #503)
+
+`cli` inspects the paths in a command and refuses those outside the
+workspace. `interactive_shell` — which spawns a real PTY and is strictly more
+capable — refused **nothing**: its only spatial notion was `cwd`, which sets
+where relative paths start and says nothing about absolute ones. So a session
+that could not `cat /etc/hostname` through `cli` could `shell_spawn` a shell
+and read anything the daemon user could. Whichever tool enforces containment,
+the model routes around it through one that does not.
+
+Three layers now answer, and they are deliberately **not** equal:
+
+| Layer | What it covers | On a string it cannot parse |
+|-------|----------------|-----------------------------|
+| `shell_spawn`'s `command` | the workspace check `cli` applies, on the same analyzer | **refuses** — this string IS a shell command |
+| `shell_input`'s `text` | the same check, best effort | **allows** — typed text is whatever the running program reads (Python, SQL, a password), so a shell-grammar failure is the normal case, not an evasion |
+| the AppArmor child profile | everything, kernel-enforced | n/a |
+
+Only the third is a boundary in the strict sense, which is why the string
+layers are stated as what they are rather than sold as one: a live PTY's
+working directory drifts under `cd`, and the analyzer does not descend into
+the quoted argument of `sh -c` (a blind spot inherited from `cli`, whose
+analyzer this is). The check refuses the direct attempt, in a vocabulary the
+model can act on, and claims nothing more.
+
+**The enforcement point is one module, not two.** `cli`'s classification and
+workspace test moved to `shared/plugins/command_containment.py`
+(`classify_command_paths`, `path_within_workspace`, `first_denied_path`); `cli`
+keeps its result-shaping (it refuses by mimicking "No such file or directory")
+and delegates the analysis. Fail-closed is the caller's decision and
+`first_denied_path` makes each caller state it — `on_parse_error="deny"` for a
+command, `"allow"` for typed input.
+
+**Unconfined is announced, not inherited.** When the runner installed no
+AppArmor child-profile transition, the plugin logs **once per session at
+WARNING** that the kernel boundary is absent — the posture `scrub_secret_env:
+none` and `--ws-unsafe-no-auth` already take. `require_confinement: true`
+refuses every spawn instead, the shape `notebook`'s in-process-exec gate has.
+The default is `false` because a PTY child is a separate process, the same risk
+class as a `cli` subprocess, which does not fail closed either.
+
+```yaml
+plugin_configs:
+  interactive_shell:
+    require_confinement: true     # default false
+```
+
+**The spawn `cwd` is verified where the process starts** (the remainder of
+#503): `ShellSession` takes the workspace root beside the `cwd` and refuses one
+that resolves outside it, both sides canonicalised so a symlinked `cwd` is
+judged by its target. The plugin passes its own workspace root, so the check is
+a tautology on today's only caller — which is the point: the invariant holds at
+the seam that spawns, rather than being a property of one call site a later
+caller could drop.
+
 ### Webhook Plugin (`shared/plugins/webhook/`)
 
 The webhook plugin provides an inbound HTTP listener for receiving external webhooks (GitHub, Slack, Jira, etc.) and delivering them to agent sessions via subscribe/poll tools. Enables long-running daemon sessions that react to external events.

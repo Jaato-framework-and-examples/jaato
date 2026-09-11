@@ -230,7 +230,8 @@ schema), and lint the profile with `jaato-scaffold validate <file>`.
     "max_lifetime": 300,
     "max_idle": 120,
     "idle_timeout": 1.0,
-    "scrub_secret_env": "default"
+    "scrub_secret_env": "default",
+    "require_confinement": false
   }
 }
 ```
@@ -238,6 +239,16 @@ schema), and lint the profile with `jaato-scaffold validate <file>`.
 `scrub_secret_env` is the same knob as `cli`'s (#503's second gap, closed by #863): the
 inherited environment of every spawned PTY session is scrubbed with the framework set
 unless the profile says otherwise, so a model-driven REPL cannot `echo $GITHUB_TOKEN`.
+
+`require_confinement` (#722) is the posture on running a PTY with no kernel boundary.
+Spawn commands and typed input are checked against the session workspace exactly as
+`cli`'s commands are, but a *live* PTY is not containable by reading strings — its
+working directory drifts under `cd`. So when the runner installed no AppArmor child
+profile the plugin announces it once per session at WARNING rather than running
+unconfined in silence; set this to `true` on hosts where the boundary must be
+kernel-enforced or the tool not offered at all. Default `false`: a PTY child is a
+separate process, the same risk class as a `cli` subprocess, which does not fail closed
+either.
 
 ### subagent
 
