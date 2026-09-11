@@ -91,7 +91,7 @@ class MemoryPlugin(RunnerForwardingMixin):
         # ``_get_session_id`` can read the always-fresh
         # ``registry._session_id`` for cascade-pool-reused slots.
         self._plugin_registry: Optional[Any] = None
-        self._storage_path_template: str = ".jaato/memories.jsonl"
+        self._storage_path_template: str = ".jaato/memories"
         # Memory IDs whose hint bullet has already been injected into the
         # model's context during this session.  Prevents the same "💡
         # Available Memories" block from being re-surfaced on every tool
@@ -235,11 +235,16 @@ class MemoryPlugin(RunnerForwardingMixin):
         memory plugin in ``profile.plugins`` no longer carry the
         grants (least-privilege).
 
-        Memory storage uses three layouts at ``~/.jaato/memories``:
+        Memory storage lives in the ``~/.jaato/memories`` DIRECTORY:
         - ``memories/raw/{id}.json`` — pending queue (one file per memory)
         - ``memories/curated.jsonl`` — curated knowledge base
-        - ``memories.jsonl`` — legacy single-file store (retained for
-          migration; readable but not writable on new sessions)
+
+        The sibling ``memories.jsonl`` grant is the legacy single-file
+        store.  It is read — once, by ``MemoryStore._recover_legacy_file``,
+        which migrates a populated one into ``curated.jsonl`` (#912) — so
+        this grant is load-bearing rather than reserved for a migration
+        nobody had written.  ``rw`` because the read resolves through the
+        same path rules; the migration never writes to it.
 
         Both the folder and its contents need ``rw`` so the plugin can
         create the parent directory on first write, enumerate raw/, and
@@ -256,7 +261,10 @@ class MemoryPlugin(RunnerForwardingMixin):
 
         Args:
             config: Optional configuration dict with keys:
-                - storage_path: Path to JSONL file (default: .jaato/memories.jsonl)
+                - storage_path: Directory holding the memory store —
+                  ``raw/`` + ``curated.jsonl`` (default: .jaato/memories).
+                  A legacy ``*.jsonl`` path still resolves to the
+                  sibling directory named after its stem.
                 - enrichment_limit: Max hints to show in prompt (default: 5)
         """
         config = config or {}
@@ -282,7 +290,7 @@ class MemoryPlugin(RunnerForwardingMixin):
         # memories.  This path (config injection) IS reached for
         # runner-side plugin init.
         self._session_id = config.get("session_id")
-        self._storage_path_template = config.get("storage_path", ".jaato/memories.jsonl")
+        self._storage_path_template = config.get("storage_path", ".jaato/memories")
 
         self._storage = MemoryStorage(self._storage_path_template)
         self._indexer = MemoryIndexer()
@@ -301,14 +309,14 @@ class MemoryPlugin(RunnerForwardingMixin):
         self._indexer.build_index(existing_memories)
         self._trace(f"initialize: storage_path={self._storage_path_template}, curated_memories={len(existing_memories)}")
 
-        # Global storage at ~/.jaato/memories.jsonl — cross-session knowledge
+        # Global storage at ~/.jaato/memories — cross-session knowledge
         # shared by UNCONFINED agents.  This tier is OPTIONAL: a confined
         # session is correctly denied HOME, so the tier is simply absent for it
         # and the workspace tier is the only (priority) store.  Configurable via
         # "global_storage_path" for testing.
         global_path = config.get(
             "global_storage_path",
-            str(Path.home() / ".jaato" / "memories.jsonl"),
+            str(Path.home() / ".jaato" / "memories"),
         )
         self._global_storage = MemoryStorage(global_path)
         self._global_indexer = MemoryIndexer()
@@ -384,8 +392,13 @@ class MemoryPlugin(RunnerForwardingMixin):
             "properties": {
                 "storage_path": {
                     "type": "string",
-                    "default": ".jaato/memories.jsonl",
-                    "description": "Path to JSONL memory storage file",
+                    "default": ".jaato/memories",
+                    "description": (
+                        "Directory holding the memory store "
+                        "(raw/ + curated.jsonl). A legacy *.jsonl path "
+                        "resolves to the sibling directory named after "
+                        "its stem."
+                    ),
                 },
                 "allowed_scopes": {
                     "type": "array",
@@ -678,7 +691,7 @@ class MemoryPlugin(RunnerForwardingMixin):
             "workspace, available within this session and future sessions in the "
             "same workspace.\n"
             "- **Universal memories** (`scope=\"universal\"`) — stored globally at "
-            "`~/.jaato/memories.jsonl`, shared across all sessions and workspaces. "
+            "`~/.jaato/memories`, shared across all sessions and workspaces. "
             "Use this for knowledge that benefits any future session or agent.\n\n"
             "## Two use cases\n\n"
             "**Context snapshots** (keeping your context clean):\n"
@@ -1906,7 +1919,7 @@ class MemoryPlugin(RunnerForwardingMixin):
             ("    ✗ dismissed    Rejected by advisor (incorrect/trivial)", "dim"),
             ("", ""),
             ("NOTES", "bold"),
-            ("    - Memories are stored in .jaato/memories.jsonl", "dim"),
+            ("    - Memories are stored in .jaato/memories/ (raw/ + curated.jsonl)", "dim"),
             ("    - Each memory has a unique ID starting with 'mem_'", "dim"),
             ("    - Use Tab completion for memory IDs in remove/edit", "dim"),
             ("    - Only active memories (raw, validated) appear in prompt hints", "dim"),

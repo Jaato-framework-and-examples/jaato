@@ -241,7 +241,7 @@ askClarification(
             <!-- Storage -->
             <rect x="375" y="125" width="140" height="50" rx="5" fill="#fef3c7" stroke="#f59e0b" stroke-width="2"/>
             <text x="445" y="142" text-anchor="middle" font-size="11" font-weight="600" fill="#78350f">Memory Storage</text>
-            <text x="445" y="157" text-anchor="middle" font-size="9" fill="#92400e">.jaato/memories.jsonl</text>
+            <text x="445" y="157" text-anchor="middle" font-size="9" fill="#92400e">.jaato/memories/</text>
             <text x="445" y="168" text-anchor="middle" font-size="9" fill="#92400e">✓ Saved</text>
 
             <!-- Separator -->
@@ -322,7 +322,7 @@ askClarification(
           <h3>Configuration</h3>
           <table>
             <tbody>
-              <tr><td><code>storage_path</code></td><td>Path to JSONL storage file (default: <code>.jaato/memories.jsonl</code>)</td></tr>
+              <tr><td><code>storage_path</code></td><td>Directory holding the memory store &mdash; <code>raw/</code> + <code>curated.jsonl</code> (default: <code>.jaato/memories</code>). A legacy <code>*.jsonl</code> path resolves to the sibling directory named after its stem.</td></tr>
             </tbody>
           </table>
 
@@ -390,10 +390,11 @@ retrieve_memories(
           <div class="code-label" style="margin-top: 24px;">Configuration</div>
           <div class="code-block">
             <pre><code class="language-python">registry.expose_tool('memory', config={
-    'storage_path': '.jaato/memories.jsonl',
+    'storage_path': '.jaato/memories',
 })
 
-# Default storage location: .jaato/memories.jsonl
+# Default storage location: .jaato/memories/  (a DIRECTORY:
+#   raw/{id}.json is the pending queue, curated.jsonl the curated store)
 # Add to .gitignore for private knowledge
 # Or commit for team-shared knowledge base</code></pre>
           </div>
