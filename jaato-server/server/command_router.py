@@ -417,6 +417,11 @@ class CommandRouter:
                                   and parsing happen in
                                   ``SessionManager.create_session``.
         """
+        # Read FIRST, not at the call site below: every refusal this parser
+        # can emit is an answer to this ``session.new``, and the client's
+        # create-wait discards an ErrorEvent that does not carry the
+        # correlation id (#882).
+        request_id = (payload or {}).get("request_id")
         name = None
         profile_name = None
         agent_name = None
@@ -439,10 +444,11 @@ class CommandRouter:
                         error="--instructions requires a value (text or @filepath)",
                         error_type="UsageError",
                         recoverable=True,
+                        request_id=request_id,
                     ))
                     return
                 system_instruction_override = self._resolve_instructions_value(
-                    raw, workspace_path, client_id,
+                    raw, workspace_path, client_id, request_id=request_id,
                 )
                 if system_instruction_override is None:
                     return  # error already emitted
@@ -489,7 +495,7 @@ class CommandRouter:
             # Correlation id from the generic payload escape hatch.  Echoed on
             # whichever event answers this create, so the caller can tell its
             # own answer from a concurrent one.
-            request_id=(payload or {}).get("request_id"),
+            request_id=request_id,
         )
         if new_session_id:
             # Update logging context now that session_id is known.
@@ -1631,6 +1637,7 @@ class CommandRouter:
         raw: str,
         workspace_path: Optional[str],
         client_id: str,
+        request_id: Optional[str] = None,
     ) -> Optional[str]:
         """Resolve a ``--instructions`` value into the literal text the session sees.
 
@@ -1643,9 +1650,20 @@ class CommandRouter:
           Relative paths resolve against ``workspace_path``; absolute
           paths are honoured as-is.  ``~`` expands.
 
+        Args:
+            raw: The flag's value, literal text or ``@path``.
+            workspace_path: Base for a relative ``@path``.
+            client_id: Who to report a failure to.
+            request_id: Correlation id of the ``session.new`` this flag
+                belongs to.  STAMPED ON THE REFUSAL: the client's
+                create-wait accepts only a correlated ``ErrorEvent``, so
+                an unstamped one is discarded and the caller waits out its
+                full timeout instead of learning the path was unreadable
+                (#882).
+
         Returns the resolved text, or ``None`` if the file reference
-        could not be read (an ``ErrorEvent`` has been emitted to the
-        client in that case).
+        could not be read (a correlated ``ErrorEvent`` has been emitted to
+        the client in that case).
         """
         from jaato_sdk.events import ErrorEvent
 
@@ -1658,6 +1676,7 @@ class CommandRouter:
                 error="--instructions @ requires a path after the @",
                 error_type="UsageError",
                 recoverable=True,
+                request_id=request_id,
             ))
             return None
 
@@ -1671,6 +1690,7 @@ class CommandRouter:
                 error=f"--instructions @{path_str}: {exc}",
                 error_type="UsageError",
                 recoverable=True,
+                request_id=request_id,
             ))
             return None
 
