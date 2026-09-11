@@ -18,7 +18,12 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 from jaato_sdk.plugins.base import TRAIT_SESSION_PERSISTENT
 from jaato_sdk.plugins.model_provider.types import ToolSchema
 
-from .policy import PermissionPolicy, PermissionDecision, PolicyMatch
+from .policy import (
+    PermissionPolicy,
+    PermissionDecision,
+    PolicyMatch,
+    overridden_evaluator_allow,
+)
 from .evaluator import EvalContext, PolicyDecision as EvalDecision, load_evaluators
 from .config_loader import load_config, PermissionConfig
 from .channels import (
@@ -1920,6 +1925,56 @@ class PermissionPlugin(RunnerForwardingMixin):
             approver=info.get("approver"),
         )
 
+    def _resolve_allow_with_comment(
+        self,
+        policy: Optional['PermissionPolicy'],
+        tool_name: str,
+        args: Dict[str, Any],
+        eval_result: 'EvalResult',
+    ) -> Tuple[bool, Dict[str, Any]]:
+        """Answer an evaluator's ``ALLOW_WITH_COMMENT`` — unless the
+        operator's blacklist refuses the call (#679).
+
+        ``ALLOW_WITH_COMMENT`` is the ONE evaluator ALLOW that returns from
+        :meth:`_check_permission_impl` directly, because it carries a comment
+        the result payload has to transport.  Every other ALLOW variant falls
+        through to ``policy.check()``, which asks ``blacklist_veto`` itself.
+        Before #679 this branch returned ``True`` without consulting any deny
+        tier at all, so a **workspace-supplied** evaluator could hand out
+        access the operator had blacklisted — a privilege escalation, since
+        evaluator scripts resolve through the workspace ``script_loader``
+        chain while the blacklist is the operator's.
+
+        The invariant is asymmetric and that is deliberate: an evaluator
+        **DENY** still overrides a whitelist / ``allow_all`` / pre-approval
+        (tightening is what evaluators are for), an evaluator **ALLOW** never
+        loosens past an operator deny, and **FALLBACK** is untouched.
+
+        Returns:
+            ``(False, info)`` naming the blacklist rule that vetoed — the
+            veto's own ``rule_type`` becomes ``method``, so the audit record
+            attributes the decision to the operator's rule rather than to the
+            evaluator — else ``(True, info)`` carrying the advisory comment,
+            exactly as before.
+        """
+        veto = policy.blacklist_veto(tool_name, args) if policy else None
+        if veto is not None:
+            veto = overridden_evaluator_allow(veto)
+            self._log_decision(tool_name, args, "deny", veto.reason)
+            return False, {
+                'reason': veto.reason,
+                'method': veto.rule_type or 'blacklist',
+            }
+
+        # Allow with advisory comment — proceed but inject feedback
+        comment = eval_result.comment or ""
+        self._log_decision(tool_name, args, "allow", f"Evaluator comment: {comment}")
+        return True, {
+            'reason': 'Evaluator granted access with comment',
+            'method': 'evaluator_comment',
+            'comment': comment,
+        }
+
     def _check_permission_impl(
         self,
         tool_name: str,
@@ -2004,14 +2059,13 @@ class PermissionPlugin(RunnerForwardingMixin):
                 policy._evaluators, tool_name, args, eval_context
             )
             if eval_result.decision == EvalDecision.ALLOW_WITH_COMMENT:
-                # Allow with advisory comment — proceed but inject feedback
-                comment = eval_result.comment or ""
-                self._log_decision(tool_name, args, "allow", f"Evaluator comment: {comment}")
-                return True, {
-                    'reason': 'Evaluator granted access with comment',
-                    'method': 'evaluator_comment',
-                    'comment': comment,
-                }
+                return self._resolve_allow_with_comment(
+                    policy, tool_name, args, eval_result
+                )
+            # The ALLOW variants listed here do NOT return: they fall through
+            # to ``policy.check()`` below, which asks ``blacklist_veto``
+            # itself, so an operator deny still decides (#679).  Only DENY
+            # short-circuits from this block.
             if eval_result.decision not in (
                 EvalDecision.FALLBACK,
                 EvalDecision.ALLOW,
