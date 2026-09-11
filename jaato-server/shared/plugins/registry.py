@@ -3074,6 +3074,21 @@ class PluginRegistry:
         """
         return {path: source for path, (source, _access) in list(self._authorized_external_paths.items())}
 
+    def list_denied_paths(self) -> Dict[str, str]:
+        """List all explicitly denied external paths.
+
+        The read counterpart of :meth:`deny_external_path`, and the mirror of
+        :meth:`list_authorized_paths`.  Exists because denial has to travel:
+        the notebook kernel enforces containment in its own process and cannot
+        call :meth:`is_path_denied`, so it is handed the list (#710).  A denial
+        outranks every allowance wherever it is applied.
+
+        Returns:
+            Dict mapping normalized (realpath) paths to the plugin that denied
+            them.
+        """
+        return dict(self._denied_external_paths)
+
     def list_authorized_paths_detailed(self) -> Dict[str, Dict[str, str]]:
         """List all authorized external paths with access mode details.
 

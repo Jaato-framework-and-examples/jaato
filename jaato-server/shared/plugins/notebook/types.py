@@ -135,6 +135,14 @@ class NotebookInfo:
         last_executed_at: Last execution timestamp
         execution_count: Total executions in this notebook
         variables: Currently defined variables
+        boundary: What bounds this notebook's filesystem reach, as the
+            executing process reported it — e.g. ``"AppArmor-enforced profile
+            jaato-ws-x"`` or ``"audit-hook workspace containment (/ws)"``
+            (issue #710).  Set by ``SubprocessKernelBackend`` from the kernel's
+            READY handshake, so it is the boundary actually established rather
+            than the one configuration implies.  ``None`` for backends that do
+            not report one; a boundary is never *inferred* from this field
+            being absent.
     """
     notebook_id: str
     name: str
@@ -144,6 +152,7 @@ class NotebookInfo:
     last_executed_at: Optional[str] = None
     execution_count: int = 0
     variables: Dict[str, str] = field(default_factory=dict)
+    boundary: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for serialization."""
@@ -156,6 +165,7 @@ class NotebookInfo:
             "last_executed_at": self.last_executed_at,
             "execution_count": self.execution_count,
             "variables": self.variables,
+            "boundary": self.boundary,
         }
 
 

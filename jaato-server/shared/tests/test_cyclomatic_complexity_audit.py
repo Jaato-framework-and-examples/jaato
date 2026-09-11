@@ -344,9 +344,9 @@ BASELINE: Dict[str, int] = {
     "jaato-server/shared/plugins/notebook/backends/kaggle.py::KaggleBackend._get_kernel_output": 18,
     "jaato-server/shared/plugins/notebook/backends/kaggle.py::KaggleBackend._parse_kernel_output": 18,
     "jaato-server/shared/plugins/notebook/backends/kaggle.py::KaggleBackend.execute": 36,
-    "jaato-server/shared/plugins/notebook/plugin.py::NotebookPlugin._execute_code": 45,
+    "jaato-server/shared/plugins/notebook/plugin.py::NotebookPlugin._execute_code": 40,
     "jaato-server/shared/plugins/notebook/plugin.py::NotebookPlugin._execute_streaming_impl": 28,
-    "jaato-server/shared/plugins/notebook/plugin.py::NotebookPlugin.execute_streaming": 18,
+    "jaato-server/shared/plugins/notebook/plugin.py::NotebookPlugin.execute_streaming": 16,
     "jaato-server/shared/plugins/notebook/plugin.py::NotebookPlugin.format_permission_request": 17,
     "jaato-server/shared/plugins/permission/channels.py::ConsoleChannel.request_permission": 16,
     # #951: the twenty-odd-exit policy evaluation, unchanged; the public

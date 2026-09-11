@@ -1,14 +1,25 @@
-"""Subprocess-kernel notebook backend (design option 1c, PR 1).
+"""Subprocess-kernel notebook backend (design option 1c).
 
 Runs each notebook in its OWN Python subprocess launched with
 ``cwd=workspace_root`` (``kernel_main``), so notebook code's ``os.getcwd()`` and
 relative paths resolve in-workspace — without the process-global ``os.chdir`` the
 framework forbids (core.py:915).  State persists in the kernel namespace.
 
-PR 1 scope: cell exec + streaming + variables/reset/lifecycle.  The ``tools.X()``
-bridge is a stub in the kernel (raises) and lands in PR 2.  This backend is
-OPT-IN (``plugin_configs.notebook.backend: "subprocess"``); the in-process
-``LocalJupyterBackend`` stays the default until the PR 3 cutover.
+This is the DEFAULT backend; ``plugin_configs.notebook.backend: "local"`` opts
+back to the in-process ``LocalJupyterBackend``.
+
+**``cwd`` was never a boundary** (issue #710).  It makes relative paths resolve
+in-workspace and leaves absolute ones untouched, so a cell could read
+``/etc/hostname`` — or spawn ``cat`` to do it — after ``cli`` had refused the
+same path.  The kernel therefore establishes a real one at startup
+(``kernel_sandbox.establish_containment``): AppArmor when the runner is
+confined (the kernel inherits the profile through the ``ix`` exec rule), else a
+:pep:`578` audit hook applying the same containment ``cli`` applies, else a
+refusal to run cells at all.  This class states the same answer one layer up in
+:meth:`SubprocessKernelBackend.execution_boundary` so ``NotebookPlugin`` can
+refuse before a kernel is spawned, and passes the session's ``sandbox add`` /
+``sandbox deny`` paths down on every cell so an authorization granted after the
+kernel spawned is honoured.
 """
 
 import ctypes
@@ -30,6 +41,11 @@ from ...workspace_venv import (
 )
 from .base import NotebookBackend
 from .. import kernel_protocol as proto
+from ..kernel_sandbox import (
+    UNCONTAINED_OPT_IN_ENV,
+    apparmor_enforced_profile,
+    env_truthy,
+)
 from ..types import (
     BackendCapabilities, CellOutput, ExecutionResult, ExecutionStatus,
     NotebookInfo, OutputType,
@@ -118,6 +134,19 @@ class SubprocessKernelBackend(NotebookBackend):
         # in the kernel reports "no executor wired".
         self._tool_executor: Optional[
             Callable[[str, Dict], Tuple[bool, object]]] = None
+        # Operator opt-out from filesystem containment (#710).  The sibling of
+        # LocalJupyterBackend's allow_inprocess_exec, and a different question:
+        # that one is "may cells run in the host process", this one is "may
+        # cells reach outside the workspace".  Announced at WARNING.
+        self._allow_uncontained = False
+        # Extra readable roots an operator declared
+        # (plugin_configs.notebook.allow_read_paths), handed to every kernel.
+        self._allow_read_paths: Tuple[str, ...] = ()
+        # Reads the session's live `sandbox add` / `sandbox deny` paths.  Wired
+        # by the plugin from the PluginRegistry; the answer is re-sent with
+        # every cell, so an authorization granted after a kernel spawned takes
+        # effect on the next cell rather than the next kernel.
+        self._sandbox_paths_fn: Optional[Callable[[], Dict[str, List[str]]]] = None
 
     def set_tool_executor(
         self, executor_fn: Callable[[str, Dict], Tuple[bool, object]]
@@ -125,6 +154,36 @@ class SubprocessKernelBackend(NotebookBackend):
         """Wire the runner-side tool executor that serves kernel tool_call frames
         (mirrors LocalJupyterBackend.inject_tools_module for the in-process case)."""
         self._tool_executor = executor_fn
+
+    def set_sandbox_paths_fn(
+        self, paths_fn: Optional[Callable[[], Dict[str, List[str]]]]
+    ) -> None:
+        """Wire the reader for the session's authorized / denied sandbox paths.
+
+        Args:
+            paths_fn: Returns ``{"read": [...], "write": [...], "deny": [...]}``
+                as the registry holds them *now* (``sandbox add`` / ``sandbox
+                deny``).  Called once per cell, because those lists are
+                operator-mutable mid-session while a kernel outlives many
+                cells.  ``None`` unwires it, leaving kernels contained to the
+                workspace alone.
+        """
+        self._sandbox_paths_fn = paths_fn
+
+    def _sandbox_allow_block(self) -> Optional[Dict[str, List[str]]]:
+        """The ``allow`` block to attach to an ``execute`` frame, or ``None``.
+
+        Never lets a diagnostic failure end a cell: a provider that raises is
+        reported as "no operator-granted paths", which is the containment the
+        kernel already has rather than a widening of it.
+        """
+        if self._sandbox_paths_fn is None:
+            return None
+        try:
+            block = self._sandbox_paths_fn() or {}
+        except Exception:  # noqa: BLE001 - a broken provider must not fail cells
+            return None
+        return {key: list(block.get(key) or ()) for key in ("read", "write", "deny")}
 
     # ---- protocol: identity / lifecycle -------------------------------------
 
@@ -135,10 +194,64 @@ class SubprocessKernelBackend(NotebookBackend):
             supports_packages=True, is_async=False, requires_auth=False)
 
     def initialize(self, config: Optional[Dict] = None) -> None:
+        """Take the workspace, the venv and the containment posture from config.
+
+        Every key is optional and absent keys are LEFT ALONE rather than reset:
+        ``NotebookPlugin.set_workspace_path`` re-initializes this backend with
+        ``{"workspace_root": ...}`` alone once the workspace arrives (the #344
+        flow), and that call must not drop the containment configuration the
+        first ``initialize`` established.
+
+        Config keys (all under ``plugin_configs.notebook``):
+            workspace_root: The session workspace; kernels spawn with it as cwd
+                and are contained to it.
+            workspace_venv: Interpreter for the kernel, and a writable root
+                (``!pip install`` writes there).
+            allow_uncontained_exec: Operator opt-out from containment
+                (``JAATO_NOTEBOOK_ALLOW_UNCONTAINED_EXEC`` beneath it).
+            allow_read_paths: Extra readable roots outside the workspace.
+        """
         if config:
             self._workspace_root = config.get("workspace_root") or self._workspace_root
             if "workspace_venv" in config:
                 self._workspace_venv = config.get("workspace_venv")
+            if "allow_uncontained_exec" in config:
+                self._allow_uncontained = bool(config.get("allow_uncontained_exec"))
+            if "allow_read_paths" in config:
+                self._allow_read_paths = tuple(config.get("allow_read_paths") or ())
+        self._allow_uncontained = (
+            self._allow_uncontained or env_truthy(UNCONTAINED_OPT_IN_ENV))
+
+    def execution_boundary(self) -> Tuple[bool, str]:
+        """What bounds a cell's filesystem reach, strongest available first.
+
+        Asked by ``NotebookPlugin`` before a cell is dispatched (issue #710),
+        and answered here rather than in the kernel because the refusal is
+        worth making before a kernel process exists.  The kernel re-decides
+        the same question for itself at startup — it is the process that runs
+        the code, and a boundary it could not install must stop cells there
+        too, whatever this said.
+
+        Returns:
+            ``(allowed, description)``.  Refuses only when there is no
+            workspace to contain to, since an unrooted kernel cannot be
+            spawned at all.
+        """
+        profile = apparmor_enforced_profile()
+        if profile:
+            return True, f"AppArmor-enforced profile {profile} (inherited by the kernel)"
+        if self._allow_uncontained:
+            return True, "operator opt-out (uncontained)"
+        workspace = get_workspace_root() or self._workspace_root
+        if not workspace:
+            return False, (
+                "Notebook execution refused: no workspace root is resolved, so "
+                "cell code cannot be contained to one. Start the session with a "
+                "workspace, or set "
+                f"{UNCONTAINED_OPT_IN_ENV}=1 (notebook plugin config "
+                "allow_uncontained_exec=true) to accept an uncontained notebook."
+            )
+        return True, f"audit-hook workspace containment ({workspace})"
 
     def is_available(self) -> bool:
         return True
@@ -169,8 +282,16 @@ class SubprocessKernelBackend(NotebookBackend):
         cell_id = uuid.uuid4().hex[:8]
         start = datetime.datetime.now()
         with kernel.lock:
-            proto.write_frame(kernel.wstream, {
-                "type": proto.EXECUTE, "cell_id": cell_id, "code": code})
+            frame_out = {"type": proto.EXECUTE, "cell_id": cell_id, "code": code}
+            # The session's `sandbox add` / `sandbox deny` paths ride EVERY
+            # cell rather than the kernel's argv: a kernel outlives many cells
+            # and those lists are operator-mutable mid-session, so an
+            # authorization granted after the spawn would otherwise be invisible
+            # until the notebook was recreated (#710).
+            allow_block = self._sandbox_allow_block()
+            if allow_block is not None:
+                frame_out["allow"] = allow_block
+            proto.write_frame(kernel.wstream, frame_out)
             outputs: List[CellOutput] = []
             while True:
                 if not self._wait_readable(kernel, timeout):
@@ -343,10 +464,23 @@ class SubprocessKernelBackend(NotebookBackend):
 
         r2k_r, r2k_w = os.pipe()   # runner → kernel
         k2r_r, k2r_w = os.pipe()   # kernel → runner
+        # Containment argv (#710).  The venv is a WRITABLE root because
+        # in-notebook `!pip install` writes there and it may sit outside the
+        # workspace; operator-declared read paths are read-only.  `--uncontained`
+        # is passed only when the operator opted out, so the kernel's default
+        # is the contained one however it is launched.
+        containment_args = []
+        for path in self._allow_read_paths:
+            containment_args += ["--allow-read", str(path)]
+        if venv_path:
+            containment_args += ["--allow-write", str(venv_path)]
+        if self._allow_uncontained:
+            containment_args.append("--uncontained")
         proc = subprocess.Popen(
             [kernel_python, "-m", "shared.plugins.notebook.kernel_main",
              "--workspace-root", workspace,
-             "--read-fd", str(r2k_r), "--write-fd", str(k2r_w)],
+             "--read-fd", str(r2k_r), "--write-fd", str(k2r_w),
+             *containment_args],
             pass_fds=(r2k_r, k2r_w),
             cwd=workspace,
             env=kernel_env,
@@ -357,10 +491,14 @@ class SubprocessKernelBackend(NotebookBackend):
         wstream = os.fdopen(r2k_w, "wb", buffering=0)
         rstream = os.fdopen(k2r_r, "rb", buffering=0)
         kernel = _Kernel(info, proc, wstream, rstream)
-        # Handshake: the kernel sends READY after chdir + namespace init.
+        # Handshake: the kernel sends READY after chdir + containment + namespace
+        # init, and names the boundary it actually established.  Recorded on the
+        # NotebookInfo so an operator reading `notebook_list` sees what bounds
+        # the kernel rather than inferring it from configuration (#710).
         if self._wait_readable(kernel, 30):
             try:
-                proto.read_frame(rstream)   # READY
+                ready = proto.read_frame(rstream)   # READY
+                info.boundary = ready.get("boundary_description") or None
             except EOFError:
                 pass
         with self._lock:
