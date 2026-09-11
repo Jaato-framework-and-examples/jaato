@@ -120,6 +120,12 @@ def _default_runtime_factory(envelope: SessionInitEnvelope) -> "JaatoRuntime":
     cost of pulling in the heavy ``JaatoRuntime`` is paid only when
     actually needed (a runner that never receives a
     ``session.bootstrap`` RPC skips this).
+
+    The envelope's ``plugin_configs.telemetry`` block is forwarded to the
+    runtime because telemetry is runtime-scoped and is therefore built
+    here, before any session exists — the profile block reaches it on this
+    argument or not at all (#858).  Step 8's per-plugin config merge cannot
+    serve it: telemetry is not a registry plugin.
     """
     # Import inside the factory so the runner's import surface
     # doesn't force the JaatoRuntime import (and its provider plugin
@@ -138,6 +144,7 @@ def _default_runtime_factory(envelope: SessionInitEnvelope) -> "JaatoRuntime":
         provider_name=envelope.provider_name or "anthropic",
         workspace_path=workspace_path,
         config_root=envelope.config_root,
+        telemetry_config=(envelope.plugin_configs or {}).get("telemetry"),
     )
 
 

@@ -2348,11 +2348,21 @@ class JaatoServer:
                                     _Path(self._workspace_path)
                                     if self._workspace_path else None
                                 )
+                                # Telemetry is runtime-scoped and is built
+                                # here, before any session exists, so its
+                                # profile block reaches it on this argument
+                                # or not at all (#858).
+                                _telemetry_cfg = (
+                                    (self._profile.plugin_configs or {}).get(
+                                        "telemetry")
+                                    if self._profile else None
+                                )
                                 self._runtime = JaatoRuntime(
                                     provider_name=provider_to_use,
                                     workspace_path=_ws,
                                     config_root=self._config_root,
                                     instruction_token_cache=self._instruction_token_cache,
+                                    telemetry_config=_telemetry_cfg,
                                 )
                             with _s2.sub("runtime_connect"):
                                 self._runtime.connect(project_id, location)

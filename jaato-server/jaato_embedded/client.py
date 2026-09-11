@@ -562,6 +562,16 @@ class InProcessClient:
         self._embedded = self._embedded_factory(
             self._provider, self._workspace_path, self._config_root
         )
+        # Telemetry is RUNTIME-scoped and is built inside connect(), so its
+        # profile block has to land before that call — and the factory above
+        # is a documented test seam whose signature predates the block, so it
+        # is handed over afterwards instead of as a fourth argument (#858).
+        # An injected fake that does not implement the setter simply keeps
+        # the environment-derived behaviour it had.
+        _telemetry_cfg = (self._resolved_plugin_configs or {}).get("telemetry")
+        _set_telemetry = getattr(self._embedded, "set_telemetry_config", None)
+        if _telemetry_cfg is not None and callable(_set_telemetry):
+            _set_telemetry(_telemetry_cfg)
         await asyncio.to_thread(
             self._embedded.connect, self._project, self._location, self._model
         )

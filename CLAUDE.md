@@ -3723,6 +3723,70 @@ collector, set `OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf` (or the `protocol`
 config key) yourself. See
 [docs/opentelemetry-design.md §12.1](docs/opentelemetry-design.md).
 
+### The Telemetry Block a Profile Wrote and Nothing Read (#858)
+
+`plugin_configs.telemetry` is a documented surface — `env_scope.py` named a
+typed key for all five `JAATO_TELEMETRY_*` vars, and `OTelPlugin.initialize()`
+reads every one of them. The factory in between assembled its own config dict
+from the environment and passed **that**:
+
+```python
+redact = os.environ.get("JAATO_TELEMETRY_REDACT_CONTENT", "true") ...
+plugin.initialize({"enabled": True, "exporter": exporter,
+                   "redact_content": redact})
+```
+
+So the whole block was inert. Not a missing key — a **missing argument**, and
+the same silent-ignore family as #910 / #925 / #947 / #950.
+
+`redact_content` is why this was P1 rather than a tidy-up: it is a **privacy**
+control. An operator who sets it in the typed place and reads `explain profile`
+has every reason to believe prompt and response content is withheld from the
+collector, and it is being exported. That the env default happens to be the
+safe one does not make the ignore correct — setting it explicitly to `false`
+was ignored just as completely, and nothing, at any severity, said so.
+
+**The whole block, not one key.** `exporter` had the identical defect and
+`file_path` / `backend` / `enabled` were each one line away from it, so
+`create_plugin(config)` carries the block through to `initialize()` and layers
+the env vars **beneath** it with `setdefault`. A key the profile did not supply
+is left ABSENT rather than filled in, because `initialize()` already resolves
+`config.get(key, os.environ[...])` per key — forcing an env-derived value in
+would make the profile's silence outrank the env var it is the default for.
+
+| Key | Reaches | Precedence beneath it |
+|-----|---------|----------------------|
+| `enabled` | the gate that returns `NullTelemetryPlugin` | `JAATO_TELEMETRY_ENABLED` |
+| `backend` | `otel` vs `langfuse` | `JAATO_TELEMETRY_BACKEND`, then Langfuse auto-detect |
+| `exporter` | `initialize()` | `JAATO_TELEMETRY_EXPORTER` |
+| `redact_content` | `initialize()` | `JAATO_TELEMETRY_REDACT_CONTENT` (default **true**) |
+| `file_path`, `endpoint`, `headers`, `protocol`, `service_name`, `instance_id`, `sample_rate`, `batch_export`, `public_key`, `secret_key`, `host` | `initialize()` unchanged | each key's own env fallback inside `initialize()` |
+
+**Backend selection is not widened by accident.** A profile carrying no
+`telemetry` block selects exactly the backend it always did. The Langfuse
+auto-detect gains the block's own `public_key` / `endpoint` as signals under the
+*same* rule it applies to `LANGFUSE_PUBLIC_KEY` / `OTEL_EXPORTER_OTLP_ENDPOINT`,
+because the profile outranks the environment everywhere else and a Langfuse
+setup expressed purely in a profile would otherwise be served by the generic
+backend.
+
+**Where it is plumbed.** Telemetry is **runtime**-scoped — one plugin per
+`JaatoRuntime`, shared by the main session and every in-process subagent, built
+in `JaatoRuntime.__init__` before any session exists. It is not a registry
+plugin, so `JaatoSession._apply_plugin_configs` (#950) cannot serve it and the
+block has to arrive at construction: `JaatoRuntime(telemetry_config=...)`, fed
+from `SessionInitEnvelope.plugin_configs` (runner-served sessions, the default
+path), from `JaatoServer._profile.plugin_configs` (the daemon's in-process
+runtime), and from `JaatoClient.set_telemetry_config()` before `connect()` (the
+embedded path, whose runtime factory is a documented test seam that could not
+take a fourth argument).
+
+**The safe default is unchanged.** With no block and no env vars: telemetry
+off; switched on by env alone: `exporter=otlp`, `redact_content=True`. A
+misspelled boolean resolves to the default rather than to `False`, so a typo
+cannot quietly disable redaction. All five vars leave the `AWAITING_TYPED_KEY`
+ratchet for a resolving `typed_key`.
+
 ## Coding Policies
 
 ### Cyclomatic Complexity

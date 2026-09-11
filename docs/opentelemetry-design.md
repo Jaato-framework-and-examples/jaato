@@ -562,9 +562,52 @@ class _NoOpSpan:
 
 ## 5. Configuration
 
-### 5.1 Environment Variables
+### 5.1 The profile block (`plugin_configs.telemetry`)
 
-Following standard OTel environment variables plus jaato-specific ones:
+A session profile configures telemetry under `plugin_configs.telemetry`, and
+that block **outranks** every environment variable in §5.2:
+
+```yaml
+plugin_configs:
+  telemetry:
+    enabled: true            # JAATO_TELEMETRY_ENABLED is the default beneath it
+    backend: langfuse        # otel (default) | langfuse
+    exporter: file           # otlp (default) | file | console | none
+    file_path: /var/log/jaato-traces.jsonl
+    redact_content: false    # withhold prompt/response content (default true)
+    service_name: my-app
+    endpoint: http://localhost:4317
+    headers: {Authorization: "Bearer xxx"}
+    sample_rate: 1.0
+```
+
+Precedence for every key, highest first: the profile block, then the matching
+`JAATO_TELEMETRY_*` / `OTEL_*` variable, then the framework default. With
+neither set, telemetry is **off** and `redact_content` is **`True`** — the safe
+default is unchanged.
+
+> **This block used to be inert (#858).** `create_plugin()` assembled its own
+> config dict from the environment and passed *that* to `initialize()`, so
+> whatever a profile wrote here was overwritten before the plugin saw it. The
+> keys were all read by `OTelPlugin.initialize()`; what was missing was the
+> argument carrying them. `redact_content` is the one that made it a privacy
+> defect rather than a papercut: an operator who set it believed prompt and
+> response content was being withheld from the collector, and it was being
+> exported, with nothing to say so — and setting it explicitly to `false` was
+> ignored just as completely.
+>
+> Telemetry is **runtime-scoped**: one plugin per `JaatoRuntime`, shared by the
+> main session and every in-process subagent, built before any session exists.
+> So the block is taken by `JaatoRuntime(telemetry_config=...)` rather than at
+> `create_session`, and reaches it from the runner envelope
+> (`SessionInitEnvelope.plugin_configs`), from `JaatoServer`'s profile, and from
+> `JaatoClient.set_telemetry_config()` on the in-process path. It is not a
+> registry plugin, so `JaatoSession._apply_plugin_configs` cannot serve it.
+
+### 5.2 Environment Variables
+
+Following standard OTel environment variables plus jaato-specific ones. Each is
+the **default beneath** the matching `plugin_configs.telemetry` key above:
 
 | Variable | Description | Default |
 |----------|-------------|---------|
@@ -574,9 +617,11 @@ Following standard OTel environment variables plus jaato-specific ones:
 | `JAATO_TELEMETRY_ENABLED` | Enable telemetry | `false` |
 | `JAATO_TELEMETRY_SAMPLE_RATE` | Sample rate (0.0-1.0) | `1.0` |
 | `JAATO_TELEMETRY_REDACT_CONTENT` | Redact prompts/responses | `true` |
-| `JAATO_TELEMETRY_EXPORTER` | Exporter type (otlp/console) | `otlp` |
+| `JAATO_TELEMETRY_EXPORTER` | Exporter type (otlp/console/file/none) | `otlp` |
+| `JAATO_TELEMETRY_BACKEND` | Backend (otel/langfuse) | `otel` |
+| `JAATO_TELEMETRY_FILE` | Output path for the `file` exporter | `/tmp/jaato-traces.jsonl` |
 
-### 5.2 Programmatic Configuration
+### 5.3 Programmatic Configuration
 
 ```python
 from shared.jaato_client import JaatoClient
@@ -603,7 +648,7 @@ runtime = client.get_runtime()
 runtime.set_telemetry_plugin(telemetry)
 ```
 
-### 5.3 Config File (`.jaato/telemetry.json`)
+### 5.4 Config File (`.jaato/telemetry.json`)
 
 ```json
 {
@@ -1008,11 +1053,14 @@ OTLP ingestion reads directly: `session.id`, `llm.token_count.*`,
 
 **Two knobs worth setting:**
 
-- **Prompt/response content is redacted by default.** jaato sets
-  `JAATO_TELEMETRY_REDACT_CONTENT=true`, so out of the box Langfuse shows
-  `[REDACTED: N chars]` instead of message text. Set
-  `JAATO_TELEMETRY_REDACT_CONTENT=false` to send full input/output (mind your
-  data-governance posture — this ships prompts and completions to Langfuse).
+- **Prompt/response content is redacted by default.** `redact_content`
+  defaults to `true`, so out of the box Langfuse shows `[REDACTED: N chars]`
+  instead of message text. Set `plugin_configs.telemetry.redact_content: false`
+  in the profile — or `JAATO_TELEMETRY_REDACT_CONTENT=false` beneath it — to
+  send full input/output (mind your data-governance posture: this ships prompts
+  and completions to Langfuse). Before #858 only the env var worked; the
+  profile key was read by the plugin and overwritten by the factory, in both
+  directions.
 - **Environment separation.** Langfuse reads `deployment.environment.name`.
   It's a resource attribute, so no jaato flag is needed — the OTel SDK merges
   `OTEL_RESOURCE_ATTRIBUTES` into every span's resource:

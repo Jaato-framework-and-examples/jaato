@@ -471,7 +471,8 @@ class JaatoRuntime:
                  workspace_path: Optional[Path] = None,
                  config_root: Optional[str] = None,
                  instruction_token_cache: Optional[InstructionTokenCache] = None,
-                 app_identity: Optional[AppIdentity] = None):
+                 app_identity: Optional[AppIdentity] = None,
+                 telemetry_config: Optional[Dict[str, Any]] = None):
         """Initialize JaatoRuntime.
 
         Args:
@@ -500,6 +501,17 @@ class JaatoRuntime:
                 resolved from ``JAATO_APP_*`` at provider-creation time and
                 falls back to jaato's own identity, so an unconfigured
                 deployment behaves exactly as before.
+            telemetry_config: The session profile's
+                ``plugin_configs.telemetry`` block, or ``None``.  Telemetry
+                is a RUNTIME-scoped plugin — one per runtime, shared by the
+                main session and every in-process subagent — so its config
+                is taken here rather than at ``create_session``, and a
+                caller that has no profile passes nothing and gets the
+                environment-derived behaviour unchanged.  Before #858 there
+                was no parameter at all and the factory built its config
+                from the environment alone, which made every key a profile
+                wrote (``redact_content`` above all) silently inert.  See
+                ``shared/plugins/telemetry/__init__.py`` for the precedence.
         """
         self._provider_name: str = provider_name
         self._workspace_path: Optional[Path] = workspace_path
@@ -565,8 +577,12 @@ class JaatoRuntime:
         # Connection state
         self._connected: bool = False
 
-        # Telemetry plugin (created lazily, opt-in)
-        self._telemetry: TelemetryPlugin = create_telemetry_plugin()
+        # Telemetry plugin (opt-in; a no-op NullTelemetryPlugin when off).
+        # The profile's ``plugin_configs.telemetry`` block outranks the
+        # JAATO_TELEMETRY_* env vars inside the factory (#858).
+        self._telemetry: TelemetryPlugin = create_telemetry_plugin(
+            telemetry_config
+        )
 
         # Per-runtime event bus for session-isolated event coordination.
         # Subagents within this runtime share the bus; different runtimes
