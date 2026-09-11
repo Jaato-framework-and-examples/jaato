@@ -197,6 +197,47 @@ DEFAULT_MAX_BUFFER = 64 * 1024
 DEFAULT_MAX_LIFETIME = 600  # 10 minutes
 
 
+def _verify_cwd_within(
+    cwd: Optional[str],
+    workspace_root: Optional[str],
+) -> None:
+    """Refuse a spawn whose working directory escapes the workspace.
+
+    The ``cwd`` half of jaato issue #503: a PTY started outside the
+    session workspace makes every relative path the model types an escape
+    before it is typed, so the boundary has to hold at the spawn.  Both
+    sides are canonicalised first, for the reason
+    :func:`shared.plugins.sandbox_utils.is_under_temp_path` documents — a
+    directory compared as written admits a symlink for where the link
+    lives rather than where it points.
+
+    Args:
+        cwd: Working directory for the process, or ``None`` (inherit the
+            parent's, which is not this function's business to judge).
+        workspace_root: The boundary, or ``None`` when the caller asserts
+            none — in which case any *cwd* is accepted, matching the
+            "no sandboxing configured" branch every other path check has.
+
+    Raises:
+        ValueError: If *cwd* resolves outside *workspace_root*.  A raise
+            rather than a returned verdict because a half-started session
+            in the wrong directory is worse than no session: the caller
+            (``InteractiveShellPlugin._exec_spawn``) turns it into a tool
+            error like any other spawn failure.
+    """
+    if not cwd or not workspace_root:
+        return
+    real_cwd = os.path.realpath(cwd)
+    real_root = os.path.realpath(workspace_root)
+    if real_cwd != real_root and not real_cwd.startswith(
+        real_root.rstrip(os.sep) + os.sep
+    ):
+        raise ValueError(
+            f"working directory {cwd!r} is outside the session workspace "
+            f"{workspace_root!r}"
+        )
+
+
 class ShellSession:
     """Wraps a single pexpect/wexpect-spawned process with idle-based I/O.
 
@@ -212,6 +253,36 @@ class ShellSession:
     - wexpect: Windows console APIs and named pipes (native Windows).
 
     The active backend is stored in the module-level ``_BACKEND`` variable.
+
+    Lifetime and the state that measures it
+    ---------------------------------------
+    A session is born in ``__init__`` (the process is spawned there, so a
+    constructed ``ShellSession`` is always a running one or an exception)
+    and dies in :meth:`close`, which is the only transition out.  Three
+    attributes carry the clock, and the plugin's reaper thread — not this
+    class — is what acts on them:
+
+    ============================ ===========================================
+    ``created_at``               spawn time.  :attr:`age_seconds` is
+                                 measured from it against ``max_lifetime``.
+    ``last_interaction``         bumped by every read/write; the plugin's
+                                 ``max_idle`` is measured from it.
+    ``max_lifetime``             the ceiling itself, held here so the
+                                 reaper can ask a session rather than
+                                 remember a value per session.
+    ============================ ===========================================
+
+    So the object holds the measurements and the *policy lives one level
+    up*: ``InteractiveShellPlugin`` owns the reaper thread, the
+    ``max_idle`` ceiling and the session map, and calls :meth:`close` on
+    whatever has expired.  A closed session stays in that map until the
+    reaper removes it; :attr:`is_alive` is what distinguishes the two.
+
+    Containment: the spawn ``cwd`` is verified against *workspace_root*
+    before the process starts (jaato #503) — see
+    :func:`_verify_cwd_within`.  What the model may *type* into a live
+    session is not this class's question; ``InteractiveShellPlugin``
+    answers it (#722).
     """
 
     # Polling interval for wexpect's non-blocking reads (seconds).
@@ -231,6 +302,7 @@ class ShellSession:
         preexec_fn: Optional[Callable[[], None]] = None,
         workspace_venv: Optional[str] = None,
         scrub_env: Optional[Sequence[str]] = None,
+        workspace_root: Optional[str] = None,
     ):
         """Spawn an interactive process and prepare idle-based I/O.
 
@@ -263,12 +335,27 @@ class ShellSession:
                 survives, while the runner's own credentials do not reach
                 a model-driven shell.  ``None`` / empty = no scrubbing (the
                 plugin resolves the policy; the session only applies it).
+            workspace_root: Session workspace the *cwd* must stay inside
+                (jaato issue #503).  ``None`` = the caller asserts no
+                boundary, which is what a standalone / unsandboxed use
+                means and what every pre-#722 caller got.  The plugin
+                always passes its own ``_workspace_root``, where *cwd* is
+                that same directory — so the check is a tautology on
+                today's only caller, and that is the point: the invariant
+                is enforced at the seam that spawns rather than left as a
+                property of one call site that a later caller could drop.
+                Both sides are resolved (``realpath``) before comparison,
+                so a symlinked *cwd* pointing out of the workspace is
+                refused rather than admitted for where the link lives.
 
         Raises:
             ImportError: If no backend is available (``_spawn is None``).
+            ValueError: If *cwd* resolves outside *workspace_root*.
         """
         if _spawn is None:
             raise ImportError(_BACKEND_ERROR or "No PTY backend available")
+
+        _verify_cwd_within(cwd, workspace_root)
 
         self.session_id = session_id
         self.command = command

@@ -22,13 +22,12 @@ from jaato_sdk.plugins.model_provider.types import (
     EditableContent,
     DISCOVERABILITY_DEFERRED,
 )
-from ..sandbox_utils import check_path_with_jaato_containment, detect_jaato_symlink
+from ..sandbox_utils import detect_jaato_symlink
 from ..workspace_venv import (
     resolve_venv_path, ensure_workspace_venv, apply_venv_to_env, pip_apparmor_rules,
 )
 from shared.ai_tool_runner import get_current_tool_output_callback, get_current_cancel_token
 from jaato_sdk.plugins.model_provider.types import CancelledException
-from shared.path_utils import msys2_to_windows_path
 from shared.subprocess_runner import run_command, requires_shell, RunResult
 from shared.secret_scrub import DEFAULT_SECRET_ENV_PATTERNS, resolve_scrub_patterns
 from shared.cli_path_policy import (
@@ -36,11 +35,11 @@ from shared.cli_path_policy import (
     precheck_cli_args,
 )
 from shared.trace import trace as _trace_write
-from shared.command_analysis import (
-    Segment,
-    UnanalyzableCommand,
-    WRAPPER_COMMANDS,
-    analyze_command,
+from shared.command_analysis import UnanalyzableCommand, analyze_command
+from ..command_containment import (
+    classify_command_paths,
+    path_like,
+    path_within_workspace,
 )
 
 
@@ -96,107 +95,6 @@ SHELL_METACHAR_PATTERN = re.compile(
     r'|`'              # Backtick command substitution
     r'|&\s*$'          # Background execution (& at end)
 )
-
-# Commands whose path arguments are write targets.
-# For commands with mixed semantics (cp, mv, install), the *last* path argument
-# is treated as write; earlier ones are read.  For single-target commands (rm,
-# touch, mkdir, etc.) all path arguments are write targets.
-_WRITE_ALL_CMDS = frozenset({
-    'rm', 'rmdir', 'touch', 'mkdir', 'mkfifo', 'mknod',
-    'truncate', 'shred',
-})
-_WRITE_LAST_CMDS = frozenset({
-    'cp', 'mv', 'install', 'rsync', 'scp',
-})
-_WRITE_OUTPUT_CMDS = frozenset({
-    'tee',
-})
-
-# Every command name whose presence in a segment implies a write somewhere.
-_ALL_WRITE_CMDS = _WRITE_ALL_CMDS | _WRITE_LAST_CMDS | _WRITE_OUTPUT_CMDS
-
-
-def _path_like(token: str) -> bool:
-    """True if a command word should be treated as a filesystem path.
-
-    Mirrors the historical heuristic used by
-    :meth:`CLIToolPlugin._extract_path_tokens`: absolute paths, ``..``
-    traversal, explicit ``./`` and ``~`` prefixes count; option flags,
-    URLs and npm-style ``@scope/package`` names do not.
-
-    Args:
-        token: One word from a command, quoting already removed.
-
-    Returns:
-        True when the token should be run through the workspace check.
-    """
-    if not token or token.startswith('-'):
-        return False
-    if re.match(r'^[a-zA-Z][a-zA-Z0-9+.-]*://', token):
-        return False
-    if token.startswith('@') and '/' in token and not token.startswith('@/'):
-        return False
-    return (token.startswith('/') or '..' in token or
-            token.startswith('./') or token.startswith('~'))
-
-
-def _arg_path_like(arg: str) -> bool:
-    """True if an explicit ``args`` entry should be workspace-checked.
-
-    Looser than :func:`_path_like` on purpose: entries in the separate
-    ``args`` list are never shell-parsed, so flag/URL exclusions (which
-    exist to avoid mis-reading shell words) must not weaken the check.
-    """
-    return (arg.startswith('/') or '..' in arg or
-            arg.startswith('./') or arg.startswith('~'))
-
-
-def _effective_command_name(segment: Segment) -> str:
-    """Pick the command name that governs a segment's path semantics.
-
-    A segment can name more than one command: ``sudo rm -rf x`` resolves to
-    ``['sudo', 'rm']``.  Write semantics win, so the first resolved name in
-    :data:`_ALL_WRITE_CMDS` is returned.  When the segment is headed by a
-    wrapper (``sudo``, ``env``, ``xargs``, ...) whose argument layout this
-    module does not model precisely, every word is scanned for a write
-    command -- deliberately over-classifying as write rather than risking a
-    write that reads as ``read``.
-
-    Args:
-        segment: One analyzed shell segment.
-
-    Returns:
-        The governing command basename, or ``''`` when the segment names
-        no command (assignments only).
-    """
-    names = segment.command_names
-    for name in names:
-        if name in _ALL_WRITE_CMDS:
-            return name
-    if any(name in WRAPPER_COMMANDS for name in names):
-        for word in segment.words:
-            base = os.path.basename(word)
-            if base in _ALL_WRITE_CMDS:
-                return base
-    return names[-1] if names else ''
-
-
-def _classify_word_paths(cmd_name: str, paths: List[str]) -> List[tuple]:
-    """Apply the command-name write heuristics to a segment's path words.
-
-    Args:
-        cmd_name: The governing command name for the segment.
-        paths: Path-looking words, in source order.
-
-    Returns:
-        List of ``(path, mode)`` tuples where mode is "read" or "write".
-    """
-    if cmd_name in _WRITE_ALL_CMDS or cmd_name in _WRITE_OUTPUT_CMDS:
-        return [(path, 'write') for path in paths]
-    result = [(path, 'read') for path in paths]
-    if cmd_name in _WRITE_LAST_CMDS and result:
-        result[-1] = (result[-1][0], 'write')
-    return result
 
 
 class CLIToolPlugin(BackgroundCapableMixin, RunnerForwardingMixin):
@@ -1194,29 +1092,23 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
         """
         tokens: List[str] = []
         for segment in analyze_command(command):
-            tokens.extend(word for word in segment.words if _path_like(word))
+            tokens.extend(word for word in segment.words if path_like(word))
             tokens.extend(
                 redirect.target for redirect in segment.redirects
-                if redirect.mode != 'none' and _path_like(redirect.target)
+                if redirect.mode != 'none' and path_like(redirect.target)
             )
         return tokens
 
     def _is_path_within_workspace(self, path: str, mode: str = "write") -> bool:
         """Check if a path is allowed for access.
 
-        A path is allowed if:
-        1. No workspace_root is configured (sandboxing disabled)
-        2. The path is within the workspace_root
-        3. The path is under .jaato and within the .jaato containment boundary
-           (see sandbox_utils.py for .jaato contained symlink escape rules)
-        4. The path is authorized via the plugin registry (respecting access mode)
-
-        Handles:
-        - Absolute paths
-        - Relative paths (resolved against workspace_root)
-        - Paths with .. traversal
-        - Symlinks (resolved to real path, but .jaato gets special handling)
-        - ~ home directory expansion
+        Thin wrapper over
+        :func:`shared.plugins.command_containment.path_within_workspace`,
+        which holds the rules (workspace bounds, ``.jaato`` containment,
+        ``/tmp``, registry authorization) and is shared with
+        ``interactive_shell`` so both execution tools answer the question
+        the same way (#722).  This method adds only the plugin's own state
+        and its trace line.
 
         Args:
             path: The path to check.
@@ -1228,63 +1120,15 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
         Returns:
             True if the path is allowed, False otherwise.
         """
-        if not self._workspace_root:
-            # No sandboxing configured
-            return True
-
-        try:
-            # Convert MSYS2 drive paths (/c/...) to Windows (C:/...) for Python
-            path = msys2_to_windows_path(path)
-
-            # Expand ~ to home directory
-            expanded = os.path.expanduser(path)
-
-            # Make absolute relative to workspace_root
-            if not os.path.isabs(expanded):
-                expanded = os.path.join(self._workspace_root, expanded)
-
-            # Use shared sandbox utility with .jaato containment support
-            allowed = check_path_with_jaato_containment(
-                expanded,
-                self._workspace_root,
-                self._plugin_registry,
-                mode=mode
+        allowed = path_within_workspace(
+            path, self._workspace_root, self._plugin_registry, mode=mode
+        )
+        if not allowed:
+            self._trace(
+                f"_is_path_within_workspace: {path} blocked "
+                f"(outside sandbox, mode={mode})"
             )
-
-            if not allowed:
-                self._trace(f"_is_path_within_workspace: {path} blocked (outside sandbox, mode={mode})")
-            return allowed
-
-        except (OSError, ValueError):
-            # If path resolution fails, treat as outside workspace for safety
-            return False
-
-    def _classify_segment(self, segment: Segment) -> List[tuple]:
-        """Classify the paths of a single shell segment.
-
-        Each segment is judged on its own command name and its own
-        redirections, which is what makes compound commands safe to reason
-        about: in ``cat README.md && rm -rf notes/`` the ``rm`` segment
-        classifies ``notes/`` as write even though the string starts with
-        ``cat``.
-
-        Args:
-            segment: One segment from :func:`analyze_command`.
-
-        Returns:
-            List of ``(path, mode)`` tuples where mode is "read" or "write".
-        """
-        cmd_name = _effective_command_name(segment)
-        word_paths = [word for word in segment.words if _path_like(word)]
-        result = _classify_word_paths(cmd_name, word_paths)
-
-        # Redirection targets carry the mode the operator grants, regardless
-        # of what the command itself does.
-        for redirect in segment.redirects:
-            if redirect.mode == 'none' or not _path_like(redirect.target):
-                continue
-            result.append((redirect.target, redirect.mode))
-        return result
+        return allowed
 
     def _classify_path_modes(
         self,
@@ -1293,21 +1137,10 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
     ) -> List[tuple]:
         """Classify each path token in a command as "read" or "write".
 
-        The command is first segmented into the simple commands the shell
-        would actually run (see :func:`shared.command_analysis.analyze_command`),
-        including the bodies of command substitutions.  Each segment is then
-        classified independently and the results are unioned, with "write"
-        winning over "read" for a path that appears in both roles.
-
-        Per-segment heuristics (in order of priority):
-        1. Redirection targets take the mode the operator grants -- the full
-           file-descriptor grammar, not just ``>``/``>>`` (so ``2>f``,
-           ``&>f``, ``>&f``, ``<>f``, ``>|f`` are all writes, and heredoc
-           delimiters are not paths at all).
-        2. All path args of commands in ``_WRITE_ALL_CMDS`` are "write".
-        3. The last path arg of commands in ``_WRITE_LAST_CMDS`` is "write".
-        4. All path args of commands in ``_WRITE_OUTPUT_CMDS`` are "write".
-        5. Everything else defaults to "read".
+        Delegates to
+        :func:`shared.plugins.command_containment.classify_command_paths`;
+        see that function for the segmentation and the per-segment
+        heuristics.
 
         Args:
             command: The shell command string.
@@ -1322,53 +1155,7 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
                 the shell would parse it.  Callers must refuse it; see
                 :meth:`_validate_command_paths`.
         """
-        segments = analyze_command(command)
-
-        modes: Dict[str, str] = {}
-        order: List[str] = []
-
-        def record(pairs: List[tuple]) -> None:
-            for path, mode in pairs:
-                if path not in modes:
-                    modes[path] = mode
-                    order.append(path)
-                elif mode == 'write':
-                    modes[path] = 'write'
-
-        for segment in segments:
-            record(self._classify_segment(segment))
-
-        if arg_list:
-            record(self._classify_arg_list(segments, arg_list))
-
-        return [(path, modes[path]) for path in order]
-
-    def _classify_arg_list(
-        self,
-        segments: List[Segment],
-        arg_list: List[str],
-    ) -> List[tuple]:
-        """Classify paths supplied through the separate ``args`` list.
-
-        The ``args`` form is never shell-parsed, so its entries are checked
-        with the looser :func:`_arg_path_like` filter but classified with the
-        same command-name heuristics as inline words.
-
-        Args:
-            segments: Segments parsed from the ``command`` string (used only
-                to resolve the command name).
-            arg_list: The explicit argument list.
-
-        Returns:
-            List of ``(path, mode)`` tuples.
-        """
-        head_words = list(segments[0].words) if segments else []
-        args = [str(arg) for arg in arg_list]
-        synthetic = Segment(words=head_words + args)
-        cmd_name = _effective_command_name(synthetic)
-        return _classify_word_paths(
-            cmd_name, [arg for arg in args if _arg_path_like(arg)]
-        )
+        return classify_command_paths(command, arg_list)
 
     def _validate_command_paths(
         self,
