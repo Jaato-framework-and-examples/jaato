@@ -7516,6 +7516,55 @@ NOTES
             return False
         return self._runtime.registry.is_streaming_tool(tool_name)
 
+    def _gate_streaming_tool(
+        self,
+        base_name: str,
+        fc: FunctionCall,
+    ) -> Tuple[bool, Optional[Dict[str, Any]], Dict[str, Any]]:
+        """Run the permission gate for a ``-stream`` tool invocation.
+
+        The streaming route executes a tool without going through
+        ``ToolExecutor.execute``, so it must run the gate itself or the
+        tool runs unchecked (#797).  It does so through
+        :meth:`ToolExecutor.check_permission_only` — the SAME gate the
+        executor uses, reused rather than reimplemented, because two
+        copies of a security check is how the bypass this closes recurs.
+
+        The name judged is the **base** name, never ``fc.name``: a
+        ``-stream`` variant is the same tool with a different output
+        shape, so it must inherit every rule already written for the
+        tool.  Judging the suffixed name would leave a standing denial
+        defeatable by seven characters the model can type.
+
+        Args:
+            base_name: The tool name with the ``-stream`` suffix removed.
+            fc: The originating function call; supplies the proposed
+                arguments and the call id the decision is correlated by.
+
+        Returns:
+            ``(allowed, denial, args)``.  When ``allowed`` is ``False``,
+            ``denial`` is the executor's own denial dict and the caller
+            must return it unchanged.  ``args`` is what to execute with —
+            ``fc.args``, unless an interactive approval edited them.
+
+        Note:
+            With no executor wired there is no permission plugin to ask
+            and nothing to enforce, so the call is allowed — the same
+            answer ``ToolExecutor`` gives when no plugin is set.
+        """
+        if self._executor is None:
+            return (True, None, fc.args)
+        gate = self._executor.check_permission_only(
+            base_name, fc.args, fc.id,
+        )
+        if not gate.allowed:
+            self._trace(
+                f"_gate_streaming_tool: DENIED tool={base_name} "
+                f"wire_name={fc.name} call_id={fc.id}"
+            )
+            return (False, gate.denial, fc.args)
+        return (True, None, gate.args)
+
     def _execute_streaming_tool(
         self,
         fc: FunctionCall,
@@ -7523,13 +7572,21 @@ NOTES
     ) -> Tuple[bool, Dict[str, Any]]:
         """Execute a streaming tool via the StreamManager.
 
+        This is a SECOND execution entry point: it reaches
+        ``plugin.execute_streaming`` directly and never passes through
+        ``ToolExecutor.execute``.  It therefore runs the permission gate
+        itself, on the BASE tool name — see below (#797).
+
         Args:
             fc: The function call (with -stream suffix).
             on_output: Optional callback for UI updates.
 
         Returns:
-            Tuple of (success, result_dict) where result_dict contains
-            stream_id, initial_chunks, and status.
+            Tuple of (success, result_dict).  On success ``result_dict``
+            contains stream_id, initial_chunks and status; on a permission
+            refusal it is the executor's own denial shape
+            (``error`` + ``_permission``), so a denied ``-stream`` call is
+            indistinguishable to the model from a denied plain one.
         """
         if not self._stream_manager or not self._runtime.registry:
             return (False, {"error": "Streaming not available"})
@@ -7540,6 +7597,19 @@ NOTES
 
         if not streaming_plugin:
             return (False, {"error": f"Tool {base_name} does not support streaming"})
+
+        # The -stream variant is the SAME tool with a different output
+        # shape, and the registry auto-generates one for every tool on a
+        # StreamingCapable plugin.  Routing here skips
+        # ToolExecutor.execute, which is where the only permission check
+        # used to live -- so an explicitly blacklisted tool executed with
+        # zero prompts when the model appended seven characters to its
+        # name (#797).  Check the BASE name so the variant inherits every
+        # policy, whitelist and blacklist rule already written for the
+        # tool, with no policy migration.
+        allowed, denial, tool_args = self._gate_streaming_tool(base_name, fc)
+        if not allowed:
+            return (False, denial)
 
         # Get plugin name for handle
         plugin_name = "unknown"
@@ -7626,7 +7696,9 @@ NOTES
                 plugin=streaming_plugin,
                 plugin_name=plugin_name,
                 tool_name=base_name,
-                arguments=fc.args,
+                # The gate's args, not fc.args: an interactive approval
+                # may have edited them (#797).
+                arguments=tool_args,
                 call_id=fc.id or "",
                 on_ui_chunk=on_chunk,
             )

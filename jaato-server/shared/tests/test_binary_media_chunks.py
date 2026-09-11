@@ -738,6 +738,9 @@ class TestTheAudienceBoundaryHoldsAtEverySite:
         session._runtime = MagicMock()
         session._runtime.registry.get_base_tool_name.return_value = "speak"
         session._runtime.registry.get_streaming_plugin.return_value = MagicMock()
+        # No executor means no permission plugin to ask (#797): the
+        # streaming gate allows, which is what these audience tests want.
+        session._executor = None
 
         handle = MagicMock(stream_id="s1", initial_chunks=chunks)
         handle.status.value = "running"
