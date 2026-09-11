@@ -170,6 +170,18 @@ async def test_cancel_token_trips_runner_cancel() -> None:
 
         # Use a streaming cli command so the runner has cancel-check
         # opportunities (run_command only checks between output lines).
+        #
+        # The iteration count is a DEADLINE, not a duration: when the
+        # cancel lands the call returns within one 0.05 s output line, so
+        # a longer command costs a passing run nothing.  What it buys is
+        # margin.  At 200 iterations the command ran 10 s and the cancel
+        # was scheduled 0.2 s in -- a 50x gap that a loaded CI runner
+        # closed twice in one afternoon, each time with the command
+        # running to completion and `ok=True` (observed 10.24 s wall for
+        # a nominally 10 s command, i.e. the event loop never got to
+        # _trip_after_a_bit in time).  2000 iterations restores the
+        # margin without weakening what is asserted: the cancel must
+        # still arrive, and a cancel that never fires still fails.
         async def _trip_after_a_bit() -> None:
             await asyncio.sleep(0.2)
             token.cancel()
@@ -183,7 +195,7 @@ async def test_cancel_token_trips_runner_cancel() -> None:
                 "name": "cli_based_tool",
                 "args": {
                     "command": (
-                        "for i in $(seq 1 200); do echo line-$i; "
+                        "for i in $(seq 1 2000); do echo line-$i; "
                         "sleep 0.05; done"
                     ),
                 },
