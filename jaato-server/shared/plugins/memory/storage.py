@@ -17,12 +17,18 @@ The ``MemoryStore`` facade exposes the operations the plugin and
 curator need; it composes a ``RawStore`` and a ``CuratedStore`` over
 a shared base directory.
 
-Backward compatibility for the legacy single-file ``memories.jsonl``
-layout is intentionally NOT provided — this is a development-stage
-refactor with no migration commitment.
+The base path a caller supplies is a DIRECTORY (``.jaato/memories``).
+A legacy ``*.jsonl`` path is still accepted and is rewritten to the
+sibling directory named after its stem, so existing configs keep
+working — see ``MemoryStore.__init__``.  That rewrite used to ignore
+the named file in silence, which is outcome-indistinguishable from an
+empty store (#912); a populated legacy file is now migrated into
+``curated.jsonl`` on first use, or, when that would clobber an existing
+store, announced at WARNING.
 """
 
 import json
+import logging
 import os
 import tempfile
 import threading
@@ -38,6 +44,9 @@ from .models import (
     MATURITY_RAW,
     Memory,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 # Fields that exist on the Memory dataclass.  Used to silently drop
@@ -232,6 +241,18 @@ class CuratedStore:
     def count(self) -> int:
         return len(self.load_all())
 
+    def replace_all(self, memories: List[Memory]) -> None:
+        """Replace the whole file with ``memories``, atomically.
+
+        The bulk counterpart of ``upsert``/``remove``, for a caller that
+        already holds the complete desired contents — today only
+        ``MemoryStore._recover_legacy_file``, which seeds a store that did
+        not exist yet.  Unconditional: it does NOT merge with what is on
+        disk, so a caller that could be racing another writer is
+        responsible for deciding that it should win.
+        """
+        self._rewrite(memories)
+
     def _rewrite(self, memories: List[Memory]) -> None:
         payload = "".join(json.dumps(asdict(m)) + "\n" for m in memories)
         _atomic_write(self._path, payload)
@@ -249,25 +270,41 @@ class MemoryStore:
     level (store, retrieve, curate) without leaking the split layout.
 
     Args:
-        path: Base path.  Either a directory that will hold ``raw/``
-            and ``curated.jsonl``, or (for backwards compatibility with
-            existing call sites that pass a ``.jsonl`` path) the file
-            path's parent directory will be used.  In the latter case
-            the legacy file is ignored — there is no migration.
+        path: The store's base **directory** — it holds ``raw/`` and
+            ``curated.jsonl``.  This is what every surface documents and
+            defaults to (``.jaato/memories``).
+
+            A legacy ``*.jsonl`` FILE path is also accepted, for profiles
+            written before the layout split: it resolves to the sibling
+            directory named after the file's stem
+            (``.../memories.jsonl`` → ``.../memories/``), keeping the
+            workspace and global stores distinct.  Explicit ``.jsonl``
+            paths exist in the wild, so that rule is a tested contract —
+            dropping it would repoint those deployments at a fresh empty
+            store.
+
+            Such a file is never itself the store.  Until #912 it was
+            ignored in silence, which is outcome-indistinguishable from
+            an empty store; it is now migrated or announced by
+            ``_recover_legacy_file``.
+
+    Attributes:
+        _base_dir: The resolved directory both sub-stores live under —
+            the value ``base_dir`` exposes.  Equal to ``path`` unless the
+            legacy suffix rule rewrote it.
+        _legacy_file: The ``*.jsonl`` path the caller passed, when the
+            suffix rule fired; ``None`` for a directory path.  Read once,
+            at construction, and never written to.
     """
 
     def __init__(self, path: str):
-        # Accept either a directory or a legacy ``*.jsonl`` path
-        # (in which case we use a directory adjacent to the file,
-        # named after its stem, so workspace and global stores stay
-        # distinct).  This keeps the plugin's existing config keys
-        # working — callers don't need to update their
-        # ``storage_path`` / ``global_storage_path``.
         p = Path(path)
         if p.suffix == ".jsonl":
             base = p.parent / p.stem  # e.g. ``.../memories.jsonl`` → ``.../memories/``
+            self._legacy_file: Optional[Path] = p
         else:
             base = p
+            self._legacy_file = None
         self._base_dir = base
         self._raw = RawStore(base)
         self._curated = CuratedStore(base)
@@ -292,6 +329,96 @@ class MemoryStore:
         #: for a cross-process interleaving to be OBSERVED rather than being
         #: built against a hypothesis.
         self._lock = threading.RLock()
+        self._recover_legacy_file()
+
+    # ── Legacy single-file recovery (#912) ──────────────────────────
+
+    def _recover_legacy_file(self) -> None:
+        """Migrate — or at minimum ANNOUNCE — a populated legacy ``*.jsonl``.
+
+        ``.../memories.jsonl`` is reinterpreted as ``.../memories/``.  A
+        real file at the given path used to be ignored without a word,
+        which reads exactly like an empty store: the reported symptom was
+        an agent waking up certain it knew nothing, with its memories on
+        disk the whole time.
+
+        Called once, at the end of ``__init__``.  Three properties, each
+        attached to a way this could go wrong:
+
+        - **Never clobber.**  Migration runs only when ``curated.jsonl``
+          is ABSENT.  Two independently-populated stores are merged by a
+          person, not by a constructor; that case warns and touches
+          nothing.
+        - **The legacy file is not deleted or renamed.**  This is a copy;
+          the operator removes the original once satisfied.  A
+          constructor that mutated the caller's file on import would be a
+          worse bug than the one being fixed.
+        - **Silence stays silent for the normal case.**  Directory paths,
+          absent files, empty files and unreadable ones log nothing, so a
+          WARNING here means something.
+
+        Recovery can only GAIN data: a populated flat file can exist only
+        on an install predating the layout split, where it has been
+        unreadable ever since.
+        """
+        legacy = self._legacy_file
+        if legacy is None:
+            return
+        memories = self._read_legacy_memories(legacy)
+        if not memories:
+            return
+        if self._curated.path.exists():
+            logger.warning(
+                "memory: %s is a legacy single-file store and is NOT read; "
+                "this store lives in %s, which already holds %s. Merge the "
+                "two by hand, or delete the legacy file.",
+                legacy, self._base_dir, self._curated.path,
+            )
+            return
+        with self._lock:
+            if self._curated.path.exists():
+                return
+            self._curated.replace_all(memories)
+        logger.warning(
+            "memory: migrated %d memories from the legacy single-file store "
+            "%s into %s. The legacy file is left untouched — delete it once "
+            "you have confirmed the migration.",
+            len(memories), legacy, self._curated.path,
+        )
+
+    @staticmethod
+    def _read_legacy_memories(legacy: Path) -> List[Memory]:
+        """Parse a legacy single-file store, tolerating everything.
+
+        Mirrors ``CuratedStore.load_all``'s line-by-line tolerance — a bad
+        line is skipped, never fatal — and additionally swallows
+        ``OSError``.  An unreadable path is the NORMAL case for a confined
+        session: ``MemoryPlugin.initialize`` builds one store from a
+        daemon-cwd-relative template and another from HOME, and a
+        confined runner is correctly denied both.  Raising there would
+        disable the plugin for the tier that IS reachable.
+
+        Returns:
+            The memories found, or ``[]`` when the file is absent, empty,
+            unreadable or entirely corrupt.  The caller does not need to
+            tell those apart: none of them is worth announcing.
+        """
+        try:
+            if not legacy.is_file() or legacy.stat().st_size == 0:
+                return []
+            text = legacy.read_text(encoding="utf-8")
+        except OSError:
+            return []
+        memories: List[Memory] = []
+        for line in text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                memories.append(_memory_from_dict(json.loads(line)))
+            except (json.JSONDecodeError, TypeError):
+                continue
+        return memories
 
     @property
     def raw(self) -> RawStore:

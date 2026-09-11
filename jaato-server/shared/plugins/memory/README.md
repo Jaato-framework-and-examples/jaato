@@ -46,7 +46,7 @@ from shared.plugins.registry import PluginRegistry
 
 registry = PluginRegistry()
 registry.expose_plugin("memory", config={
-    "storage_path": ".jaato/memories.jsonl"  # Optional, this is the default
+    "storage_path": ".jaato/memories"  # Optional, this is the default
 })
 ```
 
@@ -166,7 +166,10 @@ Memories are stored in JSONL (JSON Lines) format:
 {"id": "mem_20231211_150133", "content": "...", "description": "...", "tags": [...], "timestamp": "2023-12-11T15:01:33", "usage_count": 0, "last_accessed": null}
 ```
 
-Default location: `.jaato/memories.jsonl` (per-project)
+Default location: `.jaato/memories/` (per-project) — a directory holding
+`raw/{id}.json` (the pending queue) and `curated.jsonl` (the curated store).
+A legacy `*.jsonl` path is still accepted and resolves to the sibling
+directory named after its stem; a populated one is migrated on first use.
 
 ## Indexing
 
@@ -206,7 +209,7 @@ The plugin maintains an in-memory index for efficient lookup:
 ### For Users
 
 **Storage location:**
-- Keep `.jaato/memories.jsonl` in `.gitignore` (project-specific knowledge)
+- Keep `.jaato/memories/` in `.gitignore` (project-specific knowledge)
 - Or commit it for team-shared knowledge base
 
 **Maintenance:**
@@ -218,7 +221,7 @@ The plugin maintains an in-memory index for efficient lookup:
 
 ```python
 {
-    "storage_path": ".jaato/memories.jsonl",  # Path to storage file
+    "storage_path": ".jaato/memories",  # Directory holding the store
     "enrichment_limit": 5                      # Max hints in prompt (future)
 }
 ```
