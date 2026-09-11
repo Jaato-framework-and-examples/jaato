@@ -49,10 +49,22 @@ def _refuse(sibling_name="Permission Approver - reply yes", existing=()):
 
 
 def test_the_refusal_branch_emits_an_error_event():
+    """...through the answer funnel, which is what stamps the correlation id.
+
+    #882/#975 moved every create-path answer onto
+    ``SessionManager._answer_session_new``.  Emitting is no longer enough on
+    its own: the client's create-wait discards an ``ErrorEvent`` whose
+    ``request_id`` does not match, so a refusal sent with a bare
+    ``_emit_to_client`` reaches the socket and still leaves the caller
+    waiting out its full timeout.  The funnel is therefore the thing to
+    assert — see
+    ``server/tests/test_session_new_answers_exactly_once.py`` for the
+    class-wide guard.
+    """
     src = inspect.getsource(SessionManager._create_session_impl)
     i = src.index("create_session refused")
     window = src[i:i + 900]
-    assert "_emit_to_client" in window and "ErrorEvent" in window, (
+    assert "_answer_session_new" in window and "ErrorEvent" in window, (
         "the refusal logs and returns '' without telling the client — the "
         "caller blocks until its own timeout and the router's falsy branch "
         "hints about auth providers instead")

@@ -5,6 +5,7 @@ a profile is a reusable template, a cascade cap is a runtime aggregate
 over one live cid.
 """
 
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -137,7 +138,17 @@ def test_refusal_reaches_the_client_with_machine_readable_evidence():
     from server.session_manager import SessionManager
 
     emitted = []
-    sm = SimpleNamespace(_emit_to_client=lambda cid, ev: emitted.append((cid, ev)))
+    # The refusal goes out through ``_answer_session_new`` (#882/#975): a
+    # refusal raised during a ``session.new`` must COUNT as that create's one
+    # answer, or the last-resort frame fires on top of it and the caller gets
+    # two.  The stand-in carries both halves, so this test still observes
+    # exactly what reached the client.
+    sm = SimpleNamespace(
+        _emit_to_client=lambda cid, ev: emitted.append((cid, ev)),
+        _session_new_answer=threading.local(),
+    )
+    sm._answer_session_new = lambda cid, ev: SessionManager._answer_session_new(
+        sm, cid, ev)
     pool = CascadeBudgetPool("cid1", BudgetControlConfig.from_dict(
         {"limits": {"tokens": 12000}}))
     pool.spend(tokens=12000)
@@ -161,7 +172,7 @@ def test_refusal_reaches_the_client_with_machine_readable_evidence():
 
 def test_refusal_emit_never_raises():
     from server.session_manager import SessionManager
-    sm = SimpleNamespace(_emit_to_client=lambda *a: (_ for _ in ()).throw(
+    sm = SimpleNamespace(_answer_session_new=lambda *a: (_ for _ in ()).throw(
         RuntimeError("sink down")))
     SessionManager._emit_cascade_refusal(sm, "c", "s", RuntimeError("boom"))
 

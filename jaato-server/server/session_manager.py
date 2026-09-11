@@ -224,6 +224,58 @@ class _PendingWake:
 
 
 @dataclass
+class _SessionNewAnswer:
+    """The bookkeeping that makes ONE ``session.new`` produce ONE answer.
+
+    THE INVARIANT.  Every ``session.new`` -- refused, served, or blown up
+    part-way -- must produce exactly one event the caller's create-wait
+    accepts: a :class:`SessionInfoEvent` or an :class:`ErrorEvent`, stamped
+    with the originating ``request_id``.  Without the stamp the client's
+    ``_correlates`` discards it and waits out its full timeout, so an
+    UNSTAMPED answer is indistinguishable from no answer at all (#882, #975).
+
+    LIFECYCLE, and where the object lives at each stage:
+
+    ==============================  ==========================================
+    stage                           state
+    ==============================  ==========================================
+    opened by ``create_session``    on ``SessionManager._session_new_answer``
+                                    (thread-local), ``frames == 0``
+    an answer is emitted            ``_answer_session_new`` increments
+                                    ``frames`` and stamps ``request_id``
+    a session becomes real          ``created_session_id`` is set, so a
+                                    LATER failure can say the session exists
+    closed by ``create_session``    cleared from the thread-local; if
+                                    ``frames == 0`` a last-resort refusal is
+                                    emitted first
+    ==============================  ==========================================
+
+    ``created_session_id`` is what keeps the SDK's ``may_exist`` honest.  A
+    refusal raised before anything was allocated means nothing was created
+    and a retry is safe; a failure raised AFTER the session was registered
+    means a session really exists and a blind retry makes a second one.
+    The two used to produce the identical message.
+
+    One record per thread, not per manager: a create runs start-to-finish on
+    one executor worker, so the thread is the call, and two concurrent
+    creates cannot see each other's record.
+    """
+    #: Correlation id of the ``session.new`` being answered (``None`` when
+    #: the caller is an older client that sent none).
+    request_id: Optional[str]
+    #: Who gets the answer.  ``None`` for headless creates, which have no
+    #: client to answer and are therefore exempt from the invariant.
+    client_id: Optional[str]
+    #: How many answer-shaped frames have been emitted for this call.  The
+    #: invariant is ``frames == 1`` by the time the record closes.
+    frames: int = 0
+    #: Set once the session is registered in ``_sessions``.  Present on a
+    #: post-creation failure answer so the client can tell a refusal
+    #: (nothing created) from a lost confirmation (a session exists).
+    created_session_id: Optional[str] = None
+
+
+@dataclass
 class RuntimeSessionInfo:
     """Metadata about a session (runtime + persisted)."""
     session_id: str
@@ -888,6 +940,13 @@ class SessionManager:
         # apart, so without an atomic claim the check-then-act races: every
         # concurrent create inside that window sees the same id free.
         self._reserved_session_ids: Set[str] = set()
+        # The in-flight ``session.new`` answer record for THIS thread.
+        # ``create_session`` opens one and closes it; every answer-shaped
+        # event the create path emits is counted on it.  See
+        # :class:`_SessionNewAnswer` and :meth:`_answer_session_new`.
+        # Thread-local rather than an instance dict because a create runs
+        # start-to-finish on one executor worker, so the thread IS the call.
+        self._session_new_answer = threading.local()
         self._cascade_budgets: Dict[str, "CascadeBudgetPool"] = {}
         self._cascade_budgets_lock = threading.Lock()
         # GC backstop: cascade-client entries with no event for this
@@ -5183,7 +5242,13 @@ class SessionManager:
                 request_id=request_id,
             )
             if client_id:
-                self._emit_to_client(client_id, event)
+                # Through the answer funnel, so a refusal raised during a
+                # ``session.new`` counts as THE answer (#882/#975) and the
+                # last-resort frame does not fire on top of it.  Called
+                # from the spawn path too, where no answer record is open
+                # -- the funnel then emits exactly as ``_emit_to_client``
+                # did.
+                self._answer_session_new(client_id, event)
             cid = getattr(exc, "cascade_driver_id", None) or payload.get(
                 "cascade_driver_id")
             if cid:
@@ -5547,9 +5612,130 @@ class SessionManager:
             The new session ID, or empty string on failure.
         """
         from shared.session_context import run_in_fresh_session_context
-        return run_in_fresh_session_context(
-            self._create_session_impl, *args, **kwargs,
+        record = _SessionNewAnswer(
+            request_id=kwargs.get("request_id"),
+            client_id=kwargs.get("client_id", args[0] if args else None),
         )
+        self._session_new_answer.record = record
+        try:
+            return run_in_fresh_session_context(
+                self._create_session_impl, *args, **kwargs,
+            )
+        except BaseException as exc:            # noqa: BLE001 -- re-raised
+            self._answer_session_new_last_resort(record, exc)
+            raise
+        finally:
+            self._answer_session_new_last_resort(record, None)
+            self._session_new_answer.record = None
+
+    def _answer_session_new_last_resort(
+        self, record: "_SessionNewAnswer", exc: Optional[BaseException],
+    ) -> None:
+        """Emit the one frame a create owes its caller, if nothing else did.
+
+        A no-op when the record already carries an answer -- which is the
+        normal case, and is why this cannot turn a well-behaved path into a
+        double answer.  A no-op too for a headless create (no ``client_id``),
+        which has no caller waiting on a wire.
+
+        Args:
+            record: The open answer record for this ``session.new``.
+            exc: The exception that escaped ``_create_session_impl``, when
+                one did; ``None`` is the "returned without answering" case.
+                Both are daemon defects, so both say so rather than
+                inventing a plausible user-facing cause.
+        """
+        if record.client_id is None or record.frames:
+            return
+        if exc is not None:
+            detail = f"{type(exc).__name__}: {exc}"
+            logger.error(
+                "session.new raised without answering the caller: %s",
+                detail, exc_info=True,
+            )
+        else:
+            detail = (
+                "the daemon refused or abandoned the create without stating "
+                "a reason; see the daemon log for the cause"
+            )
+            logger.error("session.new returned without answering the caller")
+        self._answer_session_new(record.client_id, ErrorEvent(
+            error=f"session.new: {detail}",
+            error_type="SessionCreateFailed",
+            recoverable=True,
+        ))
+
+    def _latch_created_session(self, session_id: str) -> None:
+        """Record that this ``session.new`` has produced a real session.
+
+        Called once, the moment the session enters ``_sessions``.  From here
+        on a failure answer carries ``created_session_id``, so the SDK's
+        ``SessionRefused.may_exist`` is TRUE and the caller is told a retry
+        would make a SECOND session rather than that one is safe (#975).
+
+        A no-op outside a ``create_session`` call (no open record), which is
+        how the headless and disk-restore paths reach it harmlessly.
+        """
+        record = getattr(self._session_new_answer, "record", None)
+        if record is not None:
+            record.created_session_id = session_id
+
+    def _answer_session_new(
+        self,
+        client_id: Optional[str],
+        event: Event,
+        *,
+        created_session_id: Optional[str] = None,
+    ) -> None:
+        """Emit THE answer to the in-flight ``session.new``.
+
+        The single funnel every create-path refusal and confirmation goes
+        through.  Routing them all here is what makes the correlation stamp
+        structural rather than something each new refusal path has to
+        remember: before this, five of the seven refusals in
+        :meth:`_create_session_impl` built their ``ErrorEvent`` inline and
+        left ``request_id`` unset, and the client discarded every one of
+        them (#882).  The fallback confirmation did the same on the SUCCESS
+        path (#975).
+
+        Stamps, in order:
+
+        * ``request_id`` -- from the open record, unless the caller already
+          set one (a cascade refusal carries its own).  Without it the
+          client's ``_correlates`` files the event as incidental and keeps
+          waiting.
+        * ``details['created_session_id']`` -- when a session was registered
+          before the failure, so the SDK can raise a refusal whose
+          ``may_exist`` is TRUE.  Never invented: absent means nothing was
+          created, which is what makes a retry provably safe.
+
+        Args:
+            client_id: Recipient.  ``None`` (headless) emits nothing, and
+                the frame is still counted so the last-resort path stays
+                quiet for a create nobody is waiting on.
+            event: The ``SessionInfoEvent`` or ``ErrorEvent`` to send.
+            created_session_id: The session that exists despite this being
+                a failure answer.  Also latched onto the record, so a later
+                last-resort frame inherits it.
+        """
+        record = getattr(self._session_new_answer, "record", None)
+        if created_session_id and record is not None:
+            record.created_session_id = created_session_id
+        if record is not None:
+            if getattr(event, "request_id", None) is None:
+                try:
+                    event.request_id = record.request_id
+                except (AttributeError, ValueError):  # pragma: no cover
+                    pass
+            record.frames += 1
+            created_session_id = created_session_id or record.created_session_id
+        if created_session_id and isinstance(event, ErrorEvent):
+            details = dict(event.details or {})
+            details.setdefault("created_session_id", created_session_id)
+            event.details = details
+        if client_id is None:
+            return
+        self._emit_to_client(client_id, event)
 
     def _allocate_session_id(self, workspace_path: Optional[str]) -> str:
         """Atomically CLAIM a unique session id.
@@ -6279,11 +6465,10 @@ class SessionManager:
                 # session.new failure, which the SDK documents as arriving
                 # that way.
                 logger.error("create_session refused: %s", _bad)
-                self._emit_to_client(client_id, ErrorEvent(
+                self._answer_session_new(client_id, ErrorEvent(
                     error=f"session.new: {_bad}",
                     error_type="InvalidSiblingName",
                     recoverable=True,
-                    request_id=request_id,
                 ))
                 return ""
 
@@ -6340,7 +6525,7 @@ class SessionManager:
         # front rather than silently picking one.
         profile = None
         if profile_name and inline_profile_data:
-            self._emit_to_client(client_id, ErrorEvent(
+            self._answer_session_new(client_id, ErrorEvent(
                 error=(
                     "session.new: 'profile' name and inline 'spec' are "
                     "mutually exclusive — pass exactly one"
@@ -6359,7 +6544,7 @@ class SessionManager:
                 env_file=session_env_file,
             )
             if profile is None:
-                self._emit_to_client(client_id, ErrorEvent(
+                self._answer_session_new(client_id, ErrorEvent(
                     error=error,
                     error_type="ProfileNotFoundError",
                     recoverable=True,
@@ -6369,7 +6554,7 @@ class SessionManager:
         elif inline_profile_data is not None:
             from shared.plugins.subagent.config import build_inline_profile
             if not inline_profile_data.get("model"):
-                self._emit_to_client(client_id, ErrorEvent(
+                self._answer_session_new(client_id, ErrorEvent(
                     error=(
                         "session.new: inline spec requires a 'model' field "
                         "— defaults are not silently applied"
@@ -6381,7 +6566,7 @@ class SessionManager:
             try:
                 profile = build_inline_profile(inline_profile_data)
             except ValueError as exc:
-                self._emit_to_client(client_id, ErrorEvent(
+                self._answer_session_new(client_id, ErrorEvent(
                     error=f"session.new: {exc}",
                     error_type="InvalidSessionSpec",
                     recoverable=True,
@@ -6400,7 +6585,7 @@ class SessionManager:
                 agent_name, agent_params, workspace_path, config_root=config_root,
             )
             if agent_result is None:
-                self._emit_to_client(client_id, ErrorEvent(
+                self._answer_session_new(client_id, ErrorEvent(
                     error=f"Agent '{agent_name}' not found in .jaato/agents/ or .jaato/prompts/",
                     error_type="AgentNotFoundError",
                     recoverable=True,
@@ -6482,7 +6667,7 @@ class SessionManager:
                     f"({profile.spawn_payload_schema!r})."
                 )
                 logger.error(err_msg)
-                self._emit_to_client(client_id, ErrorEvent(
+                self._answer_session_new(client_id, ErrorEvent(
                     error=err_msg,
                     error_type="SpawnPayloadValidationError",
                     recoverable=True,
@@ -6572,9 +6757,25 @@ class SessionManager:
         )
         server, session = self._bootstrap_session(envelope)
         if server is None or session is None:
-            # server.initialize() failed; core.py already emitted a
-            # detailed ConfigurationError to the in-init sink.
+            # server.initialize() failed.  core.py emits a detailed
+            # ConfigurationError to the in-init sink -- but that event
+            # goes out through ``on_event_during_init``, which carries no
+            # ``request_id``, so the client's create-wait files it as
+            # incidental and keeps waiting.  The detail is still the
+            # better diagnostic; this is the correlated frame that ENDS
+            # the wait (#882).  Nothing was registered, so no
+            # ``created_session_id``: the refusal is truthfully "safe to
+            # retry".
             self._release_session_id(session_id)
+            self._answer_session_new(client_id, ErrorEvent(
+                error=(
+                    "session.new: session initialization failed -- see "
+                    "the ConfigurationError emitted during init for the "
+                    "cause"
+                ),
+                error_type="SessionInitializationError",
+                recoverable=True,
+            ))
             return ""
 
         logger.info(f"Server initialized successfully for session {session_id}")
@@ -6683,6 +6884,15 @@ class SessionManager:
                 session.cascade_driver_id,
             )
 
+        # FROM HERE A SESSION EXISTS.  Latched on the answer record so
+        # any later failure -- including one that never reaches the
+        # confirmation below -- answers with ``created_session_id`` set,
+        # and the SDK raises a refusal whose ``may_exist`` is TRUE.
+        # Before #975 a post-registration failure was indistinguishable
+        # from a refusal that allocated nothing, and only one of those is
+        # safe to retry.
+        self._latch_created_session(session_id)
+
         # Seed session-attached state BEFORE hooks fire.  Consumer
         # hooks (e.g. premium pseudonymization) read these keys via
         # session.get_session_state(...) to rebuild runtime structure
@@ -6731,20 +6941,29 @@ class SessionManager:
         # an updated SessionInfoEvent once the provider is fully ready.
         try:
             _info = self._build_session_info_event(session)
-            # Echo the correlation id so the caller can tell THIS answer
-            # from a concurrent create's.  Without it the client matched on
-            # shape and a stale buffered event satisfied the wrong wait.
-            _info.request_id = request_id
-            self._emit_to_client(client_id, _info)
         except Exception as exc:
+            # #975: this fallback used to emit an UNCORRELATED
+            # SessionInfoEvent, which the client's create-wait discards --
+            # so a session that was fully created, bootstrapped and
+            # serving RPCs answered its caller with a 60 s
+            # ``SessionNotConfirmed``.  "The client can still proceed" was
+            # only ever true for a client old enough not to correlate.
+            # The minimal event is still the right payload (the session IS
+            # usable; only the state snapshot failed to build), so it goes
+            # out through the same funnel and carries the same stamp.
             logger.error("Failed to build SessionInfoEvent: %s", exc, exc_info=True)
-            # Send a minimal SessionInfoEvent so the client can still proceed
-            self._emit_to_client(client_id, SessionInfoEvent(
+            _info = SessionInfoEvent(
                 session_id=session.session_id,
                 session_name=session.name,
                 model_provider=session.server.model_provider if session.server else "",
                 model_name=session.server.model_name if session.server else "",
-            ))
+            )
+        # Echo the correlation id so the caller can tell THIS answer from
+        # a concurrent create's.  Without it the client matched on shape
+        # and a stale buffered event satisfied the wrong wait.
+        self._answer_session_new(
+            client_id, _info, created_session_id=session.session_id,
+        )
 
         if not server.auth_pending:
             self._emit_to_client(client_id, SystemMessageEvent(
