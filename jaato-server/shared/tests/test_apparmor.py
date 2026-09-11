@@ -2797,3 +2797,100 @@ class TestRenderedProfileCompiles:
             "expected apparmor_parser to REJECT a bare 'd,' mode; if it now "
             "accepts one, delete-only grants may be reconsidered"
         )
+
+
+class TestEveryRenderedProfileDeclaresItsVariables:
+    """A profile that references ``@{VAR}`` must pull in the file that
+    declares it, in the SAME file, because that is how it is parsed.
+
+    Both provisioning paths — ``_provision_profile_impl`` and
+    ``_provision_sub_profile_impl`` — write one rendered body to one file
+    and run ``apparmor_parser -r <that file>`` on it, with no ``-I``
+    include path and no concatenation with anything else.  So a variable
+    the body does not declare is a variable nothing declares, and the
+    parser refuses the whole profile:
+
+        Found reference to variable HOME, but is never declared
+
+    The isolated sub-runner body spent its whole life in that state.  It
+    references ``@{HOME}`` in two rules and carried no
+    ``#include <tunables/global>``, which the main ``PROFILE_TEMPLATE``
+    has had since v1 — so every isolated-subagent spawn was refused by
+    ``SessionManager._spawn_isolated_runner`` (fail-closed: no unconfined
+    fallback, so a dead feature rather than a confinement hole).  Nothing
+    caught it because every test of that path mocks ``subprocess.run``.
+
+    This is the cheap structural form of the compile check above: it
+    needs no ``apparmor_parser`` on the box, so it runs everywhere and
+    fails the build on the next renderer that forgets the include.
+    """
+
+    VAR_REF = re.compile(r"@\{([A-Za-z_][A-Za-z0-9_]*)\}")
+    # Declared inline by the renderers themselves rather than by tunables.
+    LOCALLY_DECLARED: frozenset = frozenset()
+
+    def _renders(self, manager):
+        return {
+            "base": manager._render_profile("s1", "/workspace"),
+            "isolated_sub_runner": manager._render_sub_profile(
+                parent_session_id="parent-A",
+                subagent_id="agent-B",
+                workspace_path="/workspace",
+            ),
+        }
+
+    def test_a_profile_referencing_a_variable_includes_tunables(
+        self, manager,
+    ):
+        for label, text in self._renders(manager).items():
+            referenced = {
+                name for name in self.VAR_REF.findall(text)
+                if name not in self.LOCALLY_DECLARED
+            }
+            declared_inline = set(
+                re.findall(r"^\s*@\{([A-Za-z_][A-Za-z0-9_]*)\}\s*\+?=", text, re.M)
+            )
+            undeclared = referenced - declared_inline
+            if not undeclared:
+                continue
+            assert "include <tunables/global>" in text, (
+                f"{label} references {sorted(undeclared)} and includes no "
+                f"<tunables/global>; it is parsed standalone, so the parser "
+                f"will refuse it with 'Found reference to variable ..., but "
+                f"is never declared' and the profile will never load"
+            )
+
+    def test_the_isolated_profile_specifically_carries_the_include(
+        self, manager,
+    ):
+        """Named on its own because it is the one that regressed, and
+        because the generic test above goes quiet the moment someone
+        removes the last ``@{HOME}`` rule rather than fixing the include.
+        """
+        sub = manager._render_sub_profile(
+            parent_session_id="parent-A",
+            subagent_id="agent-B",
+            workspace_path="/workspace",
+        )
+        assert "#include <tunables/global>" in sub, (
+            "the isolated sub-runner profile must declare its variables; "
+            "without this line every isolated-subagent spawn is refused at "
+            "stage=sub_profile"
+        )
+
+    def test_the_include_sits_outside_the_profile_block(self, manager):
+        """``#include <tunables/global>`` must precede ``profile ... {``.
+
+        Variable declarations are file-scoped preprocessor state; inside
+        a profile block the parser rejects them outright.  Getting this
+        wrong turns a load failure into a different load failure, so pin
+        the position rather than only the presence.
+        """
+        sub = manager._render_sub_profile(
+            parent_session_id="parent-A",
+            subagent_id="agent-B",
+            workspace_path="/workspace",
+        )
+        assert sub.index("#include <tunables/global>") < sub.index("profile \""), (
+            "tunables include must come before the profile block opens"
+        )

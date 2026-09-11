@@ -340,7 +340,44 @@ class AppArmorManager:
     #       ``shared/plugins/sandbox_utils.py`` — which gates only
     #       model-driven path-taking tools, and so can afford to be
     #       stricter — does cover them.
-    _TEMPLATE_VERSION = 30
+    #  31 — (2026-09-11) ``#include <tunables/global>`` added to the
+    #       ISOLATED sub-runner profile body
+    #       (``_render_sub_profile``).  Pre-existing defect, surfaced by
+    #       the v30 work rather than caused by it: that body references
+    #       ``@{{HOME}}`` in two rules and declared the variable nowhere,
+    #       so ``apparmor_parser`` refused it with
+    #
+    #           Found reference to variable HOME, but is never declared
+    #
+    #       ``_provision_sub_profile_impl`` writes this body to its OWN
+    #       file and runs ``apparmor_parser -r <file>`` on it — no
+    #       ``-I`` include path, no concatenation with the parent's
+    #       file — so the parse it gets is the same one a standalone
+    #       compile gets.  Verified against ``origin/main``: the
+    #       isolated body fails and the base body (which has carried
+    #       the include since v1) compiles; delete the include from the
+    #       base and it fails identically.
+    #
+    #       Effect until now: EVERY isolated-subagent spawn was refused.
+    #       ``SessionManager._spawn_isolated_runner`` is fail-closed by
+    #       design — a failed provision returns
+    #       ``ok=False, stage='sub_profile'`` and there is no
+    #       unconfined fallback — so this was a dead feature, NOT a
+    #       confinement hole.  It went unnoticed because every existing
+    #       test of the path mocks ``subprocess.run``; the first thing
+    #       in the tree to hand this body to a real parser was
+    #       ``test_apparmor_proc_hardening_712.py``.
+    #
+    #       The include itself grants NOTHING — every file under
+    #       ``/etc/apparmor.d/tunables/`` is variable declarations and
+    #       further includes, with no rule of any kind.  What it changes
+    #       is that the two ``@{{HOME}}/.jaato/{{keybindings,theme}}.json r,``
+    #       rules already in this body can now compile and therefore
+    #       take effect.  Both are a strict subset of what the PARENT
+    #       profile already grants (it carries the same two plus
+    #       ``@{{HOME}}/.jaato/themes/**``), so no access appears here
+    #       that the session did not already have.
+    _TEMPLATE_VERSION = 31
 
     # AppArmor profile template.  Placeholders are filled per-session by
     # ``_render_profile()``.
@@ -1503,6 +1540,18 @@ profile jaato-ws-{session_id} flags=({profile_flags}) {{
 # Standalone profile with a //-prefixed name per Audit 6.
 # Loaded as a separate kernel-level profile; the sub-runner
 # self-confines to this profile via change_profile.
+#
+# ``tunables/global`` declares the @{{...}} variables this body
+# references (template v31).  It is REQUIRED, not decorative: this
+# profile is written to its own file and parsed standalone by
+# ``_provision_sub_profile_impl``'s ``apparmor_parser -r <file>``,
+# with no ``-I`` include path and no concatenation with the parent's
+# file — so nothing else declares them.  Without it the parser stops
+# at "Found reference to variable HOME, but is never declared" and
+# the profile never loads.  The main PROFILE_TEMPLATE has carried
+# this line from the beginning; this body did not, and was the one
+# renderer no test had ever run through the parser.
+#include <tunables/global>
 
 profile "{sub_profile_name}" flags=(attach_disconnected) {{
   #include <abstractions/base>

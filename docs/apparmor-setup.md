@@ -235,6 +235,40 @@ AppArmor confinement enabled          → kernel-enforced isolation
 AppArmor confinement not available    → directory sandboxing only
 ```
 
+## Isolated subagents: a load failure fixed in template v31
+
+Before template v31, **every isolated-subagent spawn
+(`agent_params.isolated=true`) was refused** on every host, with
+
+```
+stage=sub_profile
+sub-AppArmor profile provision failed: apparmor_parser exit=1:
+  Found reference to variable HOME, but is never declared
+```
+
+The isolated sub-runner profile is written to its own file and parsed
+standalone by `apparmor_parser -r <file>` — no `-I` include path, no
+concatenation with the parent's file. It references `@{HOME}` in two rules
+and carried no `#include <tunables/global>` to declare it, which the main
+profile template has had from the start. The parser refused it, so the
+profile never loaded.
+
+This was a **dead feature, not a confinement hole**:
+`SessionManager._spawn_isolated_runner` is fail-closed by design — a failed
+provision returns `ok=False, stage="sub_profile"` and there is no
+`profile_name=""` fallback, so no isolated subagent has ever run
+unconfined. The documented workaround in that error message (omit
+`agent_params.isolated`, use the default-share path) was the only thing
+that worked.
+
+v31 adds the one missing include. It grants nothing of itself — every file
+under `/etc/apparmor.d/tunables/` is variable declarations and further
+includes, with no rule of any kind — but it does let the two
+`@{HOME}/.jaato/{keybindings,theme}.json r,` rules already in that body
+compile and take effect. Both are a strict subset of what the parent
+session's profile already grants, so no access appears that the session did
+not already have.
+
 ## Extension fragments
 
 Daemon extensions (e.g. `jaato_premium.reactors`) sometimes need additional grants for state files they own — `~/.jaato/handoff_gates.json` for the reactor's HandoffGate registry, future cluster-state files, etc. Patching those paths into the public profile template would leak extension-specific knowledge into the framework, so the contract is **fragments**:
