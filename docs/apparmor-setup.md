@@ -150,10 +150,50 @@ When a WS client creates a session, the server:
 |----------|--------|
 | Other sessions' workspaces | Read and write |
 | User-authored config in the workspace (`.jaato/agents/`, `profiles/`, `scripts/`, `services/<name>/`, `reactors.json`, `completion_schemas/`, `spawn_schemas/`, `instructions/`, `references/`, `templates/`, `template_routing.yaml`, `apparmor-fragments/`) | Write, link, lock |
+| Procfs secret + memory entries (`/proc/*/environ`, `mem`, `pagemap`, `auxv`, `cmdline`, and each one's `task/<tid>/` twin) | Read (and write, for `mem`) |
 | Raw sockets | All |
 | ptrace (debugging other processes) | All |
 | mount/umount | All |
 | `CAP_SYS_ADMIN`, `CAP_NET_ADMIN` | All |
+
+#### The procfs denies are the secret scrub's kernel backstop (#712)
+
+The runner legitimately holds credentials in its own environment — the
+provider API key, OAuth tokens. [Secret env scrubbing](../CLAUDE.md#secret-env-scrubbing-863)
+removes those names from the environment *given to* a command the model
+drives and deliberately leaves the runner's own intact, so the runner stays
+a live credential store. That scrub is application-layer only: a process
+able to read `/proc/<pid>/environ` reads the unscrubbed store and walks
+straight around it. Since server 0.7.x (profile template v30) every profile
+body — base, `tool_hat`, `//child` and the isolated sub-runner — carries an
+`audit deny` on those entries, so the denial is kernel-enforced and each
+attempt is logged to `dmesg`.
+
+Two consequences worth knowing before you deploy:
+
+- **`--ws-token TOKEN` is the wrong spelling.** A token passed on the
+  command line sits in the daemon's `argv`, which is what `/proc/<pid>/cmdline`
+  serves. The deny closes the read from inside a confined session, but the
+  token is still visible to anything else on the host that can read that
+  file. Use **`--ws-token-file PATH`** (mode 0600 enforced), or pass neither
+  flag and let the daemon generate and persist `~/.jaato/ws.token`.
+- **`ps` output loses its command column.** `ps`, `top` and `pgrep` read
+  `/proc/*/cmdline`, so an agent running them inside a confined session sees
+  blank commands. There is no fragment-level escape hatch — in AppArmor a
+  deny beats an allow at any specificity, including one granted from
+  `~/.jaato/apparmor-fragments/*.rules` — so a deployment that genuinely
+  needs command lines back has to carry a patched template. For diagnosis,
+  `JAATO_APPARMOR_COMPLAIN=1` puts the whole profile chain in complain mode
+  and logs denials instead of enforcing them.
+
+`maps` / `smaps` are deliberately **not** denied at the kernel layer: they
+leak address layout rather than credentials, and the distribution's own
+`abstractions/base` may grant them for the C library's use. The
+application-layer denylist in `shared/plugins/sandbox_utils.py` — which
+gates only model-driven path-taking tools (`readFile`, `glob_files`,
+`file_edit`), and so can afford to be stricter — does cover them, along with
+everything above. That gate applies whether or not AppArmor is available,
+which is what covers the degraded posture below.
 
 The write-denies on user-authored config are the integrity half of the
 profile: those files are read back by the framework and turned into
@@ -177,6 +217,16 @@ that keeps that path working while the provisioned catalog in
 ## Graceful degradation
 
 If AppArmor is unavailable (non-Linux, tools not installed, permissions missing), the server falls back to **directory-level sandboxing** — the CLI plugin restricts paths to the workspace directory via application-level checks. This provides defense-in-depth but is not kernel-enforced.
+
+What survives the degradation is the application-layer procfs denylist
+(`is_sensitive_proc_path`), which is a hard refusal applied before any
+workspace rule and therefore holds even with `workspace_root` unset. What
+does **not** survive is every kernel-enforced rule above, including the
+procfs denies for anything that is not a path handed to a file tool — a
+shell command running `cat /proc/$$/environ` is bounded only by the `cli`
+plugin's command analyzer, whose coverage of compound commands and
+`sh -c '…'` is known to be porous (#668). Kernel-enforced confinement is
+what makes that layer a backstop rather than the only control.
 
 The server logs which mode is active at startup:
 
