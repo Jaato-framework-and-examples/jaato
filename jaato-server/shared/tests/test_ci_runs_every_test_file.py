@@ -33,13 +33,39 @@ error can take a whole file's tests with it -- ``test_runtime_limits_e2e
 .py``'s unguarded cgroup probe did exactly that, host-state dependently,
 and CI's ``--continue-on-collection-errors`` is what contains it.
 
+It does NOT assert that a step's filters **select** the file.  A path
+reached through a marker-filtered invocation -- the SDK leg runs
+``pytest -q -m conformance jaato-sdk/jaato_sdk/conformance/`` -- is
+counted as covering that whole directory, because the alternative is
+evaluating pytest's selection language, which is a reimplementation of
+pytest.  So a file added to ``conformance/`` WITHOUT
+``pytestmark = pytest.mark.conformance`` is named by a commit-triggered
+step, deselected by its filter, and reads as covered here while never
+running.  (Those tests are deselected by default via pyproject
+``addopts``, which is what makes the marker load-bearing rather than
+decorative.)  Same class as the skip below: named is not selected, and
+selected is not run.
+
+It does NOT assert that the tests **ran rather than SKIPPED**, and this
+one is not hypothetical -- it bit the very PR that added this guard.
+``jaato-server/tests/`` was measured green-and-wire-ready on two
+separate hosts before being wired here.  Both lacked AppArmor, where
+``test_phase2_multitenant_apparmor.py`` skips at module level; CI HAS
+AppArmor, so the first commit-triggered run to reach that body found it
+had rotted through -- it drove a synchronous ``IPCClient`` API (
+``connect(workspace=..., apparmor=...)``, ``session_new``,
+``wait_for_idle``, ``get_history``) that no longer exists anywhere in
+the SDK.  A skip is indistinguishable from a pass in a summary line,
+and "green" measured in the wrong environment is not green.  Coverage
+is not execution, and execution on YOUR host is not execution on CI's.
+
 It does NOT assert that the result **means** anything independent of
 what else ran in that process.  211 tests in this tree were measured as
 scope-dependent: the failure sets of a directory-scoped run and a
 whole-tree run were **disjoint**, every test failing in one passing in
 the other, all of them green in isolation.
 
-Those are three different properties.  Only this one is cheap to check,
+Those are five different properties.  Only this one is cheap to check,
 and it is still the property whose absence produced eight directories
 and five rediscoveries.
 

@@ -156,7 +156,36 @@ def test_two_workspaces_one_daemon_no_bounce(tmp_path: Path) -> None:
     a failure message — when this test fires red, the assertion
     explains exactly which step regressed.
     """
-    from jaato_sdk.client import IPCClient
+    asyncio.run(_drive_two_workspaces(tmp_path))
+
+
+async def _drive_two_workspaces(tmp_path: Path) -> None:
+    """The body of the gate above, as a coroutine.
+
+    Separated because ``IPCClient`` is an ASYNC client and this test
+    drove it as a synchronous one -- ``connect(workspace=..., apparmor=
+    ...)``, ``session_new``, ``wait_for_idle`` and ``get_history`` are
+    all spellings that no longer exist anywhere in the SDK.  The first
+    of them to be reached raised, so this gate had rotted through and
+    through while reading as green (#736).
+
+    THE REASON IT ROTTED UNSEEN IS THE ISSUE'S OWN THESIS, one level in.
+    ``jaato-server/tests/`` was measured as green-and-wire-ready on two
+    separate hosts, and both were hosts WITHOUT AppArmor -- where the
+    module-level ``skipif`` above makes this file skip, and a skip is
+    indistinguishable from a pass in a summary line.  CI has AppArmor,
+    so the first commit-triggered run that actually reached this body
+    found it broken.  "Green" measured in the wrong environment is not
+    green, and this gate is the proof.
+
+    Driven through the same idiom the live-conformance suite uses
+    (``jaato_sdk/conformance/test_invariants.py``), which is the one
+    daemon-driving pattern in this tree a commit-triggered workflow
+    exercises -- so it cannot drift again without that suite going red
+    too.
+    """
+    from jaato_sdk import IPCClient
+    from jaato_sdk.events import ClientType
 
     ws_a = tmp_path / "ws_a"
     ws_b = tmp_path / "ws_b"
@@ -173,18 +202,20 @@ def test_two_workspaces_one_daemon_no_bounce(tmp_path: Path) -> None:
     # apparmor entries produced during this run.
     dmesg_baseline_t = time.time()
 
+    client_a = client_b = None
     try:
         # ----- Client A: workspace_a session -----
-        client_a = IPCClient(socket_path=str(sock))
-        client_a.connect(workspace=str(ws_a), apparmor=True)
-        sid_a = client_a.session_new(profile="cli_test")
+        client_a = await _connect(
+            IPCClient, ClientType, sock, ws_a,
+        )
+        sid_a = await client_a.create_session(profile="cli_test")
         assert sid_a, "session.new for client A returned no session_id"
 
         # Write a workspace-A file via cli — exercises the runner.
-        client_a.send_message(
-            f"create file via cli: echo hi-from-A > {ws_a}/sandbox/x"
+        await _drive_turn(
+            client_a,
+            f"create file via cli: echo hi-from-A > {ws_a}/sandbox/x",
         )
-        client_a.wait_for_idle(timeout=30)
         assert (ws_a / "sandbox" / "x").exists(), (
             "session A's cli call did not create sandbox/x; the runner "
             "may have spawned but the cli RPC stub may not be wired"
@@ -195,31 +226,28 @@ def test_two_workspaces_one_daemon_no_bounce(tmp_path: Path) -> None:
         # assertion: pre-Phase-2, the daemon's apparmor profile was
         # pinned to A's workspace and B's session.new failed at the
         # IPC handshake.
-        client_b = IPCClient(socket_path=str(sock))
-        client_b.connect(workspace=str(ws_b), apparmor=True)
-        sid_b = client_b.session_new(profile="cli_test")
+        client_b = await _connect(
+            IPCClient, ClientType, sock, ws_b,
+        )
+        sid_b = await client_b.create_session(profile="cli_test")
         assert sid_b, (
             "session.new for client B returned no session_id — "
             "this is the 7:3 regression case (cross-workspace IPC "
             "handshake failed)"
         )
 
-        client_b.send_message(
-            f"create file via cli: echo hi-from-B > {ws_b}/sandbox/y"
+        await _drive_turn(
+            client_b,
+            f"create file via cli: echo hi-from-B > {ws_b}/sandbox/y",
         )
-        client_b.wait_for_idle(timeout=30)
         assert (ws_b / "sandbox" / "y").exists()
 
         # ----- Cross-workspace read MUST be kernel-denied -----
-        client_b.send_message(
-            f"read file: cat {ws_a}/sandbox/x"
-        )
-        client_b.wait_for_idle(timeout=30)
-        # The cli result on B should report Permission denied.  We
-        # don't have a structured-result accessor on the SDK level,
-        # so fall back to reading the daemon log for the cli result
-        # OR pulling the last tool result from the client's history.
-        history = client_b.get_history()
+        await _drive_turn(client_b, f"read file: cat {ws_a}/sandbox/x")
+        # The cli result on B should report Permission denied.  There is
+        # no structured-result accessor on the SDK, so pull the session's
+        # history and walk it for the last cli payload.
+        history = await _history(client_b)
         last_result = _last_cli_result(history)
         assert last_result is not None, (
             "expected a cli tool result in B's history after the "
@@ -256,6 +284,12 @@ def test_two_workspaces_one_daemon_no_bounce(tmp_path: Path) -> None:
                 "Userspace assertions still cover the deny."
             )
     finally:
+        for client in (client_a, client_b):
+            if client is not None:
+                try:
+                    await client.disconnect()
+                except Exception:       # noqa: BLE001 - teardown only
+                    pass
         _stop_daemon(daemon)
 
 
@@ -264,26 +298,117 @@ def test_two_workspaces_one_daemon_no_bounce(tmp_path: Path) -> None:
 # ----------------------------------------------------------------------
 
 
+async def _connect(ipc_client_cls, client_type_enum, sock: Path, ws: Path):
+    """Connect one AppArmor-confined client to the shared daemon.
+
+    ``workspace_path`` and ``apparmor`` are CONSTRUCTOR arguments; this
+    test used to pass them to ``connect()``, which takes only a timeout.
+    ``client_type`` is required (keyword-only) and is what the CI run
+    tripped over first.  ``auto_start=False`` because the daemon in this
+    test is spawned by hand and shared by both clients — the whole point
+    of the gate is that there is NO bounce between A and B.
+    """
+    client = ipc_client_cls(
+        socket_path=str(sock),
+        client_type=client_type_enum.API,
+        workspace_path=str(ws),
+        apparmor=True,
+        auto_start=False,
+    )
+    assert await client.connect(timeout=60), (
+        f"could not connect to the test daemon at {sock} for workspace {ws}"
+    )
+    return client
+
+
+async def _drive_turn(client, prompt: str, timeout: float = 60.0) -> None:
+    """Send one prompt and wait for the turn to complete.
+
+    Replaces the ``send_message`` + ``wait_for_idle`` pair this test used
+    to call; neither exists on the async client.  The collector is armed
+    BEFORE the send, as in the conformance suite, or a fast turn can
+    complete before anything is listening and the wait hangs to its
+    timeout.
+    """
+    from jaato_sdk.events import TurnCompletedEvent
+
+    async def collect():
+        async for ev in client.events():
+            if isinstance(ev, TurnCompletedEvent):
+                return
+
+    task = asyncio.create_task(collect())
+    await asyncio.sleep(0.2)
+    await client.send_message(prompt)
+    try:
+        await asyncio.wait_for(task, timeout=timeout)
+    except asyncio.TimeoutError:
+        task.cancel()
+        raise AssertionError(
+            f"no TurnCompletedEvent within {timeout}s for prompt {prompt!r}"
+        )
+
+
+async def _history(client, timeout: float = 30.0) -> list:
+    """Fetch the session's history.
+
+    ``get_history()`` was a synchronous accessor and is gone: history is
+    REQUESTED and arrives as a ``HistoryEvent`` on the event stream.
+    """
+    from jaato_sdk.events import HistoryEvent
+
+    async def collect():
+        async for ev in client.events():
+            if isinstance(ev, HistoryEvent):
+                return list(ev.history)
+        return []
+
+    task = asyncio.create_task(collect())
+    await asyncio.sleep(0.2)
+    await client.request_history()
+    try:
+        return await asyncio.wait_for(task, timeout=timeout)
+    except asyncio.TimeoutError:
+        task.cancel()
+        raise AssertionError(f"no HistoryEvent within {timeout}s")
+
+
 def _last_cli_result(history) -> Optional[dict]:
     """Walk a session's history backwards looking for the last cli
     tool result.  Returns the result dict (the structured payload the
     daemon-side stub forwarded) or ``None`` if nothing matched.
 
-    The exact accessor depends on the SDK's history shape; this
-    helper is intentionally tolerant — it looks for any dict-like
-    item that carries ``returncode`` / ``stdout`` / ``stderr`` keys.
+    ``HistoryEvent.history`` carries SERIALIZED ``Message`` dicts --
+    ``{role, parts: [{type: 'function_response', call_id, name, result},
+    ...]}`` -- so the payload sits one level down, inside a part, and a
+    walk over the top level alone finds nothing.  The flat shapes are
+    still accepted first: this helper predates the async history path
+    and a tolerant match costs nothing.
     """
     if not history:
         return None
     items = list(history) if not isinstance(history, list) else history
+
+    def _payload(candidate) -> Optional[dict]:
+        if not isinstance(candidate, dict):
+            return None
+        if "stdout" in candidate or "returncode" in candidate:
+            return candidate
+        inner = candidate.get("result") or candidate.get("tool_result")
+        if isinstance(inner, dict) and (
+            "stdout" in inner or "returncode" in inner
+        ):
+            return inner
+        return None
+
     for item in reversed(items):
-        # Try a few common shapes.
+        hit = _payload(item)
+        if hit is not None:
+            return hit
+        # Descend into a serialized Message's parts.
         if isinstance(item, dict):
-            if "stdout" in item or "returncode" in item:
-                return item
-            payload = item.get("result") or item.get("tool_result")
-            if isinstance(payload, dict) and (
-                "stdout" in payload or "returncode" in payload
-            ):
-                return payload
+            for part in reversed(item.get("parts") or []):
+                hit = _payload(part)
+                if hit is not None:
+                    return hit
     return None

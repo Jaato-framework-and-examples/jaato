@@ -13,7 +13,7 @@ context.
 """
 
 from datetime import datetime, timezone
-from typing import Any, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from jaato_sdk.events import (
     Event,
@@ -167,6 +167,7 @@ class _FakeRunnerRPC:
         source_id: Optional[str] = None,
         source_type: Optional[str] = None,
         require_idle: bool = False,
+        attachments: Optional[List[Dict[str, Any]]] = None,
         timeout: Optional[float] = None,
     ) -> str:
         """Stand-in for the runner's atomic queue-or-report.
@@ -179,21 +180,32 @@ class _FakeRunnerRPC:
 
         ``require_idle`` is #845's third answer: a caller that has nowhere
         to put a payload in a running turn asks NOT to be queued, and gets
-        ``"busy"`` with nothing enqueued.  ``deliver_prompt_to_session``
-        forces it for an attachment-bearing inject, because a queued
-        message is folded into the running turn as TEXT and would drop the
-        bytes that WERE the message.
+        ``"busy"`` with nothing enqueued.
 
-        THE SIGNATURE IS PART OF THE FIXTURE.  ``require_idle`` shipped on
-        the real method and not on this one, and the daemon passes it by
-        keyword unconditionally -- so every call raised ``TypeError``,
-        ``handle_request`` swallowed it into a ``not_confirmed`` status,
-        and the five ``TestInjectPromptHandler`` tests failed on status
-        strings with the real cause one line down in the captured log.
-        Invisible, because no commit-triggered workflow ran this file
-        (#736).  ``test_the_fake_matches_the_real_signature`` below is the
-        guard against the next such drift.
+        ``attachments`` (#877, landed as #964) moved that rule ONTO this
+        verb: the queue stores strings, so bytes can only ride a drive, and
+        passing attachments RAISES ``require_idle`` -- it can never lower
+        it.  The flag is mirrored here rather than merely accepted, so a
+        test that passes attachments exercises the same branch the real
+        method would take.
+
+        THE SIGNATURE IS PART OF THE FIXTURE, and this fake has now drifted
+        from its subject twice.  ``require_idle`` shipped on the real method
+        and not on this one; the daemon passes it by keyword
+        unconditionally, so every call raised ``TypeError``,
+        ``handle_request`` swallowed it into a ``not_confirmed`` status, and
+        the five ``TestInjectPromptHandler`` tests failed on status strings
+        with the real cause one line down in the captured log.  Invisible,
+        because no commit-triggered workflow ran this file (#736).
+        ``attachments`` was the second instance, and it was caught by
+        ``test_the_fake_matches_the_real_signature`` below on that guard's
+        FIRST real CI run -- which is the argument for the guard existing.
         """
+        if attachments:
+            # Not a caller preference: the queue cannot carry bytes, so the
+            # only delivery that keeps them is a drive.  Raised, never
+            # lowered -- mirroring RunnerRPCClient.session_offer_message.
+            require_idle = True
         if require_idle and self._is_running():
             # Nothing is enqueued on this branch -- that is the whole point.
             return "busy"
