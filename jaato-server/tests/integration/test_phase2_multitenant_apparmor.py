@@ -283,6 +283,21 @@ async def _drive_two_workspaces(tmp_path: Path) -> None:
                 "dmesg unavailable — skipping kernel-audit assertion. "
                 "Userspace assertions still cover the deny."
             )
+    except BaseException:
+        # The daemon's stdout/stderr is the only account of WHY a step
+        # failed, and until now this test wrote it to ``tmp_path`` and
+        # never read it -- so the first CI run to reach this body
+        # reported ``SessionNotConfirmed: session.new was sent but not
+        # answered within 60.0s`` and nothing about the refusal the
+        # daemon had already logged.  That is the #882 shape seen from
+        # the client side: a refused ``session.new`` is logged and never
+        # answered, so the caller learns only that it waited.
+        #
+        # Printed rather than raised-with: pytest captures stdout and
+        # shows it on failure, and a teardown that itself raises must not
+        # be able to replace the original exception.
+        _print_daemon_log(daemon_log)
+        raise
     finally:
         for client in (client_a, client_b):
             if client is not None:
@@ -296,6 +311,39 @@ async def _drive_two_workspaces(tmp_path: Path) -> None:
 # ----------------------------------------------------------------------
 # Helpers
 # ----------------------------------------------------------------------
+
+
+def _print_daemon_log(log_path: Path, tail_lines: int = 120) -> None:
+    """Emit the daemon's own account of a failed step.
+
+    This test spawns the daemon itself and sends its stdout+stderr to
+    ``tmp_path/daemon.log``.  That file was written and never read: on
+    the first commit-triggered run that actually reached this body, the
+    failure surfaced as a bare 60 s ``SessionNotConfirmed`` while the
+    reason sat on disk, and ``tmp_path`` was then cleaned away.
+
+    Tail rather than whole: bootstrap chatter dominates the head, and
+    the answer to "why did this step fail" is always at the end.
+    Best-effort by construction -- a diagnostic that can itself raise
+    would replace the exception it exists to explain.
+    """
+    try:
+        text = log_path.read_text(errors="replace")
+    except OSError as exc:              # noqa: BLE001 - diagnostic only
+        print(f"\n--- daemon log at {log_path} unreadable: {exc} ---")
+        return
+
+    lines = text.splitlines()
+    shown = lines[-tail_lines:]
+    elided = len(lines) - len(shown)
+    print(f"\n--- daemon log ({log_path}), last {len(shown)} of "
+          f"{len(lines)} lines ---")
+    if elided > 0:
+        print(f"    [{elided} earlier lines elided]")
+    for line in shown:
+        print(f"    {line}")
+    print("--- end daemon log ---\n")
+
 
 
 async def _connect(ipc_client_cls, client_type_enum, sock: Path, ws: Path):
