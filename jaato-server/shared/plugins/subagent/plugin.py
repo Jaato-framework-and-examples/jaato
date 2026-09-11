@@ -426,6 +426,28 @@ class SubagentPlugin(DaemonForwardingMixin):
             f" Restricted to {sorted(allow_list)}." if allow_list else "",
         )
 
+    def set_agent_name(self, agent_name: Optional[str]) -> None:
+        """Adopt a new agent label without a shutdown/initialize cycle.
+
+        Called by
+        :meth:`shared.plugins.registry.PluginRegistry._config_requires_reinit`
+        when a session re-exposes this plugin with a config carrying
+        nothing but its own ``agent_name`` — which every in-process
+        subagent spawn does for each plugin its profile lists.  For most
+        plugins ``agent_name`` is only the label their traces carry; here
+        it is also ``_self_profile_name``, the self-spawn guard
+        ``spawn_subagent`` compares against the profile it is asked to
+        spawn, and the profile ``list_subagent_profiles`` excludes.  So
+        it has to keep tracking the most recent spawner exactly as the
+        re-initialize path did, now without tearing the plugin down
+        underneath the parent's running subagents (#951).
+
+        Args:
+            agent_name: Profile name of the session re-exposing this
+                plugin, or ``None``.
+        """
+        self._self_profile_name = agent_name
+
     def shutdown(self) -> None:
         """Clean up plugin configuration state for re-initialisation.
 

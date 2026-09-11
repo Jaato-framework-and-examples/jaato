@@ -45,6 +45,17 @@ from .enrichment_formatter import (
 )
 from shared.trace import trace as _trace_write
 
+# Config keys that name WHO is exposing a plugin rather than HOW it
+# should behave.  Every in-process subagent spawn stamps ``agent_name``
+# into the config of each plugin its profile lists — see
+# ``shared/plugins/subagent/plugin.py`` — including the plugins it
+# declares no configuration for, because on a registry whose
+# ``expose_all`` was filtered to the ROOT profile's plugins that stamp is
+# what exposes them at all.  It is not an operator knob, and on a shared
+# registry it is not a reason to rebuild a live plugin.  Consumed by
+# :meth:`PluginRegistry._config_requires_reinit` (#951).
+_IDENTITY_ONLY_CONFIG_KEYS = frozenset({"agent_name"})
+
 # Entry point group names by plugin kind
 PLUGIN_ENTRY_POINT_GROUPS = {
     "tool": "jaato.plugins",
@@ -1458,8 +1469,13 @@ class PluginRegistry:
     def expose_tool(self, name: str, config: Optional[Dict[str, Any]] = None) -> bool:
         """Expose a plugin's tools to the model.
 
-        Calls the plugin's initialize() method if this is the first time
-        exposing it, or if a new config is provided.
+        Calls the plugin's ``initialize()`` if this is the first time
+        exposing it.  An already-exposed plugin is shut down and
+        re-initialized when the config actually reconfigures it; a
+        config that only names a different agent relabels it in place
+        instead, because the instance is shared with the caller's parent
+        and siblings.  :meth:`_config_requires_reinit` is that decision,
+        and documents what the rebuild used to destroy (#951).
 
         If a model_name is set and the plugin has model_requirements that
         don't match, the plugin is skipped with a warning.
@@ -1538,7 +1554,7 @@ class PluginRegistry:
             if hasattr(plugin, 'set_plugin_registry'):
                 plugin.set_plugin_registry(self)
                 _trace(f" Plugin '{name}' wired with registry")
-        elif config and config != self._configs.get(name):
+        elif config and self._config_requires_reinit(name, config):
             # Snapshot authorized/denied paths owned by this plugin so that
             # shutdown() + initialize() doesn't lose in-memory-only state
             # (e.g. sandbox paths added by a parent session that aren't in
@@ -2128,6 +2144,63 @@ class PluginRegistry:
         (e.g. ``file_edit``, ``memory``).
         """
         self._agent_name = agent_name
+
+    def _config_requires_reinit(
+        self, name: str, config: Dict[str, Any],
+    ) -> bool:
+        """Whether ``config`` reconfigures exposed plugin ``name``, or
+        only relabels the agent it traces under (#951).
+
+        :meth:`expose_tool` answers a changed config with ``shutdown()``
+        + ``initialize()``.  That is right for an operator's
+        ``plugin_configs`` block and destructive for anything else: the
+        registry — and therefore each plugin INSTANCE — is shared with a
+        session's parent and its siblings, so the rebuild lands on live
+        objects in the middle of someone else's turn.
+
+        An in-process subagent spawn stamps ``agent_name`` into the
+        config of every plugin its profile lists, the ones it declares
+        no configuration for included, because that stamp is what
+        exposes them on a registry whose ``expose_all`` was filtered to
+        the root profile's plugins.  For a plugin the parent had
+        already exposed, the same stamp replaced the parent's entire
+        configuration with a dict holding nothing but the child's name.
+        Measured on a real registry: the parent's ``file_edit`` lost
+        ``max_edit_span_chars`` and had ``allow_full_replace`` turned
+        back on — a whole-file-rewrite path the profile author had
+        deliberately closed, reopened by a spawn and left open for the
+        rest of the parent's life — and every live ``interactive_shell``
+        PTY the parent owned was killed, its next ``shell_input``
+        answered ``No session with id 'session_0'``.
+
+        So a config whose only key is an identity key is not a
+        reconfiguration: the plugin keeps running, and the new label is
+        handed to it in place when it implements ``set_agent_name``
+        (``subagent`` does, because there ``agent_name`` is the
+        self-spawn guard rather than a trace label).  A config carrying
+        any operator key re-initializes exactly as before, so #950's
+        contract — a profile's ``plugin_configs`` reach the plugin it
+        names — is unchanged.
+
+        Args:
+            name: Name of a plugin already in ``self._exposed``.
+            config: The raw, un-augmented config handed to
+                :meth:`expose_tool`.
+
+        Returns:
+            True when the plugin must be shut down and re-initialized.
+        """
+        if config == self._configs.get(name):
+            return False
+        if not set(config) <= _IDENTITY_ONLY_CONFIG_KEYS:
+            return True
+        agent_name = config.get("agent_name")
+        relabel = getattr(self._plugins[name], "set_agent_name", None)
+        if callable(relabel):
+            relabel(agent_name)
+        _trace(f" Plugin '{name}' identity-only config "
+               f"(agent_name={agent_name!r}): not re-initialized")
+        return False
 
     def _augment_plugin_config(
         self, config: Optional[Dict[str, Any]],

@@ -488,7 +488,16 @@ follow for a plugin author:
   behind the `_initialized` check the way `lsp` does. (`permission` is the
   one exception: re-initializing the enforcer clobbers the parent's policy
   and channel, so its block is installed as a session-scoped policy through
-  `set_scoped_policy` instead — #957.)
+  `set_scoped_policy` instead — #957.)  It is **not** called again merely
+  because a subagent listed your plugin: a spawn stamps `agent_name` into
+  every plugin the child profile names, and a config carrying nothing but
+  that identity relabels the instance in place rather than rebuilding it
+  (#951).  So a child that declares no block for you inherits the shared
+  instance exactly as the parent configured it, and your live state — a
+  language server, a PTY, a connection — survives the spawn.  If
+  `agent_name` is more than a trace label to you, implement
+  `set_agent_name(name)` and the registry hands it to you on that path;
+  today only `subagent` does, because there it is the self-spawn guard.
 - If your plugin DOES expose tools, `jaato-scaffold validate` warns
   `plugin_config_without_plugin` when a profile configures it and leaves it
   out of `plugins:` — the config applies, but nothing the plugin offers is on
