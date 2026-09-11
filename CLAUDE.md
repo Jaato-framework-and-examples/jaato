@@ -1339,6 +1339,108 @@ resolved-looking name hiding it. The OpenAI-shaped loops also emit a
 later delta than the one that opens the call, leaving the `TOOL_CALL_START`
 record honestly nameless.
 
+### What a Session Spent, and Which Model Spent It
+
+`get_environment(aspect="context")` has always reported how FULL the context
+window is. Nothing reported what the session had **spent** — and nothing
+could, because spend was attributed to no model anywhere in the tree:
+`_turn_accounting` carries no model stamp and neither does the token
+ledger's `response` record. So on a `model_tiers` session "what did the
+voice tier cost me" was not a question the stored data could answer. A
+measurement gap, not a reporting one.
+
+`aspect="consumption"` is the answer, and the two aspects are deliberately
+separate because they are not two views of one number:
+
+| Aspect | Question | Denominator |
+|--------|----------|-------------|
+| `context` | how full is the window right now | the shared history — belongs to no particular model |
+| `consumption` | what has been spent, and on what | the responses each binding served |
+
+A session that calls `enter_tier` has **one history and several bills**.
+
+**The unit of segregation is the BINDING** — `(provider, model, tier)` —
+not the tier name. A budget-control degrade rung **rebinds a tier's model
+in place** (`planner: opus → flash`) leaving the tier's name unchanged, so
+a tier-keyed total would merge two models' spend under one row precisely in
+the session someone is reading it because of; `switch_tier` short-circuits
+on the resolved entry rather than the name for the same reason. Tiers may
+also name different providers, so the model alone is not a key either. A
+single-model session reports a list of one with `tier: null`, so no
+consumer branches on whether the session happened to be tiered.
+
+**Measured once per response, where spend already accumulates.**
+`_accumulate_turn_tokens` is the only hook that runs exactly once per
+response on every path — which is why the `spend_*` keys live there — and
+`_observe_binding_usage` rides it. Per response rather than per turn
+because a turn is not a unit that belongs to one model: `enter_tier` can
+fire mid-turn. The per-CHUNK streaming hook (`_track_streaming_usage`)
+contributes nothing, under the same rule that forbids it a `spend_` key.
+
+```yaml
+get_environment(aspect="consumption")                 # totals + active binding
+get_environment(aspect="consumption", detail="full")  # + per-binding rows
+```
+
+Four rules the payload holds to, each attached to a way it could mislead:
+
+- **The three input buckets are disjoint and named for what they are.**
+  `TokenUsage.prompt_tokens` is the NEW, uncached input and excludes both
+  cache counts (#758), so the aspect reports `uncached_input_tokens`,
+  `cache_read_tokens`, `cache_creation_tokens` and the derived
+  `input_tokens_total`. Passing `prompt_tokens` through under its own name,
+  beside `cache_read_tokens`, invites the model reading it to count the
+  same tokens twice.
+- **Absent is not zero.** A dimension nothing reported is OMITTED, not
+  rendered `null` or `0`: a provider with no prompt cache must not read as
+  a cache that never hits, and a session with no pricing table must not
+  read as free. A reported `0` is a measurement and is shown.
+- **A cost says where it came from.** `cost_source` is `provider` (billed),
+  `pricing_table` (computed from `.jaato/pricing.json`) or `mixed`. Nothing
+  in the tree distinguished them before — `cost_usd` arrived as a bare
+  float whose meaning depended on which provider produced it —
+  so `_resolve_span_cost` now delegates to `_resolve_cost_with_source`,
+  one ladder walked once, because a cost and a provenance derived
+  separately is a bug waiting for a provider that reports cost sometimes.
+- **Every figure is SPEND.** Never the end-of-turn context size, which
+  lives under `active` where it belongs to the history. `turns` per binding
+  counts the turns it served in, so a turn crossing an `enter_tier` is
+  counted by both; `totals.turns` is the exact distinct count, taken from
+  the ledger's own set of turn indices — summing the per-binding column
+  double-counts that turn and taking the max under-counts two bindings that
+  served different turns.
+
+Two blocks appear only when they mean something. **`budget`** (when the
+profile declares `budget_control`) reports the declared dimensions, the
+fraction used, and `next_rung` — the lowest rung not yet passed, which is
+the deadline the agent can act on where the rungs behind it are history;
+an absent key is how "unbounded" is said (#947). **`completion`** (when
+`signal_completion` is on the surface) reports the nudge budget:
+`nudges_fired_this_turn` is the per-TURN counter the guard actually reads
+(#934), `nudges_fired_total` is a lifetime figure that **decides nothing** —
+a second meaning layered onto the per-turn counter is how #767's unbounded
+nudge loop returns. `max_nudges_source` is `observed` once a nudge has been
+considered and `framework_default` before that, because the budget is
+resolved from the profile by the caller that nudges and does not reach the
+session on the init envelope: `framework_default` means "not observed yet",
+not "your `max_completion_nudges` was ignored". Carrying it on the envelope
+would remove the caveat and is a wire version bump, deliberately not taken
+here.
+
+**Own session only.** A subagent runs its own `JaatoSession` and reports
+its own spend; a parent's numbers never silently absorb a child's. The
+aggregate has an owner already (`CascadeBudgetPool`), and a second, quieter
+total competing with it is how two answers start disagreeing.
+
+**`detail` bounds the feedback loop.** `summary` (the default) is totals
+plus the active binding; `full` adds the rows and the declared tier ladder
+— including tiers never entered, since a vision tier the agent was given
+and never used looks identical, in a spend report alone, to one it was
+never given. Under `aspect="all"` the detail is FORCED to summary whatever
+is passed: `all` is the eager default a model reaches for when it wants the
+OS name, and the result enters the history of the very session it measures.
+Asking what you have spent is itself spending.
+
 ### Tool Traits
 
 Tools can declare semantic **traits** on their `ToolSchema` via the `traits` field (a `FrozenSet[str]`). Traits drive cross-cutting behavior without hardcoding tool names in session or plugin code.

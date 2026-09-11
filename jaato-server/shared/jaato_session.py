@@ -105,6 +105,14 @@ from .instruction_budget import (
     PayloadExceedsContextError,
 )
 from .instruction_token_cache import InstructionTokenCache
+from .session_consumption import (
+    ConsumptionLedger,
+    COST_SOURCE_PRICING_TABLE,
+    COST_SOURCE_PROVIDER,
+    DETAIL_FULL,
+    DETAIL_SUMMARY,
+    VALID_DETAIL_LEVELS,
+)
 from .plugins.session import SessionPlugin, SessionConfig, SessionState, SessionInfo
 from .plugins.streaming import StreamManager, StreamingCapable, StreamChunk, StreamUpdate
 from .plugins.model_provider.base import UsageUpdateCallback, GCThresholdCallback
@@ -368,6 +376,71 @@ def _resolve_parallel_width(
     return getattr(limits, "max_parallel_tools", None)
 
 
+
+def _resolve_cost_and_source(
+    session: Any, usage: Any,
+) -> Tuple[Optional[float], Optional[str]]:
+    """Per-call cost (USD) and where it came from.
+
+    Precedence:
+
+    1. ``usage.cost_usd`` — provider-reported; fiscal truth, wins.
+    2. The operator pricing table (``.jaato/pricing.json`` via
+       ``shared.pricing``), computed from the model name + token counts.
+    3. ``(None, None)`` — no source knew (a telemetry backend may still
+       estimate).
+
+    A ``0.0`` cost WITH a source is a reported zero; ``None`` is an
+    absence.  Collapsing the two would make a free model indistinguishable
+    from an unpriced one.
+
+    The pricing table is loaded lazily on first non-reported cost and
+    cached on the session, so cost-free sessions never touch the JSON. Any
+    failure to load or compute degrades to ``(None, None)`` — telemetry
+    must never break a turn.
+
+    A MODULE-LEVEL function taking ``session`` rather than a third method,
+    because :meth:`JaatoSession._resolve_span_cost` is called with a
+    duck-typed ``self`` by ``test_session_cost_telemetry`` (a
+    ``SimpleNamespace`` carrying just the five attributes touched here).
+    Delegating to a sibling METHOD quietly made the whole class a
+    requirement of that call and broke those guards; a free function keeps
+    the one implementation without widening what a caller must be.
+
+    Args:
+        session: Anything carrying ``_model_name``, ``workspace_path``,
+            ``_span_pricing``, ``_span_pricing_loaded`` and ``_trace``.
+        usage: The response ``TokenUsage``.
+
+    Returns:
+        ``(cost_usd, source)`` — source is
+        :data:`~shared.session_consumption.COST_SOURCE_PROVIDER` or
+        :data:`~shared.session_consumption.COST_SOURCE_PRICING_TABLE`.
+    """
+    if usage.cost_usd is not None:
+        return usage.cost_usd, COST_SOURCE_PROVIDER
+    if not session._model_name:
+        return None, None
+    try:
+        if not session._span_pricing_loaded:
+            from shared.pricing import load_pricing
+            session._span_pricing = load_pricing(session.workspace_path)
+            session._span_pricing_loaded = True
+        if session._span_pricing is None or not session._span_pricing.has(
+                session._model_name):
+            return None, None
+        return session._span_pricing.cost_for_usage(
+            session._model_name,
+            prompt_tokens=int(usage.prompt_tokens or 0),
+            output_tokens=int(usage.output_tokens or 0),
+            cache_read_tokens=usage.cache_read_tokens,
+            cache_creation_tokens=usage.cache_creation_tokens,
+        ), COST_SOURCE_PRICING_TABLE
+    except Exception as e:  # pragma: no cover - defensive
+        session._trace(f"LLM_TELEMETRY: pricing-table cost lookup failed: {e}")
+        return None, None
+
+
 class JaatoSession:
     """Per-agent conversation session.
 
@@ -528,6 +601,15 @@ class JaatoSession:
         self._signal_completion_called: bool = False
         self._completion_nudges_fired: int = 0
         self._completion_nudge_turn_pending: bool = False
+        # LIFETIME nudge count, and the budget the caller last enforced.
+        # Both are REPORTING state for the ``consumption`` environment
+        # aspect and are read by nothing that decides anything -- which is
+        # the point: ``_completion_nudges_fired`` is per TURN by design
+        # (#934) and must stay the only number the guard consults, so a
+        # session-lifetime figure needs its own counter rather than a
+        # second meaning layered onto that one.
+        self._completion_nudges_total: int = 0
+        self._completion_nudge_budget: Optional[int] = None
         # Set in configure() when introspection's tools are dropped because there
         # is nothing deferred to discover — read by introspection's
         # get_system_instructions to suppress the now-mismatched discovery
@@ -711,6 +793,14 @@ class JaatoSession:
 
         # Per-turn token accounting
         self._turn_accounting: List[Dict[str, int]] = []
+
+        # Per-BINDING spend accounting -- (provider, model, tier).  The turn
+        # list above carries no model stamp, so it cannot say which tier of a
+        # ``model_tiers`` session spent what; this can.  Written once per
+        # response by ``_observe_binding_usage`` from the same hook that
+        # accumulates the turn's ``spend_*`` keys, read by
+        # ``get_consumption``.  See ``shared/session_consumption.py``.
+        self._consumption: ConsumptionLedger = ConsumptionLedger()
 
         # Instruction budget tracking (token usage by source layer)
         self._instruction_budget: Optional[InstructionBudget] = None
@@ -1667,6 +1757,14 @@ class JaatoSession:
         boundary.  No additional locking added (would be a behavior
         change).
         """
+        # The budget is the CALLER's knob (resolved from the profile by
+        # ``shared.completion_nudge``) and reaches the session nowhere else
+        # -- ``configure`` is not passed it and the session-init envelope
+        # does not carry it.  Latching it here is what lets the
+        # ``consumption`` aspect report the real ceiling for a profile that
+        # raised it, rather than the framework default.  Recorded on every
+        # call, refusals included, because a refusal knows the number too.
+        self._completion_nudge_budget = max_nudges
         if (
             not getattr(self, "_signal_completion_called", False)
             # A session an ``abort`` rung stopped refuses every later turn
@@ -1678,6 +1776,8 @@ class JaatoSession:
             and getattr(self, "_completion_nudges_fired", 0) < max_nudges
         ):
             self._completion_nudges_fired += 1
+            self._completion_nudges_total = getattr(
+                self, "_completion_nudges_total", 0) + 1
             self._completion_nudge_turn_pending = True
             return True, self._completion_nudges_fired
         return False, getattr(self, "_completion_nudges_fired", 0)
@@ -10347,6 +10447,112 @@ NOTES
             turn_tokens['thinking'] = turn_tokens.get('thinking', 0) + response.usage.thinking_tokens
             self._update_thinking_budget(response.usage.thinking_tokens)
 
+        # Attribute the same response to the (provider, model, tier) that
+        # served it.  Here rather than in the turn's ``finally`` because a
+        # turn is not a unit that belongs to one model: ``enter_tier`` can
+        # fire mid-turn, and a budget-control rung can rebind the active
+        # tier's model in place.  This hook runs exactly once per response
+        # on every path, which is the same property that makes it the right
+        # home for the ``spend_*`` keys above.
+        # Resolved rather than called outright: this hook is deliberately
+        # callable with a duck-typed ``self`` (``test_budget_runtime``
+        # drives it on a SimpleNamespace to prove the spend keys are
+        # written on every path), and the consumption report must not turn
+        # that into a hard requirement on the whole session class.
+        observe = getattr(self, '_observe_binding_usage', None)
+        if observe is not None:
+            observe(response)
+
+    def _observe_binding_usage(self, response: ProviderResponse) -> None:
+        """Fold one response into the per-binding consumption ledger.
+
+        The binding is read from the session's LIVE state — ``_model_name``,
+        ``_active_provider_name`` and ``_active_tier`` are all updated by
+        ``_connect_tier_entry`` / ``switch_tier`` before the next request
+        goes out, so at this moment they name what actually served this
+        response.
+
+        Never raises.  Consumption accounting is an observation ABOUT a
+        turn, not part of its contract, and the same rule the budget
+        observer follows applies: a reporting surface must not be able to
+        fail a turn that otherwise succeeded.
+
+        Args:
+            response: The provider response just received.
+        """
+        # A session built without ``__init__`` -- the shape several guard
+        # tests use to exercise ``_accumulate_turn_tokens`` in isolation --
+        # has no ledger, and therefore nothing to observe into.  Asked
+        # first because the alternative is reaching for ``_model_name``
+        # further down and relying on the handler to absorb the
+        # AttributeError, which is how this method stopped being total:
+        # ``_trace`` reads ``_agent_type`` and raised from inside the very
+        # ``except`` that was supposed to contain the failure.
+        ledger = getattr(self, '_consumption', None)
+        if ledger is None:
+            return
+        try:
+            usage = getattr(response, 'usage', None)
+            if usage is None or int(getattr(usage, 'total_tokens', 0) or 0) <= 0:
+                # A cancelled stream can settle with nothing reported.
+                # Recording a row of zeros would invent a binding the
+                # session may never have billed anything to.
+                return
+            cost, cost_source = self._reportable_cost(usage)
+            finish_reason = getattr(response, 'finish_reason', None)
+            ledger.observe(
+                provider=self._active_provider_name or 'unknown',
+                model=self._model_name or 'unknown',
+                tier=self._active_tier,
+                uncached_input_tokens=int(usage.prompt_tokens or 0),
+                output_tokens=int(usage.output_tokens or 0),
+                total_tokens=int(usage.total_tokens or 0),
+                cache_read_tokens=usage.cache_read_tokens,
+                cache_creation_tokens=usage.cache_creation_tokens,
+                thinking_tokens=usage.thinking_tokens,
+                cost_usd=cost,
+                cost_source=cost_source,
+                finish_reason=(
+                    finish_reason.value if finish_reason is not None else None),
+                # The turn being accumulated is the one AFTER every turn
+                # already recorded, so its index is the current length.
+                turn_index=len(self._turn_accounting),
+                timestamp=datetime.now().isoformat(),
+            )
+        except Exception as exc:  # noqa: BLE001
+            # The report is never worth a turn, so even the complaint is
+            # guarded: ``_trace`` touches session state of its own, and a
+            # handler that can raise is not a handler.
+            try:
+                self._trace(f"CONSUMPTION: binding observation failed: {exc}")
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _reportable_cost(self, usage) -> Tuple[Optional[float], Optional[str]]:
+        """The response's cost, or ``(None, None)`` if it is not a number.
+
+        Every other value the ledger is handed is converted in
+        :meth:`_observe_binding_usage`'s argument list, so a bad one raises
+        BEFORE the ledger is touched.  Cost is the exception: it is passed
+        through as the provider gave it, and the addition that would reject
+        it happens AFTER the row's token fields are written -- leaving a
+        half-written binding rather than no binding.
+
+        So a value that is not a number is not a cost.  It is dropped and
+        named, rather than allowed to corrupt the row it arrived with.
+        ``bool`` is excluded explicitly because Python makes it an ``int``,
+        and ``True`` dollars is not a measurement.
+        """
+        cost, cost_source = self._resolve_cost_with_source(usage)
+        if cost is None:
+            return None, None
+        if isinstance(cost, bool) or not isinstance(cost, (int, float)):
+            self._trace(
+                f"CONSUMPTION: ignoring non-numeric cost "
+                f"{type(cost).__name__} from {self._model_name}")
+            return None, None
+        return cost, cost_source
+
     def _emit_turn_progress(self, turn_data: Dict[str, Any], pending_tool_calls: int) -> None:
         """Emit turn progress event with current token state.
 
@@ -11086,27 +11292,29 @@ NOTES
         Returns:
             Cost in USD, or ``None`` when no source can supply it.
         """
-        if usage.cost_usd is not None:
-            return usage.cost_usd
-        if not self._model_name:
-            return None
-        try:
-            if not self._span_pricing_loaded:
-                from shared.pricing import load_pricing
-                self._span_pricing = load_pricing(self.workspace_path)
-                self._span_pricing_loaded = True
-            if self._span_pricing is None or not self._span_pricing.has(self._model_name):
-                return None
-            return self._span_pricing.cost_for_usage(
-                self._model_name,
-                prompt_tokens=int(usage.prompt_tokens or 0),
-                output_tokens=int(usage.output_tokens or 0),
-                cache_read_tokens=usage.cache_read_tokens,
-                cache_creation_tokens=usage.cache_creation_tokens,
-            )
-        except Exception as e:  # pragma: no cover - defensive
-            self._trace(f"LLM_TELEMETRY: pricing-table cost lookup failed: {e}")
-            return None
+        return _resolve_cost_and_source(self, usage)[0]
+
+    def _resolve_cost_with_source(
+        self, usage,
+    ) -> Tuple[Optional[float], Optional[str]]:
+        """:meth:`_resolve_span_cost`, plus WHICH source supplied the number.
+
+        The provenance exists because a consumer — including the model
+        itself, through the ``consumption`` environment aspect — acts
+        differently on a billed figure than on one computed from an
+        operator's pricing table.  Nothing in the tree distinguished them
+        before: ``cost_usd`` arrived as a bare float whose meaning depended
+        on which provider produced it.
+
+        Both this and :meth:`_resolve_span_cost` are one-line wrappers over
+        :func:`_resolve_cost_and_source`, so the cost and its provenance
+        cannot disagree — two walks of the same ladder is a bug waiting for
+        a provider that reports cost only sometimes.
+
+        Returns:
+            ``(cost_usd, source)``; see :func:`_resolve_cost_and_source`.
+        """
+        return _resolve_cost_and_source(self, usage)
 
     def _record_input_messages_telemetry(self, span) -> None:
         """Record OpenInference input messages on a telemetry span.
@@ -11349,6 +11557,267 @@ NOTES
     def get_turn_accounting(self) -> List[Dict[str, Any]]:
         """Get token usage and timing per turn."""
         return list(self._turn_accounting)
+
+    def get_consumption(self, detail: str = DETAIL_SUMMARY) -> Dict[str, Any]:
+        """What this session has consumed, segregated by model binding.
+
+        The counterpart of :meth:`get_context_usage`, and deliberately not
+        an extension of it.  That method answers *how full is the context
+        window* — an occupancy reading taken from ``InstructionBudget``,
+        which is a property of the history and belongs to no particular
+        model.  This one answers *what has been spent, and on what*: a sum
+        over the responses each ``(provider, model, tier)`` binding served.
+        A session that switches tier has one history and several bills.
+
+        Own session only.  A subagent runs its own :class:`JaatoSession`
+        and reports its own spend; nothing here rolls a child's numbers
+        into its parent's, because the aggregate has an owner already
+        (:class:`~shared.budget_control.CascadeBudgetPool`) and a second,
+        quieter one competing with it is how two totals start disagreeing.
+
+        Args:
+            detail: :data:`~shared.session_consumption.DETAIL_SUMMARY`
+                (default) reports totals and the active binding;
+                :data:`~shared.session_consumption.DETAIL_FULL` adds the
+                per-binding list and the declared tier ladder.  The
+                default is the cheap one because this result enters the
+                history of the very session it measures — asking what you
+                have spent is itself spending.  An unknown value degrades
+                to summary rather than raising: a reporting surface must
+                not be able to fail a turn.
+
+        Returns:
+            A JSON-safe dict.  ``bindings`` is a LIST even in single-model
+            mode (one row, ``tier: null``), so a consumer never branches on
+            whether the session happened to be tiered.
+        """
+        if detail not in VALID_DETAIL_LEVELS:
+            detail = DETAIL_SUMMARY
+
+        totals = self._consumption.totals()
+        bindings = self._consumption.bindings()
+        usage = self.get_context_usage()
+
+        result: Dict[str, Any] = {
+            "active": self._consumption_active_view(usage),
+            "totals": totals.as_dict(),
+            "binding_count": len(bindings),
+            "elapsed_seconds": round(float(sum(
+                float(t.get("duration_seconds") or 0.0)
+                for t in self._turn_accounting)), 2),
+            "tool_calls": sum(
+                len(t.get("function_calls") or ())
+                for t in self._turn_accounting),
+        }
+
+        unattributed = len(self._turn_accounting) - totals.turns
+        if unattributed > 0:
+            # The ledger is in-memory and is NOT part of the session
+            # snapshot, so a session revived from disk (``session.wake``, a
+            # reattach) comes back with its turn list restored and its
+            # spend unmeasured.  Reporting the remainder as though the
+            # session had been cheap is the one answer that would mislead a
+            # reader into a wrong decision, so the gap is named instead.
+            result["turns_not_attributed"] = unattributed
+            result["measurement_note"] = (
+                f"{unattributed} earlier turn(s) are not in this breakdown: "
+                f"per-binding spend is not persisted, so a revived session "
+                f"accounts only for what it has spent since waking."
+            )
+
+        budget = self._consumption_budget_view()
+        if budget is not None:
+            result["budget"] = budget
+
+        completion = self._consumption_completion_view()
+        if completion is not None:
+            result["completion"] = completion
+
+        if detail == DETAIL_FULL:
+            result["bindings"] = [b.as_dict() for b in bindings]
+            ladder = self._consumption_tier_ladder()
+            if ladder is not None:
+                result["tiers_declared"] = ladder
+        elif len(bindings) > 1:
+            # Say that the breakdown exists rather than leaving the reader
+            # to guess from ``binding_count``.  The whole reason this
+            # aspect takes a ``detail`` argument is that a multi-tier
+            # session HAS something more to say.
+            result["hint"] = (
+                f"{len(bindings)} model bindings were used; call with "
+                f"detail='full' for the per-binding breakdown."
+            )
+        return result
+
+    def _consumption_active_view(self, usage: Dict[str, Any]) -> Dict[str, Any]:
+        """The binding serving requests right now, plus window occupancy.
+
+        Occupancy lives HERE and not in a binding row on purpose: the
+        context window is filled by the shared history, so attributing
+        ``percent_used`` to the model that happens to be active would read
+        as that model's consumption when it is nothing of the sort.
+
+        Args:
+            usage: The result of :meth:`get_context_usage`, passed in so
+                the caller's single read is reused.
+        """
+        view: Dict[str, Any] = {
+            "provider": self._active_provider_name or "unknown",
+            "model": self._model_name or "unknown",
+            "tier": self._active_tier,
+            "context_limit": usage.get("context_limit", 0),
+            "context_tokens_used": usage.get("total_tokens", 0),
+            "context_percent_used": round(usage.get("percent_used", 0.0), 2),
+            "turns": usage.get("turns", 0),
+        }
+        media_bytes = usage.get("media_bytes")
+        if media_bytes:
+            # The second GC denominator (#850), in BYTES.  Reported only
+            # when non-zero: for a text session it is noise, and for a
+            # voice session it is the number that matters.
+            view["media_bytes"] = media_bytes
+        if self._tier_config is not None:
+            view["tier_switches"] = getattr(self, "_tier_switch_count", 0)
+        return view
+
+    def _consumption_tier_ladder(self) -> Optional[List[Dict[str, Any]]]:
+        """The tiers this session DECLARES, spent or not.
+
+        A tier with no row in ``bindings`` has never been entered, and
+        that absence is a finding — an agent that was given a vision tier
+        and never used it looks identical, in a spend report alone, to one
+        that was never given a vision tier at all.
+
+        ``None`` in single-model mode, where there is no ladder to report.
+        """
+        if self._tier_config is None:
+            return None
+        used = {b.tier for b in self._consumption.bindings()}
+        return [
+            {
+                "tier": name,
+                "model": entry.model,
+                "provider": entry.provider or self._active_provider_name,
+                "active": name == self._active_tier,
+                "entered": name in used,
+            }
+            for name, entry in self._tier_config.tiers.items()
+        ]
+
+    def _consumption_budget_view(self) -> Optional[Dict[str, Any]]:
+        """Where this session stands against its declared ceilings.
+
+        ``None`` when the profile declared no ``budget_control`` — an
+        absent key is how "unbounded" is said, distinct from a block of
+        ceilings that happen to be far away.  (``jaato-scaffold validate``
+        warns about the unbudgeted case at authoring time, #947; this is
+        the same fact at run time.)
+
+        Of the five dimensions only the declared ones appear, and only an
+        ``abort`` rung actually stops a run — ``finalize`` and ``escalate``
+        are advice a looping model can decline (#955), so ``next_rung``
+        names the action rather than implying a stop.
+        """
+        tracker = self._budget_tracker
+        if tracker is None:
+            return None
+        try:
+            limits = tracker.config.limits
+            used = tracker.usage.as_dict()
+            view: Dict[str, Any] = {
+                # Only the DECLARED dimensions.  The tracker accumulates
+                # all five whether or not a ceiling exists for them, and
+                # an undeclared one reading ``0.0`` beside a ceiling it
+                # does not have is noise at best and a phantom headroom
+                # reading at worst.  Absolute consumption regardless of
+                # ceilings is what ``totals`` is for.
+                "used": {
+                    dim: round(value, 6)
+                    for dim, value in used.items() if dim in limits
+                },
+                # ``limits`` is a plain mapping of declared dimensions;
+                # an absent dimension is unbounded and stays absent here.
+                "limits": dict(limits),
+                "fraction_used": round(tracker.usage_fraction(), 4),
+            }
+            next_rung = self._consumption_next_rung(tracker)
+            if next_rung is not None:
+                view["next_rung"] = next_rung
+            reason = getattr(self, "_budget_exhausted_reason", None)
+            if reason:
+                view["exhausted_reason"] = reason
+            return view
+        except Exception as exc:  # noqa: BLE001
+            self._trace(f"CONSUMPTION: budget view failed: {exc}")
+            return None
+
+    def _consumption_next_rung(self, tracker) -> Optional[Dict[str, Any]]:
+        """The lowest degrade rung that has not fired yet.
+
+        What the agent can act on: a rung at 95% it has not reached is a
+        deadline, where the rungs behind it are history.  Returns ``None``
+        when the ladder is empty or fully spent.
+        """
+        fraction_percent = tracker.usage_fraction() * 100.0
+        pending = [
+            rung for idx, rung in enumerate(tracker.config.degrade)
+            if idx not in getattr(tracker, "_fired", set())
+            and rung.at_percent > fraction_percent
+        ]
+        if not pending:
+            return None
+        rung = min(pending, key=lambda r: r.at_percent)
+        view: Dict[str, Any] = {"at_percent": rung.at_percent}
+        if rung.action:
+            view["action"] = rung.action
+        if rung.model_tiers:
+            view["rebinds_tiers"] = sorted(rung.model_tiers)
+        return view
+
+    def _consumption_completion_view(self) -> Optional[Dict[str, Any]]:
+        """The completion gate's state, when this session has one.
+
+        ``None`` when ``signal_completion`` is not on the surface — a
+        session with no gate has no nudge budget to report, and an
+        always-present block of zeros would suggest otherwise.
+
+        ``max_nudges_per_turn`` is reported with its SOURCE because the
+        session is not told its own budget: the knob is resolved from the
+        profile by the caller that nudges (``server/core.py``, the subagent
+        loop) and passed to :meth:`try_completion_nudge`, so until the
+        first nudge is considered the session knows only the framework
+        default.  ``source: "framework_default"`` beside a profile that
+        raised ``max_completion_nudges`` therefore means "not observed
+        yet", not "your knob was ignored".  Carrying the value on the
+        session-init envelope would remove the caveat; that is a wire
+        version bump and is deliberately not done here.
+        """
+        lifecycle = getattr(self, "_lifecycle_tools", None)
+        if lifecycle is None:
+            return None
+        try:
+            if lifecycle._should_hide_signal_completion():
+                return None
+        except Exception:  # noqa: BLE001
+            return None
+
+        from .completion_nudge import DEFAULT_MAX_COMPLETION_NUDGES
+        observed = getattr(self, "_completion_nudge_budget", None)
+        max_nudges = (
+            observed if observed is not None else DEFAULT_MAX_COMPLETION_NUDGES)
+        fired = getattr(self, "_completion_nudges_fired", 0)
+        return {
+            "payload_schema_declared": (
+                self._completion_payload_schema is not None),
+            "signal_completion_called": getattr(
+                self, "_signal_completion_called", False),
+            "nudges_fired_this_turn": fired,
+            "nudges_remaining_this_turn": max(0, max_nudges - fired),
+            "max_nudges_per_turn": max_nudges,
+            "max_nudges_source": (
+                "observed" if observed is not None else "framework_default"),
+            "nudges_fired_total": getattr(self, "_completion_nudges_total", 0),
+        }
 
     def restore_turn_accounting(
         self, turns: List[Dict[str, Any]],
@@ -11651,6 +12120,14 @@ NOTES
             logger.info(f"[session:{self._agent_id}] reset_session: starting fresh (no history)")
             self._history.clear()
         self._turn_accounting = []
+        # The consumption ledger follows the turn list, and not only for
+        # tidiness: ``_observe_binding_usage`` derives its turn index from
+        # ``len(self._turn_accounting)``, so a reset restarts that counter
+        # at 0 and every re-used index would be read as the SAME turn --
+        # silently under-counting ``turns`` for the rest of the session.
+        # The spend it described belongs to a conversation that no longer
+        # exists, which is the same judgement clearing the turn list makes.
+        self._consumption = ConsumptionLedger()
         if not history:
             self._msg_token_cache.clear()
             # On true fresh reset, clear pinned references and remove their
