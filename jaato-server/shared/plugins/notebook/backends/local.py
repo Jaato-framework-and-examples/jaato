@@ -15,6 +15,10 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from .base import NotebookBackend
+from ..kernel_sandbox import (
+    apparmor_enforced_profile,
+    env_truthy,
+)
 from ..types import (
     BackendCapabilities,
     CellOutput,
@@ -30,44 +34,13 @@ logger = logging.getLogger(__name__)
 # when the process is NOT under kernel-enforced AppArmor confinement.
 INPROCESS_OPT_IN_ENV = "JAATO_NOTEBOOK_ALLOW_INPROCESS_EXEC"
 
-
-def _env_truthy(name: str) -> bool:
-    """Return True when env var ``name`` holds a truthy value."""
-    return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
-
-
-def _apparmor_enforced_profile() -> Optional[str]:
-    """Return the active AppArmor profile name iff it is *enforced*.
-
-    Reads ``/proc/self/attr/current``. Returns the profile label (e.g.
-    ``jaato-ws-<id>//child``) only when an AppArmor profile is active in
-    ``enforce`` mode — a real kernel boundary on the cell's syscalls.
-    Returns ``None`` when the process is unconfined, when AppArmor is
-    unavailable, or when the profile is in ``complain`` mode (which logs
-    but does not block, so it is not a boundary).
-    """
-    try:
-        with open("/proc/self/attr/current", "r") as fh:
-            # The kernel terminates this value with a NUL byte (and a
-            # newline); str.strip() alone leaves the NUL, which would
-            # false-negative an enforced profile and break the confined
-            # path. Match the convention in server/runner_spawner.py:251.
-            raw = fh.read().strip("\x00 \t\r\n")
-    except OSError:
-        return None
-    if not raw or raw.startswith("unconfined"):
-        return None
-    # Format is typically 'name (enforce)' or 'name (complain)'; a bare
-    # 'name' with no mode annotation is treated conservatively as not a
-    # boundary.
-    if "(" not in raw:
-        return None
-    name, _, mode = raw.partition(" (")
-    if mode.rstrip(")").strip() != "enforce":
-        return None
-    name = name.strip()
-    return name or None
-
+# Both helpers live in ``kernel_sandbox`` so the in-process gate here and the
+# kernel's own boundary decision read the SAME answer about confinement
+# (issue #710: a protection that covers one path reads as covering all of
+# them).  Re-bound at module level under their historical names so the gate's
+# call sites — and the tests that monkeypatch them — are unchanged.
+_env_truthy = env_truthy
+_apparmor_enforced_profile = apparmor_enforced_profile
 
 
 class LocalJupyterBackend(NotebookBackend):
@@ -178,6 +151,23 @@ class LocalJupyterBackend(NotebookBackend):
             "the notebook plugin config allow_inprocess_exec=true) to accept "
             "in-process execution."
         )
+
+    def execution_boundary(self) -> Tuple[bool, str]:
+        """The in-process gate, answered for ``NotebookPlugin``'s pre-dispatch check.
+
+        Identical to what ``execute()`` enforces per cell — this is the same
+        decision asked one layer up, so the plugin can refuse before it routes
+        a cell here (issue #710) and the model is told which knob to reach for
+        instead of seeing a bare failure.  ``execute()`` keeps its own call
+        because a caller holding the backend directly (a harness, a test,
+        ``install_package``) must not be able to skip the gate.
+
+        Note what this backend does NOT bound: a cell that IS permitted here
+        runs in the host interpreter with no filesystem containment of its
+        own.  Under AppArmor the kernel supplies that; under the opt-in the
+        operator has accepted its absence.
+        """
+        return self._inprocess_exec_allowed()
 
     def shutdown(self) -> None:
         """Shutdown and clean up all notebooks."""

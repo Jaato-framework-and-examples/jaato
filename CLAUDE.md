@@ -2328,6 +2328,97 @@ hook emits two events (`PermissionResolvedEvent` plus the
 `PermissionStatusEvent` `emit_permission_status()` appends) and serialises
 both to every connected client. A trace line is cheap; an event is not.
 
+### A Boundary the Notebook Did Not Have (#710)
+
+`cli` contains the paths a model names: every path token in a command goes
+through `check_path_with_jaato_containment` and the command is refused when one
+falls outside the workspace. `notebook_execute` had nothing equivalent, and it
+is the cheapest surface a model can reach (eager, core, and measured at ~93% of
+tool calls in #717). Same daemon, same workspace, two sessions:
+
+| tool | asked for | result |
+|---|---|---|
+| `cli_based_tool` | `cat /etc/hostname` | **refused** |
+| `notebook_execute` | `open('/etc/hostname').read()` | the hostname |
+| `notebook_execute` | `subprocess.run(['cat','/etc/hostname'])` | the hostname |
+
+The third row is the point: the notebook spawned the very command `cli` had
+just refused. Any workspace-confinement claim made about `cli` was void while
+`notebook` was exposed, and nothing had to be jailbroken to get there — the
+reported session was asked to study a sibling checkout and simply browsed it.
+
+**`cwd=workspace_root` was never containment**, and the backend's own docstring
+said as much: it exists so `os.getcwd()` and *relative* paths resolve
+in-workspace. Absolute paths were untouched, and `_set_pdeathsig` is lifecycle,
+not isolation.
+
+**The in-process gate is a different question, and it stays.**
+`_inprocess_exec_allowed` (`backends/local.py`) asks *may model-authored code
+run in the host interpreter at all* — where a cell can reach the runtime, the
+tool executor and other plugins' memory — and fails closed without AppArmor or
+`allow_inprocess_exec`. It bounds the PROCESS. It never bounded the
+FILESYSTEM, and it is on the `local` backend while `subprocess` is the default,
+so `CLAUDE.md` describing notebook execution as failing closed described one
+backend of it. Both halves exist now, and neither replaces the other.
+
+**Three tiers, strongest first, decided in the kernel before any cell arrives:**
+
+| Tier | What bounds the cell |
+|------|----------------------|
+| AppArmor | the runner's per-session profile, inherited by the kernel through the profile's `ix` exec rule. A real kernel boundary; nothing else is installed on this path |
+| audit hook | `kernel_sandbox` installs a PEP 578 hook applying the same containment `cli` applies — to `open`, the `os.*` mutators, `listdir`/`scandir`, every spawn, and `ctypes.dlopen` |
+| nothing | the kernel answers every cell with a refusal naming the knob, and stays up so the refusal reads as a cell error rather than a dead kernel |
+
+The hook sees **actual I/O**, so it does not care how a path was spelled,
+built or obfuscated — the standing weakness of the static `code_analyzer`
+scan, which reads source text and (in the default `warn` mode) blocks nothing.
+Spawns are checked on their arguments, because a child process runs in another
+interpreter where no hook of ours is installed; `ctypes.dlopen` of anything
+outside the interpreter installation is refused for the same reason, one layer
+down — native code's own `open(2)` raises no audit event.
+
+**Be clear about what an in-process hook is.** It is not a kernel boundary. A
+cell that *sets out* to escape can attack the hook itself — rebind the module's
+policy, reach it through `gc`. It closes the accidental and the opportunistic
+case, which is what #710 measured, and makes a deliberate escape an act that
+has to defeat a declared boundary rather than walk through an open door. For a
+hostile-model threat model the answer is AppArmor, and the layering says so.
+
+**The gate belongs to notebook execution, not to one backend.** Every backend
+answers `NotebookBackend.execution_boundary()`, `NotebookPlugin` asks before
+dispatching a cell, and the base class's default is a **refusal** — a backend
+added later is contained once its author has decided how, rather than
+inheriting "allowed" and reproducing this defect. `local` answers with its
+in-process gate, `subprocess` with the tiers above, `kaggle` with "the code
+never touches this host".
+
+**And it is asked on both dispatch paths.** `supports_streaming` is `True` for
+`notebook_execute`, so the streaming path is the live one in a daemon — and it
+ran neither the boundary check nor the static analyzer. `sandbox_mode: strict`
+therefore blocked nothing in a real session. One `_guard_execution` now serves
+both paths; a gate that covers one of two dispatch paths is the same shape as a
+gate that covers one of two backends.
+
+**Escape hatches, narrow before wide:**
+
+```yaml
+plugin_configs:
+  notebook:
+    allow_read_paths: ["/srv/corpus"]   # extra readable roots
+    allow_uncontained_exec: false       # the whole boundary, off (WARNING)
+```
+
+`sandbox add <path>` is the operator's live equivalent and is honoured too: a
+kernel outlives many cells, so the session's authorized and denied paths ride
+**every** `execute` frame rather than the kernel's argv — a grant made after
+the kernel spawned takes effect on the next cell, and a revocation likewise. A
+denial outranks every allowance, the workspace included.
+
+Not addressed here: an AppArmor child profile for the kernel on an unconfined
+host (there is no profile to transition from), and the in-process backend's
+memory-reach, which #710's grooming correctly separates and which the deferred
+kernel + tool-RPC redesign owns.
+
 ### Interactive Shell Sessions (`shared/plugins/interactive_shell/`)
 
 The `interactive_shell` plugin lets the model drive any user-interactive command by spawning persistent PTY sessions. Unlike `cli/` (which uses `subprocess` and can only run non-interactive commands), this plugin uses `pexpect` to provide a real pseudo-terminal where the model can read output and send input back and forth.
@@ -3566,7 +3657,8 @@ covers it, where one exists. `jaato-scaffold explain env` renders the tags;
 | `JAATO_SESSION_LOG_DIR` | Per-session log directory, relative to workspace (default: `.jaato/logs`) |
 | `JAATO_CGROUPS_ROOT` | Parent cgroup v2 directory for the WS server's per-session cgroup tree (default: `/sys/fs/cgroup/jaato`). Override when the host has subtree_control delegated under a different path. Must already exist with `memory`, `pids`, `cpu` in `cgroup.subtree_control`. |
 | `JAATO_REQUIRE_APPARMOR` | Require kernel-enforced AppArmor confinement (`1`/`true`/`yes`). Promotes the WS server's auto-detect mode to *required*: if confinement is unavailable the server refuses to start instead of silently degrading to directory-sandbox-only isolation. Equivalent to the WS `--apparmor` flag; combining it with `--no-apparmor` is a contradiction the server rejects at startup. When unset (auto), unavailability is logged at WARNING with the specific failing precondition and the server degrades. |
-| `JAATO_NOTEBOOK_ALLOW_INPROCESS_EXEC` | Opt into in-process execution of model-authored notebook cells (`1`/`true`/`yes`). The `notebook` plugin's `local` backend runs cells via `exec`/`eval` in the host interpreter, so by default it **fails closed** unless a kernel-enforced AppArmor profile is active (the production confined-runner path). Set this (or notebook plugin config `allow_inprocess_exec: true`) to accept in-process execution on unconfined hosts (e.g. trusted single-user dev). Logs a one-time WARNING when execution runs unconfined via this opt-in. |
+| `JAATO_NOTEBOOK_ALLOW_INPROCESS_EXEC` | Opt into in-process execution of model-authored notebook cells (`1`/`true`/`yes`). The `notebook` plugin's `local` backend runs cells via `exec`/`eval` in the host interpreter, so by default it **fails closed** unless a kernel-enforced AppArmor profile is active (the production confined-runner path). Set this (or notebook plugin config `allow_inprocess_exec: true`) to accept in-process execution on unconfined hosts (e.g. trusted single-user dev). Logs a one-time WARNING when execution runs unconfined via this opt-in. Bounds the PROCESS, not the filesystem — see the row below and [A Boundary the Notebook Did Not Have](#a-boundary-the-notebook-did-not-have-710). |
+| `JAATO_NOTEBOOK_ALLOW_UNCONTAINED_EXEC` | Opt into notebook cells reaching **outside the workspace** (`1`/`true`/`yes`; profile key `plugin_configs.notebook.allow_uncontained_exec`). Cells are otherwise contained to the workspace and `/tmp` — the same boundary `cli` applies — by an AppArmor profile where one is enforced and by the kernel's own audit hook otherwise (#710). Announced at WARNING on every kernel that takes it. `plugin_configs.notebook.allow_read_paths` and the operator's `sandbox add` are the narrow alternatives. |
 | `JAATO_PLUGIN_ENTRY_POINT_ALLOWLIST` | Comma-separated distribution names allowed to contribute plugins through the `jaato.*` entry-point groups. Unset (the default) means every installed distribution participates. When set, an entry point from any other distribution is refused **before** `ep.load()` — so its module is never imported — with a WARNING naming it. The built-in package is always honoured and never needs listing. See [Entry-point plugin trust](#entry-point-plugin-trust). |
 | `JAATO_REVIVE_PROFILE` | Where a REVIVED session's profile comes from: `persisted` (default — the resolved recipe the session froze at creation) or `disk` (re-resolve `profile_name` against the profile files as they stand now). Set `disk` to interrogate a finished session under a different contract, where a `JAATO_PROFILE_SET` switch must actually take effect. |
 | `JAATO_REVIVE_PERSONA` | Where a REVIVED session's system instruction comes from: `persisted` (default — the exact prompt rendered at session-prep, prefetch output included) or `disk` (re-render from the agent markdown, **re-running** the persona's `{{!py:...}}` prefetch scripts against the session's original `agent_params`). The default is what makes a prefetch run once as documented; `disk` may execute side effects. |
