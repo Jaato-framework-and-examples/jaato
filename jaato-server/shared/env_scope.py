@@ -424,17 +424,21 @@ CATALOG: Dict[str, EnvClass] = {
         "tool-runner debug logging; a developer toggle"),
 
     # ---- telemetry ---------------------------------------------------
-    "JAATO_TELEMETRY_BACKEND": EnvClass(SESSION, None,
+    # Promoted by #858: the five keys existed and the factory overwrote
+    # them all, so the whole block was inert.  create_plugin() now takes
+    # plugin_configs.telemetry and layers these env vars BENEATH it.
+    "JAATO_TELEMETRY_BACKEND": EnvClass(SESSION, "plugin_configs.telemetry.backend",
         "per-session tracing is exactly what one profile wants "
         "and the rest do not"),
-    "JAATO_TELEMETRY_ENABLED": EnvClass(SESSION, None,
+    "JAATO_TELEMETRY_ENABLED": EnvClass(SESSION, "plugin_configs.telemetry.enabled",
         "see JAATO_TELEMETRY_BACKEND"),
-    "JAATO_TELEMETRY_EXPORTER": EnvClass(SESSION, None,
+    "JAATO_TELEMETRY_EXPORTER": EnvClass(SESSION, "plugin_configs.telemetry.exporter",
         "see JAATO_TELEMETRY_BACKEND"),
-    "JAATO_TELEMETRY_FILE": EnvClass(SESSION, None,
+    "JAATO_TELEMETRY_FILE": EnvClass(SESSION, "plugin_configs.telemetry.file_path",
         "a per-session path, same shape as the trace incident"),
-    "JAATO_TELEMETRY_REDACT_CONTENT": EnvClass(SESSION, None,
-        "redaction posture may legitimately differ per agent"),
+    "JAATO_TELEMETRY_REDACT_CONTENT": EnvClass(SESSION, "plugin_configs.telemetry.redact_content",
+        "a PRIVACY control -- redaction posture may legitimately differ "
+        "per agent, and an operator who sets it must be obeyed"),
     "LANGFUSE_HOST": EnvClass(HOST, None,
         "the Langfuse deployment the host reports to; one per host"),
     "LANGFUSE_PUBLIC_KEY": EnvClass(SESSION, None,
@@ -841,33 +845,6 @@ AWAITING_TYPED_KEY: Dict[str, Awaiting] = {
         "cannot live IN a profile -- it selects WHICH profile file is "
         "read, so it belongs on the handshake beside client.config_root "
         "rather than in the thing it selects",
-    ),
-    "JAATO_TELEMETRY_BACKEND": Awaiting(
-        "A", "plugin_configs.telemetry.backend",
-    ),
-    "JAATO_TELEMETRY_ENABLED": Awaiting(
-        "A", "plugin_configs.telemetry.enabled",
-        "the key EXISTS; create_plugin() gates construction on the env "
-        "var and returns NullTelemetryPlugin, so no profile key can "
-        "reach it. Needs the factory to consult the profile -- wiring, "
-        "not a key",
-    ),
-    "JAATO_TELEMETRY_EXPORTER": Awaiting(
-        "A", "plugin_configs.telemetry.exporter",
-        "the key EXISTS; create_plugin() builds the config dict from "
-        "env and passes it to initialize(), so plugin_configs.telemetry "
-        "never arrives",
-    ),
-    "JAATO_TELEMETRY_FILE": Awaiting(
-        "A", "plugin_configs.telemetry.file_path",
-        "the key EXISTS and already wins (config.get(file_path, env)) "
-        "-- but create_plugin() never passes it, so the win is "
-        "unreachable",
-    ),
-    "JAATO_TELEMETRY_REDACT_CONTENT": Awaiting(
-        "A", "plugin_configs.telemetry.redact_content",
-        "as JAATO_TELEMETRY_EXPORTER -- the key exists, the factory "
-        "overwrites it",
     ),
 
     # ---- tier B: plugin knobs --------------------------------

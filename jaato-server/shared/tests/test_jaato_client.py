@@ -121,10 +121,14 @@ class TestJaatoClientConnect:
         client = JaatoClient(provider_name="github_models")
         client.connect(model="gpt-4o")
 
+        # ``telemetry_config`` is the profile's ``plugin_configs.telemetry``
+        # block (#858); an unconfigured client passes ``None``, so the
+        # runtime's telemetry stays env-derived exactly as it was.
         mock_runtime_class.assert_called_once_with(provider_name="github_models",
                                                          workspace_path=None,
                                                          config_root=None,
-                                                         instruction_token_cache=None)
+                                                         instruction_token_cache=None,
+                                                         telemetry_config=None)
 
     @patch('shared.jaato_client.JaatoRuntime')
     def test_connect_with_project_and_location(self, mock_runtime_class):

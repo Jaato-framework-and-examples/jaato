@@ -126,7 +126,7 @@ The 20 `ambient` vars are the issue's tier D — `PATH`, `TERM`, `HOME`, `USER`,
 `PSModulePath`, `ComSpec`, `workspaceRoot` and friends. `env_scope.is_knob()`
 excludes them, so tooling can present a knob view without them inflating it.
 
-## The ratchet: 38 session knobs with no typed key
+## The ratchet: the session knobs with no typed key
 
 These are declared in `AWAITING_TYPED_KEY`, each with a tier **and a proposed
 key** — where the typed key should go. A debt entry that says only "this wants a
@@ -144,6 +144,18 @@ stops the set sitting at the same size for a year. **The set may only shrink.**
 > below as the model. All five now carry a `typed_key`; three of them carry a note
 > that the env var currently outranks it, which is a **precedence defect**, a
 > different and smaller fix than adding a key. 43 → 38.
+
+> **Promotion, #858 — the five telemetry entries.** `JAATO_TELEMETRY_ENABLED`,
+> `_BACKEND`, `_EXPORTER`, `_FILE` and `_REDACT_CONTENT` each named a
+> `plugin_configs.telemetry.*` key that **existed** — `OTelPlugin.initialize()`
+> reads every one — and the plugin factory assembled its config dict from the
+> environment and handed *that* to `initialize()`, so the profile block never
+> arrived. Not a missing key: a missing argument. `redact_content` is why this
+> was a P1 rather than a tidy-up — an operator who sets a privacy control in the
+> typed place and is ignored has no way to tell, and the env default failing in
+> the safe direction does not make the ignore correct. `create_plugin(config)`
+> now takes the block and layers the env vars beneath it, so all five move from
+> `AWAITING_TYPED_KEY` to a resolving `typed_key`.
 
 The guard derives the same set from the catalog on every run and fails when the
 two disagree, so promoting a knob is a deletion and adding an untyped session
