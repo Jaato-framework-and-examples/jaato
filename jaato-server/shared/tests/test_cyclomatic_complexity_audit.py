@@ -111,7 +111,13 @@ BASELINE: Dict[str, int] = {
     # loop is a single long function by construction and splitting it is a
     # real refactor, not a tidy-up to bundle into a CI change.  It is the
     # one entry in this file that moved the ratchet the wrong way.
-    "jaato-server/server/core.py::JaatoServer._start_model_thread.model_thread": 41,
+    #
+    # 41 -> 40 by #877, which had to carry attachments through the
+    # wind-down stash and lifted the merge out into the module-level
+    # ``merge_pending_continuations``.  A net improvement rather than the
+    # +3 the inline version cost -- and the lifted rule is now reachable
+    # from a test, which is what #877 needed it to be.
+    "jaato-server/server/core.py::JaatoServer._start_model_thread.model_thread": 40,
     "jaato-server/server/core.py::JaatoServer.execute_command": 28,
     "jaato-server/server/core.py::JaatoServer.initialize": 44,
     "jaato-server/server/core.py::JaatoServer.initialize._run_load_plugins": 17,

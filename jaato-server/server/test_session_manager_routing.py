@@ -14,7 +14,7 @@ reaching into the daemon-side session.  Tests updated accordingly.
 import pytest
 
 from datetime import datetime, timezone
-from typing import Any, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from .session_manager import Session, SessionManager
 
@@ -43,6 +43,7 @@ class _FakeRunnerRPC:
         source_id: Optional[str] = None,
         source_type: Optional[str] = None,
         require_idle: bool = False,
+        attachments: Optional[List[Dict[str, Any]]] = None,
         timeout: Optional[float] = None,
     ) -> str:
         """Stand-in for the runner's ATOMIC queue-or-report.

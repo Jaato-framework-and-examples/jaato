@@ -16,7 +16,7 @@ import pathlib
 import queue
 import threading
 from datetime import datetime, timezone
-from typing import Any, Callable, Dict, List, Optional, Set, TYPE_CHECKING
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple, TYPE_CHECKING
 
 if TYPE_CHECKING:  # pragma: no cover — types only
     from server.runner_rpc_client import RunnerRPCClient
@@ -376,6 +376,43 @@ def _dispatch_tool_output(hooks, payload, default_agent_id: str) -> None:
     )
 
 
+def merge_pending_continuations(
+    stashed: List[Tuple[str, List[Dict]]],
+) -> Tuple[str, List[Dict]]:
+    """Fold the wind-down stash into the ONE turn the drain will start.
+
+    ``_pending_continuations`` collects every message that arrived while the
+    model thread was unwinding, and the drain turns all of them into a single
+    turn -- taking only the newest would re-introduce #623's silent loss with
+    extra steps.
+
+    The two halves merge differently, and each way is the one that preserves
+    content:
+
+    * **texts join** with a blank line, as ``_drain_child_messages`` already
+      joined a batch it collected;
+    * **attachments concatenate**, so two utterances landing in one window
+      become one turn carrying both parts rather than one losing the other
+      (#877).
+
+    Module-level and named rather than inlined in the drain: it is the one
+    piece of that ``finally`` block a test can drive without standing up a
+    model thread, and the drain's rule is exactly what #877 got wrong.
+
+    Args:
+        stashed: The ``(text, attachments)`` pairs, oldest first.
+
+    Returns:
+        ``(text, attachments)`` for one turn.  Either half may be empty --
+        including the text, since an attachment is content (#838) and a
+        blank-text utterance is a voice agent's normal case.  Both empty
+        means there is nothing to drive.
+    """
+    text = "\n\n".join(t for t, _atts in stashed if t)
+    attachments = [a for _t, atts in stashed for a in atts]
+    return text, attachments
+
+
 class JaatoServer:
     """Core server logic for Jaato - UI-agnostic.
 
@@ -681,7 +718,7 @@ class JaatoServer:
         # advancement on an error-terminated session (the recovery path
         # re-spawns it).  See docs/design/agent-error-recovery-event.md.
         self._terminal_reason: Optional[str] = None
-        # Texts stashed for the model thread's ``finally`` to turn into the
+        # Messages stashed for the model thread's ``finally`` to turn into the
         # next turn: continuations drained from child/sibling messages, and
         # sends that arrived for an idle SESSION while THIS thread was still
         # unwinding its previous turn.
@@ -692,7 +729,18 @@ class JaatoServer:
         # reproduced live at 4 deliveries -> 2 turn inputs.  Before #620 that
         # path went to the runner's ``_message_queue``, which is a real queue;
         # the regression was replacing a queue with a variable.
-        self._pending_continuations: List[str] = []
+        #
+        # A LIST OF ``(text, attachments)`` PAIRS, not of texts (#877).  A
+        # voice turn's attachment IS the message (#838), and a stash that
+        # held text alone discarded the bytes of every user send that landed
+        # in the wind-down window -- silently, since the drain then produced
+        # a text-only turn whose ``_evict_consumed_media`` correctly purged
+        # the PREVIOUS turn's audio, leaving an audio-requiring model a
+        # request with no audio at all.  ``attachments`` is the
+        # client-expanded list of ``{mime_type, data, display_name}`` dicts,
+        # empty for every continuation that has no bytes (child messages,
+        # nudges, formatter feedback).
+        self._pending_continuations: List[Tuple[str, List[Dict]]] = []
         #: Guards :attr:`_pending_continuations`.  The stash is written from
         #: the RPC client's asyncio READ LOOP (notification dispatch, see
         #: ``runner_rpc_client._read_loop``) and from ``send_message`` on a
@@ -4607,12 +4655,102 @@ class JaatoServer:
     # Client Request Handlers
     # =========================================================================
 
+    def _emit_attachment_dropped(
+        self,
+        text: str,
+        attachments: List[Dict],
+        because: str,
+    ) -> None:
+        """Report by name that a send's binary payload was NOT delivered.
+
+        #877's whole cost was that the drop had no witness.  A send whose
+        attachments could not be carried emitted ``MidTurnPromptQueuedEvent``
+        -- an event carrying only ``text`` -- and was indistinguishable, from
+        the client's side, from a healthy queue.  The turn then ran without
+        the bytes and the failure surfaced as a provider ``400`` several
+        layers away, naming nothing.
+
+        The same posture as ``EmptyMessageError`` (#838): a request that
+        cannot be honoured is refused by name rather than reported as a
+        degraded success.  ``recoverable=True`` because the caller CAN act --
+        re-send once the session is idle.
+
+        Never logs or emits the payload itself: mime, size and display name
+        only, which is the rule ``_wrap_wake_content`` follows for the same
+        reason (#845).
+
+        Args:
+            text: The send's text, echoed in ``details`` so the caller can
+                identify WHICH send lost its payload.
+            attachments: The dropped attachments.  Described, never emitted.
+            because: One clause naming the path that could not carry them,
+                spliced into the human sentence.
+        """
+        described = [
+            {
+                "mime_type": (a or {}).get("mime_type") or "unknown",
+                "display_name": (a or {}).get("display_name"),
+                "bytes": len((a or {}).get("data") or ""),
+            }
+            for a in attachments
+        ]
+        logger.error(
+            "ATTACHMENT_DROPPED: %d attachment(s) not delivered -- %s",
+            len(described), because,
+        )
+        self.emit(ErrorEvent(
+            error=(
+                f"{len(described)} attachment(s) were not delivered to the "
+                f"model: {because}. Re-send once the session is idle."
+            ),
+            error_type="AttachmentDropped",
+            recoverable=True,
+            details={"text": text, "attachments": described},
+        ))
+
     def send_message(self, text: str, attachments: Optional[List[Dict]] = None) -> None:
         """Send a message to the model.
 
+        Three arrival shapes, and the bytes survive all three (#877).
+
+        A user send does not always meet an idle daemon.  ``ask()`` returns on
+        ``TurnCompletedEvent``, which is emitted from INSIDE the turn -- before
+        the model thread's ``finally`` clears ``_model_running`` -- so the
+        caller's next send structurally lands in the wind-down window.  This
+        method therefore has to answer for:
+
+        ============  ==============================================
+        arrival       what happens to ``attachments``
+        ============  ==============================================
+        idle          ``_start_model_thread(text, attachments=...)``
+        session busy  ``require_idle`` refuses the QUEUE (see below)
+                      and the send falls through to the stash
+        unwinding     stashed as ``(text, attachments)`` for the
+                      model thread's ``finally`` to drive
+        ============  ==============================================
+
+        AN ATTACHMENT-BEARING SEND IS NEVER QUEUED.  This is #845's rule,
+        which ``SessionManager.deliver_prompt_to_session`` has held since it
+        shipped and this path did not: the mid-turn queue folds a message into
+        the running turn as TEXT and has nowhere to put an ``inline_data``
+        part, so queuing one trades the payload that WAS the message for a
+        ``MidTurnPromptQueuedEvent`` naming only the text.  For a voice turn
+        the attachment IS the message (#838), and the drop was silent --
+        which is the whole cost of the bug: the resulting text-only turn ran
+        ``_evict_consumed_media`` (correctly) over the PREVIOUS turn's audio
+        and reached an audio-requiring model with no audio at all.
+
+        So ``require_idle`` is set from the payload, not from a caller
+        preference, and a "queued" answer to an attachment-bearing offer --
+        which a runner honouring ``require_idle`` cannot give -- is reported
+        as ``ErrorEvent(error_type="AttachmentDropped")`` rather than passed
+        off as a normal queue.  Nothing here may drop bytes quietly again.
+
         Args:
-            text: The message text.
-            attachments: Optional list of attachments.
+            text: The message text.  May be empty when *attachments* is not:
+                an attachment is content (#838).
+            attachments: Optional list of client-expanded attachment dicts
+                (``{mime_type, data, display_name, ...}``).
         """
         # Phase 3 §7c step 6.6.4.5e: ``if not self._jaato: emit error;
         # return`` guard dropped (always-true branch post-seat-flip;
@@ -4640,6 +4778,11 @@ class JaatoServer:
                         text,
                         source_id="user",
                         source_type=SourceType.USER.value,
+                        # #845's rule, applied to the USER path (#877): the
+                        # queue cannot carry bytes, so the only delivery that
+                        # keeps them is a drive.  ``busy`` enqueues NOTHING,
+                        # which is what makes the fall-through below safe.
+                        attachments=attachments,
                         timeout=2.0,
                     )
                 except Exception as exc:  # noqa: BLE001 — boundary
@@ -4661,6 +4804,20 @@ class JaatoServer:
                 text=text,
                 position_in_queue=0,
             ))
+            if attachments:
+                # UNREACHABLE against a runner that honours ``require_idle``
+                # -- which is exactly why it is reported rather than trusted.
+                # An older runner ignores the flag and answers "queued", and
+                # the text is now in a queue this daemon cannot recall it
+                # from; the bytes are not, and never could have been.  Saying
+                # so BY NAME is the whole lesson of #877: the drop's only
+                # witness was an event that said ``text=...`` and looked like
+                # a healthy queue.
+                self._emit_attachment_dropped(
+                    text, attachments,
+                    "the message was queued into the running turn, which "
+                    "carries text only",
+                )
             return
 
         # ``needs_turn``: the SESSION is idle.  This daemon-side model thread
@@ -4670,7 +4827,13 @@ class JaatoServer:
         # actually IS (is MY thread alive), not as a proxy for session state.
         with self._pending_continuation_lock:
             if self._model_running:
-                self._pending_continuations.append(text)
+                # The pair, not the text (#877).  The drain below turns this
+                # into a real turn via ``_start_model_thread``, which already
+                # routes ``attachments`` to the multimodal parts loop -- so
+                # carrying them here is the entire fix for this arrival.
+                self._pending_continuations.append(
+                    (text, list(attachments or [])),
+                )
                 # INFO, not debug.  This and its partner below are the ONLY
                 # witnesses that #623's accumulate path ran, and #623 shipped
                 # on inspection with no live reproduction -- so at debug the
@@ -4837,7 +5000,12 @@ class JaatoServer:
                     else:
                         # Stash for the model_thread finally block to pick up.
                         with server._pending_continuation_lock:
-                            server._pending_continuations.append(child_messages)
+                            # Child messages are text by construction -- a
+                            # subagent returns prose, never bytes -- so the
+                            # attachment half of the pair is empty here.
+                            server._pending_continuations.append(
+                                (child_messages, []),
+                            )
                         server._trace(
                             f"CONTINUATION: Stashed {len(child_messages)} "
                             f"chars (model still running)",
@@ -5220,9 +5388,15 @@ class JaatoServer:
         """Start the model call in a background thread.
 
         ``attachments`` (user-message multimodal: ``[{mime_type, data:
-        base64-str, display_name}, ...]``) ride only the FIRST send to the
-        runner session; continuation sends (formatter feedback, nudges, child
-        messages) are text-only.
+        base64-str, display_name}, ...]``) ride the send that carries them to
+        the runner session's multimodal parts loop.  That is a USER send --
+        either straight from :meth:`send_message` when the daemon is idle, or
+        the ``_pending_continuations`` drain replaying one that arrived while
+        this thread was unwinding (#877).  The framework's own continuation
+        sends (formatter feedback, completion nudges, child messages) carry
+        none, because none of them has bytes to carry: they are generated
+        text.  ``prompt`` may be empty when *attachments* is not -- an
+        attachment is content (#838).
 
         Phase 3 §7c step 6.6.4.3b: switched from
         ``server._jaato.send_message(...)`` (daemon-side
@@ -5508,11 +5682,19 @@ class JaatoServer:
                 with server._pending_continuation_lock:
                     stashed = server._pending_continuations
                     server._pending_continuations = []
-                # ALL of them, joined -- the same shape
+                # ALL of them, merged -- the same shape
                 # ``_drain_child_messages`` uses for a batch it collected.
-                # Taking only one would re-introduce the loss with extra steps.
-                pending = "\n\n".join(stashed) if stashed else None
-                if pending:
+                # Taking only one would re-introduce the loss with extra
+                # steps.  ``merge_pending_continuations`` owns the two merge
+                # rules (texts join, attachments concatenate) and is where a
+                # test can reach them; see #877.
+                merged = merge_pending_continuations(stashed)
+                # ``any`` asks whether EITHER half survived: an attachment IS
+                # content (#838), so bytes with no text is a turn, and
+                # reading the text alone would drop exactly the blank-text
+                # utterance that is a voice agent's normal case.
+                if any(merged):
+                    pending, pending_attachments = merged
                     # INFO for the same reason as SEND_WHILE_UNWINDING above.
                     # ``count>1`` is the case that USED to lose messages: the
                     # stash was a single slot until #623, so every message but
@@ -5520,8 +5702,9 @@ class JaatoServer:
                     # one grep separates "the fix ran" from "the fix mattered".
                     logger.info(
                         "CONTINUATION: Processing %d stashed message(s), "
-                        "%d chars%s",
+                        "%d chars, %d attachment(s)%s",
                         len(stashed), len(pending),
+                        len(pending_attachments),
                         "  <- MULTIPLE: pre-#623 this lost all but the last"
                         if len(stashed) > 1 else "",
                     )
@@ -5529,7 +5712,12 @@ class JaatoServer:
                         agent_id=server._main_agent_id,
                         status="active",
                     ))
-                    server._start_model_thread(pending)
+                    # An empty list is wire-identical to None here: the send
+                    # RPC adds an ``attachments`` key only ``if attachments``,
+                    # so a text continuation's request is unchanged.
+                    server._start_model_thread(
+                        pending, attachments=pending_attachments,
+                    )
                     clear_logging_context()
                     return  # new thread handles idle/done status
 
@@ -5544,6 +5732,15 @@ class JaatoServer:
                 # Atomically pop it and start a fresh turn.  Mirrors the
                 # ``_pending_continuations`` drain above; runner-tier only
                 # (daemon-local sessions have no ``_runner_rpc``).
+                #
+                # TEXT-ONLY BY CONSTRUCTION, not by omission (#877).  This
+                # drains the runner-side ``_message_queue``, which stores
+                # strings; nothing there could hold an ``inline_data`` part.
+                # Since ``send_message`` now sets ``require_idle`` from the
+                # payload, an attachment-bearing send can no longer be queued
+                # into it at all -- it is either driven or stashed above.  So
+                # this path carries no bytes because none can reach it, which
+                # is the property, not an accepted loss.
                 if server._runner_rpc is not None:
                     drained = None
                     try:
