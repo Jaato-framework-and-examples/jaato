@@ -30,6 +30,8 @@ from server.runner.session import (
 )
 from shared.session_envelope import SessionInitEnvelope
 
+from .conftest import StubSession
+
 
 def _envelope(profile_name: str = "") -> SessionInitEnvelope:
     return SessionInitEnvelope(
@@ -61,7 +63,10 @@ class _StubRuntime:
                 # touch real kernel state.
                 pass
 
-        class _S:
+        # Subclasses the shared conftest stub: bootstrap_session stamps
+        # the session (set_daemon_session_id / set_client_user_id)
+        # before the self-confine step under test (#736).
+        class _S(StubSession):
             _session_env: Dict[str, str] = {}
             _executor = _Executor()
 

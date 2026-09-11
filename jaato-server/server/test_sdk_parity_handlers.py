@@ -166,6 +166,7 @@ class _FakeRunnerRPC:
         *,
         source_id: Optional[str] = None,
         source_type: Optional[str] = None,
+        require_idle: bool = False,
         timeout: Optional[float] = None,
     ) -> str:
         """Stand-in for the runner's atomic queue-or-report.
@@ -175,7 +176,27 @@ class _FakeRunnerRPC:
         the daemon to start a turn.  The real one decides under a lock
         against the session's own ``_is_running``; this one reads the fake
         server's flag through a lazy callable so tests can set it.
+
+        ``require_idle`` is #845's third answer: a caller that has nowhere
+        to put a payload in a running turn asks NOT to be queued, and gets
+        ``"busy"`` with nothing enqueued.  ``deliver_prompt_to_session``
+        forces it for an attachment-bearing inject, because a queued
+        message is folded into the running turn as TEXT and would drop the
+        bytes that WERE the message.
+
+        THE SIGNATURE IS PART OF THE FIXTURE.  ``require_idle`` shipped on
+        the real method and not on this one, and the daemon passes it by
+        keyword unconditionally -- so every call raised ``TypeError``,
+        ``handle_request`` swallowed it into a ``not_confirmed`` status,
+        and the five ``TestInjectPromptHandler`` tests failed on status
+        strings with the real cause one line down in the captured log.
+        Invisible, because no commit-triggered workflow ran this file
+        (#736).  ``test_the_fake_matches_the_real_signature`` below is the
+        guard against the next such drift.
         """
+        if require_idle and self._is_running():
+            # Nothing is enqueued on this branch -- that is the whole point.
+            return "busy"
         if not self._is_running():
             return "needs_turn"
         from shared.message_queue import SourceType
@@ -416,6 +437,69 @@ class TestInjectPromptHandler:
         _, event = captured[0]
         assert event.error_type == "ValidationError"
         assert "garbage" in event.error
+
+    def test_the_fake_matches_the_real_signature(self):
+        """A fake whose signature has drifted silently tests the
+        ``except`` branch.
+
+        ``require_idle`` was added to the real
+        ``session_offer_message_threadsafe`` and not to this file's
+        ``_FakeRunnerRPC``.  The daemon passes it by keyword on every
+        call, so every call raised ``TypeError``,
+        ``deliver_prompt_to_session`` reported ``offer_failed``, and the
+        five tests above -- named for source-type mapping, the
+        queue-or-drive decision and the result-event channel -- were in
+        fact all exercising the delivery-failure path.  They did not go
+        green-and-wrong; they went red, in a file no commit-triggered
+        workflow ran, so nothing said so (#736).
+
+        Compared as a SET of accepted keywords rather than by exact
+        signature: the fake may narrow defaults or annotations freely,
+        but it must not reject a keyword the caller actually passes.
+        """
+        import inspect
+
+        from .runner_rpc_client import RunnerRPCClient
+
+        real = set(inspect.signature(
+            RunnerRPCClient.session_offer_message_threadsafe).parameters)
+        fake = set(inspect.signature(
+            _FakeRunnerRPC.session_offer_message_threadsafe).parameters)
+
+        missing = real - fake
+        assert not missing, (
+            f"the fake rejects {sorted(missing)}, which the daemon passes; "
+            "every call would land in the caller's except branch and the "
+            "tests above would exercise delivery-failure instead of what "
+            "they are named for"
+        )
+
+    def test_attachment_bearing_inject_is_idle_only(self):
+        """#845: bytes may only ride the DRIVE branch, never the queue.
+
+        A queued message is folded into the running turn as TEXT -- a tool
+        result's ``model_suffix``, or ``Message.from_text`` -- which has
+        nowhere to put an ``inline_data`` part.  So an attachment-bearing
+        inject into a BUSY session must answer ``BUSY`` with **nothing
+        enqueued**, rather than accepting the message and dropping the
+        payload that WAS the message.
+
+        No test covered this rule, precisely because the only file that
+        would have caught the ``require_idle`` drift was unwired (#736).
+        """
+        from shared.message_delivery import BUSY
+
+        manager, server, jaato_session, captured = _setup()
+        server._model_running = True            # a turn is in flight
+
+        status = manager.deliver_prompt_to_session(
+            "sess_1", "look at this",
+            attachments=[{"mime_type": "audio/wav", "data": "AAAA"}],
+        )
+
+        assert status == BUSY
+        # The payload was NOT silently downgraded to a queued text message.
+        assert jaato_session.inject_calls == []
 
 
 class TestReplayMessagesHandler:

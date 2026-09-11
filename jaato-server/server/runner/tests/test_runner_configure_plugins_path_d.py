@@ -81,6 +81,8 @@ from server.runner.session import (
 )
 from shared.session_envelope import SessionInitEnvelope
 
+from .conftest import StubSession
+
 
 # ----------------------------------------------------------------------
 # Stubs
@@ -125,10 +127,9 @@ class _StubRuntime:
         self._registry = registry
 
     def create_session(self, **kwargs: Any) -> Any:
-        class _StubSession:
-            pass
-
-        return _StubSession()
+        # Shared conftest stub: bootstrap_session stamps the returned
+        # session, so it must answer those calls (#736).
+        return StubSession(**kwargs)
 
 
 def _envelope(

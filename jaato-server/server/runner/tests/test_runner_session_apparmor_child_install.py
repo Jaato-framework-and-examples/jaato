@@ -40,6 +40,8 @@ from server.runner.session import (
 )
 from shared.session_envelope import SessionInitEnvelope
 
+from .conftest import StubSession
+
 
 # ----------------------------------------------------------------------
 # Stubs
@@ -96,8 +98,16 @@ class _StubRuntimeWithSession:
                         stub.install_calls.append(cb)
                     inner.set_apparmor_child_transition_callback = _setter
 
-        class _StubSession:
+        # Subclasses the shared conftest stub rather than starting from
+        # `object`: bootstrap_session stamps the session it is handed
+        # (set_daemon_session_id / set_client_user_id) BEFORE reaching
+        # the AppArmor step these ten tests exercise, so a stub without
+        # those methods dies in bootstrap and every one of the ten fails
+        # for the same reason, none of them the behaviour under test
+        # (#736).
+        class _StubSession(StubSession):
             def __init__(inner) -> None:
+                super().__init__()
                 inner._executor = _StubExecutor()
 
         return _StubSession()

@@ -149,7 +149,12 @@ def test_bootstrap_passes_plugin_list_to_runtime() -> None:
     runtime = _StubRuntime()
     bootstrap_session(env, runtime_factory=lambda e: runtime)
     assert runtime.create_session_kwargs is not None
-    assert runtime.create_session_kwargs["tools"] == [
+    # ``plugins=``, not ``tools=``: bootstrap_session calls
+    # ``runtime.create_session(plugins=tool_names, ...)``.  ``tools=``
+    # is the DEPRECATED alias (#292) and this assertion was pinning the
+    # alias, so it broke when production stopped spelling it that way
+    # -- invisibly, in an unwired directory (#736).
+    assert runtime.create_session_kwargs["plugins"] == [
         "signal_completion", "cli",
     ]
 
@@ -227,8 +232,8 @@ def test_bootstrap_with_empty_plugins_passes_empty_list() -> None:
     env = _good_envelope(plugins=[], plugin_configs={})
     runtime = _StubRuntime()
     bootstrap_session(env, runtime_factory=lambda e: runtime)
-    assert runtime.create_session_kwargs["tools"] == [], (
-        "Empty profile.plugins must produce tools=[] (NOT None).  "
+    assert runtime.create_session_kwargs["plugins"] == [], (
+        "Empty profile.plugins must produce plugins=[] (NOT None).  "
         "None would cascade to the runtime's 'load all exposed "
         "plugins' fallback — the bug the vLLM smoke 2026-06-07 "
         "surfaced."
@@ -236,7 +241,7 @@ def test_bootstrap_with_empty_plugins_passes_empty_list() -> None:
     # plugin_configs and preloaded_plugins still get the empty→None
     # falsy coercion since their downstream semantics treat
     # empty-dict and empty-set as equivalent to None (no overrides,
-    # no preloaded plugins).  Distinct from tools where None has
+    # no preloaded plugins).  Distinct from plugins where None has
     # meaningfully different semantics.
     assert runtime.create_session_kwargs["plugin_configs"] is None
     assert runtime.create_session_kwargs["preloaded_plugins"] is None
