@@ -1,20 +1,33 @@
-"""Notebook subprocess kernel entrypoint (design option 1c, PR 1).
+"""Notebook subprocess kernel entrypoint (design option 1c).
 
 Run as a subprocess by ``SubprocessKernelBackend`` with ``cwd=workspace_root``
 (so the kernel's own ``os.getcwd()`` IS the workspace — relative paths in
 notebook code resolve in-workspace, with no process-global ``os.chdir`` in the
 runner).  Speaks ``kernel_protocol`` frames over two inherited fds.
 
-Lifecycle: handshake ``ready`` → loop {execute | variables | reset | shutdown}.
-Cell stdout/stderr is captured and streamed as ``stream`` frames; the last
-expression's value (Jupyter-style) is returned in the ``result`` frame.
+Lifecycle: establish the filesystem boundary → handshake ``ready`` → loop
+{execute | variables | reset | shutdown}.  Cell stdout/stderr is captured and
+streamed as ``stream`` frames; the last expression's value (Jupyter-style) is
+returned in the ``result`` frame.  ``tools.X(**kwargs)`` in the namespace
+blocks on a ``tool_call`` frame the runner answers.
 
-The ``tools`` object in the namespace is a STUB in PR 1 (raises a clear error);
-the cross-process tools bridge lands in PR 2.
+**Containment comes first, and refusal is a state this process can be in**
+(issue #710).  ``main`` calls ``kernel_sandbox.establish_containment`` BEFORE
+the READY handshake and before any cell can arrive, and records the boundary in
+``_BOUNDARY``: an enforced AppArmor profile (the kernel inherits the runner's),
+this module's audit hook, or an explicit operator opt-out.  When none of those
+holds, every ``execute`` is answered with an ``error`` frame naming the reason
+instead of running the cell — the kernel stays up and serving so the refusal
+reaches the model as an ordinary cell error rather than as a dead kernel.
+
+Containment is installed AFTER this module's own imports on purpose: the hook
+would otherwise audit the interpreter's own startup, and the read roots it
+grants are read off ``sys.path`` as it stands once importing is done.
 
 Invocation:
   python -m shared.plugins.notebook.kernel_main \
-      --workspace-root <abs> --read-fd <n> --write-fd <n>
+      --workspace-root <abs> --read-fd <n> --write-fd <n> \
+      [--allow-read PATH ...] [--allow-write PATH ...] [--uncontained]
 """
 
 import argparse
@@ -29,6 +42,13 @@ from shared.plugins.notebook.tool_stubs import ToolExecutionError
 from shared.plugins.notebook.cell_transform import (
     transform_cell_source, inject_shell_helper,
 )
+from shared.plugins.notebook import kernel_sandbox
+
+# The boundary this kernel established at startup, as
+# ``(kind, description)``.  ``kind == kernel_sandbox.BOUNDARY_NONE`` means no
+# boundary could be established, and every cell is refused — see
+# ``_refuse_uncontained``.
+_BOUNDARY = (kernel_sandbox.BOUNDARY_NONE, "containment not established")
 
 
 class _StreamWriter:
@@ -159,11 +179,61 @@ def _variables(namespace: Dict[str, Any]) -> Dict[str, str]:
     return out
 
 
+def _refuse_uncontained(out, cell_id: str) -> None:
+    """Answer one ``execute`` with the refusal this kernel came up in.
+
+    Reached only when ``establish_containment`` could reach no boundary at all
+    — no AppArmor, no audit hook, no opt-out — which makes running a cell
+    exactly the thing #710 reports.  Refusing per cell rather than exiting
+    keeps the failure legible: the model gets a named error it can act on, and
+    the runner does not read a dead kernel as a crash and respawn it.
+    """
+    proto.write_frame(out, {
+        "type": proto.ERROR, "cell_id": cell_id,
+        "ename": "NotebookContainmentUnavailable",
+        "evalue": (
+            "Notebook execution refused: no filesystem boundary could be "
+            f"established for this kernel ({_BOUNDARY[1]}). Cells would run "
+            "with the daemon user's full filesystem access. Run under an "
+            "AppArmor-confined runner, or set "
+            f"{kernel_sandbox.UNCONTAINED_OPT_IN_ENV}=1 (notebook plugin "
+            "config allow_uncontained_exec=true) to accept that."),
+        "traceback": "",
+    })
+
+
+def _apply_allow_frame(frame: Dict[str, Any]) -> None:
+    """Refresh the containment policy from an ``execute`` frame's ``allow`` block.
+
+    The runner re-sends the session's ``sandbox add`` / ``sandbox deny`` paths
+    with every cell (they are operator-mutable while a kernel outlives many
+    cells).  A frame with no block leaves the policy alone rather than clearing
+    it, so a runner that does not speak this field is not read as "the operator
+    revoked everything".
+    """
+    allow = frame.get("allow")
+    policy = kernel_sandbox.current_policy()
+    if not isinstance(allow, dict) or policy is None:
+        return
+    policy.set_extra_allows(
+        read=allow.get("read") or (),
+        write=allow.get("write") or (),
+        deny=allow.get("deny") or (),
+    )
+
+
 def main(argv=None) -> int:
+    global _BOUNDARY
     ap = argparse.ArgumentParser(prog="notebook-kernel")
     ap.add_argument("--workspace-root", required=True)
     ap.add_argument("--read-fd", type=int, required=True)
     ap.add_argument("--write-fd", type=int, required=True)
+    ap.add_argument("--allow-read", action="append", default=[],
+                    help="extra path a cell may READ (repeatable)")
+    ap.add_argument("--allow-write", action="append", default=[],
+                    help="extra path a cell may read and WRITE (repeatable)")
+    ap.add_argument("--uncontained", action="store_true",
+                    help="operator opted out of filesystem containment")
     args = ap.parse_args(argv)
 
     # The whole point of 1c: the kernel's OWN cwd is the workspace, so relative
@@ -171,10 +241,22 @@ def main(argv=None) -> int:
     # the runner (which the framework forbids, core.py:915).
     os.chdir(args.workspace_root)
 
+    # Before READY, and so before any cell can arrive: cwd is ergonomics, the
+    # boundary is this (#710).
+    _BOUNDARY = kernel_sandbox.establish_containment(
+        args.workspace_root,
+        extra_read_paths=tuple(args.allow_read),
+        extra_write_paths=tuple(args.allow_write),
+        opt_out=bool(args.uncontained),
+    )
+
     rstream = os.fdopen(args.read_fd, "rb", buffering=0)
     wstream = os.fdopen(args.write_fd, "wb", buffering=0)
 
-    proto.write_frame(wstream, {"type": proto.READY, "cwd": os.getcwd()})
+    proto.write_frame(wstream, {
+        "type": proto.READY, "cwd": os.getcwd(),
+        "boundary": _BOUNDARY[0], "boundary_description": _BOUNDARY[1],
+    })
 
     tools_bridge = _ToolsBridge(rstream, wstream)
     namespace = _fresh_namespace(tools_bridge)
@@ -186,6 +268,10 @@ def main(argv=None) -> int:
             break
         ftype = frame.get("type")
         if ftype == proto.EXECUTE:
+            if _BOUNDARY[0] == kernel_sandbox.BOUNDARY_NONE:
+                _refuse_uncontained(wstream, frame.get("cell_id", ""))
+                continue
+            _apply_allow_frame(frame)
             execution_count += 1
             _execute(namespace, wstream, frame.get("cell_id", ""),
                      frame.get("code", ""), execution_count)

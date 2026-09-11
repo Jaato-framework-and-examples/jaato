@@ -39,6 +39,20 @@ from shared.trace import trace as _trace_write
 _thread_local = threading.local()
 
 
+def _refusal_text(refusal: Dict[str, Any]) -> str:
+    """Render a refusal dict from ``_guard_execution`` as one line of prose.
+
+    The dict is the model-facing shape the non-streaming path returns
+    (``{"error": ..., "reason": ...}``); the streaming path has only a text
+    chunk, so the two fields are joined rather than one of them dropped — the
+    ``error`` names the class of refusal and the ``reason`` is what an author
+    acts on.
+    """
+    detail = refusal.get("reason") or refusal.get("details") or ""
+    headline = refusal.get("error", "Notebook execution refused")
+    return f"{headline}: {detail}" if detail else headline
+
+
 class SandboxMode(Enum):
     """Sandbox enforcement mode for notebook execution."""
     DISABLED = "disabled"      # No analysis, execute everything
@@ -47,7 +61,10 @@ class SandboxMode(Enum):
     STRICT = "strict"          # Block HIGH and CRITICAL risks
 
 
-# Default to local backend
+# The backend name held before ``initialize()`` runs.  NOT the default a
+# session gets: ``initialize()`` resolves "subprocess" unless the config asks
+# for "local", and only the subprocess backend contains a cell's filesystem
+# reach (issue #710).
 DEFAULT_BACKEND = "local"
 
 # Max output size to return to model (avoid context overflow)
@@ -64,12 +81,23 @@ class NotebookPlugin(StreamingCapable, RunnerForwardingMixin):
     - Variable inspection
     - Streaming execution output in real-time
 
-    Configuration:
-        default_backend: 'local' or 'kaggle' (default: 'local')
+    Configuration (``plugin_configs.notebook``):
+        default_backend: 'subprocess' (default), 'local' or 'kaggle'
         enable_kaggle: Whether to enable Kaggle backend (default: True)
         max_output_length: Max output chars to return (default: 10000)
+        sandbox_mode: Static code analysis posture (default: 'warn')
+        allow_inprocess_exec / allow_uncontained_exec / allow_read_paths:
+            the two boundaries and the narrow grant — see
+            ``_guard_execution`` and ``kernel_sandbox``.
 
     Implements StreamingCapable for real-time output streaming during execution.
+
+    **Execution is gated twice before any backend sees a cell**
+    (``_guard_execution``, on BOTH the streaming and non-streaming paths): the
+    static analyzer reads the cell's source, and the selected backend must
+    state the boundary its execution runs inside
+    (``NotebookBackend.execution_boundary``).  A backend that states none
+    refuses rather than running model-authored code uncontained (issue #710).
     """
 
     def __init__(self):
@@ -148,6 +176,13 @@ class NotebookPlugin(StreamingCapable, RunnerForwardingMixin):
                 - agent_name: Agent name for trace logging
                 - workspace_root: Workspace root for sandbox path validation
                 - sandbox_mode: 'disabled', 'warn', 'block_critical', or 'strict'
+                - allow_uncontained_exec / allow_read_paths: the filesystem
+                  boundary knobs, consumed by the subprocess backend
+                - allow_inprocess_exec: the process boundary knob, consumed by
+                  the local backend
+
+        The whole config dict is handed to each backend, so a backend takes
+        the keys it owns and ignores the rest.
         """
         config = config or {}
         self._config = config  # Store for lazy kaggle init
@@ -193,6 +228,11 @@ class NotebookPlugin(StreamingCapable, RunnerForwardingMixin):
                      or "subprocess")
         self._active_backend_name = (
             "local" if requested == "local" else "subprocess")
+
+        # Idempotent, and repeated here because the registry may hand us the
+        # registry before OR after initialize(); the subprocess backend that
+        # takes the wiring only exists from this point on.
+        self._wire_sandbox_paths()
 
         self._initialized = True
         self._trace(f"Initialized with backend={self._active_backend_name}")
@@ -263,9 +303,15 @@ class NotebookPlugin(StreamingCapable, RunnerForwardingMixin):
             "properties": {
                 "default_backend": {
                     "type": "string",
-                    "default": "local",
-                    "description": "Default execution backend",
-                    "enum": ["local", "kaggle"],
+                    "default": "subprocess",
+                    "description": (
+                        "Default execution backend. 'subprocess' runs each "
+                        "notebook in its own workspace-contained kernel "
+                        "process; 'local' is the in-process backend, which "
+                        "runs cells in the host interpreter and is gated on "
+                        "AppArmor or allow_inprocess_exec"
+                    ),
+                    "enum": ["subprocess", "local", "kaggle"],
                 },
                 "enable_kaggle": {
                     "type": "boolean",
@@ -282,6 +328,40 @@ class NotebookPlugin(StreamingCapable, RunnerForwardingMixin):
                     "default": "warn",
                     "description": "Sandbox mode",
                     "enum": ["disabled", "warn", "block_critical", "strict"],
+                },
+                "allow_inprocess_exec": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": (
+                        "Permit the 'local' backend to run model-authored "
+                        "cells IN-PROCESS on a host with no kernel-enforced "
+                        "AppArmor profile. Cell code can then reach this "
+                        "process's memory and state. Env sibling: "
+                        "JAATO_NOTEBOOK_ALLOW_INPROCESS_EXEC"
+                    ),
+                },
+                "allow_uncontained_exec": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": (
+                        "Permit notebook cells to reach OUTSIDE the workspace "
+                        "(issue #710). A different question from "
+                        "allow_inprocess_exec: this one removes the "
+                        "filesystem boundary, that one removes the process "
+                        "boundary. Announced at WARNING. Env sibling: "
+                        "JAATO_NOTEBOOK_ALLOW_UNCONTAINED_EXEC"
+                    ),
+                },
+                "allow_read_paths": {
+                    "type": "array",
+                    "default": [],
+                    "description": (
+                        "Extra absolute paths notebook cells may READ outside "
+                        "the workspace (a reference dataset, a shared corpus). "
+                        "Narrower than allow_uncontained_exec, and the "
+                        "per-profile counterpart of the operator's 'sandbox "
+                        "add' command, which is honoured as well"
+                    ),
                 },
                 "workspace_venv": {
                     "type": "string",
@@ -348,8 +428,125 @@ class NotebookPlugin(StreamingCapable, RunnerForwardingMixin):
         self._plugin_registry = registry
         registry.register_category("code", "Code analysis, editing, refactoring, and LSP diagnostics")
         self._rebuild_code_analyzer()
+        self._wire_sandbox_paths()
         self._maybe_build_tool_bindings()
         self._trace("set_plugin_registry: registry set")
+
+    def _wire_sandbox_paths(self) -> None:
+        """Let kernels honour ``sandbox add`` / ``sandbox deny`` (issue #710).
+
+        The kernel enforces containment in its OWN process, so it cannot call
+        the registry; it is handed the operator-granted paths with every cell
+        instead.  Wired here because the registry is where those grants live,
+        and re-read per cell because they change mid-session.
+
+        Only the subprocess backend takes this — the in-process backend shares
+        the runner's process, where the registry is directly reachable.
+        """
+        backend = self._backends.get("subprocess")
+        if backend is None or not hasattr(backend, "set_sandbox_paths_fn"):
+            return
+        backend.set_sandbox_paths_fn(self._current_sandbox_paths)
+
+    def _current_sandbox_paths(self) -> Dict[str, List[str]]:
+        """The session's authorized / denied external paths, as they stand now.
+
+        Returns:
+            ``{"read": [...], "write": [...], "deny": [...]}``.  A
+            ``readwrite`` authorization appears in both ``read`` and ``write``;
+            a ``readonly`` one only in ``read``.  Denials are listed separately
+            because they outrank every allowance, including the workspace
+            itself.  An empty dict when no registry is wired — containment to
+            the workspace alone, which is the safe reading.
+        """
+        registry = self._plugin_registry
+        if registry is None:
+            return {"read": [], "write": [], "deny": []}
+        detailed = {}
+        denied = {}
+        if hasattr(registry, "list_authorized_paths_detailed"):
+            detailed = registry.list_authorized_paths_detailed() or {}
+        if hasattr(registry, "list_denied_paths"):
+            denied = registry.list_denied_paths() or {}
+        read = list(detailed)
+        write = [path for path, entry in detailed.items()
+                 if (entry or {}).get("access") == "readwrite"]
+        return {"read": read, "write": write, "deny": list(denied)}
+
+    def _guard_execution(self, code: str) -> Optional[Dict[str, Any]]:
+        """Decide whether this cell may run at all, before any backend sees it.
+
+        Two checks, in the order that costs least:
+
+        1. **The static analyzer** (``sandbox_mode``), which reads the cell's
+           source for paths outside the workspace and for subprocess/shell
+           escapes.  Advisory by construction — it inspects text, so an
+           obfuscated path passes — and it blocks only in ``strict`` /
+           ``block_critical``.
+        2. **The backend's declared boundary**
+           (``NotebookBackend.execution_boundary``), which is what actually
+           bounds the cell once it runs.  A backend that cannot state one
+           refuses here rather than executing uncontained (issue #710).
+
+        Both checks used to live on the non-streaming path alone, so the
+        streaming path — the live one, since ``supports_streaming`` returns
+        True for ``notebook_execute`` — ran with neither.  A gate that covers
+        one of two dispatch paths is the shape #710 reports one layer down.
+
+        Args:
+            code: The cell source, as the model wrote it.
+
+        Returns:
+            An error dict to return to the model instead of running the cell,
+            or ``None`` when the cell may proceed.
+        """
+        blocked = self._analyzer_verdict(code)
+        if blocked is not None:
+            return blocked
+        backend = self._backends.get(self._active_backend_name)
+        if backend is None:
+            return None
+        allowed, reason = backend.execution_boundary()
+        if not allowed:
+            self._trace(f"Blocked code execution: no boundary ({reason})")
+            return {"error": "Notebook execution refused", "reason": reason}
+        return None
+
+    def _analyzer_verdict(self, code: str) -> Optional[Dict[str, Any]]:
+        """Run the static code analyzer and decide whether it blocks this cell.
+
+        Caches the analysis on ``self._last_analysis`` for the permission
+        display, warns on risks that do not block, and returns the model-facing
+        error dict when ``sandbox_mode`` says to stop.
+
+        Returns:
+            The error dict when the cell is blocked, else ``None`` — including
+            when the analyzer found risks the current mode only warns about.
+        """
+        if self._sandbox_mode == SandboxMode.DISABLED or not self._code_analyzer:
+            return None
+        analysis = self._code_analyzer.analyze(code)
+        self._last_analysis = analysis
+        if not analysis.has_risks:
+            return None
+        max_level = analysis.max_risk_level
+        should_block = False
+        if self._sandbox_mode == SandboxMode.STRICT:
+            should_block = max_level in (RiskLevel.HIGH, RiskLevel.CRITICAL)
+        elif self._sandbox_mode == SandboxMode.BLOCK_CRITICAL:
+            should_block = max_level == RiskLevel.CRITICAL
+        if not should_block:
+            self._trace(f"Code analysis warning: {analysis.get_summary()}")
+            return None
+        self._trace(f"Blocked code execution: {analysis.get_summary()}")
+        return {
+            "error": "Code blocked by sandbox",
+            "reason": analysis.get_summary(),
+            "details": analysis.format_risks(max_items=10),
+            "external_paths": analysis.external_paths,
+            "hint": "Code contains patterns that could bypass workspace sandboxing. "
+                    "Use workspace-relative paths and avoid subprocess/shell commands.",
+        }
 
     def set_session(self, session: Any) -> None:
         """Set the session reference for tool bindings executor access.
@@ -762,34 +959,10 @@ class NotebookPlugin(StreamingCapable, RunnerForwardingMixin):
         if not code.strip():
             return {"error": "No code provided"}
 
-        # Analyze code for security risks (if sandbox is enabled)
-        if self._sandbox_mode != SandboxMode.DISABLED and self._code_analyzer:
-            analysis = self._code_analyzer.analyze(code)
-            self._last_analysis = analysis
-
-            if analysis.has_risks:
-                max_level = analysis.max_risk_level
-
-                # Check if we should block execution
-                should_block = False
-                if self._sandbox_mode == SandboxMode.STRICT:
-                    should_block = max_level in (RiskLevel.HIGH, RiskLevel.CRITICAL)
-                elif self._sandbox_mode == SandboxMode.BLOCK_CRITICAL:
-                    should_block = max_level == RiskLevel.CRITICAL
-
-                if should_block:
-                    self._trace(f"Blocked code execution: {analysis.get_summary()}")
-                    return {
-                        "error": "Code blocked by sandbox",
-                        "reason": analysis.get_summary(),
-                        "details": analysis.format_risks(max_items=10),
-                        "external_paths": analysis.external_paths,
-                        "hint": "Code contains patterns that could bypass workspace sandboxing. "
-                                "Use workspace-relative paths and avoid subprocess/shell commands.",
-                    }
-
-                # Log warning for non-blocking risks
-                self._trace(f"Code analysis warning: {analysis.get_summary()}")
+        # Static analysis + the backend's declared boundary (issue #710).
+        refusal = self._guard_execution(code)
+        if refusal is not None:
+            return refusal
 
         # Auto-create notebook if needed
         if not notebook_id:
@@ -1079,6 +1252,37 @@ class NotebookPlugin(StreamingCapable, RunnerForwardingMixin):
         """Get list of tools that support streaming."""
         return ["notebook_execute"]
 
+    def _error_chunk(
+        self,
+        message: str,
+        on_chunk: Optional[ChunkCallback],
+    ) -> StreamChunk:
+        """Build one ``error`` chunk, deliver it to ``on_chunk``, and return it.
+
+        Every early exit on the streaming path — no code, a refused cell, a
+        notebook that could not be created, a notebook that does not exist —
+        ends the same way: one error chunk, delivered to the callback when the
+        caller supplied one, and yielded.  Collecting that here keeps those
+        exits identical to each other (a chunk that reached the callback but
+        not the generator, or the reverse, is a client desync) and keeps the
+        generator readable.
+
+        Args:
+            message: Human-readable text, wrapped in the ``<notebook-cell
+                type="error">`` marker the formatter pipeline expects.
+            on_chunk: The caller's per-chunk callback, or ``None``.
+
+        Returns:
+            The chunk, for the caller to ``yield``.
+        """
+        chunk = StreamChunk(
+            content=f'<notebook-cell type="error">{message}</notebook-cell>',
+            chunk_type="error",
+        )
+        if on_chunk:
+            on_chunk(chunk)
+        return chunk
+
     async def execute_streaming(
         self,
         tool_name: str,
@@ -1105,29 +1309,25 @@ class NotebookPlugin(StreamingCapable, RunnerForwardingMixin):
         notebook_id = arguments.get("notebook_id")
 
         if not code.strip():
-            chunk = StreamChunk(
-                content="<notebook-cell type=\"error\">No code provided</notebook-cell>",
-                chunk_type="error",
-            )
-            if on_chunk:
-                on_chunk(chunk)
-            yield chunk
+            yield self._error_chunk("No code provided", on_chunk)
+            return
+
+        # The same pre-dispatch gate the non-streaming path applies.  This is
+        # the LIVE path (supports_streaming is True for notebook_execute), and
+        # before #710 it ran neither the static analyzer nor any boundary
+        # check — so `sandbox_mode: strict` blocked nothing in a daemon.
+        refusal = self._guard_execution(code)
+        if refusal is not None:
+            yield self._error_chunk(_refusal_text(refusal), on_chunk)
             return
 
         # Auto-create notebook if needed
         if not notebook_id:
-            if self._current_notebook_id:
-                notebook_id = self._current_notebook_id
-            else:
+            notebook_id = self._current_notebook_id
+            if not notebook_id:
                 result = self._create_notebook({"name": "default", "gpu": False})
                 if "error" in result:
-                    chunk = StreamChunk(
-                        content=f"<notebook-cell type=\"error\">{result['error']}</notebook-cell>",
-                        chunk_type="error",
-                    )
-                    if on_chunk:
-                        on_chunk(chunk)
-                    yield chunk
+                    yield self._error_chunk(result["error"], on_chunk)
                     return
                 notebook_id = result["notebook_id"]
 
@@ -1144,13 +1344,7 @@ class NotebookPlugin(StreamingCapable, RunnerForwardingMixin):
                 break
 
         if not backend:
-            chunk = StreamChunk(
-                content=f"<notebook-cell type=\"error\">Notebook {notebook_id} not found</notebook-cell>",
-                chunk_type="error",
-            )
-            if on_chunk:
-                on_chunk(chunk)
-            yield chunk
+            yield self._error_chunk(f"Notebook {notebook_id} not found", on_chunk)
             return
 
         # Next execution number (cosmetic "In [N]:" label).  Read it via the

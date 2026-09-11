@@ -37,7 +37,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 
@@ -88,6 +88,22 @@ class KaggleBackend(NotebookBackend):
         self._temp_dirs: Dict[str, str] = {}  # Temp directories for kernel files
         self._initialized = False
         self._trace_fn: Optional[callable] = None  # Trace callback
+
+    def execution_boundary(self) -> Tuple[bool, str]:
+        """Kaggle kernels never touch this host, so the boundary is the network.
+
+        Cells are pushed to Kaggle and executed on Kaggle's own infrastructure;
+        the only thing that crosses back is the kernel's output.  No path the
+        model names in a cell can resolve to a file on the machine running
+        this daemon, which is the reach ``NotebookPlugin``'s gate asks about
+        (issue #710).
+
+        What happens to the code on the other side is Kaggle's isolation, not
+        jaato's, and is a separate question from this one — it is the same
+        trade any remote execution service carries, and the reason the
+        backend requires explicit auth to use at all.
+        """
+        return True, "remote Kaggle kernel (no access to this host's filesystem)"
 
     def set_trace_fn(self, trace_fn: callable) -> None:
         """Set a trace callback for logging."""
