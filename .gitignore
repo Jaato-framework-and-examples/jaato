@@ -39,6 +39,14 @@ provider_trace.log
 # Claude local settings
 .claude/settings.local.json
 
+# Claude Code agent worktrees.  An agent run with worktree isolation
+# materialises one full git worktree per agent here and locks it for the
+# duration, so a concurrent fan-out leaves several checkouts of the whole
+# tree in place.  Same hazard as .jaato-eval-workspaces/ below: transient
+# scratch that must never be one ``git add -A`` from being committed, and
+# that must not be deleted while an agent still holds it.
+.claude/worktrees/
+
 # OS files
 .DS_Store
 Thumbs.db
