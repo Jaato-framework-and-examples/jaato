@@ -264,18 +264,31 @@ def test_cancel_for_an_unknown_id_is_counted_and_not_silent(
 def test_cancel_after_completion_is_benign_and_counted_late(
     single_worker_rpc,
 ) -> None:
-    """A cancel racing a completion is routine — DEBUG, counted ``late``.
+    """A cancel arriving after the call is deregistered is ``late``.
 
     The distinction matters because promoting this one to WARNING would
     make the signal useless: any token tripped near the end of a turn
     produces it.
+
+    Note what "after the call finished" has to mean here.  The response
+    frame is emitted BEFORE ``_handle_request``'s ``finally`` pops the
+    entry, so reading the response is not proof of deregistration —
+    asserting on it directly was flaky at 4 runs in 30 under load, with
+    the cancel landing on a still-registered (and by then unread) token.
+    The barrier is structural instead: the pool has ONE work-lane
+    worker, so a second work-lane call reaching the executor proves the
+    first call's ``_handle_request`` returned, ``finally`` included.
     """
     daemon_sock, rpc, executor = single_worker_rpc
 
     executor.hold.set()             # calls complete immediately
     _send(daemon_sock, _request(1, "done"))
-    env = _read_response(daemon_sock, 1)
-    assert env.ok is True
+    assert _read_response(daemon_sock, 1).ok is True
+
+    # The single work-lane worker cannot begin call 2 until call 1's
+    # handler has fully returned, so call 2's response deregisters call 1.
+    _send(daemon_sock, _request(2, "barrier"))
+    assert _read_response(daemon_sock, 2).ok is True
 
     _send(daemon_sock, CancelFrame(id=1).to_dict())
     _barrier_through_reader(daemon_sock, rpc, request_id=97)
