@@ -160,15 +160,26 @@ def _install_session(pair: _Pair, session: Any) -> None:
 
 @pytest.mark.asyncio
 async def test_e2e_session_health_check_no_host() -> None:
+    """Over the real wire, with the #856 transport fields (see below).
+
+    The probe reports ITSELF as active: it is registered on the runner's
+    reader thread before its own handler runs.  That is not an artefact
+    to tolerate — it is exactly why the daemon reconciles against
+    ``known_request_ids`` and never against ``highest_request_id``,
+    which at answer time is always the probe's own id and would
+    therefore report every id as received.
+    """
     pair = await _make_pair()
     try:
         result = await pair.daemon_client.session_health_check()
-        assert result == {
-            "has_host": False,
-            "ready": False,
-            "session_id": "",
-            "tool_count": -1,
-        }
+        assert result["has_host"] is False
+        assert result["ready"] is False
+        assert result["session_id"] == ""
+        assert result["tool_count"] == -1
+
+        probe_id = result["highest_request_id"]
+        assert result["active_call_ids"] == [probe_id]
+        assert result["known_request_ids"] == [probe_id]
     finally:
         await _teardown(pair)
 
