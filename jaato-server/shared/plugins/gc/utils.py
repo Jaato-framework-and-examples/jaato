@@ -900,7 +900,10 @@ def _evict_parts_media(
             new_parts.append(part)
             continue
         reclaimed += freed
-        new_parts.append(Part.from_function_response(replacement))
+        # ``_dc_replace`` rather than ``Part.from_function_response``:
+        # swap only the field that changed, so anything else the part
+        # carries survives the rewrite.
+        new_parts.append(_dc_replace(part, function_response=replacement))
     return (new_parts, reclaimed) if reclaimed else (None, 0)
 
 
