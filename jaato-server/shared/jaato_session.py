@@ -12023,7 +12023,7 @@ NOTES
         # generation before the first chunk.
         self._cancel_token = CancelToken()
 
-        use_streaming = self._resolve_use_streaming()
+        use_streaming = False
 
         turn_start = datetime.now()
         turn_data = {

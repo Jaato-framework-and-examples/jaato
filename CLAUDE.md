@@ -1181,7 +1181,11 @@ the ordinal says which branch, the attachment says what content. So
 `Choice.expects_attachment` is per-CHOICE, because in that example option 1
 wants a file and option 2 does not. `QuestionType` stays three values; the
 choice flag is advisory (a client renders an attach control, nothing
-enforces it).
+enforces it). The model spells it as `attachment_choices: [1]`, a sibling
+array of 1-based indices — `choices` stays an array of strings, because this
+schema is ordinal throughout (`default_choice` is the same shape) and
+promoting every choice to an object would charge every clarification that
+ceremony for a rarely-used flag.
 
 Protocol **1.6**: `ClarificationBatchResponseEvent.answer_attachments` is a
 PARALLEL map (1-based question index -> the canonical `{mime_type, data,

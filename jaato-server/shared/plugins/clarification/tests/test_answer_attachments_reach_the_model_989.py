@@ -426,3 +426,63 @@ def test_a_wire_without_audio_withholds_it_rather_than_relabelling_it():
     text = message["content"][0]["text"]
     assert "withheld" in text.lower()
     assert not [b for b in message["content"] if b.get("type") == "image_url"]
+
+
+# =====================================================================
+# 5. How the MODEL declares the per-choice affordance
+# =====================================================================
+
+def test_the_model_names_attachment_choices_by_ordinal():
+    """An index array, not an object-shaped ``choices`` entry.
+
+    This schema is ordinal throughout -- questions and choices are
+    identified by position, and ``default_choice`` is already a 1-based
+    index -- and turning every choice into ``{text: ...}`` would cost
+    every clarification that ceremony for a rarely-used flag.  So
+    ``choices`` stays an array of STRINGS and the affordance is a sibling
+    list of indices.
+    """
+    channel, sent = _relay({"cancelled": False, "answers": ["1"]})
+    plugin = _plugin(channel)
+
+    plugin._execute_clarification({
+        "context": "design",
+        "questions": [{
+            "text": "How should we design this?",
+            "choices": ["You attach a screenshot", "We discuss the design"],
+            "attachment_choices": [1],
+        }],
+    })
+
+    choices = sent["questions"][0]["choices"]
+    assert choices[0] == {"text": "You attach a screenshot",
+                          "expects_attachment": True}
+    assert choices[1] == {"text": "We discuss the design"}
+
+
+def test_a_clarification_that_names_none_is_byte_identical_to_before():
+    channel, sent = _relay({"cancelled": False, "answers": ["1"]})
+    plugin = _plugin(channel)
+
+    plugin._execute_clarification({
+        "context": "c",
+        "questions": [{"text": "Pick one", "choices": ["a", "b"]}],
+    })
+
+    assert sent["questions"][0]["choices"] == [{"text": "a"}, {"text": "b"}]
+
+
+def test_an_index_outside_the_range_is_ignored_not_raised():
+    """Advisory flag: a miscounted index must not cost the user the whole
+    clarification."""
+    channel, sent = _relay({"cancelled": False, "answers": ["1"]})
+    plugin = _plugin(channel)
+
+    result = plugin._execute_clarification({
+        "context": "c",
+        "questions": [{"text": "Pick one", "choices": ["a", "b"],
+                       "attachment_choices": [7, 0, -1, "1", True, None]}],
+    })
+
+    assert "error" not in result
+    assert sent["questions"][0]["choices"] == [{"text": "a"}, {"text": "b"}]

@@ -994,6 +994,15 @@ is a client that can render an attach control in the right place instead of
 the agent writing *"attach a screenshot"* as prose nothing downstream can act
 on.
 
+The MODEL spells it as `attachment_choices: [1]` — a sibling array of 1-based
+indices on the question — rather than as an object-shaped `choices` entry.
+`choices` stays an array of strings, which is what every existing persona
+emits; this schema is ordinal throughout (`default_choice` is the same shape),
+and promoting every choice to `{text: ...}` would charge every clarification
+that ceremony for a rarely-used flag. An index outside the range is ignored
+rather than raised: the flag is advisory, so a miscount must not cost the user
+the whole clarification.
+
 ### 14.3 What is refused at submit, and what is deliberately not
 
 `JaatoServer.respond_to_clarification_batch` validates the whole map before

@@ -243,32 +243,31 @@ class ClarificationPlugin(RunnerForwardingMixin):
                                         "type": "array",
                                         "description": (
                                             "Available choices (for single/multiple choice). "
-                                            "Choices are numbered 1, 2, 3... automatically. "
-                                            "Each entry is the choice text, or an object "
-                                            "{text, expects_attachment} when picking that "
-                                            "choice means the user should attach a file "
-                                            "(a screenshot, a recording, a document) - the "
-                                            "client then offers an attach control on that "
-                                            "choice. The user's file arrives back attached "
-                                            "to the answer, alongside the choice they picked."
+                                            "Choices are numbered 1, 2, 3... automatically."
                                         ),
                                         "items": {
-                                            "type": "object",
-                                            "properties": {
-                                                "text": {
-                                                    "type": "string",
-                                                    "description": "Choice text",
-                                                },
-                                                "expects_attachment": {
-                                                    "type": "boolean",
-                                                    "description": (
-                                                        "This choice expects the user to "
-                                                        "attach a file (default false)."
-                                                    ),
-                                                },
-                                            },
-                                            "required": ["text"],
+                                            "type": "string",
+                                            "description": "Choice text",
                                         },
+                                    },
+                                    "attachment_choices": {
+                                        "type": "array",
+                                        "description": (
+                                            "1-based indices of the choices that expect the "
+                                            "user to ATTACH A FILE (a screenshot, a "
+                                            "recording, a document). Per choice, not per "
+                                            "question: in 'How should we design this? "
+                                            "1. You attach a screenshot  2. We discuss it', "
+                                            "this is [1]. The client then offers an attach "
+                                            "control on that choice only, and the file comes "
+                                            "back attached to the answer ALONGSIDE the "
+                                            "choice the user picked - the two are "
+                                            "independent, so an answer may carry either or "
+                                            "both. Advisory: nothing forces the user to "
+                                            "attach, and an attachment on a choice not "
+                                            "listed here is still delivered."
+                                        ),
+                                        "items": {"type": "integer"},
                                     },
                                     "required": {
                                         "type": "boolean",
@@ -615,6 +614,14 @@ The tool returns responses keyed by question number (1-based):
                             c.get("expects_attachment", False)
                         ),
                     ))
+            # ``attachment_choices`` names the choices that expect a file,
+            # by 1-based index (#989).  An index array rather than an
+            # object-shaped ``choices`` entry because this schema is
+            # ordinal throughout -- ``default_choice`` is the same shape --
+            # and because turning every choice into an object would cost
+            # every clarification the ceremony for a rarely-used flag.
+            _mark_attachment_choices(choices,
+                                     q_data.get("attachment_choices"))
 
             question_type_str = q_data.get("question_type", "single_choice")
             try:
@@ -694,6 +701,28 @@ The tool returns responses keyed by question number (1-based):
         # Create the channel with config
         from .channels import create_channel
         self._channel = create_channel(channel_type, **(channel_config or {}))
+
+
+def _mark_attachment_choices(choices: List[Choice], raw: Any) -> None:
+    """Set ``expects_attachment`` on the choices *raw* names, in place.
+
+    *raw* is the model's ``attachment_choices``: 1-based indices into
+    *choices*.  An index outside the range is IGNORED rather than raising
+    -- the flag is advisory (a client renders an attach control; nothing
+    enforces it), so a miscounted index should not cost the user the
+    whole clarification.
+
+    Args:
+        choices: The parsed choices, in order.
+        raw: Whatever the model supplied, which may be anything.
+    """
+    if not isinstance(raw, (list, tuple)):
+        return
+    for index in raw:
+        if isinstance(index, bool) or not isinstance(index, int):
+            continue
+        if 1 <= index <= len(choices):
+            choices[index - 1].expects_attachment = True
 
 
 def _apply_answer_attachments(
