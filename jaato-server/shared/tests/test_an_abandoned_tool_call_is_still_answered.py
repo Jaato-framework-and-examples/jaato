@@ -441,6 +441,19 @@ def test_the_session_can_still_make_a_request_after_a_severed_turn():
         f"found for function call {dangling[0][1][0]}' and the session "
         f"cannot continue (#751)."
     )
+    # ...and the SESSION reconciled its own history, not merely the copy
+    # each request was built from.  Since #674 a boundary repair
+    # (``_history_for_provider`` -> ``repair_history``) sanitises every
+    # outgoing request, which would make the assertion above pass even
+    # with ``_reconcile_unanswered_calls`` reverted — i.e. it would make
+    # this guard decorative, which the meta-guard duly caught.  The stored
+    # history is the half that repair deliberately never touches, so it is
+    # what still distinguishes a working fix from a missing one.
+    assert not _dangling_call_ids(session.get_history()), (
+        "the severed call is still unanswered in STORED history: the "
+        "session did not reconcile it, and only the per-request repair is "
+        "hiding that from the wire (#751, #674)."
+    )
 
 
 def test_the_severed_turn_still_reports_its_own_truncation():
@@ -495,6 +508,15 @@ def test_the_parts_loop_reconciles_too():
     dangling = [(i, d) for i, d in enumerate(seen) if d]
     assert not dangling, (
         f"the parts loop left {dangling} unanswered after a severed turn"
+    )
+    # Stored history too — see the note in
+    # ``test_the_session_can_still_make_a_request_after_a_severed_turn``:
+    # the #674 boundary repair sanitises every request, so asserting only
+    # on ``seen`` no longer distinguishes a reconciling parts loop from a
+    # non-reconciling one.
+    assert not _dangling_call_ids(session.get_history()), (
+        "the parts loop left the severed call unanswered in STORED "
+        "history; only the per-request repair is hiding it (#674)."
     )
 
 
