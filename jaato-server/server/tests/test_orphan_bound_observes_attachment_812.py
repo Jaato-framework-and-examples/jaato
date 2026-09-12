@@ -45,11 +45,52 @@ _MANAGER_PY = pathlib.Path(__file__).resolve().parents[2] / (
 
 # ----------------------------------------------------------------- AST guard
 
+#: Method names that decide MEMBERSHIP of a container, as opposed to merely
+#: reading it.  ``pop`` / ``discard`` are included because forgetting an entry
+#: is as much a decision about what the bound may stop as adding one.
+_MEMBERSHIP_METHODS = frozenset(
+    {"setdefault", "add", "pop", "discard", "update", "clear"})
+
+
+def _is_membership_call(node: ast.AST, attr: str) -> bool:
+    """True for ``self.<attr>.<membership method>(...)``.
+
+    Split out of :func:`_functions_writing` to keep each piece under the
+    cyclomatic-complexity ceiling: radon counts every ``and`` in the chain,
+    and the combined predicate scored 16 against a ceiling of 15.
+    """
+    if not isinstance(node, ast.Call):
+        return False
+    func = node.func
+    if not isinstance(func, ast.Attribute) or func.attr not in _MEMBERSHIP_METHODS:
+        return False
+    owner = func.value
+    if not isinstance(owner, ast.Attribute) or owner.attr != attr:
+        return False
+    return isinstance(owner.value, ast.Name) and owner.value.id == "self"
+
+
+def _is_subscript_assign(node: ast.AST, attr: str) -> bool:
+    """True for ``self.<attr>[...] = ...`` (or any ``<expr>.<attr>[...] =``).
+
+    The sibling of :func:`_is_membership_call`; see its note on why the two
+    are separate functions.
+    """
+    if not isinstance(node, ast.Assign):
+        return False
+    for tgt in node.targets:
+        if not isinstance(tgt, ast.Subscript):
+            continue
+        if isinstance(tgt.value, ast.Attribute) and tgt.value.attr == attr:
+            return True
+    return False
+
+
 def _functions_writing(attr: str) -> set:
     """Names of methods that write to ``self.<attr>``.
 
-    A "write" is a ``setdefault`` / ``add`` / ``pop`` / subscript-assignment
-    against the attribute — i.e. anything that decides membership.
+    A "write" is anything that decides membership — see
+    :data:`_MEMBERSHIP_METHODS` and :func:`_is_subscript_assign`.
     """
     tree = ast.parse(_MANAGER_PY.read_text(encoding="utf-8"))
     writers = set()
@@ -57,23 +98,9 @@ def _functions_writing(attr: str) -> set:
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
         for inner in ast.walk(node):
-            # self.<attr>.setdefault(...) / .add(...) / .pop(...)
-            if (isinstance(inner, ast.Call)
-                    and isinstance(inner.func, ast.Attribute)
-                    and isinstance(inner.func.value, ast.Attribute)
-                    and inner.func.value.attr == attr
-                    and isinstance(inner.func.value.value, ast.Name)
-                    and inner.func.value.value.id == "self"
-                    and inner.func.attr in {"setdefault", "add", "pop",
-                                            "discard", "update", "clear"}):
+            if (_is_membership_call(inner, attr)
+                    or _is_subscript_assign(inner, attr)):
                 writers.add(node.name)
-            # self.<attr>[...] = ...
-            if isinstance(inner, ast.Assign):
-                for tgt in inner.targets:
-                    if (isinstance(tgt, ast.Subscript)
-                            and isinstance(tgt.value, ast.Attribute)
-                            and tgt.value.attr == attr):
-                        writers.add(node.name)
     return writers
 
 
