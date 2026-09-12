@@ -4,5 +4,6 @@
   "session_id": "",
   "request_id": "",
   "answers": [],
-  "cancelled": false
+  "cancelled": false,
+  "answer_attachments": {}
 }
