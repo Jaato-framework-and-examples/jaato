@@ -599,6 +599,10 @@ class RunnerRPC:
                 would find no entry.  ``serve`` always passes the token
                 it registered; see :class:`_ActiveCall`.
         """
+        logger.info(   # [RPC_DIAG] register-stall trace — DIAG BRANCH
+            "[RPC_DIAG] _handle_request ENTER method=%s id=%s tid=%s "
+            "preregistered=%s",
+            env.method, env.id, threading.get_ident(), token is not None)
         if token is None:
             token = self._register_call(env.id)
 
