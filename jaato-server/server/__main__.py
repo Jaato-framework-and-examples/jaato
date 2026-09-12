@@ -593,6 +593,16 @@ class JaatoDaemon:
         # fan out across all transports via CompositeEventSink.broadcast_event.
         self._session_manager.set_broadcast_callback(composite_sink.broadcast_event)
 
+        # #812: arm the daemon-side wall-clock bound on loaded sessions.
+        # Armed HERE rather than in ``SessionManager.__init__`` so a manager
+        # constructed in a test or an embedding process grows no background
+        # thread it did not ask for -- and armed on the DAEMON because the
+        # daemon is the process that outlives the client whose death left
+        # #812's session running for seven unattended minutes.  The call
+        # logs the effective defaults (the #735 rule: a cap that silently
+        # does not apply is worse than no cap).
+        self._session_manager.start_lifetime_watchdog()
+
         # Load daemon extensions (e.g., gossip clustering from jaato-premium)
         self._load_extensions()
 
@@ -719,6 +729,10 @@ class JaatoDaemon:
 
         # Cleanup
         if self._session_manager:
+            # Stop the #812 sweep before the manager tears sessions down, so
+            # a sweep in flight cannot stop a session that is already being
+            # unloaded and log a verdict about it.
+            self._session_manager.stop_lifetime_watchdog()
             self._session_manager.shutdown()
 
         # Pool PR 3: tear down idle pool slots BEFORE template.  Slots
