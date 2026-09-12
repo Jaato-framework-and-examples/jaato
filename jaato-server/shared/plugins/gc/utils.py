@@ -23,6 +23,10 @@ from jaato_sdk.plugins.model_provider.types import (
     Role,
     ToolResult,
 )
+# The pairing invariant has ONE definition, and this module is a consumer of
+# it rather than a second author (#674).  Import direction is safe:
+# ``history_invariant`` depends only on the SDK types, never on GC.
+from shared.history_invariant import repair_history
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from .base import GCConfig, GCTriggerReason
@@ -429,156 +433,79 @@ def ensure_tool_call_integrity(
     history: List[Message],
     trace_fn=None,
 ) -> List[Message]:
-    """Validate and repair tool_use/tool_result pairing after GC.
+    """Repair tool_use/tool_result pairing in **stored** history after GC.
 
-    GC may remove individual messages from history, breaking the mandatory
-    pairing between MODEL messages with function_call parts (tool_use) and
-    TOOL/USER messages with function_response parts (tool_result). This
-    function removes orphaned messages to restore a valid history that
-    providers can accept.
+    GC removes messages individually, which can cut between a MODEL
+    message's ``function_call`` parts (tool_use) and the
+    ``function_response`` parts that answer them (tool_result) — a pairing
+    every provider requires.  The four GC call sites in
+    :mod:`shared.jaato_session` install this function's output as the
+    session's history, so unlike the per-request boundary repair this one
+    **is** destructive by design: it fixes the record once instead of
+    hiding the damage on every later request.
 
-    Handles two cases:
-    1. Orphaned tool_results: A TOOL message references call_ids not present
-       in any preceding MODEL message's function_calls.
-    2. Unpaired tool_uses: A MODEL message has function_calls but no matching
-       tool_result follows before the next USER or MODEL message.
+    **The policy is** :func:`shared.history_invariant.repair_history`, and
+    that is the whole implementation.  One invariant must have one
+    definition — this function existing alongside a boundary validator
+    with a *different* repair policy is what produced #674's worst case.
+
+    Until #674 this function repaired by DELETION, and pass 2 removed a
+    MODEL message whose tool calls were not all answered.  On a
+    **partially** answered batch — the routine outcome of cancelling
+    8-wide parallel execution — that deletes the assistant turn while its
+    real result stays behind, so the function named for the invariant
+    produced the violation it exists to prevent::
+
+        MODEL calls {A, B}  ->  TOOL answers A  ->  USER turn
+
+    Pass 1 kept the TOOL message (``A`` is valid); pass 2 reached the USER
+    branch with ``B`` still pending and deleted the MODEL message, leaving
+    ``A``'s result answering a call present nowhere.  Measured across
+    widths 2/3/5/8: every case with at least one real result, 14 of 18.
+    A stored history in that state is then **persisted**, so a session
+    revived from the record (``SessionManager._load_session``) comes back
+    corrupt — which is why repairing only the per-request copy was not
+    enough.
+
+    Now an unanswered call is *answered* with a synthetic cancelled result
+    and no MODEL message is ever removed, which also preserves the turn's
+    ``Part.thought`` — the ``reasoning_content`` ``replay_reasoning``
+    providers require back (MiMo answers 400 without it).  The synthetic
+    payload is the same ``{"error": "cancelled", ...}`` shape
+    :meth:`JaatoSession._inject_synthetic_cancelled_results` already
+    writes into stored history for this exact situation.
+
+    **Writing results into the store is safe at all four call sites**
+    because each runs between turns, never mid-batch:
+    ``_maybe_collect_after_turn`` and ``_maybe_collect_before_send`` sit on
+    turn boundaries, ``manual_gc`` is operator-driven, and
+    ``_try_gc_for_context_recovery`` pops the trailing MODEL message with
+    pending calls *before* calling this and re-appends it after — so the
+    calls the session is about to execute are not present to be answered.
+
+    Fully orphaned tool results (a result whose call this history no longer
+    contains — the rewind/resume shape) are still dropped: there is no call
+    to attach a partner to, and inventing an assistant turn would put words
+    in the model's mouth.
 
     Args:
-        history: Conversation history (potentially with broken pairs).
-        trace_fn: Optional callable for trace logging, signature: (str) -> None.
+        history: Conversation history, possibly with broken pairs.
+        trace_fn: Optional trace sink, ``(str) -> None``.  Receives one
+            ``HISTORY_INVARIANT: ...`` line per repair kind that fired;
+            the GC call sites prefix it with their own phase name.
 
     Returns:
-        History with orphaned tool_use/tool_result messages removed.
+        A history satisfying the pairing invariant — ``history`` itself
+        when nothing needed repair.
+
+    See also:
+        :func:`shared.history_invariant.validate_history` for the defects
+        this repairs, and :meth:`JaatoSession._history_for_provider` for
+        the per-request backstop that catches the producers this function
+        does not see (cancellation, rewind, subagent history sharing, a
+        wire that streams no tool-call id).
     """
-    if not history:
-        return history
-
-    def _trace(msg: str) -> None:
-        if trace_fn:
-            trace_fn(msg)
-
-    # --- Pass 1: Remove orphaned tool_result messages ---
-    # A tool_result is orphaned if its call_id doesn't appear in any preceding
-    # MODEL message's function_calls.
-    available_call_ids: set = set()
-    pass1_result: List[Message] = []
-    orphaned_tool_result_ids: set = set()
-
-    for msg in history:
-        if msg.role == Role.MODEL:
-            # Collect function_call IDs from this MODEL message
-            for p in msg.parts:
-                if p.function_call and p.function_call.id:
-                    available_call_ids.add(p.function_call.id)
-            pass1_result.append(msg)
-
-        elif msg.role == Role.TOOL or (
-            msg.role == Role.USER
-            and msg.parts
-            and any(p.function_response is not None for p in msg.parts)
-        ):
-            # This is a tool result message - check if its call_ids are valid
-            msg_call_ids = set()
-            for p in msg.parts:
-                if p.function_response and p.function_response.call_id:
-                    msg_call_ids.add(p.function_response.call_id)
-
-            valid_ids = msg_call_ids & available_call_ids
-            if not valid_ids and msg_call_ids:
-                # ALL call_ids in this message are orphaned - remove it
-                _trace(
-                    f"ensure_tool_call_integrity: removing orphaned tool_result "
-                    f"message (call_ids={msg_call_ids})"
-                )
-                orphaned_tool_result_ids.update(msg_call_ids)
-            else:
-                pass1_result.append(msg)
-                # Resolve matched call_ids (they now have results)
-                available_call_ids -= valid_ids
-        else:
-            pass1_result.append(msg)
-
-    # --- Pass 2: Remove MODEL messages with unresolved tool_calls ---
-    # A MODEL message with function_calls is unpaired if no matching
-    # tool_result follows before the next non-tool message or end of history.
-    # We scan forward and track pending tool_call_ids.
-    result: List[Message] = []
-    pending_tool_use_ids: set = set()
-    pending_model_idx: Optional[int] = None
-
-    for msg in pass1_result:
-        if msg.role == Role.MODEL:
-            has_tool_calls = any(
-                p.function_call is not None for p in msg.parts
-            )
-            if has_tool_calls:
-                # If there's a previous MODEL with unresolved tool_calls,
-                # that one is unpaired - remove it
-                if pending_tool_use_ids and pending_model_idx is not None:
-                    removed_msg = result[pending_model_idx]
-                    _trace(
-                        f"ensure_tool_call_integrity: removing unpaired tool_use "
-                        f"MODEL message (pending_ids={pending_tool_use_ids})"
-                    )
-                    result = result[:pending_model_idx] + result[pending_model_idx + 1:]
-
-                # Track this MODEL message and its tool_call IDs
-                pending_model_idx = len(result)
-                pending_tool_use_ids = set()
-                for p in msg.parts:
-                    if p.function_call and p.function_call.id:
-                        pending_tool_use_ids.add(p.function_call.id)
-
-            result.append(msg)
-
-        elif msg.role == Role.TOOL or (
-            msg.role == Role.USER
-            and msg.parts
-            and any(p.function_response is not None for p in msg.parts)
-        ):
-            # Resolve matching tool_call IDs
-            for p in msg.parts:
-                if p.function_response and p.function_response.call_id:
-                    pending_tool_use_ids.discard(p.function_response.call_id)
-
-            if not pending_tool_use_ids:
-                pending_model_idx = None
-
-            result.append(msg)
-
-        elif msg.role == Role.USER:
-            # User text message - any pending tool_calls are unpaired
-            if pending_tool_use_ids and pending_model_idx is not None:
-                _trace(
-                    f"ensure_tool_call_integrity: removing unpaired tool_use "
-                    f"MODEL message before USER message "
-                    f"(pending_ids={pending_tool_use_ids})"
-                )
-                result = result[:pending_model_idx] + result[pending_model_idx + 1:]
-                pending_tool_use_ids.clear()
-                pending_model_idx = None
-
-            result.append(msg)
-        else:
-            result.append(msg)
-
-    # Final check: if history ends with unpaired tool_calls, remove the MODEL msg
-    if pending_tool_use_ids and pending_model_idx is not None:
-        _trace(
-            f"ensure_tool_call_integrity: removing unpaired tool_use "
-            f"MODEL message at end of history "
-            f"(pending_ids={pending_tool_use_ids})"
-        )
-        result = result[:pending_model_idx] + result[pending_model_idx + 1:]
-
-    removed_count = len(history) - len(result)
-    if removed_count > 0:
-        _trace(
-            f"ensure_tool_call_integrity: removed {removed_count} message(s) "
-            f"to restore tool_call pairing"
-        )
-
-    return result
+    return repair_history(history, trace_fn=trace_fn)
 
 
 def get_preserved_indices(

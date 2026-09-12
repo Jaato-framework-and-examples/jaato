@@ -28,7 +28,7 @@ from shared.jaato_session import JaatoSession
 from shared.model_tiers import ModelTierConfig, TierEntry
 from shared.session_history import SessionHistory
 from jaato_sdk.plugins.model_provider.types import (
-    Attachment, Message, Part, Role, ToolResult,
+    Attachment, FunctionCall, Message, Part, Role, ToolResult,
 )
 
 
@@ -226,8 +226,21 @@ class TestToolResultsInHistory:
     """
 
     def _history_with_image_result(self):
+        """A tool result carrying an image, in a **well-paired** history.
+
+        The MODEL message carries the ``function_call`` that ``c1``
+        answers.  That is not decoration: since #674
+        ``_history_for_provider`` also runs the pairing repair, and a
+        lone tool result with no matching call is an orphan it correctly
+        drops — so a fixture without the call would exercise the repair
+        instead of the modality gate this class is about.
+        """
         return [
-            Message(role=Role.MODEL, parts=[Part.from_text("reading")]),
+            Message(role=Role.MODEL, parts=[
+                Part.from_text("reading"),
+                Part.from_function_call(
+                    FunctionCall(id="c1", name="readFile", args={})),
+            ]),
             Message(role=Role.TOOL, parts=[Part.from_function_response(
                 ToolResult(call_id="c1", name="readFile", result="bytes",
                            attachments=[Attachment(mime_type="image/png",
