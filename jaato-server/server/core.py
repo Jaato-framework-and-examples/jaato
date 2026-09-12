@@ -281,6 +281,29 @@ from shared.model_tiers import (bound_model_for_profile,
                                 bound_provider_for_profile)
 
 
+def _transport_error_details(exc: BaseException) -> Optional[Dict[str, Any]]:
+    """Machine-readable evidence for a transport failure, or ``None``.
+
+    Today only a lost dispatch (#856) has any: it knows whether the work
+    MAY ALREADY HAVE RUN, which decides whether the caller may send the
+    turn again or would be duplicating side effects that have already
+    happened.  Every other ``RunnerRPCTimeout`` carries nothing
+    structured, and ``None`` leaves ``ErrorEvent.details`` absent rather
+    than present-and-empty — an absent key says "this failure has no
+    structured evidence", an empty dict says "it has some and it is
+    blank".
+
+    A module-level function rather than a ternary at the emit site
+    because ``model_thread`` sits at its complexity ceiling, and a
+    branch there would have cost a baseline bump for one expression.
+    """
+    from server.runner_rpc_client import RunnerDispatchLost
+
+    if isinstance(exc, RunnerDispatchLost):
+        return exc.as_details()
+    return None
+
+
 def _profile_binds_a_model(profile: Any) -> bool:
     """Does *profile* bind a model for session start, by EITHER route?
 
@@ -5603,10 +5626,28 @@ class JaatoServer:
                         "is daemon-side plumbing, not the agent.",
                         type(e).__name__, str(e),
                     )
+                    # #856: a lost dispatch carries whether the work MAY
+                    # ALREADY HAVE RUN, and that decides whether sending
+                    # the turn again is safe or duplicates side effects
+                    # that already happened.  It rides ``details``, which
+                    # is the field documented as "what a driver branches
+                    # on" while ``error`` stays the human sentence -- the
+                    # same shape ``SessionRefused.may_exist`` takes, and
+                    # for the same reason.
+                    #
+                    # NOT ``recoverable``.  In this tree that flag means
+                    # "this session can continue" (every recoverable=False
+                    # site is a config or provider-connect failure that
+                    # ends initialisation), and the whole point of sparing
+                    # a RunnerRPCTimeout here is that the session DOES
+                    # continue.  Flipping it to encode retry-safety would
+                    # assert something false about session viability to
+                    # every existing consumer.
                     server.emit(ErrorEvent(
                         error=str(e),
                         error_type=type(e).__name__,
                         recoverable=True,
+                        details=_transport_error_details(e),
                     ))
                     # RETURN.  Without it the terminal path below runs anyway:
                     # ``terminal_error = e`` is reached unconditionally and the
