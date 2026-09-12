@@ -1067,6 +1067,54 @@ the text-only floor from `ModalityCapabilityMixin`, a user-message image
 now meets the same withhold their tool-result images always have. See
 [Binary Media Chunks §10](docs/design/binary-media-chunks.md).
 
+**A tier gets what it ASKED for, not what its model can read (#1001).**
+#847's gate had one bound — `provider.supports_modality(kind)`, the active
+model's catalog INPUT capability — and a tier declares a second one nobody
+consulted. A voice bot heard a Telegram voice note in its `executor` tier
+(`google/gemini-2.5-flash`, which accepts audio) and then
+`enter_tier("voz")` to *speak* the answer. `voz` is
+`openai/gpt-audio` with `modalities: {audio: outbound}` — it speaks, it was
+never asked to listen — and `gpt-audio`'s catalog lists audio INPUT
+(verified live: `input: ['text', 'audio']`), so the gate kept the recording
+and the upstream refused the request. The tier that only needed the text to
+vocalise was handed the bytes of the question.
+
+**This is the level at which the question is answerable.** The refusal
+named a container (`Invalid value: 'ogg'`), which invites fixing the
+*format* — and the framework cannot know which containers a given model
+accepts, so a jaato-side allowlist could only ever be stale in one of two
+directions, the argument `api_params` already makes about per-model tables.
+The tier's declared role is knowable, local, and written by the author.
+`_gate_history_for_active_modalities` is where the two bounds meet.
+
+| The active tier | Inbound bound |
+|---|---|
+| no tier config, or no active tier | the model's capability alone — **unchanged** |
+| declares no role of its own | the model's capability alone — **unchanged** |
+| a `vision` tier carrying only its IMPLICIT `{image}` role | the model's capability alone — the shim exists to keep pre-`modalities` profiles working, so it must not arm a gate |
+| declares any role, either direction | the model's capability **∩** its own `inbound_modalities` |
+
+`ModelTierConfig.gating_inbound_modalities` answers that question (`None` =
+"no opinion", distinct from `frozenset()` = "accepts no non-text input"),
+and `JaatoSession._modality_refusal` intersects it with the model —
+**narrow, never widen**, the most-restrictive-wins shape
+`runtime_limits.max_parallel_tools` uses: a tier declaring `audio: inbound`
+on a text-only model still withholds.
+
+**The note names the bound that refused.** A model on `openai/gpt-audio`
+told "the active model can't view audio content" has a true fact to
+contradict and spends a turn contradicting it, so a tier refusal gets its
+own note (`_build_tier_role_withheld_note`) saying the TIER declares no
+inbound role, that the model itself can read it, and which tier does
+declare it — while a model refusal keeps #847's wording unchanged. The
+trace line names both sets for the same reason.
+
+Deliberately NOT done: evicting consumed media at tier entrance. That is a
+context-SIZE concern (#850's territory), it is destructive to stored
+history where this gate filters a per-request copy, and per-tier
+consumption tracking is state nobody has a failing case for — the gate
+above is what fixes the reported failure.
+
 **How long anyone sees it (#850).** #847 fixed *which* model sees an
 utterance; media still had a lifecycle in one direction only. Outbound was
 right — model media is `CLIENT`-audience so it never enters history, and

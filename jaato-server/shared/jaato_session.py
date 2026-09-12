@@ -8750,13 +8750,83 @@ NOTES
             return "file"
         return None
 
+    def _active_tier_inbound_modalities(self) -> Optional[FrozenSet[str]]:
+        """Inbound roles the ACTIVE tier declares, or ``None`` for "unset".
+
+        Thin session-side read of
+        :meth:`ModelTierConfig.gating_inbound_modalities`, which owns the
+        rule (including why a purely implicit ``vision`` role does not arm
+        the gate).  ``None`` here means the tier system has nothing to say
+        about this session's content — no tier config, no active tier, or
+        an active tier that declared no role — and the gate then keys on
+        model capability alone, exactly as it did before #1001.
+        """
+        config = self._tier_config
+        active = getattr(self, "_active_tier", None)
+        if config is None or not active:
+            return None
+        return config.gating_inbound_modalities(active)
+
+    def _modality_refusal(
+        self, kind: str, provider: 'ModelProviderPlugin'
+    ) -> Optional[str]:
+        """Why ``kind`` may not be sent right now — ``None`` when it may.
+
+        Two independent bounds, and the gate applies BOTH; the answer names
+        which one refused, because the model-facing note is only actionable
+        if it states the true reason.
+
+        * ``"model"`` — the active model's catalog does not list ``kind``
+          as an input modality.  The historical rule (#847), unchanged.
+        * ``"tier"`` — the model accepts it, but the ACTIVE TIER declared
+          its roles and ``kind`` is not among the inbound ones (#1001).
+          The reported case: a ``voz`` tier declaring ``{audio: outbound}``
+          on ``openai/gpt-audio``, whose catalog lists audio INPUT, so the
+          caller's recorded utterance was replayed into a tier that only
+          ever needed the text to speak.
+
+        The two compose as an INTERSECTION — most-restrictive-wins, the
+        shape ``runtime_limits.max_parallel_tools`` uses.  A tier declaring
+        ``audio: inbound`` against a text-only model still withholds: a
+        declaration narrows what a tier receives, it can never widen it
+        past what the wire will carry.
+        """
+        if not provider.supports_modality(kind):
+            return "model"
+        declared = self._active_tier_inbound_modalities()
+        if declared is not None and kind not in declared:
+            return "tier"
+        return None
+
+    @staticmethod
+    def _tally_withheld(
+        withheld: Dict[str, int],
+        tier_refused: Set[str],
+        kind: str,
+        reason: str,
+    ) -> None:
+        """Record one withheld item against its kind and its reason.
+
+        ``withheld`` counts by kind (what the note reports); ``tier_refused``
+        remembers which kinds were refused by the TIER rather than by the
+        model, which is what selects the note.  A kind lands wholly in one
+        bucket or the other — the refusal depends only on (kind, model,
+        active tier), all constant across one gating pass.
+        """
+        withheld[kind] = withheld.get(kind, 0) + 1
+        if reason == "tier":
+            tier_refused.add(kind)
+
     def _gate_tool_results_for_active_modalities(
         self, tool_results: List[ToolResult]
     ) -> List[ToolResult]:
         """Synthetic-self-correct content gate (multimodal-by-composition).
 
         The active model can only *see* the input modalities its provider
-        declares (``provider.modalities()``).  When a tool returns
+        declares (``provider.modalities()``), and the active tier receives
+        only the inbound roles it declared (#1001, and no constraint at all
+        when it declared none) — :meth:`_modality_refusal` applies both.
+        When a tool returns
         attachment content of a modality the active model can't view
         (canonically a ``readFile`` image while in a text-only tier),
         sending the bytes would silently fail.  Instead this strips those
@@ -8795,15 +8865,19 @@ NOTES
             return result
         kept: List[Any] = []
         withheld: Dict[str, int] = {}
+        tier_refused: Set[str] = set()
         rerouted: List[Any] = []
         for att in result.attachments:
             modality = self._mime_to_modality(getattr(att, "mime_type", None))
             # None = unclassifiable; keep (don't over-strip).  Otherwise
-            # keep iff the active model declares it.
-            if modality is None or provider.supports_modality(modality):
+            # keep iff BOTH the active model and the active tier admit it
+            # (:meth:`_modality_refusal`).
+            reason = (None if modality is None
+                      else self._modality_refusal(modality, provider))
+            if reason is None:
                 kept.append(att)
             else:
-                withheld[modality] = withheld.get(modality, 0) + 1
+                self._tally_withheld(withheld, tier_refused, modality, reason)
                 rerouted.append(att)
         if not withheld:
             return result
@@ -8813,10 +8887,13 @@ NOTES
         # being stripped from the model's copy.  Delivery is best-effort:
         # a failure here must not fail the tool result.
         self._emit_withheld_attachments_to_clients(result, rerouted)
-        note = self._build_withheld_attachment_note(withheld)
+        note = self._withheld_notes(withheld, tier_refused)
         self._trace(
             f"MODALITY_GATE: withheld {dict(withheld)} from tool "
-            f"{result.name!r} (active model {self._model_name!r} lacks them)"
+            f"{result.name!r} (active model {self._model_name!r} lacks "
+            f"{sorted(set(withheld) - tier_refused)}; active tier "
+            f"{getattr(self, '_active_tier', None)!r} does not declare "
+            f"{sorted(tier_refused)} inbound)"
         )
         # Keep ``result`` structured; the withheld-attachment note is
         # model-facing only (append to model_suffix, appended at serialization).
@@ -8857,6 +8934,15 @@ NOTES
         was replayed verbatim on every later request — including the ones made
         after ``enter_tier`` moved to a text-only model, whose upstream
         answered ``404 No endpoints found that support input audio``.
+
+        **Two bounds, intersected (#1001).**  What the active model's
+        catalog accepts, AND what the active tier declared inbound — see
+        :meth:`_modality_refusal`.  Keying on the model alone replayed a
+        caller's utterance into a tier declared ``{audio: outbound}``,
+        whose model accepts audio input and whose job was only to speak the
+        text; the upstream refused the request.  A session with no tiers,
+        or whose active tier declares no role, is bounded by the model
+        alone exactly as before.
 
         **Per-request, never destructive.**  This returns a filtered *copy*;
         ``self._history`` keeps the bytes.  That distinction is the whole
@@ -8915,16 +9001,24 @@ NOTES
         if not any(self._part_carries_binary(p) for p in parts):
             return msg
         withheld: Dict[str, int] = {}
-        new_parts = [self._gate_one_part(p, provider, withheld) for p in parts]
+        tier_refused: Set[str] = set()
+        new_parts = [
+            self._gate_one_part(p, provider, withheld, tier_refused)
+            for p in parts
+        ]
         if not withheld:
             return msg
         self._trace(
             f"HISTORY_MODALITY_GATE: withheld {dict(withheld)} from a "
             f"{msg.role} message for this request (active model "
-            f"{self._model_name!r} lacks them); history is unchanged"
+            f"{self._model_name!r} lacks "
+            f"{sorted(set(withheld) - tier_refused)}; active tier "
+            f"{getattr(self, '_active_tier', None)!r} does not declare "
+            f"{sorted(tier_refused)} inbound); history is unchanged"
         )
-        note = self._build_withheld_attachment_note(
+        note = self._withheld_notes(
             withheld,
+            tier_refused,
             retry_action="continue (the content stays in this session's "
                          "history and is sent again from that tier)",
         )
@@ -8950,13 +9044,22 @@ NOTES
         part: 'Part',
         provider: 'ModelProviderPlugin',
         withheld: Dict[str, int],
+        tier_refused: Set[str],
     ) -> Optional['Part']:
         """Gate one part, tallying what it lost into ``withheld``.
 
-        Returns the part unchanged when it carries nothing the active model
+        Returns the part unchanged when it carries nothing this request
         refuses, a copy with the refused attachments stripped when it is a
         tool result, and ``None`` when the part *is* the refused content (an
         ``inline_data`` part has nothing left once its bytes are withheld).
+
+        What "refuses" means is :meth:`_modality_refusal`: the active
+        model's catalog capability AND the active tier's declared inbound
+        roles, intersected.  ``tier_refused`` collects the kinds the TIER
+        refused while the model would have accepted them, because those two
+        outcomes need different notes — telling a model on
+        ``openai/gpt-audio`` that "this wire does not accept audio" is false
+        and costs a turn in argument.
 
         An attachment whose mime does not classify
         (:meth:`_mime_to_modality` returns ``None``) is kept: the gate never
@@ -8964,9 +9067,11 @@ NOTES
         """
         if part.inline_data:
             kind = self._mime_to_modality(part.inline_data.get("mime_type"))
-            if kind is None or provider.supports_modality(kind):
+            reason = (None if kind is None
+                      else self._modality_refusal(kind, provider))
+            if reason is None:
                 return part
-            withheld[kind] = withheld.get(kind, 0) + 1
+            self._tally_withheld(withheld, tier_refused, kind, reason)
             return None
         response = part.function_response
         if response is None or not getattr(response, "attachments", None):
@@ -8974,10 +9079,12 @@ NOTES
         kept = []
         for att in response.attachments:
             kind = self._mime_to_modality(getattr(att, "mime_type", None))
-            if kind is None or provider.supports_modality(kind):
+            reason = (None if kind is None
+                      else self._modality_refusal(kind, provider))
+            if reason is None:
                 kept.append(att)
             else:
-                withheld[kind] = withheld.get(kind, 0) + 1
+                self._tally_withheld(withheld, tier_refused, kind, reason)
         if len(kept) == len(response.attachments):
             return part
         return Part.from_function_response(
@@ -9156,13 +9263,107 @@ NOTES
         )
         return target, covered, stuck
 
+    def _withheld_notes(
+        self,
+        withheld: Dict[str, int],
+        tier_refused: Set[str],
+        *,
+        retry_action: str = "re-run this tool",
+    ) -> str:
+        """The note(s) standing in for everything one gating pass withheld.
+
+        Two refusals, two notes, because they are different facts and one
+        sentence covering both would have to be false about one of them:
+        :meth:`_build_withheld_attachment_note` says the MODEL cannot read
+        this, :meth:`_build_tier_role_withheld_note` says the model can and
+        the TIER did not ask for it.  Both are emitted when a single pass
+        managed both, which needs a message carrying two kinds at once (an
+        image the model can't see beside audio the tier didn't declare) —
+        rare, and two accurate sentences beat one averaged one.
+
+        The common case allocates one note, as before.
+        """
+        model_refused = {
+            k: n for k, n in withheld.items() if k not in tier_refused
+        }
+        notes: List[str] = []
+        if model_refused:
+            notes.append(self._build_withheld_attachment_note(
+                model_refused, retry_action=retry_action))
+        if tier_refused:
+            notes.append(self._build_tier_role_withheld_note(
+                {k: withheld[k] for k in tier_refused},
+                retry_action=retry_action))
+        return "  ".join(notes)
+
+    def _build_tier_role_withheld_note(
+        self,
+        withheld: Dict[str, int],
+        *,
+        retry_action: str = "re-run this tool",
+    ) -> str:
+        """The note for content the ACTIVE TIER declined (#1001).
+
+        Distinct from :meth:`_build_withheld_attachment_note` in the one
+        way that matters to the model reading it: the active model *can*
+        consume this content, so every sentence that blames the model is
+        false here.  A ``voz`` tier told "the active model can't view audio
+        content" about ``openai/gpt-audio`` has a true fact to contradict,
+        and spends a turn contradicting it; what it needs to know is that
+        the TIER declared no inbound audio role, which is a profile
+        statement, not a capability.
+
+        Two outcomes, mirroring the sibling note's first and third:
+
+        1. **Another tier declares the role inbound** — name it, and name
+           only the kinds it covers.  The ``stuck`` case the sibling
+           handles cannot arise here: a kind is only in this note because
+           the ACTIVE tier does not declare it inbound, so the active tier
+           is never the sole declarer of it.
+        2. **No tier declares it inbound** — say that, and point at the
+           profile key, without claiming the content is unreadable.
+        """
+        kinds = ", ".join(sorted(withheld))
+        model = self._model_name or "the current model"
+        active = getattr(self, "_active_tier", None)
+        target, covered, _stuck = self._resolve_withheld_target(withheld)
+
+        if target is not None:
+            covers = ", ".join(sorted(covered))
+            rest = sorted(set(withheld) - set(covered))
+            tail = (f"  No tier accepts {', '.join(rest)} content as input."
+                    if rest else "")
+            return (
+                f"[Attachment withheld: the {active!r} tier does not accept "
+                f"{kinds} as input — it declares no inbound role for it.  "
+                f"({model} itself can read {kinds}; this is the tier's "
+                f"declared role, not a model limit.)  Call "
+                f"enter_tier(\"{target}\") to take in the {covers} content, "
+                f"then {retry_action}.{tail}]"
+            )
+
+        return (
+            f"[Attachment withheld: the {active!r} tier does not accept "
+            f"{kinds} as input — it declares no inbound role for it, and no "
+            f"other tier in this session declares {kinds} inbound either.  "
+            f"({model} itself can read {kinds}; this is a profile "
+            f"statement, not a model limit.)  If a tier should receive this "
+            f"content, give it `modalities: {{{sorted(withheld)[0]}: "
+            f"inbound}}` in the profile's model_tiers.]"
+        )
+
     def _build_withheld_attachment_note(
         self,
         withheld: Dict[str, int],
         *,
         retry_action: str = "re-run this tool",
     ) -> str:
-        """Build the actionable note that stands in for withheld content.
+        """The note for content the active MODEL cannot consume.
+
+        Reached through :meth:`_withheld_notes`, which routes each withheld
+        kind by its refusal reason; content the active TIER declined goes
+        to :meth:`_build_tier_role_withheld_note` instead, because every
+        sentence below blames the model and would be false about it.
 
         Three outcomes, in order:
 

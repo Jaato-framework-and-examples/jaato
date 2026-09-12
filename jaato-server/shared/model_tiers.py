@@ -852,6 +852,52 @@ class ModelTierConfig:
             if kind in self.tiers[name].modalities_for(direction)
         )
 
+    def gating_inbound_modalities(
+        self, tier_name: str
+    ) -> Optional[FrozenSet[str]]:
+        """The inbound roles that BOUND what ``tier_name`` may be handed.
+
+        The tier half of the inbound content gate (#1001).  A tier
+        declaring its roles is making an exhaustive statement about what it
+        is *for*: ``voz: {audio: outbound}`` says "this tier speaks", and a
+        tier that speaks has no use for the caller's recorded utterance —
+        so the gate must be able to withhold audio from it even though its
+        model (``openai/gpt-audio``) accepts audio input perfectly well.
+        Keying that gate on the model's catalog capability alone sent the
+        utterance anyway and the upstream refused the request.
+
+        Returns:
+            ``None`` — "this tier declares no role of its own, so it does
+            not constrain content": the caller falls back to the model's
+            own capability and behaves exactly as it did before the key
+            existed.  Otherwise the tier's FULL inbound set (its implicit
+            role included), which the caller INTERSECTS with model
+            capability — a declaration narrows, it never widens.
+
+        A purely IMPLICIT role does not arm the gate.  A tier named
+        ``vision`` carrying no ``modalities:`` key at all has
+        ``{"image"}`` inbound from :data:`IMPLICIT_TIER_MODALITIES`, and
+        that shim exists precisely so profiles written before the key
+        behave unchanged; letting it arm a gate would make it change
+        their behaviour instead.  So the question asked here is "did the
+        author write a role", and it is answered by subtracting the
+        implicit map the same way :meth:`describe_tier` does.  A
+        ``vision`` tier that DOES write a role (say ``audio: outbound``)
+        is armed, and then admits image — its implicit role is part of
+        the set, just not the trigger.
+        """
+        entry = self.tiers.get(tier_name)
+        if entry is None:
+            return None
+        implicit = IMPLICIT_TIER_MODALITIES.get(tier_name, {})
+        authored_in = entry.inbound_modalities - implicit.get(
+            DIRECTION_INBOUND, frozenset())
+        authored_out = entry.outbound_modalities - implicit.get(
+            DIRECTION_OUTBOUND, frozenset())
+        if not authored_in and not authored_out:
+            return None
+        return entry.inbound_modalities
+
     def describe_tier(self, tier_name: str) -> str:
         """Prose for one tier, as the model should read it.
 
