@@ -204,7 +204,7 @@ class RunnerAnswerTimeout(RunnerRPCTimeout):
 
 
 class RunnerDispatchLost(RunnerRPCTimeout):
-    """A dispatched RPC that the runner, when asked, does not have (#856).
+    """A dispatched RPC the runner, when asked, cannot account for (#856).
 
     The third failure mode of this channel, and until now the only one
     with no bound and no name:
@@ -232,13 +232,262 @@ class RunnerDispatchLost(RunnerRPCTimeout):
     TURN must fail and the SESSION must live.  That is also what makes
     it distinguishable from #851 in the client-visible error: a dead
     runner reaches the client as ``RunnerCallError`` on a terminating
-    ``ErrorEvent``, a lost dispatch as ``RunnerDispatchLost`` with
-    ``recoverable=True``.
+    ``ErrorEvent``, a lost dispatch as one of the three subclasses
+    below on a ``recoverable=True`` one.
 
     The message always names the request id and the session, because
     the only artefacts of the original incident were four
     ``_in_flight SET id=N`` lines that named neither.
+
+    **CATCH THIS BASE to handle every lost dispatch; catch a subclass
+    when the recovery differs -- and it does.**  ``never_received`` and
+    ``finished`` have opposite consequences for a caller, and a single
+    type hid that:
+
+    * the work did not happen -- the runner-side session is untouched
+      and **retrying is safe**;
+    * the work RAN -- history advanced, tools executed, files were
+      written, a provider was billed, an external API was called, and
+      only the daemon's view of the result was lost.  **Retrying
+      re-executes it.**
+
+    The axis is :attr:`may_have_run`, deliberately shaped after
+    :attr:`jaato_sdk.client.errors.SessionCreateFailed.may_exist` --
+    whose own docstring makes the case ("``True`` means the outcome is
+    genuinely unknown and a blind retry may create a SECOND session")
+    and whose ``SessionNotConfirmed`` sibling states the design rule
+    this follows: *"the one failure where the correct action depends on
+    something the caller cannot see, which is why it is a distinct type
+    rather than a detail in a message"*.
+
+    :attr:`verdict` is the machine-readable token for the MECHANISM, the
+    way ``SessionCreateFailed.cause`` is: stable, greppable and safe to
+    branch on where the human message is not.
+
+    ``may_have_run`` FAILS SAFE.  Only a verdict that positively
+    establishes the runner never received the call may claim ``False``;
+    every form of "we could not find out" reports ``True``.  A wrong
+    ``True`` costs a caller a redundant check, a wrong ``False`` costs
+    it a duplicated turn.
+
+    Attributes:
+        verdict: One of ``never_received``, ``finished``,
+            ``indeterminate``, ``unreachable``.
+        may_have_run: Whether the runner may already have executed this
+            call.  ``False`` only when that is provably excluded.
+        request_id: The RPC id, for correlation against the daemon's
+            ``DISPATCHED`` trace line.
+        method: The RPC method, e.g. ``session.send_message``.
+        session_id: The session this channel serves, when bootstrap has
+            named one.
     """
+
+    #: Class-level defaults are the SAFE reading, so introspecting the
+    #: base (or a subclass that forgets to override) never yields
+    #: "safe to retry" by omission.
+    verdict: str = "unknown"
+    may_have_run: bool = True
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        request_id: Optional[int] = None,
+        method: Optional[str] = None,
+        session_id: Optional[str] = None,
+    ) -> None:
+        super().__init__(message)
+        self.request_id = request_id
+        self.method = method
+        self.session_id = session_id
+
+    def as_details(self) -> Dict[str, Any]:
+        """The machine-readable evidence for ``ErrorEvent.details``.
+
+        ``ErrorEvent.details`` is documented as "what a driver branches
+        on", with ``error`` left as the human sentence -- so the
+        retry-safety answer travels there rather than being recoverable
+        from a message string.  See
+        :meth:`server.core.JaatoServer` 's model-thread handler for the
+        emission, and the module docstring of
+        ``test_lost_dispatch_deadline_856`` for why ``recoverable`` is
+        NOT the field for this.
+        """
+        return {
+            "verdict": self.verdict,
+            "may_have_run": self.may_have_run,
+            "request_id": self.request_id,
+            "method": self.method,
+            "session_id": self.session_id or None,
+        }
+
+
+class RunnerDispatchNotReceived(RunnerDispatchLost):
+    """The runner positively does not have the call, and never did.
+
+    Its seen-id window covers the id and does not contain it, so the
+    request never reached the dispatcher.  The runner-side session is
+    untouched.
+
+    **RETRY IS SAFE** -- this is the only lost-dispatch verdict that may
+    say so, and it says so because the runner's answer excluded the
+    alternative rather than because nothing contradicted it.
+    """
+
+    verdict = "never_received"
+    may_have_run = False
+
+
+class RunnerResultLost(RunnerDispatchLost):
+    """The runner RAN the call and the RESPONSE never arrived.
+
+    The id has left ``active_call_ids`` and is still inside the seen-id
+    window, so the dispatcher took it and finished with it.  Every side
+    effect of that work is already in the world; the only casualty is
+    the daemon's view of the result.
+
+    **RETRY RE-EXECUTES THE WORK.**  Prefer reading the session's state
+    (``get_history``, the artefacts the turn was meant to produce) over
+    sending it again -- the counterpart of ``SessionNotConfirmed``'s
+    "prefer looking for the session over creating another".
+    """
+
+    verdict = "finished"
+    may_have_run = True
+
+
+class RunnerDispatchUnknown(RunnerDispatchLost):
+    """Nobody could say whether the call ran.
+
+    Two mechanisms, one consequence, told apart by :attr:`verdict`:
+
+    * ``unreachable`` -- the reconciliation probe itself did not come
+      back, so the runner was never asked;
+    * ``indeterminate`` -- the runner answered, and its seen-id window
+      had already rolled past the id, so its answer does not cover the
+      question.  This is the case that makes
+      :data:`server.runner.rpc.SEEN_REQUEST_ID_MEMORY` a correctness
+      bound rather than a tuning parameter: without this verdict a
+      rolled window reads as ``never_received``, which is the one
+      misclassification that says "safe to retry" about work that ran.
+
+    **TREAT AS POSSIBLY EXECUTED.**
+    """
+
+    verdict = "unreachable"
+    may_have_run = True
+
+    def __init__(self, message: str, *, verdict: str = "unreachable",
+                 **kwargs: Any) -> None:
+        super().__init__(message, **kwargs)
+        #: Per-instance, because the two mechanisms share this type and
+        #: differ only in which one happened.
+        self.verdict = verdict
+
+
+#: verdict token -> the exception that carries it.  One table rather than a
+#: chain of ``if``s, so a verdict added later cannot silently fall through to
+#: a class whose ``may_have_run`` is wrong for it.
+_VERDICT_EXCEPTIONS: Dict[str, type] = {
+    "never_received": RunnerDispatchNotReceived,
+    "finished": RunnerResultLost,
+    "indeterminate": RunnerDispatchUnknown,
+    "unreachable": RunnerDispatchUnknown,
+}
+
+
+def classify_reconciliation(
+    request_id: int, status: Dict[str, Any],
+) -> Tuple[str, str]:
+    """Turn one ``session.health_check`` answer into a verdict (#856).
+
+    Pure, so the dangerous cases are unit-testable without a socket:
+    every branch below is a claim about whether the runner may already
+    have executed *request_id*, and one of them is allowed to say "no".
+
+    Args:
+        request_id: The id under reconciliation.
+        status: The runner's ``session.health_check`` result.
+
+    Returns:
+        ``(verdict, detail)``.  Verdict is one of ``running``,
+        ``finished``, ``never_received``, ``indeterminate``; ``detail``
+        is a human sentence for the log and the exception message.
+
+    The ordering is load-bearing:
+
+    1. **active** -> ``running``.  The runner has it; nothing is wrong.
+    2. **in the window** -> ``finished``.  It ran, so the response is
+       what was lost.
+    3. **the window has EVICTED, and the id is below its floor** ->
+       ``indeterminate``.  The runner's answer is then silent about the
+       id rather than negative, and reading silence as "never received"
+       is the one misclassification that says "safe to retry" about work
+       that ran.
+    4. otherwise -> ``never_received``, the one safe-to-retry verdict.
+
+    **Absence is proof only while the window has never evicted.**  It is
+    a ``deque(maxlen=...)``, so it has dropped something iff it is FULL
+    -- and the runner reports its own capacity
+    (``seen_window_capacity``) rather than the daemon assuming a
+    constant, because a number asserted on one side of a wire about the
+    other is exactly the kind of claim that goes stale silently.  A
+    partly-filled window has evicted nothing, so an id missing from it
+    was genuinely never registered, and `min()` is merely the oldest id
+    the runner happens to have seen -- NOT a floor.  Treating it as one
+    would report ``indeterminate`` for the ordinary lost dispatch (whose
+    id is, by construction, older than the probe's), and the safe
+    verdict would then be the only verdict ever reached: fail-safe, and
+    useless.
+
+    With no capacity reported the window is assumed full whenever it is
+    non-empty, which is the conservative reading -- it can only move an
+    answer from ``never_received`` towards ``indeterminate``.
+    """
+    active = set(status.get("active_call_ids") or ())
+    known = set(status.get("known_request_ids") or ())
+    highest = status.get("highest_request_id")
+
+    if request_id in active:
+        return "running", f"the runner reports id={request_id} running"
+
+    if request_id in known:
+        return "finished", (
+            f"the runner ran id={request_id} and it is no longer active, "
+            f"so the RESPONSE frame is what was lost.  Its side effects "
+            f"have already happened"
+        )
+
+    if not known and highest:
+        # A runner that has registered calls and remembers none of them:
+        # its answer cannot be interpreted either way.
+        return "indeterminate", (
+            f"the runner reports no remembered ids beside a high-water "
+            f"mark of {highest}, so its answer does not cover "
+            f"id={request_id}"
+        )
+
+    capacity = status.get("seen_window_capacity")
+    evicted = (
+        len(known) >= capacity if isinstance(capacity, int) and capacity > 0
+        else bool(known)
+    )
+    floor = min(known) if known else 0
+    if evicted and request_id < floor:
+        return "indeterminate", (
+            f"id={request_id} is below the runner's seen-id window, which "
+            f"is full ({len(known)} of {capacity}) and now starts at "
+            f"{floor} -- it has rolled past the id, so the answer is "
+            f"silent about it rather than negative, and it may have run"
+        )
+
+    return "never_received", (
+        f"the runner has never been asked to run id={request_id} "
+        f"(it is running {sorted(active)}, and its seen-id window holds "
+        f"{len(known)} of {capacity} ids, so it has evicted nothing and "
+        f"its silence about this id is conclusive).  The frame was "
+        f"written to the wire and the runner does not have it"
+    )
 
 
 async def _await_runner(coro: Any, timeout: Optional[float], method: str) -> Any:
@@ -430,6 +679,12 @@ class RunnerRPCClient:
         #: Counted, not merely logged, so a harness can assert on it —
         #: the posture ``cancel_write_failures`` already takes (#988).
         self._dispatch_lost = 0
+        #: Of those, how many MAY ALREADY HAVE RUN — the subset whose
+        #: side effects are in the world and whose result is gone.  A
+        #: separate number because the two need different operator
+        #: responses: the first is lost work, the second is work that
+        #: happened and cannot be safely repeated.
+        self._dispatch_lost_may_have_run = 0
 
     @property
     def runner_pid(self) -> int:
@@ -1271,35 +1526,28 @@ class RunnerRPCClient:
         the probe's own id.  Comparing against it would report every id
         as received, including the ones that never arrived.
 
+        The reasoning is :func:`classify_reconciliation`, which is pure
+        and therefore unit-testable without a socket -- it decides
+        whether the work MAY ALREADY HAVE RUN, which is the one answer
+        a caller acts on differently.  This method owns only the I/O
+        and the one verdict the classifier cannot reach: a probe that
+        did not come back at all.
+
         Returns:
             ``(verdict, detail)`` where verdict is one of ``running``,
-            ``finished``, ``never_received`` or ``unreachable``, and
-            detail is a human-readable account for the log and the
-            exception message.
+            ``finished``, ``never_received``, ``indeterminate`` or
+            ``unreachable``, and detail is a human-readable account for
+            the log and the exception message.
         """
         try:
             status = await self.session_health_check(timeout=10.0)
         except Exception as exc:   # noqa: BLE001 — any failure is "no answer"
             return "unreachable", (
                 f"the runner did not answer session.health_check "
-                f"({type(exc).__name__}: {exc})"
+                f"({type(exc).__name__}: {exc}), so nobody can say whether "
+                f"id={request_id} ran"
             )
-        active = set(status.get("active_call_ids") or ())
-        known = set(status.get("known_request_ids") or ())
-        if request_id in active:
-            return "running", f"the runner reports id={request_id} running"
-        if request_id in known:
-            return "finished", (
-                f"the runner ran id={request_id} and it is no longer "
-                f"active, so the RESPONSE frame is what was lost"
-            )
-        return "never_received", (
-            f"the runner has never been asked to run id={request_id} "
-            f"(it is running {sorted(active)} and remembers "
-            f"{len(known)} recent ids, highest="
-            f"{status.get('highest_request_id')}).  The frame was "
-            f"written to the wire and the runner does not have it."
-        )
+        return classify_reconciliation(request_id, status)
 
     def _fail_lost_dispatch(
         self,
@@ -1319,26 +1567,62 @@ class RunnerRPCClient:
         if fut.done():
             return
         self._dispatch_lost += 1
-        message = (
+        exc_cls = _VERDICT_EXCEPTIONS.get(verdict, RunnerDispatchLost)
+        kwargs: Dict[str, Any] = {
+            "request_id": request_id,
+            "method": method,
+            "session_id": self._session_id,
+        }
+        if exc_cls is RunnerDispatchUnknown:
+            # The two mechanisms share the type and differ in the token.
+            kwargs["verdict"] = verdict
+        exc = exc_cls(
             f"runner RPC id={request_id} ({method}) was dispatched and is "
-            f"lost: {detail}.  session={self._session_id or '<unbootstrapped>'} "
-            f"runner_pid={self._runner_pid} verdict={verdict}.  The channel "
-            f"is open and the runner is answering, so this is NOT a dead "
-            f"runner (#851) — the turn failed, the session is still loaded."
+            f"lost: {detail}.  "
+            f"session={self._session_id or '<unbootstrapped>'} "
+            f"runner_pid={self._runner_pid} verdict={verdict} "
+            f"may_have_run={exc_cls.may_have_run}.  The channel is open and "
+            f"the runner is answering, so this is NOT a dead runner (#851) "
+            f"— the turn failed, the session is still loaded.",
+            **kwargs,
         )
-        logger.warning("RunnerRPCClient: %s", message)
-        fut.set_exception(RunnerDispatchLost(message))
+        # WARNING for a retry-safe verdict, ERROR for one that is not: a
+        # call whose side effects have already happened and whose result
+        # is gone is the one an operator must see, and the two used to be
+        # the same line at the same level.
+        logger.log(
+            logging.ERROR if exc.may_have_run else logging.WARNING,
+            "RunnerRPCClient: %s", str(exc),
+        )
+        if exc.may_have_run:
+            self._dispatch_lost_may_have_run += 1
+        fut.set_exception(exc)
 
     def dispatch_lost_count(self) -> int:
         """How many calls this channel failed as lost dispatches (#856).
 
         Nonzero means at least one request reached the wire and the
-        runner, asked directly, did not have it.  The companion to
-        :meth:`cancel_write_failures`, and the daemon-side half of the
+        runner, asked directly, could not account for it.  The companion
+        to :meth:`cancel_write_failures`, and the daemon-side half of the
         runner's ``cancel_stats()['unknown']`` (#988): both count a peer
         disagreeing with us about what is in flight.
+
+        Counts every verdict.  :meth:`dispatch_lost_may_have_run_count`
+        is the subset that matters operationally.
         """
         return self._dispatch_lost
+
+    def dispatch_lost_may_have_run_count(self) -> int:
+        """Of the lost dispatches, how many may already have EXECUTED.
+
+        The difference between this and :meth:`dispatch_lost_count` is
+        the difference between work that never happened and work that
+        happened with nobody to receive the result — and therefore
+        between a turn that is safe to send again and one that is not.
+        Nonzero on a healthy-looking daemon is the signal to go and
+        reconcile side effects by hand.
+        """
+        return self._dispatch_lost_may_have_run
 
     async def _send_cancel(self, request_id: int) -> None:
         """Send a cancel frame for *request_id* if the call is still in flight.

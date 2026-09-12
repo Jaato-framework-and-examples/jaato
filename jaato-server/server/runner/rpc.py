@@ -260,8 +260,16 @@ MAIN_THREAD_METHODS = frozenset({"session.bootstrap"})
 #: 256 is sized against the question actually asked.  The daemon probes
 #: about an id it dispatched seconds ago, so the window only has to outlive
 #: the ack deadline -- a session would have to issue 256 further RPCs on one
-#: channel inside that window to roll the answer out of memory, and the
-#: daemon reports that case as inconclusive rather than guessing.
+#: channel inside that window to roll the answer out of memory.
+#:
+#: **The size is a tuning parameter; the FULLNESS is a correctness bound.**
+#: The daemon tells its caller whether a lost call may already have executed,
+#: and "the id is not in this window" only proves it was never registered
+#: while the window has evicted nothing.  So the capacity is reported
+#: alongside the ids (``seen_window_capacity``) and a FULL window whose floor
+#: sits above the id is answered "indeterminate -- it may have run", never
+#: "never received".  Raising this number reduces how often that happens; it
+#: is not what makes the answer safe.
 SEEN_REQUEST_ID_MEMORY = 256
 
 
@@ -1471,6 +1479,16 @@ class RunnerRPC:
             - ``known_request_ids`` (List[int]): the last
               :data:`SEEN_REQUEST_ID_MEMORY` ids the reader thread
               registered, sorted.  A superset of the active ones.
+            - ``seen_window_capacity`` (int): that window's ``maxlen``.
+              Reported rather than assumed daemon-side, because it is
+              what tells the reader whether the window has EVICTED
+              anything: a window that is not full has dropped nothing,
+              so an id missing from it was genuinely never registered,
+              and the daemon may safely tell its caller the work did
+              not happen.  A full one has rolled, and its silence about
+              an old id is not a denial.  Hardcoding the number on the
+              far side of a wire is how that distinction goes stale
+              without anyone noticing.
             - ``highest_request_id`` (int): the highest id ever
               registered.  Diagnostic only -- see
               :data:`SEEN_REQUEST_ID_MEMORY` for why the daemon must
@@ -1496,6 +1514,7 @@ class RunnerRPC:
                 "active_call_ids": sorted(self._active_calls),
                 "known_request_ids": sorted(self._seen_request_ids),
                 "highest_request_id": self._highest_request_id,
+                "seen_window_capacity": self._seen_request_ids.maxlen,
             }
 
         with self._session_lock:

@@ -2748,16 +2748,68 @@ request it wrote is being worked on: after a window with no frame bearing
 that id, it ASKS the runner — over the **control lane**, so the answer
 arrives while the work lane is busy with the very turn in question.
 
-| verdict | the runner says | action |
-|---|---|---|
-| `running` | the id is in `active_call_ids` | another full window, indefinitely |
-| `finished` | the id has left `active_call_ids` and is still in `known_request_ids` | fail — the RESPONSE was lost |
-| `never_received` | neither | fail — **the bug** |
-| `unreachable` | the probe itself did not come back | fail — bounded work went unanswered |
+| verdict | the runner says | action | may have run? |
+|---|---|---|---|
+| `running` | the id is in `active_call_ids` | another full window, indefinitely | — |
+| `finished` | it left `active_call_ids`, still in the window | fail — the RESPONSE was lost | **yes** |
+| `never_received` | not in a window that has evicted nothing | fail — **the bug** | no |
+| `indeterminate` | the window has rolled past the id | fail | **yes** |
+| `unreachable` | the probe itself did not come back | fail | **yes** |
 
 `session.health_check` carries the transport view (`active_call_ids`,
-`known_request_ids`, `highest_request_id`), reported whether or not a
-session host exists because it describes the CHANNEL, not the session.
+`known_request_ids`, `highest_request_id`, `seen_window_capacity`),
+reported whether or not a session host exists because it describes the
+CHANNEL, not the session.
+
+**The last column is the whole point, and it is a TYPE.** `finished` and
+`never_received` have opposite consequences: one says the work did not
+happen and retrying is safe; the other says it RAN — history advanced,
+tools executed, files were written, a provider was billed — and only the
+daemon's view of the result was lost, so retrying re-executes it. A
+single exception hid that, which is the shape
+`jaato_sdk.client.errors.SessionNotConfirmed` already names: *"the one
+failure where the correct action depends on something the caller cannot
+see, which is why it is a distinct type rather than a detail in a
+message"*.
+
+| exception | verdict(s) | `may_have_run` |
+|---|---|---|
+| `RunnerDispatchNotReceived` | `never_received` | `False` — retry is safe |
+| `RunnerResultLost` | `finished` | `True` — retry re-executes |
+| `RunnerDispatchUnknown` | `indeterminate`, `unreachable` | `True` — nobody could say |
+
+All three subclass `RunnerDispatchLost`, so `except RunnerDispatchLost`
+still catches every one. `may_have_run` is the axis
+`SessionCreateFailed.may_exist` established, `verdict` is the
+machine-readable mechanism token its `cause` established, and both **fail
+safe**: the base defaults to `may_have_run = True`, so a verdict added
+later cannot inherit "safe to retry" by forgetting to decide.
+
+It reaches a client on **`ErrorEvent.details`** — the field documented as
+"what a driver branches on", with `error` left as the human sentence.
+Deliberately **not** `recoverable`: in this tree that flag means *this
+session can continue* (every `recoverable=False` site is a config or
+provider-connect failure that ends initialisation), and sparing a
+`RunnerRPCTimeout` here is precisely what keeps the session alive.
+Encoding retry-safety there would assert something false about session
+viability to every consumer that reads it the documented way.
+
+**The window's FULLNESS, not its size, is the correctness bound.**
+`known_request_ids` is a `deque(maxlen=...)`, so it has evicted something
+only once it is FULL; until then "not in the window" proves "never
+registered". A full window whose floor sits above the id is answered
+`indeterminate`, never `never_received` — that one misclassification is
+exactly the unsafe direction, and raising 256 to a larger number would
+only make it rarer, not impossible. The runner reports its own
+`seen_window_capacity` rather than the daemon assuming the constant,
+because a number asserted on one side of a wire about the other is how
+that distinction goes stale unnoticed.
+
+Two counters, because the two need different operator responses:
+`dispatch_lost_count()` is every lost dispatch,
+`dispatch_lost_may_have_run_count()` the subset whose side effects are
+already in the world. The first is logged at WARNING, the second at
+ERROR.
 
 **The predicate is a window, not a high-water mark.** The probe is itself
 a request, registered on the runner's reader thread *before* its own
