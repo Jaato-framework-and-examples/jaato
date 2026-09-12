@@ -19,6 +19,10 @@ from __future__ import annotations
 
 import json
 import os
+from shared.history_invariant import (
+    new_tool_call_nonce,
+    synthetic_tool_call_id,
+)
 from shared.session_context import get_workspace_root, get_config_root
 from shared.secret_repr import secret_safe_repr
 from shared.tool_id_map import wire_name_trace_fields
@@ -1820,6 +1824,11 @@ class GitHubModelsProvider(ModalityCapabilityMixin):
 
         # Track tool call accumulation (streaming sends tool calls in pieces)
         tool_call_accumulators: Dict[int, Dict[str, Any]] = {}
+        # Discriminator for ids this response has to mint because the
+        # upstream sent none (#674).  One per response: the delta ``index``
+        # is unique only WITHIN a response, so index alone would put two
+        # different calls from two turns under one id in the same history.
+        tool_id_nonce = new_tool_call_nonce()
 
         def flush_text_block():
             nonlocal accumulated_text
@@ -1839,16 +1848,22 @@ class GitHubModelsProvider(ModalityCapabilityMixin):
                     args, unreadable_args = parse_tool_call_arguments(
                         tc.get("function", {}).get("arguments")
                     )
-                    # OpenAI/Copilot API should always return an ID for tool calls.
-                    # If missing, log for investigation - this indicates a parsing issue.
+                    # The API should always return an ID for tool calls.
+                    # When it does not, mint one rather than letting an
+                    # unmatchable call reach history (#674).
                     tool_id = tc.get("id")
                     # Restore original tool name from sanitized version
                     sanitized_name = tc["function"]["name"]
                     original_name = get_original_tool_name(sanitized_name)
                     if not tool_id:
-                        self._trace(f"ERROR: Missing tool call ID from API for {sanitized_name} - this will cause 400 errors")
+                        tool_id = synthetic_tool_call_id(idx, tool_id_nonce)
+                        self._trace(
+                            f"SYNTHETIC_TOOL_CALL_ID idx={idx} "
+                            f"id={tool_id!r} name={original_name!r} — "
+                            f"upstream streamed no id"
+                        )
                     fc = FunctionCall(
-                        id=tool_id,  # May be None - will cause API error, which is correct
+                        id=tool_id,
                         name=original_name,
                         args=args,
                         unreadable_args=unreadable_args,

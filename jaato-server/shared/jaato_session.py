@@ -92,6 +92,7 @@ from .plugins.gc.utils import (
     history_media_bytes,
     message_media_tokens,
 )
+from .history_invariant import repair_history
 from jaato_sdk.media_identity import ATTACHMENT_ID_KEY, mint_attachment_id
 from .instruction_budget import (
     InstructionBudget,
@@ -8588,13 +8589,34 @@ NOTES
         This is called when the model rejects a request due to context limit exceeded.
         The GC plugin decides whether it's feasible to collect anything at this point.
 
-        During context limit recovery from send_tool_results, the provider has already
-        rolled back the tool result messages, leaving the trailing MODEL message (with
-        function_calls) without matching tool results. This MODEL message must be
-        preserved through GC because the caller will retry sending the tool results.
-        Without this preservation, ensure_tool_call_integrity() would remove the
-        "unpaired" MODEL message, and the retry would fail because the tool results
-        would reference tool_call_ids absent from the history.
+        During context limit recovery from send_tool_results, the provider has
+        already rolled back the tool result messages, leaving the trailing MODEL
+        message (with function_calls) without matching tool results. That message
+        is withheld from GC below, and the reason INVERTED in #674 — the pop is
+        still load-bearing, so do not remove it on the strength of the old one.
+
+        Its calls are **pending a retry, not unanswered**, and the repair pass
+        cannot tell those two states apart: a call with no result looks the same
+        whether the turn abandoned it or ``send_tool_results`` is about to send
+        its real result a moment later. Only this method knows which.
+
+        ==========================  =======================================
+        repair policy               what leaving the message in would cost
+        ==========================  =======================================
+        before #674 (delete)        the MODEL message was removed as
+                                    "unpaired", so the retry's results
+                                    referenced tool_call_ids absent from
+                                    the history.
+        since #674 (answer)         ``repair_history`` SYNTHESISES a
+                                    cancelled result for each pending call,
+                                    and the retry then appends the real one
+                                    — the same ``call_id`` answered twice.
+                                    A duplicated ``tool_result`` is its own
+                                    provider rejection.
+        ==========================  =======================================
+
+        The old policy lost a message; the new one would duplicate a result.
+        Withholding the message is what prevents both.
 
         Args:
             on_output: Optional callback for UI notifications.
@@ -8616,11 +8638,15 @@ NOTES
         context_usage = self.get_context_usage()
         history = self.get_history()
 
-        # Save trailing MODEL message with pending tool calls before GC.
+        # Withhold the trailing MODEL message with pending tool calls from GC.
         # When send_tool_results fails with context limit, the provider rolls back
-        # the tool result messages but the MODEL message (with function_calls) remains
-        # at the end of history without matching responses. ensure_tool_call_integrity()
-        # would remove this as "unpaired", but we need it for the retry.
+        # the tool result messages but the MODEL message (with function_calls)
+        # remains at the end of history without matching responses.  Those calls
+        # are pending a RETRY, not unanswered, and ensure_tool_call_integrity()
+        # cannot tell the difference: since #674 it would synthesise a cancelled
+        # result for each, and the retry would then append the real one — the same
+        # call_id answered twice.  (Before #674 it removed the message instead.)
+        # Either way the message must not be visible to the repair pass.
         trailing_model_msg = None
         if (history and history[-1].role == Role.MODEL
                 and history[-1].function_calls):
@@ -8912,13 +8938,38 @@ NOTES
         because what the session *remembers* and what the *active model* may
         be handed are not the same list once a session is multimodal.
 
-        The difference is :meth:`_gate_history_for_active_modalities`: binary
-        content the active model cannot consume is withheld from the copy
-        handed to the provider, with a note in its place.  The stored history
-        is untouched, so switching back to a tier that can consume the
-        content restores it (#847).
+        Two transforms apply, in this order, and **neither touches stored
+        history** — both return a per-request copy:
+
+        1. :meth:`_gate_history_for_active_modalities` withholds binary
+           content the active model cannot consume, leaving a note in its
+           place.  Switching back to a tier that can consume it restores the
+           content, because the bytes never left the store (#847).
+        2. :func:`shared.history_invariant.repair_history` enforces the
+           call/result pairing invariant: every ``FunctionCall`` leaves here
+           with a matching ``ToolResult``, no result precedes the call it
+           answers, no content block is empty, and no call carries a missing
+           id.  This is the boundary backstop for **all** the subsystems that
+           edit history independently — the four GC strategies, cancellation
+           mid-batch, ``rewind``, subagent history sharing, and an
+           OpenAI-compatible endpoint that streamed a tool call with no id —
+           so none of them has to know about the others (#674).
+
+        Gating runs first: withholding an attachment can empty a part, and
+        the invariant pass is what notices that the message it left behind
+        has no content.  Repairing the *copy* rather than the store is the
+        same contract the gate holds to and matters for the same reason
+        inverted — a turn cancelled mid-batch must keep its unanswered calls
+        on disk, because the session may still execute them and the real
+        results would collide with synthetic ones written into the store.
+
+        Returns:
+            A list safe to hand to any provider; the stored ``Message``
+            objects themselves when nothing needed gating or repair.
         """
-        return self._gate_history_for_active_modalities(self._history.messages)
+        gated = self._gate_history_for_active_modalities(
+            self._history.messages)
+        return repair_history(gated, trace_fn=self._trace)
 
     def _gate_history_for_active_modalities(
         self, messages: List['Message']
@@ -13016,9 +13067,48 @@ NOTES
         self._gc_config = None
 
     def manual_gc(self) -> GCResult:
-        """Manually trigger garbage collection."""
+        """Manually trigger garbage collection.  **Turn-boundary only.**
+
+        Refuses while a turn is in progress, for the same reason
+        :meth:`_try_gc_for_context_recovery` withholds its trailing MODEL
+        message: the repair pass cannot distinguish a call **pending a
+        retry** from one **genuinely unanswered**.  One reason, two guards.
+
+        Mid-turn, history can end with an assistant message whose calls are
+        about to be answered for real.  ``ensure_tool_call_integrity`` would
+        synthesise a cancelled result for each, and the real results would
+        then arrive as duplicates — the same ``call_id`` answered twice,
+        which is its own provider rejection.  (Before #674 the same window
+        removed the message instead; the hazard is not new, its shape is.)
+
+        Idle, the opposite is true and is why this refuses rather than
+        withholding: a trailing batch with no results is then genuinely
+        abandoned, and answering it **in the stored record** is the right
+        outcome — the one a later per-request repair cannot achieve, since
+        it never writes to disk.
+
+        **Raises rather than returning a no-op result** because this verb is
+        operator-driven and its only non-test caller is the public
+        :meth:`JaatoClient.manual_gc`: a ``GCResult`` reporting nothing
+        collected is indistinguishable from a pass that found nothing to
+        collect, which is exactly the partially-firing-but-observable
+        failure mode ``gc_support`` exists to complain about.  Raising also
+        matches this method's own precedent for "cannot do the job".
+
+        Raises:
+            RuntimeError: If no GC plugin is configured, or if a turn is in
+                progress.
+        """
         if not self._gc_plugin:
             raise RuntimeError("No GC plugin configured.")
+        if self.is_running:
+            raise RuntimeError(
+                "manual_gc() is a turn-boundary operation and a turn is in "
+                "progress. Mid-turn, a pending tool-call batch is "
+                "indistinguishable from an abandoned one, so collection "
+                "would synthesise results for calls that are about to be "
+                "answered for real. Retry once the turn completes."
+            )
         if not self._gc_config:
             self._gc_config = GCConfig()
 

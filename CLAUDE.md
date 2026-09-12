@@ -803,6 +803,109 @@ from `.jaato/gc.json`; both layers pass a key only when it is present, so
 omitting one leaves the framework default (and `JAATO_GC_MEDIA_BYTES`) in
 charge rather than silently overriding it.
 
+### One Invariant, Enforced Where History Leaves (#674)
+
+Every provider here requires that an assistant turn's function calls and
+the results answering them stay **paired**: one `ToolResult` per
+`FunctionCall` id, no result before its call, no empty content block. Break
+it and the upstream rejects the *whole* request — several turns after the
+damage, which is what makes the class expensive.
+
+**Five subsystems edit history independently and none can see the others**:
+the four GC strategies, cancellation (`CancelToken` mid-batch, widened by
+8-wide parallel execution), `rewind`, subagent history sharing, and the
+**wire** — an OpenAI-compatible endpoint that streams a tool call with no
+id puts a call into history no result can ever match. Enforcing at each site
+means auditing five subsystems plus every future GC plugin; enforcing at the
+boundary is one place.
+
+`shared/history_invariant.py` is that place. `validate_history` reports
+defects (`unmatched_call`, `orphan_result`, `missing_call_id`,
+`duplicate_call_id`, `empty_content`); `repair_history` fixes them in four
+ordered passes — mint missing ids, drop orphan results, **answer** unmatched
+calls, drop empty content — and is called from
+`JaatoSession._history_for_provider`, the seam every `provider.complete()`
+call site already reads (#847).
+
+| Property | Why it is load-bearing |
+|---|---|
+| **repairs the per-request COPY, never stored history** | the #847 precedent, inverted: a turn cancelled mid-batch must keep its unanswered calls on disk, because the session may still execute them and real results would collide with synthetic ones written into the store |
+| **an unanswered call is ANSWERED, never deleted** | deleting the assistant message is the obvious repair and it strips `Part.thought` — which `replay_reasoning` providers require back (MiMo answers **400** without `reasoning_content`, Kimi K3 wants the message as-is). That trades a pairing 400 for a reasoning 400. No MODEL message is ever removed |
+| **the synthesised result is byte-CONSTANT** | `repair_history` runs on every request built from the same history, so a timestamp or random id in the payload would change the request prefix each turn and cost a full prompt-cache re-read on Anthropic/Gemini upstreams |
+| **a healthy history is returned unchanged** (same list object) | the overwhelmingly common case allocates nothing |
+| **every repair traces `HISTORY_INVARIANT: ...`** | a silent repair hides the subsystem producing bad histories, which was half the original defect |
+
+**Empty content blocks are MORE reachable now, not less.** *"Text content
+blocks must be non-empty"* after a thought-only turn is exactly the shape
+reasoning replay makes routine: a `replay_reasoning` session deliberately
+keeps thought parts in history. The empty text beside the thought is removed
+and the thought is kept.
+
+**The wire seam is fixed too, not only the backstop.**
+`synthetic_tool_call_id(index, nonce)` mints an id at accumulation time in
+all four streaming loops that key tool-call deltas by index
+(`_openai_compat` — so nim/nebius/ovhcloud/doubleword/zhipuai_openai — plus
+`openrouter`, `vllm` and `github_models`). The **nonce is required, not
+defaulted**: `index` is unique only *within* a response, so index alone
+would put two different calls from two turns under one id in the same
+history — the defect wearing the fix as a disguise. An upstream-supplied id
+is never replaced.
+
+**Measured, and recorded because it is a negative result.** On a seeded
+corpus of multi-call histories all four GC strategies are *already*
+pair-safe — they cut on turn boundaries (`split_into_turns` /
+`flatten_turns` keep an assistant turn and its results together), removing
+~500 messages across 40 seeds without orphaning a call. So those tests are a
+regression detector, guarded by `test_gc_collection_is_not_vacuous`.
+
+**The defect was in the repair, not the strategies.**
+`ensure_tool_call_integrity` — the GC-path repair, named for the invariant —
+*produced* the violation it exists to prevent, on the shape #674 is about:
+
+```
+MODEL calls {A, B}  ->  TOOL answers A  ->  USER turn
+```
+
+Pass 1 kept the TOOL message (`A` is valid); pass 2 reached the USER branch
+with `B` still pending and deleted the **MODEL** message, leaving `A`'s
+result answering a call present nowhere. Every case with at least one real
+result — 14 of 18 at widths 2/3/5/8. And its output is **stored**, so a
+session GC'd into that state and then persisted came back corrupt on revive.
+
+So the producer is fixed at source: `ensure_tool_call_integrity` now
+delegates to `repair_history`, giving one policy in one place. Writing
+synthetic results into the store is safe there because all four call sites
+run **between** turns — `_maybe_collect_after_turn` and
+`_maybe_collect_before_send` sit on turn boundaries, `manual_gc` is
+operator-driven, and `_try_gc_for_context_recovery` pops the trailing MODEL
+message with pending calls before calling it. The boundary validator remains,
+now as a backstop for a *fixed* producer rather than the sole defence — it
+covers what GC never sees (cancellation, rewind, subagent sharing, the wire).
+Its complexity baseline entry dropped from **41** to gone (the function is
+now 1).
+
+**Already-corrupt records are not migrated**, deliberately. Such a history is
+never *sent* corrupt (every request goes through `_history_for_provider`), and
+the first GC pass in a revived session heals the stored record — but an
+untouched record stays corrupt on disk until one of those happens. Rewriting
+persisted session records is a migration with its own failure modes; the two
+paths above cover every route this tree reads history by.
+
+Tests: `shared/tests/test_history_invariant.py` (unit per defect kind,
+seeded property tests over all four GC strategies / cancel-at-turn-N / every
+suffix / every partial-batch width, plus the **prose** wire — `_prose_tools`
+carries the pairing in text, so a repair that is pair-safe on the Anthropic
+wire is not automatically pair-safe there; both pairing survival *and*
+byte-stability are asserted on it, since the prose form re-serialises the
+whole result including its `(call <id>)` label),
+`shared/plugins/gc/tests/test_utils.py` (the stored-history half — the
+`{A,B}`/answer-`A`/USER regression, and the renamed tests that used to
+encode the deletion policy) and
+`shared/plugins/model_provider/_openai_compat/tests/test_streamed_tool_call_without_id_674.py`
+(drives the real streaming loop of three providers; verified to fail 9/15
+when the mint is neutralised, because a test that cannot fail proves
+nothing).
+
 ### Deferred Tool Loading
 
 Tools have a `discoverability` attribute: `"core"` (always loaded) or `"discoverable"` (on-demand).

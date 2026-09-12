@@ -279,12 +279,71 @@ def make_user_tool_results(call_ids):
     return Message(role=Role.USER, parts=parts)
 
 
+def _call_ids(history):
+    """Every function-call id in ``history``, in order."""
+    return [p.function_call.id for m in history for p in m.parts
+            if p.function_call]
+
+
+def _result_ids(history):
+    """Every call id answered by ``history``, in order."""
+    return [p.function_response.call_id for m in history for p in m.parts
+            if p.function_response]
+
+
 class TestEnsureToolCallIntegrity:
     """Tests for ensure_tool_call_integrity().
 
     This function repairs tool_use/tool_result pairing after GC removes
     messages individually, which can create orphaned entries.
+
+    **Its repair policy changed in #674** and several tests here were
+    renamed to match.  It used to repair by DELETION — a MODEL message
+    whose tool calls were not all answered was removed — which on a
+    *partially* answered batch left the answered result orphaned, i.e.
+    produced the violation the function exists to prevent.  It now
+    delegates to :func:`shared.history_invariant.repair_history`: an
+    unanswered call is ANSWERED with a synthetic cancelled result and no
+    MODEL message is ever removed.  Orphaned *results* are still dropped
+    (there is no call to pair them with).
     """
+
+    def test_a_partially_answered_batch_does_not_orphan_its_real_result(self):
+        """The #674 shape: ``{A,B}`` called, ``A`` answered, then a USER turn.
+
+        Under the old deletion policy pass 1 kept the TOOL message because
+        ``A`` was valid, then pass 2 hit the USER branch with ``B`` still
+        pending and deleted the MODEL message — leaving ``A``'s result
+        answering a call present nowhere.  This is the regression test for
+        that exact sequence, and it is the stored-history half of the fix:
+        a session GC'd into that state is **persisted**, so a revived
+        session came back corrupt.
+        """
+        history = [
+            make_message("user", "Do tasks"),
+            make_model_with_tool_calls(["call_A", "call_B"]),
+            make_tool_results(["call_A"]),
+            make_message("user", "Never mind"),
+        ]
+        result = ensure_tool_call_integrity(history)
+        assert _call_ids(result) == ["call_A", "call_B"]
+        assert sorted(_result_ids(result)) == ["call_A", "call_B"]
+        # The MODEL turn survives, so nothing it carried is lost.
+        assert any(m.role == Role.MODEL for m in result)
+
+    def test_the_executed_result_keeps_its_real_payload(self):
+        """Answering ``B`` must not overwrite what ``A`` actually returned."""
+        history = [
+            make_message("user", "Do tasks"),
+            make_model_with_tool_calls(["call_A", "call_B"]),
+            make_tool_results(["call_A"]),
+            make_message("user", "Never mind"),
+        ]
+        result = ensure_tool_call_integrity(history)
+        by_id = {p.function_response.call_id: p.function_response
+                 for m in result for p in m.parts if p.function_response}
+        assert by_id["call_A"].is_error is False
+        assert by_id["call_B"].is_error is True
 
     def test_empty_history(self):
         assert ensure_tool_call_integrity([]) == []
@@ -364,9 +423,13 @@ class TestEnsureToolCallIntegrity:
             make_message("model", "All done"),
         ]
         result = ensure_tool_call_integrity(history)
-        # model(call_A) should be removed because it has no tool_result
-        assert len(result) == 4
+        # Since #674 model(call_A) is ANSWERED rather than removed: a
+        # synthetic cancelled result is inserted right after it, so the
+        # assistant turn (and any reasoning on it) survives.
+        assert len(result) == 6
         assert result[0].parts[0].text == "Do tasks"
+        assert _call_ids(result) == ["call_A", "call_B"]
+        assert _result_ids(result) == ["call_A", "call_B"]
         # The model with call_B should remain with its tool_result
         assert any(
             p.function_call and p.function_call.id == "call_B"
@@ -386,19 +449,26 @@ class TestEnsureToolCallIntegrity:
         assert result[0].parts[0].text == "Search for X"
         assert result[1].parts[0].text == "Results"
 
-    def test_unpaired_tool_use_at_end_removed(self):
-        """MODEL with tool_calls at end of history with no results is removed."""
+    def test_unpaired_tool_use_at_end_is_answered(self):
+        """MODEL with tool_calls at end of history gets a synthetic result.
+
+        Was ``..._removed``: deleting the assistant turn is never safe
+        (#674), because it also discards the turn's ``Part.thought`` — the
+        ``reasoning_content`` ``replay_reasoning`` providers require back.
+        """
         history = [
             make_message("user", "Search for X"),
             make_model_with_tool_calls(["call_1"]),
             # No tool_result follows - end of history
         ]
         result = ensure_tool_call_integrity(history)
-        assert len(result) == 1
+        assert len(result) == 3
         assert result[0].parts[0].text == "Search for X"
+        assert result[1].role == Role.MODEL
+        assert _result_ids(result) == ["call_1"]
 
-    def test_unpaired_tool_use_before_user_removed(self):
-        """MODEL with tool_calls followed by USER (no results) is removed."""
+    def test_unpaired_tool_use_before_user_is_answered(self):
+        """MODEL with tool_calls followed by USER gets a synthetic result."""
         history = [
             make_message("user", "Do X"),
             make_model_with_tool_calls(["call_1"]),
@@ -407,10 +477,12 @@ class TestEnsureToolCallIntegrity:
             make_message("model", "OK doing Y"),
         ]
         result = ensure_tool_call_integrity(history)
-        assert len(result) == 3
+        assert len(result) == 5
         assert result[0].parts[0].text == "Do X"
-        assert result[1].parts[0].text == "Never mind, do Y"
-        assert result[2].parts[0].text == "OK doing Y"
+        assert result[2].role == Role.TOOL
+        assert result[3].parts[0].text == "Never mind, do Y"
+        assert result[4].parts[0].text == "OK doing Y"
+        assert _result_ids(result) == ["call_1"]
 
     def test_mixed_valid_and_orphaned_across_turns(self):
         """Complex scenario: multiple turns, some corrupted by GC."""
@@ -449,9 +521,13 @@ class TestEnsureToolCallIntegrity:
         assert len(result) == 2
         assert any("orphaned" in t.lower() or "orphan" in t.lower() for t in traces)
 
-    def test_model_with_text_and_tool_calls_removed_when_unpaired(self):
-        """MODEL message that has BOTH text and tool_calls is removed
-        when tool_calls are unpaired (even though it has text)."""
+    def test_model_text_survives_an_unpaired_tool_call(self):
+        """A MODEL message with BOTH text and tool_calls keeps its text.
+
+        Was ``..._removed_when_unpaired``, and the rename is the fix:
+        deleting the assistant turn threw away prose the user had already
+        been shown, on top of the reasoning-replay problem (#674).
+        """
         history = [
             make_message("user", "Do X"),
             make_model_with_tool_calls(["call_1"], text="I'll search for you"),
@@ -460,8 +536,10 @@ class TestEnsureToolCallIntegrity:
             make_message("model", "Sorry, let me try again"),
         ]
         result = ensure_tool_call_integrity(history)
-        # The MODEL with unpaired tool_calls should be removed
-        assert len(result) == 3
+        assert len(result) == 5
+        texts = [p.text for msg in result for p in msg.parts if p.text]
+        assert "I'll search for you" in texts
+        assert _result_ids(result) == ["call_1"]
 
     def test_sequential_tool_call_chains(self):
         """Multiple sequential tool_use/tool_result pairs stay intact."""
@@ -494,7 +572,10 @@ class TestEnsureToolCallIntegrity:
             make_message("model", "Done"),
         ]
         result = ensure_tool_call_integrity(history)
-        # model(call_A) removed, rest stays
-        assert len(result) == 4
+        # model(call_A) is answered in place, rest stays (#674).
+        assert len(result) == 6
         roles = [msg.role for msg in result]
-        assert roles == [Role.USER, Role.MODEL, Role.TOOL, Role.MODEL]
+        assert roles == [Role.USER, Role.MODEL, Role.TOOL,
+                         Role.MODEL, Role.TOOL, Role.MODEL]
+        assert _call_ids(result) == ["call_A", "call_B"]
+        assert _result_ids(result) == ["call_A", "call_B"]
