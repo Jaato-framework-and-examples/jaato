@@ -54,6 +54,7 @@ from shared.message_queue import SourceType
 from shared.plugins.clarification.attachments import (
     validate_answer_attachments,
 )
+from shared.plugins.clarification.channels import question_payload
 from shared.plugins.session import create_plugin as create_session_plugin, load_session_config
 from jaato_sdk.plugins.base import parse_command_args, HelpLines
 from shared.plugins.gc import load_gc_from_file
@@ -4412,25 +4413,14 @@ class JaatoServer:
             delivery and answering it is mandatory (#704).
             """
             request_id = server._pending_clarification_request_id or ""
-            questions_payload = []
-            for i, q in enumerate(request.questions, 1):
-                q_data = {
-                    "index": i,
-                    "text": q.text,
-                    "question_type": q.question_type.value,
-                    "required": q.required,
-                }
-                if q.choices:
-                    choices_list = []
-                    for j, c in enumerate(q.choices, 1):
-                        choice_entry = {"text": c.text}
-                        if q.default_choice == j:
-                            choice_entry["default"] = True
-                        choices_list.append(choice_entry)
-                    q_data["choices"] = choices_list
-                if q.default_choice:
-                    q_data["default_choice"] = q.default_choice
-                questions_payload.append(q_data)
+            # ONE builder, shared with the runner-tier relay channel: this
+            # was a byte-for-byte copy of that loop, and a copy is how a
+            # per-question field reaches one emitter and not the other
+            # (``expects_attachment``, #989).
+            questions_payload = [
+                question_payload(i, q)
+                for i, q in enumerate(request.questions, 1)
+            ]
 
             server.emit(ClarificationBatchEvent(
                 agent_id=server._current_tool_agent_id,

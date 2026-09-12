@@ -965,12 +965,16 @@ def create_channel(channel_type: str = "console", **kwargs) -> ClarificationChan
         raise ValueError(f"Unknown channel type: {channel_type}")
 
 
-def _question_payload(index: int, question: "Question") -> dict:
+def question_payload(index: int, question: "Question") -> dict:
     """One question, in the shape ``ClarificationBatchEvent`` carries.
 
-    Identical to what the daemon-local batch-emit hook produces (see
-    ``core.py``), so a client's ClarificationHandler renders a relayed
-    batch and a daemon-local one with the same code.
+    THE one builder, used by both emitters: this channel (runner-tier
+    relay, ``batch_only=True``) and ``server.core``'s daemon-local
+    batch-emit hook, which called a byte-for-byte copy of this loop.
+    A client's ClarificationHandler renders either with the same code,
+    which is what the copy claimed and could only keep by hand --
+    ``expects_attachment`` (#989) would have reached one path and not
+    the other.
 
     ``choices[].expects_attachment`` is the per-choice attach affordance
     (#989) and is emitted only when true, so a client that does not know
@@ -1083,7 +1087,7 @@ class RunnerRPCClarificationChannel(ClarificationChannel):
     ) -> ClarificationResponse:
         """Relay the batch to the daemon and collect the answers."""
         questions_payload: List[dict] = [
-            _question_payload(i, q)
+            question_payload(i, q)
             for i, q in enumerate(request.questions, 1)
         ]
 

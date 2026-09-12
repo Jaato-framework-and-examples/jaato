@@ -10334,8 +10334,7 @@ NOTES
         if response.usage.cache_read_tokens is not None:
             turn_tokens['cache_read'] = response.usage.cache_read_tokens
             turn_tokens['spend_cache_read'] = (
-                turn_tokens.get('spend_cache_read', 0)
-                + response.usage.cache_read_tokens)
+                response.usage.cache_read_tokens)
         if response.usage.cache_creation_tokens is not None:
             turn_tokens['cache_creation'] = response.usage.cache_creation_tokens
             turn_tokens['spend_cache_creation'] = (
@@ -12023,7 +12022,7 @@ NOTES
         # generation before the first chunk.
         self._cancel_token = CancelToken()
 
-        use_streaming = False
+        use_streaming = self._resolve_use_streaming()
 
         turn_start = datetime.now()
         turn_data = {
