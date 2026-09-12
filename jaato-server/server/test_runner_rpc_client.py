@@ -179,7 +179,10 @@ async def test_cancel_token_trips_runner_cancel() -> None:
         # commit 86ebf523's message, which cannot be edited; read this
         # instead.  Measurement disproved it: on a failing run the token
         # trips at 0.201 s and the cancel frame is WRITTEN at 0.206 s.
-        # The loop was fine.
+        # The loop was fine.  And the widening refutes the theory on its
+        # own terms -- a task scheduled at 0.2 s cannot go unreached
+        # across a 100 s window, yet the 2000-iteration command failed
+        # the same way.
         #
         # What was racing was inside the runner: `serve` registered the
         # call in `_active_calls` from the POOL WORKER, and went straight
@@ -192,8 +195,14 @@ async def test_cancel_token_trips_runner_cancel() -> None:
         # cancel-check can recover it -- which was measured directly: at
         # 2000 iterations under the same load the command still ran to
         # completion and returned ok=True, at 105.1 s instead of 10.9 s.
-        # A longer deadline only made a failing run ten times slower, so
-        # the count is back at 200.
+        # Two A/B runs of 10 put the loss at 2000 iterations at 20-30%
+        # under load, against ~1 in 5 at 200: the deadline moved and the
+        # defect did not, and it failed this way in CI too.
+        #
+        # The count is back at 200 for the cost, not for masking: a
+        # longer deadline made every occurrence ten times more expensive
+        # (~100 s of CI instead of ~10 s), on unrelated PRs at random,
+        # while catching nothing extra.
         #
         # `test_cancel_before_worker_registers_988.py` reproduces the
         # loaded case with no clock at all; this one stays as the
