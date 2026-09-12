@@ -31,10 +31,13 @@ What fails here without the fix (registration inside ``_handle_request``):
 
 from __future__ import annotations
 
+import ast
+import inspect
 import json
 import socket
+import textwrap
 import threading
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import pytest
 
@@ -120,6 +123,34 @@ def single_worker_rpc():
         except OSError:
             pass
         thread.join(timeout=JOIN_TIMEOUT)
+
+
+
+# ----------------------------------------------------------------------
+# AST helpers for the structural guards below
+# ----------------------------------------------------------------------
+
+
+def _attr_calls(tree: ast.AST, *names: str) -> List[ast.Call]:
+    """Every ``<expr>.<name>(...)`` call in *tree* whose attribute is in *names*.
+
+    Factored out of the guards so each guard reads as the claim it makes
+    rather than as an AST walk; also keeps both under the repo's
+    cyclomatic-complexity ceiling, which radon charges heavily for the
+    ``and``-chained comprehension this replaces.
+    """
+    found: List[ast.Call] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if isinstance(node.func, ast.Attribute) and node.func.attr in names:
+            found.append(node)
+    return found
+
+
+def _positional_names(call: ast.Call) -> Set[str]:
+    """The bare-identifier positional arguments of *call*."""
+    return {arg.id for arg in call.args if isinstance(arg, ast.Name)}
 
 
 def _send(sock: socket.socket, payload: Dict[str, Any]) -> None:
@@ -317,39 +348,19 @@ def test_registration_is_on_the_reader_thread_for_every_method() -> None:
     it returned.  An AST guard rather than prose, so a fourth branch
     added later cannot quietly reinstate the worker-side registration.
     """
-    import ast
-    import inspect
-    import textwrap
+    tree = ast.parse(textwrap.dedent(inspect.getsource(RunnerRPC.serve)))
 
-    src = textwrap.dedent(inspect.getsource(RunnerRPC.serve))
-    tree = ast.parse(src)
-
-    register_calls = [
-        node for node in ast.walk(tree)
-        if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Attribute)
-        and node.func.attr == "_register_call"
-    ]
-    assert len(register_calls) == 1, (
+    registrations = _attr_calls(tree, "_register_call")
+    assert len(registrations) == 1, (
         "serve must register each call exactly once, on the reader thread"
     )
 
-    dispatches = [
-        node for node in ast.walk(tree)
-        if isinstance(node, ast.Call)
-        and (
-            (isinstance(node.func, ast.Attribute)
-             and node.func.attr == "_handle_request")
-            or (isinstance(node.func, ast.Attribute)
-                and node.func.attr == "submit")
-        )
-    ]
-    assert dispatches, "serve dispatches nothing — test is looking at the wrong code"
+    dispatches = _attr_calls(tree, "_handle_request", "submit")
+    assert dispatches, (
+        "serve dispatches nothing — this guard is reading the wrong code"
+    )
     for node in dispatches:
-        names = {
-            a.id for a in node.args if isinstance(a, ast.Name)
-        }
-        assert "call_token" in names, (
+        assert "call_token" in _positional_names(node), (
             "every dispatch branch must hand the worker the token "
             "_register_call published, or a cancel reaches a different "
             "object than the tool polls (#988)"
