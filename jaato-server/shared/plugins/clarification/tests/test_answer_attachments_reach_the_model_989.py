@@ -332,6 +332,43 @@ def test_an_unusable_entry_is_dropped_not_turned_into_empty_bytes(entry):
 
 
 # =====================================================================
+# 3b. The real session seam, not a stand-in for it
+# =====================================================================
+
+def test_the_session_moves_them_onto_the_ToolResult_and_strips_the_scaffolding():
+    """``JaatoSession._build_tool_result`` itself, because it does TWO
+    things and the second is easy to get wrong: it lifts the attachments
+    onto ``ToolResult.attachments`` AND strips every ``_multimodal*`` key
+    from the dict the model reads.  A payload left behind in the result
+    text would reach the model as base64 prose."""
+    from types import SimpleNamespace
+
+    from jaato_sdk.plugins.model_provider.types import FunctionCall
+    from shared.jaato_session import JaatoSession
+
+    result = _run_plugin(
+        [""], {"1": [{"mime_type": "audio/wav", "data": _b64(VOICE),
+                      "display_name": "answer.wav"}]},
+        [{"text": "Name?", "question_type": "free_text"}],
+    )
+
+    session = JaatoSession.__new__(JaatoSession)
+    session._runtime = SimpleNamespace(registry=None)
+    tool_result = session._build_tool_result(
+        FunctionCall(id="call_1", name="request_clarification", args={}),
+        result,
+    )
+
+    assert tool_result.attachments[0].data == VOICE
+    assert not [k for k in tool_result.result if k.startswith("_multimodal")]
+    assert _b64(VOICE) not in repr(tool_result.result)
+    # The descriptor stays: the model must know WHICH answer the audio
+    # belongs to, and that it arrived as audio at all.
+    assert tool_result.result["responses"]["1"]["attachments"][0][
+        "mime_type"] == "audio/wav"
+
+
+# =====================================================================
 # 4. The wire: the bytes reach the provider
 # =====================================================================
 
