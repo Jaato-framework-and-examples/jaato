@@ -13,7 +13,9 @@ the dispatch round-trips correctly.
 Tests pin:
 
 - No bootstrap → ``has_host=False`` + ``ready=False`` +
-  ``session_id=""`` + ``tool_count=-1``.
+  ``session_id=""`` + ``tool_count=-1``, and the #856 transport
+  fields present anyway (they describe the channel, not the
+  session).
 - After successful bootstrap → ``has_host=True`` + matching
   session_id + ``tool_count`` reflects the registry's exposed
   tools.
@@ -68,15 +70,29 @@ def _good_envelope(**overrides: Any) -> SessionInitEnvelope:
 
 
 def test_health_check_returns_empty_status_before_bootstrap() -> None:
+    """The SESSION half is empty; the TRANSPORT half is still reported.
+
+    #856 added ``active_call_ids`` / ``known_request_ids`` /
+    ``highest_request_id``, and they describe the channel rather than the
+    session — so they are present with no host, which is precisely the
+    state the daemon reconciles a lost dispatch against.  Asserted as a
+    subset plus an explicit key set, so a future addition fails the KEY
+    assertion (deliberate review) rather than every value assertion.
+    """
     rpc = _make_lone_runner()
     ok, result = rpc._handle_session_health_check()
     assert ok is True
-    assert result == {
-        "has_host": False,
-        "ready": False,
-        "session_id": "",
-        "tool_count": -1,
+    assert set(result) == {
+        "has_host", "ready", "session_id", "tool_count",
+        "active_call_ids", "known_request_ids", "highest_request_id",
     }
+    assert result["has_host"] is False
+    assert result["ready"] is False
+    assert result["session_id"] == ""
+    assert result["tool_count"] == -1
+    assert result["active_call_ids"] == []
+    assert result["known_request_ids"] == []
+    assert result["highest_request_id"] == 0
 
 
 def test_health_check_via_dispatch_method_before_bootstrap() -> None:
