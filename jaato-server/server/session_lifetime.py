@@ -36,22 +36,44 @@ write would have left #812's session running exactly as long.
 What "orphaned" means, and why it is safe to default
 ----------------------------------------------------
 
-**No attached clients at all** — not even the synthetic ``_headless`` marker.
-That is a narrower condition than "the client disconnected", and it is what
-keeps this from becoming the terminate-on-client-loss behaviour the framework
-deliberately does not want:
+A session is judged an orphan only when **both** hold:
 
-* a session woken by ``session.wake`` / ``resume_session`` is attached to
-  ``SessionManager._HEADLESS_CLIENT_ID`` and is **never** orphaned;
-* a cascade stage likewise carries a client for the duration of its run;
-* a completion-gated session that ended has been UNLOADED to disk — the sweep
-  only sees loaded sessions, so the documented ``signal_completion`` →
-  ``session.wake`` resume path is untouched;
+1. it is LOADED and has no attached clients at all, and
+2. the sweep has previously OBSERVED it carrying at least one client.
+
+The second clause is the load-bearing one and was added after the first,
+weaker predicate turned out to be wrong.  "Has no client" is a broader state
+than "its client went away", and the difference is not academic:
+``_load_session_impl`` uses its ``client_id`` argument for config, env and
+progress events and **never attaches it**, so a session revived through
+``wake_session`` → ``resume_session`` has an empty ``attached_clients`` by
+construction.  ``wake_session`` knows this and branches on it — the log line
+reads *"revived cold, no client — DEFERRED"* — so under the weaker predicate a
+cold revive driving a long turn would have been cancelled by a bound written
+for an entirely different situation.
+
+Requiring an observed attachment makes the bound depend on something the sweep
+MEASURES rather than on an invariant maintained at call sites it cannot see.
+That is deliberate: an earlier draft of this module asserted "every path that
+drives a session attaches a client id", which is simply **false** in this
+tree.  A guard policing that claim would have failed on ``main``.
+
+The clause also fails safe.  A session the sweep never saw attached is never
+stopped by the orphan bound; an explicit ``max_session_seconds`` still applies
+to it, because that one is an operator's own ceiling rather than an inference
+about who is watching.
+
+What survives both clauses is the #812 state: loaded, running, with a client
+that existed and is now gone, and nothing that will ever read the result.  The
+other detached shapes are excluded structurally:
+
+* a completion-gated session that ended has been UNLOADED — the sweep only
+  walks ``_sessions``, so the documented ``signal_completion`` →
+  ``session.wake`` resume path cannot be reached at all;
+* a cold wake revive fails clause 2;
+* a cascade stage and an attached interactive session fail clause 1;
 * an idle orphan is normally unloaded by ``_maybe_unload_session`` before the
   grace expires anyway.
-
-What is left, once those are excluded, is the #812 state: loaded, running, and
-with nothing that will ever read the result.
 
 Composition with ``budget_control``
 -----------------------------------

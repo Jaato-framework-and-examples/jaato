@@ -60,6 +60,9 @@ def _make_sm() -> SessionManager:
     sm._sessions = {}
     sm._lock = threading.RLock()
     sm._orphan_since = {}
+    # Sessions the sweep has seen attached — the orphan bound's second
+    # condition.  See test_orphan_bound_observes_attachment_812.py.
+    sm._ever_attached = set()
     sm._lifetime_watchdog = None
     sm._lifetime_watchdog_stop = threading.Event()
     sm._lifetime_sweep_interval = 15.0
@@ -311,6 +314,7 @@ class TestOrphanSurface:
 
     def test_a_row_says_what_an_operator_needs_to_act(self):
         sm = _make_sm()
+        sm._ever_attached.add("orphan")
         session = _make_session("orphan", processing=True)
         session.runner_identity = RunnerIdentity(runner_pid=4242)
         session.workspace_path = "/ws/arm"
@@ -323,7 +327,8 @@ class TestOrphanSurface:
         assert row["max_orphan_seconds"] == DEFAULT_MAX_ORPHAN_SECONDS
 
     def test_a_headless_marker_is_a_client(self):
-        """A woken / reactor-driven session is NEVER an orphan."""
+        """A session carrying the synthetic headless client is NEVER an
+        orphan — it fails clause 1 (it has a client)."""
         sm = _make_sm()
         sm._sessions["woken"] = _make_session(
             "woken", clients={SessionManager._HEADLESS_CLIENT_ID})
@@ -468,19 +473,27 @@ class TestBoundEvaluation:
 
 class TestTheSweep:
     def test_it_stops_the_orphan_that_crossed_its_bound(self):
-        """#812 end to end at the manager: an orphaned, still-processing
-        session is stopped daemon-side without any client involvement."""
+        """#812 end to end at the manager: a session whose client went away
+        is stopped daemon-side without any client involvement.
+
+        The session starts WITH a client, because the orphan bound applies
+        only to a session the sweep has observed attached — "no client" on
+        its own is a cold wake revive, which is a different contract.
+        """
         sm = _make_sm()
-        sm._sessions["runaway"] = _make_session(
-            "runaway", clients=set(), loaded_at=0.0, processing=True,
-            limits=RuntimeLimits(max_orphan_seconds=10),
+        session = _make_session(
+            "runaway", clients={"client_ipc_14"}, loaded_at=0.0,
+            processing=True, limits=RuntimeLimits(max_orphan_seconds=10),
         )
-        # First sweep observes the orphanhood; nothing has elapsed yet.
+        sm._sessions["runaway"] = session
+        # Observed with its client — this is what makes it eligible.
         assert sm.sweep_session_lifetimes(now=0.0) == []
+        session.attached_clients.clear()          # the client process dies
+        assert sm.sweep_session_lifetimes(now=1.0) == []
         # Later sweep: past the grace.
         verdicts = sm.sweep_session_lifetimes(now=100.0)
         assert [v.session_id for v in verdicts] == ["runaway"]
-        sm._sessions["runaway"].server.stop.assert_called_once()
+        session.server.stop.assert_called_once()
         assert sm._emit_to_session.call_args[0][1].reason == \
             REASON_MAX_ORPHAN_SECONDS
 
@@ -488,10 +501,13 @@ class TestTheSweep:
         """The bound measures CONTINUOUS orphanhood."""
         sm = _make_sm()
         session = _make_session(
-            "s1", clients=set(), limits=RuntimeLimits(max_orphan_seconds=10))
+            "s1", clients={"client_ipc_1"},
+            limits=RuntimeLimits(max_orphan_seconds=10))
         sm._sessions["s1"] = session
 
-        sm.sweep_session_lifetimes(now=0.0)
+        sm.sweep_session_lifetimes(now=0.0)              # observed attached
+        session.attached_clients.clear()
+        sm.sweep_session_lifetimes(now=1.0)              # clock starts
         session.attached_clients.add("client_ipc_1")     # reconnect
         sm.sweep_session_lifetimes(now=5.0)
         assert "s1" not in sm._orphan_since
@@ -502,18 +518,25 @@ class TestTheSweep:
 
     def test_the_orphan_map_does_not_grow(self):
         sm = _make_sm()
-        sm._sessions["s1"] = _make_session("s1", clients=set())
+        session = _make_session("s1", clients={"c1"})
+        sm._sessions["s1"] = session
+        sm.sweep_session_lifetimes(now=0.0)               # observed attached
+        session.attached_clients.clear()
         sm.sweep_session_lifetimes(now=1.0)
         assert "s1" in sm._orphan_since
         del sm._sessions["s1"]                            # unloaded
         sm.sweep_session_lifetimes(now=2.0)
         assert sm._orphan_since == {}
+        assert sm._ever_attached == set()
 
     def test_a_crossed_session_is_not_re_stopped_every_sweep(self):
         sm = _make_sm()
-        sm._sessions["s1"] = _make_session(
-            "s1", clients=set(), limits=RuntimeLimits(max_orphan_seconds=10))
-        sm.sweep_session_lifetimes(now=0.0)
+        session = _make_session(
+            "s1", clients={"c1"}, limits=RuntimeLimits(max_orphan_seconds=10))
+        sm._sessions["s1"] = session
+        sm.sweep_session_lifetimes(now=0.0)               # observed attached
+        session.attached_clients.clear()
+        sm.sweep_session_lifetimes(now=0.5)
         assert len(sm.sweep_session_lifetimes(now=100.0)) == 1
         # Session survived the stop (wedged model thread): re-judged from
         # now, not stopped again immediately.
@@ -533,11 +556,27 @@ class TestTheBoundDoesNotKillWhatItMustNot:
     fixes, so each documented detached shape gets a test."""
 
     def test_a_woken_session_is_not_stopped(self):
-        """``session.wake`` / ``resume_session`` attach the synthetic
-        headless client, so a revived session is never an orphan."""
+        """A COLD revive has an empty ``attached_clients`` — ``_load_session``
+        never attaches its ``client_id`` — so it is excluded by the
+        eligibility clause, not by holding a marker.
+
+        The headless-marker case (a session created through
+        ``create_headless_session``) is covered by clause 1 below.
+        """
         sm = _make_sm()
         sm._sessions["woken"] = _make_session(
-            "woken", clients={SessionManager._HEADLESS_CLIENT_ID},
+            "woken", clients=set(),
+            limits=RuntimeLimits(max_orphan_seconds=1),
+        )
+        sm.sweep_session_lifetimes(now=0.0)
+        assert sm.sweep_session_lifetimes(now=10_000.0) == []
+
+    def test_a_headless_created_session_is_not_stopped(self):
+        """``create_headless_session`` DOES attach the synthetic client, so
+        this one fails clause 1 (it has a client) rather than clause 2."""
+        sm = _make_sm()
+        sm._sessions["headless"] = _make_session(
+            "headless", clients={SessionManager._HEADLESS_CLIENT_ID},
             limits=RuntimeLimits(max_orphan_seconds=1),
         )
         sm.sweep_session_lifetimes(now=0.0)
@@ -562,10 +601,13 @@ class TestTheBoundDoesNotKillWhatItMustNot:
 
     def test_an_explicit_zero_disables_the_default_grace(self):
         sm = _make_sm()
-        sm._sessions["forever"] = _make_session(
-            "forever", clients=set(), limits=RuntimeLimits(
+        session = _make_session(
+            "forever", clients={"c1"}, limits=RuntimeLimits(
                 max_orphan_seconds=0))
-        sm.sweep_session_lifetimes(now=0.0)
+        sm._sessions["forever"] = session
+        sm.sweep_session_lifetimes(now=0.0)               # observed attached
+        session.attached_clients.clear()
+        sm.sweep_session_lifetimes(now=1.0)
         assert sm.sweep_session_lifetimes(now=10_000_000.0) == []
 
     def test_an_attended_session_is_never_bounded_by_default(self):

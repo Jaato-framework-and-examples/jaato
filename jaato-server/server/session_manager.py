@@ -1044,6 +1044,26 @@ class SessionManager:
         # observed it, up to one interval late — which is noise against a
         # bound measured in minutes.
         self._orphan_since: Dict[str, float] = {}
+        # Sessions the sweep has SEEN carrying at least one attached client.
+        # Only these are eligible for the orphan bound (#812).
+        #
+        # The bound exists for a session whose client EXISTED AND WENT AWAY --
+        # that is the incident: a live IPC client, `client_ipc_14`, that died.
+        # "Has no client" is a broader state than that, and the difference is
+        # not academic: a session revived by ``wake_session`` ->
+        # ``resume_session`` -> ``_load_session`` has an EMPTY
+        # ``attached_clients`` by construction, because ``_load_session_impl``
+        # uses its ``client_id`` for config/env/progress and never attaches.
+        # ``wake_session`` knows this and branches on it ("revived cold, no
+        # client -- DEFERRED"), so a cold revive that drives a long turn would
+        # otherwise be cancelled by a bound written for a different situation.
+        #
+        # Requiring an observed attachment first makes the bound depend on
+        # something the sweep MEASURES rather than on an invariant maintained
+        # at call sites it cannot see.  It fails safe: a session the sweep
+        # never saw attached is never stopped by the orphan bound (an explicit
+        # ``max_session_seconds`` still applies).
+        self._ever_attached: Set[str] = set()
         self._lifetime_watchdog: Optional[threading.Thread] = None
         self._lifetime_watchdog_stop = threading.Event()
         self._lifetime_sweep_interval = DEFAULT_SWEEP_INTERVAL_SECONDS
@@ -4456,6 +4476,7 @@ class SessionManager:
                 if self._is_orphaned(sess)
             ]
             orphan_since = dict(self._orphan_since)
+            ever_attached = set(self._ever_attached)
         for session_id, session in entries:
             since = orphan_since.get(session_id)
             session_bound, orphan_bound = resolve_bounds(
@@ -4471,6 +4492,11 @@ class SessionManager:
                     getattr(session.server, "_model_running", False)),
                 "orphaned_seconds": (
                     None if since is None else round(now - since, 1)),
+                # False for a session the sweep has never seen attached (a
+                # cold wake revive).  It is listed -- an operator asking
+                # "what has no client" wants to see it -- but the orphan
+                # bound does not apply to it.  See ``_ever_attached``.
+                "orphan_bound_applies": session_id in ever_attached,
                 "loaded_seconds": round(now - session.loaded_at, 1),
                 "max_orphan_seconds": orphan_bound,
                 "max_session_seconds": session_bound,
@@ -4668,8 +4694,15 @@ class SessionManager:
             live_ids = set(self._sessions)
             for session_id, session in self._sessions.items():
                 if self._is_orphaned(session):
-                    self._orphan_since.setdefault(session_id, now)
+                    # Only a session this sweep has seen ATTACHED can become
+                    # an orphan -- see ``_ever_attached``.  A session that has
+                    # never had a client is not "abandoned", it is being
+                    # driven under a different contract (a cold wake revive),
+                    # and the bound was written for the other case.
+                    if session_id in self._ever_attached:
+                        self._orphan_since.setdefault(session_id, now)
                 else:
+                    self._ever_attached.add(session_id)
                     self._orphan_since.pop(session_id, None)
                 observations.append(SessionLifetimeObservation(
                     session_id=session_id,
@@ -4679,6 +4712,7 @@ class SessionManager:
                 ))
             for stale_id in set(self._orphan_since) - live_ids:
                 self._orphan_since.pop(stale_id, None)
+            self._ever_attached &= live_ids
         return observations
 
     def sweep_session_lifetimes(

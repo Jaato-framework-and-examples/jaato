@@ -2027,24 +2027,41 @@ declaring layer, like `max_parallel_tools` / `max_turns`), and `0` cannot win
 that `min()` — a child may disable a bound no ancestor set, and may not
 disable one an ancestor did.
 
-**"Orphaned" is narrower than "the client disconnected", deliberately.** It
-means no attached clients *at all* — not even the synthetic `_headless` marker.
-That is what keeps this from becoming terminate-on-client-loss, which would
-break the documented resume path and be worse than the bug:
+**"Orphaned" is TWO conditions, and the second is the load-bearing one.** A
+session qualifies only when it is loaded with no attached clients **and** the
+sweep has previously *observed* it carrying one:
 
 | Detached shape | Orphaned? |
 |---|---|
-| `session.wake` / `resume_session` | no — carries `_HEADLESS_CLIENT_ID` |
+| a completion-gated session that ended | invisible — it is UNLOADED, and the sweep only walks `_sessions` |
+| `session.wake` → `resume_session` (a **cold revive**) | no — never observed attached, so clause 2 fails |
 | a cascade stage mid-run | no — carries its driver's client |
-| a completion-gated session that ended | invisible — it is UNLOADED; the sweep only sees loaded sessions |
+| an attached interactive session | no — clause 1 fails |
 | an idle orphan | usually unloaded by `_maybe_unload_session` before the grace expires |
-| **loaded, running, nothing will read the result** | **yes** — the #812 state |
+| **a client that existed and went away, mid-turn** | **yes** — the #812 state |
+
+The first draft had only clause 1 and justified it with an invariant —
+*every path that drives a session attaches a client id* — which is **false in
+this tree**. `_load_session_impl` uses its `client_id` for config, env and
+progress events and never attaches it; `wake_session` branches on exactly that
+("revived cold, no client — DEFERRED"). So a cold revive driving a long turn
+would have been cancelled by a bound written for a different situation. An AST
+guard policing the invariant would have failed on `main`, and one exempting the
+revive path would assert almost nothing — so the *dependency* was removed
+instead: the bound now rests on a fact the sweep MEASURES. It fails safe, since
+a session never seen attached is never stopped by the orphan bound (an explicit
+`max_session_seconds` still applies).
 
 The orphan clock is **derived by the sweep** from `attached_clients` rather
 than stamped at the ten-odd sites that mutate it: a bound that silently does
 not apply is #735, and instrumenting every mutation is exactly the shape that
 lets one new call site disarm it. It measures CONTINUOUS orphanhood, so a
 reconnect renews the session's claim on being wanted.
+`test_orphan_bound_observes_attachment_812.py` carries two AST guards — one
+that `_orphan_since` has a single writer, one that the clock is started
+*inside* an `if` consulting `_ever_attached` — each verified to fail on its own
+reversion. The sibling precedents are `test_budget_mid_turn_955.py` and
+`test_registry_iteration_snapshots.py`.
 
 **It logs what it armed.** `start_lifetime_watchdog` is called by the daemon
 (not from `__init__`, so a `SessionManager` in a test grows no thread) and logs
