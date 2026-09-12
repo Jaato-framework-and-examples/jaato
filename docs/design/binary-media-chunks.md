@@ -934,3 +934,177 @@ envelope changes a verified security contract (and the size of every signed
 request) rather than adding a field. A relay that needs to deliver media
 should be given its own body shape and its own decision about what is
 signed — a separate change, deliberately not made in passing here.
+
+
+## 14. Answering a question with media (#989)
+
+§13 made an *existing* session drivable with bytes. This is the other
+direction the agent itself opens: `request_clarification` asks a question and
+blocks the turn until someone answers it, and the answer was text-only. A
+Telegram user asked "what's your name?" and replying with a voice note had
+nowhere to go — submitting the audio as an ordinary turn instead is stashed
+silently behind the pending clarification (there is no path that folds a
+mid-turn attachment into a running turn), so the question stays unanswered
+and the recording is delivered later as a surprise turn.
+
+### 14.1 A clarification answer is a tool result
+
+The decisive fact, and the one the issue as filed missed.
+`_execute_clarification` returns a `ToolResult`, so the natural home for the
+bytes is `ToolResult.attachments`:
+
+| what it buys | where it already exists |
+|---|---|
+| the wire | `google_genai/converters.py`, `anthropic/converters.py` and `_attachments.tool_result_followup_message` (which emits `input_audio` under `audio_as_input_audio`) all marshal `ToolResult.attachments` today |
+| the modality gate | `_gate_one_tool_result` already runs on exactly this shape, withholds what the active model cannot consume, routes the refused bytes to the CLIENT, and leaves the model a note |
+| the lifecycle | once GC can see a tool result's attachments (§14.5), `evict_consumed_media`'s per-mime default is already the right policy |
+
+The alternative — ferrying them in as a user turn through
+`_parts_from_user_message` — puts a message in history the user never sent,
+leaves the tool result claiming it carried nothing, and *worsens* the
+question↔answer adjacency rather than improving it: on every OpenAI-shaped
+wire the tool-result path already synthesises a follow-up `role: "user"`
+message, so it is the same wire shape with the framework-level bookkeeping
+done by hand.
+
+### 14.2 Attachments are orthogonal to the answer's TYPE
+
+The issue proposed "free_text answers become text and/or attachments; choice
+answers stay ordinal (attachments N/A)". N/A is wrong, and the case that
+shows it is ordinary:
+
+```
+How should we design this?
+  1. You attach a screenshot of the design
+  2. We discuss the design
+```
+
+Choosing (1) *and attaching the screenshot* is `selected_choices=[1]` **plus**
+an image. The ordinal says which branch; the attachment says what content.
+So `attachments` is a field of `Answer`, beside `selected_choices` /
+`free_text` / `skipped` — never a free-text sub-case, which would foreclose
+that permanently.
+
+The question-side half follows the same split: in that example option 1 wants
+a file and option 2 does not, so a question-level flag is too coarse.
+`Choice.expects_attachment` is the declaration, and `QuestionType` stays three
+values. It is advisory — nothing refuses an answer that ignores it, and
+nothing refuses an attachment on a choice that never declared it. What it buys
+is a client that can render an attach control in the right place instead of
+the agent writing *"attach a screenshot"* as prose nothing downstream can act
+on.
+
+### 14.3 What is refused at submit, and what is deliberately not
+
+`JaatoServer.respond_to_clarification_batch` validates the whole map before
+resolving anything, and on **any** problem emits an `ErrorEvent` and leaves
+the clarification OPEN — resolving it with the media dropped would report an
+answer the user never gave, and for a voice-only answer an empty one (§9).
+
+| refusal | why the daemon is the right place |
+|---|---|
+| an index that names no question | the relay records the batch's own question count when it emits it |
+| a payload that does not decode | the alternative is an attachment that is silently empty, which is worse than an absent one |
+| the batch over a **6 MiB** cap | load-bearing, not hygiene — see below |
+| attachments with no relay waiting | the daemon-local `QueueChannel` carries answer STRINGS through a queue and has nowhere to put bytes |
+
+The cap is the frame budget. The answers cross daemon→runner as the
+*response* to `client.request_clarification`, under the 10 MB
+`MAX_MESSAGE_SIZE`, and an oversized response is **not written at all**:
+`RunnerRPCClient._write_frame_json` raises `FrameTooLargeError`, which is
+logged and swallowed, so the runner's call never resolves and the turn hangs
+behind a clarification nobody can answer. A 120 s utterance is 3.84 MB raw /
+~5.12 MB serialised: one fits, two do not. What the right multi-question voice
+policy is — per-question delivery, a per-answer cap, chunking — is still open;
+failing loudly at submit is what keeps that question open instead of answering
+it with a hang.
+
+**Not** refused at submit: whether the active model can consume a mime. The
+daemon does not hold the runner's provider, and the tier can change between
+the question and the answer (§10), so a submit-time check would be a guess
+wrong in both directions — refusing content the model could consume, or
+passing content it cannot. `_gate_one_tool_result` answers it against the
+model the bytes actually reach. A note the user never sees is the acknowledged
+cost, and it is partly paid back by the same gate routing the withheld bytes
+to the client as `CLIENT` media.
+
+### 14.4 Which of §13's rules transfer
+
+**Rule 1 (the untrusted boundary stated beside the bytes) transfers as
+LABELLING, not as a trust boundary.** A wake payload is untrusted because it
+arrives from a webhook or a cron. A clarification answer is a direct reply to
+a question *this agent just asked*, and today's **text** answer is inserted
+into the tool result verbatim with no wrapper. Defanging only the audio would
+weigh a spoken answer differently from the identical typed one — the exact
+asymmetry `_wrap_wake_content` exists to avoid, inverted. So each attachment
+is NAMED beside the answer it belongs to (mime, display name, ingest id,
+duration; never the payload), which is also what makes a multi-question batch
+attributable at all: the wire's follow-up message names files in one lead line
+with no structural link to a question.
+
+**Rule 2 (an attachment-bearing inject is idle-only) cannot transfer** — a
+clarification answer arrives mid-turn by construction. Its *reason* was
+mechanical (the queue folds a message in as text and has nowhere to put an
+`inline_data` part) and does not apply: this path resolves a future whose
+result becomes a tool result, which does have somewhere to put bytes.
+
+**Rule 3 (refuse an old daemon) transfers verbatim.** An older daemon ignores
+`answer_attachments` and answers the clarification with the media gone — and
+for a voice-only answer `_parse_answer` reads the empty response as
+`free_text=""`, so a blank answer is reported as a successful one. Protocol
+**1.6**, and both SDKs raise below it
+(`MIN_CLARIFICATION_ATTACHMENT_PROTOCOL`).
+
+And §9's rule holds inside the answer: an attachment IS content, so a
+blank-text answer carrying bytes is un-skipped
+(`_parse_answer_with_attachments`). Without that, the normal voice case is
+reported to the model as "the user declined to answer" with its audio beside
+the claim.
+
+### 14.5 The prerequisite: GC could not see a tool result's bytes
+
+`message_media_bytes`, `estimate_media_tokens` and the eviction walk all read
+`part.inline_data` and nothing else; `function_response` appeared in
+`gc/utils.py` only for message *grouping*. So a `ToolResult.attachments`
+payload was sized at the one-token floor, absent from
+`context_usage["media_bytes"]`, and immune to `_evict_consumed_media` — §11's
+hole, one part-shape over. Pre-existing for the `_multimodal` image tools; a
+clarification answered by voice is where it recurs, once per question, every
+turn.
+
+`part_media_views` is now the single answer to "what binary payload does this
+part carry", rendering a tool result's attachments into the same
+`{mime_type, data, display_name}` dict an `inline_data` part already is, so
+the rate table, the byte count, the mime match and the marker text stay one
+implementation. The id is **minted from the payload** rather than read off a
+field: `Attachment` has none, and the id is a digest of the bytes, so
+recomputing it yields exactly what ingest would have.
+
+Eviction cannot swap the part for a text one — the model answered from the
+result's `result`, and the ledger, completion processors and enrichment all
+read it — so the attachment is dropped and the marker appended to
+`model_suffix`, the existing model-facing-only channel.
+
+**No new knob.** `media_evict_mime_prefixes` already defaults to `("audio/",)`
+on §11's reasoning that an image is routinely re-examined across turns and a
+recording is not. That is exactly the right split here: the screenshot
+attached to a design question survives the turns that discuss it; the voice
+note answering "what's your name" does not.
+
+### 14.6 Scoped out
+
+- **Subagents.** `ParentBridgedChannel` parses the parent's answer out of an
+  injected TEXT prompt and has no representation for bytes at all. A subagent's
+  `Answer.attachments` is therefore always empty, stated on the class rather
+  than left to look supported.
+- **Advertising the accepted mimes at ask time.** Putting
+  `accepted_attachment_mimes` on `ClarificationBatchEvent` — so a client knows
+  before the user records whether to offer the microphone — needs the
+  clarification plugin to hold a session and read the active provider's
+  vocabulary. Worth doing; an unpopulated field would only lie by omission
+  (empty meaning "unknown", not "nothing accepted"), so it is absent rather
+  than stubbed.
+- **The TS client's normalisation.** `respondToClarificationBatch` gained the
+  parameter and the protocol refusal, but that SDK reads no files and encodes
+  nothing (exactly as `sendMessage` and `wakeSession` do not): a TS caller
+  passes canonical wire dicts.

@@ -645,6 +645,15 @@ class ParentBridgedChannel(ClarificationChannel):
 
     This unifies the communication model - all subagent input comes through
     the same injection queue mechanism.
+
+    **Text only, and deliberately stated rather than left to look
+    supported.**  A subagent's answer arrives as an INJECTED PROMPT and is
+    parsed out of that prompt's text, so there is no representation for
+    binary content anywhere on this path: an answer produced here always
+    has an empty ``Answer.attachments`` (#989).  Giving the parent a way
+    to hand a child media is a different design — the injection queue
+    folds a message into the running turn as text, which is the same
+    mechanical limit #845 hit — and is deliberately not attempted here.
     """
 
     def __init__(self, **kwargs):
