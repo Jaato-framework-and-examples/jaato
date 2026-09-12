@@ -31,6 +31,13 @@ Key responsibilities:
    ``CancelledException``.  Either way the runner emits a terminating
    response with ``ok=False, error.type="CancelledException"``.
 
+   The ordering that makes this reliable is #988's fix and is stated
+   in :meth:`RunnerRPC.serve`: a call is registered in
+   ``_active_calls`` on the **reader thread**, before the next frame
+   is read, never inside the worker that runs it.  Registering inside
+   the worker made "is the cancel honoured?" a thread-scheduling race
+   that a loaded host lost outright — see :class:`_ActiveCall`.
+
 5. **Surface failures via the typed envelope (§4.8).**  Any executor
    exception is caught here and serialized into the response's
    ``error`` payload so the daemon side decoder doesn't have to be
@@ -159,9 +166,46 @@ class ExecuteFn(Protocol):
 
 @dataclass
 class _ActiveCall:
-    """Runner-side bookkeeping for an in-flight tool call.
+    """Runner-side bookkeeping for an in-flight call.
 
-    ``cancel_token`` is tripped when a ``CancelFrame`` arrives.
+    ``cancel_token`` is tripped when a ``CancelFrame`` arrives.  The
+    same object is published to the worker thread as
+    ``_thread_local.cancel_token``, which is what
+    ``get_current_cancel_token()`` — and through it ``run_command`` —
+    polls.  So tripping it here is what a tool observes, whether the
+    worker has started yet or not.
+
+    **Lifecycle, and why every step of it is on the stated thread
+    (#988).**  The entry lives in ``RunnerRPC._active_calls`` keyed by
+    the wire request id:
+
+    ==================  ===============  ==============================
+    transition          thread           site
+    ==================  ===============  ==============================
+    created + inserted  reader (serve)   :meth:`RunnerRPC._register_call`
+    tripped             reader (serve)   :meth:`RunnerRPC._handle_cancel`
+    published to TLS    worker           :meth:`RunnerRPC._handle_request`
+    removed             worker           ``_handle_request``'s ``finally``
+    ==================  ===============  ==============================
+
+    Insertion is on the READER thread, in wire order, before the next
+    frame is decoded.  That is the whole cancel guarantee: the daemon
+    only ever cancels an id whose request frame it has already
+    written, so by the time ``_handle_cancel`` is reached for id *N*
+    the entry for *N* is either present (in flight — trip it) or gone
+    (already completed).  "Not registered yet" is not reachable.
+
+    It used to be.  Insertion was the first statement of
+    ``_handle_request``, i.e. on the pool WORKER, while ``serve`` went
+    straight back to reading — so a cancel frame already sitting in
+    the socket buffer routinely beat the worker to the dict.
+    ``_handle_cancel`` then found nothing, returned, and logged at
+    DEBUG; the token was never tripped and the tool ran to completion
+    reporting ``ok=True``.  Measured at 12/12 lost cancels on a
+    4-core host carrying 16 busy loops, against 0/10 idle.  The loss
+    is PERMANENT, not deferred: the frame is consumed and discarded,
+    so no later cancel-check can recover it (a 105 s command lost the
+    cancel just as completely as a 10 s one).
     """
 
     cancel_token: CancelToken
@@ -268,6 +312,24 @@ class RunnerRPC:
         self._write_lock = threading.Lock()
         self._active_calls: Dict[int, _ActiveCall] = {}
         self._active_lock = threading.Lock()
+        # Highest incoming request id the reader thread has registered.
+        # Written under ``_active_lock`` beside ``_active_calls`` so the
+        # two cannot disagree.  Its only job is to let
+        # ``_handle_cancel`` tell a BENIGN miss (the call finished
+        # before the cancel arrived) from an ANOMALOUS one (a cancel
+        # for an id this runner was never asked to run) -- the two were
+        # indistinguishable, and both silent, before #988.
+        self._highest_request_id = 0
+        # #988 observability counters.  A cancel that is written to the
+        # wire and not honoured must be countable, not merely absent
+        # from a DEBUG log nobody enables.  Read via
+        # :meth:`cancel_stats`.
+        self._cancel_counts: Dict[str, int] = {
+            "received": 0,      # cancel frames decoded
+            "tripped": 0,       # matched an in-flight call and tripped it
+            "late": 0,          # arrived after the call completed (benign)
+            "unknown": 0,       # id this runner never registered (anomaly)
+        }
         self._closed = False
 
         # Phase 3 §3.2: runner → daemon outgoing-call bookkeeping.
@@ -484,21 +546,65 @@ class RunnerRPC:
 
         return _cb
 
-    def _handle_request(self, env: RequestEnvelope) -> None:
-        """Worker-thread entrypoint for one in-flight request.
+    def _register_call(self, request_id: int) -> CancelToken:
+        """Create and publish the cancel token for *request_id*.
 
-        Sets thread-local cancel token + on_output, calls the executor,
-        emits the terminating response.  Any exception from the
-        executor is caught and serialized into the error payload — the
-        wire never sees a half-open call.
+        **Call this from the reader thread, before reading the next
+        frame** — that ordering is the #988 cancel guarantee, and it is
+        the reason this is a separate method from
+        :meth:`_handle_request` rather than its first two statements.
+        See :class:`_ActiveCall` for the full lifecycle.
+
+        Idempotent per id in the only sense that matters: re-registering
+        an id replaces its entry, so a direct caller (a test, or the
+        synchronous ``session.bootstrap`` path) that reaches
+        ``_handle_request`` without going through ``serve`` still gets a
+        token.
+
+        Returns:
+            The :class:`CancelToken` now reachable from
+            ``_active_calls[request_id]`` — hand it to
+            :meth:`_handle_request` so the worker publishes the SAME
+            object to its thread-local, rather than a second one that
+            a cancel would never reach.
         """
-        import threading as _thr   # [RPC_DIAG] register-stall trace — DIAG BRANCH
-        logger.info(
-            "[RPC_DIAG] _handle_request ENTER method=%s id=%s tid=%s",
-            env.method, env.id, _thr.get_ident())
         token = CancelToken()
         with self._active_lock:
-            self._active_calls[env.id] = _ActiveCall(cancel_token=token)
+            self._active_calls[request_id] = _ActiveCall(cancel_token=token)
+            if request_id > self._highest_request_id:
+                self._highest_request_id = request_id
+        return token
+
+    def _handle_request(
+        self,
+        env: RequestEnvelope,
+        token: Optional[CancelToken] = None,
+    ) -> None:
+        """Worker-thread entrypoint for one in-flight request.
+
+        Publishes the cancel token + on_output to the worker's
+        thread-locals, calls the executor, emits the terminating
+        response, and deregisters the call.  Any exception from the
+        executor is caught and serialized into the error payload — the
+        wire never sees a half-open call.
+
+        Args:
+            env: the decoded request frame.
+            token: the token :meth:`_register_call` already published
+                for ``env.id`` on the reader thread.  ``None`` means
+                "nobody registered this call yet" and registers it here
+                — correct only for a caller that is ITSELF the reader
+                thread (or a test with no concurrent cancel), because a
+                cancel frame decoded between the submit and this line
+                would find no entry.  ``serve`` always passes the token
+                it registered; see :class:`_ActiveCall`.
+        """
+        logger.info(   # [RPC_DIAG] register-stall trace — DIAG BRANCH
+            "[RPC_DIAG] _handle_request ENTER method=%s id=%s tid=%s "
+            "preregistered=%s",
+            env.method, env.id, threading.get_ident(), token is not None)
+        if token is None:
+            token = self._register_call(env.id)
 
         _thread_local.cancel_token = token
         _thread_local.on_output = self._make_on_output(env.id)
@@ -4822,14 +4928,67 @@ class RunnerRPC:
         with self._session_lock:
             return self._session_host
 
-    def _handle_cancel(self, frame: CancelFrame) -> None:
+    def cancel_stats(self) -> Dict[str, int]:
+        """Snapshot of the cancel-frame counters (#988).
+
+        Keys: ``received`` (frames decoded), ``tripped`` (matched an
+        in-flight call), ``late`` (the call had already finished —
+        benign), ``unknown`` (an id this runner never registered — an
+        anomaly, and the shape a lost cancel used to take).
+
+        ``received == tripped + late + unknown`` holds by construction,
+        so a nonzero ``unknown`` is the one number that says "a cancel
+        reached this runner and nothing was cancelled".
+        """
         with self._active_lock:
+            return dict(self._cancel_counts)
+
+    def _handle_cancel(self, frame: CancelFrame) -> None:
+        """Trip the cancel token for *frame.id*, or say why it could not.
+
+        Runs on the reader thread, in wire order, which is what makes
+        the miss branches below genuinely exceptional — see
+        :class:`_ActiveCall`.  Before #988 this method had one miss
+        branch logged at DEBUG, so a cancel the daemon had written to
+        the wire and the runner had decoded could vanish leaving no
+        trace at any level an operator runs at.
+
+        The two misses are NOT the same event and no longer read the
+        same:
+
+        * ``id <= _highest_request_id`` — the call finished before the
+          cancel arrived.  Benign and routine (any cancel racing a
+          completion does this); DEBUG.
+        * ``id > _highest_request_id`` — a cancel for a call this
+          runner was never asked to run.  The daemon believes a call is
+          in flight that is not, which is #856's signature; WARNING.
+        """
+        with self._active_lock:
+            self._cancel_counts["received"] += 1
             active = self._active_calls.get(frame.id)
+            if active is not None:
+                self._cancel_counts["tripped"] += 1
+            elif frame.id <= self._highest_request_id:
+                self._cancel_counts["late"] += 1
+            else:
+                self._cancel_counts["unknown"] += 1
+            highest = self._highest_request_id
+
         if active is None:
-            logger.debug(
-                "runner RPC: cancel for unknown call id=%d — already finished?",
-                frame.id,
-            )
+            if frame.id <= highest:
+                logger.debug(
+                    "runner RPC: cancel for call id=%d arrived after the "
+                    "call completed — nothing to trip",
+                    frame.id,
+                )
+            else:
+                logger.warning(
+                    "runner RPC: cancel for call id=%d was NOT honoured — "
+                    "this runner has never been asked to run that id "
+                    "(highest registered=%d).  The daemon believes a call "
+                    "is in flight that is not; the cancel is discarded.",
+                    frame.id, highest,
+                )
             return
         active.cancel_token.cancel()
         logger.info("runner RPC: cancel tripped for call id=%d", frame.id)
@@ -4876,6 +5035,15 @@ class RunnerRPC:
                         continue
                     logger.info(   # [RPC_DIAG] register-stall trace — DIAG BRANCH
                         "[RPC_DIAG] serve recv method=%s id=%s", env.method, env.id)
+                    # #988: register the call HERE, on the reader
+                    # thread, before the next frame is decoded — never
+                    # inside the worker that runs it.  Every branch
+                    # below hands the resulting token to
+                    # ``_handle_request`` so the worker publishes the
+                    # same object to its thread-local.  See
+                    # :class:`_ActiveCall` for what the worker-side
+                    # registration cost us.
+                    call_token = self._register_call(env.id)
                     if env.method == "session.bootstrap":
                         # Pool PR 5a-fix: ``session.bootstrap`` runs
                         # synchronously on the main thread (NOT via
@@ -4901,17 +5069,19 @@ class RunnerRPC:
                         # synchronous-on-main-thread pattern that
                         # cold-spawn uses in ``__main__.py`` step 2
                         # — pool slot now mirrors it.
-                        self._handle_request(env)
+                        self._handle_request(env, call_token)
                     elif env.method in WORK_LANE_METHODS:
                         # Unbounded: runs model or user code.
-                        self._pool.submit(self._handle_request, env)
+                        self._pool.submit(self._handle_request, env, call_token)
                     else:
                         # Control plane -- bounded work, its own lane, so it
                         # cannot queue behind a turn or a tool.  Unclassified
                         # methods land here by falling through; the guard in
                         # ``test_every_rpc_method_has_a_lane`` makes that a
                         # test failure rather than a silent latency cliff.
-                        self._control_pool.submit(self._handle_request, env)
+                        self._control_pool.submit(
+                            self._handle_request, env, call_token,
+                        )
                 elif kind == KIND_CANCEL:
                     try:
                         frame = CancelFrame.from_dict(payload)
