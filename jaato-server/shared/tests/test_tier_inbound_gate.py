@@ -506,6 +506,74 @@ class TestTheNoteDoesNotBlameTheModel:
         assert "does not accept audio as input" in note
 
 
+class TestTheAuthoringSurfaceAgrees:
+    """`explain tiers` must not assert the opposite of what the gate does.
+
+    The surface carried one sentence saying an OUTBOUND role "is INERT
+    unless the named provider declares `output_media`" — true of the
+    EMISSION half, and after #1001 false of the role, which now arms the
+    inbound gate.  An author reading it before writing
+    ``voz: {audio: outbound}`` would be told the declaration does nothing,
+    when that declaration is exactly what withholds the caller's audio.
+
+    That is the silent-ignore family (#910, #925, #947, #950) arriving
+    from the other direction: a surface claiming inertness for something
+    load-bearing.  These pin the correction rather than the wording, so
+    they fail if the claim comes back, not when a sentence is reworded.
+    """
+
+    def _explained(self):
+        from shared.scaffold import explain
+        return explain.tiers()
+
+    def test_the_outbound_note_no_longer_calls_the_role_inert(self):
+        data, _ = self._explained()
+        note = data["outbound_is_inert"]
+        assert "EMISSION half" in note
+        assert "ARMS the inbound gate" in note
+
+    def test_it_states_the_gating_rule(self):
+        data, text = self._explained()
+        rule = data["inbound_gate_is_armed_by_any_role"]
+        assert "outbound" in rule and "STOP inbound audio" in rule
+        assert "HOW YOU STOP" in text
+
+    def test_it_states_the_arming_trigger_exactly(self):
+        """Not "is the inbound set non-empty" — an empty set still arms."""
+        rule = self._explained()[0]["inbound_gate_is_armed_by_any_role"]
+        assert "did the author write a role" in rule
+        assert "EMPTY" in rule
+
+    def test_it_states_that_a_declaration_narrows_and_never_widens(self):
+        rule = self._explained()[0]["inbound_gate_is_armed_by_any_role"]
+        assert "NARROWS, never" in rule and "INTERSECTED" in rule
+
+    def test_it_states_the_fallback_for_an_unconfigured_session(self):
+        fallback = self._explained()[0]["inbound_gate_fallback"]
+        assert "ALONE" in fallback
+        assert "vision" in fallback and "IMPLICIT" in fallback
+
+    def test_it_states_why_the_tier_is_the_right_level(self):
+        why = self._explained()[0]["why_the_tier_and_not_the_format"]
+        assert "CONTAINERS" in why
+        assert "gpt-audio" in why
+
+    def test_the_modality_vocabulary_is_derived_not_restated(self):
+        """The rule text must track the framework's own vocabulary."""
+        from shared.model_tiers import VALID_TIER_MODALITIES
+        rule = self._explained()[0]["inbound_gate_is_armed_by_any_role"]
+        for kind in VALID_TIER_MODALITIES:
+            assert kind in rule
+
+    def test_validate_does_not_call_the_whole_outbound_role_inert(self):
+        """The warning is about emission; the role still bounds intake."""
+        import inspect
+        from shared.scaffold import validate as V
+        src = inspect.getsource(V._check_modality_direction)
+        assert "EMISSION" in src
+        assert "bounds what this tier" in src
+
+
 class TestTraceNamesWhichBoundRefused:
     """An operator reading the trace must be able to tell them apart."""
 

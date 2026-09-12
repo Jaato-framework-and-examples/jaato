@@ -625,11 +625,18 @@ def _check_tier_modalities(key, raw, add, provider_name=None):
     Accepts both spellings: the list sugar (``[image]``, meaning inbound)
     and the direction map (``{image: bidirectional}``).
 
-    Emits a **warning**, not an error, for an outbound role: it parses and
-    is stored, but no adapter can deliver model-generated media yet, so the
-    declaration is inert.  Warning rather than error because a profile
-    should be writable ahead of the delivery work landing — see
+    Emits a **warning**, not an error, for an outbound role whose provider
+    does not declare ``output_media``: the role parses and is stored, but
+    that adapter decodes no model-generated media, so its EMISSION half is
+    inert.  Warning rather than error because a profile should be writable
+    ahead of the delivery work landing — see
     ``docs/design/binary-media-chunks.md``.
+
+    The role as a whole is **not** inert, and the warning says so: since
+    #1001 any authored role bounds what the tier is HANDED, so
+    ``{audio: outbound}`` withholds inbound audio from that tier whatever
+    the provider can emit.  Claiming otherwise is what made this surface
+    disagree with the gate.
 
     Args:
         key: Tier name, for the diagnostic's ``where``.
@@ -786,10 +793,13 @@ def _check_modality_direction(key, kind, direction, where, add,
         # inert.  The provider's own `output_media` capability is the
         # thing that changes, so it is the thing to ask.
         add("warning", "outbound_modality_not_deliverable",
-            f"model_tiers.{key} declares '{kind}' {value}, which parses but "
-            f"is INERT: provider '{provider_name or '<unset>'}' does not "
-            "declare `output_media`, so its adapter does not decode "
-            "model-generated media — nothing can deliver it.  See "
+            f"model_tiers.{key} declares '{kind}' {value}, whose EMISSION "
+            f"half is INERT: provider '{provider_name or '<unset>'}' does "
+            "not declare `output_media`, so its adapter does not decode "
+            "model-generated media — nothing can deliver it.  (The role "
+            "itself still takes effect: declaring it bounds what this tier "
+            f"is HANDED, so {kind} is withheld from it inbound unless it "
+            "declares that too — #1001.)  See "
             "docs/design/binary-media-chunks.md for the three touches that "
             "wire a provider."
             + ("  The inbound half of this role IS live."
