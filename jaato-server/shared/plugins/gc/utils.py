@@ -14,6 +14,7 @@ from jaato_sdk.media_identity import (
     ATTACHMENT_ID_KEY,
     audio_duration_seconds,
     describe_attachment,
+    mint_attachment_id,
     split_mime,
 )
 from jaato_sdk.plugins.model_provider.types import (
@@ -205,12 +206,75 @@ def estimate_media_tokens(inline_data: Optional[Dict[str, Any]]) -> int:
     return max(1, num_bytes // rate)
 
 
+def attachment_media_view(attachment: Any) -> Dict[str, Any]:
+    """An ``inline_data``-shaped view of one :class:`ToolResult` attachment.
+
+    A tool result carries its binary payload as
+    :class:`~jaato_sdk.plugins.model_provider.types.Attachment` objects
+    (``mime_type`` / ``data`` / ``display_name``) rather than as the
+    ``Part.inline_data`` dict, so the two shapes are the SAME three fields
+    wearing different clothes.  Rendering the attachment into the dict
+    form here means the rate table, the byte count, the marker text and
+    the mime match are one implementation for both, instead of a parallel
+    set that can disagree about what a megabyte of audio costs.
+
+    The attachment id is **minted from the payload** rather than read off
+    a field: :class:`Attachment` has none (it is a public SDK dataclass
+    used by every multimodal tool, and widening it is a separate
+    decision), and the id is a digest of the bytes — so recomputing it
+    here yields exactly the value ingest would have given it.
+    """
+    data = getattr(attachment, "data", None)
+    return {
+        "mime_type": getattr(attachment, "mime_type", None),
+        "data": data,
+        "display_name": getattr(attachment, "display_name", None),
+        ATTACHMENT_ID_KEY: mint_attachment_id(data),
+    }
+
+
+def part_media_views(part: Part) -> List[Dict[str, Any]]:
+    """Every binary payload one part carries, in ``inline_data`` shape.
+
+    Two sources, which GC previously knew one of (#850, #989):
+
+    * ``Part.inline_data`` — a user-message attachment, the inbound audio
+      #850 was filed about.
+    * ``Part.function_response.attachments`` — a TOOL RESULT's bytes.
+      ``function_response`` appeared in this module only for message
+      grouping, so these were sized at the one-token floor and were
+      immune to :func:`evict_consumed_media`.  Pre-existing for the
+      ``_multimodal`` image tools; it is a clarification answered by
+      voice (#989) that makes it recur every turn.
+    """
+    if part.inline_data:
+        return [part.inline_data]
+    response = part.function_response
+    if response is None:
+        return []
+    return [
+        attachment_media_view(att)
+        for att in (getattr(response, "attachments", None) or [])
+    ]
+
+
+def part_media_bytes(part: Part) -> int:
+    """Binary payload carried by one part, in bytes (either source)."""
+    return sum(inline_data_bytes(view) for view in part_media_views(part))
+
+
+def part_media_tokens(part: Part) -> int:
+    """Estimated token cost of one part's binary payload (either source)."""
+    return sum(estimate_media_tokens(view) for view in part_media_views(part))
+
+
 def message_media_bytes(message: Message) -> int:
-    """Total ``inline_data`` payload carried by one message, in bytes."""
-    return sum(
-        inline_data_bytes(part.inline_data)
-        for part in (message.parts or [])
-    )
+    """Total binary payload carried by one message, in bytes.
+
+    Counts both a part's own ``inline_data`` and the attachments of a
+    tool result it carries — see :func:`part_media_views`.
+    """
+    return sum(part_media_bytes(part) for part in (message.parts or []))
 
 
 def message_media_tokens(message: Message) -> int:
@@ -222,11 +286,7 @@ def message_media_tokens(message: Message) -> int:
     at the top of the cyclomatic-complexity baseline -- can account for
     media with a single statement and no additional decision point.
     """
-    return sum(
-        estimate_media_tokens(part.inline_data)
-        for part in (message.parts or [])
-        if part.inline_data
-    )
+    return sum(part_media_tokens(part) for part in (message.parts or []))
 
 
 def history_media_bytes(history: Sequence[Message]) -> int:
@@ -277,6 +337,11 @@ def estimate_message_tokens(message: Message) -> int:
                 total_chars += len(fr.name) if fr.name else 0
                 if fr.result:
                     total_chars += len(str(fr.result))
+                # A tool result's own binary payload — an image a tool
+                # produced, or the audio a clarification was answered with
+                # (#989).  Invisible here until now, exactly as
+                # ``inline_data`` was before #850.
+                media_tokens += part_media_tokens(part)
 
             # Binary parts (audio, images, PDFs) — the payload that
             # dominates a voice request and used to be sized at zero.
@@ -727,7 +792,12 @@ def evict_consumed_media(
     mime_prefixes: Iterable[str] = DEFAULT_MEDIA_EVICT_MIME_PREFIXES,
     protect_last_messages: int = 0,
 ) -> Tuple[List[Message], int, List[str]]:
-    """Replace consumed binary parts with a traceable text marker.
+    """Replace consumed binary payloads with a traceable text marker.
+
+    Covers both sources :func:`part_media_views` knows: a ``Part``'s own
+    ``inline_data`` (swapped for a text part carrying the marker) and a
+    tool result's ``attachments`` (dropped, with the marker appended to
+    that result's ``model_suffix`` — see :func:`_evict_tool_result_media`).
 
     Inbound media was the one direction with no lifecycle at all (#850).
     Outbound already did the right thing — model media is ``CLIENT``
@@ -777,39 +847,105 @@ def evict_consumed_media(
 
     cutoff = len(history) - max(0, protect_last_messages)
 
-    def _matches(part: Part) -> bool:
-        if not part.inline_data:
-            return False
-        base, _params = split_mime(part.inline_data.get("mime_type"))
-        return base.startswith(prefixes) and inline_data_bytes(
-            part.inline_data
-        ) > 0
-
     new_history: List[Message] = []
     evicted_ids: List[str] = []
     bytes_reclaimed = 0
 
     for index, msg in enumerate(history):
-        parts = msg.parts or []
-        if index >= cutoff or not any(_matches(p) for p in parts):
+        if index >= cutoff:
             new_history.append(msg)
             continue
-        new_parts: List[Part] = []
-        for part in parts:
-            if not _matches(part):
-                new_parts.append(part)
-                continue
-            inline = part.inline_data or {}
-            bytes_reclaimed += inline_data_bytes(inline)
-            new_parts.append(Part.from_text(_evicted_media_marker(
-                inline, inline.get(ATTACHMENT_ID_KEY),
-            )))
+        new_parts, reclaimed = _evict_parts_media(msg.parts or [], prefixes)
+        if new_parts is None:
+            new_history.append(msg)
+            continue
+        bytes_reclaimed += reclaimed
         new_history.append(_dc_replace(msg, parts=new_parts))
         evicted_ids.append(msg.message_id)
 
     if not evicted_ids:
         return history, 0, []
     return new_history, bytes_reclaimed, evicted_ids
+
+
+def _media_matches(view: Dict[str, Any], prefixes: Tuple[str, ...]) -> bool:
+    """Whether one ``inline_data``-shaped payload is evictable."""
+    base, _params = split_mime(view.get("mime_type"))
+    return base.startswith(prefixes) and inline_data_bytes(view) > 0
+
+
+def _evict_parts_media(
+    parts: Sequence[Part],
+    prefixes: Tuple[str, ...],
+) -> Tuple[Optional[List[Part]], int]:
+    """Rewrite one message's parts, dropping evictable binary payloads.
+
+    Returns ``(None, 0)`` when nothing in this message matches, so the
+    caller shares the original message by reference instead of copying it.
+    """
+    new_parts: List[Part] = []
+    reclaimed = 0
+    for part in parts:
+        if part.inline_data and _media_matches(part.inline_data, prefixes):
+            inline = part.inline_data
+            reclaimed += inline_data_bytes(inline)
+            new_parts.append(Part.from_text(_evicted_media_marker(
+                inline, inline.get(ATTACHMENT_ID_KEY),
+            )))
+            continue
+        replacement, freed = _evict_tool_result_media(
+            part.function_response, prefixes,
+        )
+        if replacement is None:
+            new_parts.append(part)
+            continue
+        reclaimed += freed
+        new_parts.append(Part.from_function_response(replacement))
+    return (new_parts, reclaimed) if reclaimed else (None, 0)
+
+
+def _evict_tool_result_media(
+    response: Optional[ToolResult],
+    prefixes: Tuple[str, ...],
+) -> Tuple[Optional[ToolResult], int]:
+    """Strip evictable attachments off one tool result.
+
+    A tool result's bytes live in ``ToolResult.attachments``, not in a
+    ``Part``, so eviction cannot simply swap the part for a text one — the
+    call id, the name and the structured ``result`` the model answered from
+    all have to survive.  The attachment is dropped and its marker appended
+    to ``model_suffix``, which is the existing model-facing-only channel
+    (:func:`render_result_for_model`): the structured ``result`` stays the
+    source of truth every non-model consumer reads — the tool-call ledger,
+    completion processors, enrichment — while the model still learns that
+    a recording was here and what its id was.
+
+    Returns ``(None, 0)`` when nothing matched, so the caller keeps the
+    original part.
+    """
+    attachments = list(getattr(response, "attachments", None) or [])
+    if not attachments:
+        return None, 0
+    kept: List[Any] = []
+    markers: List[str] = []
+    reclaimed = 0
+    for attachment in attachments:
+        view = attachment_media_view(attachment)
+        if not _media_matches(view, prefixes):
+            kept.append(attachment)
+            continue
+        reclaimed += inline_data_bytes(view)
+        markers.append(_evicted_media_marker(view, view.get(ATTACHMENT_ID_KEY)))
+    if not markers:
+        return None, 0
+    suffix = "\n".join(
+        [s for s in [response.model_suffix] if s] + markers
+    )
+    return _dc_replace(
+        response,
+        attachments=kept or None,
+        model_suffix=suffix,
+    ), reclaimed
 
 
 def media_pressure_reason(
