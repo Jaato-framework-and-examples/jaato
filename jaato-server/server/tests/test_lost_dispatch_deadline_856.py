@@ -518,6 +518,66 @@ async def test_a_bootstrap_in_flight_suppresses_the_probe():
 # ----------------------------------------------------------------------
 
 
+def test_a_runner_can_answer_a_call_with_nothing_and_stay_healthy():
+    """One demonstrated mechanism for the observed state (#856 triage).
+
+    #920 made the runner refuse to WRITE an oversized frame rather than
+    write one the peer cannot skip, and turned that drop into a small
+    typed error for the call it belonged to.  That substitution is
+    guarded by ``if not ok or self._closed: return`` — so it happens for
+    a SUCCESS response and not for an ERROR one, on the reasoning that
+    "an error frame that did not fit will not fit a second time".  The
+    substitute, though, is small by construction; what did not fit is
+    the original, whose ``result`` dict can carry megabytes of tool
+    output beside the traceback.
+
+    The consequence is exactly the state the issue describes: the call
+    is answered with NOTHING, the channel stays OPEN, the runner returns
+    to idle with an empty active set, and the daemon waits forever.
+    Distinct from #851 in the one way that matters — there is no EOF, so
+    nothing fails the in-flight future.
+
+    This is NOT a claim that it is what happened in the reported
+    incident: that would need the runner's own log, which the report
+    does not carry.  It is a demonstration that the class of failure is
+    reachable, and it is the case the ``finished`` verdict answers — the
+    id has left ``active_call_ids`` and is still in
+    ``known_request_ids``, so the daemon reports a lost RESPONSE rather
+    than a lost dispatch.
+    """
+    from shared.framing import MAX_MESSAGE_SIZE
+    from server.runner.envelope import ErrorPayload
+    from server.runner.rpc import RunnerRPC
+
+    a, b = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        rpc = RunnerRPC(a, lambda name, args: (True, {}))
+        oversized = "x" * (MAX_MESSAGE_SIZE + 1024)
+        b.settimeout(0.3)
+
+        # ok=True: #920's substitution fires, so the caller IS answered.
+        rpc._emit_response(
+            request_id=41, ok=True, result={"stdout": oversized},
+        )
+        assert read_frame_sync(b) is not None
+        assert rpc._closed is False
+
+        # ok=False: nothing is written at all.
+        rpc._emit_response(
+            request_id=42, ok=False, result={"stdout": oversized},
+            error=ErrorPayload(type="ToolError", message=oversized),
+        )
+        with pytest.raises(socket.timeout):
+            read_frame_sync(b)
+        assert rpc._closed is False, (
+            "the channel stayed open, which is what makes this NOT #851: "
+            "no EOF reaches the daemon, so no in-flight future fails"
+        )
+    finally:
+        a.close()
+        b.close()
+
+
 def test_the_runner_reports_what_it_actually_received():
     """Ask 2, runner side: ``health_check`` carries the transport view.
 

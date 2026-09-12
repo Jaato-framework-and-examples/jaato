@@ -2709,6 +2709,126 @@ gated call, so the cancelled call is provably still queued; wire ordering is
 established by a control-lane probe rather than by polling. It fails
 `unknown=1, tripped=0` against the old registration site, deterministically.
 
+### A Request the Daemon Wrote and the Runner Does Not Have (#856)
+
+#988 is a cancel that lost a race inside the runner. This is the turn
+itself. A session's second turn was registered in the daemon's
+`_in_flight` and never happened; sixty-eight minutes later the client was
+still blocked in `session.ask()` and py-spy showed **every thread in all
+three processes idle** — no lock held, no read outstanding, the pipe
+healthy, the runner alive with an empty work queue. The daemon's entire
+record was four lines:
+
+```
+[RPC_DIAG] daemon _in_flight SET id=30 client=129050257488880
+[RPC_DIAG] daemon _in_flight SET id=31 ...
+```
+
+which are emitted ~25 lines BEFORE the write, so they say what the daemon
+INTENDED and nothing about what became of it.
+
+**Three failure modes, and one had no name and no bound:**
+
+| what happened | how it surfaces | session survives? |
+|---|---|---|
+| the runner died (#851) | `RunnerCallError` — the read loop sees EOF and fails every future | no — terminal |
+| the runner is slow | `RunnerAnswerTimeout` | yes |
+| **the dispatch is lost** | **`RunnerDispatchLost`** | yes |
+
+`call()`'s `return await fut` had no deadline, and the two calls that
+matter most default to `timeout=None` (`session.send_message`,
+`call_threadsafe`) because a turn legitimately runs for minutes. So a
+dead runner reached a person as an error and a lost request reached them
+as the agent apparently thinking.
+
+**The bound is a reconciliation, not a wall clock.** A wall-clock cap on
+an RPC would kill healthy long turns, which is worse than the hang. What
+is bounded is how long the daemon will believe, *unchecked*, that a
+request it wrote is being worked on: after a window with no frame bearing
+that id, it ASKS the runner — over the **control lane**, so the answer
+arrives while the work lane is busy with the very turn in question.
+
+| verdict | the runner says | action |
+|---|---|---|
+| `running` | the id is in `active_call_ids` | another full window, indefinitely |
+| `finished` | the id has left `active_call_ids` and is still in `known_request_ids` | fail — the RESPONSE was lost |
+| `never_received` | neither | fail — **the bug** |
+| `unreachable` | the probe itself did not come back | fail — bounded work went unanswered |
+
+`session.health_check` carries the transport view (`active_call_ids`,
+`known_request_ids`, `highest_request_id`), reported whether or not a
+session host exists because it describes the CHANNEL, not the session.
+
+**The predicate is a window, not a high-water mark.** The probe is itself
+a request, registered on the runner's reader thread *before* its own
+handler runs — so `highest_request_id` at answer time is always the
+probe's own id, and comparing against it would report every id as
+received, including the ones that never arrived: the one answer that
+makes the whole mechanism worthless. `SEEN_REQUEST_ID_MEMORY` (256) only
+has to outlive the ack window. This is the daemon-side half of #988's
+`unknown` cancel counter — both count a peer disagreeing about what is in
+flight — and `dispatch_lost_count()` is its counter.
+
+**`RunnerDispatchLost` subclasses `RunnerRPCTimeout`**, which decides the
+blast radius: `core.py`'s model thread terminates the session for
+anything it catches EXCEPT a `RunnerRPCTimeout`, so the TURN fails and
+the SESSION lives. That is also what makes it distinguishable from #851
+in the client-visible error, since `ErrorEvent.error_type` is
+`type(exc).__name__`. The message names the id, the method and the
+session, because the incident's whole record named none of them.
+
+**Two exemptions, each for a runner that cannot answer:**
+
+- `session.health_check` — it IS the probe, and watching it would have
+  the watchdog answer its own question, recursively.
+- any window in which `session.bootstrap` is outstanding. It runs on the
+  runner's MAIN thread (synchronously, so `aa_change_profile` confines
+  the thread that later spawns the workers), so the reader thread is
+  inside it and NEITHER lane answers; a probe would time out and read as
+  a lost dispatch. The 120s default also sits clear above bootstrap's own
+  30s deadline, so two independent things stop it.
+
+**And the dispatch is logged.** `_dispatched[id] = method` is set AFTER
+the frame reaches the wire, beside a `[RPC_DIAG] daemon DISPATCHED
+id=N method=...` line. An `_in_flight` entry with no `_dispatched` entry
+is "registered, never written" — the state the four original log lines
+could not be told apart from a healthy in-flight turn.
+
+Knob: `JAATO_RUNNER_ACK_TIMEOUT` (host-scoped — it bounds the channel,
+which a pool slot shares across several sessions in turn). `0` disables,
+following the provider-deadline convention; a negative or unparseable
+value falls back to the default rather than disabling, because
+"unbounded" is the bug this exists to fix.
+
+**What the triage established, and what it did not.** The request-write
+path was ruled OUT as a silent drop: `_write_frame_json` awaits
+`writer.drain()` and `call()` catches only `FrameTooLargeError`, which it
+re-raises after deregistering, so any other write failure reaches the
+caller. There is no queue on that path to drop from. A runner-side
+dispatch-table miss was ruled out too — an unknown method returns an
+error RESPONSE (`unknown method: ...`), and `serve()` wraps its loop body
+in no broad `except`, so an unexpected reader-thread exception closes the
+channel and becomes #851 rather than this.
+
+What IS reachable, and demonstrated in
+`test_a_runner_can_answer_a_call_with_nothing_and_stay_healthy`, is a
+response-side drop. #920 refuses to write an oversized frame and
+substitutes a small typed error for the call — guarded by `if not ok or
+self._closed: return`, so the substitution happens for a SUCCESS
+response and not for an ERROR one, on the reasoning that an error frame
+that did not fit will not fit again. But the substitute is small by
+construction; what did not fit is the original, whose `result` dict
+carries megabytes of tool output beside the traceback. Measured: `ok=True`
+answers the caller in 221 bytes, `ok=False` writes **nothing at all** and
+leaves `_closed` **False** — the channel open, the runner idle, the
+daemon waiting forever. Not a claim about the reported incident, which
+would need the runner's own log; a demonstration that the class is
+reachable, and it is precisely what the `finished` verdict answers.
+
+So: **bounded, not root-caused.** The remaining gap — extending #920's
+substitution to error responses — is now bounded by this deadline rather
+than infinite, and is left as its own change.
+
 ### Interactive Shell Sessions (`shared/plugins/interactive_shell/`)
 
 The `interactive_shell` plugin lets the model drive any user-interactive command by spawning persistent PTY sessions. Unlike `cli/` (which uses `subprocess` and can only run non-interactive commands), this plugin uses `pexpect` to provide a real pseudo-terminal where the model can read output and send input back and forth.
@@ -3996,6 +4116,7 @@ covers it, where one exists. `jaato-scaffold explain env` renders the tags;
 | `JAATO_DEFERRED_TOOLS` | Enable deferred tool loading (default: `true`) |
 | `JAATO_RUNNER_POOL_ENABLED` | Enable pre-warm runner pool routing (default: `true`).  Sessions consume pre-warm pool slots instead of cold-spawning a runner subprocess.  Set to `false` / `0` / `no` / `off` to disable.  See `docs/design/runner_prewarm_pool_plan.md`. |
 | `JAATO_RUNNER_POOL_SIZE` | Number of **unreserved** pre-warm pool slots to keep idle (default: 2) — slots any arriving session may take.  Raise for cascades that fan out stages **concurrently** (each simultaneous stage needs its own warm slot).  Sequential/back-to-back stages do NOT need a larger pool — they reuse one warm slot via the `slot.settled` handoff (the next stage is spawned on slot-availability), so pool size >1 only helps parallel fan-out.  Cascade-affined idle slots (reservations) are **not** counted here (#898): they are capacity for one tenant only, and counting them as pool capacity starved everybody else. |
+| `JAATO_RUNNER_ACK_TIMEOUT` | Seconds a dispatched runner RPC may go with NO frame bearing its id before the daemon stops assuming and asks the runner what it actually has (default 120; `0` disables). **Not** a cap on how long an RPC may take — a turn legitimately runs for minutes, and a runner that claims the id buys another full window. What it bounds is an unbounded WAIT: before it, a request the daemon wrote and the runner does not have hung the caller forever with every thread idle (#856). Host-scoped, because it bounds the channel, which a pool slot shares across several sessions in turn. A negative or unparseable value falls back to the default — "unbounded" is the bug this exists to fix. |
 | `JAATO_RUNNER_POOL_MAX_SIZE` | Hard ceiling on **total** idle pool slots, reservations included (default: `2 x JAATO_RUNNER_POOL_SIZE`).  This is the memory bound — a slot is 129–187 MB — on the growth that per-tenant reservations imply.  Raise it when `pool_replenish_ceiling_blocked_total` is nonzero: some tenant is being served by cold-spawn while reservations hold the ceiling. |
 | `JAATO_IPC_EVENT_QUEUE_MAX` | Per-client IPC event-queue bound (default 2048). Beyond it, lossy tool-output chunks are evicted oldest-first (media before text); essential lifecycle events are queued past the bound rather than dropped, because losing one desynchronises the client permanently. A non-numeric or non-positive value falls back to the default — "unbounded" is the bug this exists to fix. See [Binary Media Chunks](docs/design/binary-media-chunks.md). |
 | `JAATO_AMBIGUOUS_WIDTH` | Width for East Asian Ambiguous chars in tables (`1` default, `2` for CJK terminals) |
