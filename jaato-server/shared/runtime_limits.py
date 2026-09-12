@@ -62,6 +62,31 @@ DEFAULT_MAX_PARALLEL_TOOLS = 8
 # a profile asking for 4096 workers has a typo, not a workload.
 _MAX_PARALLEL_TOOLS_LIMIT = 256
 
+# How long a session may keep running with NO consumer at all -- no attached
+# client, no headless marker, nothing -- before the daemon stops it (#812).
+#
+# This is the ONE field in this block that carries a framework default, and
+# the reason is the incident it comes from: a session whose client died kept
+# executing tools for seven minutes and spent $2.52, and the only thing that
+# eventually stopped it was a ``budget_control`` ceiling its profile happened
+# to declare.  A profile that declared none had nothing at all.  A bound that
+# must be declared to exist would have left that session running just as long,
+# so the default is what makes the answer to "what stops an unattended
+# session?" independent of what its author remembered to write.
+#
+# 900s rather than something tight: the sweep cannot distinguish "the harness
+# crashed" from "the harness is being restarted", and the cost of being wrong
+# is destroyed work, while the cost of being slow is bounded spend.  An
+# operator who wants it tighter declares ``max_orphan_seconds`` and gets it;
+# one who genuinely runs unattended-forever sessions declares 0.
+DEFAULT_MAX_ORPHAN_SECONDS = 900.0
+
+# The value both wall-clock fields read as "explicitly unbounded".  Zero
+# rather than a string because these are numeric deadlines, and 0-disables is
+# already this tree's spelling for one (``JAATO_GC_MEDIA_BYTES``,
+# ``gc.media_bytes_threshold``, the three OpenRouter timeouts).
+UNBOUNDED_SECONDS = 0
+
 
 def _positive_int(
     name: str,
@@ -118,6 +143,33 @@ def _positive_number(name: str, value: Any) -> None:
         )
     if value <= 0:
         raise ValueError(f"{name} must be > 0, got {value}")
+
+
+def _non_negative_number(name: str, value: Any) -> None:
+    """Reject anything that is not a non-negative ``int`` or ``float``.
+
+    The sibling of :func:`_positive_number` for the two wall-clock bounds,
+    which accept ``0`` as "explicitly unbounded" -- so 0 must validate here
+    where it would be rejected there.  ``bool`` is excluded for the reason
+    given on :func:`_positive_int`.
+
+    Args:
+        name: Field name, for the message.
+        value: The declared value; ``None`` (unset) always passes.
+
+    Raises:
+        ValueError: With the field name and the offending value.
+    """
+    if value is None:
+        return
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        raise ValueError(
+            f"{name} must be a number, got {type(value).__name__}"
+        )
+    if value < 0:
+        raise ValueError(
+            f"{name} must be >= 0, got {value} (0 means explicitly unbounded)"
+        )
 
 
 def _in_range(name: str, value: Any, low: int, high: int) -> None:
@@ -193,6 +245,33 @@ class RuntimeLimits:
     # (single-worker), so the parallel path's ordering, hooks and
     # cancellation semantics are unchanged.
     max_parallel_tools: Optional[int] = None
+    # Wall-clock ceilings, enforced DAEMON-SIDE by the session-lifetime
+    # watchdog (#812).  The odd ones out in WHERE they are enforced: every
+    # other field here is applied inside the session (by the kernel, by a
+    # subprocess plugin, or by ``JaatoSession``), and these two are applied
+    # by the ``SessionManager`` that owns the session from the outside.
+    #
+    # That placement is the whole point.  The ceilings that already existed
+    # were all held by something the session could outlive -- the eval
+    # harness's ``--arm-timeout`` lived in the client process that died, and
+    # the task pool's ``seconds`` is reconciled when a session ENDS, so a
+    # session that never ends never consumes it.  A bound held by the daemon
+    # is held by the one process that is still there.
+    #
+    # ``None`` = nothing declared (``max_orphan_seconds`` then takes
+    # :data:`DEFAULT_MAX_ORPHAN_SECONDS`; ``max_session_seconds`` is
+    # unbounded).  ``0`` = explicitly unbounded, see
+    # :data:`UNBOUNDED_SECONDS`.
+    #
+    #: Total wall-clock a session may stay LOADED, attended or not.  Opt-in
+    #: and unbounded by default: an interactive TUI session left open over a
+    #: lunch break is not a defect, and a default here would kill it.
+    max_session_seconds: Optional[float] = None
+    #: Wall-clock a session may keep running with NO consumer -- no attached
+    #: client and not even the synthetic headless marker a woken or
+    #: cascade-driven session carries.  Defaulted, because the session this
+    #: field exists for is precisely the one whose profile declared nothing.
+    max_orphan_seconds: Optional[float] = None
 
     # Future-proof: forward-compat passthrough for fields the runtime
     # doesn't recognise yet.  Profile schema validation should reject
@@ -219,6 +298,8 @@ class RuntimeLimits:
                       ceiling=_MAX_PARALLEL_TOOLS_LIMIT,
                       ceiling_note="a model emits a handful of calls per "
                                    "turn, not hundreds")
+        _non_negative_number("max_session_seconds", self.max_session_seconds)
+        _non_negative_number("max_orphan_seconds", self.max_orphan_seconds)
 
     @classmethod
     def from_dict(cls, data: Optional[Mapping[str, Any]]) -> "RuntimeLimits":
@@ -232,7 +313,8 @@ class RuntimeLimits:
             return cls()
         known_fields = {"memory_max_mb", "pids_max", "cpu_weight",
                         "tool_timeout_seconds", "max_output_bytes",
-                        "max_parallel_tools"}
+                        "max_parallel_tools", "max_session_seconds",
+                        "max_orphan_seconds"}
         kwargs: Dict[str, Any] = {k: data[k] for k in known_fields if k in data}
         extra = {k: v for k, v in data.items() if k not in known_fields}
         return cls(extra=extra, **kwargs)

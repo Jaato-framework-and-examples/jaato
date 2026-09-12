@@ -177,9 +177,11 @@ class TestJournalRoundTrip:
         # 2.7 profile_spec for inline-profile disk-restore, 2.8
         # profile_snapshot/rendered_instructions/agent_params so a revive
         # restores its recipe and prompt instead of re-deriving them
-        # (#787), 2.9 created_by so the record names its user (#859);
+        # (#787), 2.9 created_by so the record names its user (#859),
+        # 2.10 runner_identity so the record names the PROCESS running it
+        # and an operator who can see a session can act on it (#812);
         # serializer.py).
-        assert data["version"] == "2.9"
+        assert data["version"] == "2.10"
         assert data["session_state"] == {"audit_chain_head": "deadbeef", "n": 3}
         restored = deserialize_session_state(data)
         assert restored.session_state == {"audit_chain_head": "deadbeef", "n": 3}

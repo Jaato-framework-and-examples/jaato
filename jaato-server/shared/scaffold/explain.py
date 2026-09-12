@@ -433,6 +433,11 @@ _RUNTIME_LIMIT_FIELDS = (
     ("max_output_bytes", "cli/shell", "truncates captured stdout/stderr"),
     ("max_parallel_tools", "session",
      "width of the tool thread pool (and of the token-count fan-out)"),
+    ("max_session_seconds", "daemon",
+     "total wall-clock a session may stay LOADED; 0 = unbounded"),
+    ("max_orphan_seconds", "daemon",
+     "wall-clock with NO client attached before the daemon stops it; "
+     "0 = unbounded"),
 )
 
 
@@ -455,6 +460,10 @@ def _runtime_limits_report() -> Dict[str, Any]:
         "max_parallel_tools": (
             f"{rl.DEFAULT_MAX_PARALLEL_TOOLS} (framework default)"
         ),
+        "max_session_seconds": "unbounded",
+        "max_orphan_seconds": (
+            f"{rl.DEFAULT_MAX_ORPHAN_SECONDS:g}s (framework default)"
+        ),
     }
     iso = rl.ISOLATED_SUBAGENT_DEFAULT_RUNTIME_LIMITS
     return {
@@ -474,6 +483,8 @@ def _runtime_limits_report() -> Dict[str, Any]:
         "inheritance": {
             "ceilings": "child REPLACES the block (parents must agree)",
             "max_parallel_tools": "MIN across every layer that declares it",
+            "max_session_seconds": "MIN across every layer that declares it",
+            "max_orphan_seconds": "MIN across every layer that declares it",
         },
     }
 
@@ -500,10 +511,28 @@ def _runtime_limits_lines(report: Dict[str, Any]) -> List[str]:
         "  inheritance: the ceilings are child-REPLACES (parents must agree);"
     )
     lines.append(
-        "               max_parallel_tools is MIN across every layer that sets it,"
+        "               max_parallel_tools and the two wall-clock bounds are"
     )
     lines.append(
-        "               so a child may only ever narrow the pool it was spawned under."
+        "               MIN across every layer that sets one, so a child may"
+    )
+    lines.append(
+        "               only ever narrow what it was spawned under."
+    )
+    lines.append(
+        "  the 'daemon' layer is enforced by the SessionManager watchdog, not"
+    )
+    lines.append(
+        "  inside the session -- so it still applies when the client that created"
+    )
+    lines.append(
+        "  the session has died (#812).  max_orphan_seconds is the ONE field here"
+    )
+    lines.append(
+        "  with a framework default: the session it exists for is the one whose"
+    )
+    lines.append(
+        "  profile declared nothing.  Declare 0 to opt out."
     )
     return lines
 

@@ -60,6 +60,11 @@ INTENTIONALLY_ABSENT = {
         "inject_prompt / wake_session guard; recovery forwards both METHODS "
         "and the inner client raises when the daemon is too old to carry the "
         "bytes -- same reasoning as MIN_INJECT_RESULT_PROTOCOL above",
+    "MIN_SESSION_STOP_PROTOCOL":
+        "implementation detail of the INNER IPCClient's session.orphans / "
+        "session.stop guard (#812); recovery forwards both METHODS and the "
+        "inner client raises when the daemon is too old to serve the verbs "
+        "-- same reasoning as MIN_ATTACHMENT_RESUME_PROTOCOL above",
     "MIN_CLARIFICATION_ATTACHMENT_PROTOCOL":
         "implementation detail of the INNER IPCClient's attachment-bearing "
         "respond_to_clarification_batch guard (#989); recovery forwards the "

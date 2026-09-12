@@ -284,6 +284,27 @@ class SessionState:
     # a reload while the MEMBERSHIP did not, so a revived sibling held a name
     # belonging to a cascade it was no longer in.
     cascade_driver_id: Optional[str] = None
+    # WHICH PROCESS RAN THIS SESSION (record version 2.10+, issue #812) --
+    # the dict ``server.session_identity.RunnerIdentity.to_dict`` produces:
+    # runner pid, whether it was pool-served and the slot pid if so, the
+    # cascade, and the AppArmor profile.
+    #
+    # Persisted because an operator who can SEE a session must be able to ACT
+    # on it.  #812 reports a session whose client had died, still executing
+    # tools and spending money, that could not be stopped from outside: the
+    # workspace index named a workspace and no process, this record had no
+    # runner-, slot- or pid-shaped key, and the per-session logs named only an
+    # IPC connection number.  The only options were killing a
+    # circumstantially-identified runner on a daemon shared with another live
+    # session, or waiting for the budget to burn.
+    #
+    # Restored with ``stale=True``: after a reload the pid named belonged to a
+    # previous process lifetime, so it is EVIDENCE (what last ran this) and
+    # never a handle.  A re-spawn overwrites it with a live record.
+    #
+    # ``None`` on records written before 2.10 and on sessions with no runner
+    # subprocess at all.
+    runner_identity: Optional[Dict[str, Any]] = None
     """Serialized conversation budget for restoration."""
 
     interrupted_turn: Optional[Dict[str, Any]] = None
