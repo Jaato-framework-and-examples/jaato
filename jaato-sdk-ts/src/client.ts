@@ -112,6 +112,18 @@ export const MIN_PROTOCOL_VERSION = "1.0";
 export const MIN_ATTACHMENT_RESUME_PROTOCOL = "1.5";
 
 /**
+ * Wire-protocol minor from which a clarification ANSWER carries
+ * `answer_attachments` (#989).
+ *
+ * Per-call for the same reason as {@link MIN_ATTACHMENT_RESUME_PROTOCOL},
+ * and refused for the same one: an older daemon ignores the field and
+ * answers the clarification with the media gone, which for a voice-only
+ * answer is a BLANK answer reported as a successful one — the server reads
+ * an empty response as `free_text: ""` and the agent proceeds on nothing.
+ */
+export const MIN_CLARIFICATION_ATTACHMENT_PROTOCOL = "1.6";
+
+/**
  * Parse ``"MAJOR.MINOR"`` into ``[major, minor]``.  Extra components
  * are tolerated and dropped (e.g. ``"1.0.5"`` → ``[1, 0]``).  Returns
  * ``null`` on malformed input rather than throwing — the compat check
@@ -536,18 +548,65 @@ export class JaatoClient {
    *   the tool returns ``{cancelled: true}`` to the model and the turn
    *   continues.  ``answers`` is ignored.  This is the way out of a
    *   question the user cannot or will not answer.
+   * @param answerAttachments Media attached to individual answers
+   *   (protocol 1.6+, #989), keyed by 1-based question index as a string:
+   *   `{"1": [{mime_type, data, display_name}]}`.  `data` must already be
+   *   base64 — this SDK does no file reading, exactly as `sendMessage`
+   *   and `wakeSession` do none.  A voice note answering a `free_text`
+   *   question is the motivating case, and the matching entry in
+   *   `answers` is then legitimately `""`: the utterance IS the answer,
+   *   and the daemon does not read it as a skip.  Equally valid on a
+   *   CHOICE answer — the ordinal says which branch, the attachment says
+   *   what content.  Refused (not degraded) below protocol 1.6.
    */
   async respondToClarificationBatch(
     requestId: string,
     answers: string[],
     cancelled = false,
+    answerAttachments?: Record<string, Array<Record<string, unknown>>>,
   ): Promise<void> {
+    const hasMedia =
+      !cancelled &&
+      answerAttachments !== undefined &&
+      Object.keys(answerAttachments).length > 0;
+    if (hasMedia) {
+      this._requireClarificationAttachmentProtocol();
+    }
     await this._sendEvent({
       type: EventTypeValue.CLARIFICATION_BATCH_RESPONSE,
       request_id: requestId,
       answers,
       cancelled,
+      answer_attachments: hasMedia ? answerAttachments : {},
     } as ClarificationBatchResponseEvent);
+  }
+
+  /**
+   * Refuse answer attachments against a daemon too old to carry them.
+   *
+   * Sibling of {@link _requireAttachmentResumeProtocol}, and the same
+   * argument: the degraded call does not mean what the caller asked for.
+   * Here it answers the agent's question with the recording thrown away —
+   * and the agent acts on it, because a clarification answer reaches the
+   * model as a tool result it reads as fact.
+   */
+  private _requireClarificationAttachmentProtocol(): void {
+    if (
+      this._serverProtocolVersion !== null &&
+      isProtocolCompatible(
+        this._serverProtocolVersion,
+        MIN_CLARIFICATION_ATTACHMENT_PROTOCOL,
+      )
+    ) {
+      return;
+    }
+    throw new Error(
+      `respondToClarificationBatch: this daemon speaks protocol ` +
+        `${this._serverProtocolVersion ?? "unknown"} and would DROP the ` +
+        `answer attachments (needs >= ` +
+        `${MIN_CLARIFICATION_ATTACHMENT_PROTOCOL}).  Answer the ` +
+        `clarification in text, or upgrade the daemon.`,
+    );
   }
 
   async respondToReferenceSelection(requestId: string, response: string): Promise<void> {

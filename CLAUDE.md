@@ -1151,6 +1151,86 @@ An attachment IS content here too (#838): a wake carrying only an utterance
 is valid; one carrying neither text nor bytes is refused by name. See
 [Binary Media Chunks §13](docs/design/binary-media-chunks.md).
 
+**A question can be answered with media (#989).** #845 made an existing
+session drivable with bytes; this is the direction the agent itself opens.
+`request_clarification` blocks the turn until someone answers, and the
+answer was text-only — so a user asked "what's your name?" who replies with
+a voice note has nowhere to put it, and submitting the audio as an ordinary
+turn is stashed silently behind the pending clarification. **A clarification
+answer is a tool result, not a user message**, which decides the mechanism:
+the bytes ride `ToolResult.attachments`, where all three converter families
+already marshal them (`input_audio` included, since #830) and where
+`_gate_one_tool_result` already gates them against the active model. The
+ferry the issue first proposed — `_parts_from_user_message` — would put a
+user turn in history the user never sent and leave the tool result claiming
+it carried nothing.
+
+**Attachments are orthogonal to the answer's TYPE.** "Choice answers stay
+ordinal, attachments N/A" is wrong:
+
+```
+How should we design this?
+  1. You attach a screenshot of the design
+  2. We discuss the design
+```
+
+Choosing (1) and attaching it is `selected_choices=[1]` **plus** an image —
+the ordinal says which branch, the attachment says what content. So
+`attachments` is a field of `Answer`, beside `selected_choices` /
+`free_text` / `skipped`, and the question-side declaration
+`Choice.expects_attachment` is per-CHOICE, because in that example option 1
+wants a file and option 2 does not. `QuestionType` stays three values; the
+choice flag is advisory (a client renders an attach control, nothing
+enforces it). The model spells it as `attachment_choices: [1]`, a sibling
+array of 1-based indices — `choices` stays an array of strings, because this
+schema is ordinal throughout (`default_choice` is the same shape) and
+promoting every choice to an object would charge every clarification that
+ceremony for a rarely-used flag.
+
+Protocol **1.6**: `ClarificationBatchResponseEvent.answer_attachments` is a
+PARALLEL map (1-based question index -> the canonical `{mime_type, data,
+display_name, attachment_id}` dicts `send_message` already takes), never a
+widening of `answers` into a union — that list is positional in the TUI, the
+TS SDK and the web store. #845's rule 3 transfers verbatim: an old daemon
+ignores the field and answers with the media gone, which for a voice answer
+is a BLANK answer reported as a success (`_parse_answer` reads an empty
+response as `free_text=""`), so both SDKs REFUSE below 1.6. Rule 1 transfers
+as **labelling only** — today's typed answer is inserted verbatim, so
+defanging just the spoken one would weigh it differently from the identical
+typed one; each attachment is instead NAMED beside the answer it belongs to
+(mime, display name, ingest id — never the payload), which is also what
+makes a multi-question batch attributable.
+
+| Refused at submit, clarification left OPEN | Why there |
+|---|---|
+| an index naming no question; an undecodable payload | the daemon holds the batch it emitted |
+| a batch over **6 MiB** of payload | over it the RPC response frame is never written (`FrameTooLargeError`), the runner's call never resolves, and the turn hangs behind a clarification nobody can answer. A 120 s utterance is ~5.12 MB serialised: one fits, two do not, and the multi-question voice policy is still open |
+| attachments with no relay waiting | the daemon-local `QueueChannel` carries strings and has nowhere to put bytes |
+
+**Not** refused at submit: whether the active model can consume the mime.
+The daemon does not hold the runner's provider and the tier can change
+between question and answer (#847), so that stays with
+`_gate_one_tool_result`, which answers it against the model the bytes
+actually reach and routes what it withholds to the client.
+
+**The GC prerequisite (#850, one part-shape over).** `message_media_bytes`,
+`estimate_media_tokens` and the eviction walk read `part.inline_data`
+exclusively; `function_response` appeared in `gc/utils.py` only for message
+grouping. So a tool result's attachments were sized at the one-token floor
+and immune to `_evict_consumed_media` — pre-existing for the `_multimodal`
+image tools, and a per-clarification voice answer is where it recurs every
+turn. `part_media_views` is now the one answer to "what binary payload does
+this part carry". **No new knob**: `media_evict_mime_prefixes` already
+defaults to `("audio/",)`, which is exactly right here — the screenshot in a
+design discussion survives the turns that discuss it, the voice note
+answering "what's your name" does not.
+
+Scoped out, explicitly: subagents (`ParentBridgedChannel` parses answers out
+of injected TEXT and has no representation for bytes), and advertising the
+accepted mimes at ask time (`ClarificationBatchEvent.accepted_attachment_mimes`
+— worth doing, and an unpopulated field would only lie by omission). See
+[Binary Media Chunks §14](docs/design/binary-media-chunks.md).
+
 Two shapes were available for #830 and only one is implemented here: audio as
 an **input modality** (above), not **transcription as a step**. A transcriber
 is a different animal — `microsoft/mai-transcribe-2` is served on

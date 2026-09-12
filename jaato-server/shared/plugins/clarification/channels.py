@@ -23,6 +23,7 @@ def _get_timeout(default: float) -> float:
             pass
     return default
 
+from .attachments import attachments_from_wire
 from .models import (
     Answer,
     ClarificationRequest,
@@ -85,6 +86,51 @@ class ClarificationChannel(ABC):
             else:
                 return f"{len(answer.selected_choices)} choices"
         return "answered"
+
+    def _parse_answer_with_attachments(
+        self,
+        question_index: int,
+        question: "Question",
+        response: str,
+        attachments: Optional[List[Any]] = None,
+    ) -> "Answer":
+        """Parse one answer that may carry media as well as text (#989).
+
+        A thin shell over :meth:`_parse_answer` rather than an extra
+        branch inside it: that method is a twenty-way decision table over
+        the three question types and is frozen at the top of the
+        cyclomatic-complexity baseline, and nothing about *which ordinal
+        was picked* changes because a file came with it.
+
+        The one thing attachments DO change is the skip verdict.
+        ``_parse_answer`` reads an empty response to an optional question
+        as ``skipped=True``; for a voice answer that response is empty by
+        construction -- the utterance IS the message (#838) -- so a
+        blank-text answer carrying bytes is un-skipped here.  Without
+        this, the normal voice case would be reported to the model as
+        "the user declined to answer" while its audio rode along beside
+        the claim.
+
+        Args:
+            question_index: 1-based index of the question.
+            question: The question being answered.
+            response: The user's text, possibly ``""``.
+            attachments: :class:`Attachment` objects the user attached to
+                THIS answer, or ``None``/empty for a text-only answer (the
+                case on every channel that cannot receive media).
+
+        Returns:
+            The ``Answer``, with ``attachments`` populated.
+        """
+        answer = self._parse_answer(question_index, question, response)
+        if not attachments:
+            return answer
+        answer.attachments = list(attachments)
+        if answer.skipped:
+            answer.skipped = False
+            if question.question_type == QuestionType.FREE_TEXT:
+                answer.free_text = response.strip()
+        return answer
 
     def _parse_answer(self, question_index: int, question: "Question", response: str) -> "Answer":
         """Parse user response into an Answer."""
@@ -599,6 +645,15 @@ class ParentBridgedChannel(ClarificationChannel):
 
     This unifies the communication model - all subagent input comes through
     the same injection queue mechanism.
+
+    **Text only, and deliberately stated rather than left to look
+    supported.**  A subagent's answer arrives as an INJECTED PROMPT and is
+    parsed out of that prompt's text, so there is no representation for
+    binary content anywhere on this path: an answer produced here always
+    has an empty ``Answer.attachments`` (#989).  Giving the parent a way
+    to hand a child media is a different design — the injection queue
+    folds a message into the running turn as text, which is the same
+    mechanical limit #845 hit — and is deliberately not attempted here.
     """
 
     def __init__(self, **kwargs):
@@ -910,6 +965,75 @@ def create_channel(channel_type: str = "console", **kwargs) -> ClarificationChan
         raise ValueError(f"Unknown channel type: {channel_type}")
 
 
+def question_payload(index: int, question: "Question") -> dict:
+    """One question, in the shape ``ClarificationBatchEvent`` carries.
+
+    THE one builder, used by both emitters: this channel (runner-tier
+    relay, ``batch_only=True``) and ``server.core``'s daemon-local
+    batch-emit hook, which called a byte-for-byte copy of this loop.
+    A client's ClarificationHandler renders either with the same code,
+    which is what the copy claimed and could only keep by hand --
+    ``expects_attachment`` (#989) would have reached one path and not
+    the other.
+
+    ``choices[].expects_attachment`` is the per-choice attach affordance
+    (#989) and is emitted only when true, so a client that does not know
+    the key sees exactly the dict it always saw.
+    """
+    payload: dict = {
+        "index": index,
+        "text": question.text,
+        "question_type": question.question_type.value,
+        "required": question.required,
+    }
+    if question.choices:
+        choices_list = []
+        for position, choice in enumerate(question.choices, 1):
+            entry = {"text": choice.text}
+            if choice.expects_attachment:
+                entry["expects_attachment"] = True
+            if question.default_choice == position:
+                entry["default"] = True
+            choices_list.append(entry)
+        payload["choices"] = choices_list
+    if question.default_choice:
+        payload["default_choice"] = question.default_choice
+    return payload
+
+
+def _answer_attachments_by_index(
+    raw: Any,
+) -> "dict[int, List[Any]]":
+    """Decode a relay result's ``answer_attachments`` map.
+
+    The daemon validated and normalised this at submit
+    (``validate_answer_attachments``), so anything unusable here is a
+    transport fault rather than bad client input: it is dropped, never
+    repaired into an empty attachment.  JSON object keys arrive as
+    strings, so ``"2"`` and ``2`` both mean question 2.
+
+    Returns:
+        ``{question_index: [Attachment, ...]}``; empty for a text-only
+        answer set, which is every pre-#989 daemon's reply.
+    """
+    if not isinstance(raw, dict):
+        return {}
+    out: "dict[int, List[Any]]" = {}
+    for key, entries in raw.items():
+        try:
+            index = int(key)
+        except (TypeError, ValueError):
+            logger.warning(
+                "clarification relay: ignoring answer_attachments key %r "
+                "(not a question index)", key,
+            )
+            continue
+        decoded = attachments_from_wire(entries or [])
+        if decoded:
+            out[index] = decoded
+    return out
+
+
 class RunnerRPCClarificationChannel(ClarificationChannel):
     """Runner→daemon batch relay for clarification (mirror of the
     permission plugin's ``RunnerRPCChannel``).
@@ -962,28 +1086,10 @@ class RunnerRPCClarificationChannel(ClarificationChannel):
         on_question_answered: Optional[Callable[[str, int, str], None]] = None,
     ) -> ClarificationResponse:
         """Relay the batch to the daemon and collect the answers."""
-        # Build the per-question payload — same shape the daemon emits in
-        # ``ClarificationBatchEvent`` (see core.py's batch-emit hook), so
-        # the connected client's ClarificationHandler renders it as-is.
-        questions_payload: List[dict] = []
-        for i, q in enumerate(request.questions, 1):
-            q_data: dict = {
-                "index": i,
-                "text": q.text,
-                "question_type": q.question_type.value,
-                "required": q.required,
-            }
-            if q.choices:
-                choices_list = []
-                for j, c in enumerate(q.choices, 1):
-                    choice_entry = {"text": c.text}
-                    if q.default_choice == j:
-                        choice_entry["default"] = True
-                    choices_list.append(choice_entry)
-                q_data["choices"] = choices_list
-            if q.default_choice:
-                q_data["default_choice"] = q.default_choice
-            questions_payload.append(q_data)
+        questions_payload: List[dict] = [
+            question_payload(i, q)
+            for i, q in enumerate(request.questions, 1)
+        ]
 
         payload = {
             "request_id": uuid.uuid4().hex,
@@ -1007,10 +1113,13 @@ class RunnerRPCClarificationChannel(ClarificationChannel):
             return ClarificationResponse(cancelled=True)
 
         answer_strings = result.get("answers") or []
+        media = _answer_attachments_by_index(result.get("answer_attachments"))
         answers = []
         for i, question in enumerate(request.questions, 1):
             raw = answer_strings[i - 1] if (i - 1) < len(answer_strings) else ""
-            answer = self._parse_answer(i, question, raw)
+            answer = self._parse_answer_with_attachments(
+                i, question, raw, media.get(i),
+            )
             answers.append(answer)
             if on_question_answered:
                 on_question_answered(
