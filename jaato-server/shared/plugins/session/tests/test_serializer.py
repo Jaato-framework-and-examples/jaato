@@ -185,7 +185,7 @@ class TestSessionStateSerialization:
 
         data = serialize_session_state(state)
 
-        assert data["version"] == "2.9"
+        assert data["version"] == "2.10"
         assert data["session_id"] == "20251207_143022"
         assert data["description"] == "Test session"
         assert data["turn_count"] == 1
@@ -240,7 +240,7 @@ class TestSessionStateSerialization:
         )
 
         data = serialize_session_state(state)
-        assert data["version"] == "2.9"
+        assert data["version"] == "2.10"
         assert data["config_root"] == "/repo/.jaato"
         assert data["profile_name"] == "discovery"
 
@@ -274,7 +274,7 @@ class TestSessionStateSerialization:
             profile_spec=spec,
         )
         data = serialize_session_state(state)
-        assert data["version"] == "2.9"
+        assert data["version"] == "2.10"
         assert data["profile_spec"] == spec              # full recipe on the wire
 
         restored = deserialize_session_state(data)
@@ -555,7 +555,7 @@ class TestMessageProvenanceSerialization:
             created_by="sso|alice",
         )
         data = serialize_session_state(state)
-        assert data["version"] == "2.9"
+        assert data["version"] == "2.10"
         assert data["created_by"] == "sso|alice"
         assert deserialize_session_state(data).created_by == "sso|alice"
 

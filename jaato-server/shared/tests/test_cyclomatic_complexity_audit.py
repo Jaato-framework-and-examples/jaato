@@ -96,7 +96,11 @@ BASELINE: Dict[str, int] = {
     "jaato-server/server/__main__.py::JaatoDaemon.start": 25,
     "jaato-server/server/__main__.py::main": 33,
     "jaato-server/server/apparmor.py::AppArmorManager._render_profile": 18,
-    "jaato-server/server/command_router.py::CommandRouter._dispatch": 33,
+    # 33 -> 30 by #812.  The two orphan-management verbs needed a branch in
+    # this chain, and a baselined function may not grow -- so the six uniform
+    # ``cascade.*`` arms were lifted into ``_dispatch_cascade_command``, which
+    # pays for the new branch and leaves the chain shorter than it was.
+    "jaato-server/server/command_router.py::CommandRouter._dispatch": 30,
     "jaato-server/server/command_router.py::CommandRouter._execute_daemon_command": 16,
     "jaato-server/server/command_router.py::CommandRouter._handle_session_bind_wake": 18,
     "jaato-server/server/command_router.py::CommandRouter._handle_session_new": 18,

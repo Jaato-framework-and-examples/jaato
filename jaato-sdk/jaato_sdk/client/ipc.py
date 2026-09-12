@@ -1932,6 +1932,114 @@ class IPCClient:
             args=[session_id],
         ))
 
+    #: Wire-protocol minor from which the daemon serves ``session.orphans``
+    #: and ``session.stop``.  Below it an unknown command is ignored, so a
+    #: stop call is a silent no-op that reads to its caller exactly like a
+    #: successful stop -- the one degraded outcome worse than an error, and
+    #: the reason these two are checked rather than sent blind (#812).
+    MIN_SESSION_STOP_PROTOCOL = "1.7"
+
+    def _require_session_stop_protocol(self, verb: str) -> None:
+        """Refuse an orphan-management verb against a daemon too old to serve it.
+
+        The sibling of :meth:`_require_attachment_resume_protocol`, refused on
+        the same principle and for a sharper reason: an unrecognised COMMAND
+        produces no answer at all, so ``stop_session`` against an old daemon
+        would return normally having stopped nothing.  A supervisor process
+        acting on that answer concludes a runaway session has been dealt with.
+
+        An UNKNOWN version (no handshake yet) is refused too:
+        ``_protocol_compatible`` answers ``False`` for ``None``, and "I have
+        not been told what this daemon can do" is not a licence to report a
+        stop that may not have happened.
+
+        Args:
+            verb: The calling method name, for the message.
+
+        Raises:
+            ValueError: When the connected daemon is below
+                :attr:`MIN_SESSION_STOP_PROTOCOL`.
+        """
+        if _protocol_compatible(
+                self.server_protocol_version,
+                self.MIN_SESSION_STOP_PROTOCOL):
+            return
+        spoken = self.server_protocol_version or "unknown (not connected)"
+        raise ValueError(
+            f"{verb}: this daemon speaks protocol {spoken} and does not serve "
+            f"the orphan-management verbs (needs >= "
+            f"{self.MIN_SESSION_STOP_PROTOCOL}).  It would ignore the command "
+            f"silently, which reads like success.  Upgrade the daemon."
+        )
+
+    async def list_orphan_sessions(self) -> None:
+        """Request the LOADED sessions with no client attached (#812).
+
+        The daemon answers with a ``SessionListEvent`` whose rows carry
+        ``session_id``, ``orphaned_seconds``, the effective
+        ``max_orphan_seconds`` / ``max_session_seconds`` bounds, whether the
+        session ``is_processing`` (spending, right now), and the ``runner``
+        identity — the runner pid, pool slot and cascade executing it.
+
+        An orphan is a session nothing is consuming: no attached client, not
+        even the synthetic headless marker a woken or cascade-driven session
+        carries.  It is NOT "the client disconnected" — the framework
+        deliberately supports sessions that outlive their client, and every
+        documented resume path keeps a marker or is unloaded to disk.
+
+        Pair with :meth:`stop_session`, which takes a ``session_id`` from a
+        row here.
+
+        Raises:
+            ValueError: Against a daemon below
+                :attr:`MIN_SESSION_STOP_PROTOCOL`, which would ignore the
+                command and answer nothing — leaving the caller waiting or
+                concluding there are no orphans.
+        """
+        self._require_session_stop_protocol("list_orphan_sessions")
+        await self._send_event(CommandRequest(
+            command="session.orphans",
+            args=[],
+        ))
+
+    async def stop_session(self, session_id: str) -> None:
+        """Stop ANY loaded session by id, not just this client's own (#812).
+
+        ``end_session`` stops the session THIS client is attached to.  This
+        stops the one you name, which is what an operator or a supervisor
+        process needs when the client that created a session is gone: #812
+        reports a session that kept executing tools and spending money for
+        seven minutes past its client's death, with no way to stop it short
+        of killing a circumstantially-identified runner on a shared daemon.
+
+        Cancellation, not a kill.  The daemon trips the session's cancel
+        token — the same path ``budget_control``'s ``abort`` rung uses — so a
+        mid-turn session stops at its next check point and is then saved to
+        disk, and nothing signals the runner pid (which may be a pool slot
+        other sessions of the same cascade are going to reuse).
+
+        The daemon confirms with a ``SystemMessageEvent`` naming what
+        happened — mid-turn cancellation, an idle termination, or no such
+        loaded session — because an operator acts differently on each.
+
+        Args:
+            session_id: The session to stop, e.g. from
+                :meth:`list_orphan_sessions`.
+
+        Raises:
+            ValueError: When ``session_id`` is empty, or against a daemon
+                below :attr:`MIN_SESSION_STOP_PROTOCOL` — which would ignore
+                the command silently and leave the session running while its
+                caller believed otherwise.
+        """
+        if not session_id:
+            raise ValueError("stop_session: session_id is required")
+        self._require_session_stop_protocol("stop_session")
+        await self._send_event(CommandRequest(
+            command="session.stop",
+            args=[session_id],
+        ))
+
     async def list_profiles(self) -> None:
         """Request list of available agent profiles.
 

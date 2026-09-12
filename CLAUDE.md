@@ -414,9 +414,15 @@ default_agent: researcher
 #   max_parallel_tools are application-enforced.  max_parallel_tools (#862)
 #   is the width of the tool thread pool (default 8) and inherits
 #   most-restrictive-wins; the rest of the block is child-replaces.
+#   max_session_seconds / max_orphan_seconds (#812) are the two WALL-CLOCK
+#   bounds, enforced daemon-side by the session-lifetime watchdog so they
+#   still apply when the client that created the session has died.  Both
+#   inherit most-restrictive-wins; 0 = explicitly unbounded.
+#   max_orphan_seconds is the one field here with a framework default (900s).
 runtime_limits:
   pids_max: 64
   max_parallel_tools: 2
+  max_orphan_seconds: 300
 # scrub_secret_env: secret env vars stripped from every model-driven
 #   subprocess (cli / interactive_shell / mcp).  ON by default (#863) —
 #   absent = the framework set; `none` opts out (announced at WARNING);
@@ -483,6 +489,9 @@ await client.create_session(profile="researcher")
 **IPC command protocol:**
 - `session.new [name] --profile <name>` — create session from profile
 - `session.profiles` — list available profiles (→ `SessionProfilesEvent`)
+- `session.orphans` — list LOADED sessions with no client attached
+  (→ `SessionListEvent`; see [A Session Nobody Was Watching](#a-session-nobody-was-watching-812))
+- `session.stop <id>` — stop ANY loaded session by id, not just the caller's own
 
 **Flow:** Client sends `session.new --profile researcher` → server discovers profiles from `.jaato/profiles/` → resolves `SubagentProfile` → `JaatoServer` applies profile overrides (model, provider, plugins, plugin_configs, GC) during `initialize()`.
 
@@ -603,6 +612,7 @@ with what the files on disk say today (issue #787):
 | the rendered system instruction | `SessionState.rendered_instructions` (snapshotted at the end of `JaatoSession.configure()`) | `BootstrapEnvelope.system_instruction_override` |
 | the creation `agent_params` | `SessionState.agent_params` | `BootstrapEnvelope.agent_params` |
 | the authenticated creator (#859, record 2.9+) | `SessionState.created_by` | `BootstrapEnvelope.created_by` → `SessionInitEnvelope.created_by` → `set_client_user_id` |
+| the runner that ran it (#812, record 2.10+) | `SessionState.runner_identity` | restored onto `Session.runner_identity` as **`stale=True`** — the pid named is from a previous process lifetime, so it is evidence, never a handle |
 
 Record version 2.8+. Restoring the render means a revive does **not** re-run
 the persona's `{{!py:...}}` prefetch scripts — which is what made a session
@@ -2023,6 +2033,156 @@ Still true: a profile with `limits` and no `abort` rung crosses in silence
 except for that trace line; `finalize` remains advice, and the subagent
 that outlives its parent is bounded only by what its own profile declares.
 
+### A Session Nobody Was Watching (#812)
+
+An eval sweep created session `20260903_084517` and its client process was
+stopped ~40 s later. The session ran for **seven more minutes and spent
+$2.52**, executing tools and marking plan steps complete against files that
+no longer existed. Nothing graded it and no result row was ever written, so
+the work is unrecoverable. It stopped only because its profile happened to
+declare `budget_control` with a `degrade: at 100 -> abort` rung — **a profile
+omitting `budget_control` would not have been stopped by anything.**
+
+It also could not be stopped from outside. Every ceiling that existed was
+held by something the session could outlive:
+
+| Ceiling | Held by | Why it did not fire |
+|---|---|---|
+| `jaato_eval --arm-timeout` | the client's own runner loop | that process is the one that died |
+| the task pool's `seconds` | reconciled when a session **ends** | a session that never ends never consumes it |
+| `budget_control` | the session itself | worked — and is opt-in |
+
+**Identity: what the daemon knew and never wrote down.** `spawn_session_runner`
+builds a `SpawnedRunner` carrying the pid, and the `PoolSlot` when pool-served,
+and hands it to `set_runner_rpc`. It then went nowhere an outside observer
+could read: `~/.jaato/session_workspace_index.json` mapped the id to a
+workspace and recorded no runner, pid or slot; the session record had no
+runner-, slot- or pid-shaped key; the per-session logs named only an IPC
+connection number (`client_ipc_14`). So the choice was killing a
+circumstantially-identified process on a daemon shared with another live
+session, or waiting for the budget to burn.
+
+`server/session_identity.py` is the record — runner pid, `pool_served` + slot
+pid, cascade, AppArmor profile — written to three places because they answer
+different questions: `Session.runner_identity` (live), the session record
+(**version 2.10**), and the daemon-owned workspace index (the cross-workspace
+lookup for someone holding only an id). Reusable rather than eval-specific:
+#806 needs the same fact to say which runner holds which language server.
+
+Three properties, each attached to a way it could mislead:
+
+- **A restored record is `stale=True`.** After a reload the pid belonged to a
+  previous process lifetime, so it is *evidence* about what ran the session and
+  never a handle. Nothing in the framework acts on a stale record. It is kept
+  rather than cleared because "which process last ran this" is exactly what a
+  post-mortem wants.
+- **`None` means "could not read one", never "there is none".** The save-path
+  refresher never clears a good record, or a transient read would destroy the
+  evidence the field exists to preserve.
+- **The refresh is on the SAVE path, not per spawn site.** There are two spawn
+  call sites (IPC, and the WS pre-init hook) and a third could be added;
+  instrumenting each is the shape that leaves one path armed and one silently
+  not — the #735 failure. The explicit post-spawn stamp is kept for
+  *immediacy* (identifiable from the first tool call, not the first save).
+
+**Surface and stop.** `session.orphans` lists the LOADED sessions with no
+client — how long each has been orphaned, its effective bounds, whether it is
+`is_processing` (spending, right now), and the runner executing it.
+`session.stop <id>` stops any one of them. Shaped after the verbs that already
+exist (`session.list`'s own `SessionListEvent`, `cascade.cancel`'s confirmation
+pair) rather than as a parallel surface, and distinct from both neighbours:
+`session.end` stops the CALLER's session and `cascade.cancel` stops a whole
+cascade, so neither could stop the one session an operator was looking at.
+
+**Stopping is cancellation, not a kill.** Nothing signals the runner pid —
+killing a pool-served runner destroys a slot other stages of the same cascade
+expect to reuse, and stopping by id lets the daemon unwind its own bookkeeping.
+It reaches `server.stop()`, the same cancel token `budget_control`'s `abort`
+rung trips, so a mid-turn session stops at its next check point and is then
+saved to disk.
+
+**The bound.** `runtime_limits` gains two wall-clock fields, enforced
+DAEMON-side by a `SessionManager` sweep (`server/session_lifetime.py`) — the
+odd ones out in *where* they apply, which is the whole point: they are held by
+the one process that is still there when the client dies, and they do not wait
+for the session to end.
+
+| Field | Measures | Default |
+|---|---|---|
+| `max_session_seconds` | total wall-clock LOADED | unbounded (opt-in) |
+| `max_orphan_seconds` | continuous time with **no consumer** | **900 s** |
+
+```yaml
+runtime_limits:
+  max_orphan_seconds: 120     # tighter than the default
+  max_session_seconds: 3600   # opt-in total ceiling
+```
+
+`max_session_seconds` is opt-in because an interactive session left open over
+a lunch break is not a defect and a default would kill it.
+`max_orphan_seconds` is **the one field in the block with a framework
+default**, because the session it exists for is precisely the one whose
+profile declared nothing — a bound you must remember to write would have left
+this session running exactly as long. `0` is the explicit opt-out, the
+0-disables spelling `gc.media_bytes_threshold` and the OpenRouter deadlines
+already use. Inheritance is **most-restrictive-wins** (`min()` across every
+declaring layer, like `max_parallel_tools` / `max_turns`), and `0` cannot win
+that `min()` — a child may disable a bound no ancestor set, and may not
+disable one an ancestor did.
+
+**"Orphaned" is TWO conditions, and the second is the load-bearing one.** A
+session qualifies only when it is loaded with no attached clients **and** the
+sweep has previously *observed* it carrying one:
+
+| Detached shape | Orphaned? |
+|---|---|
+| a completion-gated session that ended | invisible — it is UNLOADED, and the sweep only walks `_sessions` |
+| `session.wake` → `resume_session` (a **cold revive**) | no — never observed attached, so clause 2 fails |
+| a cascade stage mid-run | no — carries its driver's client |
+| an attached interactive session | no — clause 1 fails |
+| an idle orphan | usually unloaded by `_maybe_unload_session` before the grace expires |
+| **a client that existed and went away, mid-turn** | **yes** — the #812 state |
+
+The first draft had only clause 1 and justified it with an invariant —
+*every path that drives a session attaches a client id* — which is **false in
+this tree**. `_load_session_impl` uses its `client_id` for config, env and
+progress events and never attaches it; `wake_session` branches on exactly that
+("revived cold, no client — DEFERRED"). So a cold revive driving a long turn
+would have been cancelled by a bound written for a different situation. An AST
+guard policing the invariant would have failed on `main`, and one exempting the
+revive path would assert almost nothing — so the *dependency* was removed
+instead: the bound now rests on a fact the sweep MEASURES. It fails safe, since
+a session never seen attached is never stopped by the orphan bound (an explicit
+`max_session_seconds` still applies).
+
+The orphan clock is **derived by the sweep** from `attached_clients` rather
+than stamped at the ten-odd sites that mutate it: a bound that silently does
+not apply is #735, and instrumenting every mutation is exactly the shape that
+lets one new call site disarm it. It measures CONTINUOUS orphanhood, so a
+reconnect renews the session's claim on being wanted.
+`test_orphan_bound_observes_attachment_812.py` carries two AST guards — one
+that `_orphan_since` has a single writer, one that the clock is started
+*inside* an `if` consulting `_ever_attached` — each verified to fail on its own
+reversion. The sibling precedents are `test_budget_mid_turn_955.py` and
+`test_registry_iteration_snapshots.py`.
+
+**It logs what it armed.** `start_lifetime_watchdog` is called by the daemon
+(not from `__init__`, so a `SessionManager` in a test grows no thread) and logs
+the sweep period and the *effective* defaults — #735's rule, since the declared
+and effective values differ whenever a field is omitted or set to `0`.
+
+Protocol **1.7** for `IPCClient.stop_session` / `list_orphan_sessions`. An
+additive FIELD degrades harmlessly; a missing VERB does not — an older daemon
+ignores `session.stop` silently, and its caller concludes a runaway session was
+stopped. So the SDK refuses below `MIN_SESSION_STOP_PROTOCOL`, the #845 verdict
+applied to a command rather than a payload.
+
+Not addressed here: nothing grades a session whose harness died (the results
+have no consumer by construction — #812's first ask, "terminate on client
+loss", is deliberately **not** implemented as written), and a session that
+survives its stop because its model thread is wedged is re-judged on the next
+sweep rather than escalated.
+
 ### Configuring a Plugin and Enabling It Are Two Decisions (#950)
 
 `plugin_configs.<name>` and `plugins:` answer different questions — *how does
@@ -2811,6 +2971,178 @@ the loaded case **with no clock at all**: one work-lane worker, held by a
 gated call, so the cancelled call is provably still queued; wire ordering is
 established by a control-lane probe rather than by polling. It fails
 `unknown=1, tripped=0` against the old registration site, deterministically.
+
+### A Request the Daemon Wrote and the Runner Does Not Have (#856)
+
+#988 is a cancel that lost a race inside the runner. This is the turn
+itself. A session's second turn was registered in the daemon's
+`_in_flight` and never happened; sixty-eight minutes later the client was
+still blocked in `session.ask()` and py-spy showed **every thread in all
+three processes idle** — no lock held, no read outstanding, the pipe
+healthy, the runner alive with an empty work queue. The daemon's entire
+record was four lines:
+
+```
+[RPC_DIAG] daemon _in_flight SET id=30 client=129050257488880
+[RPC_DIAG] daemon _in_flight SET id=31 ...
+```
+
+which are emitted ~25 lines BEFORE the write, so they say what the daemon
+INTENDED and nothing about what became of it.
+
+**Three failure modes, and one had no name and no bound:**
+
+| what happened | how it surfaces | session survives? |
+|---|---|---|
+| the runner died (#851) | `RunnerCallError` — the read loop sees EOF and fails every future | no — terminal |
+| the runner is slow | `RunnerAnswerTimeout` | yes |
+| **the dispatch is lost** | **`RunnerDispatchLost`** | yes |
+
+`call()`'s `return await fut` had no deadline, and the two calls that
+matter most default to `timeout=None` (`session.send_message`,
+`call_threadsafe`) because a turn legitimately runs for minutes. So a
+dead runner reached a person as an error and a lost request reached them
+as the agent apparently thinking.
+
+**The bound is a reconciliation, not a wall clock.** A wall-clock cap on
+an RPC would kill healthy long turns, which is worse than the hang. What
+is bounded is how long the daemon will believe, *unchecked*, that a
+request it wrote is being worked on: after a window with no frame bearing
+that id, it ASKS the runner — over the **control lane**, so the answer
+arrives while the work lane is busy with the very turn in question.
+
+| verdict | the runner says | action | may have run? |
+|---|---|---|---|
+| `running` | the id is in `active_call_ids` | another full window, indefinitely | — |
+| `finished` | it left `active_call_ids`, still in the window | fail — the RESPONSE was lost | **yes** |
+| `never_received` | not in a window that has evicted nothing | fail — **the bug** | no |
+| `indeterminate` | the window has rolled past the id | fail | **yes** |
+| `unreachable` | the probe itself did not come back | fail | **yes** |
+
+`session.health_check` carries the transport view (`active_call_ids`,
+`known_request_ids`, `highest_request_id`, `seen_window_capacity`),
+reported whether or not a session host exists because it describes the
+CHANNEL, not the session.
+
+**The last column is the whole point, and it is a TYPE.** `finished` and
+`never_received` have opposite consequences: one says the work did not
+happen and retrying is safe; the other says it RAN — history advanced,
+tools executed, files were written, a provider was billed — and only the
+daemon's view of the result was lost, so retrying re-executes it. A
+single exception hid that, which is the shape
+`jaato_sdk.client.errors.SessionNotConfirmed` already names: *"the one
+failure where the correct action depends on something the caller cannot
+see, which is why it is a distinct type rather than a detail in a
+message"*.
+
+| exception | verdict(s) | `may_have_run` |
+|---|---|---|
+| `RunnerDispatchNotReceived` | `never_received` | `False` — retry is safe |
+| `RunnerResultLost` | `finished` | `True` — retry re-executes |
+| `RunnerDispatchUnknown` | `indeterminate`, `unreachable` | `True` — nobody could say |
+
+All three subclass `RunnerDispatchLost`, so `except RunnerDispatchLost`
+still catches every one. `may_have_run` is the axis
+`SessionCreateFailed.may_exist` established, `verdict` is the
+machine-readable mechanism token its `cause` established, and both **fail
+safe**: the base defaults to `may_have_run = True`, so a verdict added
+later cannot inherit "safe to retry" by forgetting to decide.
+
+It reaches a client on **`ErrorEvent.details`** — the field documented as
+"what a driver branches on", with `error` left as the human sentence.
+Deliberately **not** `recoverable`: in this tree that flag means *this
+session can continue* (every `recoverable=False` site is a config or
+provider-connect failure that ends initialisation), and sparing a
+`RunnerRPCTimeout` here is precisely what keeps the session alive.
+Encoding retry-safety there would assert something false about session
+viability to every consumer that reads it the documented way.
+
+**The window's FULLNESS, not its size, is the correctness bound.**
+`known_request_ids` is a `deque(maxlen=...)`, so it has evicted something
+only once it is FULL; until then "not in the window" proves "never
+registered". A full window whose floor sits above the id is answered
+`indeterminate`, never `never_received` — that one misclassification is
+exactly the unsafe direction, and raising 256 to a larger number would
+only make it rarer, not impossible. The runner reports its own
+`seen_window_capacity` rather than the daemon assuming the constant,
+because a number asserted on one side of a wire about the other is how
+that distinction goes stale unnoticed.
+
+Two counters, because the two need different operator responses:
+`dispatch_lost_count()` is every lost dispatch,
+`dispatch_lost_may_have_run_count()` the subset whose side effects are
+already in the world. The first is logged at WARNING, the second at
+ERROR.
+
+**The predicate is a window, not a high-water mark.** The probe is itself
+a request, registered on the runner's reader thread *before* its own
+handler runs — so `highest_request_id` at answer time is always the
+probe's own id, and comparing against it would report every id as
+received, including the ones that never arrived: the one answer that
+makes the whole mechanism worthless. `SEEN_REQUEST_ID_MEMORY` (256) only
+has to outlive the ack window. This is the daemon-side half of #988's
+`unknown` cancel counter — both count a peer disagreeing about what is in
+flight — and `dispatch_lost_count()` is its counter.
+
+**`RunnerDispatchLost` subclasses `RunnerRPCTimeout`**, which decides the
+blast radius: `core.py`'s model thread terminates the session for
+anything it catches EXCEPT a `RunnerRPCTimeout`, so the TURN fails and
+the SESSION lives. That is also what makes it distinguishable from #851
+in the client-visible error, since `ErrorEvent.error_type` is
+`type(exc).__name__`. The message names the id, the method and the
+session, because the incident's whole record named none of them.
+
+**Two exemptions, each for a runner that cannot answer:**
+
+- `session.health_check` — it IS the probe, and watching it would have
+  the watchdog answer its own question, recursively.
+- any window in which `session.bootstrap` is outstanding. It runs on the
+  runner's MAIN thread (synchronously, so `aa_change_profile` confines
+  the thread that later spawns the workers), so the reader thread is
+  inside it and NEITHER lane answers; a probe would time out and read as
+  a lost dispatch. The 120s default also sits clear above bootstrap's own
+  30s deadline, so two independent things stop it.
+
+**And the dispatch is logged.** `_dispatched[id] = method` is set AFTER
+the frame reaches the wire, beside a `[RPC_DIAG] daemon DISPATCHED
+id=N method=...` line. An `_in_flight` entry with no `_dispatched` entry
+is "registered, never written" — the state the four original log lines
+could not be told apart from a healthy in-flight turn.
+
+Knob: `JAATO_RUNNER_ACK_TIMEOUT` (host-scoped — it bounds the channel,
+which a pool slot shares across several sessions in turn). `0` disables,
+following the provider-deadline convention; a negative or unparseable
+value falls back to the default rather than disabling, because
+"unbounded" is the bug this exists to fix.
+
+**What the triage established, and what it did not.** The request-write
+path was ruled OUT as a silent drop: `_write_frame_json` awaits
+`writer.drain()` and `call()` catches only `FrameTooLargeError`, which it
+re-raises after deregistering, so any other write failure reaches the
+caller. There is no queue on that path to drop from. A runner-side
+dispatch-table miss was ruled out too — an unknown method returns an
+error RESPONSE (`unknown method: ...`), and `serve()` wraps its loop body
+in no broad `except`, so an unexpected reader-thread exception closes the
+channel and becomes #851 rather than this.
+
+What IS reachable, and demonstrated in
+`test_a_runner_can_answer_a_call_with_nothing_and_stay_healthy`, is a
+response-side drop. #920 refuses to write an oversized frame and
+substitutes a small typed error for the call — guarded by `if not ok or
+self._closed: return`, so the substitution happens for a SUCCESS
+response and not for an ERROR one, on the reasoning that an error frame
+that did not fit will not fit again. But the substitute is small by
+construction; what did not fit is the original, whose `result` dict
+carries megabytes of tool output beside the traceback. Measured: `ok=True`
+answers the caller in 221 bytes, `ok=False` writes **nothing at all** and
+leaves `_closed` **False** — the channel open, the runner idle, the
+daemon waiting forever. Not a claim about the reported incident, which
+would need the runner's own log; a demonstration that the class is
+reachable, and it is precisely what the `finished` verdict answers.
+
+So: **bounded, not root-caused.** The remaining gap — extending #920's
+substitution to error responses — is now bounded by this deadline rather
+than infinite, and is left as its own change.
 
 ### Interactive Shell Sessions (`shared/plugins/interactive_shell/`)
 
@@ -4099,6 +4431,7 @@ covers it, where one exists. `jaato-scaffold explain env` renders the tags;
 | `JAATO_DEFERRED_TOOLS` | Enable deferred tool loading (default: `true`) |
 | `JAATO_RUNNER_POOL_ENABLED` | Enable pre-warm runner pool routing (default: `true`).  Sessions consume pre-warm pool slots instead of cold-spawning a runner subprocess.  Set to `false` / `0` / `no` / `off` to disable.  See `docs/design/runner_prewarm_pool_plan.md`. |
 | `JAATO_RUNNER_POOL_SIZE` | Number of **unreserved** pre-warm pool slots to keep idle (default: 2) — slots any arriving session may take.  Raise for cascades that fan out stages **concurrently** (each simultaneous stage needs its own warm slot).  Sequential/back-to-back stages do NOT need a larger pool — they reuse one warm slot via the `slot.settled` handoff (the next stage is spawned on slot-availability), so pool size >1 only helps parallel fan-out.  Cascade-affined idle slots (reservations) are **not** counted here (#898): they are capacity for one tenant only, and counting them as pool capacity starved everybody else. |
+| `JAATO_RUNNER_ACK_TIMEOUT` | Seconds a dispatched runner RPC may go with NO frame bearing its id before the daemon stops assuming and asks the runner what it actually has (default 120; `0` disables). **Not** a cap on how long an RPC may take — a turn legitimately runs for minutes, and a runner that claims the id buys another full window. What it bounds is an unbounded WAIT: before it, a request the daemon wrote and the runner does not have hung the caller forever with every thread idle (#856). Host-scoped, because it bounds the channel, which a pool slot shares across several sessions in turn. A negative or unparseable value falls back to the default — "unbounded" is the bug this exists to fix. |
 | `JAATO_RUNNER_POOL_MAX_SIZE` | Hard ceiling on **total** idle pool slots, reservations included (default: `2 x JAATO_RUNNER_POOL_SIZE`).  This is the memory bound — a slot is 129–187 MB — on the growth that per-tenant reservations imply.  Raise it when `pool_replenish_ceiling_blocked_total` is nonzero: some tenant is being served by cold-spawn while reservations hold the ceiling. |
 | `JAATO_IPC_EVENT_QUEUE_MAX` | Per-client IPC event-queue bound (default 2048). Beyond it, lossy tool-output chunks are evicted oldest-first (media before text); essential lifecycle events are queued past the bound rather than dropped, because losing one desynchronises the client permanently. A non-numeric or non-positive value falls back to the default — "unbounded" is the bug this exists to fix. See [Binary Media Chunks](docs/design/binary-media-chunks.md). |
 | `JAATO_AMBIGUOUS_WIDTH` | Width for East Asian Ambiguous chars in tables (`1` default, `2` for CJK terminals) |

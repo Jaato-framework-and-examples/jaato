@@ -50,6 +50,15 @@ from shared.session_envelope import BootstrapEnvelope
 from shared.instruction_suppression import normalize_suppression
 from .core import JaatoServer
 from .session_logging import set_logging_context, clear_logging_context, get_session_handler
+from .session_identity import RunnerIdentity, identity_from_server
+from .session_lifetime import (
+    DEFAULT_SWEEP_INTERVAL_SECONDS,
+    LifetimeVerdict,
+    SessionLifetimeObservation,
+    describe_armed_bounds,
+    evaluate,
+    resolve_bounds,
+)
 from .session_workspace_index import SessionWorkspaceIndex
 from .wake_binding_registry import WakeBindingRegistry, BindOutcome
 
@@ -291,6 +300,16 @@ class RuntimeSessionInfo:
     turn_count: int
     workspace_path: Optional[str] = None
     created_by: Optional[str] = None  # Authenticated user who created the session
+    # #812.  Both are about being able to ACT on a session you can see.
+    #: True when this LOADED session has no attached client at all -- not
+    #: even the synthetic headless marker a woken or cascade-driven session
+    #: carries.  Always False for a cold (unloaded) session, which consumes
+    #: nothing and is not an orphan in the sense that matters.
+    orphaned: bool = False
+    #: ``RunnerIdentity.to_dict()`` -- which process is (or last was)
+    #: executing this session.  ``None`` when nothing was ever recorded;
+    #: carries ``stale: True`` when it names a previous process lifetime.
+    runner: Optional[Dict[str, Any]] = None
 
 
 @dataclass
@@ -405,6 +424,24 @@ class Session:
     # surfaces a "review pending tool calls" prompt and drains the
     # queue.  False for fresh / never-restored sessions.
     restored_pending_attach: bool = False
+    # WHEN this session became LOADED, on the MONOTONIC clock (#812).  Read
+    # by the session-lifetime watchdog for ``runtime_limits.max_session_seconds``.
+    #
+    # Monotonic rather than wall-clock so a bound cannot be shortened or
+    # lengthened by an NTP step; distinct from ``created_at`` (an ISO
+    # wall-clock string that survives persistence and describes the
+    # CONVERSATION) because this describes the current residency in memory —
+    # a session revived from disk is newly loaded however old its record is,
+    # and the resources the bound exists to cap are the ones it is consuming
+    # now.  Set by the field default at every construction site, which is
+    # what makes "loaded" and "this object exists" the same instant.
+    loaded_at: float = field(default_factory=time.monotonic)
+    # WHICH PROCESS is executing this session (#812) -- see
+    # :mod:`server.session_identity`.  Stamped after
+    # ``_spawn_session_runner_unconditional`` succeeds, persisted on every
+    # save (record 2.10), and restored from disk as a STALE record naming the
+    # process of a previous daemon.  ``None`` for a session with no runner.
+    runner_identity: Optional['RunnerIdentity'] = None
 
 
 @dataclass
@@ -991,6 +1028,45 @@ class SessionManager:
         # ``_sessions``) — both dicts are mutated together at
         # parent-shutdown time.
         self._isolated_sub_runners: Dict[str, SubRunnerHandle] = {}
+
+        # ---- Session-lifetime watchdog (#812) -------------------------
+        # When each currently-orphaned session BECAME orphaned, on the
+        # monotonic clock.  Owned entirely by the sweep: it is (re)derived
+        # from ``session.attached_clients`` on every pass, so an entry
+        # appears when a session is first SEEN with no clients and is
+        # dropped the moment one re-attaches.
+        #
+        # Derived rather than stamped at the ten-odd sites that mutate
+        # ``attached_clients``: a bound that silently does not apply is the
+        # #735 failure, and instrumenting every mutation is exactly the
+        # shape that lets one new call site quietly disarm it.  The cost is
+        # granularity — orphanhood is measured from the first sweep that
+        # observed it, up to one interval late — which is noise against a
+        # bound measured in minutes.
+        self._orphan_since: Dict[str, float] = {}
+        # Sessions the sweep has SEEN carrying at least one attached client.
+        # Only these are eligible for the orphan bound (#812).
+        #
+        # The bound exists for a session whose client EXISTED AND WENT AWAY --
+        # that is the incident: a live IPC client, `client_ipc_14`, that died.
+        # "Has no client" is a broader state than that, and the difference is
+        # not academic: a session revived by ``wake_session`` ->
+        # ``resume_session`` -> ``_load_session`` has an EMPTY
+        # ``attached_clients`` by construction, because ``_load_session_impl``
+        # uses its ``client_id`` for config/env/progress and never attaches.
+        # ``wake_session`` knows this and branches on it ("revived cold, no
+        # client -- DEFERRED"), so a cold revive that drives a long turn would
+        # otherwise be cancelled by a bound written for a different situation.
+        #
+        # Requiring an observed attachment first makes the bound depend on
+        # something the sweep MEASURES rather than on an invariant maintained
+        # at call sites it cannot see.  It fails safe: a session the sweep
+        # never saw attached is never stopped by the orphan bound (an explicit
+        # ``max_session_seconds`` still applies).
+        self._ever_attached: Set[str] = set()
+        self._lifetime_watchdog: Optional[threading.Thread] = None
+        self._lifetime_watchdog_stop = threading.Event()
+        self._lifetime_sweep_interval = DEFAULT_SWEEP_INTERVAL_SECONDS
 
         # Path H (cycle 10): serialize concurrent async saves so
         # parallel ToolCallStartEvents (parallel tool execution)
@@ -1898,6 +1974,15 @@ class SessionManager:
                 cgroup_attach=cgroup_attach,
                 pool_manager=getattr(self, "_pool_manager_ref", None),
                 cascade_driver_id=cascade_driver_id,
+            )
+            # #812: record WHICH PROCESS is running this session, now that
+            # the spawn helper has left the ``SpawnedRunner`` on the server.
+            # Immediately after the spawn rather than at the next save: the
+            # window this closes is exactly the one that hurt — a session
+            # that runs away is identifiable from its first tool call, not
+            # from whenever a save happens to land.
+            self._record_runner_identity(
+                session_id, server, cascade_driver_id=cascade_driver_id,
             )
             # Phase 3 post-Step-7 regression fix (Path B):
             # synchronously dispatch ``session.bootstrap`` so the
@@ -4155,6 +4240,519 @@ class SessionManager:
             "cancelled_session_ids": cancelled_ids,
             "stopped_count": len(cancelled_ids),
         }
+
+    # ------------------------------------------------------------------
+    # Runner identity, orphan surface and the wall-clock bound (#812)
+    # ------------------------------------------------------------------
+
+    def _record_runner_identity(
+        self,
+        session_id: str,
+        server: 'JaatoServer',
+        *,
+        cascade_driver_id: Optional[str] = None,
+    ) -> Optional[RunnerIdentity]:
+        """Stamp which process is executing ``session_id`` (#812).
+
+        Called right after a successful ``spawn_session_runner``.  Writes the
+        identity to two places, because they answer different questions:
+
+        * ``Session.runner_identity`` — the live record, read by
+          :meth:`list_orphan_sessions` and by ``session.list``;
+        * the daemon-owned :class:`SessionWorkspaceIndex` — the
+          cross-workspace lookup an operator reaches for when all they have
+          is a session id.  #812's reporter got as far as that file and found
+          a workspace and no process.
+
+        The session record on disk is the third place, written by the next
+        :meth:`_save_session` (record 2.10).
+
+        Best-effort by construction: this is diagnostic information, and a
+        failure to record it must never fail a spawn that has already
+        succeeded.  Every branch is guarded and reports at DEBUG/WARNING.
+
+        Args:
+            session_id: The session that was just spawned.
+            server: Its ``JaatoServer``, carrying the ``SpawnedRunner``.
+            cascade_driver_id: The cascade it belongs to, when known.
+
+        Returns:
+            The recorded identity, or ``None`` when there was no runner pid
+            to record (an in-process session, or a stand-in server).
+        """
+        try:
+            identity = identity_from_server(
+                server, cascade_driver_id=cascade_driver_id,
+            )
+        except Exception as exc:  # noqa: BLE001 — never fail a spawn
+            logger.warning(
+                "runner identity unreadable for session %s (%s: %s) — the "
+                "session runs normally but cannot be correlated to a process",
+                session_id, type(exc).__name__, exc,
+            )
+            return None
+        if identity is None:
+            logger.debug(
+                "runner identity: session %s has no runner pid to record",
+                session_id,
+            )
+            return None
+        with self._lock:
+            session = self._sessions.get(session_id)
+            if session is not None:
+                session.runner_identity = identity
+        try:
+            self._session_index.record_identity(session_id, identity.to_dict())
+        except Exception as exc:  # noqa: BLE001 — best-effort
+            logger.warning(
+                "runner identity not written to the workspace index for "
+                "session %s (%s: %s)", session_id, type(exc).__name__, exc,
+            )
+        logger.info(
+            "session %s runner identity: %s",
+            session_id, identity.describe(),
+        )
+        return identity
+
+    def _refresh_runner_identity(
+        self, session: Session,
+    ) -> Optional[Dict[str, Any]]:
+        """Re-read the live runner identity off ``session.server`` (#812).
+
+        Called from :meth:`_save_session`, so every persisted record names
+        the process that was running the session at the moment it was
+        written — including a slot handoff, where a cascade stage's session
+        moves to a different runner mid-life.
+
+        **Why a refresh here and not a second stamp per spawn site.**  There
+        are two spawn call sites (the IPC path in
+        :meth:`_spawn_session_runner_unconditional` and the WS pre-init hook
+        in ``websocket.py``), and a third could be added.  Instrumenting each
+        is the shape that leaves one path armed and one silently not — the
+        #735 failure.  The save path is downstream of every spawn, so one
+        refresher here covers all of them, self-heals a session whose stamp
+        was missed, and needs no edit when a fourth arrives.  The explicit
+        post-spawn stamp is kept for IMMEDIACY (identifiable from the first
+        tool call, not from the first save) and for its log line.
+
+        A session whose server reports no runner keeps whatever it had:
+        ``None`` is "I could not read one", never "there is none" — clearing
+        a good record on a transient read would destroy exactly the evidence
+        the field exists to preserve.
+
+        Returns the SERIALISED identity (or ``None``) so the caller can put
+        it straight on the record: ``_save_session`` sits at its
+        cyclomatic-complexity baseline and may not grow, and a
+        ``x.to_dict() if x else None`` at the call site is a decision point
+        there while being free here.
+
+        Args:
+            session: The session about to be persisted.
+
+        Returns:
+            ``RunnerIdentity.to_dict()`` for whatever the session now holds,
+            or ``None`` when it holds nothing.
+        """
+        try:
+            identity = identity_from_server(
+                session.server,
+                cascade_driver_id=session.cascade_driver_id,
+            )
+        except Exception as exc:  # noqa: BLE001 — never fail a save
+            logger.debug(
+                "runner identity refresh failed for session %s (%s: %s)",
+                session.session_id, type(exc).__name__, exc,
+            )
+            identity = None
+        if identity is not None and session.runner_identity != identity:
+            session.runner_identity = identity
+            try:
+                self._session_index.record_identity(
+                    session.session_id, identity.to_dict())
+            except Exception as exc:  # noqa: BLE001 — best-effort
+                logger.debug(
+                    "runner identity not written to the workspace index for "
+                    "session %s (%s: %s)",
+                    session.session_id, type(exc).__name__, exc,
+                )
+        current = session.runner_identity
+        return current.to_dict() if current is not None else None
+
+    def get_runner_identity(
+        self, session_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Which process is (or last was) running ``session_id`` (#812).
+
+        Answers for a LOADED session from memory and for a cold one from the
+        daemon-owned workspace index, so a caller holding only a session id
+        gets an answer either way.  A cold session's record always reads
+        ``stale: True`` — the pid named belonged to a previous process
+        lifetime, and nothing may act on it.
+
+        Args:
+            session_id: The session to look up.
+
+        Returns:
+            The identity dict, or ``None`` when nothing was ever recorded.
+        """
+        with self._lock:
+            session = self._sessions.get(session_id)
+            live = session.runner_identity if session is not None else None
+        if live is not None:
+            return live.to_dict()
+        stored = self._session_index.identity(session_id)
+        if stored is None:
+            return None
+        # A session not in ``_sessions`` is not being executed by anything
+        # this daemon spawned, whatever the index remembers.
+        stored["stale"] = True
+        return stored
+
+    def _is_orphaned(self, session: Session) -> bool:
+        """True when ``session`` has NO consumer at all.
+
+        The predicate the wall-clock orphan bound and the orphan listing both
+        use, so they cannot disagree about what the word means.
+
+        "No attached clients" is deliberately narrower than "the client
+        disconnected".  A woken or reactor-driven session carries the
+        synthetic ``_HEADLESS_CLIENT_ID`` and a cascade stage carries its
+        driver's, so neither is ever orphaned — which is what keeps this from
+        becoming the terminate-on-client-loss behaviour the framework
+        deliberately does not have.  See :mod:`server.session_lifetime`.
+
+        Args:
+            session: The loaded session to test.
+
+        Returns:
+            True when nothing is attached.
+        """
+        return not session.attached_clients
+
+    def _session_runtime_limits(self, session: Session) -> Optional[Any]:
+        """The ``runtime_limits`` this session is running under, or ``None``.
+
+        Read off the resolved profile the server holds rather than off the
+        persisted snapshot: the profile is what the session was actually
+        built with, and a stand-in server in a test simply yields ``None``,
+        which :func:`server.session_lifetime.resolve_bounds` reads as "nobody
+        declared limits".
+
+        Args:
+            session: The loaded session.
+
+        Returns:
+            The ``RuntimeLimits``, or ``None``.
+        """
+        profile = getattr(session.server, "_profile", None)
+        limits = getattr(profile, "runtime_limits", None) if profile else None
+        return limits if isinstance(limits, RuntimeLimits) else None
+
+    def list_orphan_sessions(self) -> List[Dict[str, Any]]:
+        """Every LOADED session with no client, and what would stop it (#812).
+
+        The "at minimum" ask of #812: a way to SEE the sessions nothing is
+        consuming.  Pairs with :meth:`stop_session`, which takes the
+        ``session_id`` from a row here.
+
+        Loaded sessions only.  A cold session consumes nothing and is not an
+        orphan in the sense that matters — the state this reports is
+        "running, and nobody will read the result".
+
+        Returns:
+            One dict per orphan: ``session_id``, ``name``, ``workspace_path``,
+            ``profile``, ``cascade_driver_id``, ``is_processing`` (the
+            dangerous state — spending, right now), ``orphaned_seconds``
+            (``None`` until the watchdog's first sweep observes it),
+            ``loaded_seconds``, the effective ``max_orphan_seconds`` /
+            ``max_session_seconds``, and ``runner`` (the identity dict, or
+            ``None``).
+        """
+        now = time.monotonic()
+        rows: List[Dict[str, Any]] = []
+        with self._lock:
+            entries = [
+                (sid, sess) for sid, sess in self._sessions.items()
+                if self._is_orphaned(sess)
+            ]
+            orphan_since = dict(self._orphan_since)
+            ever_attached = set(self._ever_attached)
+        for session_id, session in entries:
+            since = orphan_since.get(session_id)
+            session_bound, orphan_bound = resolve_bounds(
+                self._session_runtime_limits(session))
+            rows.append({
+                "session_id": session_id,
+                "name": session.name or "",
+                "workspace_path": session.workspace_path or "",
+                "profile": getattr(
+                    getattr(session.server, "_profile", None), "name", None),
+                "cascade_driver_id": session.cascade_driver_id,
+                "is_processing": bool(
+                    getattr(session.server, "_model_running", False)),
+                "orphaned_seconds": (
+                    None if since is None else round(now - since, 1)),
+                # False for a session the sweep has never seen attached (a
+                # cold wake revive).  It is listed -- an operator asking
+                # "what has no client" wants to see it -- but the orphan
+                # bound does not apply to it.  See ``_ever_attached``.
+                "orphan_bound_applies": session_id in ever_attached,
+                "loaded_seconds": round(now - session.loaded_at, 1),
+                "max_orphan_seconds": orphan_bound,
+                "max_session_seconds": session_bound,
+                "runner": (
+                    session.runner_identity.to_dict()
+                    if session.runner_identity is not None else None
+                ),
+            })
+        return rows
+
+    def stop_session(
+        self,
+        session_id: str,
+        reason: str = "operator_request",
+    ) -> Dict[str, Any]:
+        """Stop ONE loaded session by id, whoever created it (#812).
+
+        The verb #812 asked for.  ``session.end`` stops the CALLER's own
+        session and :meth:`cancel_cascade` stops a whole cascade; neither can
+        stop the one session an operator is looking at, which is what left
+        "kill a circumstantially-identified runner, or wait for the budget to
+        burn" as the only two options.
+
+        Uses the SAME cancellation path as both of those and as
+        ``budget_control``'s ``abort`` rung — ``server.stop()``, which trips
+        the session's cancel token — rather than growing a second mechanism.
+        A session mid-turn is cancelled at its next check point; an idle one
+        is a no-op stop and is then unloaded, which saves it to disk so a
+        later ``session.wake`` can revive it.
+
+        Deliberately NOT a kill: nothing here signals the runner pid.  The
+        identity recorded by :meth:`_record_runner_identity` exists so an
+        operator can SEE which process a session is using; killing it would
+        destroy a pool slot other sessions of the same cascade expect to
+        reuse, and stopping by id lets the daemon unwind its own bookkeeping.
+
+        Idempotent: stopping an unknown or already-stopped session reports
+        rather than raising.
+
+        Args:
+            session_id: The session to stop.
+            reason: Carried on the emitted ``SessionTerminatedEvent`` so a
+                client can tell an operator stop from a user cancel, a
+                cascade cancel or a wall-clock bound.
+
+        Returns:
+            ``{"session_id", "found", "stopped", "was_processing", "reason"}``
+            — ``found`` False when no such session is loaded; ``stopped``
+            False when it was already idle, which is still a successful stop
+            with nothing to cancel.
+        """
+        # Local import, matching ``cancel_cascade`` right above: the
+        # module-level SDK import block does not carry this type.
+        from jaato_sdk.events import SessionTerminatedEvent
+
+        with self._lock:
+            session = self._sessions.get(session_id)
+        if session is None:
+            logger.info(
+                "stop_session: %s is not loaded — nothing to stop", session_id)
+            return {
+                "session_id": session_id, "found": False, "stopped": False,
+                "was_processing": False, "reason": reason,
+            }
+
+        was_processing = bool(getattr(session.server, "_model_running", False))
+        stopped = False
+        if session.server is not None:
+            try:
+                stopped = bool(session.server.stop())
+            except Exception:  # noqa: BLE001 — best-effort cancel
+                logger.exception(
+                    "stop_session: server.stop() raised for session=%s — the "
+                    "termination event is still emitted", session_id)
+
+        agent_id = getattr(session.server, "_main_agent_id", None) or "main"
+        self._emit_to_session(
+            session_id,
+            SessionTerminatedEvent(
+                session_id=session_id, agent_id=agent_id, reason=reason,
+            ),
+        )
+        logger.info(
+            "stop_session: %s reason=%s was_processing=%s cancelled=%s "
+            "runner=%s",
+            session_id, reason, was_processing, stopped,
+            session.runner_identity.describe()
+            if session.runner_identity is not None else "(unknown)",
+        )
+        return {
+            "session_id": session_id, "found": True, "stopped": stopped,
+            "was_processing": was_processing, "reason": reason,
+        }
+
+    def start_lifetime_watchdog(
+        self, interval_seconds: Optional[float] = None,
+    ) -> bool:
+        """Arm the daemon-side wall-clock bound (#812).
+
+        The bound is enforced HERE, in the daemon, because every ceiling that
+        existed was held by something the session could outlive: the eval
+        harness's ``--arm-timeout`` lived in the client process that died,
+        and the task pool's ``seconds`` is reconciled when a session ends, so
+        a session that never ends never consumes it.
+
+        **Logs what it armed, with the EFFECTIVE values.**  #735 is the
+        cautionary tale: ``tool_timeout_seconds`` was documented, parsed,
+        validated and delivered to nothing, and a cap that silently does not
+        apply is worse than no cap.  This line names the framework default
+        every session inherits; each session's own effective bounds are in
+        its ``list_orphan_sessions`` row and in the verdict line that stops
+        it.
+
+        Started explicitly by the daemon rather than from ``__init__`` so a
+        ``SessionManager`` constructed in a test or an embedding process
+        grows no background thread it did not ask for.  Idempotent.
+
+        Args:
+            interval_seconds: Sweep period; defaults to
+                :data:`~server.session_lifetime.DEFAULT_SWEEP_INTERVAL_SECONDS`.
+
+        Returns:
+            True when this call started the thread, False when one was
+            already running.
+        """
+        if (self._lifetime_watchdog is not None
+                and self._lifetime_watchdog.is_alive()):
+            return False
+        if interval_seconds is not None and interval_seconds > 0:
+            self._lifetime_sweep_interval = float(interval_seconds)
+        self._lifetime_watchdog_stop.clear()
+        thread = threading.Thread(
+            target=self._lifetime_watchdog_loop,
+            name="session-lifetime-watchdog",
+            daemon=True,
+        )
+        self._lifetime_watchdog = thread
+        thread.start()
+        logger.info(
+            "session-lifetime watchdog armed: sweep=%.1fs; defaults %s "
+            "(a profile's runtime_limits overrides; 0 = unbounded)",
+            self._lifetime_sweep_interval, describe_armed_bounds(None),
+        )
+        return True
+
+    def stop_lifetime_watchdog(self, timeout: float = 2.0) -> None:
+        """Stop the watchdog thread and wait briefly for it to exit.
+
+        Args:
+            timeout: Seconds to wait for the thread to join.
+        """
+        self._lifetime_watchdog_stop.set()
+        thread = self._lifetime_watchdog
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=timeout)
+        self._lifetime_watchdog = None
+
+    def _lifetime_watchdog_loop(self) -> None:
+        """Sweep every :attr:`_lifetime_sweep_interval` until asked to stop.
+
+        A raising sweep must not silence the bound for the rest of the
+        daemon's life, so the body is wrapped and the loop continues — the
+        next pass re-derives everything it needs from ``_sessions``.
+        """
+        while not self._lifetime_watchdog_stop.wait(
+                self._lifetime_sweep_interval):
+            try:
+                self.sweep_session_lifetimes()
+            except Exception:  # noqa: BLE001 — one bad pass must not disarm
+                logger.exception(
+                    "session-lifetime sweep raised — the bound stays armed "
+                    "and the next sweep re-derives its state",
+                )
+
+    def _observe_session_lifetimes(
+        self, now: float,
+    ) -> List[SessionLifetimeObservation]:
+        """Snapshot every loaded session's clocks, updating the orphan map.
+
+        Also where ``_orphan_since`` is maintained: a session seen with no
+        clients gets an entry (at ``now`` the first time), and one seen WITH
+        a client has any entry dropped — so the grace measures CONTINUOUS
+        orphanhood, and a reconnect renews the session's claim on being
+        wanted.  Entries for sessions no longer loaded are reaped in the same
+        pass, which is what keeps the map from growing.
+
+        Args:
+            now: Monotonic now, shared across the pass.
+
+        Returns:
+            One observation per loaded session.
+        """
+        observations: List[SessionLifetimeObservation] = []
+        with self._lock:
+            live_ids = set(self._sessions)
+            for session_id, session in self._sessions.items():
+                if self._is_orphaned(session):
+                    # Only a session this sweep has seen ATTACHED can become
+                    # an orphan -- see ``_ever_attached``.  A session that has
+                    # never had a client is not "abandoned", it is being
+                    # driven under a different contract (a cold wake revive),
+                    # and the bound was written for the other case.
+                    if session_id in self._ever_attached:
+                        self._orphan_since.setdefault(session_id, now)
+                else:
+                    self._ever_attached.add(session_id)
+                    self._orphan_since.pop(session_id, None)
+                observations.append(SessionLifetimeObservation(
+                    session_id=session_id,
+                    loaded_at=session.loaded_at,
+                    orphaned_since=self._orphan_since.get(session_id),
+                    limits=self._session_runtime_limits(session),
+                ))
+            for stale_id in set(self._orphan_since) - live_ids:
+                self._orphan_since.pop(stale_id, None)
+            self._ever_attached &= live_ids
+        return observations
+
+    def sweep_session_lifetimes(
+        self, now: Optional[float] = None,
+    ) -> List[LifetimeVerdict]:
+        """Evaluate the wall-clock bounds once and stop whatever crossed one.
+
+        The whole of #812's runtime behaviour, in one method so a test can
+        drive it with no thread and no sleeping: observe, evaluate (a pure
+        function in :mod:`server.session_lifetime`), then stop each verdict
+        through :meth:`stop_session` — the same cancellation path
+        ``budget_control``'s ``abort`` rung uses.
+
+        A stopped session is left to the existing unload machinery rather
+        than torn down here: ``stop_session`` cancels it, its model thread
+        settles, and ``_maybe_unload_session`` saves it to disk.  A session
+        that crossed a bound is recoverable; one destroyed mid-write is not.
+
+        Args:
+            now: Monotonic instant to judge against; defaults to
+                ``time.monotonic()``.  Injectable so a test can advance the
+                clock instead of sleeping.
+
+        Returns:
+            The verdicts acted on this pass — empty on a healthy daemon.
+        """
+        now = time.monotonic() if now is None else now
+        verdicts = evaluate(self._observe_session_lifetimes(now), now)
+        for verdict in verdicts:
+            logger.warning(
+                "session-lifetime bound: %s — stopping it daemon-side "
+                "(nothing was consuming its results)", verdict.describe(),
+            )
+            self.stop_session(verdict.session_id, reason=verdict.reason)
+            # Forget the orphan clock so a session that SURVIVES the stop
+            # (one whose model thread is wedged) is re-judged from now
+            # rather than re-stopped on every subsequent sweep.
+            with self._lock:
+                self._orphan_since.pop(verdict.session_id, None)
+        return verdicts
 
     def unregister_all_cascade_clients_for_connection(
         self, connection_client_id: str,
@@ -8942,6 +9540,15 @@ class SessionManager:
             user_inputs=state.user_inputs or [],  # Command history for prompt restoration
             provisioned=state.metadata.get('provisioned', False),
             created_by=getattr(state, "created_by", None),  # 2.9+ (#859)
+            # 2.10+ (#812): the LAST KNOWN runner, restored as STALE.  After
+            # a reload the pid named belonged to a previous process
+            # lifetime, so it is evidence about what ran this session and
+            # never a handle -- nothing in the framework acts on a stale
+            # record, and a re-spawn overwrites it with a live one.  Kept
+            # rather than cleared because "which process last ran this" is
+            # exactly what a post-mortem of a finished session wants.
+            runner_identity=RunnerIdentity.from_dict(
+                getattr(state, "runner_identity", None), stale=True),
             sandbox_mode=getattr(state, "sandbox_mode", None),
             # Carry the inline spec forward so a re-save of the restored
             # session re-persists it (survives restore → save → restore).
@@ -9467,6 +10074,13 @@ class SessionManager:
                 if session.provisioned:
                     subagent_metadata['provisioned'] = True
 
+                # #812: refresh which process is executing this session
+                # before the record is written, and take the serialised form
+                # back from the refresher.  See the method docstring for why
+                # this is a refresh on the SAVE path rather than a second
+                # stamp at each spawn site.
+                runner_identity_dict = self._refresh_runner_identity(session)
+
                 # Create SessionState.  Post-2.3: persist ``profile_name``
                 # (denormalised from the server's bound SubagentProfile) so
                 # disk-restore can re-resolve the full provider recipe
@@ -9524,6 +10138,11 @@ class SessionManager:
                     # 2.9+ (#859): the authenticated creator, so the record
                     # says whose session this was without telemetry.
                     created_by=session.created_by,
+                    # 2.10+ (#812): WHICH PROCESS ran this.  An operator who
+                    # can see a session must be able to act on it, and the
+                    # record carried no runner-, slot- or pid-shaped key at
+                    # all.  None for a session with no runner subprocess.
+                    runner_identity=runner_identity_dict,
                     workspace_path=session.workspace_path,
                     config_root=session.config_root,
                     # Persist confinement so orphan-revive / disk-restore re-applies
@@ -10750,6 +11369,14 @@ class SessionManager:
                     turn_count=len(session.server.get_history()) // 2,
                     workspace_path=session.workspace_path,
                     created_by=session.created_by,
+                    # #812: a listing that shows a session and not whether
+                    # anything is consuming it, nor which process is running
+                    # it, is the listing the issue's reporter had.
+                    orphaned=self._is_orphaned(session),
+                    runner=(
+                        session.runner_identity.to_dict()
+                        if session.runner_identity is not None else None
+                    ),
                 )
 
         # Sort by last activity

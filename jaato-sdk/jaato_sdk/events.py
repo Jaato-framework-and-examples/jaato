@@ -92,7 +92,18 @@ from pydantic import BaseModel, ConfigDict, Field
 # reads an empty response as ``free_text=""``), so a client that sends
 # attachments must declare ``min_protocol_version="1.6"`` -- the SDK
 # refuses the call below it.
-PROTOCOL_VERSION = "1.6"
+# 1.7 -- ``session.orphans`` and ``session.stop``: list the LOADED sessions
+# with no client attached, and stop ANY session by id rather than only the
+# caller's own (#812).  A session whose client died kept running for seven
+# minutes and $2.52, and could not be identified or stopped from outside.
+#
+# Unlike every additive FIELD above, a missing VERB does not degrade
+# harmlessly: an older daemon does not recognise ``session.stop``, so the
+# call is a silent no-op and the caller is told nothing -- while believing a
+# runaway session has been stopped.  That is the #845 verdict (refuse, don't
+# degrade) applied to a command rather than a payload, so the SDK raises
+# below ``MIN_SESSION_STOP_PROTOCOL``.
+PROTOCOL_VERSION = "1.7"
 
 
 # =============================================================================
