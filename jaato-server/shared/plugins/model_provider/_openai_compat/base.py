@@ -91,6 +91,10 @@ from .._prose_tools import (
     read_prose_tool_calls_quirk,
     rewrite_prose_tool_calls,
 )
+from shared.history_invariant import (
+    new_tool_call_nonce,
+    synthetic_tool_call_id,
+)
 from shared.tool_id_map import tool_choice_to_wire, wire_name_trace_fields
 
 logger = logging.getLogger(__name__)
@@ -772,6 +776,11 @@ class OpenAICompatProvider(OpenAIMediaOutputMixin, ModalityCapabilityMixin):
 
         # Track tool call accumulation (streaming sends tool calls in pieces)
         tool_call_accumulators: Dict[int, Dict[str, Any]] = {}
+        # Discriminator for ids this response has to mint because the
+        # upstream sent none (#674).  One per response: the delta ``index``
+        # is unique only WITHIN a response, so index alone would put two
+        # different calls from two turns under one id in the same history.
+        tool_id_nonce = new_tool_call_nonce()
 
         # Monotonic index over model-generated media chunks, so a consumer
         # can spot a gap left by backpressure.  Separate from the text
@@ -816,7 +825,19 @@ class OpenAICompatProvider(OpenAIMediaOutputMixin, ModalityCapabilityMixin):
                     tool_id = tc.get("id")
                     original_name = get_original_tool_name(func_name)
                     if not tool_id:
-                        self._trace(f"ERROR: Missing tool call ID for {func_name}")
+                        # A third-party OpenAI-compatible endpoint that
+                        # streams a call with no id used to put an
+                        # unmatchable call into history and 400 the NEXT
+                        # turn.  Mint one instead: the id is only ever a
+                        # correlation handle between this call and the
+                        # result we send back, and both sides are ours
+                        # once the upstream declines to supply it (#674).
+                        tool_id = synthetic_tool_call_id(idx, tool_id_nonce)
+                        self._trace(
+                            f"SYNTHETIC_TOOL_CALL_ID idx={idx} "
+                            f"id={tool_id!r} name={original_name!r} — "
+                            f"upstream streamed no id"
+                        )
                     if unreadable_args is not None:
                         self._trace(
                             f"UNREADABLE_TOOL_ARGS name={original_name} "

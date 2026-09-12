@@ -78,6 +78,10 @@ from .._openai_compat.converters import (
     response_from_openai,
     tool_schemas_to_openai,
 )
+from shared.history_invariant import (
+    new_tool_call_nonce,
+    synthetic_tool_call_id,
+)
 from shared.tool_id_map import name_to_id
 from .env import (
     ENV_CONTEXT_LENGTH,
@@ -832,6 +836,11 @@ class VLLMProvider(OpenAICompatLocalHostProvider):
         was_cancelled = False
 
         tool_call_accumulators: Dict[int, Dict[str, Any]] = {}
+        # Discriminator for ids this response has to mint because the
+        # upstream sent none (#674).  One per response: the delta ``index``
+        # is unique only WITHIN a response, so index alone would put two
+        # different calls from two turns under one id in the same history.
+        tool_id_nonce = new_tool_call_nonce()
         chunk_count = 0
 
         def flush_text_block():
@@ -854,6 +863,16 @@ class VLLMProvider(OpenAICompatLocalHostProvider):
                     )
                     tool_id = tc.get("id")
                     original_name = get_original_tool_name(func_name)
+                    if not tool_id:
+                        # A self-hosted server whose OpenAI compatibility
+                        # is approximate may stream no id; minting one
+                        # keeps the call matchable to its result (#674).
+                        tool_id = synthetic_tool_call_id(idx, tool_id_nonce)
+                        self._trace(
+                            f"SYNTHETIC_TOOL_CALL_ID idx={idx} "
+                            f"id={tool_id!r} name={original_name!r} — "
+                            f"upstream streamed no id"
+                        )
                     # Quirk: coerce stringified args BEFORE building the
                     # FunctionCall so downstream (schema validator,
                     # ledger, history) sees the typed shape.  Nothing to

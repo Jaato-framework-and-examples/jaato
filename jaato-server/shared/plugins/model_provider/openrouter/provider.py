@@ -127,6 +127,10 @@ from .._prose_tools import (
     rewrite_prose_tool_calls,
 )
 from shared.app_identity import AppIdentity, resolve_app_identity
+from shared.history_invariant import (
+    new_tool_call_nonce,
+    synthetic_tool_call_id,
+)
 from shared.tool_id_map import tool_choice_to_wire, wire_name_trace_fields
 
 from .env import (
@@ -1797,6 +1801,11 @@ class OpenRouterProvider(OpenAIMediaOutputMixin, ModalityCapabilityMixin):
 
         # Tool calls stream in pieces — accumulate by index.
         tool_call_accumulators: Dict[int, Dict[str, Any]] = {}
+        # Discriminator for ids this response has to mint because the
+        # upstream sent none (#674).  One per response: the delta ``index``
+        # is unique only WITHIN a response, so index alone would put two
+        # different calls from two turns under one id in the same history.
+        tool_id_nonce = new_tool_call_nonce()
 
         def record_finish(choice: Any) -> None:
             """Resolve a choice's reported finish reason, keeping the native one.
@@ -1841,7 +1850,15 @@ class OpenRouterProvider(OpenAIMediaOutputMixin, ModalityCapabilityMixin):
                     tool_id = tc.get("id")
                     original_name = get_original_tool_name(func_name)
                     if not tool_id:
-                        self._trace(f"ERROR: Missing tool call ID for {func_name}")
+                        # See ``_openai_compat.base``: an upstream that
+                        # streams no id would otherwise put an unmatchable
+                        # call into history and 400 the next turn (#674).
+                        tool_id = synthetic_tool_call_id(idx, tool_id_nonce)
+                        self._trace(
+                            f"SYNTHETIC_TOOL_CALL_ID idx={idx} "
+                            f"id={tool_id!r} name={original_name!r} — "
+                            f"upstream streamed no id"
+                        )
                     if unreadable_args is not None:
                         self._trace(
                             f"UNREADABLE_TOOL_ARGS name={original_name} "
