@@ -60,6 +60,7 @@ import socket
 import threading
 import traceback
 import concurrent.futures as _concurrent_futures
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Protocol
@@ -245,6 +246,24 @@ WORK_LANE_METHODS = frozenset({
 #: "every method is classified" guard can account for it.
 MAIN_THREAD_METHODS = frozenset({"session.bootstrap"})
 
+#: How many recently-registered request ids the reader thread remembers,
+#: for the reconciliation payload on ``session.health_check`` (#856).
+#:
+#: A WINDOW rather than a high-water mark, because the probe that asks the
+#: question is itself a request: it is registered on the reader thread
+#: BEFORE its handler runs, so by the time the handler answers, the highest
+#: id this runner has ever seen is the PROBE's -- which is greater than any
+#: id the daemon could be asking about.  A high-water comparison would
+#: therefore answer "yes, received" for every id, including the ones that
+#: never arrived: the one answer that makes the reconciliation worthless.
+#:
+#: 256 is sized against the question actually asked.  The daemon probes
+#: about an id it dispatched seconds ago, so the window only has to outlive
+#: the ack deadline -- a session would have to issue 256 further RPCs on one
+#: channel inside that window to roll the answer out of memory, and the
+#: daemon reports that case as inconclusive rather than guessing.
+SEEN_REQUEST_ID_MEMORY = 256
+
 
 class RunnerRPC:
     """Bidirectional dispatcher serving on a blocking Unix socket.
@@ -320,6 +339,14 @@ class RunnerRPC:
         # for an id this runner was never asked to run) -- the two were
         # indistinguishable, and both silent, before #988.
         self._highest_request_id = 0
+        # #856 reconciliation: the ids the reader thread has registered,
+        # most recent last.  Bounded -- see SEEN_REQUEST_ID_MEMORY for why
+        # this is a window and not a high-water mark.  Written under
+        # ``_active_lock`` beside ``_active_calls`` and
+        # ``_highest_request_id`` so all three describe one instant.
+        self._seen_request_ids: "deque[int]" = deque(
+            maxlen=SEEN_REQUEST_ID_MEMORY,
+        )
         # #988 observability counters.  A cancel that is written to the
         # wire and not honoured must be countable, not merely absent
         # from a DEBUG log nobody enables.  Read via
@@ -571,6 +598,7 @@ class RunnerRPC:
         token = CancelToken()
         with self._active_lock:
             self._active_calls[request_id] = _ActiveCall(cancel_token=token)
+            self._seen_request_ids.append(request_id)
             if request_id > self._highest_request_id:
                 self._highest_request_id = request_id
         return token
@@ -1438,7 +1466,38 @@ class RunnerRPC:
               session is None / not yet ready / can't enumerate.
               Useful as a sanity check that the runner-side plugin
               set actually loaded.
+            - ``active_call_ids`` (List[int]): request ids running
+              RIGHT NOW -- the keys of ``_active_calls``, sorted.
+            - ``known_request_ids`` (List[int]): the last
+              :data:`SEEN_REQUEST_ID_MEMORY` ids the reader thread
+              registered, sorted.  A superset of the active ones.
+            - ``highest_request_id`` (int): the highest id ever
+              registered.  Diagnostic only -- see
+              :data:`SEEN_REQUEST_ID_MEMORY` for why the daemon must
+              not reconcile against it.
+
+        The last three are the **reconciliation** payload (#856), and
+        they are reported whether or not a session host exists,
+        because they describe the TRANSPORT rather than the session.
+        The daemon believes a call is in flight iff it holds an entry
+        in ``RunnerRPCClient._in_flight``; this runner believes it iff
+        the id is in ``active_call_ids``.  Those two beliefs diverged
+        -- four ids registered daemon-side against an empty work queue
+        here -- and nothing could see it, because no RPC asked.  Now
+        one does, over the CONTROL lane, so the answer arrives while
+        the work lane is busy with the very turn in question.
+
+        The predicate is the same one :meth:`_handle_cancel` already
+        uses to count a cancel as ``unknown`` (#988): an id this
+        runner has never been asked to run.  One fact, two readers.
         """
+        with self._active_lock:
+            transport = {
+                "active_call_ids": sorted(self._active_calls),
+                "known_request_ids": sorted(self._seen_request_ids),
+                "highest_request_id": self._highest_request_id,
+            }
+
         with self._session_lock:
             host = self._session_host
 
@@ -1448,6 +1507,7 @@ class RunnerRPC:
                 "ready": False,
                 "session_id": "",
                 "tool_count": -1,
+                **transport,
             }
 
         tool_count = -1
@@ -1467,6 +1527,7 @@ class RunnerRPC:
             "ready": host.is_ready,
             "session_id": host.session_id,
             "tool_count": tool_count,
+            **transport,
         }
 
     def _handle_session_end(self) -> "tuple[bool, Any]":

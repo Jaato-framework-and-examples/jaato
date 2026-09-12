@@ -290,6 +290,14 @@ CATALOG: Dict[str, EnvClass] = {
         "resolved profile (default) or re-resolve the name from disk.  "
         "Self-referential as a profile key: the daemon would have to load "
         "the file to learn whether it may load the file (#787)"),
+    "JAATO_RUNNER_ACK_TIMEOUT": EnvClass(HOST, None,
+        "seconds a dispatched runner RPC may go unacknowledged before "
+        "the daemon reconciles it against the runner and fails it "
+        "(#856).  A property of the daemon<->runner TRANSPORT, which "
+        "is owned by the channel and not by a session -- the same "
+        "reading JAATO_IPC_EVENT_QUEUE_MAX gets.  Sessions on one "
+        "channel cannot disagree about it, because a pool slot serves "
+        "several of them in turn through one RunnerRPCClient"),
     "JAATO_RUNNER_DISABLE_CONFINE": EnvClass(HOST, None,
         "disables runner self-confinement host-wide; deliberately NOT per "
         "session"),
