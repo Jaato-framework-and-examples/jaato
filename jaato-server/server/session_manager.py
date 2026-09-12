@@ -11244,6 +11244,7 @@ class SessionManager:
         elif isinstance(event, ClarificationBatchResponseEvent):
             server.respond_to_clarification_batch(
                 event.request_id, event.answers, cancelled=event.cancelled,
+                answer_attachments=event.answer_attachments,
             )
 
         elif isinstance(event, ReferenceSelectionResponseRequest):

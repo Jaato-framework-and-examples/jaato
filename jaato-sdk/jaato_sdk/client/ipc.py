@@ -2059,6 +2059,7 @@ class IPCClient:
         answers: List[str],
         *,
         cancelled: bool = False,
+        answer_attachments: Optional[Dict[Any, list]] = None,
     ) -> None:
         """Respond to a batched clarification — all answers at once.
 
@@ -2077,11 +2078,47 @@ class IPCClient:
             cancelled: Abandon the clarification instead of answering it.
                 The tool returns ``{"cancelled": True}`` to the model and
                 the turn continues; ``answers`` is ignored.
+            answer_attachments: Media attached to individual answers
+                (#989), as ``{question_index: [attachment, ...]}`` with a
+                1-BASED index (``int`` or its decimal string; both are
+                accepted).  Each attachment takes the same forms
+                :meth:`send_message` accepts — a file-path ``str``, or a
+                ``{mime_type, data, display_name}`` dict whose ``data``
+                is raw ``bytes`` or a base64 ``str`` — and is normalised
+                by the same encoder, so a client that can attach to a
+                message can attach to an answer with no second code path.
+
+                A voice note answering a ``free_text`` question is the
+                motivating case, and the answer string is then legitimately
+                ``""``: the utterance IS the answer (#838), and the daemon
+                does not read it as a skip.  Attachments are equally valid
+                on a CHOICE answer — picking "1. you attach a screenshot"
+                and attaching it is the ordinal plus the image, two axes
+                rather than alternatives.
+
+                Requires a daemon at protocol
+                >= :attr:`MIN_CLARIFICATION_ATTACHMENT_PROTOCOL`; below
+                that the call is REFUSED rather than degraded, because an
+                older daemon would answer the clarification with the
+                payload dropped and, for a voice-only answer, report an
+                empty answer as a success.
+
+        Raises:
+            ValueError: when attachments are supplied and the connected
+                daemon is too old to carry them.
         """
+        wire: Dict[str, List[Dict[str, Any]]] = {}
+        if answer_attachments and not cancelled:
+            self._require_clarification_attachment_protocol()
+            for index, items in answer_attachments.items():
+                normalized = self._normalize_attachments(items)
+                if normalized:
+                    wire[str(index)] = normalized
         await self._send_event(ClarificationBatchResponseEvent(
             request_id=request_id,
             answers=answers,
             cancelled=cancelled,
+            answer_attachments=wire,
         ))
 
     async def respond_to_reference_selection(
@@ -2403,6 +2440,41 @@ class IPCClient:
     #: ignores the field — and for BYTES that is not a benign no-op, so the
     #: SDK refuses the call instead of letting the payload vanish.
     MIN_ATTACHMENT_RESUME_PROTOCOL = "1.5"
+
+    #: Wire-protocol minor from which a clarification ANSWER carries
+    #: ``answer_attachments``.  Below it the daemon ignores the field and
+    #: answers the clarification with the media gone — which for a
+    #: voice-only answer is a BLANK answer reported as a successful one,
+    #: since ``_parse_answer`` reads an empty response as ``free_text=""``.
+    #: Same verdict as #838 and #845: refused, not degraded.
+    MIN_CLARIFICATION_ATTACHMENT_PROTOCOL = "1.6"
+
+    def _require_clarification_attachment_protocol(self) -> None:
+        """Refuse attachments on a clarification answer against an old daemon.
+
+        The sibling of :meth:`_require_attachment_resume_protocol`, and
+        refused for the same reason: an additive optional field is safe to
+        send blind only when the degraded call still means what the caller
+        asked for.  Here the degraded call answers the question with the
+        recording thrown away — and the agent proceeds on it, because a
+        clarification answer is a tool result the model reads as fact.
+
+        An UNKNOWN version (no handshake yet) is refused too:
+        ``_protocol_compatible`` answers ``False`` for ``None``, and "I
+        have not been told what this daemon can do" is not a licence to
+        send bytes it may drop.
+        """
+        if _protocol_compatible(
+                self.server_protocol_version,
+                self.MIN_CLARIFICATION_ATTACHMENT_PROTOCOL):
+            return
+        spoken = self.server_protocol_version or "unknown (not connected)"
+        raise ValueError(
+            f"respond_to_clarification_batch: this daemon speaks protocol "
+            f"{spoken} and would DROP the answer attachments (needs >= "
+            f"{self.MIN_CLARIFICATION_ATTACHMENT_PROTOCOL}).  Answer the "
+            f"clarification in text, or upgrade the daemon."
+        )
 
     def _require_attachment_resume_protocol(self, verb: str) -> None:
         """Refuse an attachment-bearing resume against a daemon too old to

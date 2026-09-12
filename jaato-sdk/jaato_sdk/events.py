@@ -80,7 +80,19 @@ from pydantic import BaseModel, ConfigDict, Field
 # is not a benign no-op: a client that sends attachments must declare
 # ``min_protocol_version="1.5"`` (the SDK refuses the call rather than
 # letting the payload be silently dropped).
-PROTOCOL_VERSION = "1.5"
+# 1.6 (2026-09-12): additive optional ``answer_attachments`` on
+# ClarificationBatchResponseEvent, so a clarification ANSWER can carry
+# media -- a voice note answering "what is your name", a screenshot
+# answering "how should we design this".  Plus an advisory
+# ``expects_attachment`` flag on a question's individual CHOICES, so a
+# client can render an attach control on the branch that wants a file.
+# Same reasoning as 1.5 and the same consequence: an older daemon
+# ignores the field, and a clarification answered with the audio
+# dropped is a BLANK answer reported as a successful one (``_parse_answer``
+# reads an empty response as ``free_text=""``), so a client that sends
+# attachments must declare ``min_protocol_version="1.6"`` -- the SDK
+# refuses the call below it.
+PROTOCOL_VERSION = "1.6"
 
 
 # =============================================================================
@@ -951,7 +963,16 @@ class ClarificationBatchEvent(Event):
     tool_name: str = ""
     context: str = ""
     questions: List[Dict[str, Any]] = Field(default_factory=list)
-    # ^ List of {index, text, question_type, required, choices: [{text, default?}]}
+    # ^ List of {index, text, question_type, required,
+    #            choices: [{text, default?, expects_attachment?}]}
+    #
+    #   ``expects_attachment`` (protocol 1.6, #989) marks a CHOICE whose
+    #   branch expects the user to attach a file -- "1. you attach a
+    #   screenshot" vs "2. we discuss it".  Per choice rather than per
+    #   question because that is where the case splits.  Advisory: a
+    #   client renders an attach control on that choice, and nothing
+    #   refuses an answer that ignores it.  Absent means false, so a
+    #   client that does not know the key behaves exactly as before.
     batch_only: bool = False
     # ^ True when this event is the ONLY delivery of the questions and the
     #   only way to answer them.  False means the per-question
@@ -974,6 +995,30 @@ class ClarificationBatchResponseEvent(Event):
     # ^ Ordered list of answers, one per question (by index)
     cancelled: bool = False
     # ^ True to cancel the clarification outright (answers ignored).
+    answer_attachments: Dict[str, List[Dict[str, Any]]] = Field(
+        default_factory=dict
+    )
+    # ^ Media attached to individual ANSWERS (protocol 1.6, #989), keyed
+    #   by 1-based question index as a decimal string ("1", "2", ...) —
+    #   JSON object keys are strings, and the daemon accepts either
+    #   spelling.  Each entry is the canonical attachment dict
+    #   ``{mime_type, data: base64-str, display_name, attachment_id}``,
+    #   the same shape ``send_message(attachments=...)`` takes.
+    #
+    #   A PARALLEL field rather than a widening of ``answers`` into a
+    #   union: ``respond_to_clarification_batch(request_id, answers)`` is
+    #   positional in the TUI, the TS SDK and the web store, and a union
+    #   would break each of them silently.
+    #
+    #   Orthogonal to the answer's TYPE.  An attachment on a choice
+    #   answer is meaningful and is carried — picking "1. you attach a
+    #   screenshot" and attaching it is the ordinal AND the image.
+    #
+    #   The daemon validates the whole map before resolving anything: an
+    #   index that names no question, an undecodable payload, or a batch
+    #   over the per-submission byte cap is answered with an
+    #   ``ErrorEvent`` and the clarification stays OPEN for a corrected
+    #   submission.  Ignored when ``cancelled``.
 
 
 class ReferenceSelectionRequestedEvent(Event):

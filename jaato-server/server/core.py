@@ -51,6 +51,9 @@ from shared.dynamic_instructions import DynamicInstructionsError
 from shared.instruction_suppression import normalize_suppression
 from shared.instruction_token_cache import InstructionTokenCache
 from shared.message_queue import SourceType
+from shared.plugins.clarification.attachments import (
+    validate_answer_attachments,
+)
 from shared.plugins.session import create_plugin as create_session_plugin, load_session_config
 from jaato_sdk.plugins.base import parse_command_args, HelpLines
 from shared.plugins.gc import load_gc_from_file
@@ -6087,6 +6090,7 @@ class JaatoServer:
         request_id: str,
         answers: List[str],
         cancelled: bool = False,
+        answer_attachments: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Respond to a batch clarification request with all answers at once.
 
@@ -6105,12 +6109,27 @@ class JaatoServer:
                 returns ``{"cancelled": True}`` and the turn continues,
                 which is what keeps an unanswerable question from blocking
                 a turn forever (#704).  ``answers`` is ignored.
+            answer_attachments: Media attached to individual answers
+                (#989), keyed by 1-based question index (a decimal string
+                on the wire), each entry a ``{mime_type, data,
+                display_name}`` dict with a base64 payload — the same
+                shape ``send_message(attachments=...)`` uses.  Validated
+                here; on ANY problem an ``ErrorEvent`` is emitted and the
+                clarification is left PENDING, so the client can fix the
+                submission and answer the same request again.  Ignored
+                when ``cancelled``: there is no answer to attach to.
         """
         # Runner→daemon relay path (post-seat-flip runner sessions) — mirror
         # of respond_to_permission's prompt_operator_handler.resolve_response.
         relay = getattr(self, "_clarification_relay_handler", None)
+        media, accepted = self._resolve_clarification_attachments(
+            relay, request_id, answer_attachments, cancelled,
+        )
+        if not accepted:
+            return
         if relay is not None and relay.resolve_response(
-            request_id, answers, cancelled=cancelled
+            request_id, answers, cancelled=cancelled,
+            answer_attachments=media,
         ):
             return
 
@@ -6130,6 +6149,65 @@ class JaatoServer:
 
         for answer in answers:
             self._channel_input_queue.put(answer)
+
+    def _resolve_clarification_attachments(
+        self,
+        relay: Any,
+        request_id: str,
+        answer_attachments: Optional[Dict[str, Any]],
+        cancelled: bool,
+    ) -> Tuple[Optional[Dict[int, List[Dict[str, Any]]]], bool]:
+        """Validate a clarification submission's attachments (#989).
+
+        Returns ``(media, accepted)``.  ``accepted=False`` means an
+        ``ErrorEvent`` has been emitted and the caller must NOT resolve
+        the clarification — leaving the future pending is precisely what
+        lets the client retry the same ``request_id``, where resolving it
+        with the media silently dropped would report an answer the user
+        never gave (and, for a voice-only answer, an EMPTY one: #838).
+
+        Two refusals, and what each protects:
+
+        * **no relay is waiting for this id** — the daemon-local
+          ``QueueChannel`` path carries answer STRINGS through a queue
+          and has nowhere to put bytes.  Accepting them there would drop
+          the payload that was the message.
+        * **the batch is malformed or too large** — see
+          ``validate_answer_attachments``; over the cap the RPC response
+          frame is never written at all and the turn hangs behind a
+          clarification nobody can answer.
+        """
+        if not answer_attachments or cancelled:
+            return None, True
+        question_count = (
+            relay.pending_question_count(request_id)
+            if relay is not None else None
+        )
+        if question_count is None:
+            self.emit(ErrorEvent(
+                error=(
+                    f"Clarification {request_id} cannot carry attachments: "
+                    f"no relayed batch is awaiting it. Attachments are "
+                    f"supported on runner-tier sessions (the default); the "
+                    f"daemon-local clarification channel carries text only."
+                ),
+                error_type="ClarificationAttachmentError",
+            ))
+            return None, False
+        media, errors = validate_answer_attachments(
+            answer_attachments, question_count,
+        )
+        if errors:
+            self.emit(ErrorEvent(
+                error=(
+                    f"Clarification {request_id} attachments rejected; the "
+                    f"request is still open, answer it again. "
+                    + " | ".join(errors)
+                ),
+                error_type="ClarificationAttachmentError",
+            ))
+            return None, False
+        return media, True
 
     def respond_to_reference_selection(self, request_id: str, response: str) -> None:
         """Respond to a reference selection request.

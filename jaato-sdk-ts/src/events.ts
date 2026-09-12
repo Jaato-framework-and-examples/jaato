@@ -14803,6 +14803,12 @@ export interface ClarificationBatchResponseEvent {
   request_id?: RequestId9;
   answers?: Answers;
   cancelled?: Cancelled;
+  answer_attachments?: AnswerAttachments;
+}
+export interface AnswerAttachments {
+  [k: string]: {
+    [k: string]: unknown;
+  }[];
 }
 /**
  * Reference selection has been requested.

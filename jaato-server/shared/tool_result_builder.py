@@ -52,12 +52,25 @@ def extract_multimodal_attachments(
 ) -> Optional[List[Attachment]]:
     """Extract multimodal attachments from a ``_multimodal`` result dict.
 
-    Supports ``_multimodal_type == 'image'`` (the default; reads
-    ``image_data``) and ``'file'`` (PDFs/documents; reads ``file_data``),
-    both into the generic ``Attachment(mime_type, data, display_name)``.
+    Three shapes:
+
+    * ``_multimodal_type == 'image'`` (the default) reads ``image_data``;
+    * ``'file'`` (PDFs/documents) reads ``file_data``;
+    * ``'attachments'`` reads ``_multimodal_attachments``, a LIST of
+      canonical wire dicts ``{mime_type, data, display_name}`` -- the
+      only shape that can carry more than one payload, which is what a
+      clarification BATCH needs (#989: N questions, any of them answered
+      with media).  The single-payload forms stay exactly as they were;
+      they are what every ``_multimodal`` tool in the tree emits today.
+
     Returns ``None`` when there is nothing to attach.
     """
     multimodal_type = result.get('_multimodal_type', 'image')
+
+    if multimodal_type == 'attachments':
+        return _attachments_from_entries(
+            result.get('_multimodal_attachments') or []
+        )
 
     if multimodal_type == 'image':
         image_data = result.get('image_data')
@@ -88,6 +101,51 @@ def extract_multimodal_attachments(
         )]
 
     return None
+
+
+def _attachments_from_entries(
+    entries: List[Any],
+) -> Optional[List[Attachment]]:
+    """Build attachments from the list form of ``_multimodal``.
+
+    Accepts an already-built :class:`Attachment` (an in-process producer)
+    and the canonical wire dict with a raw-``bytes`` or base64-``str``
+    ``data`` (anything that crossed a transport).  An entry whose payload
+    will not decode is DROPPED rather than turned into an empty
+    attachment: a zero-byte payload on the wire is a provider error, and
+    an attachment that is silently empty is worse than one that is
+    absent.
+
+    Returns ``None`` when nothing usable is left, which is the "no
+    attachments" answer every caller of
+    :func:`extract_multimodal_attachments` already handles.
+    """
+    import base64
+
+    out: List[Attachment] = []
+    for entry in entries:
+        if isinstance(entry, Attachment):
+            out.append(entry)
+            continue
+        if not isinstance(entry, dict):
+            continue
+        data = entry.get('data')
+        if isinstance(data, str):
+            try:
+                data = base64.b64decode(data, validate=True)
+            except Exception:  # noqa: BLE001 - undecodable means unusable
+                continue
+        if not isinstance(data, (bytes, bytearray)):
+            continue
+        mime_type = (entry.get('mime_type') or '').strip()
+        if not mime_type:
+            continue
+        out.append(Attachment(
+            mime_type=mime_type,
+            data=bytes(data),
+            display_name=entry.get('display_name') or None,
+        ))
+    return out or None
 
 
 def normalize_result_dict(result_data: Any, *, ok: bool) -> Any:

@@ -714,14 +714,21 @@ class IPCRecoveryClient:
         answers: List[str],
         *,
         cancelled: bool = False,
+        answer_attachments: Optional[Dict[Any, list]] = None,
     ) -> None:
         """Respond to a batched clarification (all answers at once) — proxied
-        to the inner client (see ``IPCClient.respond_to_clarification_batch``)."""
+        to the inner client (see ``IPCClient.respond_to_clarification_batch``).
+
+        ``answer_attachments`` maps a 1-based question index to the media
+        attached to THAT answer (#989); the inner client normalises each
+        entry and REFUSES the call against a daemon below protocol 1.6
+        rather than letting the payload be dropped."""
         self._check_can_send()
 
         if self._client:
             await self._client.respond_to_clarification_batch(
                 request_id, answers, cancelled=cancelled,
+                answer_attachments=answer_attachments,
             )
 
     async def register_client_tools(self, tools: List[Dict[str, Any]]) -> None:

@@ -13,8 +13,10 @@ from jaato_sdk.plugins.model_provider.types import (
 )
 
 from jaato_sdk.plugins.base import UserCommand
+from .attachments import attachment_to_wire, describe_wire_attachment
 from .channels import ClarificationChannel, create_channel
 from .models import (
+    Answer,
     Choice,
     ClarificationRequest,
     Question,
@@ -241,11 +243,31 @@ class ClarificationPlugin(RunnerForwardingMixin):
                                         "type": "array",
                                         "description": (
                                             "Available choices (for single/multiple choice). "
-                                            "Choices are numbered 1, 2, 3... automatically."
+                                            "Choices are numbered 1, 2, 3... automatically. "
+                                            "Each entry is the choice text, or an object "
+                                            "{text, expects_attachment} when picking that "
+                                            "choice means the user should attach a file "
+                                            "(a screenshot, a recording, a document) - the "
+                                            "client then offers an attach control on that "
+                                            "choice. The user's file arrives back attached "
+                                            "to the answer, alongside the choice they picked."
                                         ),
                                         "items": {
-                                            "type": "string",
-                                            "description": "Choice text",
+                                            "type": "object",
+                                            "properties": {
+                                                "text": {
+                                                    "type": "string",
+                                                    "description": "Choice text",
+                                                },
+                                                "expects_attachment": {
+                                                    "type": "boolean",
+                                                    "description": (
+                                                        "This choice expects the user to "
+                                                        "attach a file (default false)."
+                                                    ),
+                                                },
+                                            },
+                                            "required": ["text"],
                                         },
                                     },
                                     "required": {
@@ -527,6 +549,13 @@ The tool returns responses keyed by question number (1-based):
                         }
                         qa_pairs.append((question_text, choice_texts[0] if choice_texts else "(none)"))
 
+            # Fold any media the user attached onto the result (#989).
+            # ONE unconditional call: every branch this needs lives inside
+            # the helper, because ``_execute_clarification`` is frozen at
+            # the top of the cyclomatic-complexity baseline and even a
+            # single ``if`` here would push it past its recorded score.
+            _apply_answer_attachments(result, qa_pairs, response.answers)
+
             # Emit clarification resolved hook with Q&A summary
             # SKIP in subagent mode
             if self._on_clarification_resolved and not is_subagent_mode:
@@ -580,7 +609,12 @@ The tool returns responses keyed by question number (1-based):
                 if isinstance(c, str):
                     choices.append(Choice(text=c))
                 elif isinstance(c, dict):
-                    choices.append(Choice(text=c.get("text", "")))
+                    choices.append(Choice(
+                        text=c.get("text", ""),
+                        expects_attachment=bool(
+                            c.get("expects_attachment", False)
+                        ),
+                    ))
 
             question_type_str = q_data.get("question_type", "single_choice")
             try:
@@ -660,6 +694,72 @@ The tool returns responses keyed by question number (1-based):
         # Create the channel with config
         from .channels import create_channel
         self._channel = create_channel(channel_type, **(channel_config or {}))
+
+
+def _apply_answer_attachments(
+    result: Dict[str, Any],
+    qa_pairs: List[Tuple[str, str]],
+    answers: List[Answer],
+) -> None:
+    """Fold the media a user attached to their answers onto *result* (#989).
+
+    A clarification answer is a **tool result**, so the bytes ride
+    ``ToolResult.attachments`` -- the path every converter family already
+    marshals (``image_url`` / ``input_audio`` / a Gemini ``Blob``) and the
+    one ``_gate_one_tool_result`` already gates against the active model.
+    Reaching it from a plugin means emitting the ``_multimodal`` keys
+    ``JaatoSession._build_tool_result`` reads; the ``_multimodal``-prefixed
+    keys are stripped from the model-facing dict there, so nothing here
+    leaks a payload into the result text.
+
+    Mutates in place, and does nothing at all when no answer carried
+    media -- which is every clarification on every channel that cannot
+    receive it.  In-place because the caller invokes it unconditionally
+    and with no branch of its own (see the call site).
+
+    Three things reach the model, each for a different reason:
+
+    * the **bytes**, on ``ToolResult.attachments``;
+    * a per-answer ``attachments`` descriptor list in
+      ``result["responses"][<n>]`` -- mime, display name and ingest id,
+      never the payload -- because a batch with two audio answers is
+      otherwise unattributable: the wire's own follow-up message names
+      files in one lead line with no structural link to a question;
+    * the same, one line per attachment, appended to the Q&A summary the
+      UI renders, so a person reading the transcript sees that an answer
+      arrived as a recording.
+
+    Deliberately NOT a trust wrapper.  Today's typed answer is inserted
+    into the result verbatim, so defanging only the spoken one would
+    weigh a voice answer differently from the identical typed one -- the
+    asymmetry #845's ``_wrap_wake_content`` exists to avoid, inverted.
+
+    Args:
+        result: The result dict being built, with ``responses`` already
+            keyed by 1-based question number.
+        qa_pairs: The UI summary pairs, in the same order as *answers*.
+        answers: The parsed answers, some of which may carry attachments.
+    """
+    wire: List[Dict[str, Any]] = []
+    for position, answer in enumerate(answers):
+        if not answer.attachments:
+            continue
+        entries = [attachment_to_wire(a) for a in answer.attachments]
+        wire.extend(entries)
+        descriptors = [describe_wire_attachment(e) for e in entries]
+        slot = result.get("responses", {}).get(str(answer.question_index))
+        if isinstance(slot, dict):
+            slot["attachments"] = descriptors
+        if position < len(qa_pairs):
+            question_text, answer_text = qa_pairs[position]
+            summary = "; ".join(d["description"] for d in descriptors)
+            joined = f"{answer_text} [attached: {summary}]".strip()
+            qa_pairs[position] = (question_text, joined)
+    if not wire:
+        return
+    result["_multimodal"] = True
+    result["_multimodal_type"] = "attachments"
+    result["_multimodal_attachments"] = wire
 
 
 def create_plugin() -> ClarificationPlugin:
