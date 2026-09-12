@@ -10334,7 +10334,8 @@ NOTES
         if response.usage.cache_read_tokens is not None:
             turn_tokens['cache_read'] = response.usage.cache_read_tokens
             turn_tokens['spend_cache_read'] = (
-                response.usage.cache_read_tokens)
+                turn_tokens.get('spend_cache_read', 0)
+                + response.usage.cache_read_tokens)
         if response.usage.cache_creation_tokens is not None:
             turn_tokens['cache_creation'] = response.usage.cache_creation_tokens
             turn_tokens['spend_cache_creation'] = (

@@ -746,6 +746,14 @@ def _apply_answer_attachments(
     receive it.  In-place because the caller invokes it unconditionally
     and with no branch of its own (see the call site).
 
+    The bytes go in as base64 WIRE DICTS rather than as the
+    :class:`Attachment` objects ``extract_multimodal_attachments`` would
+    also accept.  A tool result may cross the runner RPC before the
+    session builds it (``RunnerForwardingMixin``), and a dataclass in
+    that payload is not JSON -- pre-#920 it became its Python repr and
+    never decoded back.  A dict of strings survives any hop, so the
+    encode here buys the one property that matters.
+
     Three things reach the model, each for a different reason:
 
     * the **bytes**, on ``ToolResult.attachments``;
