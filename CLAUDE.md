@@ -2452,6 +2452,81 @@ host (there is no profile to transition from), and the in-process backend's
 memory-reach, which #710's grooming correctly separates and which the deferred
 kernel + tool-RPC redesign owns.
 
+### A Cancel the Daemon Wrote and the Runner Threw Away (#988)
+
+`client.stop()` / `session.request_stop()` reach a runner-served tool as a
+`kind: "cancel"` frame on the daemon ↔ runner socket. The daemon wrote it, the
+runner decoded it, and under load the tool ran to completion and answered
+`ok=True` — measured from a plain `asyncio.run()` driver with no pytest
+involved: token tripped at 0.201 s, frame written at 0.206 s with no
+exception, result at 10.971 s.
+
+**The frame was not lost on the wire; it lost a race inside the runner.**
+`serve()` reads frames on one thread and dispatches each request to a pool
+worker, and the worker's FIRST act was to register the call:
+
+```python
+self._pool.submit(self._handle_request, env)   # serve, reader thread
+...
+def _handle_request(self, env):                # pool worker
+    token = CancelToken()
+    self._active_calls[env.id] = _ActiveCall(cancel_token=token)
+```
+
+so `serve` went straight back to reading while the worker was still being
+scheduled. A cancel frame already sitting in the socket buffer — which is the
+normal case, because a runner takes ~0.5 s to boot and both frames are queued
+before it reads either — reached `_handle_cancel` first, found no
+`_active_calls[id]`, logged at DEBUG and returned. Nothing re-checked. The
+token the worker then created was a **different object**, never tripped, and
+the `cli` executor polled it ~200 times without seeing anything.
+
+| Layer | Verdict |
+|-------|---------|
+| the runner never reads the frame | **no** — `_handle_cancel` ran, every time |
+| `_handle_cancel` finds no `_active_calls[id]` | **yes** — 12/12 losses under load, 0/10 idle |
+| the executor does not observe a tripped token | **no** — the token was never tripped |
+
+**Registration moved to the reader thread** (`_register_call`, called from
+`serve` before the next frame is decoded; the token is then handed to
+`_handle_request`, which publishes that same object to its thread-local). The
+daemon only cancels an id whose request frame it has already written, and the
+reader handles frames in wire order, so by the time a cancel for id *N* is
+read the entry for *N* is either present (trip it) or gone (already finished).
+*Not registered yet* is no longer reachable. This is shared RPC machinery, so
+the **session-hosted path was affected identically** — `session.send_message`
+takes the same work-lane branch — and is fixed by the same change.
+
+**Why the loss was invisible, and what says it now.** Two swallows on one
+path made a lost cancel indistinguishable from "no cancel was requested".
+Both are promoted, and each miss is told apart from the others rather than
+lumped together, because one of them is routine and the other never is:
+
+| Site | Event | Now |
+|------|-------|-----|
+| `RunnerRPCClient._send_cancel` | the write FAILED — the runner is alive and never heard | **WARNING**, counted in `cancel_write_failures()` |
+| same | the channel is already closed — the call dies with it | DEBUG |
+| `RunnerRPC._handle_cancel` | id ≤ the highest registered — the call finished first | DEBUG, counted `late` |
+| same | id > the highest registered — a cancel for a call this runner was never asked to run (#856's signature) | **WARNING**, counted `unknown` |
+
+`RunnerRPC.cancel_stats()` reports `received / tripped / late / unknown`, and
+`received == tripped + late + unknown` by construction — so a nonzero
+`unknown` is the one number that says *a cancel reached this runner and
+nothing was cancelled*.
+
+**The test that hid it.** `test_cancel_token_trips_runner_cancel` is a timing
+bet, and a previous attempt to stabilise it widened the command from 200 to
+2000 iterations on the theory that the event loop was starved. It was not, and
+the extra iterations bought nothing: a dropped cancel is dropped
+*permanently* — the frame is consumed and no later cancel-check can recover it
+— measured at 2000 iterations under the same load, still `ok=True`, at 105.1 s
+instead of 10.9 s. The count is back at 200, and
+`server/runner/tests/test_cancel_before_worker_registers_988.py` reproduces
+the loaded case **with no clock at all**: one work-lane worker, held by a
+gated call, so the cancelled call is provably still queued; wire ordering is
+established by a control-lane probe rather than by polling. It fails
+`unknown=1, tripped=0` against the old registration site, deterministically.
+
 ### Interactive Shell Sessions (`shared/plugins/interactive_shell/`)
 
 The `interactive_shell` plugin lets the model drive any user-interactive command by spawning persistent PTY sessions. Unlike `cli/` (which uses `subprocess` and can only run non-interactive commands), this plugin uses `pexpect` to provide a real pseudo-terminal where the model can read output and send input back and forth.
