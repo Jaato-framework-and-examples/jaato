@@ -26,6 +26,30 @@ routing they interrupt.
 import base64
 import queue
 
+from shared.tests.test_every_guard_detects_its_own_reversion import Reversion
+
+#: The refusal gate is the whole of #989's safety story on this path: with
+#: it removed the daemon resolves the clarification and the media simply
+#: never travels -- an answer the user did not give, and for a voice-only
+#: answer an EMPTY one reported as a success (#838).  That is exactly the
+#: silent-drop shape the repo keeps filing, so the guard has to be able to
+#: notice its own removal rather than being taken on trust.
+REVERSIONS = [
+    Reversion(
+        target="jaato-server/server/core.py",
+        find="""        media, accepted = self._resolve_clarification_attachments(
+            relay, request_id, answer_attachments, cancelled,
+        )
+        if not accepted:
+            return""",
+        replace="        media = None",
+        test="test_an_attachment_on_a_question_that_does_not_exist_is_refused",
+        because="a clarification resolving with its attachments silently "
+                "discarded -- the answer reaches the model with the "
+                "recording gone, and nothing anywhere says so",
+    ),
+]
+
 
 def _server(pending_id=None, relay=None):
     """A ``JaatoServer`` with only the state this method reads.
