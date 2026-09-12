@@ -24,7 +24,8 @@ The plugin exposes a single tool:
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `aspect` | string | No | `"all"` | Which aspect to query: `os`, `shell`, `arch`, `cwd`, `terminal`, `context`, `session`, `datetime`, `network`, or `all` |
+| `aspect` | string | No | `"all"` | Which aspect to query: `os`, `shell`, `arch`, `cwd`, `terminal`, `context`, `consumption`, `session`, `datetime`, `network`, or `all` |
+| `detail` | string | No | `"summary"` | Only meaningful for `aspect="consumption"`: `summary` or `full` |
 
 ### Response
 
@@ -167,8 +168,12 @@ get_environment(aspect="cwd")
 # Get terminal emulation info
 get_environment(aspect="terminal")
 
-# Get token usage and GC thresholds
+# Get context-window OCCUPANCY and GC thresholds
 get_environment(aspect="context")
+
+# Get what this session has SPENT, per model binding
+get_environment(aspect="consumption")
+get_environment(aspect="consumption", detail="full")
 
 # Get network connectivity configuration
 get_environment(aspect="network")
@@ -226,7 +231,13 @@ Returns a string (not an object) with the absolute path to the current working d
 
 ### Context (`aspect="context"`)
 
-Returns token usage and garbage collection settings. Requires session injection via `set_session()`.
+Returns context-window **occupancy** and garbage collection settings.
+Requires session injection via `set_session()`.
+
+This is how full the window is *now* — a property of the shared history.
+For what the session has **spent**, and which model it spent it on, use
+[`aspect="consumption"`](#consumption-aspectconsumption).  The two are
+easy to confuse and are not two views of one number.
 
 | Field | Description | Example Values |
 |-------|-------------|----------------|
@@ -248,6 +259,174 @@ Returns token usage and garbage collection settings. Requires session injection 
 | `auto_trigger` | Whether GC triggers automatically | `true` |
 | `preserve_recent_turns` | Turns to always keep | `5` |
 | `max_turns` | Maximum turns before GC (if set) | `100` |
+
+### Consumption (`aspect="consumption"`)
+
+What this session has **spent**, segregated by the model that served each
+response.  Requires session injection, like `context`.
+
+**`context` and `consumption` are not two views of one number.**
+
+| Aspect | Question | Denominator |
+|--------|----------|-------------|
+| `context` | how FULL is the window right now | the shared history — belongs to no particular model |
+| `consumption` | what has been SPENT, and on what | the responses each binding served |
+
+A session that calls `enter_tier` has **one history and several bills**.
+Only `consumption` can tell them apart.  (`context.prompt_tokens` /
+`output_tokens` come from `InstructionBudget`, which tracks a total rather
+than a split — use `consumption` for the input/output breakdown.)
+
+#### The binding
+
+The unit of segregation is the **binding** — `(provider, model, tier)` —
+not the tier name.  A budget-control degrade rung **rebinds a tier's model
+in place** (`planner: opus → flash`) without changing the tier's name, so
+a tier-keyed total would merge two models' spend under one row precisely
+in the session someone is reading it because of.  Tiers may also name
+different providers, so the model name alone is not a key either.
+
+A single-model session reports a list of one, with `tier: null` — so a
+consumer never branches on whether the session happened to be tiered.
+
+#### Response
+
+```json
+{
+  "active": {
+    "provider": "openrouter",
+    "model": "anthropic/claude-sonnet-4.5",
+    "tier": "planner",
+    "context_limit": 200000,
+    "context_tokens_used": 62800,
+    "context_percent_used": 31.4,
+    "turns": 5,
+    "tier_switches": 2
+  },
+  "totals": { "...": "same shape as a binding row, summed" },
+  "binding_count": 2,
+  "elapsed_seconds": 38.1,
+  "tool_calls": 17,
+  "budget": {
+    "used": { "tool_calls": 78.0 },
+    "limits": { "tool_calls": 100 },
+    "fraction_used": 0.78,
+    "next_rung": { "at_percent": 95.0, "action": "abort" }
+  },
+  "completion": {
+    "payload_schema_declared": true,
+    "signal_completion_called": false,
+    "nudges_fired_this_turn": 1,
+    "nudges_remaining_this_turn": 1,
+    "max_nudges_per_turn": 2,
+    "max_nudges_source": "observed",
+    "nudges_fired_total": 4
+  },
+  "bindings": [
+    {
+      "provider": "openrouter",
+      "model": "anthropic/claude-sonnet-4.5",
+      "tier": "planner",
+      "responses": 14,
+      "turns": 5,
+      "uncached_input_tokens": 8100,
+      "cache_read_tokens": 91200,
+      "cache_creation_tokens": 12000,
+      "input_tokens_total": 111300,
+      "output_tokens": 3400,
+      "thinking_tokens": 1200,
+      "total_tokens": 114700,
+      "cache_hit_percent": 91.84,
+      "cost_usd": 0.4231,
+      "cost_source": "pricing_table",
+      "finish_reasons": { "stop": 12, "tool_use": 2 },
+      "first_used": "2026-09-11T09:14:02.118",
+      "last_used": "2026-09-11T09:14:41.902"
+    }
+  ],
+  "tiers_declared": [
+    { "tier": "planner", "model": "...", "provider": "openrouter",
+      "active": true, "entered": true },
+    { "tier": "vision", "model": "...", "provider": "openrouter",
+      "active": false, "entered": false }
+  ]
+}
+```
+
+`bindings` and `tiers_declared` appear only at `detail="full"`.
+
+#### Token fields
+
+| Field | Description |
+|-------|-------------|
+| `uncached_input_tokens` | **NEW** input — excludes both cache buckets |
+| `cache_read_tokens` | input served from cache |
+| `cache_creation_tokens` | input written to cache |
+| `input_tokens_total` | the three above, summed |
+| `output_tokens` | generated tokens |
+| `thinking_tokens` | reasoning — a **subset** of `output_tokens` |
+| `total_tokens` | the provider's own total, summed over responses |
+| `cache_hit_percent` | `cache_read / (cache_read + uncached_input)` |
+
+The three input buckets are **disjoint**: `TokenUsage.prompt_tokens` is the
+new, uncached input and excludes the cached counts (issue #758).  They are
+named for what they are rather than passed through as `prompt_tokens`,
+because the model reads this result and `prompt_tokens` sitting beside
+`cache_read_tokens` invites it to count the same tokens twice.
+
+#### Absent is not zero
+
+`cache_read_tokens`, `cache_creation_tokens`, `thinking_tokens` and
+`cost_usd` are **omitted** when nothing reported them.  A provider with no
+prompt cache must not read as a cache that never hits, and a session with
+no pricing table must not read as free.  A reported `0` is a measurement
+and is shown.
+
+`cost_source` says where a cost came from — `provider` (billed), or
+`pricing_table` (computed from `.jaato/pricing.json`, an estimate), or
+`mixed` on a total that combined both.
+
+#### Every figure is SPEND, not level
+
+Each token field is the sum over the responses the binding served.  It is
+never the end-of-turn context size — that is a property of the history and
+lives under `active`.  A turn with a tool call has ≥2 billed responses, so
+reading only the last one undercounted a real 3-turn run by 41%.
+
+`turns` per binding counts the turns it served in; a turn crossing an
+`enter_tier` is counted by both bindings, so the per-binding column can sum
+to more than `totals.turns`, which is the exact distinct count.
+
+#### Budget and completion
+
+`budget` appears only when the profile declares `budget_control`; an absent
+key is how "unbounded" is said.  Only the **declared** dimensions are
+reported.  `next_rung` is the lowest rung not yet passed — note that only
+`abort` stops a run, while `finalize` / `escalate` are advice a model can
+decline.
+
+`completion` appears only when `signal_completion` is on the surface.
+`max_nudges_source` is `observed` once a nudge has been considered, and
+`framework_default` before that — the nudge budget is resolved from the
+profile by the caller that nudges and does not reach the session on the
+init envelope, so `framework_default` means "not observed yet", **not**
+"your `max_completion_nudges` was ignored".
+
+#### Own session only
+
+A subagent runs its own session and reports its own spend.  A parent's
+numbers never silently include a child's — aggregating a cascade is
+`CascadeBudgetPool`'s job, and a second, quieter total competing with it is
+how two answers start disagreeing.
+
+#### Detail and the feedback loop
+
+`detail="summary"` (the default) reports totals plus the active binding.
+`detail="full"` adds the per-binding list and the declared tier ladder.
+Under `aspect="all"` the detail is **forced to summary** whatever is
+passed: `all` is the eager default a model reaches for when it wants the OS
+name, and a five-tier binding list on every such call is real context
+spend.  Asking what you have spent is itself spending.
 
 ### Network (`aspect="network"`)
 

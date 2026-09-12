@@ -1015,3 +1015,119 @@ class TestEnvironmentPluginProtocol:
 
         # No user commands provided
         assert commands == []
+
+
+class TestConsumptionAspect:
+    """The ``consumption`` aspect: what this session SPENT, per binding.
+
+    Kept apart from :class:`TestContextInfo` deliberately — ``context``
+    reports window OCCUPANCY (a property of the shared history) and
+    ``consumption`` reports SPEND (attributed to the model that served
+    each response).  A session that switches tier has one history and
+    several bills.
+    """
+
+    def _plugin_with_session(self, report=None):
+        from shared.plugins.environment import EnvironmentPlugin
+
+        class FakeSession:
+            def __init__(self):
+                self.calls = []
+
+            def get_context_usage(self):
+                # Needed because aspect="all" also runs the context aspect.
+                return {"model": "m", "context_limit": 1000,
+                        "total_tokens": 10, "prompt_tokens": 10,
+                        "output_tokens": 0, "tokens_remaining": 990,
+                        "percent_used": 1.0, "turns": 1}
+
+            def get_consumption(self, detail="summary"):
+                self.calls.append(detail)
+                return report if report is not None else {
+                    "active": {"provider": "p", "model": "m", "tier": None},
+                    "totals": {"total_tokens": 120},
+                    "binding_count": 1,
+                }
+
+        plugin = EnvironmentPlugin()
+        session = FakeSession()
+        plugin.set_session(session)
+        return plugin, session
+
+    def test_consumption_is_a_valid_aspect(self):
+        from shared.plugins.environment import EnvironmentPlugin
+        plugin = EnvironmentPlugin()
+        assert "consumption" in plugin.VALID_ASPECTS
+        schema = plugin.get_tool_schemas()[0]
+        assert "consumption" in schema.parameters["properties"]["aspect"]["enum"]
+
+    def test_detail_parameter_is_declared(self):
+        from shared.plugins.environment import EnvironmentPlugin
+        schema = EnvironmentPlugin().get_tool_schemas()[0]
+        detail = schema.parameters["properties"]["detail"]
+        assert set(detail["enum"]) == {"summary", "full"}
+        # Optional: an agent that only wants the OS must not have to think
+        # about a consumption knob.
+        assert schema.parameters["required"] == []
+
+    def test_without_a_session_it_reports_an_error(self):
+        from shared.plugins.environment import EnvironmentPlugin
+        result = json.loads(
+            EnvironmentPlugin()._get_environment({"aspect": "consumption"}))
+        assert "error" in result
+        assert "Session not available" in result["error"]
+
+    def test_detail_defaults_to_summary(self):
+        plugin, session = self._plugin_with_session()
+        plugin._get_environment({"aspect": "consumption"})
+        assert session.calls == ["summary"]
+
+    def test_detail_full_is_forwarded(self):
+        plugin, session = self._plugin_with_session()
+        plugin._get_environment({"aspect": "consumption", "detail": "full"})
+        assert session.calls == ["full"]
+
+    def test_all_forces_summary_detail(self):
+        """A five-tier session's binding list on every ``all`` query is
+        real context spend, and ``all`` is the eager default."""
+        plugin, session = self._plugin_with_session()
+        plugin._get_environment({"aspect": "all", "detail": "full"})
+        assert session.calls == ["summary"]
+
+    def test_all_includes_consumption(self):
+        plugin, _ = self._plugin_with_session()
+        result = json.loads(plugin._get_environment({"aspect": "all"}))
+        assert "consumption" in result
+
+    def test_an_invalid_detail_is_refused_by_name(self):
+        plugin, session = self._plugin_with_session()
+        result = json.loads(plugin._get_environment(
+            {"aspect": "consumption", "detail": "everything"}))
+        assert "Invalid detail" in result["error"]
+        assert session.calls == []
+
+    def test_single_aspect_response_is_flattened(self):
+        plugin, _ = self._plugin_with_session()
+        result = json.loads(
+            plugin._get_environment({"aspect": "consumption"}))
+        assert "totals" in result and "consumption" not in result
+
+    def test_a_session_without_the_ledger_says_so(self):
+        """An old runner across the RPC seam, or a test double — better a
+        named refusal than an AttributeError reaching the model."""
+        from shared.plugins.environment import EnvironmentPlugin
+
+        class OldSession:
+            pass
+
+        plugin = EnvironmentPlugin()
+        plugin.set_session(OldSession())
+        result = json.loads(
+            plugin._get_environment({"aspect": "consumption"}))
+        assert "does not report consumption" in result["error"]
+
+    def test_the_aspect_description_separates_spend_from_occupancy(self):
+        from shared.plugins.environment import EnvironmentPlugin
+        description = EnvironmentPlugin()._build_aspect_description()
+        assert "'consumption' = what you have SPENT" in description
+        assert "it is not what you have spent" in description
