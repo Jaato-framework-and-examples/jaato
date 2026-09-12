@@ -1,7 +1,19 @@
-name: "Publish jaato-eval to PyPI"
+name: "Publish jaato-eval (PyPI or TestPyPI)"
 
 on:
   workflow_dispatch:
+    inputs:
+      target:
+        description: "Index to publish to. Stage on TestPyPI, let someone install and test it, then re-run this workflow on the SAME commit with pypi -- what ships is then what was tested."
+        type: choice
+        options:
+          - testpypi
+          - pypi
+        default: testpypi
+      suffix:
+        description: "Pre-release suffix for a staging retry, e.g. rc1 (TestPyPI only). An index accepts a version once, ever, so a second staging attempt of one release needs one."
+        type: string
+        default: ""
 
 jobs:
   test:
@@ -29,7 +41,8 @@ jobs:
     permissions:
       contents: read
       id-token: write
-    environment: pypi-eval
+    environment:
+      name: ${{ inputs.target == 'pypi' && 'pypi-eval' || 'testpypi-eval' }}
     steps:
       # fetch-depth: 0 — scripts/build_readme.py derives the changelog that
       # becomes the package's PyPI long description from `git log` since the
@@ -50,18 +63,50 @@ jobs:
       # jaato-eval has never been released, so on the first run this check
       # simply sees a 404 for the project and passes.  From the second release
       # on it behaves exactly like its three siblings.
-      - name: Check version not already on PyPI
+      # `suffix` is free text from the dispatch form, so it reaches the shell
+      # through `env:` rather than a `${{ }}` interpolation inside `run:`,
+      # which would splice whatever was typed into the script itself.  Its
+      # shape is checked here too, because the step that applies it builds a
+      # `sed` expression around the value.
+      - name: Resolve the target index
+        id: index
+        env:
+          TARGET: ${{ inputs.target }}
+          SUFFIX: ${{ inputs.suffix }}
         run: |
-          version=$(python -c "
+          case "$SUFFIX" in
+            "") ;;
+            *[!a-z0-9.]*)
+              echo "::error::suffix must be lowercase alphanumerics and dots (e.g. rc1, dev2); got '$SUFFIX'"
+              exit 1 ;;
+          esac
+          if [ "$TARGET" = "pypi" ]; then
+            if [ -n "$SUFFIX" ]; then
+              echo "::error::suffix is for staging on TestPyPI only -- PyPI publishes the version the repository declares, so that what ships is what was tested"
+              exit 1
+            fi
+            echo "host=pypi.org" >> "$GITHUB_OUTPUT"
+            echo "upload=https://upload.pypi.org/legacy/" >> "$GITHUB_OUTPUT"
+          else
+            echo "host=test.pypi.org" >> "$GITHUB_OUTPUT"
+            echo "upload=https://test.pypi.org/legacy/" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check version not already on the target index
+        env:
+          SUFFIX: ${{ inputs.suffix }}
+        run: |
+          base=$(python -c "
           import tomllib, pathlib
           data = tomllib.loads(pathlib.Path('pyproject.toml').read_text())
           print(data['project']['version'])
           ")
-          echo "Package version: $version"
+          version="${base}${SUFFIX}"
+          echo "Package version: $version (declared: $base)"
           status=$(curl -s -o /dev/null -w '%{http_code}' \
-            "https://pypi.org/pypi/jaato-eval/${version}/json")
+            "https://${{ steps.index.outputs.host }}/pypi/jaato-eval/${version}/json")
           if [ "$status" = "200" ]; then
-            echo "::error::Version ${version} of jaato-eval already exists on PyPI"
+            echo "::error::Version ${version} of jaato-eval already exists on ${{ steps.index.outputs.host }}. An index accepts a version once, ever -- re-run with a suffix (rc1, rc2, ...) to stage again, or bump the release."
             exit 1
           fi
           echo "Version ${version} is available for publishing"
@@ -74,11 +119,25 @@ jobs:
         run: python ../scripts/build_readme.py
         working-directory: jaato-eval
 
+      # AFTER the README step, deliberately.  build_readme.py anchors the
+      # changelog on the version pyproject declares, walking git history for
+      # the commits that set it; a suffixed version matches no commit, so the
+      # walk anchors on the bump commit itself -- measured: an EMPTY changelog.
+      - name: Apply the staging suffix
+        if: inputs.suffix != ''
+        env:
+          SUFFIX: ${{ inputs.suffix }}
+        run: |
+          sed -i "0,/^version = \"/{s/^\(version = \"[^\"]*\)\"/\1${SUFFIX}\"/}" pyproject.toml
+          grep -m1 '^version = ' pyproject.toml
+        working-directory: jaato-eval
+
       - name: Build package
         run: python -m build .
         working-directory: jaato-eval
 
-      - name: Publish to PyPI
+      - name: Publish to the target index
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: jaato-eval/dist/
+          repository-url: ${{ steps.index.outputs.upload }}
