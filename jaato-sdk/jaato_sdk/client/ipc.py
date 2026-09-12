@@ -221,6 +221,18 @@ class IncompatibleServerError(Exception):
         return self.min_protocol
 
 
+def _created_session_id(event: Any) -> Optional[str]:
+    """The session a failed ``session.new`` left behind, if the daemon named one.
+
+    A refusal normally means nothing was allocated; a failure raised AFTER
+    the session was registered inverts that, and the daemon states which it
+    was on ``ErrorEvent.details['created_session_id']`` (#975).  Read, never
+    inferred -- absence is what makes "retrying is safe" provable.
+    """
+    value = (getattr(event, "details", None) or {}).get("created_session_id")
+    return value if isinstance(value, str) and value else None
+
+
 class IPCClient:
     r"""Client for connecting to Jaato server via IPC.
 
@@ -1839,9 +1851,17 @@ class IPCClient:
                     # summarise it into a likely cause -- the caller that
                     # used to guess "check provider auth" was wrong for
                     # every refusal that was not an auth failure.
+                    #
+                    # It also states whether a session survives the failure
+                    # (#975).  Read it rather than assuming "refused means
+                    # nothing was created": that assumption is right for
+                    # every refusal raised before the session is registered
+                    # and wrong for one raised after, and only the daemon
+                    # can tell the two apart.
                     raise SessionRefused(
                         f"the daemon refused session.new: {event.error}",
                         error_type=event.error_type,
+                        session_id=_created_session_id(event),
                     )
 
                 # Non-target event — track for re-buffer when solo.
