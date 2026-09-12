@@ -266,7 +266,10 @@ def serialize_session_state(state: SessionState) -> Dict[str, Any]:
         # 2.9: created_by -- the authenticated user the session was
         # created for, so the record is attributable without telemetry
         # (issue #859).
-        'version': '2.9',
+        # 2.10: runner_identity -- which PROCESS is (or last was) executing
+        # this session, so a session an operator can see is one they can act
+        # on (issue #812).
+        'version': '2.10',
         'session_id': state.session_id,
         'description': state.description,
         'created_at': state.created_at.isoformat(),
@@ -306,6 +309,10 @@ def serialize_session_state(state: SessionState) -> Dict[str, Any]:
         'budget_control': state.budget_control,
         'sibling_name': state.sibling_name,
         'cascade_driver_id': state.cascade_driver_id,
+        # 2.10+ (#812).  Enumerated explicitly like every field above: this
+        # serializer writes a FIXED key list, so a field added to the
+        # dataclass alone never reaches disk.
+        'runner_identity': state.runner_identity,
         'interrupted_turn': state.interrupted_turn,
         'session_state': state.session_state,
     }
@@ -358,6 +365,7 @@ def deserialize_session_state(data: Dict[str, Any]) -> SessionState:
         budget_control=data.get('budget_control'),
         sibling_name=data.get('sibling_name'),
         cascade_driver_id=data.get('cascade_driver_id'),
+        runner_identity=data.get('runner_identity'),  # None on pre-2.10
         interrupted_turn=data.get('interrupted_turn'),
         session_state=data.get('session_state'),
     )

@@ -3043,35 +3043,60 @@ def resolve_profiles(
     return resolved, errors
 
 
-def _merged_parallel_width(
+#: ``runtime_limits`` fields resolved MOST-RESTRICTIVE-WINS across an
+#: ``inherits:`` chain, rather than by the block-level child-REPLACES rule.
+#:
+#: ``max_parallel_tools`` (#862) and the two wall-clock bounds (#812) are all
+#: statements about how much of a shared environment one session may take,
+#: which is the same safety direction ``max_turns`` and
+#: ``budget_control.limits`` already resolve in: a child may TIGHTEN what an
+#: ancestor declared and may never widen it.  Every other field in the block
+#: is a cgroup controller value, where interleaving layers would produce a
+#: confinement nobody wrote — hence child-REPLACES for those.
+_MIN_WINS_RUNTIME_LIMIT_FIELDS = (
+    "max_parallel_tools",
+    "max_session_seconds",
+    "max_orphan_seconds",
+)
+
+
+def _merged_min_wins_limit(
     parents: List['SubagentProfile'],
     child: 'SubagentProfile',
-) -> Optional[int]:
-    """MIN of ``runtime_limits.max_parallel_tools`` across every layer (#862).
+    field_name: str,
+) -> Optional[float]:
+    """MIN of one :data:`_MIN_WINS_RUNTIME_LIMIT_FIELDS` field across every layer.
 
-    Most-restrictive-wins, the same safety direction ``max_turns`` and
-    ``budget_control.limits`` take: a parent that narrowed the tool pool
-    because its cgroup has a small ``pids_max``, or because the service
-    behind its tools is rate-limited, said something about the
-    environment the child also runs in.  A child may TIGHTEN it, never
-    widen it.  Divergent parent values are not a conflict — the minimum
-    is well-defined and is the safe resolution.
+    Divergent parent values are not a conflict — the minimum is well-defined
+    and is the safe resolution, so two parents differing only here are
+    resolved rather than reported.
+
+    ``0`` means "explicitly unbounded" for the wall-clock fields and must not
+    win a ``min()`` against a real ceiling (it is the LEAST restrictive value,
+    not the most).  It is therefore read as infinity while comparing, and
+    returned as ``0`` only when EVERY declaring layer said ``0`` — so a child
+    can disable a bound no ancestor set, and cannot disable one an ancestor
+    did.  ``max_parallel_tools`` never sees this branch: it is validated
+    positive, so no layer can declare 0.
 
     Args:
         parents: The resolved parent profiles.
         child: The profile declaring ``inherits:``.
+        field_name: Which field to resolve.
 
     Returns:
-        The narrowest declared width, or ``None`` when no layer sets one.
+        The most restrictive declared value, or ``None`` when no layer
+        declares one (the caller then applies whatever default the field has).
     """
-    widths = [
-        limits.max_parallel_tools
-        for limits in (
-            p.runtime_limits for p in (*parents, child)
-        )
-        if limits is not None and limits.max_parallel_tools is not None
+    declared = [
+        getattr(limits, field_name)
+        for limits in (p.runtime_limits for p in (*parents, child))
+        if limits is not None and getattr(limits, field_name) is not None
     ]
-    return min(widths) if widths else None
+    if not declared:
+        return None
+    bounded = [v for v in declared if v != 0]
+    return min(bounded) if bounded else 0
 
 
 def _resolve_runtime_limit_ceilings(
@@ -3086,10 +3111,11 @@ def _resolve_runtime_limit_ceilings(
     ceiling from another would produce a confinement neither author
     wrote — which is why this half is not merged per-field.
 
-    The agreement test normalises ``max_parallel_tools`` out, because
-    :func:`_merged_parallel_width` resolves that field by ``min()``: two
-    parents that agree on every ceiling and differ only in the width
-    must not be reported as conflicting.
+    The agreement test normalises every
+    :data:`_MIN_WINS_RUNTIME_LIMIT_FIELDS` field out, because
+    :func:`_merged_min_wins_limit` resolves those by ``min()``: two parents
+    that agree on every ceiling and differ only in the tool-pool width or a
+    wall-clock bound must not be reported as conflicting.
 
     Args:
         parents: The resolved parent profiles.
@@ -3106,8 +3132,9 @@ def _resolve_runtime_limit_ceilings(
     declaring = [p for p in parents if p.runtime_limits is not None]
     if not declaring:
         return None, []
+    normalise = {f: None for f in _MIN_WINS_RUNTIME_LIMIT_FIELDS}
     comparable = {
-        p.name: replace(p.runtime_limits, max_parallel_tools=None)
+        p.name: replace(p.runtime_limits, **normalise)
         for p in declaring
     }
     if len(set(str(v) for v in comparable.values())) == 1:
@@ -3127,10 +3154,11 @@ def _merge_runtime_limits(
     Two different rules, one per half of the block — the same shape
     :func:`_merge_budget_control` uses:
 
-    * every field except ``max_parallel_tools`` — **scalar-override**
-      (:func:`_resolve_runtime_limit_ceilings`);
-    * ``max_parallel_tools`` — **min-wins** across every layer that
-      declares it (:func:`_merged_parallel_width`).
+    * every field outside :data:`_MIN_WINS_RUNTIME_LIMIT_FIELDS` —
+      **scalar-override** (:func:`_resolve_runtime_limit_ceilings`);
+    * ``max_parallel_tools``, ``max_session_seconds`` and
+      ``max_orphan_seconds`` — **min-wins** across every layer that
+      declares them (:func:`_merged_min_wins_limit`).
 
     Args:
         parents: The resolved parent profiles, in declaration order.
@@ -3141,11 +3169,14 @@ def _merge_runtime_limits(
         declares anything; ``conflicts`` is a possibly-empty list of
         lines for the caller's ``scalar_conflicts``.
     """
-    width = _merged_parallel_width(parents, child)
+    min_wins = {
+        name: _merged_min_wins_limit(parents, child, name)
+        for name in _MIN_WINS_RUNTIME_LIMIT_FIELDS
+    }
     base, conflicts = _resolve_runtime_limit_ceilings(parents, child)
-    if base is None and width is None:
+    if base is None and all(v is None for v in min_wins.values()):
         return None, conflicts
-    return replace(base or RuntimeLimits(), max_parallel_tools=width), conflicts
+    return replace(base or RuntimeLimits(), **min_wins), conflicts
 
 
 def _merge_budget_control(

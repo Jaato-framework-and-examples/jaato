@@ -797,6 +797,29 @@ class IPCRecoveryClient:
         if self._client:
             await self._client.delete_session(session_id)
 
+    async def list_orphan_sessions(self) -> None:
+        """Request the LOADED sessions with no client attached (#812).
+
+        See :meth:`IPCClient.list_orphan_sessions` for full docs.  The
+        inner client raises against a daemon too old to serve the verb.
+        """
+        self._check_can_send()
+        if self._client:
+            await self._client.list_orphan_sessions()
+
+    async def stop_session(self, session_id: str) -> None:
+        """Stop ANY loaded session by id, not just this client's own (#812).
+
+        See :meth:`IPCClient.stop_session` for full docs.  The inner client
+        raises against a daemon too old to serve the verb -- which matters
+        here more than anywhere: a supervisor reconnecting to an unknown
+        daemon must not be told a runaway session was stopped when the
+        command was ignored.
+        """
+        self._check_can_send()
+        if self._client:
+            await self._client.stop_session(session_id)
+
     async def respond_to_post_auth_setup(
         self,
         request_id: str,
