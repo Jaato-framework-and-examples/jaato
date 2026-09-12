@@ -171,17 +171,33 @@ async def test_cancel_token_trips_runner_cancel() -> None:
         # Use a streaming cli command so the runner has cancel-check
         # opportunities (run_command only checks between output lines).
         #
-        # The iteration count is a DEADLINE, not a duration: when the
-        # cancel lands the call returns within one 0.05 s output line, so
-        # a longer command costs a passing run nothing.  What it buys is
-        # margin.  At 200 iterations the command ran 10 s and the cancel
-        # was scheduled 0.2 s in -- a 50x gap that a loaded CI runner
-        # closed twice in one afternoon, each time with the command
-        # running to completion and `ok=True` (observed 10.24 s wall for
-        # a nominally 10 s command, i.e. the event loop never got to
-        # _trip_after_a_bit in time).  2000 iterations restores the
-        # margin without weakening what is asserted: the cancel must
-        # still arrive, and a cancel that never fires still fails.
+        # THIS TEST IS A TIMING BET, and the bet is not the one an
+        # earlier version of this comment described (#988).  That
+        # version blamed loop starvation -- "the event loop never got to
+        # _trip_after_a_bit in time" -- and widened the command from 200
+        # iterations to 2000 to buy margin.  It is also the reasoning in
+        # commit 86ebf523's message, which cannot be edited; read this
+        # instead.  Measurement disproved it: on a failing run the token
+        # trips at 0.201 s and the cancel frame is WRITTEN at 0.206 s.
+        # The loop was fine.
+        #
+        # What was racing was inside the runner: `serve` registered the
+        # call in `_active_calls` from the POOL WORKER, and went straight
+        # back to reading frames, so a cancel already in the socket
+        # buffer routinely reached `_handle_cancel` first and was dropped
+        # as an unknown id.  Registration is on the reader thread now.
+        #
+        # So the extra iterations bought nothing.  A dropped cancel is
+        # dropped PERMANENTLY -- the frame is consumed, and no later
+        # cancel-check can recover it -- which was measured directly: at
+        # 2000 iterations under the same load the command still ran to
+        # completion and returned ok=True, at 105.1 s instead of 10.9 s.
+        # A longer deadline only made a failing run ten times slower, so
+        # the count is back at 200.
+        #
+        # `test_cancel_before_worker_registers_988.py` reproduces the
+        # loaded case with no clock at all; this one stays as the
+        # end-to-end check through a real runner subprocess.
         async def _trip_after_a_bit() -> None:
             await asyncio.sleep(0.2)
             token.cancel()
@@ -195,7 +211,7 @@ async def test_cancel_token_trips_runner_cancel() -> None:
                 "name": "cli_based_tool",
                 "args": {
                     "command": (
-                        "for i in $(seq 1 2000); do echo line-$i; "
+                        "for i in $(seq 1 200); do echo line-$i; "
                         "sleep 0.05; done"
                     ),
                 },

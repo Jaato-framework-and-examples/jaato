@@ -284,6 +284,9 @@ class RunnerRPCClient:
         # Tasks dispatching incoming request frames; tracked so we
         # can cancel on close().
         self._dispatch_tasks: Dict[int, asyncio.Task] = {}
+        # #988: cancel frames that failed to reach the wire.  Nonzero
+        # means a caller's stop() was accepted and never delivered.
+        self._cancel_write_failures = 0
 
     @property
     def runner_pid(self) -> int:
@@ -931,8 +934,31 @@ class RunnerRPCClient:
             self._notification_cbs.pop(request_id, None)
 
     async def _send_cancel(self, request_id: int) -> None:
-        """Send a cancel frame for *request_id* if the call is still in flight."""
+        """Send a cancel frame for *request_id* if the call is still in flight.
+
+        This is the daemon end of ``client.stop()`` /
+        ``session.request_stop()`` for a runner-served tool, so its
+        failure modes are a user's stop request not happening.  The
+        three outcomes are deliberately not logged alike (#988):
+
+        * **the call already finished** — nothing to cancel, and the
+          overwhelmingly common case for a token tripped near the end
+          of a turn.  Silent.
+        * **the channel is closed** — the runner is going away, which
+          cancels the call by construction.  DEBUG.
+        * **the write FAILED** — the runner is alive and never heard
+          about it, so the tool runs on and the caller is told it
+          succeeded.  **WARNING**, and counted.
+
+        The third used to be a DEBUG line indistinguishable from "no
+        cancel was requested", which is half of why #988 spent a day
+        wearing "flaky test".
+        """
         if self._closed or self._writer is None:
+            logger.debug(
+                "RunnerRPCClient: not sending cancel for id=%d — channel "
+                "already closed (the call dies with it)", request_id,
+            )
             return
         if request_id not in self._in_flight:
             return  # already finished
@@ -941,10 +967,23 @@ class RunnerRPCClient:
                 CancelFrame(id=request_id).to_dict(),
             )
         except Exception as exc:  # noqa: BLE001
-            logger.debug(
-                "RunnerRPCClient: cancel-write for id=%d failed: %s",
-                request_id, exc,
+            self._cancel_write_failures += 1
+            logger.warning(
+                "RunnerRPCClient: cancel for id=%d was NOT delivered — the "
+                "write to runner pid=%s failed (%s: %s).  The tool keeps "
+                "running and its result will report success; the stop "
+                "request is lost.",
+                request_id, self._runner_pid, type(exc).__name__, exc,
             )
+
+    def cancel_write_failures(self) -> int:
+        """How many cancel frames failed to reach the wire (#988).
+
+        Nonzero means at least one ``stop()`` was accepted from a
+        caller and never delivered to the runner.  Counted rather than
+        only logged so a harness can assert on it.
+        """
+        return self._cancel_write_failures
 
     # --------- threadsafe wrapper for the cli plugin's sync stub ---------
 
