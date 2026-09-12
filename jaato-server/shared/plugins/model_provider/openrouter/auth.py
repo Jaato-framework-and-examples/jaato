@@ -37,6 +37,12 @@ class OpenRouterCredentials:
     created_at: float  # Unix timestamp
     base_url: Optional[str] = None  # Optional custom base URL
 
+    # Never print the key: a bare dataclass repr put a live
+    # ``sk-…`` into a pytest failure message, and from there into
+    # scrollback and CI logs (#721).  ``to_dict`` below still
+    # returns the real value — this guards display, not storage.
+    __repr__ = secret_safe_repr("api_key")
+
     def to_dict(self) -> dict:
         data = {
             "api_key": self.api_key,
