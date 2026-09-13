@@ -1320,15 +1320,26 @@ def _check_knob_value(cfg_name, key, value, setting, add):
 
     * ``invalid_knob_value`` (**error**) — the value is outside the knob's
       declared ``enum``.  A plugin that spells out ``["memory","file",
-      "hybrid"]`` has left nothing to be generous about, and the runtime
-      consequence is the silent-fallback shape validate exists to catch:
-      ``todo.storage_type: sqlite`` raises inside ``create_storage``, is
-      caught, printed to daemon stdout, and replaced with in-memory storage —
-      so an operator who asked for persistence gets none and nothing fails.
+      "hybrid"]`` has left nothing to be generous about: either way the
+      profile asks for something the plugin does not offer.
     * ``knob_type_mismatch`` (**warn**) — the value does not match the
       declared ``type``.  Softer on purpose: YAML scalar typing is easy to
       trip over (a quoted ``"30"``), a plugin may coerce, and a declared type
       can be an incomplete summary of what the knob accepts.
+
+    WHAT NEITHER MESSAGE MAY SAY (#937).  Both tails used to assert what the
+    runtime does with the bad value — "silently replaced by a fallback",
+    "assigned without coercion" — and the validator is reading a JSON Schema,
+    so it cannot know.  Both were false for a real out-of-tree plugin, in
+    opposite directions: ``jaato-m365`` RAISES on an unknown ``cloud``, and
+    COERCES ``max_body_chars: "8000"`` to ``8000``.  The severities were
+    already reasoned correctly — this docstring's own "a plugin may coerce"
+    is what the emitted string denied — so only the strings changed.  One
+    plugin's behaviour is an illustration, not a consequence to promise of
+    every plugin: ``todo.storage_type: sqlite`` does fall back silently
+    (``create_storage`` raises, ``todo/plugin.py`` catches, prints to daemon
+    stdout, and installs ``InMemoryStorage``), and that story belongs in
+    ``explain`` and the docs, where it is attributed to ``todo``.
 
     Both are generic, driven by the declaration a plugin already publishes, so
     an OUT-OF-TREE plugin gets them with nothing to register — unlike
@@ -1345,8 +1356,8 @@ def _check_knob_value(cfg_name, key, value, setting, add):
         valid = ", ".join(repr(c) for c in setting.enum)
         add("error", "invalid_knob_value",
             f"{cfg_name}.{key} = {value!r} is not one of the values the "
-            f"plugin declares ({valid}) — the value is not rejected at "
-            f"runtime, it is silently replaced by a fallback", where=where)
+            f"plugin declares ({valid}) — what happens next is the plugin's "
+            f"choice: it may raise, or fall back silently", where=where)
         return
     predicates = [_KNOB_TYPE_PREDICATES[tok]
                   for tok in setting.type.split("|")
@@ -1356,8 +1367,53 @@ def _check_knob_value(cfg_name, key, value, setting, add):
     if not any(pred(value) for pred in predicates):
         add("warn", "knob_type_mismatch",
             f"{cfg_name}.{key} = {value!r} ({type(value).__name__}) does not "
-            f"match the declared type '{setting.type}' — assigned without "
-            f"coercion at runtime and carried downstream", where=where)
+            f"match the declared type '{setting.type}' — the plugin may "
+            f"coerce it, reject it, or carry it downstream as-is", where=where)
+
+
+def _report_undeclared_name(cfg_name, key, declared, sites, add):
+    """Report one knob name the plugin's schema does not declare (#910).
+
+    Which finding, and which tail, is decided by EVIDENCE — what the scan of
+    the plugin's own source established, and nothing beyond it:
+
+    * the source reads a config key by that name → ``undeclared_knob``
+      (**warn**), quoting the site.  The knob is live and merely absent from
+      the plugin's published surface, so ``explain plugin <name>`` will not
+      list it;
+    * the source was scanned and reads no such key → ``unknown_knob``
+      (**warn**), saying that and only that;
+    * the source is not in the scanned tree (an out-of-tree distribution) →
+      ``unknown_knob`` (**warn**) with the absence of evidence stated, not
+      dressed up as evidence of absence.
+
+    Why not the old single tail.  It read "silently ignored at runtime", which
+    the validator cannot know and which was **false** for the two knobs #910
+    found: ``memory.global_storage_path`` and ``references.exclude_tools`` are
+    both read, both work, and an author told a knob is ignored reasonably
+    deletes it — silently moving where memories are stored.  A check that
+    cries wolf is worse than no check, because the real typo then hides in
+    the noise the check itself created.
+    """
+    where = f"plugin_configs.{cfg_name}.{key}"
+    site = sites.get(key) if sites else None
+    if site:
+        add("warn", "undeclared_knob",
+            f"'{key}' is absent from the {cfg_name} plugin's "
+            f"get_config_schema(), but the plugin's source reads a config "
+            f"key by that name ({site}) — so it is live and undocumented, "
+            f"and 'explain plugin {cfg_name}' will not show it",
+            where=where)
+        return
+    valid = ", ".join(sorted(declared))
+    tail = ("and no config read site for it appears in the plugin's source "
+            "either, so it is most likely a typo"
+            if sites is not None else
+            "and the plugin's source is not in the scanned tree, so whether "
+            "it is read anyway was not checked")
+    add("warn", "unknown_knob",
+        f"'{key}' is not a declared {cfg_name} config knob — {tail} "
+        f"(known: {valid})", where=where)
 
 
 def _validate_plugin_knobs(cfg_name, cfg, plugins, add):
@@ -1368,13 +1424,15 @@ def _validate_plugin_knobs(cfg_name, cfg, plugins, add):
     a plugin that declares none opts out (we cannot tell a typo from an
     accepted free-form key).
 
-    An unknown NAME emits ``warn`` (not ``error``): a plugin's schema may be
-    incomplete, so a hard failure would risk false positives; the signal still
-    surfaces likely typos (e.g. ``evaluatorss``) which are silently ignored at
-    runtime.  That generosity does not carry over to a declared knob's VALUE —
-    see :func:`_check_knob_value`, which is where a declared ``enum`` or
-    ``type`` is actually checked.  Nested / free-form sub-structures are still
-    not descended: only a top-level knob's own scalar shape is judged.
+    An undeclared NAME emits ``warn`` (not ``error``): a plugin's schema may
+    be incomplete — demonstrably so, which is why the finding splits into
+    ``undeclared_knob`` and ``unknown_knob`` by what
+    :func:`~shared.scaffold.introspect.plugin_config_read_sites` found.  See
+    :func:`_report_undeclared_name`.  That generosity does not carry over to
+    a declared knob's VALUE — see :func:`_check_knob_value`, which is where a
+    declared ``enum`` or ``type`` is actually checked.  Nested / free-form
+    sub-structures are still not descended: only a top-level knob's own
+    scalar shape is judged.
     """
     if not isinstance(cfg, dict):
         return
@@ -1382,14 +1440,11 @@ def _validate_plugin_knobs(cfg_name, cfg, plugins, add):
     if pinfo is None or not pinfo.config_settings:
         return
     declared = {s.name: s for s in pinfo.config_settings}
+    sites = introspect.plugin_config_read_sites(cfg_name)
     for key, value in cfg.items():
         setting = declared.get(key)
         if setting is None:
-            valid = ", ".join(sorted(declared))
-            add("warn", "unknown_knob",
-                f"'{key}' is not a declared {cfg_name} config knob "
-                f"(silently ignored at runtime; known: {valid})",
-                where=f"plugin_configs.{cfg_name}.{key}")
+            _report_undeclared_name(cfg_name, key, declared, sites, add)
             continue
         _check_knob_value(cfg_name, key, value, setting, add)
 
