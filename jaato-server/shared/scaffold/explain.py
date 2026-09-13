@@ -159,6 +159,91 @@ def transports() -> Rendered:
 
 # --------------------------------------------------------------- clients
 
+def _turn_method_block() -> List[str]:
+    """The ask/complete/stream decision, rendered at the FRONT DOOR.
+
+    The rule was reachable only through ``explain archetype observer``, where
+    a reader who is not scaffolding that archetype never meets it — while the
+    topic named after the thing (``clients``) listed the three methods and
+    said nothing about choosing (jaato #909).
+
+    Both halves come from :mod:`archetypes`: the table from
+    :data:`~archetypes.TURN_METHODS`, the prose verbatim from
+    :data:`~archetypes.TURN_METHOD_RULE` — the SAME object the archetype page
+    renders, so the two cannot drift into disagreeing wordings.
+    """
+    rows = [
+        f"    {m.name:10} {m.settles_on:20} {m.returns:25} "
+        f"{'YES' if m.ends_session else 'no'}"
+        for m in _archetypes.TURN_METHODS
+    ]
+    lines = [
+        "",
+        "  WHICH TURN METHOD — the question is whether the session is",
+        "  COMPLETION-GATED (does its profile declare completion_payload_schema?):",
+        "",
+        f"    {'method':10} {'settles on':20} {'returns':25} session ends?",
+        "    " + "-" * 66,
+    ]
+    lines += rows
+    lines.append("")
+    lines += _wrap_bullet(_archetypes.TURN_METHOD_RULE, indent=4, glyph=" ")
+    lines += [
+        "",
+        "    Getting it wrong does not fail loudly.  complete() returns None when",
+        "    the profile declared no schema or the model never completed — there",
+        "    is no payload to capture — and otherwise waits for a termination a",
+        "    conversational session may never reach.  Conversely a completed",
+        "    session is a session that ENDED: keep driving it and you replay a",
+        "    history whose tool_calls never got responses.",
+        "    Gated or not is decided in the profile, not here: see",
+        "    `explain completion` (the gate) and `explain plugin lifecycle`",
+        "    (signal_completion itself).",
+    ]
+    return lines
+
+
+def _timeouts_block() -> List[str]:
+    """Every clock between ``jaato.session(...)`` and a turn's terminus.
+
+    ``explain clients`` documented none of them, so hitting the 60s
+    ``session.new`` budget sent an author to ``convenience.py`` and ``ipc.py``
+    to discover that the knob exists at all (jaato #904).  Numbers are READ
+    from the live SDK signatures by ``introspect.client_timeouts`` — none is
+    written down here, so none can go stale.
+
+    Renders nothing when the SDK is not importable, rather than asserting
+    defaults it could not check.
+    """
+    TO = introspect.client_timeouts()
+    if not TO:
+        return []
+    lines = [
+        "",
+        "  TIMEOUTS — every clock between connect and a turn's terminus.",
+        "  They are not one knob, and they do not all live in the same place:",
+        "",
+        f"    {'default':9} {'where':45} settable via",
+        "    " + "-" * 72,
+    ]
+    for t in TO:
+        shown = "none" if t.default is None else f"{t.default:g}s"
+        lines.append(f"    {shown:9} {t.where:45} {t.settable_via}")
+        lines.append(f"    {'':9} {t.bounds}")
+        lines.append(f"    {'':9} on expiry: {t.on_expiry}")
+    lines += [
+        "",
+        "    The facade and the bare client carry DIFFERENT connect defaults,",
+        "    deliberately: a cold daemon autostart takes ~30-60s, which the",
+        "    facade's default accounts for and the bare constructor's does not.",
+        "    A hand-rolled client that autostarts must pass its own.",
+        "    A `session.new` that times out is the one failure that may have",
+        "    LEFT A SESSION RUNNING — it has no idempotency key, so retrying",
+        "    makes a second one.  Raise it (bare client) or list_sessions().",
+    ]
+    return lines
+
+
 def clients() -> Rendered:
     """The Python SDK client classes — one per transport (+ recovery) — and when
     to use each.
@@ -246,7 +331,25 @@ def clients() -> Rendered:
         "  jaato-scaffold new client --transport ws ...              # WSClient\n"
         "  jaato-scaffold new client --transport ws --recoverable .  # WSRecoveryClient\n"
     )
-    return data, text
+    # The topic is named after the CLASSES; what a reader needs from it is how
+    # to DRIVE a session (#904, #909).  Both blocks render from a single
+    # definition elsewhere — the rule from ``archetypes``, the numbers from
+    # the live SDK signatures — so neither is a second copy.
+    turn = _turn_method_block()
+    timeouts = _timeouts_block()
+    data["turn_methods"] = [
+        {"name": m.name, "settles_on": m.settles_on, "returns": m.returns,
+         "ends_session": m.ends_session, "use_for": m.use_for}
+        for m in _archetypes.TURN_METHODS
+    ]
+    data["turn_method_rule"] = _archetypes.TURN_METHOD_RULE
+    data["timeouts"] = [
+        {"name": t.name, "where": t.where, "default": t.default,
+         "bounds": t.bounds, "settable_via": t.settable_via,
+         "on_expiry": t.on_expiry}
+        for t in introspect.client_timeouts()
+    ]
+    return data, text + "\n".join(turn + timeouts) + "\n"
 
 
 # ------------------------------------------------------------ archetypes
@@ -928,8 +1031,31 @@ def plugins() -> Rendered:
             + "\n  `<- dist (module)` marks a plugin supplied by an "
               "installed distribution\n  rather than the built-in "
               "package — see JAATO_PLUGIN_ENTRY_POINT_ALLOWLIST"
-            + _tier_missing_note(PL))
+            + _tier_missing_note(PL)
+            + _session_tools_note())
     return data, text
+
+
+def _session_tools_note() -> str:
+    """Name the session-level tools this registry walk cannot contain.
+
+    ``plugins()`` walks ``PluginRegistry``, and ``lifecycle`` is wired onto
+    the session instead — so the surface an author consults to find
+    ``signal_completion``'s owner could only ever omit it (jaato #905).  The
+    omission is what sent two repos to ``grep``, so the list now ends by
+    saying what is NOT in it and where to look.  Names are probed live, not
+    written down.
+    """
+    ST = introspect.session_tools()
+    if not ST:
+        return ""
+    names = ", ".join(sorted({s.name for s in ST}))
+    return ("\n\n  NOT IN THIS LIST — session tools, wired by "
+            "JaatoSession.configure() for every\n  session regardless of "
+            "`plugins:`, so they are not registry plugins and cannot\n"
+            "  be named in a profile:\n"
+            f"    lifecycle   {names}\n"
+            "                (each gated — see `explain plugin lifecycle`)")
 
 
 def _signature(parameters: "Optional[Dict[str, Any]]") -> str:
@@ -1093,10 +1219,91 @@ def _config_block(settings) -> List[str]:
     return out
 
 
+#: The name the profile loader and ``explain profile`` both use for the
+#: session-level tool provider that is NOT a registry plugin.  Kept as a
+#: constant because three surfaces have to agree on the spelling a reader
+#: will type.
+LIFECYCLE_TOPIC = "lifecycle"
+
+
+def lifecycle() -> Rendered:
+    """``explain plugin lifecycle`` — the owner of ``signal_completion``.
+
+    The route this closes (jaato #905): the profile loader's own error names
+    ``lifecycle`` as part of the minimal framework set, and ``explain plugin
+    lifecycle`` answered ``unknown plugin``.  Both were right about their own
+    half — it IS wired for every session, and it is NOT in the registry — so
+    the honest answer is to resolve the topic and say which.
+
+    The tool list and its gates are PROBED from the live
+    ``LifecycleTools`` (``introspect.session_tools``), never listed here, so
+    a tool added there shows up without an edit.
+    """
+    ST = introspect.session_tools()
+    data = {
+        "name": LIFECYCLE_TOPIC,
+        "kind": "session tools (NOT a registry plugin)",
+        "module": "shared/lifecycle_tools.py",
+        "wired_by": "JaatoSession.configure() — regardless of profile.plugins",
+        "selectable": False,
+        "tools": [{"name": s.name, "gate": s.gate,
+                   "description": s.description} for s in ST],
+        "see_also": ["explain completion", "explain profile"],
+    }
+    lines = [
+        f"plugin: {LIFECYCLE_TOPIC}   (session tools — NOT a registry plugin)",
+        "  The owner of signal_completion.  Lives in "
+        "shared/lifecycle_tools.py and is",
+        "  wired onto the session by JaatoSession.configure(), so it is "
+        "reachable for",
+        "  EVERY session regardless of the profile's `plugins:` list — and "
+        "for the same",
+        "  reason it is absent from `explain plugins`' registry walk and "
+        "cannot be named",
+        "  in `plugins:`.  Listing it there does nothing; it is already "
+        "there.",
+    ]
+    if not ST:
+        lines.append("  tools: could not be probed in this environment")
+        return data, "\n".join(lines)
+    lines.append("")
+    lines.append("  tools — each is on the wire only when its gate holds:")
+    for s in ST:
+        lines.append(f"    [{s.gate}]")
+        lines.append(f"      {s.name}")
+        if s.description:
+            lines.extend(_wrap_bullet(s.description, indent=8, glyph=" "))
+    lines += [
+        "",
+        "  NO completion_payload_schema → NO signal_completion.  The tool is "
+        "opt-in via",
+        "  that profile key, and a schema DECLARED but unresolvable leaves "
+        "the same",
+        "  empty surface as one never declared — the agent then cannot "
+        "complete at all.",
+        "  `jaato-scaffold validate` reports the second case "
+        "(completion_asset_missing).",
+        "  A root session on an INTERACTIVE client (terminal/web/chat) also "
+        "hides it;",
+        "  client_type=api keeps it, which is why a driver sets that.",
+        "",
+        "  see also:  `explain completion`  the gate that runs when it is "
+        "called",
+        "             `explain clients`     which turn method captures its "
+        "payload",
+    ]
+    return data, "\n".join(lines)
+
+
 def plugin(name: str) -> Rendered:
     PL = introspect.plugins()
     pi = PL.get(name)
     if pi is None:
+        # ``lifecycle`` is not in the registry and never will be — it is
+        # session-level (#905).  Pointing at `explain plugins`, which by
+        # construction cannot list it, was the dead end.
+        if name == LIFECYCLE_TOPIC:
+            return lifecycle()
         return ({"error": f"unknown plugin {name!r}"},
                 f"unknown plugin {name!r} — see `explain plugins`")
     lines = [f"plugin: {name}"]
@@ -2115,15 +2322,31 @@ def profile() -> Rendered:
         "\n  inheritance (`inherits: [_base_<stage>]`) — how a child profile merges with its\n"
         "  parent(s), resolved at discover_profiles() (config.py:_merge_profiles):\n"
         "    plugins, preloaded_plugins   UNION / additive — child ADDS to the parents'; it\n"
-        "                                 CANNOT scope DOWN here (the list only grows).\n"
+        "                                 CANNOT scope DOWN here (the list only grows). `[]`\n"
+        "                                 in the child ADDS NOTHING — it does NOT clear the\n"
+        "                                 parents'. There is NO spelling that clears them.\n"
+        "                                 To reduce the surface: tool_scopes, the permission\n"
+        "                                 whitelist, or do not inherit.\n"
         "    completion_processors        CONCATENATED parent → child; all of them fire. `[]`\n"
         "                                 in the child ADDS NOTHING — it does NOT clear the\n"
         "                                 parents'. Scope DOWN by naming inherited entries in\n"
         "                                 `suppress_inherited_processors` (matches an entry's\n"
         "                                 `name`, else its `script`); an entry matching nothing\n"
         "                                 is a load ERROR, and it is not inherited further.\n"
-        "    tool_scopes, env,            per-KEY dict-merge — child wins on keys it sets;\n"
-        "    plugin_configs, quirks       the parent's other keys survive.\n"
+        "    tool_scopes, env, quirks     per-KEY dict-merge — child wins on keys it sets;\n"
+        "                                 the parent's other keys survive.  The VALUE at a\n"
+        "                                 key is REPLACED, never merged into.\n"
+        "    plugin_configs               the same, one level deeper: merged per PLUGIN and\n"
+        "                                 then per KEY within it, so a sibling key survives\n"
+        "                                 — but the value at a key is still REPLACED.  A\n"
+        "                                 NESTED dict is NOT merged recursively:\n"
+        "                                   parent  openrouter.api_params {temperature: 0.0}\n"
+        "                                   child   openrouter.api_params {thinking: high}\n"
+        "                                   result  openrouter.api_params {thinking: high}\n"
+        "                                 `temperature` is GONE, nothing fails, and the two\n"
+        "                                 stages that override api_params are exactly the\n"
+        "                                 ones that lose the determinism the base hoisted.\n"
+        "                                 Repeat the shared keys in each child that sets any.\n"
         "    model, provider, gc, cache,  child REPLACES — the child's value wins outright\n"
         "    model_tiers, runtime_limits, (this is how a child scopes DOWN, unlike plugins).\n"
         "    scrub_secret_env, default_agent,\n"
@@ -2136,13 +2359,23 @@ def profile() -> Rendered:
         "      max_parallel_tools         runtime_limits' other, kernel-enforced ceilings.)\n"
         "    suppress_base_instructions,  UNION / OR — STICKY: a piece any layer drops stays\n"
         "    apparmor                     dropped, and a confined parent can't be un-confined.\n"
-        "\n  empty vs listed `plugins` (a REQUIRED key — authors must pick):\n"
+        "\n  empty vs listed `plugins` (a REQUIRED key — authors must pick).  WITH NO PARENT\n"
+        "  (no `inherits:`) — this is the ONLY context in which [] means 'none':\n"
         "    plugins: []   → tools=[] → NONE of the registry tool plugins; only the framework\n"
         "                   set (permission, reliability, lifecycle/signal_completion) is wired.\n"
         "                   (Pre-2026-06-07 a falsy bug made [] silently load ALL ~30 tools.)\n"
-        "    plugins: [x]  → exactly those, UNIONed with any inherited.\n"
-        "    To scope DOWN per stage, use tool_scopes (per-plugin allow-list) or the permission\n"
-        "    plugin's whitelist — NOT the plugins list, which only ADDS to the inherited set.")
+        "    plugins: [x]  → exactly those.\n"
+        "\n  IN A CHILD (`inherits:` set) — [] does NOT mean 'none'.  The list is a UNION, so:\n"
+        "    plugins: []   → the parents' plugins, UNCHANGED.  Writing [] to lock a stage down\n"
+        "                   hands it the parent's ENTIRE tool surface, silently, with a profile\n"
+        "                   that validates cleanly.  Measured: parent [memory, todo] + child []\n"
+        "                   → [memory, todo].\n"
+        "    plugins: [x]  → the parents' plugins PLUS x.\n"
+        "    To scope DOWN per stage, use tool_scopes (per-plugin allow-list — re-list the\n"
+        "    plugin as `memory(tools:[a,b])`) or the permission plugin's whitelist, or do not\n"
+        "    inherit — NOT the plugins list, which only ADDS to the inherited set.\n"
+        "    NB `[]` is not one vocabulary across this schema: for apparmor_fragments above it\n"
+        "    DOES mean none.  Read each key's own row; do not generalise from a neighbour.")
     lines.append(
         "\n  declining ONE inherited completion_processor (the only removal opt-out there is):\n"
         "    inherits: [_base_worker]\n"
@@ -2506,6 +2739,30 @@ def completion() -> Rendered:
         "  fix-until-it-passes loop.  The INPUT-side sibling is `explain",
         "  prefetch` — read it first; this is the same shape at the other",
         "  boundary.",
+        "",
+        "  WHO OWNS signal_completion: the session-level lifecycle tools",
+        "  (shared/lifecycle_tools.py), wired by JaatoSession.configure() for",
+        "  every session — NOT a registry plugin, so it is not in `plugins:`",
+        "  and not in `explain plugins`.  `explain plugin lifecycle` has the",
+        "  tools and their gates.  What turns gating ON is one profile key:",
+        "  completion_payload_schema.  Without it signal_completion is not on",
+        "  the wire at all and the session just ends when the model stops.",
+        "",
+        "  TWO SHAPES OF A CORRECT FINISH, and a watcher must not read the",
+        "  second as a loop:",
+        "    one-shot     signal_completion(<the whole payload>)",
+        "    field-by-    prepare_completion(field_path, value)  × ~one per",
+        "      field      schema field, optionally query_completion to see what",
+        "                 is still pending, then signal_completion() with NO",
+        "                 args — the framework synthesizes from what accumulated",
+        "  Both are the protocol working.  The second exists for models that",
+        "  collapse to args={} when asked to compose a whole structured payload",
+        "  in one emission, and a correction pass after a processor refuses is",
+        "  normal.  So ~N prepare_completion calls for an N-field schema, plus a",
+        "  few, is expected; what a LOOP looks like is the same two errors with",
+        "  no work in between (see max_refusals below).  prepare_completion and",
+        "  query_completion exist only when a completion_payload_schema is",
+        "  declared — there is nothing to accumulate against otherwise.",
         "",
         "  AUTHOR IT in two places:",
         "    .jaato/profiles/<set>/<agent>.yaml   the wiring (fields below)",

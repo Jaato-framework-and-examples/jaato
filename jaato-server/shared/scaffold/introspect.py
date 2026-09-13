@@ -323,6 +323,232 @@ def gc_strategies() -> Dict[str, List[str]]:
     return {name: fields for name in sorted(discover_gc_plugins().keys())}
 
 
+# ------------------------------------------------------- SDK client timeouts
+
+#: Sentinel for "this signature has no such parameter" — distinct from a
+#: parameter whose default IS ``None`` (an unbounded wait, which is a fact).
+_NO_PARAM = object()
+
+
+@dataclass
+class ClientTimeout:
+    """One clock a driver author can hit, READ from the live SDK signature.
+
+    Every default here is introspected from the installed ``jaato_sdk``
+    rather than written down, so a number that moves in the SDK moves in
+    ``explain clients`` with it.
+
+    ``settable_via`` records WHERE a caller may change it, which is the half
+    #904 went to the source for: a knob that exists on the bare client and
+    not on the convenience facade is, for a facade user, a knob that does
+    not exist.
+
+    Attributes:
+        name: The parameter as a caller spells it.
+        where: The callable carrying it.
+        default: The live default; ``None`` means an unbounded wait.
+        bounds: What the clock measures.
+        settable_via: ``"facade"``, ``"bare client only"``, or ``"both"``.
+        on_expiry: What the caller is handed when it fires.
+    """
+
+    name: str
+    where: str
+    default: Optional[float]
+    bounds: str
+    settable_via: str
+    on_expiry: str
+
+
+def _sig_default(fn: Any, param: str) -> Any:
+    """The live default of *param* on *fn*; ``_NO_PARAM`` when it has none.
+
+    Wrapped rather than called inline so a signature that loses a parameter
+    degrades to a missing number instead of crashing the walk — this module
+    backs ``explain``, which must keep answering when one fact will not
+    resolve.
+    """
+    import inspect
+
+    try:
+        p = inspect.signature(fn).parameters.get(param)
+    except (TypeError, ValueError):  # pragma: no cover - C callables
+        return _NO_PARAM
+    if p is None or p.default is inspect.Parameter.empty:
+        return _NO_PARAM
+    return p.default
+
+
+def _accepts(fn: Any, param: str) -> bool:
+    """Whether *fn* accepts *param* at all.
+
+    This is what keeps ``settable_via`` from being prose: the convenience
+    facade can forward a knob only if ``open_session`` takes one, so the day
+    a parameter is added the answer flips with no edit here.
+    """
+    import inspect
+
+    try:
+        return param in inspect.signature(fn).parameters
+    except (TypeError, ValueError):  # pragma: no cover - C callables
+        return False
+
+
+def client_timeouts() -> List[ClientTimeout]:
+    """Every clock between ``jaato.session(...)`` and a turn's terminus.
+
+    Returns ``[]`` when the SDK is not importable, so ``explain clients``
+    degrades to its class table rather than failing.
+    """
+    try:
+        from jaato_sdk.client.ipc import IPCClient
+        from jaato_sdk.client.convenience import Session, open_session
+    except Exception:  # pragma: no cover - SDK not installed alongside
+        return []
+
+    def _num(value: Any) -> Optional[float]:
+        return value if isinstance(value, (int, float)) else None
+
+    # Can a facade caller set the session.new budget?  Asked of the
+    # signature, never assumed.
+    create_via = ("both" if _accepts(open_session, "create_timeout")
+                  else "bare client only")
+    return [
+        ClientTimeout(
+            name="connect_timeout",
+            where="jaato.session(...) / IPCClient.session(...)",
+            default=_num(_sig_default(open_session, "connect_timeout")),
+            bounds="connecting to (or autostarting) the daemon",
+            settable_via="facade",
+            on_expiry="ConnectionError — nothing was created",
+        ),
+        ClientTimeout(
+            name="timeout",
+            where="IPCClient.connect(timeout=)",
+            default=_num(_sig_default(IPCClient.connect, "timeout")),
+            bounds="the same connect, on the BARE client",
+            settable_via="bare client only",
+            on_expiry="connect() returns False",
+        ),
+        ClientTimeout(
+            name="autostart_timeout",
+            where="IPCClient(autostart_timeout=)",
+            default=_num(_sig_default(IPCClient.__init__, "autostart_timeout")),
+            bounds="waiting for a daemon this client COLD-STARTED",
+            settable_via="bare client only",
+            on_expiry="the connect above fails",
+        ),
+        ClientTimeout(
+            name="timeout",
+            where="IPCClient.create_session(timeout=)",
+            default=_num(_sig_default(IPCClient.create_session, "timeout")),
+            bounds="the `session.new` confirmation — provider init included",
+            settable_via=create_via,
+            on_expiry="SessionNotConfirmed — A SESSION MAY EXIST",
+        ),
+        ClientTimeout(
+            name="timeout",
+            where="Session.ask / .complete / .stream(timeout=)",
+            default=_num(_sig_default(Session.ask, "timeout")),
+            bounds="ONE turn, caller-side",
+            settable_via="facade",
+            on_expiry="TurnTimeout — stops WAITING, not the session",
+        ),
+    ]
+
+
+# ------------------------------------------------------ session-level tools
+
+#: The profile conditions ``LifecycleTools`` gates its tools on, cheapest
+#: first.  The GATES are named here; WHICH tools each yields is PROBED
+#: below, so a tool added to ``lifecycle_tools.py`` appears with no edit.
+_LIFECYCLE_GATES = (
+    ("completion_payload_schema declared", True, False),
+    ("model_tiers declared", True, True),
+)
+
+
+@dataclass
+class SessionToolInfo:
+    """One model-facing tool registered by the SESSION, not by a plugin.
+
+    ``shared/lifecycle_tools.py`` is wired by ``JaatoSession.configure()``
+    straight onto the session, so it is absent from ``PluginRegistry`` and
+    therefore from :func:`plugins`.  That absence is #905: the profile
+    loader names ``lifecycle`` as part of the minimal framework set while
+    ``explain plugin lifecycle`` denied it existed.
+
+    Attributes:
+        name: The tool as the model sees it.
+        gate: The profile condition that puts it on the wire.
+        description: First line of the live tool description.
+    """
+
+    name: str
+    gate: str
+    description: str = ""
+
+
+class _StubTierConfig:
+    """Duck-typed stand-in for a resolved ``model_tiers`` config.
+
+    Only the three members ``_enter_tier_schema`` reads; the placeholder
+    names never reach a reader because only the tool NAME is kept.
+    """
+
+    initial_tier = "<tier>"
+
+    def ordered_tier_names(self) -> List[str]:
+        return ["<tier>"]
+
+    def describe_tier(self, name: str) -> str:
+        return ""
+
+
+def _probe_lifecycle(schema: bool, tiers: bool) -> List[Any]:
+    """``LifecycleTools`` schemas for a stub session with the given gates.
+
+    Probing beats restating: the gates live in ``lifecycle_tools.py`` and are
+    read here by exercising them, so a tool added or re-gated there is
+    reflected without anyone remembering to edit ``explain``.
+    """
+    import types
+
+    from shared.lifecycle_tools import LifecycleTools
+
+    stub = types.SimpleNamespace()
+    if schema:
+        stub._completion_payload_schema = {"type": "object", "properties": {}}
+    if tiers:
+        stub._tier_config = _StubTierConfig()
+    return LifecycleTools(stub).get_tool_schemas()
+
+
+def session_tools() -> List[SessionToolInfo]:
+    """The lifecycle tool surface, probed gate by gate.
+
+    Each gate is exercised against a stub session; a tool first seen under a
+    gate is attributed to it.  Returns ``[]`` if the probe raises — a
+    diagnostic that crashes is worse than one that is silent.
+    """
+    out: List[SessionToolInfo] = []
+    seen: set = set()
+    try:
+        for gate, schema, tiers in _LIFECYCLE_GATES:
+            for s in _probe_lifecycle(schema, tiers):
+                name = getattr(s, "name", "?")
+                if name in seen:
+                    continue
+                seen.add(name)
+                doc = (getattr(s, "description", "") or "").split("\n")[0]
+                out.append(SessionToolInfo(name=name, gate=gate,
+                                           description=doc.strip()))
+    except Exception:  # pragma: no cover - probe is best-effort
+        return []
+    return out
+
+
+
 # ------------------------------------------------------------- placeholders
 
 @dataclasses.dataclass
