@@ -634,7 +634,10 @@ def _apply_envelope_session_env(envelope: SessionInitEnvelope) -> Dict[str, str]
     return applied
 
 
-def _maybe_self_confine(envelope: SessionInitEnvelope) -> None:
+def _maybe_self_confine(
+    envelope: SessionInitEnvelope,
+    recycle_pools: Optional[Callable[[str], Any]] = None,
+) -> None:
     """Transition the runner to ``envelope.profile_name`` if needed.
 
     Pool PR 5a (initial).  Pool slots fork from the template unconfined;
@@ -670,7 +673,37 @@ def _maybe_self_confine(envelope: SessionInitEnvelope) -> None:
     No-op cases:
       - ``envelope.profile_name`` is empty (operator opted out of
         confinement; runner runs unconfined).
-      - The kernel already reports the target profile (idempotency).
+      - The kernel already reports the target profile (idempotency) —
+        note this still recycles and verifies, see below.
+
+    **Per-thread confinement (#1023).**  ``aa_change_profile`` confines
+    the CALLING TASK, not the process, and every check in this tree reads
+    ``/proc/self/attr/current`` — which resolves to ``/proc/<pid>/`` and
+    therefore reports the MAIN THREAD's label.  A worker thread created
+    before the transition keeps its own cred for the life of the slot and
+    is invisible to all of them.  So once the process is confined, two
+    more things happen on every path where a profile is expected:
+
+    1. *recycle* — ``recycle_pools`` retires the RPC worker lanes so every
+       later RPC runs on a thread spawned under the confined cred;
+    2. *verify* — every thread's own ``attr/current`` is read and compared
+       against the target profile.
+
+    Both run on the IDEMPOTENT path too, and deliberately.  That path is
+    reached by a slot serving its second session of a cascade under the
+    same profile, where a worker created before the slot's FIRST bootstrap
+    is still ``unconfined`` — precisely the durable population #1023
+    reports.  Skipping the check there would leave the commonest case
+    unexamined.
+
+    Args:
+        envelope: The bootstrap payload; ``profile_name`` is read.
+        recycle_pools: Optional ``(reason) -> Any`` supplied by
+            :class:`server.runner.rpc.RunnerRPC`, which owns the worker
+            lanes.  ``None`` on the paths that have no RPC lanes (the
+            cold-spawn ``__main__`` sequence confines before any executor
+            exists; tests) — verification still runs, because a process
+            with no lanes can still carry another thread.
 
     Raises:
         BootstrapError: confinement attempt failed (kernel refused
@@ -737,6 +770,11 @@ def _maybe_self_confine(envelope: SessionInitEnvelope) -> None:
             "(kernel reports: %s); skipping redundant self-confine",
             target_profile, actual,
         )
+        # NOT a skip of the #1023 work: this is the path a reused pool
+        # slot takes when the next session of its cascade carries the
+        # same profile, and a worker created before the slot's FIRST
+        # bootstrap is unconfined on it.
+        _retire_and_verify_threads(target_profile, recycle_pools)
         return
 
     # Need to transition.  ``confine_to_profile`` does the
@@ -782,6 +820,93 @@ def _maybe_self_confine(envelope: SessionInitEnvelope) -> None:
             f"AppArmor self-confine failed for profile={target_profile}: "
             f"{exc}",
         ) from exc
+
+    _retire_and_verify_threads(target_profile, recycle_pools)
+
+
+def _retire_and_verify_threads(
+    target_profile: str,
+    recycle_pools: Optional[Callable[[str], Any]],
+) -> None:
+    """Retire pre-transition worker threads, then verify every thread (#1023).
+
+    Order is load-bearing: recycling FIRST removes the population the
+    framework created and can remove, so anything the verification still
+    finds is a thread reached by neither lane — the unknown that must not
+    be certified silently.
+
+    **Divergence fails the bootstrap.**  Argued rather than assumed, since
+    failing closed on a false positive would take down every session on a
+    host whose ``/proc`` were misread:
+
+    - the check acts only on POSITIVE evidence — a label read successfully
+      that names a different profile.  A ``/proc`` that cannot be read
+      (``hidepid``, an unusual container, a profile template predating the
+      task-dir grant) yields ``unreadable`` and is logged, never raised;
+    - the alternative — log an ERROR and proceed — reproduces exactly the
+      incident state: a session whose record asserts
+      ``sandbox_mode: apparmor`` while in-process tools run outside the
+      kernel boundary.  A log line is not a boundary, and #1013's proposed
+      ``require`` mode would certify such a runner;
+    - an operator who cannot tolerate the failure already has an honest
+      opt-out: an empty ``profile_name`` runs the session unconfined and
+      the record then claims nothing.  "Confined, but tolerating threads
+      that are not" is not a posture anyone needs — it is the defect.
+
+    A failed bootstrap is also the right remedy in kind: the slot is
+    poisoned for the life of the process, and discarding it is what the
+    operator did by hand (SIGTERM on the two divergent slots).
+    """
+    if recycle_pools is not None:
+        try:
+            recycle_pools(f"confined to {target_profile}")
+        except Exception as exc:  # noqa: BLE001 — boundary surface
+            # Recycling is a remedy, not the verdict.  If it fails, the
+            # verification below is still run and still fails the
+            # bootstrap on any divergence it finds.
+            logger.error(
+                "runner-session bootstrap: worker-pool recycle failed "
+                "(%s); per-thread verification still applies", exc,
+            )
+
+    try:
+        from .bootstrap import (
+            ThreadConfinementDivergence,
+            verify_thread_confinement,
+        )
+    except ImportError as exc:  # noqa: BLE001 — boundary surface
+        logger.warning(
+            "runner-session bootstrap: per-thread confinement check "
+            "unavailable (%s)", exc,
+        )
+        return
+
+    try:
+        scan = verify_thread_confinement(target_profile)
+    except ThreadConfinementDivergence as exc:
+        raise BootstrapError(
+            "confine",
+            f"{exc}  The runner refuses this session rather than report "
+            f"sandbox_mode=apparmor for a process carrying threads "
+            f"outside the profile.",
+        ) from exc
+
+    if scan.unreadable:
+        logger.warning(
+            "runner-session bootstrap: per-thread confinement "
+            "UNVERIFIED for %d of %d threads (%s) — %s.  Absence of "
+            "evidence is not divergence, so the session continues; a "
+            "confined runner needs `/proc/*/task/ r,` (AppArmor "
+            "template v32+) for the complete walk.",
+            len(scan.unreadable), scan.scanned,
+            "; ".join(f"tid={tid}: {why}" for tid, why in scan.unreadable),
+            scan.summary(),
+        )
+    else:
+        logger.info(
+            "runner-session bootstrap: per-thread confinement verified "
+            "(%s)", scan.summary(),
+        )
 
 
 def _stamp_daemon_identity(envelope: SessionInitEnvelope, session: Any) -> None:
@@ -930,6 +1055,7 @@ def bootstrap_session(
     envelope: SessionInitEnvelope,
     *,
     runtime_factory: Any = _USE_DEFAULT,
+    recycle_pools: Optional[Callable[[str], Any]] = None,
 ) -> RunnerSessionHost:
     """Construct a runner-side session from a daemon-supplied envelope.
 
@@ -947,6 +1073,11 @@ def bootstrap_session(
             stub.  Pass ``None`` explicitly for the test-only
             "skip runtime construction entirely" path (the host
             is returned with ``runtime=None`` + ``session=None``).
+        recycle_pools: Optional ``(reason) -> Any`` the RPC dispatcher
+            supplies so step 1c can retire worker threads that predate
+            its AppArmor transition (#1023).  ``None`` leaves the
+            per-thread VERIFICATION in place and skips only the
+            retirement — see :func:`_retire_and_verify_threads`.
 
     Returns:
         A :class:`RunnerSessionHost` wrapping the bootstrap
@@ -1023,7 +1154,7 @@ def bootstrap_session(
     # When ``envelope.profile_name`` is empty (operator-side
     # ``disable_confine`` opt-out or no AppArmor opt-in), the step
     # is also a no-op — runner runs unconfined.
-    _maybe_self_confine(envelope)
+    _maybe_self_confine(envelope, recycle_pools)
 
     # ---- 2. Optionally construct the runtime ----
     if runtime_factory is None:

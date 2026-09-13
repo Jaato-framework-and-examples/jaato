@@ -21,6 +21,10 @@ API:
   ``os._exit(2)`` per the spec's no-fallback-to-unconfined contract.
 - :func:`read_current_profile` — small helper exposed mostly for
   tests.
+- :func:`verify_thread_confinement` — the #1023 check: every thread of
+  this process, not just the one ``/proc/self/attr/current`` reports.
+  See the section header below it for why the process-level readback
+  provably cannot see the condition it is there to catch.
 
 Failure modes are distinguished so the daemon-side error message can
 explain the cause:
@@ -39,17 +43,27 @@ import ctypes
 import ctypes.util
 import logging
 import os
-from typing import Optional
+import threading
+import time
+from dataclasses import dataclass
+from typing import Callable, List, Optional, Sequence, Tuple
 
 
 logger = logging.getLogger(__name__)
 
 
-# Default proc-attr path; override-able for tests.  The runner uses
-# the PROCESS-level path (``/proc/self/attr/current``) because
-# ``aa_change_profile`` is a process-level transition — distinct from
-# the daemon's old thread-level pattern at
-# ``/proc/self/task/<tid>/attr/current``.
+# Default proc-attr path; override-able for tests.  Reads the label of the
+# task whose tid == pid — the MAIN THREAD — because ``/proc/self``
+# resolves to ``/proc/<pid>/``.
+#
+# This path is the right one for :func:`confine_to_profile`, which runs ON
+# the main thread and is asking whether ITS OWN transition took.  It is the
+# wrong one for "is this PROCESS confined", and a comment here used to say
+# ``aa_change_profile`` was a process-level transition.  It is not:
+# AppArmor confines TASKS, so a sibling thread created before the
+# transition keeps its own cred and this path cannot see it.  That is
+# #1023 — see :func:`verify_thread_confinement`, which asks the whole
+# process.
 DEFAULT_PROC_ATTR_PATH = "/proc/self/attr/current"
 
 # Default libapparmor SONAME.
@@ -192,4 +206,374 @@ def confine_to_profile(
     logger.info(
         "runner confined to AppArmor profile %s (kernel reports: %s)",
         profile_name, actual,
+    )
+
+
+# ---------------------------------------------------------------------
+# Per-thread confinement verification (#1023)
+# ---------------------------------------------------------------------
+#
+# ``aa_change_profile`` is PER-TASK.  ``/proc/self/attr/current`` is
+# not: ``/proc/self`` resolves to ``/proc/<pid>/``, whose ``attr/current``
+# reports the label of the task whose tid == pid -- the MAIN THREAD.  So
+# the post-transition readback in :func:`confine_to_profile`, the
+# idempotency check in ``runner/session.py``, ``sandbox_mode`` in the
+# session record and an operator's ``cat /proc/<pid>/attr/current`` all
+# read exactly one thread's label and report the process confined.
+#
+# #1023 is the state that makes the difference observable: a worker
+# thread spawned while the process was still ``unconfined`` keeps that
+# cred for its whole life, and ``ThreadPoolExecutor`` spawns workers
+# lazily on first submit -- so any RPC dispatched to a lane before that
+# slot's first ``session.bootstrap`` leaves a durably unconfined thread
+# behind while every reader above says ``(enforce)``.  Confirmed live:
+# 2 of 5 runners on a fully enforcing host.
+#
+# Reading the CALLING thread's own label needs
+# ``/proc/thread-self/attr/current``; reading EVERY thread's needs
+# ``/proc/self/task/<tid>/attr/current``, which is what this section
+# does.  Nothing in the tree did either before #1023.
+#
+# Note on the existing caution at ``server/apparmor.py`` (_run_unconfined):
+# reading ``/proc/self/task/<tid>/attr/current`` to answer "am I
+# confined?" is called fragile there, and correctly so -- that is a
+# DAEMON worker asking about itself in a process where confinement is
+# transient (``apparmor_confine`` enters a hat and restores), and a
+# thread silently confined without the framework's knowledge would lie.
+# The question here is a different one with a different failure mode:
+# a runner process confines ONCE, for the life of a session, and the
+# check compares every thread's label against the profile the framework
+# just asked the kernel for.  It never asks a thread to classify itself,
+# and it acts only on POSITIVE evidence -- see
+# :func:`verify_thread_confinement`.
+
+#: Default per-thread proc-attr directory; override-able for tests.
+#: Shape is ``<task_dir>/<tid>/attr/current``, which a fabricated
+#: temp tree reproduces exactly -- the only reason this is a
+#: parameter.
+DEFAULT_TASK_ATTR_DIR = "/proc/self/task"
+
+#: How long :func:`verify_thread_confinement` keeps re-scanning while it
+#: still sees divergence, before calling that divergence durable.
+#:
+#: NOT a tolerance for the defect -- a grace window for one benign race.
+#: The pool recycle that precedes this check (``RunnerRPC``) swaps the
+#: executors and shuts the old ones down withOUT waiting, deliberately:
+#: waiting could deadlock against a pre-bootstrap task blocked on an
+#: outgoing call that only the reader thread (us) can answer.  A worker
+#: draining its last task is therefore briefly alive and still carrying
+#: the old cred.  It exits within milliseconds; a leaked thread does not.
+DEFAULT_VERIFY_GRACE_SECONDS = 2.0
+
+#: Interval between re-scans inside the grace window.
+DEFAULT_VERIFY_POLL_SECONDS = 0.05
+
+
+class ThreadConfinementDivergence(RuntimeError):
+    """Raised when a thread's AppArmor label is not the process's.
+
+    Carries the evidence rather than a summary, because the operator's
+    next question is always *which thread, and what does it hold* -- and
+    because the answer names the exposure: a thread labelled
+    ``unconfined`` runs in-process tools outside the kernel boundary
+    entirely, while one labelled another session's ``jaato-ws-*``
+    profile runs them against the wrong workspace (#1023 impact 3).
+    """
+
+    def __init__(
+        self,
+        expected: str,
+        divergent: Sequence[Tuple[int, str]],
+        *,
+        scanned: int,
+        route: str,
+    ) -> None:
+        detail = ", ".join(
+            f"tid={tid} label={label!r}" for tid, label in divergent
+        )
+        super().__init__(
+            f"AppArmor per-thread confinement divergence: expected every "
+            f"thread of this process to be confined to {expected!r}, but "
+            f"{len(divergent)} of {scanned} scanned threads report "
+            f"otherwise ({detail}).  A thread created before the "
+            f"aa_change_profile transition keeps the cred it was created "
+            f"with -- aa_change_profile is per-task, and "
+            f"/proc/self/attr/current reports only the main thread, which "
+            f"is why every other check in the tree says this runner is "
+            f"confined.  See issue #1023."
+        )
+        self.expected = expected
+        self.divergent = tuple(divergent)
+        self.scanned = scanned
+        self.route = route
+
+
+@dataclass(frozen=True)
+class ThreadProfileScan:
+    """One walk of every thread's AppArmor label.
+
+    Attributes:
+        expected: The profile name every thread should be inside.
+        matched: tids whose label is *expected* or a sub-profile of it.
+        divergent: ``(tid, label)`` for every thread whose label was
+            read successfully and names something else.  This is the
+            only field that is POSITIVE evidence of exposure.
+        unreadable: ``(tid, reason)`` for every thread whose
+            ``attr/current`` could not be read for a reason other than
+            the thread having exited.  Absence of evidence -- never
+            treated as divergence.
+        gone: tids that vanished between enumeration and read.  Benign:
+            threads exit.
+        route: How tids were enumerated -- ``"task_dir"`` (complete) or
+            ``"threading"`` (Python-visible threads only).  Recorded
+            because it bounds what the scan could have seen.
+    """
+
+    expected: str
+    matched: Tuple[int, ...]
+    divergent: Tuple[Tuple[int, str], ...]
+    unreadable: Tuple[Tuple[int, str], ...]
+    gone: Tuple[int, ...]
+    route: str
+
+    @property
+    def scanned(self) -> int:
+        """How many threads the walk actually reached a verdict on."""
+        return len(self.matched) + len(self.divergent) + len(self.unreadable)
+
+    @property
+    def uniform(self) -> bool:
+        """True when nothing diverged and nothing was unreadable."""
+        return not self.divergent and not self.unreadable
+
+    def summary(self) -> str:
+        """One line naming what the walk found, for the operator log."""
+        return (
+            f"threads={self.scanned} matched={len(self.matched)} "
+            f"divergent={len(self.divergent)} "
+            f"unreadable={len(self.unreadable)} gone={len(self.gone)} "
+            f"route={self.route} expected={self.expected!r}"
+        )
+
+
+def profile_name_of(label: str) -> str:
+    """Strip the enforcement-mode suffix from an ``attr/current`` value.
+
+    ``"jaato-ws-abc (enforce)"`` -> ``"jaato-ws-abc"``.  Complain mode
+    is stripped the same way on purpose: ``JAATO_APPARMOR_COMPLAIN=1``
+    is a documented diagnostic route that puts the whole profile chain
+    in complain mode, and a check that read that as divergence would
+    make the diagnostic unusable.  Complain mode is a separate question
+    (#1014) from *which profile a thread is in*, which is this one.
+    """
+    return label.split(" ", 1)[0].strip()
+
+
+def _label_is_inside(label: str, expected: str) -> bool:
+    """Is *label* the expected profile, or something strictly narrower?
+
+    ``expected`` itself matches.  So does a hat or sub-profile of it
+    (``expected//child``): those DROP rules, so a thread wearing one is
+    inside the boundary the session claims, which is the property being
+    checked.  Anything else -- ``unconfined``, another session's
+    ``jaato-ws-*``, an unrelated profile -- is divergence.
+    """
+    name = profile_name_of(label)
+    return name == expected or name.startswith(expected + "//")
+
+
+def _tids_from_threading() -> List[int]:
+    """Python-visible tids, including this one.
+
+    ``os.getpid()`` is the main thread's tid on Linux and is added
+    unconditionally: the main thread is the one thread whose label the
+    rest of the tree already reads, so a walk that omitted it would
+    lose the reference point.
+    """
+    tids = {os.getpid()}
+    for thread in threading.enumerate():
+        native_id = getattr(thread, "native_id", None)
+        if native_id:
+            tids.add(int(native_id))
+    return sorted(tids)
+
+
+def _enumerate_tids(task_dir: str) -> Tuple[List[int], str]:
+    """List the tids of every thread in this process.
+
+    Two routes, and the fallback is not cosmetic.  Listing
+    ``/proc/<pid>/task/`` is COMPLETE -- it sees threads created by C
+    extensions that Python knows nothing about -- but it needs a
+    directory-read grant the per-session profile only carries from
+    template v32 onward.  A runner confined by an older template gets
+    ``EACCES`` on the listing (and one AVC), so the walk falls back to
+    :func:`threading.enumerate`, which needs no grant at all because it
+    reads no file: it sees every thread the interpreter created, which
+    is every thread this defect is known to produce (the RPC lanes, the
+    reader, the telemetry exporter).
+
+    The route is reported rather than hidden, because it bounds what
+    the scan could have seen.
+
+    Returns:
+        ``(tids, route)`` where route is ``"task_dir"`` or
+        ``"threading"``.
+    """
+    try:
+        entries = os.listdir(task_dir)
+    except OSError:
+        return _tids_from_threading(), "threading"
+    tids: List[int] = []
+    for entry in entries:
+        try:
+            tids.append(int(entry))
+        except ValueError:
+            continue
+    if not tids:
+        return _tids_from_threading(), "threading"
+    return sorted(tids), "task_dir"
+
+
+def _read_one_thread_label(task_dir: str, tid: int) -> Tuple[str, str]:
+    """Read one thread's ``attr/current``.
+
+    Returns:
+        ``(kind, value)`` where kind is ``"label"`` (value is the
+        label), ``"gone"`` (the thread exited; value is empty) or
+        ``"unreadable"`` (value is the reason).
+    """
+    path = os.path.join(task_dir, str(tid), "attr", "current")
+    try:
+        with open(path, "r") as handle:
+            raw = handle.read()
+    except FileNotFoundError:
+        return "gone", ""
+    except OSError as exc:
+        return "unreadable", f"{type(exc).__name__}: {exc}"
+    # procfs NUL-terminates this value, and the terminator does not always
+    # arrive with the newline the AppArmor form carries -- measured on a
+    # host whose active LSM reports a bare ``kernel\x00``.  Stripping only
+    # ``\n`` (what :func:`read_current_profile` does) would leave the NUL
+    # inside the label, and every later comparison then fails against a
+    # profile name that looks identical when printed.
+    label = raw.replace("\x00", "").strip()
+    if not label:
+        return "unreadable", "empty attr/current"
+    return "label", label
+
+
+def scan_thread_profiles(
+    expected_profile: str,
+    *,
+    task_dir: str = DEFAULT_TASK_ATTR_DIR,
+) -> ThreadProfileScan:
+    """Read every thread's AppArmor label and classify it.
+
+    Pure I/O plus classification -- no policy.  The caller decides what
+    a divergent thread means; :func:`verify_thread_confinement` is that
+    caller for the bootstrap path.
+
+    Args:
+        expected_profile: The profile name the process just entered.
+        task_dir: ``/proc/self/task`` in production; a fabricated
+            ``<dir>/<tid>/attr/current`` tree in tests.
+
+    Returns:
+        A :class:`ThreadProfileScan`.  Never raises for a thread that
+        exited mid-walk or whose label could not be read -- those are
+        recorded as ``gone`` / ``unreadable`` respectively, because
+        acting on absence of evidence is how a verifier takes a host
+        down for a ``/proc`` it merely could not read.
+    """
+    tids, route = _enumerate_tids(task_dir)
+    matched: List[int] = []
+    divergent: List[Tuple[int, str]] = []
+    unreadable: List[Tuple[int, str]] = []
+    gone: List[int] = []
+
+    for tid in tids:
+        kind, value = _read_one_thread_label(task_dir, tid)
+        if kind == "gone":
+            gone.append(tid)
+        elif kind == "unreadable":
+            unreadable.append((tid, value))
+        elif _label_is_inside(value, expected_profile):
+            matched.append(tid)
+        else:
+            divergent.append((tid, value))
+
+    return ThreadProfileScan(
+        expected=expected_profile,
+        matched=tuple(matched),
+        divergent=tuple(divergent),
+        unreadable=tuple(unreadable),
+        gone=tuple(gone),
+        route=route,
+    )
+
+
+def verify_thread_confinement(
+    expected_profile: str,
+    *,
+    task_dir: str = DEFAULT_TASK_ATTR_DIR,
+    grace_seconds: float = DEFAULT_VERIFY_GRACE_SECONDS,
+    poll_seconds: float = DEFAULT_VERIFY_POLL_SECONDS,
+    sleep: Callable[[float], None] = time.sleep,
+    monotonic: Callable[[], float] = time.monotonic,
+) -> ThreadProfileScan:
+    """Assert that every thread of this process is inside *expected_profile*.
+
+    Fails on POSITIVE EVIDENCE ONLY.  The distinction decides what this
+    function can do to a deployment:
+
+    - a label READ SUCCESSFULLY that names a different profile is proof
+      that code in this process runs outside the boundary the session's
+      record claims -- :class:`ThreadConfinementDivergence` is raised
+      and the caller fails the bootstrap;
+    - a label that could not be read proves nothing.  A restricted
+      ``/proc`` (``hidepid``, an unusual container, an older profile
+      template without the task-dir grant) must not take every session
+      on the host down, so the scan is returned with ``unreadable``
+      populated and the caller logs rather than raises.
+
+    Divergence is re-checked across a short grace window before it is
+    called durable: the pool recycle that precedes this check does not
+    wait for in-flight work, so a worker draining its last task is
+    briefly alive holding the old cred.  It exits in milliseconds.  A
+    thread that is still divergent at the end of the window is not
+    draining -- it is the #1023 population.
+
+    Args:
+        expected_profile: Profile the process just entered.
+        task_dir: See :func:`scan_thread_profiles`.
+        grace_seconds: Total time to keep re-scanning while divergence
+            persists.
+        poll_seconds: Interval between re-scans.
+        sleep: Injection point so the grace window is testable without
+            spending it.
+        monotonic: Injection point for the same reason.
+
+    Returns:
+        The final :class:`ThreadProfileScan` when no divergence
+        survived the window.
+
+    Raises:
+        ThreadConfinementDivergence: divergence persisted.
+    """
+    scan = scan_thread_profiles(expected_profile, task_dir=task_dir)
+    if not scan.divergent:
+        return scan
+
+    deadline = monotonic() + max(0.0, grace_seconds)
+    while monotonic() < deadline:
+        sleep(poll_seconds)
+        scan = scan_thread_profiles(expected_profile, task_dir=task_dir)
+        if not scan.divergent:
+            return scan
+
+    raise ThreadConfinementDivergence(
+        expected_profile,
+        scan.divergent,
+        scanned=scan.scanned,
+        route=scan.route,
     )

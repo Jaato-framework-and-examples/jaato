@@ -325,6 +325,10 @@ class RunnerRPC:
         self._sock = sock
         self._execute_fn = execute_fn
         self._workspace_root = workspace_root
+        # Kept so :meth:`recycle_worker_pools` can rebuild each lane with
+        # the width it was constructed with (#1023).
+        self._max_workers = max_workers
+        self._control_workers = control_workers
         self._pool = ThreadPoolExecutor(
             max_workers=max_workers,
             thread_name_prefix="runner-rpc-work",
@@ -390,6 +394,107 @@ class RunnerRPC:
         # dispatch through this host's session executor.
         self._session_host = None  # type: Optional[Any]
         self._session_lock = threading.Lock()
+
+    # ---------------------- worker-pool recycling (#1023) ----------------
+
+    def _lane_threads(self, pool: ThreadPoolExecutor) -> "List[Any]":
+        """Best-effort snapshot of the Thread objects a lane owns.
+
+        Reads ``ThreadPoolExecutor._threads`` — private, and stable across
+        the CPython versions this tree supports.  Used only to SAY how many
+        threads a recycle retired; nothing branches on it, so a future
+        interpreter that renames the attribute degrades the log line and
+        nothing else.
+        """
+        try:
+            return list(getattr(pool, "_threads", ()) or ())
+        except Exception:  # noqa: BLE001 — diagnostics must not raise
+            return []
+
+    def recycle_worker_pools(self, reason: str) -> Dict[str, Any]:
+        """Replace both worker lanes so future work runs on NEW threads.
+
+        **The #1023 remedy.**  ``aa_change_profile`` is per-task, and
+        ``ThreadPoolExecutor`` spawns its workers lazily on the first
+        submit — so a worker created before the runner transitioned into
+        its session's AppArmor profile keeps the cred it was created with,
+        for the life of the slot, while ``/proc/<pid>/attr/current``
+        (the main thread) reports the process confined.  Executors reuse
+        workers and a slot serves several sessions of one cascade, so that
+        population is durable *and* carries across session boundaries with
+        the profile of whichever session created it.
+
+        There is no way to make another thread call ``aa_change_profile``
+        on its own behalf — the kernel enforces ``current != task ->
+        -EACCES`` on ``attr/current`` writes — so an existing thread cannot
+        be repaired.  It can only be retired, which is what this does: the
+        executor OBJECTS are replaced, so every later submit spawns a fresh
+        worker under the confined cred, and the old executors are asked to
+        drain.
+
+        **What can legitimately be outstanding, and why nothing is
+        dropped.**  This runs on the reader thread, inside the synchronous
+        ``session.bootstrap`` handler, which is the only submitter — so no
+        NEW work can be submitted while it runs.  What may still be running
+        is a pre-bootstrap RPC the reader dispatched earlier: on a slot
+        serving its second or later session, ``session.end`` is the routine
+        one (control lane), and the dispatch watchdog's
+        ``session.health_check`` probe can overlap the instant a bootstrap
+        frame is read.  So the old executors are shut down with
+        ``wait=False`` and **without** ``cancel_futures``:
+
+        - not cancelling means a submitted call still runs and still
+          answers its caller — cancelling would leave the daemon waiting
+          for a response that is never written;
+        - not waiting means this cannot deadlock.  A pre-bootstrap task
+          blocked on an ``outgoing_call`` needs the READER thread to
+          resolve its future, and the reader thread is the one executing
+          this.
+
+        A worker still draining is therefore alive and still carrying the
+        old cred for a few milliseconds.  That is the race
+        :func:`server.runner.bootstrap.verify_thread_confinement` absorbs
+        with its grace window rather than reporting as durable divergence.
+
+        Args:
+            reason: Free text for the log line — typically the profile the
+                process just entered.
+
+        Returns:
+            A dict with ``work_threads_retired`` / ``ctl_threads_retired``
+            counts for the caller's log.  Best-effort figures; see
+            :meth:`_lane_threads`.
+        """
+        old_work, old_ctl = self._pool, self._control_pool
+        retired_work = self._lane_threads(old_work)
+        retired_ctl = self._lane_threads(old_ctl)
+
+        # Build the replacements BEFORE retiring the old ones so a failure
+        # here leaves the runner with working lanes rather than none.
+        # Construction spawns no thread: the first submit does, which is
+        # the whole reason this defect exists and the reason this is safe
+        # to do on the confined thread.
+        self._pool = ThreadPoolExecutor(
+            max_workers=self._max_workers,
+            thread_name_prefix="runner-rpc-work",
+        )
+        self._control_pool = ThreadPoolExecutor(
+            max_workers=self._control_workers,
+            thread_name_prefix="runner-rpc-ctl",
+        )
+        old_work.shutdown(wait=False)
+        old_ctl.shutdown(wait=False)
+
+        logger.info(
+            "runner RPC: worker pools recycled (%s) — retired %d work + %d "
+            "control worker threads; every later RPC runs on a thread "
+            "spawned after the AppArmor transition (#1023)",
+            reason, len(retired_work), len(retired_ctl),
+        )
+        return {
+            "work_threads_retired": len(retired_work),
+            "ctl_threads_retired": len(retired_ctl),
+        }
 
     # --------------------------- write paths ---------------------------
 
@@ -1403,7 +1508,15 @@ class RunnerRPC:
                 }
 
         try:
-            host: RunnerSessionHost = bootstrap_session(envelope)
+            host: RunnerSessionHost = bootstrap_session(
+                envelope,
+                # #1023: hand the bootstrap a way to retire worker threads
+                # that predate its AppArmor transition.  Called from step
+                # 1c, on this (the reader) thread, immediately after the
+                # process is confined and before the per-thread
+                # verification that follows it.
+                recycle_pools=self.recycle_worker_pools,
+            )
         except BootstrapError as exc:
             return False, {
                 "error": f"session.bootstrap: {exc.message}",
@@ -5137,10 +5250,26 @@ class RunnerRPC:
                         # spawned workers (for tool.execute etc.)
                         # would inherit the MAIN thread's
                         # ``unconfined`` cred via pthread_create.
-                        # Running synchronously on main thread means
-                        # main confines BEFORE any worker spawns;
-                        # later worker threads inherit the confined
-                        # cred cleanly.  See the v67 cascade smoke
+                        # Running synchronously on the reader thread is
+                        # NECESSARY and, on its own, NOT SUFFICIENT.
+                        # This comment used to end "main confines BEFORE
+                        # any worker spawns; later worker threads inherit
+                        # the confined cred cleanly", which assumed no
+                        # worker existed yet.  Nothing guaranteed that:
+                        # both lanes spawn workers lazily on first
+                        # submit, and a slot fields RPCs before its first
+                        # bootstrap (``session.end`` from the previous
+                        # session of a cascade; a dispatch-watchdog
+                        # probe).  Such a worker keeps its ``unconfined``
+                        # cred for the life of the slot while
+                        # ``/proc/<pid>/attr/current`` — the MAIN
+                        # thread's label — reports ``(enforce)``.  That
+                        # is #1023, confirmed live on 2 of 5 runners of
+                        # an enforcing host.  ``bootstrap_session`` now
+                        # RECYCLES both lanes at the transition and then
+                        # verifies every thread's own label, so the
+                        # premise is enforced and checked rather than
+                        # assumed.  See the v67 cascade smoke
                         # debug for the empirical evidence (worker
                         # thread aa_change_profile silent-no-ops at
                         # the verification step because /proc/self/
