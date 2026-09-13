@@ -535,10 +535,23 @@ class JaatoSession:
         self._completion_payload_schema: Optional[Any] = None
 
         # Tier to return to when the tier currently at the wheel finishes
-        # its completion.  Armed by ``switch_tier`` when the entered tier
-        # declares ``exit_on: completion``; consumed by
-        # :meth:`_exit_completion_tier_if_settled`.  ``None`` = nothing
-        # pending, which is every session using no such tier.
+        # its completion.  ``None`` = nothing pending, which is every
+        # session using no such tier.
+        #
+        # Exactly one writer each way, which is what bounds the state
+        # (#1025):
+        #   ARMED   by ``switch_tier``, on every entry into a tier
+        #           declaring ``exit_on: completion`` from a different
+        #           tier.
+        #   SPENT   by ``_take_pending_tier_return``, the sole clearing
+        #           site.  Its two callers -- the mid-turn
+        #           ``_exit_completion_tier_if_settled`` and the turn-end
+        #           ``_finalize_completion_tier_exit`` -- take the target
+        #           BEFORE performing the switch, so whichever reaches it
+        #           first spends the arming and the other becomes a no-op.
+        #           A double pop is therefore unrepresentable, and the
+        #           turn-end site guarantees the arming is never left
+        #           standing into a later turn.
         #
         # Deferred rather than nested: the exit is state a lifecycle tool
         # stamps and the next settled completion consumes -- the same
@@ -5838,14 +5851,50 @@ NOTES
         """
         abnormal = self._finish_abnormally(response, turn_data, on_output)
         if abnormal is None:
+            self._log_finish_for_pending_tier(response, "normal", context)
             return response, None
         continued = self._recover_truncated_turn(
             response, use_streaming, on_output, wrapped_usage_callback,
             turn_data, context=context,
         )
         if continued is None:
+            self._log_finish_for_pending_tier(response, "abnormal", context)
             return response, abnormal
+        self._log_finish_for_pending_tier(response, "continued", context)
         return continued, None
+
+    def _log_finish_for_pending_tier(
+        self, response, outcome: str, context: str = "",
+    ) -> None:
+        """Say at INFO what :meth:`_finish_or_continue` just decided.
+
+        Only while an ``exit_on: completion`` return is ARMED.  #1025 could
+        not establish which path a lingering speech tier took, because the
+        finish reason was logged nowhere at INFO on either side of this
+        method -- and a tier switch that silently does not happen is
+        invisible without it.  Gating on the arming is what keeps it from
+        being a per-response line in every session: a session using no such
+        tier pays one ``getattr`` and logs nothing.
+
+        Args:
+            response: the response just classified.
+            outcome: ``normal`` (kept processing), ``abnormal`` (the turn
+                ends with a ``TurnResult``, bypassing the mid-turn exit
+                check) or ``continued`` (a truncation was recovered and
+                *response* is the continuation).
+            context: the caller's trace label, so the line names the slot.
+        """
+        if getattr(self, "_pending_tier_return", None) is None:
+            return
+        finish = getattr(
+            getattr(response, "finish_reason", None), "value", None)
+        has_calls = response is not None and response.has_function_calls()
+        logger.info(
+            "Completion-tier armed (return to %s): finish_reason=%s "
+            "outcome=%s has_function_calls=%s (%s)",
+            self._pending_tier_return, finish, outcome, has_calls,
+            context or "-",
+        )
 
     def _truncation_nudge(
         self,
@@ -6497,9 +6546,14 @@ NOTES
             turn_data, context=context,
         )
 
-        # A delegated tier hands back HERE: the continuation has landed
-        # and asks for nothing more, the earliest point the framework can
-        # know its completion settled.
+        # A delegated tier hands back EARLY here: the continuation has
+        # landed and asks for nothing more, the earliest point the
+        # framework can know its completion settled, and the only point at
+        # which there is still a turn to resume the caller into.  It is
+        # not the guarantee -- the turn-end backstop in this loop's
+        # ``finally`` is (#1025), because this line sits past
+        # ``_finish_or_continue``'s abnormal return above and past the
+        # ``signal_completion`` short-circuit earlier in this method.
         self._exit_completion_tier_if_settled(response)
 
         # 7. Optionally check mid-turn prompts
@@ -7188,6 +7242,15 @@ NOTES
             raise
 
         finally:
+            # A delegation that never settled cleanly hands back HERE
+            # (#1025).  The mid-turn check above is reached only on the
+            # clean-settle continuation slot; this runs on every way out of
+            # the loop, including the abnormal-finish return, the
+            # ``signal_completion`` short-circuit, cancellation and an
+            # unhandled provider error.
+            self._finalize_completion_tier_exit(
+                turn_data.get('finish_reason'), reason="turn end")
+
             # Record turn end time
             turn_end = datetime.now()
             turn_data['end_time'] = turn_end.isoformat()
@@ -13040,6 +13103,16 @@ NOTES
                         "write",
                     )
 
+            # A delegation entered from an attachment-carrying turn hands
+            # back HERE (#1025).  This loop is the voice path -- a user
+            # message with audio in it -- and it evaluated the
+            # completion-tier exit NOWHERE, so a speech tier entered from a
+            # spoken question could never pop.  Terminal-only, and
+            # deliberately: this loop has no mid-turn drain, so a resumable
+            # report would sit in the queue for the next turn.
+            self._finalize_completion_tier_exit(
+                turn_data.get('finish_reason'), reason="parts turn end")
+
             turn_end = datetime.now()
             turn_data['end_time'] = turn_end.isoformat()
             turn_data['duration_seconds'] = (turn_end - turn_start).total_seconds()
@@ -13667,45 +13740,171 @@ NOTES
                 f"TIER_OUTPUT_MODALITIES: provider refused {sorted(kinds)!r}"
             )
 
+    def _take_pending_tier_return(self) -> Optional[str]:
+        """Read-and-clear the armed completion-tier return.
+
+        The SOLE clearing site for ``_pending_tier_return``, which is what
+        makes a double pop unrepresentable rather than merely unlikely:
+        whichever evaluation point reaches here first takes the target and
+        every later one on the same turn sees ``None``.  ``switch_tier`` is
+        the only writer in the other direction (#1025).
+
+        ``getattr`` rather than attribute access: 28 test files build a
+        bare ``JaatoSession`` via ``__new__`` to exercise one method
+        without a runtime, and this runs on paths several of them drive.
+        The session already accommodates that idiom for ``_ui_hooks`` in
+        three places; a session with no tier state has nothing pending,
+        which is what ``None`` means here.
+        """
+        target = getattr(self, "_pending_tier_return", None)
+        if target is not None:
+            self._pending_tier_return = None
+        return target
+
     def _exit_completion_tier_if_settled(self, response) -> None:
-        """Leave an ``exit_on: completion`` tier once its work is done.
+        """Leave an ``exit_on: completion`` tier MID-TURN, once it settles.
 
         "Settled" means the tier's response asks for nothing more: no
         function calls.  Deliberately not "one provider call" -- a
         delegated tier that legitimately calls a tool would be evicted
-        mid-task -- and deliberately not "one turn", because a turn
-        boundary is not a terminus (#767).
+        mid-task.
 
-        Best-effort in the same way as the entry: a failed return must not
-        fail a turn that has already produced its answer.  The pending
-        target is cleared either way, so a tier cannot be armed to return
-        twice.
+        This is the RESUMABLE half of the exit and it is an optimisation,
+        not the guarantee: the turn goes on afterwards, so the caller is
+        handed both the binding and -- via :meth:`_report_delegated_tier`
+        -- something to act on.  A response still carrying calls leaves
+        the arming in place and the loop re-evaluates on the next
+        continuation.
+
+        The guarantee lives in :meth:`_finalize_completion_tier_exit`,
+        which runs at turn end on every path.  Before #1025 this method was
+        the ONLY evaluation point, sitting past ``_finish_or_continue``'s
+        abnormal return and past the ``signal_completion`` short-circuit,
+        so an abnormally-finished delegation -- routine for a speech tier,
+        whose spoken answers reach the output cap -- left the tier armed
+        and resident for every later turn.
         """
-        # ``getattr`` rather than attribute access: 28 test files build a
-        # bare ``JaatoSession`` via ``__new__`` to exercise one method
-        # without a runtime, and this runs on the tool-continuation path
-        # that several of them drive.  The session already accommodates
-        # that idiom for ``_ui_hooks`` in three places; a session with no
-        # tier state has nothing pending, which is what None means here.
         target = getattr(self, "_pending_tier_return", None)
         if target is None or response is None:
             return
         if response.has_function_calls():
+            logger.info(
+                "Completion-tier exit HELD: %s has not settled (its "
+                "response carries function calls); still armed to return "
+                "to %s", getattr(self, "_active_tier", None), target,
+            )
             return                      # still working; it has not settled
-        self._pending_tier_return = None
-        if target == self._active_tier:
+        self._pop_completion_tier(
+            self._take_pending_tier_return(), response,
+            resumable=True, trigger="settled",
+        )
+
+    def _finalize_completion_tier_exit(
+        self, finish_reason: Optional[str] = None, reason: str = "turn end",
+    ) -> None:
+        """Leave an ``exit_on: completion`` tier that never settled cleanly.
+
+        The TERMINAL half of the exit, and the one that makes the contract
+        ("entered, one completion, control handed back") true rather than
+        probable.  It runs from the ``finally`` of both chat loops, so it
+        sees every way a turn can end -- a clean settle that already
+        popped, an abnormal finish (#749 hands back before the mid-turn
+        check), ``signal_completion`` terminating the turn, a cancellation,
+        an unhandled provider error, and the whole attachment-carrying
+        parts loop, which evaluated the exit nowhere at all.
+
+        "Terminal" here means *the framework has stopped making provider
+        calls on the delegate's behalf*, which is a stronger claim than
+        "the last response had no function calls": at this point the loop
+        has already stopped dispatching, so nothing is outstanding and a
+        pop cannot strand work.  It is NOT "one turn" in the #767 sense --
+        the tier is not evicted because a turn boundary arrived, it is
+        evicted because the turn it was delegated for is over.
+
+        Not resumable: there is no turn left to steer, so the outcome is
+        NOT queued as a mid-turn report.  Doing so would leave "You are
+        back in control; continue." in the queue for whatever the next
+        caller-originated turn turns out to be.
+
+        Never raises -- it runs in a ``finally`` and must not replace the
+        turn's own exception.
+        """
+        try:
+            if getattr(self, "_pending_tier_return", None) is None:
+                return
+            logger.info(
+                "Completion-tier exit at %s: %s never settled cleanly "
+                "(finish_reason=%s); returning to %s",
+                reason, getattr(self, "_active_tier", None),
+                finish_reason, self._pending_tier_return,
+            )
+            self._pop_completion_tier(
+                self._take_pending_tier_return(), None,
+                resumable=False, trigger=reason,
+            )
+        except Exception as exc:  # noqa: BLE001 - a finally must not raise
+            logger.warning("Completion-tier exit at %s raised: %s", reason, exc)
+
+    def _pop_completion_tier(
+        self, target: Optional[str], response, *,
+        resumable: bool, trigger: str,
+    ) -> None:
+        """Switch back to *target*, reporting the outcome when resumable.
+
+        The one place the return is actually performed; both evaluation
+        points above funnel through it having already TAKEN the target, so
+        the arming is spent before any of this can fail.
+
+        Best-effort in the same way as the entry: a failed return must not
+        fail a turn that has already produced its answer.  The pending
+        target is spent either way, so a tier cannot be armed to return
+        twice.
+
+        Args:
+            target: the tier to return to, as taken from the arming.
+                ``None`` is a no-op (nothing was armed).
+            response: the delegate's terminal response, used only to
+                compose the resumable report.  ``None`` on the terminal
+                path, which sends none.
+            resumable: whether the turn continues after this.  ``True``
+                queues :meth:`_report_delegated_tier` so the caller is
+                resumed through the ordinary mid-turn path; ``False`` is
+                the turn-end pop, which has no turn to resume.
+            trigger: what caused the evaluation, for the trace and the log
+                line -- ``settled`` for the mid-turn path, otherwise the
+                turn-end reason.
+        """
+        if target is None:
             return
-        delegated_from = self._active_tier
-        produced = "".join(p.text for p in response.parts if p.text).strip()
-        spoke = getattr(response, "media_chunks", 0) or 0
+        delegated_from = getattr(self, "_active_tier", None)
+        if target == delegated_from:
+            self._trace(
+                f"TIER_EXIT_ON_COMPLETION: already at {target} ({trigger})")
+            return
+        produced = ""
+        spoke = 0
+        if response is not None:
+            produced = "".join(
+                p.text for p in response.parts if p.text).strip()
+            spoke = getattr(response, "media_chunks", 0) or 0
         try:
             self.switch_tier(target)
-            self._trace(f"TIER_EXIT_ON_COMPLETION: returned to {target}")
         except Exception as exc:  # noqa: BLE001 - never fail a finished turn
             self._trace(
                 f"TIER_EXIT_ON_COMPLETION: return to {target} failed: {exc}")
+            logger.warning(
+                "Completion-tier exit %s -> %s (%s) FAILED: %s",
+                delegated_from, target, trigger, exc,
+            )
             return
-        self._report_delegated_tier(delegated_from, produced, spoke)
+        self._trace(
+            f"TIER_EXIT_ON_COMPLETION: returned to {target} ({trigger})")
+        logger.info(
+            "Completion-tier exit: %s -> %s (%s)",
+            delegated_from, target, trigger,
+        )
+        if resumable:
+            self._report_delegated_tier(delegated_from, produced, spoke)
 
     def _report_delegated_tier(
         self, tier: str, produced: str, media_chunks: int,
