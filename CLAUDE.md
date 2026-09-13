@@ -5064,6 +5064,49 @@ required `contract-guards` job:
   row's capability, so adding `pdf_input` to a provider means updating that
   row.
 
+### The Reversion Meta-Guard Never Writes to Your Checkout (#995)
+
+`jaato-server/shared/tests/test_every_guard_detects_its_own_reversion.py`
+proves each contract guard is not decorative by putting its defect **back** —
+rewriting a source file, running the one guard test that must fail, and
+restoring. Until #995 it rewrote the file **in the working tree** and restored
+it in a per-case `finally`, which is an exception handler and not a
+crash-safety mechanism: SIGKILL, a CI job timeout, a container restart or an
+interrupt between the write and the restore leaves the sabotage on disk,
+looking exactly like deliberate work in progress. Measured in one session: a
+dirty tree in **seven of nine** runs, and one occasion where a `git add -A`
+committed the suite's live deletion of `__repr__ = secret_safe_repr("api_key")`
+— #721's protection against an API key reaching a log through a default
+`repr`. It was caught only by diffing failing test **IDs** against a baseline.
+
+The suite now copies the checkout once per session and does every sabotage,
+every guard subprocess and every restore **inside the copy**. No code path in
+it opens a file under the repository root for writing, so there is no signal,
+timeout or interrupt that can leave your tree modified — the failure is
+unreachable rather than recoverable. Three things hold that up: the one path
+helper every write goes through refuses anything resolving outside the sandbox
+or inside the checkout (symlinks resolved before comparing), each case asserts
+the real file's bytes are unchanged afterwards, and one test states the
+property directly on a real reversion.
+
+A green run is itself evidence the copy is being read: if the subprocess
+resolved the real tree instead it would see **unsabotaged** source, the guard
+would pass, and the case would fail as "decorative". There is no configuration
+in which a broken copy reports success.
+
+Consequences worth knowing:
+
+- The sandbox is a **snapshot** taken at session start. Editing the tree while
+  the suite runs means the guards report on the source as it was, and the
+  per-case tripwire says so by name rather than blaming the suite.
+- The folklore that this suite must never run under `pytest -n` or alongside
+  anything else, and that `git status` is untrustworthy near it, was a
+  consequence of the in-place design and no longer applies. Each xdist worker
+  builds its own sandbox, which costs disk rather than correctness.
+- Cost is one copy of ~2.4k files plus a `compileall` pass — a couple of
+  seconds once per session, against ~5s per case. A case runs marginally
+  *faster* in the sandbox than in the checkout.
+
 ### Docstring Maintenance
 
 Whenever you read or modify code, check that the docstrings on the classes, methods, and functions you touch are **present, accurate, and complete**. If they are missing, outdated, or misleading, update them as part of the same change. Specifically:
