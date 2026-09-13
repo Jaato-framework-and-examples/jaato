@@ -58,6 +58,44 @@ no jailbreak involved — and they make a deliberate escape an act that has to
 defeat a declared boundary rather than walk through an open door.  For a
 hostile-model threat model the answer is AppArmor (tier 1), not this.
 
+What tier 2 costs: no ``ctypes``, and so no numpy (#1011)
+=========================================================
+
+On the audit tier ``import ctypes`` **fails**, and it takes the scientific
+stack down with it.  CPython's ``ctypes/__init__.py`` runs ``pythonapi =
+PyDLL(None)`` at module import, which raises ``ctypes.dlopen`` with ``None``;
+:func:`_check_dlopen` refuses it.  ``numpy/_core/_internal.py`` does ``import
+ctypes`` guarded by ``except ImportError``, and
+:class:`NotebookContainmentError` is a :class:`PermissionError`, so the guard
+does not catch it and the whole numpy import dies.  Anything above numpy —
+pandas, scipy, scikit-learn, matplotlib, shapely-via-geopandas, osmnx, torch —
+goes with it.
+
+**This is not a sloppy check and must not be relaxed.**  ``dlopen(None)``
+returns a handle to the whole process symbol table, so the object the stdlib
+constructs *is* the escape: ``ctypes.pythonapi.system(b"...")`` resolves and
+calls libc ``system(3)``.  The only event that path raises is
+``ctypes.dlsym``, which this hook does not audit — so a frame-gated exemption
+permitting just ``ctypes/__init__.py``'s own ``PyDLL(None)`` would hand a cell
+arbitrary libc with nothing left to stop it.  Auditing ``ctypes.dlsym`` as
+well would not close it either: with the module imported, ``memmove`` over a
+``from_buffer`` view and ``string_at`` at a raw address give in-process memory
+read/write with no library load at all, which is the ``_POLICY``-rebinding
+limit named above.  Under the audit tier you genuinely cannot have both
+``import ctypes`` and this boundary.
+
+The compiled extension modules were never the problem: they load through the
+import machinery (``open`` events) and site-packages is a read root via
+``sys.path`` in :func:`interpreter_read_roots`.  With ``dlopen(None)``
+permitted and every other rule intact, ``import numpy`` succeeds.  Only the
+stdlib ``ctypes`` module's own initialization line fails.
+
+The remedies are all *other surfaces*, which is why :func:`boundary_notice`
+exists: the AppArmor tier installs no hook at all, and a spawned child is not
+audited, so the same ``import numpy`` succeeds through ``cli`` or ``!python``.
+A model that is not told this reads one refusal as "the sandbox forbids native
+code" and stops — the failure #1011 and #1012 were filed for.
+
 Layering with the in-process gate
 =================================
 
@@ -102,6 +140,81 @@ BOUNDARY_APPARMOR = "apparmor"
 BOUNDARY_AUDIT = "audit"
 BOUNDARY_OPT_OUT = "opt-out"
 BOUNDARY_NONE = "none"
+
+#: Prefix on every refusal this module raises into a cell.  Names the tier,
+#: because the hook is installed on the audit tier and on no other: a cell that
+#: sees this text is proof the session did NOT get the AppArmor boundary.  On a
+#: deployment whose operator believes AppArmor is enforced that is a
+#: misconfiguration (``JAATO_REQUIRE_APPARMOR=1`` turns it into a refusal to
+#: start), and before #1012 the only evidence was a runner log line nobody
+#: reads.
+REFUSAL_PREFIX = "notebook containment (audit tier)"
+
+#: What each tier means for a model writing cells, as the lines
+#: :func:`boundary_notice` renders.  Two consequences per tier and no essay:
+#: this text is paid on every request when it reaches the system prompt (see
+#: ``NotebookPlugin.get_system_instructions``), and only the ACTIVE tier's
+#: entry is ever rendered.
+#:
+#: Both halves of every entry answer a question the failing session in #1012
+#: could not: *is this refused because of containment, or genuinely
+#: unavailable?* and *does the same thing work on another surface?*
+_BOUNDARY_NOTICES: Dict[str, Tuple[str, ...]] = {
+    BOUNDARY_APPARMOR: (
+        "Cells are bounded by a kernel-enforced AppArmor profile. No Python "
+        "audit hook is installed, so Python itself is unrestricted: "
+        "`import ctypes`, numpy, pandas and the rest of the scientific stack "
+        "import normally.",
+        "Reach outside the profile is refused by the kernel, not by Python, "
+        "and applies to subprocesses too.",
+    ),
+    BOUNDARY_AUDIT: (
+        "Cells are bounded by a Python audit hook contained to the workspace "
+        "(and /tmp), the same boundary the `cli` tool applies.",
+        "`import ctypes` is REFUSED on this tier, which also makes numpy, "
+        "pandas, scipy, matplotlib and anything built on them unimportable "
+        "IN A CELL. That is the boundary refusing, NOT a missing package: "
+        "other compiled extension modules import normally.",
+        "A subprocess is NOT audited. The same import succeeds through the "
+        "`cli` tool, and `!pip install X` works. Before reporting a package "
+        "as unavailable or a dependency as uninstallable, check it with "
+        "`cli` — a refusal in a cell is not evidence about what is installed.",
+    ),
+    BOUNDARY_OPT_OUT: (
+        "Cells run with NO filesystem boundary — the operator accepted an "
+        "uncontained notebook. Everything imports, and cell code can read and "
+        "write anything this user can. Stay inside the workspace anyway.",
+    ),
+    BOUNDARY_NONE: (
+        "No execution boundary could be established, so cells are refused "
+        "outright. This is a deployment condition, not something a different "
+        "cell will get past.",
+    ),
+}
+
+
+def boundary_notice(kind: Optional[str]) -> Tuple[str, ...]:
+    """The model-facing consequences of running under boundary ``kind``.
+
+    The ONE renderer for this text (#1012).  The tier itself is decided by
+    :func:`establish_containment` in the kernel and reported on the READY
+    frame, and re-derived pre-spawn by
+    ``SubprocessKernelBackend.boundary_kind``; this function invents nothing
+    and only says what a given answer means.  Both places the model reads it —
+    the plugin's system-instruction contribution and the first
+    ``notebook_execute`` result on a fresh kernel — call this, so the standing
+    fact and the per-kernel one cannot disagree about what a tier costs.
+
+    Args:
+        kind: One of the ``BOUNDARY_*`` constants, or ``None`` / an
+            unrecognised value when the executing process reported no tier.
+
+    Returns:
+        Zero or more lines.  Empty for an unknown ``kind``: saying nothing is
+        correct when the tier is unknown, and inventing a default would be the
+        second source of truth this function exists to avoid.
+    """
+    return _BOUNDARY_NOTICES.get(kind or "", ())
 
 #: Operator opt-out: run notebook cells with NO filesystem boundary.  The
 #: sibling of ``JAATO_NOTEBOOK_ALLOW_INPROCESS_EXEC`` (which governs whether
@@ -364,12 +477,15 @@ class ContainmentPolicy:
     def refuse(self, path: str, mode: str, what: str) -> "NotebookContainmentError":
         """Build the error a refused access raises into the cell.
 
-        The message names the boundary and the escape hatches, because the
-        model reads it and its next move should be a workspace-relative path
-        or a request to the operator — not a retry loop.
+        The message names the tier, the boundary and the escape hatches,
+        because the model reads it and its next move should be a
+        workspace-relative path or a request to the operator — not a retry
+        loop.  The tier is named for the operator's benefit too: this hook is
+        installed on the audit tier only, so the prefix is evidence of which
+        tier the session actually got (see :data:`REFUSAL_PREFIX`).
         """
         return NotebookContainmentError(
-            f"notebook containment: {what} {mode} of {path!r} is outside the "
+            f"{REFUSAL_PREFIX}: {what} {mode} of {path!r} is outside the "
             f"workspace boundary ({self.workspace_root}). Notebook cells are "
             "contained to the workspace (and /tmp), the same boundary the cli "
             "tool applies. Use a workspace-relative path, ask the operator to "
@@ -549,18 +665,43 @@ def _check_dlopen(policy: ContainmentPolicy, args: Sequence[Any]) -> None:
     inside the interpreter installation (a wheel's bundled ``.so``) resolve
     under the read roots and load normally; a bare soname or ``None`` (which
     means "this process's own symbols") does not, and is refused.
+
+    The ``None`` branch is the expensive one and its price is paid by code
+    that never mentions ``ctypes``: ``import ctypes`` raises this event by
+    itself, so on the audit tier numpy and everything above it is
+    unimportable.  The module docstring states the full cost and why the check
+    is nonetheless correct (#1011); both messages here are written for the
+    *model* that hits them, because the one this replaced — "loading native
+    code would bypass the notebook's filesystem boundary" — was read in a live
+    session as "the sandbox forbids native code", which is false and stopped
+    the task.
     """
     name = _path_arg(args[0]) if args else None
     if name is None:
         raise NotebookContainmentError(
-            "notebook containment: ctypes.dlopen(None) is refused — loading "
-            "native code would bypass the notebook's filesystem boundary.")
+            f"{REFUSAL_PREFIX}: ctypes.dlopen(None) is refused. That handle "
+            "exposes this process's whole symbol table, so ctypes.pythonapi "
+            "would call arbitrary libc functions beneath the notebook's "
+            "filesystem boundary. `import ctypes` raises this by itself, so "
+            "on this tier ctypes — and numpy, pandas, scipy, matplotlib and "
+            "anything built on them — cannot be imported IN A CELL. This is "
+            "NOT a missing package and NOT a limit on native code in general: "
+            "compiled extension modules inside the interpreter installation "
+            "import normally. The same code works elsewhere — run it through "
+            "the `cli` tool or `!python` (a subprocess is not audited, which "
+            "is also why `!pip install X` works), or run the session under an "
+            "enforced AppArmor profile, where no audit hook is installed. An "
+            "operator can also set plugin_configs.notebook."
+            "allow_uncontained_exec.")
     if not os.path.isabs(name) or not policy.allows(name, "read"):
         raise NotebookContainmentError(
-            f"notebook containment: loading the shared library {name!r} is "
-            "refused — native code runs beneath the notebook's filesystem "
-            "boundary. Only libraries inside the interpreter installation "
-            "may be loaded.")
+            f"{REFUSAL_PREFIX}: loading the shared library {name!r} is refused "
+            "— native code runs beneath the notebook's filesystem boundary, "
+            "so only libraries inside the interpreter installation may be "
+            "loaded. Extension modules that ship with an installed package "
+            "are inside it and import normally; a bare soname is not. Run the "
+            "work through the `cli` tool or `!python` instead (a subprocess "
+            "is not audited).")
 
 
 def _dispatch(policy: ContainmentPolicy, event: str, args: Sequence[Any]) -> None:
@@ -604,7 +745,7 @@ def _audit_hook(event: str, args: Sequence[Any]) -> None:
         raise
     except Exception as exc:  # noqa: BLE001 — a check that failed is a refusal
         raise NotebookContainmentError(
-            f"notebook containment: refusing {event} — the containment check "
+            f"{REFUSAL_PREFIX}: refusing {event} — the containment check "
             f"failed ({type(exc).__name__}: {exc})") from exc
     finally:
         _reentry.busy = False

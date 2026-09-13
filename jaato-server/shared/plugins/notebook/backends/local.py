@@ -16,6 +16,9 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from .base import NotebookBackend
 from ..kernel_sandbox import (
+    BOUNDARY_APPARMOR,
+    BOUNDARY_NONE,
+    BOUNDARY_OPT_OUT,
     apparmor_enforced_profile,
     env_truthy,
 )
@@ -168,6 +171,23 @@ class LocalJupyterBackend(NotebookBackend):
         operator has accepted its absence.
         """
         return self._inprocess_exec_allowed()
+
+    def boundary_kind(self) -> str:
+        """The tier a cell would run under here (issue #1012).
+
+        Three of the four tiers are reachable and the missing one is the
+        informative part: this backend **never** installs an audit hook, so
+        it is never :data:`BOUNDARY_AUDIT` and a cell here never meets #1011's
+        ``import ctypes`` refusal. Under AppArmor the kernel bounds it; under
+        the opt-in nothing bounds its filesystem reach at all, which is what
+        :data:`BOUNDARY_OPT_OUT` says — and is the honest answer, since this
+        backend's gate gained the operator a PROCESS decision and never a
+        filesystem one.
+        """
+        if apparmor_enforced_profile():
+            return BOUNDARY_APPARMOR
+        allowed, _ = self._inprocess_exec_allowed()
+        return BOUNDARY_OPT_OUT if allowed else BOUNDARY_NONE
 
     def shutdown(self) -> None:
         """Shutdown and clean up all notebooks."""
