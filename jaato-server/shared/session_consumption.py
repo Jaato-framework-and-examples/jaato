@@ -45,6 +45,20 @@ one.  A provider with no prompt cache must not read as a provider whose
 cache never hits, and a session with no pricing table must not read as
 free.  ``cost_source`` says which source supplied a cost, so a consumer
 can tell a billed figure from an estimated one.
+
+AND THE TOTAL IS WHERE THAT RULE IS EASIEST TO BREAK.  A pooled
+cache-hit rate sums the numerator over the bindings that HAVE a cache
+and the denominator over all of them, so a binding reporting no cache
+dimension contributes zero hits and its whole uncached input — which is
+absent-read-as-zero, arrived at by arithmetic instead of by a literal.
+Measured on a two-tier voice session: a caching ``executor`` binding at
+76.41% pooled with a non-reporting ``voz`` binding to 54.66%, a
+session-wide "efficiency" figure no binding had and nothing in the
+payload explained.  So :meth:`ConsumptionLedger.totals` WITHHOLDS the
+pooled percentage whenever part of its denominator is unmeasured, and
+publishes :class:`CacheMeasurementBasis` in its place — which says how
+much input could not be measured, and what the rate is over the subset
+that could.  Nothing is lost; the number that was never defensible is.
 """
 
 from __future__ import annotations
@@ -77,6 +91,99 @@ def _add_optional(current: Optional[int], delta: Optional[int]) -> Optional[int]
     if delta is None:
         return current
     return delta if current is None else current + delta
+
+
+@dataclass
+class CacheMeasurementBasis:
+    """Which bindings a POOLED cache-hit figure could actually be taken over.
+
+    Attached to the totals row only (:meth:`ConsumptionLedger.totals`);
+    an ordinary binding leaves it ``None``, because a single binding
+    either reports the dimension or does not and there is no mixture to
+    describe.
+
+    It exists because the pooled rate's premise is stronger than the
+    per-binding one.  ``BindingUsage.cache_hit_percent`` divides by "what
+    this binding paid for that COULD have been a hit" — established, for
+    one binding, by the provider having reported the dimension at all.
+    Pooled across bindings that premise is no longer established: a
+    binding whose provider reports nothing contributes its uncached input
+    to the denominator and nothing to the numerator, and we cannot say
+    whether that input was cacheable-and-missed or not cacheable at all.
+
+    Attributes:
+        measured_bindings: Bindings that reported ``cache_read_tokens``.
+        unmeasured_bindings: Bindings that reported none.
+        measured_input_tokens: ``cache_read + uncached`` over the measured
+            bindings — the denominator the subset rate is taken over.
+        unmeasured_input_tokens: UNCACHED input from the unmeasured
+            bindings.  Not their ``input_tokens_total``: this is precisely
+            the quantity a pooled denominator would have absorbed, and
+            naming it after a larger number would repeat the error this
+            class exists to report.
+        cache_hit_percent: The rate over the measured subset, or ``None``
+            when nothing was measured.  Defensible where the pooled figure
+            is not, because every binding behind it reported the dimension.
+    """
+
+    measured_bindings: int = 0
+    unmeasured_bindings: int = 0
+    measured_input_tokens: int = 0
+    unmeasured_input_tokens: int = 0
+    cache_hit_percent: Optional[float] = None
+
+    @property
+    def is_mixed(self) -> bool:
+        """True when a pooled rate would silently absorb unmeasured input.
+
+        All three clauses are load-bearing, and each excludes a pool that
+        needs no explanation:
+
+        * ``measured_bindings`` — with nothing measured there is no pooled
+          rate to withhold.  ``cache_read_tokens`` is already absent from
+          the row, which reads correctly on its own, and a basis beside it
+          would explain the absence of a number nobody expected.
+        * ``unmeasured_bindings`` — a homogeneous pool's rate is sound.
+        * ``unmeasured_input_tokens`` — a binding contributing no uncached
+          input could not have moved the pooled denominator, so the figure
+          it would have produced is the one we would publish anyway.
+        """
+        return (
+            self.measured_bindings > 0
+            and self.unmeasured_bindings > 0
+            and self.unmeasured_input_tokens > 0
+        )
+
+    def as_dict(self) -> Dict[str, Any]:
+        """The reportable view, with the note that says why it is here.
+
+        The note's second sentence is conditional: a measured subset whose
+        own denominator came out empty publishes no rate, and promising a
+        "figure below" that is not below it would be the same shape of
+        defect at one remove.
+        """
+        note = (
+            f"No session-wide cache_hit_percent is reported: "
+            f"{self.unmeasured_bindings} binding(s) contributed "
+            f"{self.unmeasured_input_tokens} uncached input tokens while "
+            f"reporting no cache dimension, so a pooled rate would count them "
+            f"as misses without knowing they were cacheable."
+        )
+        out: Dict[str, Any] = {
+            "measured_bindings": self.measured_bindings,
+            "unmeasured_bindings": self.unmeasured_bindings,
+            "measured_input_tokens": self.measured_input_tokens,
+            "unmeasured_input_tokens": self.unmeasured_input_tokens,
+        }
+        if self.cache_hit_percent is not None:
+            out["cache_hit_percent"] = self.cache_hit_percent
+            note += (
+                " cache_hit_percent here is over the measured bindings only;"
+                " see the per-binding rows (detail='full') for each one's own"
+                " rate."
+            )
+        out["note"] = note
+        return out
 
 
 @dataclass
@@ -116,6 +223,12 @@ class BindingUsage:
             accumulating ``max_tokens`` is one whose output cap is wrong.
         first_used: ISO timestamp of this binding's first response.
         last_used: ISO timestamp of its most recent one.
+        cache_basis: Set on the TOTALS row only, by
+            :meth:`ConsumptionLedger.totals` — see
+            :class:`CacheMeasurementBasis`.  ``None`` on every real
+            binding, which is what keeps a single-model session's report
+            byte-identical to what it was before the totals row learned to
+            withhold.
     """
 
     provider: str
@@ -134,6 +247,7 @@ class BindingUsage:
     finish_reasons: Dict[str, int] = field(default_factory=dict)
     first_used: Optional[str] = None
     last_used: Optional[str] = None
+    cache_basis: Optional[CacheMeasurementBasis] = None
     # Which turn index last contributed, so ``turns`` counts distinct turns
     # in O(1) without holding the set.  Not reported.
     _last_turn_index: Optional[int] = field(default=None, repr=False)
@@ -165,8 +279,17 @@ class BindingUsage:
 
         ``None`` when the provider reports no cache at all, so "uncached
         provider" stays distinct from "cache never hit".
+
+        Also ``None`` on a TOTALS row whose :attr:`cache_basis` reports a
+        mixed pool.  The denominator's premise — "input that could have
+        been a hit" — is established per binding by its provider having
+        reported the dimension, and pooling across a binding that reported
+        nothing silently drops that premise while keeping the formula.
+        The measured subset's rate is published on the basis instead.
         """
         if self.cache_read_tokens is None:
+            return None
+        if self.cache_basis is not None and self.cache_basis.is_mixed:
             return None
         denominator = self.cache_read_tokens + self.uncached_input_tokens
         if denominator <= 0:
@@ -256,6 +379,12 @@ class BindingUsage:
         hit = self.cache_hit_percent
         if hit is not None:
             out["cache_hit_percent"] = hit
+        if self.cache_basis is not None and self.cache_basis.is_mixed:
+            # Emitted ONLY in the mixed case.  On a homogeneous pool the
+            # percentage above is sound and a basis beside it is noise; on
+            # a pool where nothing was measured ``cache_read_tokens`` is
+            # already absent, which reads correctly on its own.
+            out["cache_hit_basis"] = self.cache_basis.as_dict()
         if self.thinking_tokens is not None:
             out["thinking_tokens"] = self.thinking_tokens
         if self.cost_usd is not None:
@@ -348,9 +477,23 @@ class ConsumptionLedger:
         those is right: summing double-counts a turn that crossed an
         ``enter_tier`` (each binding it touched counted it), and taking
         the max under-counts two bindings that served different turns.
+
+        ``cache_hit_percent`` is WITHHELD here when the bindings disagree
+        about whether their provider reports a cache at all — see
+        :class:`CacheMeasurementBasis`, which is attached in its place.
+        The token sums are unaffected: they are sums of measurements, and
+        a dimension nothing reported still contributes nothing to them.
         """
         total = BindingUsage(provider="*", model="*", tier=None)
+        basis = CacheMeasurementBasis()
         for binding in self._bindings.values():
+            if binding.cache_read_tokens is None:
+                basis.unmeasured_bindings += 1
+                basis.unmeasured_input_tokens += binding.uncached_input_tokens
+            else:
+                basis.measured_bindings += 1
+                basis.measured_input_tokens += (
+                    binding.cache_read_tokens + binding.uncached_input_tokens)
             total.responses += binding.responses
             total.uncached_input_tokens += binding.uncached_input_tokens
             total.output_tokens += binding.output_tokens
@@ -383,5 +526,9 @@ class ConsumptionLedger:
                     setattr(total, attr, min(current, stamp))
                 else:
                     setattr(total, attr, max(current, stamp))
+        if total.cache_read_tokens is not None and basis.measured_input_tokens > 0:
+            basis.cache_hit_percent = round(
+                100.0 * total.cache_read_tokens / basis.measured_input_tokens, 2)
+        total.cache_basis = basis
         total.turns = len(self._turn_indices)
         return total
