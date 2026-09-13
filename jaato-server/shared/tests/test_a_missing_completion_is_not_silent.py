@@ -2,22 +2,31 @@
 
 THE GAP.  When a session's profile puts ``signal_completion`` in its tool
 surface and the model ends its loop without calling it, the framework nudges
-it -- up to ``MAX_COMPLETION_NUDGES`` (2).  If it still never calls it, the
-turn simply ends, and:
+it -- up to ``max_completion_nudges`` (default 2).  If it still never calls
+it, the turn ends without a typed payload.  A cascade driver waiting for one
+has to INVENT a reason for its absence, and the reason reached for is "the
+profile must not declare a completion schema" -- which is the one thing that
+was fine.  That misdirection is the defect; it cost a downstream consumer an
+afternoon inspecting a correct schema.
 
-  * no ``AgentCompletedEvent`` fires   -- only ``signal_completion`` produces
-    one (``lifecycle_tools``); and
-  * no ``SessionTerminatedEvent`` fires -- quiescence is explicitly gated on
-    ``signal_completion`` having been called (``jaato_session``).
+WHAT ACTUALLY SIGNALS IT (#771).  This docstring used to say that no
+``AgentCompletedEvent`` and no ``SessionTerminatedEvent`` fire, and that
+``TurnCompletedEvent.completion_gap`` is therefore "the ONLY event that fires
+on this path".  Both halves were wrong:
 
-So the consumer sees a turn end and nothing else.  A cascade driver waiting
-for a typed payload has to INVENT a reason for its absence, and the reason
-reached for is "the profile must not declare a completion schema" -- which is
-the one thing that was fine.  That misdirection is the defect; it cost a
-downstream consumer an afternoon inspecting a correct schema.
+  * a terminal DOES fire -- ``server/core.py`` emits ``ErrorEvent`` and
+    ``_emit_error_termination`` with ``error_type="NudgeExhausted"``; and
+  * ``completion_gap`` does NOT reach a consumer on this path.  Its sole
+    writer in the server runs after ``on_agent_turn_completed`` has built the
+    turn event, read the field and cleared it, and the session then ends.
 
-``TurnCompletedEvent.completion_gap`` is the signal.  It is the ONLY event
-that fires on this path.
+So the consumer signal is the ``NudgeExhausted`` terminal, which is typed,
+terminal and unconditional; ``jaato_eval.sign_off`` already routes on it.
+The tests below still pin the CARRIER (the field round-trips, and a clean
+turn reports nothing) because the wire shape is released and must not drift
+-- but carriage is not delivery, and
+``test_a_nudge_exhausted_session_is_announced.py`` is the guard that the
+signal a consumer is told to watch is really emitted.
 """
 
 import ast

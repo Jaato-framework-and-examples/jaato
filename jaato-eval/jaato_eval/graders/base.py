@@ -51,15 +51,16 @@ class GraderContext:
             strings — the set of terminals that leave a gradeable
             workspace is one rule, and it lives in
             :mod:`jaato_eval.sign_off`.
-        completion_gap: ``TurnCompletedEvent.completion_gap`` (jaato #654) —
-            set when the framework asked the agent twice to signal
-            completion and it never did.  Before this existed, that path
-            emitted NO terminal event at all: no AgentCompletedEvent, and
-            no SessionTerminatedEvent because quiescence is gated on
-            signal_completion having been called.  There was nothing to
-            misread, so a consumer had to invent a cause for an absence —
-            which this engine did, blaming a rubric's schema that was
-            correct.
+        completion_gap: ``TurnCompletedEvent.completion_gap`` (jaato #654).
+            **In practice always ``None``** — jaato #771 established that no
+            daemon delivers it: its sole writer runs after the turn event
+            has been built and cleared, and the session then ends.  So it
+            is a corroborating witness at best, never a premise.  The fact
+            it was meant to carry — *the framework asked and gave up* — is
+            carried by :attr:`termination_error_type` as
+            ``"NudgeExhausted"``, and should be read through
+            :attr:`missing_sign_off`, which is the one place that rule
+            lives.
         socket_path: The daemon the ARM ran on.  A grader that opens its
             own session (the judge) must use the same one — the socket is
             a property of the RUN, not of the task, so it cannot live in

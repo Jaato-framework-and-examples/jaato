@@ -90,10 +90,17 @@ class JudgeGrader:
 
         if payload is None:
             # Prefer the framework's own account over this adapter's guess.
-            # jaato #654 added completion_gap for exactly this: before it,
-            # the "asked and refused" path emitted no terminal event at all,
-            # so the guess below was the best anyone could do and it named
-            # the schema — the one thing that was fine.
+            # jaato #654 added completion_gap for exactly this, and jaato
+            # #771 established that no daemon delivers it — its sole writer
+            # runs after the turn event has been built and cleared — so in
+            # practice this branch does not fire and the guess below is what
+            # a reader sees.  Fixing that properly means deciding what the
+            # JUDGE's own session terminal was (this ``context`` describes
+            # the ARM, and ``_ask_judge`` returns only a payload), which is
+            # a semantics question rather than a wording one.  Left as-is
+            # deliberately: the branch is harmless where it stands, and
+            # guessing at the answer here is how the original misdirection
+            # was introduced.
             if context.completion_gap:
                 return blocked(
                     self.spec, claim,
