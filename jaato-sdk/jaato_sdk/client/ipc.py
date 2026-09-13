@@ -2638,8 +2638,12 @@ class IPCClient:
         Args:
             text: Prompt text to inject.
             source_type: Queue priority — ``"user"`` (steer),
-                ``"child"`` (follow-up), or ``"system"`` / ``"event"``
-                / ``"parent"`` for reactor / hook callers.
+                ``"child"`` (follow-up), ``"sibling"`` (idle-only
+                coordination from another session in the same cascade),
+                or ``"system"`` / ``"event"`` / ``"parent"`` for
+                reactor / hook callers.  The daemon derives the
+                accepted set from its ``SourceType`` enum, so these six
+                are the whole vocabulary and anything else is refused.
             source_id: Caller identifier for telemetry / logs.
             timeout: Seconds to wait for the daemon's result event.
             attachments: Optional binary user content — each a file-path

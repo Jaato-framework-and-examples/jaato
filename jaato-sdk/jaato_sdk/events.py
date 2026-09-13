@@ -2024,15 +2024,25 @@ class InjectPromptRequest(Event):
       model at the next safe point).
     * ``"child"`` — CHILD priority (queued behind in-flight work; runs
       when the agent would otherwise stop, the "follow-up" pattern).
+    * ``"sibling"`` — SIBLING priority (idle-only, like ``"child"``,
+      and never mid-turn): another SESSION sharing this cascade's
+      ``cascade_driver_id``.  Siblings coordinate, they do not
+      control, which is what keeps them out of the high-priority
+      tier.
     * ``"system"`` / ``"event"`` / ``"parent"`` — other priority
       tiers from :class:`SourceType` for reactor / hook callers.
+
+    The daemon derives the accepted set from ``SourceType`` itself and
+    rejects anything outside it, so this list is the whole vocabulary —
+    all six members, not a selection from them.
 
     Single verb covers both pi-agent's ``steer`` and ``followUp``
     patterns via the priority dimension.
     """
     type: EventType = Field(default=EventType.INJECT_PROMPT_REQUEST)
     text: str = ""
-    source_type: str = "user"  # "user" | "child" | "system" | "event" | "parent"
+    # "user" | "child" | "sibling" | "system" | "event" | "parent"
+    source_type: str = "user"
     source_id: Optional[str] = None  # caller identifier for telemetry / logs
     #: Binary user content in the same canonical wire shape
     #: :class:`SendMessageRequest` accepts (``{mime_type, data: base64-str,
