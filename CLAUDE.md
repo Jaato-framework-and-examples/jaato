@@ -600,6 +600,80 @@ caller-originated and starts with a full budget. Consequences:
 - **Nothing is persisted**, so a revived session begins with a full budget —
   the same answer the reset gives its first caller-originated turn.
 
+### A Tier Binds (provider, model), and Half of It Did Not Take
+
+Reported as *"two tiers of the same profile do not share history; each
+tier keeps its own."* The premise is false, and saying so is what locates
+the real defects: a session has ONE `_history`, `switch_tier` never
+touches it, and every request is built from `_history_for_provider()`,
+whose only per-tier filter withholds **binary** content. Driven end to
+end, the tier entered second is handed the first tier's turns verbatim —
+`test_a_tier_binds_provider_and_window.py` measures that on the wire
+rather than leaving it as folklore.
+
+What a tier *does* bind is a **pair**, and the session applied one half of
+it in two places.
+
+**The initial tier's provider was dropped.** `configure()` overrode
+`self._model_name` from the initial tier and left
+`self._provider_name_override` at the profile's top-level `provider:` —
+`None` when the profile declares none, which is the normal shape when
+every tier declares its own. So turn 0 ran the initial tier's MODEL on
+somebody else's PROVIDER (the runtime default, or a top-level value that
+disagrees), and the binding the profile declared did not take effect
+until the first `enter_tier`.
+
+The second consequence is the one the report is about.
+`_active_provider_name` — what `_connect_tier_entry` compares
+`entry.provider` against to decide whether to SWAP — was that same wrong
+value, and `_ensure_provider` seeded the per-provider cache only when the
+override was non-`None`. Entering a tier that named the provider the
+session was **already running** therefore compared unequal and built a
+SECOND instance of it:
+
+| Provider | What a duplicate instance costs |
+|----------|--------------------------------|
+| any stateless one (all but one) | a wasted handshake |
+| `claude_cli` | **a second conversation.** It sends `messages[-1]` and nothing else, leaving the transcript to the CLI's own `--resume` session (`_cli_session_id`), so the new instance starts empty and accumulates only the turns taken while its tier holds the wheel |
+
+That last row is the one shape in this tree that genuinely produces
+"each tier keeps its own history", and it is a property of that provider
+rather than of `switch_tier`: even on ONE instance, a `claude_cli` tier
+never receives the turns another tier took. Two fixes, because they cover
+different cases and neither subsumes the other —
+`_apply_initial_tier_binding` overrides the provider alongside the model,
+and `_ensure_provider` resolves the name from the runtime
+(`cfg['provider_name'] or runtime.provider_name`) when the override is
+absent, since `None` there never meant "no provider", it meant "whichever
+one the runtime is configured for" — which is exactly what
+`create_provider` had just resolved. A tier declaring no `provider` still
+leaves the choice alone: that is what "use the session's main provider"
+means.
+
+**The window did not follow the model.**
+`InstructionBudget.context_limit` is the denominator for the after-turn GC
+threshold, the pre-send refusal guard and `get_context_usage` (so
+`aspect="context"` and every client's readout). It was stamped ONCE, when
+the provider was lazily created, and never again — while
+`get_context_limit()` answers live for whatever provider is active.
+Measured: a session that booted on a 200k tier and entered an 8k one
+reported `get_context_limit() == 8000` against a budget still saying
+`200000`.
+
+The direction that hurts is entering a **smaller** window: GC cannot fire
+before the request overflows, the guard lets it through, the upstream
+rejects it, and `_try_gc_for_context_recovery` then trims history in the
+**store** — destructive, and shared, so the tier that had the room loses
+the conversation too. Which is how a stale denominator ends up looking
+like the isolation that was reported.
+`_refresh_context_limit_from_provider` is now the one definition, called
+from both points where the binding changes (first materialisation, and
+every tier connect), so the two cannot disagree about where the number
+comes from. It joins the post-connect block that must not raise, and
+therefore joins its rule: a failure is counted onto
+`jaato.tier.context_limit_refresh_failures`, beside its two siblings —
+best-effort blocks are not the problem, unobservable ones are.
+
 ### Session Revive (waking a persisted session)
 
 A session woken from disk — `session.wake`, a reattach, anything reaching

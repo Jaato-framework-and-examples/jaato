@@ -439,8 +439,9 @@ refactor produces, and a guard aimed at an adversary rather than at a
 mistake buys nothing.
 
 *Attribution.* The LLM span carries `jaato.tier`,
-`jaato.tier.switches`, `jaato.tier.cache_rewire_failures` and
-`jaato.tier.reliability_retarget_failures` whenever tier mode is active,
+`jaato.tier.switches`, `jaato.tier.cache_rewire_failures`,
+`jaato.tier.reliability_retarget_failures` and
+`jaato.tier.context_limit_refresh_failures` whenever tier mode is active,
 and nothing when it is not. The tier is what makes a span's cache figures readable — a miss
 after a switch is expected, a miss without one is not.
 `jaato.tier.switches` counts real binding changes only (an `enter_tier`
@@ -452,16 +453,18 @@ Deriving the tier from `llm.model_name` instead does not work: two tiers
 may share a model, and a degrade rung rebinds a tier's model underneath
 it.
 
-The two `*_failures` counters exist because §5.2's post-connect
+The `*_failures` counters exist because §5.2's post-connect
 bookkeeping cannot be allowed to raise — the provider is already
 re-pointed by then, so an exception leaves the switch half-applied. That
-made two real regressions invisible: a cache plugin that fails to
-re-attach leaves the session running **uncached** (a cost regression),
-and a failed reliability retarget judges patterns against the **wrong
-model** (a correctness one). Three best-effort blocks is not the problem;
-three *unobservable* ones is. Both counters are emitted even when zero,
-so `> 0` is a queryable condition and a healthy span is distinguishable
-from an older build's.
+made three real regressions invisible: a cache plugin that fails to
+re-attach leaves the session running **uncached** (a cost regression), a
+failed reliability retarget judges patterns against the **wrong model**,
+and a failed context-window refresh leaves GC and every "how full am I"
+figure measuring against the **previous model's window** (both
+correctness ones). Best-effort blocks are not the problem; *unobservable*
+ones are. Every counter is emitted even when zero, so `> 0` is a
+queryable condition and a healthy span is distinguishable from an older
+build's.
 
 Landing them exposed a second layer of hiding:
 `_retarget_reliability_model` had its own `try/except` *inside* the
