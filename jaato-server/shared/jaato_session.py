@@ -13897,6 +13897,18 @@ NOTES
                 delegated_from, target, trigger, exc,
             )
             return
+        # A hand-back is not a delegation.  ``switch_tier`` arms on ANY
+        # entry into a completion tier from a different one, so returning
+        # to a caller that itself declares ``exit_on: completion`` would
+        # re-arm -- pointing at the tier just left, which is a ping-pong,
+        # and on the terminal path would leave an arming standing into the
+        # next turn.  The model did not ask for this switch, so it does not
+        # count as an entry.
+        rearmed = self._take_pending_tier_return()
+        if rearmed is not None:
+            self._trace(
+                f"TIER_EXIT_ON_COMPLETION: not re-arming {target} "
+                f"(a hand-back is not a delegation)")
         self._trace(
             f"TIER_EXIT_ON_COMPLETION: returned to {target} ({trigger})")
         logger.info(

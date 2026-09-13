@@ -189,6 +189,24 @@ def _live_session(provider):
     return session
 
 
+def _continuation_slot(session, response):
+    """Drive the shipped tool-continuation slot with *response*.
+
+    ``_execute_tools_and_continue`` is the method the issue's root-cause
+    reading is about, and its steps 4-7 -- cancellation,
+    ``_finish_or_continue``, ``_nudge_for_tool_use``, the exit check --
+    are the shipped code with nothing stubbed.  Only the two ends are
+    replaced: the tool batch (empty) and the provider round trip that
+    produces the continuation, which is what lets a test name the finish
+    reason the upstream reported.
+    """
+    session._execute_function_call_group = lambda *a, **k: []
+    session._send_tool_results_and_continue = lambda *a, **k: response
+    session._check_and_handle_mid_turn_prompt = lambda *a, **k: None
+    return session._execute_tools_and_continue(
+        [], False, None, None, {}, False, None, context="probe")
+
+
 def _delegated(session):
     """Enter the completion tier through the real arming path.
 
@@ -307,30 +325,50 @@ def test_an_output_cap_on_the_continuation_still_returns_the_tier():
     assert session._pending_tier_return is None
 
 
+def test_the_continuation_slot_alone_does_not_pop_an_abnormal_finish():
+    """Why the turn-end backstop is load-bearing and not belt-and-braces.
+
+    At the slot the issue points at, an abnormal finish still returns
+    before the exit check -- deliberately, because #749 owns that exit
+    and re-ordering it to suit tiers would put a tier concern in front of
+    a truncation-recovery one.  The arming therefore SURVIVES this
+    method, and the turn-end evaluation is what spends it.  Recorded so
+    the two halves are not mistaken for duplicates of each other.
+    """
+    session = _delegated(_live_session(MagicMock()))
+
+    _, turn_result, _ = _continuation_slot(
+        session, _response("cut off", finish=FinishReason.MAX_TOKENS))
+
+    assert turn_result is not None, "the turn did not end here"
+    assert session._pending_tier_return == "executor"
+
+
 # ==================== the nudge (bypass 2 -- not a bypass) ============
 
 
 @pytest.mark.parametrize("finish,text", [
     (FinishReason.TOOL_USE, ""),      # TOOL_USE without function calls
     (FinishReason.UNKNOWN, ""),       # empty UNKNOWN
-    (FinishReason.STOP, "said it"),   # the clean settle
+    (FinishReason.STOP, "said it"),   # the clean settle, for contrast
 ])
 def test_the_nudge_path_was_never_a_bypass(finish, text):
     """Recorded because the issue names it as one, and it is not.
 
-    The exit check sits AFTER ``_nudge_for_tool_use``, so a re-fetch
-    cannot skip it -- it can only change WHICH response is judged.  All
-    three of these popped correctly before the fix and still do; the row
-    exists so a future reader does not go looking for a defect here.
+    Driven at the tool-continuation slot the issue's reading is about,
+    with everything between it and the exit check shipped.  The check
+    sits AFTER ``_nudge_for_tool_use``, so a re-fetch cannot skip it --
+    it can only change WHICH response is judged.  All three of these
+    popped correctly BEFORE the fix and still do, which is why this file
+    says the issue is wrong about that candidate; the row exists so a
+    future reader does not go hunting for a defect here.
     """
-    session = _delegated(_live_session(_scripted_provider([
-        _response(text, finish=finish),
-        _response("ok", finish=FinishReason.STOP),
-    ])))
+    session = _delegated(_live_session(MagicMock()))
 
-    session.send_message("say something")
+    _continuation_slot(session, _response(text, finish=finish))
 
     assert session._active_tier == "executor"
+    assert session._pending_tier_return is None
 
 
 # ==================== the hold (bypass 3 -- deliberate) ===============
@@ -406,6 +444,31 @@ def test_the_arming_is_spent_so_the_exit_cannot_fire_twice():
 
     assert session._active_tier == "executor"
     assert session._pending_tier_return is None
+
+
+def test_handing_back_to_a_completion_tier_does_not_re_arm():
+    """A hand-back is not a delegation.
+
+    ``switch_tier`` arms on ANY entry into a completion tier from a
+    different one, so a profile where the caller ALSO declares
+    ``exit_on: completion`` would have the return itself re-arm --
+    pointing back at the tier just left.  That is a ping-pong, and on the
+    terminal path it is an arming standing into the next turn, which is
+    the bug this whole change is about, one layer along.
+    """
+    tiers = dict(TIERS)
+    tiers["executor"] = {"model": "text-model", "exit_on": "completion"}
+    session = _live_session(MagicMock())
+    session._tier_config = ModelTierConfig.from_unified_dict(tiers)
+    session._active_tier = "executor"
+    _delegated(session)
+
+    session._finalize_completion_tier_exit(reason="turn end")
+
+    assert session._active_tier == "executor"
+    assert session._pending_tier_return is None, (
+        "the hand-back re-armed, so the next turn starts owing a return"
+    )
 
 
 def test_a_turn_that_never_delegated_pops_nothing():
