@@ -19,7 +19,17 @@ privileges), all methods are no-ops and ``is_available()`` returns False.
 Callers should check availability and fall back to directory-level sandboxing
 (which is the existing default behaviour).
 
-Profile naming convention: ``jaato-ws-{session_id}``
+Profile naming convention: ``jaato-ws-{confinement_id}``, where the id names
+the BOUNDARY rather than the session — the workspace, the config root and a
+digest of the rendered rules (``server.confinement_id``).  It was
+``jaato-ws-{session_id}`` until #1033: a pre-warm pool slot cannot change the
+profile its existing threads wear (``aa_change_profile`` is per-task, and the
+kernel refuses ``current != task``), so a per-session name meant every slot
+reuse straddled two profiles and its bootstrap was refused by #1023's
+verification.  Callers that supply no ``confinement_id`` still get
+``jaato-ws-{session_id}``; the two are the same string for a session whose id
+IS its boundary id.  The ``{session_id}`` placeholder inside PROFILE_TEMPLATE
+keeps its name and is fed whichever id was resolved.
 
 Thread-level confinement
 ------------------------
