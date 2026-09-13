@@ -15,9 +15,15 @@ bump + merge  ->  run with target: testpypi  ->  someone tests  ->  run the SAME
                                                                     target: pypi
 ```
 
-Re-running the same commit is what makes this worth doing: the sdist and wheel
-built for PyPI are byte-identical to the ones that were tested, because nothing
-in between changed.
+Re-running the same commit is what makes this worth doing. The staged build
+carries a pre-release suffix (see below) and the PyPI build does not, so the two
+artifacts differ in exactly one respect — the version string. Everything else is
+the same file: the same tree, the same dependency pins, and the same generated
+changelog, because the suffix is applied *after* `build_readme.py` runs and the
+changelog is anchored on the version `pyproject.toml` declares.
+
+`target: pypi` publishes that declared version and refuses a `suffix`, so an
+`rcN` never reaches PyPI.
 
 ## Which packages need a release
 
