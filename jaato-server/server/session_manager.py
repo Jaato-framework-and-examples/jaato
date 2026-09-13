@@ -1421,6 +1421,14 @@ class SessionManager:
         self._ws_server_ref = ws_server
         self._daemon_loop = daemon_loop
         self._pool_manager_ref = pool_manager
+        if pool_manager is not None:
+            # #1033 consequence 1: a boundary-derived AppArmor profile
+            # outlives the session that created it, so the thing allowed
+            # to unload it is the death of the last slot wearing it, not
+            # a session ending.  This is the only place that holds both
+            # the pool and the apparmor manager.
+            pool_manager.profile_reaper = (
+                self._reap_apparmor_profile_for_dead_slot)
 
     def _provision_ipc_apparmor_and_spawn_runner(
         self,
@@ -1808,6 +1816,21 @@ class SessionManager:
             )
             return "", SANDBOX_MODE_SOFT
 
+        # #1033: name the profile after the BOUNDARY, not after this
+        # session.  A pre-warm pool slot cannot change the profile its
+        # existing threads wear (``aa_change_profile`` is per-task, and
+        # the kernel refuses to let one thread re-confine another —
+        # #1023), so a per-session name made every slot reuse a straddle
+        # of two profiles and every reused bootstrap a refusal.  Derived
+        # here so the same id reaches ``acquire_slot`` as part of the
+        # slot key and reaches the runner on the envelope.
+        confinement_id = apparmor.confinement_id_for_boundary(
+            workspace_path,
+            config_root=config_root,
+            env_file=env_file,
+            requested_fragments=requested_fragments,
+            plugin_rules=plugin_rules,
+        )
         if not apparmor.provision_profile(
             session_id,
             workspace_path,
@@ -1815,6 +1838,7 @@ class SessionManager:
             env_file=env_file,
             requested_fragments=requested_fragments,
             plugin_rules=plugin_rules,
+            confinement_id=confinement_id,
         ):
             self._notify_apparmor(
                 client_id, session_id,
@@ -1842,33 +1866,39 @@ class SessionManager:
         current_session_id: str,
         current_profile_name: str,
     ) -> None:
-        """Phase 3 cascade-sharing: unload the prior session's
-        apparmor profile after the runner has transitioned to the
-        current session's profile.
+        """Unload the slot's PRIOR profile — only if it really is prior.
 
-        Called from :meth:`_spawn_session_runner_unconditional` right
-        after :func:`dispatch_bootstrap_envelope` returns success.  By
-        the time this fires, the runner's main thread has already
-        called ``aa_change_profile(current_profile_name)`` (bootstrap
-        step 1c, re-entry path) — so the prior session's profile is
-        no longer the runner's active profile and is safe to unload.
+        Phase 3 cascade-sharing shipped this as an unconditional unload
+        of ``slot.last_session_id``'s profile, fired right after the
+        bootstrap RPC returned, on the reasoning that the runner had by
+        then transitioned away from it.  That reasoning depended on the
+        profile name changing per session, and #1033 is precisely the
+        change that stops it changing: a reused slot now keeps the
+        profile it was already wearing, so "the prior session's profile"
+        and "the profile this runner is confined to right now" are THE
+        SAME PROFILE.  Unloading it would pull the kernel boundary out
+        from under a live session — a strictly worse outcome than the
+        stale-profile accumulation this was written to prevent.
 
-        No-op when:
-          - ``current_profile_name`` is empty (operator opted out of
-            apparmor; no transition occurred; nothing to unload).
-          - The session was NOT pool-served (no ``pool_slot`` on the
-            SpawnedRunner; this is the first session in the runner's
-            life, no prior profile exists).
-          - ``slot.last_session_id`` is unset (first cascade session
-            on this slot — no prior profile to unload).
-          - ``slot.last_session_id == current_session_id`` (defensive
-            self-check; shouldn't happen because session_ids are
-            unique).
+        So the unload is conditional on the names actually differing,
+        which on the pool path they no longer do.  The accumulation
+        worry goes with it: per-session names grew without bound, one
+        per session for the life of the daemon, while boundary-derived
+        names are bounded by the number of distinct boundaries a
+        deployment has.  What reaps them is the death of the last slot
+        wearing one — see ``PoolManager._reap_slot_profile`` — and the
+        session-end path in ``AppArmorManager.teardown_profile``, which
+        refuses to unload a boundary another live session still holds.
+
+        Kept rather than deleted because a slot CAN still change profile
+        legitimately: a pool slot that has never been confined (a fresh
+        template fork) is handed to a confined session on acquire path
+        (2), and an older daemon rolling over to a redeployed workspace
+        can leave a genuinely orphaned name behind.
 
         Best-effort: any unload failure (EBUSY because of lingering
         references, apparmor unavailable, etc.) is logged at WARNING
-        and tolerated.  The cascade-idle teardown sweep will reap
-        leftover profiles when the slot itself is torn down.
+        and tolerated.
         """
         if not current_profile_name:
             return
@@ -1884,14 +1914,27 @@ class SessionManager:
         if apparmor is None or not apparmor.is_available():
             return
 
+        # THE #1033 GUARD.  Resolve the prior session to the profile it
+        # was actually confined to and compare NAMES, not session ids.
+        # Same name = the slot is still wearing it = nothing to unload.
+        prior_profile_name = apparmor.get_profile_name(prior_session_id)
+        if prior_profile_name == current_profile_name:
+            logger.debug(
+                "AppArmor: slot kept its profile %s across sessions "
+                "%s -> %s; nothing to unload",
+                current_profile_name, prior_session_id, current_session_id,
+            )
+            return
+
         try:
             ok = apparmor.teardown_profile(prior_session_id)
             if ok:
                 logger.info(
                     "AppArmor: cascade-sharing transition complete — "
-                    "unloaded prior profile for session=%s after slot "
-                    "transitioned to session=%s",
-                    prior_session_id, current_session_id,
+                    "unloaded prior profile %s for session=%s after slot "
+                    "transitioned to %s for session=%s",
+                    prior_profile_name, prior_session_id,
+                    current_profile_name, current_session_id,
                 )
             else:
                 logger.warning(
@@ -1908,6 +1951,27 @@ class SessionManager:
                 "kernel profile loaded; cascade-idle sweep will reap",
                 prior_session_id, current_session_id, exc,
             )
+
+    def _reap_apparmor_profile_for_dead_slot(self, profile_name: str) -> None:
+        """``PoolManager.profile_reaper`` — the last wearer has died.
+
+        Unloads *profile_name* unless a live session still claims it;
+        that second guard lives in ``AppArmorManager.teardown_profile``,
+        which is also where the checked-out (non-idle) slots are covered,
+        since such a slot always has a session.
+
+        Silently does nothing when no AppArmor manager was ever built —
+        the pool runs on hosts with no AppArmor at all, and a reaper that
+        insisted on one would log noise on every slot teardown.
+        """
+        apparmor = getattr(self, "_apparmor_manager", None)
+        if apparmor is None or not apparmor.is_available():
+            return
+        prefix = "jaato-ws-"
+        if not profile_name.startswith(prefix):
+            return
+        apparmor.teardown_profile_by_confinement_id(
+            profile_name[len(prefix):])
 
     def _spawn_session_runner_unconditional(
         self,

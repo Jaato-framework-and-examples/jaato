@@ -633,9 +633,15 @@ class JaatoWSServer:
                     workspace_path=workspace_path,
                     config_root=None,
                 )
+                # #1033: the profile is named after the BOUNDARY, so a
+                # pre-warm slot that already wears it needs no
+                # ``aa_change_profile`` — which it could not perform for
+                # the threads it already has (#1023).
                 if apparmor.provision_profile(
                     session_id, workspace_path,
                     plugin_rules=plugin_rules,
+                    confinement_id=apparmor.confinement_id_for_boundary(
+                        workspace_path, plugin_rules=plugin_rules),
                 ):
                     profile_name = apparmor.get_profile_name(session_id)
                 else:
@@ -859,6 +865,8 @@ class JaatoWSServer:
             if not apparmor.provision_profile(
                 session_id, sess.workspace_path,
                 plugin_rules=plugin_rules,
+                confinement_id=apparmor.confinement_id_for_boundary(
+                    sess.workspace_path, plugin_rules=plugin_rules),
             ):
                 sess.sandbox_mode = SANDBOX_MODE_SOFT
                 return

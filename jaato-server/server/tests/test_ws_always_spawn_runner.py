@@ -42,6 +42,7 @@ class _FakeAppArmor:
         self.available = True
         self.provision_outcome = True
         self.provision_calls: List[Tuple[str, str]] = []
+        self._confinement_ids: Dict[str, str] = {}
 
     def is_available(self) -> bool:
         return self.available
@@ -51,10 +52,25 @@ class _FakeAppArmor:
         **kwargs: Any,
     ) -> bool:
         self.provision_calls.append((session_id, workspace_path))
+        cid = kwargs.get("confinement_id")
+        if cid:
+            self._confinement_ids[session_id] = cid
         return self.provision_outcome
 
     def get_profile_name(self, session_id: str) -> str:
-        return f"jaato-ws-{session_id}"
+        return f"jaato-ws-{self._confinement_ids.get(session_id, session_id)}"
+
+    def confinement_id_for_boundary(
+        self, workspace_path: str, **kwargs: Any,
+    ) -> str:
+        """#1033: the profile is named after the boundary, not the
+        session, so the WS hook derives an id before provisioning."""
+        from server.confinement_id import confinement_id
+        return confinement_id(
+            workspace_root=workspace_path,
+            config_root=None,
+            rendered_body=repr(sorted(kwargs.items(), key=str)),
+        )
 
 
 class _FakeSM:
@@ -215,7 +231,9 @@ def test_ws_hook_spawns_confined_when_apparmor_available(
     assert len(spawn_calls) == 1
     call = spawn_calls[0]
     assert call["disable_confine"] is False
-    assert call["profile_name"] == "jaato-ws-s-aa"
+    # #1033: boundary-derived, so the session id is NOT in the name.
+    assert call["profile_name"].startswith("jaato-ws-")
+    assert "s-aa" not in call["profile_name"]
     assert apparmor.provision_calls == [("s-aa", str(sess_dir))]
 
 
@@ -352,7 +370,8 @@ def test_ws_hook_dispatches_bootstrap_after_spawn(
     assert bootstrap["session_id"] == "s-bootstrap"
     assert bootstrap["workspace_path"] == str(sess_dir)
     # profile_name passed through from apparmor provisioning.
-    assert bootstrap["profile_name"] == "jaato-ws-s-bootstrap"
+    assert bootstrap["profile_name"].startswith("jaato-ws-")
+    assert "s-bootstrap" not in bootstrap["profile_name"]
 
 
 def test_ws_hook_dispatches_bootstrap_on_unconfined_path(

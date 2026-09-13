@@ -490,10 +490,20 @@ class _FakePoolManager:
         self.slot = slot
         self.acquire_calls = 0
         self.last_cascade_id = None
+        self.last_key = None
 
-    def acquire_slot(self, cascade_driver_id=None, config_root=None):
+    def acquire_slot(self, cascade_driver_id=None, config_root=None,
+                     workspace_root=None, profile_name=None):
         self.acquire_calls += 1
         self.last_cascade_id = cascade_driver_id
+        # #1033: the whole key, so a test can assert the spawn path
+        # hands the pool the boundary and not just the tenant.
+        self.last_key = {
+            "cascade_driver_id": cascade_driver_id,
+            "config_root": config_root,
+            "workspace_root": workspace_root,
+            "profile_name": profile_name,
+        }
         return self.slot
 
 
