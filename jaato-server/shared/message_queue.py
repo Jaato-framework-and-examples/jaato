@@ -18,7 +18,7 @@ class SourceType(Enum):
 
     Priority groups:
     - High priority (mid-turn): PARENT, USER, SYSTEM, EVENT
-    - Low priority (idle-only): CHILD, PEER
+    - Low priority (idle-only): CHILD, SIBLING
 
     The tier a source sits in is an AUTHORITY statement, not a scheduling
     detail.  A high-priority source can interrupt a turn in progress; an

@@ -209,8 +209,44 @@ class TestAuditEventChecks:
             _check_dlopen(policy, ("libc.so.6",))
 
     def test_dlopen_of_none_refused(self, policy):
+        # RATIONALE: dlopen(None) hands back a handle to the whole process
+        # symbol table, so the object the stdlib builds IS the escape —
+        # ctypes.pythonapi.system(b"...") resolves and CALLS libc system(3),
+        # raising only ctypes.dlsym, which this hook does not audit.
+        #
+        # PRICE (#1011): `import ctypes` raises this event BY ITSELF —
+        # ctypes/__init__.py runs `pythonapi = PyDLL(None)` at module import —
+        # so on the audit tier ctypes is unimportable, and with it numpy,
+        # pandas, scipy, matplotlib, osmnx, torch. That is the whole
+        # scientific stack, and it is the accepted cost, not an oversight:
+        # a frame-gated exemption for ctypes' own PyDLL(None) would leave the
+        # cell holding arbitrary libc. Do not "fix" this by relaxing it —
+        # the remedy is the AppArmor tier (no hook at all) or a subprocess
+        # (`cli`, `!pip`), which the refusal message names.
         with pytest.raises(NotebookContainmentError):
             _check_dlopen(policy, (None,))
+
+    def test_dlopen_refusals_name_ctypes_and_a_working_alternative(self, policy):
+        """Both messages must correct the over-generalisation #1011 reports.
+
+        The wording this replaced — "loading native code would bypass the
+        notebook's filesystem boundary" — was read in a live session as "the
+        sandbox forbids native code", which is false and ended the task. So
+        each refusal has to name the culprit, deny the general claim, and
+        point at a surface where the work does run.
+        """
+        for args in ((None,), ("libc.so.6",)):
+            with pytest.raises(NotebookContainmentError) as exc:
+                _check_dlopen(policy, args)
+            message = str(exc.value)
+            assert "audit tier" in message
+            assert "import normally" in message
+            assert "`cli`" in message
+        with pytest.raises(NotebookContainmentError) as exc:
+            _check_dlopen(policy, (None,))
+        # The blast radius, on the message the whole scientific stack hits.
+        assert "import ctypes" in str(exc.value)
+        assert "numpy" in str(exc.value)
 
     def test_path_like_mirrors_cli(self):
         assert _spawn_path_like("/etc/passwd") is True
