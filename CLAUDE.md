@@ -4604,7 +4604,19 @@ nim-auth login/key/logout/status       # NVIDIA NIM API key
 minimax-auth login/key/logout/status   # MiniMax API key
 kimi-auth login/key/logout/status      # Moonshot AI Kimi API key
 mimo-auth login/key/logout/status      # Xiaomi MiMo API key
+nebius-auth login/key/logout/status    # Nebius Token Factory API key
+ovhcloud-auth login/key/logout/status  # OVHcloud AI Endpoints API key
+doubleword-auth login/key/logout/status # Doubleword API key
 ```
+
+Every provider whose `PROVIDER_AUTH_RESOLUTION` names a `stored` command has
+a plugin registering it, and
+`shared/tests/test_a_named_auth_command_exists.py` derives both halves from
+the tree so a new provider cannot advertise a command nothing provides
+(#888). A `stored` entry naming a FILE instead — `openai_auth.json`,
+`~/.aws/credentials`, `GOOGLE_APPLICATION_CREDENTIALS` — has no command and
+is not expected to: Bedrock resolves through botocore's chain and Google
+through ADC.
 
 ### Session Commands
 ```
