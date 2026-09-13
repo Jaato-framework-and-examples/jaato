@@ -268,8 +268,12 @@ SANDBOX_MODE_APPARMOR = "apparmor"
 #:
 #: An older reader comparing ``sandbox_mode == "apparmor"`` reads this as
 #: "not confined", which is the true and safe direction — so this widens a
-#: value vocabulary rather than adding a record field, and needs no record
-#: version bump (the version string is written and never read back).
+#: value vocabulary rather than adding a record field.  No record-version
+#: bump: the record's ``version`` has exactly one reader
+#: (``deserialize_session_state``) and it gates on the MAJOR, refusing
+#: anything outside ``1.x`` / ``2.x``.  A field that gains a value is
+#: precisely the change that gate is indifferent to, so 2.10 -> 2.11 would
+#: have been cosmetic.
 SANDBOX_MODE_APPARMOR_COMPLAIN = "apparmor-complain"
 
 #: ``Session.sandbox_mode`` when AppArmor was requested and unavailable —

@@ -52,6 +52,123 @@ from shared.apparmor_label import (
 
 
 # ----------------------------------------------------------------------
+# Reversions: the one change that must make each guard go red.
+# ----------------------------------------------------------------------
+#
+# Read by ``shared/tests/test_every_guard_detects_its_own_reversion.py``,
+# which puts each defect back in a DISPOSABLE COPY of the checkout and
+# fails if the named test still passes.  That is what stops the tests
+# below becoming decorative: a guard nobody has seen fail is a guard
+# nobody knows works.
+#
+# Every anchor here is deliberately tight -- the call or the condition
+# itself, never a run of lines reaching down to the next ``def``.  A span
+# that crosses a gap goes stale the moment anything is inserted into it,
+# and a stale reversion reports BLOCKED: the guard is then neither
+# known-good nor known-broken.  This change did exactly that to #1023's
+# own reversion, by inserting a helper between a call and the ``def``
+# that followed it -- which is why the rule is written down here.
+
+try:  # pragma: no cover - import shape differs per invocation
+    from shared.tests.test_every_guard_detects_its_own_reversion import Reversion
+except Exception:  # pragma: no cover
+    Reversion = None  # type: ignore[assignment]
+
+_BOOTSTRAP = "jaato-server/server/runner/bootstrap.py"
+_APPARMOR = "jaato-server/server/apparmor.py"
+_LABEL = "jaato-server/shared/apparmor_label.py"
+_ISHELL = "jaato-server/shared/plugins/interactive_shell/plugin.py"
+_KERNEL_SANDBOX = "jaato-server/shared/plugins/notebook/kernel_sandbox.py"
+
+REVERSIONS = [] if Reversion is None else [
+    # Ask 1 -- the load-bearing readback.  Accepting any attached profile
+    # is the pre-#1014 behaviour: the INFO line says "runner confined to"
+    # about a kernel that is enforcing nothing, and no warning is emitted.
+    Reversion(
+        target=_BOOTSTRAP,
+        find='''    if label.enforced:
+        logger.info(
+            "runner confined to AppArmor profile %s (kernel reports: %s)",''',
+        replace='''    if True:
+        logger.info(
+            "runner confined to AppArmor profile %s (kernel reports: %s)",''',
+        test="test_confine_to_profile_warns_rather_than_claiming_confinement",
+        because=(
+            "a complain-mode profile is logged as confinement again, which "
+            "is the line the #1014 operator read"
+        ),
+    ),
+    # Ask 1 -- one predicate.  BEHAVIOUR is unchanged by this reversion;
+    # what comes back is a second parser of the mode string, living
+    # outside the one module allowed to know that vocabulary.  That is the
+    # finding itself: the tree held five opinions, four were wrong, and
+    # nothing failed when a sixth was added.
+    Reversion(
+        target=_KERNEL_SANDBOX,
+        find='''    label = try_read_label()
+    return label.profile if label.enforced else None''',
+        replace='''    label = try_read_label()
+    mode = label.raw.partition(" (")[2].rstrip(")").strip()
+    return label.profile if mode == "enforce" else None''',
+        test="test_no_second_mode_parser_survives_in_the_tree",
+        because=(
+            "a module parses the enforcement mode itself again, so the tree "
+            "holds two definitions of 'the kernel is enforcing'"
+        ),
+    ),
+    # Ask 2 -- the persisted record.  A complain-mode session goes back to
+    # claiming ``sandbox_mode: "apparmor"``: a durable positive claim about
+    # a boundary the kernel was not applying.
+    Reversion(
+        target=_LABEL,
+        find=(
+            "    return SANDBOX_MODE_APPARMOR_COMPLAIN if complain "
+            "else SANDBOX_MODE_APPARMOR"
+        ),
+        replace="    return SANDBOX_MODE_APPARMOR",
+        test="test_complain_provisioning_records_the_mode_not_a_boundary_claim",
+        because=(
+            "the session record asserts enforcement for a session that had "
+            "no kernel boundary"
+        ),
+    ),
+    # Ask 3 -- announce it.  Generation goes silent again, which is the
+    # state in which grepping ``complain`` against ``logger|warn`` in
+    # ``server/apparmor.py`` returned nothing at all.
+    Reversion(
+        target=_APPARMOR,
+        find='''        complain = complain_mode_requested()
+        announce_complain_mode_once()
+        self._complain_profiles[session_id] = complain''',
+        replace='''        complain = complain_mode_requested()
+        self._complain_profiles[session_id] = complain''',
+        test="test_rendering_a_complain_profile_announces_and_records",
+        because=(
+            "complain-mode profile generation stops announcing itself -- the "
+            "one weakened boundary in this tree that was silent"
+        ),
+    ),
+    # Ask 4 -- the strictest fail-closed knob in the tree.  Reverting to
+    # "a transition callback is installed, therefore confined" is exactly
+    # what let ``require_confinement: true`` pass while the kernel blocked
+    # nothing.
+    Reversion(
+        target=_ISHELL,
+        find='''            if not self._require_confinement:
+                return None
+            label = read_thread_label()
+            if label.enforced:
+                return None''',
+        replace='''            return None''',
+        test="test_require_confinement_refuses_a_complain_mode_child",
+        because=(
+            "require_confinement is satisfied by a transition into a "
+            "complain-mode child profile, which enforces nothing"
+        ),
+    ),
+]
+
+# ----------------------------------------------------------------------
 # Ask 1 — one predicate, and a named mode-tolerant sibling
 # ----------------------------------------------------------------------
 

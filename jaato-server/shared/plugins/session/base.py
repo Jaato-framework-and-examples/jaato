@@ -137,9 +137,11 @@ class SessionState:
     Ask it through :func:`shared.apparmor_label.sandbox_mode_is_apparmor`
     ("was a profile provisioned at all") or
     :func:`~shared.apparmor_label.sandbox_mode_is_enforced` ("was there a
-    boundary") rather than by equality.  ``apparmor-complain`` widened an
-    existing field's value vocabulary rather than adding a record key, so
-    it needs no record-version bump; an older reader comparing
+    boundary") rather than by equality.  ``apparmor-complain`` widened this
+    field's value vocabulary rather than adding a record key, so the record
+    version was NOT bumped: the ``version`` string has one reader, right
+    here, and it gates on the MAJOR (``1.x`` / ``2.x``) — a field that gains
+    a value is what that gate is indifferent to.  An older reader comparing
     ``== "apparmor"`` reads it as "not confined", which is TRUE and is the
     safe direction.
 

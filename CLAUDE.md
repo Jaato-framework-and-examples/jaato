@@ -1184,10 +1184,12 @@ annotation is not enforced: absence of evidence is not a boundary.
 | `require_confinement` means enforce | an installed child transition is necessary and no longer sufficient — the spawning thread's label must be `(enforce)` |
 
 **A value, not a field.** `apparmor-complain` widens an existing string's
-vocabulary rather than adding a record key, so there is no record-version
-bump (the version string is written and never read back). An older reader
-comparing `sandbox_mode == "apparmor"` reads it as "not confined", which is
-TRUE and is the safe direction. In-tree readers ask through
+vocabulary rather than adding a record key, so the record version is not
+bumped. The record's `version` does have a reader — `deserialize_session_state`
+— and it gates on the **major** (`1.x` / `2.x`), which is exactly what a field
+gaining a value is indifferent to; 2.10 → 2.11 would have been cosmetic. An
+older reader comparing `sandbox_mode == "apparmor"` reads it as "not
+confined", which is TRUE and is the safe direction. In-tree readers ask through
 `sandbox_mode_is_apparmor` ("was a profile provisioned at all" — the revive
 gate, which re-arms confinement for either mode because the mode is
 re-decided at the next provisioning) or `sandbox_mode_is_enforced` ("was
