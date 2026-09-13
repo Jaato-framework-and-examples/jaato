@@ -130,6 +130,7 @@ import sys
 import threading
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
+from shared.apparmor_label import try_read_label
 from shared.plugins.sandbox_utils import check_path_with_jaato_containment
 
 logger = logging.getLogger(__name__)
@@ -268,28 +269,16 @@ def apparmor_enforced_profile() -> Optional[str]:
     Lives here rather than in ``backends/local.py`` (its original home)
     because both notebook execution paths need the same answer: the in-process
     gate asks it about the runner, the kernel asks it about itself.
+
+    #1014: this was the ONE component in the tree that got the mode question
+    right, while four others answered it by prefix-matching the profile name.
+    The parsing it did is now :mod:`shared.apparmor_label`, so those four
+    resolve through the same definition instead of carrying a fifth and sixth
+    opinion.  Behaviour here is unchanged — including the conservative
+    treatment of a bare name with no ``(mode)`` annotation as NOT a boundary.
     """
-    try:
-        with open("/proc/self/attr/current", "r") as fh:
-            # The kernel terminates this value with a NUL byte (and a
-            # newline); str.strip() alone leaves the NUL, which would
-            # false-negative an enforced profile and break the confined
-            # path. Match the convention in server/runner_spawner.py:251.
-            raw = fh.read().strip("\x00 \t\r\n")
-    except OSError:
-        return None
-    if not raw or raw.startswith("unconfined"):
-        return None
-    # Format is typically 'name (enforce)' or 'name (complain)'; a bare
-    # 'name' with no mode annotation is treated conservatively as not a
-    # boundary.
-    if "(" not in raw:
-        return None
-    name, _, mode = raw.partition(" (")
-    if mode.rstrip(")").strip() != "enforce":
-        return None
-    name = name.strip()
-    return name or None
+    label = try_read_label()
+    return label.profile if label.enforced else None
 
 
 def env_truthy(name: str) -> bool:

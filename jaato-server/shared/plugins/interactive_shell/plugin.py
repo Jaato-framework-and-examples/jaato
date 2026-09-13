@@ -52,6 +52,7 @@ from jaato_sdk.plugins.model_provider.types import (
 from .session import ShellSession, _BACKEND, _BACKEND_ERROR, IS_MSYS2
 from .ansi import strip_ansi
 from shared.ai_tool_runner import get_current_tool_output_callback
+from shared.apparmor_label import COMPLAIN_ENV_VAR, read_thread_label
 from shared.plugins.runner_forwarding import RunnerForwardingMixin
 from shared.secret_scrub import DEFAULT_SECRET_ENV_PATTERNS, resolve_scrub_patterns
 from shared.command_analysis import UnanalyzableCommand
@@ -604,13 +605,37 @@ class InteractiveShellPlugin(RunnerForwardingMixin):
         directory drifts under ``cd`` and a program inside it can name
         paths through channels no analyzer sees — so the kernel boundary
         is the real one, and whether it is present is worth stating
-        (#722).  The plugin's evidence for it is
-        ``_apparmor_child_transition``: the runner installs that callback
-        only when it is itself confined, and it is what puts the forked
-        child into the per-session ``//child`` profile.
+        (#722).
+
+        TWO conditions, and until #1014 only the first was checked:
+
+        1. ``_apparmor_child_transition`` is installed — the runner
+           installs that callback only when it is itself confined, and it
+           is what puts the forked child into the per-session ``//child``
+           profile.
+        2. the kernel is ENFORCING the profile the child will land in.
+           Under ``JAATO_APPARMOR_COMPLAIN=1`` the transition into
+           ``//child (complain)`` succeeds and the kernel blocks nothing,
+           so condition 1 was satisfied by a profile that contains
+           nothing.  ``require_confinement`` is documented as *"Refuse to
+           spawn at all when no AppArmor…"* and is the strictest
+           fail-closed knob in the tree; accepting complain inverted its
+           entire purpose.
+
+        What is read is the SPAWNING THREAD's own label
+        (:func:`~shared.apparmor_label.read_thread_label`), not the
+        process's: ``fork()`` inherits the cred of the thread that calls
+        it — here the tool worker — and per #1023 a worker created before
+        the transition can carry a different label from the main thread
+        ``/proc/self/attr/current`` reports.  That label names the
+        session's own profile rather than its ``//child``, which is the
+        right proxy: both are rendered in one pass from one
+        ``JAATO_APPARMOR_COMPLAIN`` read, and template v22 exists
+        precisely so the flag reaches the sub-profiles too.  A child
+        cannot be enforcing while its parent is not.
 
         Returns:
-            ``None`` when the spawn may proceed (confined, or unconfined
+            ``None`` when the spawn may proceed (enforced, or unenforced
             and permitted).  Otherwise an executor result refusing the
             spawn, which happens only under ``require_confinement``.
 
@@ -621,7 +646,31 @@ class InteractiveShellPlugin(RunnerForwardingMixin):
             boundary is never silent.
         """
         if self._apparmor_child_transition is not None:
-            return None
+            if not self._require_confinement:
+                return None
+            label = read_thread_label()
+            if label.enforced:
+                return None
+            # A transition is installed and the kernel is not enforcing.
+            # Distinct wording from the no-transition refusal below,
+            # because the operator's next move is different: there IS a
+            # profile, and the thing to change is the mode.
+            self._trace(
+                f"spawn: refused — require_confinement and profile not "
+                f"enforced ({label.raw!r})"
+            )
+            return {
+                'error': (
+                    'shell_spawn: refused — this deployment requires '
+                    'kernel-enforced confinement for interactive shells '
+                    '(plugin_configs.interactive_shell.require_confinement). '
+                    'An AppArmor child-profile transition IS installed for '
+                    'this session, but the kernel is not enforcing the '
+                    f"session's profile: {label.describe()}. "
+                    f'Unset {COMPLAIN_ENV_VAR} to enforce, or clear '
+                    'require_confinement to accept a log-only profile.'
+                ),
+            }
 
         if self._require_confinement:
             self._trace("spawn: refused — require_confinement and no AppArmor transition")

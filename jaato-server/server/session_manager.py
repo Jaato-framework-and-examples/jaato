@@ -34,6 +34,12 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from shared.apparmor_label import (
+    SANDBOX_MODE_APPARMOR_COMPLAIN,
+    SANDBOX_MODE_SOFT,
+    sandbox_mode_for_profile,
+    sandbox_mode_is_apparmor,
+)
 from shared.utils.errors import exc_message
 from shared.plugins.session import (
     create_plugin as create_session_plugin,
@@ -359,7 +365,18 @@ class Session:
     interrupted_turn: Optional[Dict[str, Any]] = None  # Turn interruption state for recovery
     provisioned: bool = False  # True if workspace was auto-provisioned by server
     created_by: Optional[str] = None  # Authenticated user who created the session
-    sandbox_mode: Optional[str] = None  # "apparmor" or "soft" when workspace sandboxing is active
+    #: Workspace-sandboxing posture, PERSISTED in the session record.
+    #: ``"apparmor"`` (a profile the kernel is ENFORCING), ``"apparmor-complain"``
+    #: (a profile loaded under ``JAATO_APPARMOR_COMPLAIN`` — the kernel logs
+    #: denials and allows them, so there is no boundary; #1014) or ``"soft"``
+    #: (directory sandboxing only).  ``None`` when nothing was requested.
+    #:
+    #: Read it with :func:`shared.apparmor_label.sandbox_mode_is_apparmor`
+    #: ("was a profile provisioned at all") or
+    #: :func:`~shared.apparmor_label.sandbox_mode_is_enforced` ("was there a
+    #: boundary") rather than by equality — those are different questions and
+    #: the string used to be able to answer only the first.
+    sandbox_mode: Optional[str] = None
     # The UNRESOLVED inline-profile spec (dict), for sessions created from
     # an inline profile rather than a named one.  Carried so _save_session
     # can persist it (SessionState.profile_spec) → disk-restore reconstructs
@@ -1440,7 +1457,8 @@ class SessionManager:
         4. **Apparmor (opt-in)**: if ``client_config["apparmor"]``
            is set, call :meth:`_provision_apparmor_for_session` to
            load the profile.  Returns the resolved profile_name +
-           sandbox_mode (``"apparmor"`` on success, ``"soft"`` on
+           sandbox_mode (``"apparmor"`` on success, ``"apparmor-complain"``
+           when the profile was rendered in complain mode, ``"soft"`` on
            provisioning failure).
         5. **Spawn (unconditional)**: call
            :meth:`_spawn_session_runner_unconditional` with the
@@ -1452,7 +1470,9 @@ class SessionManager:
         Returns:
             The planned ``sandbox_mode`` for the Session record:
             ``"apparmor"`` (kernel-confined, runner spawned),
-            ``"soft"`` (apparmor downgrade due to provisioning /
+            ``"apparmor-complain"`` (profile loaded, kernel NOT enforcing
+            it — #1014; the record must not claim a boundary that was not
+            applied), ``"soft"`` (apparmor downgrade due to provisioning /
             spawn failure), or ``None`` (no apparmor opt-in or
             spawn was unconditional but unconfined — sandbox_mode
             stays None for the runner-without-confinement case
@@ -1578,7 +1598,7 @@ class SessionManager:
                 requested_fragments=requested_fragments,
                 plugin_rules=plugin_rules,
             )
-            if profile_name == "" and sandbox_mode == "soft":
+            if profile_name == "" and sandbox_mode == SANDBOX_MODE_SOFT:
                 # Apparmor unavailable / provisioning failed.
                 # Continue to the unconditional spawn but the
                 # runner is unconfined — that's the §7a intent
@@ -1619,25 +1639,55 @@ class SessionManager:
             return None
 
         # ----- Step 5b: success notification + return -----
-        if opt_in_apparmor and sandbox_mode == "apparmor":
-            # ``config_root`` is the resolved value from above (envelope
-            # override first, then client_config); the notification
-            # reflects what the policy was actually generated with.
-            self._notify_apparmor(
-                client_id, session_id,
-                f"profile provisioned (workspace={workspace_path}, "
-                f"config_root={config_root or '(none)'}); runner spawned",
-                style="info",
+        if opt_in_apparmor and sandbox_mode_is_apparmor(sandbox_mode):
+            self._notify_apparmor_provisioned(
+                client_id=client_id,
+                session_id=session_id,
+                sandbox_mode=sandbox_mode,
+                workspace_path=workspace_path,
+                config_root=config_root,
             )
-            return "apparmor"
-        if opt_in_apparmor and sandbox_mode == "soft":
+            return sandbox_mode
+        if opt_in_apparmor and sandbox_mode == SANDBOX_MODE_SOFT:
             # Apparmor opt-in but provisioning failed; runner
             # spawned anyway (always-spawn).
-            return "soft"
+            return SANDBOX_MODE_SOFT
         # No apparmor opt-in: runner spawned unconfined.
         # sandbox_mode stays None (semantically tracks confinement
         # — there's none here, even though there IS a runner).
         return None
+
+    def _notify_apparmor_provisioned(
+        self,
+        *,
+        client_id: str,
+        session_id: str,
+        sandbox_mode: str,
+        workspace_path: str,
+        config_root: Optional[str],
+    ) -> None:
+        """Tell the client a profile was provisioned — and in which mode.
+
+        This is the line an operator sees at session start.  Saying
+        "profile provisioned" full stop about a complain-mode profile is
+        exactly how a boundary-less session reads as a confined one
+        (#1014), so the posture is named and the style is raised to
+        ``warning``.  ``config_root`` is the resolved value the caller
+        generated the policy with, so the notification reflects what was
+        actually rendered.
+        """
+        complain = sandbox_mode == SANDBOX_MODE_APPARMOR_COMPLAIN
+        posture = (
+            " in COMPLAIN mode — the kernel logs denials and allows them, "
+            "so this session has NO kernel boundary"
+            if complain else ""
+        )
+        self._notify_apparmor(
+            client_id, session_id,
+            f"profile provisioned{posture} (workspace={workspace_path}, "
+            f"config_root={config_root or '(none)'}); runner spawned",
+            style="warning" if complain else "info",
+        )
 
     def _notify_apparmor(
         self,
@@ -1724,7 +1774,15 @@ class SessionManager:
 
         Returns:
             ``(profile_name, sandbox_mode)``:
-            - ``("<name>", "apparmor")`` on success.
+            - ``("<name>", "apparmor")`` on success with an ENFORCING
+              profile.
+            - ``("<name>", "apparmor-complain")`` when the profile was
+              generated under ``JAATO_APPARMOR_COMPLAIN`` (#1014).  The
+              profile loaded and the kernel is not enforcing it, so the
+              session record must not make the positive claim ``apparmor``
+              makes — a session record is what an operator reads weeks
+              later during a post-mortem, and what an auditor would read
+              as evidence of enforcement.
             - ``("", "soft")`` when AppArmor is unavailable on the
               host or provisioning failed.  Caller should still
               spawn the runner (with disable_confine=True) — that's
@@ -1748,7 +1806,7 @@ class SessionManager:
                 "apparmor_parser missing) — running unconfined",
                 style="warning",
             )
-            return "", "soft"
+            return "", SANDBOX_MODE_SOFT
 
         if not apparmor.provision_profile(
             session_id,
@@ -1764,9 +1822,18 @@ class SessionManager:
                 "running unconfined",
                 style="warning",
             )
-            return "", "soft"
+            return "", SANDBOX_MODE_SOFT
 
-        return apparmor.get_profile_name(session_id), "apparmor"
+        # #1014 ask 2: the mode is read from the manager, which recorded
+        # what it RENDERED, rather than from the environment as it stands
+        # now — ``_with_session_env`` overlays a profile's ``env:`` map
+        # onto the daemon's ``os.environ`` for the duration of a turn, so
+        # a second read of the env var is a second question.
+        complain = apparmor.profile_is_complain_mode(session_id)
+        return (
+            apparmor.get_profile_name(session_id),
+            sandbox_mode_for_profile(complain=complain),
+        )
 
     def _teardown_prior_apparmor_profile_after_transition(
         self,
@@ -9285,7 +9352,14 @@ class SessionManager:
             # threaded above.  env_file stays a saved-driven override; config_root
             # is resolved saved→client→<workspace>/.jaato (restore_config_root
             # above) so a pre-persistence None can't hang the runner.
-            apparmor=(getattr(state, "sandbox_mode", None) == "apparmor"),
+            # #1014: ANY apparmor mode re-arms confinement on revive.
+            # The mode is re-decided at provisioning time from the env as
+            # it stands then, so a session that ran complain does not
+            # inherit that posture — it inherits "this session wants a
+            # profile", which is what the field was always asking.
+            apparmor=sandbox_mode_is_apparmor(
+                getattr(state, "sandbox_mode", None)
+            ),
             profile=restored_profile,
             # Re-apply the profile's ``suppress_base_instructions`` on restore.
             # Unlike plugins / plugin_configs / system_instructions / gc (which

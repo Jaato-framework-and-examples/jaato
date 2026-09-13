@@ -34,6 +34,7 @@ except ImportError:
     HAS_WEBSOCKETS = False
     ServerConnection = Any
 
+from shared.apparmor_label import SANDBOX_MODE_SOFT, sandbox_mode_for_profile
 from .core import JaatoServer
 from .workspace_provisioner import WorkspaceProvisioner, ProvisionedWorkspace
 from .apparmor import AppArmorManager
@@ -836,7 +837,7 @@ class JaatoWSServer:
             #   file-write rule that the profile doesn't grant).
             if not apparmor or not apparmor.is_available():
                 if apparmor is not None:
-                    sess.sandbox_mode = "soft"
+                    sess.sandbox_mode = SANDBOX_MODE_SOFT
                 return
 
             # Profile provisioning happens in the pre-initialize hook
@@ -859,7 +860,7 @@ class JaatoWSServer:
                 session_id, sess.workspace_path,
                 plugin_rules=plugin_rules,
             ):
-                sess.sandbox_mode = "soft"
+                sess.sandbox_mode = SANDBOX_MODE_SOFT
                 return
 
             # Phase 2 (confined runner): kernel-level profile is loaded
@@ -879,7 +880,15 @@ class JaatoWSServer:
             authorizer = ws_server.get_reference_authorizer(session_id)
             if authorizer is not None:
                 server.set_reference_authorizer(authorizer)
-            sess.sandbox_mode = "apparmor"
+            # #1014: record the MODE, not merely that a profile loaded.
+            # Under ``JAATO_APPARMOR_COMPLAIN`` the kernel logs denials and
+            # allows them, and a record asserting ``"apparmor"`` about that
+            # session is a durable false claim of enforcement.  Same
+            # vocabulary as the IPC path
+            # (``SessionManager._provision_apparmor_for_session``).
+            sess.sandbox_mode = sandbox_mode_for_profile(
+                complain=apparmor.profile_is_complain_mode(session_id),
+            )
             # Record mapping so the workspace reaper can teardown
             # the profile by workspace ID.  (Uses the module-level ``os``
             # imported at the top — a local ``import os`` here would make

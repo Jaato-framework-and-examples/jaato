@@ -24,6 +24,7 @@ from unittest.mock import patch
 import pytest
 
 from server.runner.bootstrap import ThreadProfileScan
+from shared.apparmor_label import parse_label
 from server.runner.session import (
     BootstrapError,
     _maybe_self_confine,
@@ -93,8 +94,12 @@ def test_maybe_self_confine_already_confined_skips() -> None:
     transition (which would also fail — per-session profiles omit
     ``change_profile -> self``)."""
     with patch(
-        "server.runner.bootstrap.read_current_profile",
-        return_value="jaato-ws-sess-5a (enforce)",
+        # #1014: the readback seam is now the PARSED label, so the
+        # idempotency check can tell "already in this profile" (which it
+        # asks) from "the kernel is enforcing it" (which it must not
+        # conflate with the first).
+        "server.runner.bootstrap.current_confinement",
+        return_value=parse_label("jaato-ws-sess-5a (enforce)"),
     ), patch(
         # #1023: step 1c now walks every thread's own attr/current after
         # the process is confined.  This test SIMULATES confinement, so
@@ -110,12 +115,13 @@ def test_maybe_self_confine_already_confined_skips() -> None:
 
 
 def test_maybe_self_confine_already_confined_no_mode_suffix_skips() -> None:
-    """``read_current_profile`` may return the profile name WITHOUT
-    the enforcement-mode suffix on some kernels.  Match exact-equal
-    too (not just prefix)."""
+    """``attr/current`` may report the profile name WITHOUT the
+    enforcement-mode suffix on some kernels.  The idempotency check must
+    still recognise it (a re-transition would fail — per-session profiles
+    omit ``change_profile -> self``)."""
     with patch(
-        "server.runner.bootstrap.read_current_profile",
-        return_value="jaato-ws-sess-5a",
+        "server.runner.bootstrap.current_confinement",
+        return_value=parse_label("jaato-ws-sess-5a"),
     ), patch(
         # See the note in the preceding test (#1023).
         "server.runner.bootstrap.verify_thread_confinement",

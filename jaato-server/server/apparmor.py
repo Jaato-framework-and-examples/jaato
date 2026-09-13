@@ -51,9 +51,55 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, ContextManager, Dict, List, Optional, Tuple
 
+from shared.apparmor_label import (
+    COMPLAIN_ENV_VAR,
+    complain_mode_requested,
+)
 from shared.session_id import validate_session_id
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------
+# Complain mode is announced, not silent (#1014 ask 3)
+# ---------------------------------------------------------------------
+#
+# ``JAATO_APPARMOR_COMPLAIN=1`` stamps ``flags=(complain)`` on the whole
+# profile chain and, until #1014, emitted no log line of ANY kind --
+# grepping ``complain`` against ``logger|warn`` in this module returned
+# nothing.  Every other weakened boundary in this tree announces itself
+# at WARNING (``scrub_secret_env: none``, ``--ws-unsafe-no-auth``,
+# ``notebook.allow_uncontained_exec``); this one was the exception, and
+# it is the one that turns every confinement claim in the process into a
+# false positive.
+#
+# Once per PROCESS rather than once per profile: a daemon provisions a
+# profile per session, and one line per session would be noise an
+# operator filters out -- which is the same outcome as silence.
+_complain_announced = threading.Event()
+
+
+def announce_complain_mode_once() -> None:
+    """WARN, once per daemon process, that profiles are log-only.
+
+    No-op when :data:`~shared.apparmor_label.COMPLAIN_ENV_VAR` is unset,
+    so an ordinary deployment gains nothing.
+    """
+    if not complain_mode_requested():
+        return
+    if _complain_announced.is_set():
+        return
+    _complain_announced.set()
+    logger.warning(
+        "%s is set: every AppArmor profile this daemon generates carries "
+        "flags=(complain), for the base profile and for the tool_hat / "
+        "//child sub-profiles alike.  The kernel will LOG each denial and "
+        "ALLOW the syscall -- these sessions have no kernel boundary.  "
+        "Sessions provisioned under this posture record "
+        "sandbox_mode='apparmor-complain' rather than 'apparmor'.  Unset "
+        "%s to enforce.",
+        COMPLAIN_ENV_VAR, COMPLAIN_ENV_VAR,
+    )
 
 
 class AppArmorManager:
@@ -881,6 +927,13 @@ profile jaato-ws-{session_id} flags=({profile_flags}) {{
         self._sessions_root = self._workspace_root / "sessions"
         self._venv_path = Path(venv_path or sys.prefix).resolve()
         self._profile_dir = Path(profile_dir)
+
+        # session_id -> was this session's profile GENERATED in complain
+        # mode?  Recorded at render time rather than re-read from the env
+        # later: ``JaatoServer._with_session_env`` overlays a profile's
+        # ``env:`` map onto the daemon's ``os.environ`` for the duration
+        # of a turn, so a second read is a second question.  #1014.
+        self._complain_profiles: Dict[str, bool] = {}
 
         # User-local cache directory for apparmor_parser, avoiding the
         # system-level /var/cache/apparmor which requires root access.
@@ -1770,6 +1823,12 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
         profile_name = self.get_profile_name(session_id)
         profile_path = self._profile_dir / profile_name
 
+        # Drop the recorded enforcement mode with the profile it describes
+        # (#1014); a stale entry would outlive its session on a long-lived
+        # daemon.  Done before the early return, so a profile already gone
+        # from disk still releases it.
+        self._complain_profiles.pop(session_id, None)
+
         if not profile_path.exists():
             return True  # Already gone
 
@@ -2125,6 +2184,16 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
         validate_session_id(session_id)
         return f"jaato-ws-{session_id}"
 
+    def profile_is_complain_mode(self, session_id: str) -> bool:
+        """Was this session's profile generated in complain (log-only) mode?
+
+        Answers from what was RENDERED, not from the environment as it
+        stands now — see ``_complain_profiles``.  ``False`` for a session
+        this manager never rendered a profile for, which is the same
+        answer "no complain-mode profile exists here" deserves.
+        """
+        return self._complain_profiles.get(session_id, False)
+
     @staticmethod
     def _format_plugin_contributed_rules(
         plugin_rules: Optional[List[str]],
@@ -2326,7 +2395,13 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
         # AppArmor sub-profiles do NOT inherit base rules — every allow
         # and deny must be redeclared.  We mirror the base body
         # verbatim and append the hat-specific read-denies on
-        complain = os.environ.get("JAATO_APPARMOR_COMPLAIN", "").lower() in ("1", "true", "yes")  # env: generate AppArmor profiles in complain (log-only) mode; confinement debugging aid
+        # env: generate AppArmor profiles in complain (log-only) mode;
+        # confinement debugging aid.  #1014: announced at WARNING (once per
+        # daemon) and recorded per session, instead of being applied in
+        # silence while every confinement check in the tree said "confined".
+        complain = complain_mode_requested()
+        announce_complain_mode_once()
+        self._complain_profiles[session_id] = complain
         profile_flags = "attach_disconnected, complain" if complain else "attach_disconnected"
         # v22 (2026-05-16): propagate complain to sub-profiles.  AppArmor
         # sub-profiles do NOT inherit the parent's flag set, so

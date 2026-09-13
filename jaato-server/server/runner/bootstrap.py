@@ -21,6 +21,9 @@ API:
   ``os._exit(2)`` per the spec's no-fallback-to-unconfined contract.
 - :func:`read_current_profile` — small helper exposed mostly for
   tests.
+- :func:`current_confinement` — the readback as a parsed
+  :class:`shared.apparmor_label.AppArmorLabel`, so callers can ask
+  *which mode* rather than only *which profile* (#1014).
 - :func:`verify_thread_confinement` — the #1023 check: every thread of
   this process, not just the one ``/proc/self/attr/current`` reports.
   See the section header below it for why the process-level readback
@@ -35,6 +38,21 @@ explain the cause:
 - :class:`ConfinementMismatchError` — transition apparently succeeded
   but ``/proc/self/attr/current`` doesn't match the requested profile
   (silent-failure case from §6.5).
+- :class:`ConfinementModeError` — the kernel attached the right profile
+  and is NOT enforcing it (``JAATO_APPARMOR_COMPLAIN=1``).  Raised only
+  under ``require_enforce=True``; see :func:`confine_to_profile`.
+
+The one import
+--------------
+
+The "no cross-imports" rule above has exactly one exception:
+:mod:`shared.apparmor_label`.  It is a pure-stdlib leaf (the same shape
+as :mod:`shared.runtime_limits`) carrying the single definition of "is
+this confined, and in which mode", and ``shared/__init__.py`` is lazy —
+so the import executes that one file and loads no plugin code, which is
+what the rule protects.  The alternative was a sixth private copy of the
+mode predicate inside the module whose readback is precisely the one
+#1014 found mode-blind.
 """
 
 from __future__ import annotations
@@ -47,6 +65,13 @@ import threading
 import time
 from dataclasses import dataclass
 from typing import Callable, List, Optional, Sequence, Tuple
+
+from shared.apparmor_label import (
+    AppArmorLabel,
+    COMPLAIN_ENV_VAR,
+    parse_label,
+    profile_name_ignoring_mode,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -90,6 +115,42 @@ class ConfinementMismatchError(RuntimeError):
         self.actual = actual
 
 
+class ConfinementModeError(RuntimeError):
+    """Raised when the right profile is attached and the kernel is NOT
+    enforcing it.
+
+    The #1014 state: ``JAATO_APPARMOR_COMPLAIN=1`` stamps
+    ``flags=(complain)`` on the whole profile chain, the transition
+    succeeds, ``/proc/self/attr/current`` reports
+    ``jaato-ws-<sid> (complain)`` — and the kernel logs every denial and
+    allows the syscall.  There is a profile and there is no boundary.
+
+    Raised ONLY under ``confine_to_profile(..., require_enforce=True)``.
+    The default stays permissive because complain mode is a documented
+    diagnostic (harvest the missing-rule set in one cascade run, then
+    ship targeted grants) and refusing to start under it would delete the
+    diagnostic.  What the default does instead is say so, loudly: see the
+    WARNING in :func:`confine_to_profile`.
+
+    ``require_enforce=True`` is the hook point #1013's
+    ``JAATO_APPARMOR_BEHAVIOR=require`` needs.  Built on the mode-blind
+    readback this replaces, ``require`` would have been satisfied by a
+    complain-mode profile — the exact posture it exists to refuse.
+    """
+
+    def __init__(self, expected: str, label: AppArmorLabel) -> None:
+        super().__init__(
+            f"AppArmor profile {expected!r} is attached but NOT enforced: "
+            f"the kernel reports {label.raw!r}.  A {label.mode or 'mode-less'} "
+            f"profile logs denials and allows the syscall, so this session "
+            f"has no kernel boundary.  Unset {COMPLAIN_ENV_VAR} (or stop "
+            f"requiring enforcement) to proceed."
+        )
+        self.expected = expected
+        self.label = label
+        self.actual = label.raw
+
+
 def _load_libapparmor(soname: str = DEFAULT_LIBAPPARMOR_SONAME) -> ctypes.CDLL:
     """Open ``libapparmor.so.1`` via ctypes.
 
@@ -126,12 +187,33 @@ def _load_libapparmor(soname: str = DEFAULT_LIBAPPARMOR_SONAME) -> ctypes.CDLL:
 def read_current_profile(proc_attr_path: str = DEFAULT_PROC_ATTR_PATH) -> str:
     """Return the current process's AppArmor profile string.
 
-    Format on a confined process is ``<profile> (enforce)``; an
-    unconfined process reports ``unconfined``.  The trailing newline
-    written by the kernel is stripped.
+    Format on a confined process is ``<profile> (enforce)`` or
+    ``<profile> (complain)``; an unconfined process reports
+    ``unconfined``.  The trailing newline AND the NUL terminator procfs
+    writes are stripped — the NUL does not always arrive alongside the
+    newline, and a label carrying one compares unequal to a name that
+    looks identical when printed.
+
+    Returns the raw string for the callers that log it.  Callers deciding
+    whether a BOUNDARY exists want :func:`current_confinement` instead:
+    this string answers "which profile", never "is the kernel enforcing".
     """
     with open(proc_attr_path, "r") as f:
-        return f.read().rstrip("\n")
+        return parse_label(f.read()).raw
+
+
+def current_confinement(
+    proc_attr_path: str = DEFAULT_PROC_ATTR_PATH,
+) -> AppArmorLabel:
+    """Read ``attr/current`` and return it PARSED — profile and mode.
+
+    The mode-aware sibling of :func:`read_current_profile`, and the one
+    #1014 asks callers to reach for.  Raises :class:`OSError` like its
+    sibling, so a caller that cannot read ``/proc`` still tells "could not
+    look" apart from "unconfined".
+    """
+    with open(proc_attr_path, "r") as f:
+        return parse_label(f.read())
 
 
 def confine_to_profile(
@@ -139,7 +221,8 @@ def confine_to_profile(
     *,
     libapparmor: Optional[ctypes.CDLL] = None,
     proc_attr_path: str = DEFAULT_PROC_ATTR_PATH,
-) -> None:
+    require_enforce: bool = False,
+) -> AppArmorLabel:
     """Self-confine the current process to *profile_name*.
 
     Implements §4.6 bootstrap steps 2-3:
@@ -163,6 +246,16 @@ def confine_to_profile(
             When ``None``, :func:`_load_libapparmor` is called.
         proc_attr_path: Override for ``/proc/self/attr/current``
             (test injection point).
+        require_enforce: Refuse a profile the kernel is not enforcing.
+            Default ``False`` — see :class:`ConfinementModeError` for why
+            complain mode is announced rather than refused by default,
+            and why this flag is the hook #1013's ``require`` behaviour
+            needs.
+
+    Returns:
+        The parsed post-transition label, so the caller can record the
+        MODE rather than re-deriving it from a string.  This is the fact
+        ``sandbox_mode`` was missing (#1014 ask 2).
 
     Raises:
         RuntimeError: libapparmor lookup failure ("apparmor not
@@ -171,6 +264,8 @@ def confine_to_profile(
         ConfinementMismatchError: ``aa_change_profile`` returned 0
             but ``/proc/self/attr/current`` reports a different
             profile (silent-failure case — §6.5).
+        ConfinementModeError: the profile is attached but not enforced,
+            and *require_enforce* is set.
     """
     if not profile_name:
         raise RuntimeError("confine_to_profile: profile_name is empty")
@@ -198,15 +293,47 @@ def confine_to_profile(
     # where libapparmor returned 0 but the kernel didn't actually
     # transition (rare but observed when the parent profile lacks the
     # required change_profile -> rule).
-    expected_prefix = f"{profile_name} "  # e.g. "jaato-ws-20260507_120000 (enforce)"
-    actual = read_current_profile(proc_attr_path)
-    if not actual.startswith(expected_prefix) and actual != profile_name:
-        raise ConfinementMismatchError(expected=profile_name, actual=actual)
+    #
+    # TWO conditions, and until #1014 only the first was checked:
+    #   1. WHICH profile the kernel attached -- a mismatch is the silent
+    #      no-op above;
+    #   2. WHICH MODE it is applying -- a ``(complain)`` profile logs
+    #      every denial and allows the syscall, so there is a profile and
+    #      no boundary.  The old comment on this line read
+    #      ``# e.g. "jaato-ws-... (enforce)"`` while the match accepted
+    #      ``(complain)`` just as happily.
+    label = current_confinement(proc_attr_path)
+    if profile_name_ignoring_mode(label.raw) != profile_name:
+        raise ConfinementMismatchError(expected=profile_name, actual=label.raw)
 
-    logger.info(
-        "runner confined to AppArmor profile %s (kernel reports: %s)",
-        profile_name, actual,
+    if label.enforced:
+        logger.info(
+            "runner confined to AppArmor profile %s (kernel reports: %s)",
+            profile_name, label.raw,
+        )
+        return label
+
+    if require_enforce:
+        raise ConfinementModeError(profile_name, label)
+
+    # Ask 3: the weakened posture is ANNOUNCED, the way
+    # ``scrub_secret_env: none`` and ``--ws-unsafe-no-auth`` are.  The
+    # leading words must not say "confined": the whole #1014 incident
+    # turned on an operator reading a line that did, with the truth in
+    # its parenthetical.
+    remedy = (
+        f"{COMPLAIN_ENV_VAR} is the only supported route to this posture "
+        f"— unset it to enforce."
+        if label.complaining
+        else "The kernel reported no enforcement mode for this profile, "
+             "which is not evidence of a boundary and is not treated as one."
     )
+    logger.warning(
+        "runner attached AppArmor profile %s WITHOUT a kernel boundary: "
+        "%s.  This session's tools are NOT confined.  %s",
+        profile_name, label.describe(), remedy,
+    )
+    return label
 
 
 # ---------------------------------------------------------------------
@@ -356,17 +483,22 @@ class ThreadProfileScan:
         )
 
 
-def profile_name_of(label: str) -> str:
-    """Strip the enforcement-mode suffix from an ``attr/current`` value.
-
-    ``"jaato-ws-abc (enforce)"`` -> ``"jaato-ws-abc"``.  Complain mode
-    is stripped the same way on purpose: ``JAATO_APPARMOR_COMPLAIN=1``
-    is a documented diagnostic route that puts the whole profile chain
-    in complain mode, and a check that read that as divergence would
-    make the diagnostic unusable.  Complain mode is a separate question
-    (#1014) from *which profile a thread is in*, which is this one.
-    """
-    return label.split(" ", 1)[0].strip()
+#: Deliberately mode-TOLERANT name extraction, kept as an alias so the
+#: intent is legible at every call site.
+#:
+#: ``"jaato-ws-abc (enforce)"`` -> ``"jaato-ws-abc"``, and
+#: ``"jaato-ws-abc (complain)"`` -> the same.  That is correct for the
+#: question its callers ask — *which profile is this thread in, compared
+#: with its siblings* (#1023) — where a complain-mode label is not
+#: divergence, and a check that read it as divergence would make
+#: ``JAATO_APPARMOR_COMPLAIN`` unusable as the diagnostic it is.
+#:
+#: It is NOT an enforcement assertion, and #1014 ask 1 is precisely that
+#: the difference be impossible to mistake: the canonical spelling is
+#: :func:`shared.apparmor_label.profile_name_ignoring_mode`, whose name
+#: says so.  Use :func:`current_confinement` when the question is whether
+#: a boundary exists.
+profile_name_of = profile_name_ignoring_mode
 
 
 def _label_is_inside(label: str, expected: str) -> bool:
@@ -377,8 +509,14 @@ def _label_is_inside(label: str, expected: str) -> bool:
     inside the boundary the session claims, which is the property being
     checked.  Anything else -- ``unconfined``, another session's
     ``jaato-ws-*``, an unrelated profile -- is divergence.
+
+    Mode-tolerant, and that is the right tolerance HERE: this compares
+    tasks of one process against each other, and every task of a
+    complain-mode process is in complain mode.  It says nothing about
+    whether the kernel is enforcing -- :func:`confine_to_profile` owns
+    that question (#1014).
     """
-    name = profile_name_of(label)
+    name = profile_name_ignoring_mode(label)
     return name == expected or name.startswith(expected + "//")
 
 

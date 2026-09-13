@@ -22,11 +22,13 @@ absent.
 """
 
 import logging
+from unittest.mock import patch
 
 import pytest
 
 from jaato_sdk.plugins.model_provider.types import WithMetadata
 
+from shared.apparmor_label import parse_label
 from shared.plugins.interactive_shell.plugin import create_plugin
 from shared.plugins.interactive_shell.session import (
     ShellSession,
@@ -229,6 +231,12 @@ class TestConfinementPosture:
             p.shutdown()
 
     def test_require_confinement_allows_when_confined(self, tmp_path):
+        """#1014: an installed transition is necessary and no longer
+        sufficient — the kernel must also be ENFORCING the profile the
+        child will land in.  Before #1014 this test passed with the
+        callback alone, which is the defect: under
+        ``JAATO_APPARMOR_COMPLAIN`` the transition into
+        ``//child (complain)`` succeeds and the kernel blocks nothing."""
         p = create_plugin()
         p.initialize({
             'workspace_root': str(tmp_path),
@@ -236,7 +244,11 @@ class TestConfinementPosture:
         })
         p.set_apparmor_child_transition_callback(lambda: None)
         try:
-            assert p._confinement_refusal() is None
+            with patch(
+                'shared.plugins.interactive_shell.plugin.read_thread_label',
+                return_value=parse_label('jaato-ws-s//child (enforce)'),
+            ):
+                assert p._confinement_refusal() is None
         finally:
             p.shutdown()
 
