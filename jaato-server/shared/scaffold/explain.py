@@ -2924,6 +2924,54 @@ def completion() -> Rendered:
     return data, "\n".join(lines)
 
 
+#: What each ``RenderContext`` attribute is FOR.  The SET of attributes is
+#: never written here — it is read off the dataclass by
+#: :func:`_render_context_attrs` (#911), because the hand-copied set was
+#: incomplete on the day it was written and stayed that way through two later
+#: edits.  This table carries only the prose a derivation cannot know (which
+#: handle is for what; that ``tool_calls`` is empty on the input side), and an
+#: attribute missing from it is rendered by NAME — visible, unannotated, and
+#: never silently absent.
+_RENDER_CONTEXT_NOTES = {
+    "session": "the owning JaatoSession: session.workspace_path, "
+               "session.history, ...",
+    "runtime": "the session's JaatoRuntime — ledger, registered providers",
+    "registry": "registry.get_plugin('<name>') to reach a plugin",
+    "agent_params": "the agent's params dict",
+    "env": "os.environ snapshot",
+    "session_id": "None when the session is not daemon-attached",
+    "tool_calls": "completion-time only; [] for input-side prefetch",
+}
+
+
+def _render_context_attrs() -> List[Tuple[str, str]]:
+    """``RenderContext``'s attributes, in declaration order, with their notes.
+
+    Derived from ``dataclasses.fields`` so a field added to the dataclass is
+    documented by ``explain prefetch`` the day it is added rather than the day
+    someone remembers (#911).  Returns ``(name, note)`` pairs; the note is
+    ``""`` for a field :data:`_RENDER_CONTEXT_NOTES` does not describe.
+    """
+    import dataclasses
+
+    from shared.dynamic_instructions import RenderContext
+
+    return [(f.name, _RENDER_CONTEXT_NOTES.get(f.name, ""))
+            for f in dataclasses.fields(RenderContext)]
+
+
+def _context_attr_lines(attrs: List[Tuple[str, str]]) -> List[str]:
+    """Render ``(name, note)`` pairs as one indented line per attribute.
+
+    One line each rather than a reflowed paragraph: the set is derived, so it
+    grows, and a wrapped run of comma-separated names is where an omission
+    hides.  An annotated attribute reads ``name — note``; an unannotated one is
+    its bare name.
+    """
+    return [f"        {name} — {note}" if note else f"        {name}"
+            for name, note in attrs]
+
+
 def prefetch() -> Rendered:
     """The prefetch-script capability — a DETERMINISTIC per-agent way to inject
     computed/fetched content into the system prompt BEFORE the model's first turn.
@@ -2933,14 +2981,15 @@ def prefetch() -> Rendered:
     never mentions — so an author/agent self-configuring via explain can
     actually discover it.
     """
+    attrs = _render_context_attrs()
     data = {
         "directive_mandatory": "{{!py:scripts/<name>.py [args]}}",
         "directive_optional": "{{!py?:scripts/<name>.py [args]}}",
         "lives_in": ".jaato/agents/<name>.md  (the persona)",
         "script_at": "<config_root>/scripts/<name>.py  OR  ~/.jaato/scripts/<name>.py",
         "entry": "def render(context, args) -> str",
-        "context_attrs": ["agent_params", "registry", "runtime", "workspace_path",
-                          "config_root", "env", "session_id", "logger", "tool_calls"],
+        "context_attrs": [name for name, _ in attrs],
+        "context_attr_notes": {name: note for name, note in attrs if note},
         "example": "shared/plugins/subagent/README.md (prefetch_kyc_aml.py)",
         "agent_params_are_not_secret": (
             "agent_params are substituted into the persona, so anything put "
@@ -2984,11 +3033,8 @@ def prefetch() -> Rendered:
         "  SCRIPT contract:",
         "    def render(context, args) -> str",
         "      args    = whitespace-split tokens after the script name.",
-        "      context = RenderContext: agent_params (the agent's params dict),",
-        "        registry (registry.get_plugin('<name>') to reach a plugin),",
-        "        runtime, workspace_path, config_root, env (os.environ snapshot),",
-        "        session_id, logger, tool_calls (completion-time only; [] for",
-        "        input-side prefetch).",
+        "      context = RenderContext, every attribute of it:",
+        *_context_attr_lines(attrs),
         "",
         "",
         "  NEVER PASS A CREDENTIAL AS AN agent_param.  They are substituted",

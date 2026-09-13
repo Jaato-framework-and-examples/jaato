@@ -1316,6 +1316,89 @@ def plugin_config_keys(plugin: str) -> FrozenSet[str]:
     return result
 
 
+#: Memo for :func:`plugin_config_read_sites` — plugin name → its read sites,
+#: or ``None`` when the plugin's source is not in the scanned tree.
+_PLUGIN_READ_SITE_CACHE: Dict[str, Optional[Dict[str, str]]] = {}
+
+#: Receiver names a TOP-LEVEL ``plugin_configs.<plugin>`` dict is read
+#: through.  Deliberately narrower than :func:`plugin_config_keys`' ``base
+#: endswith "config"`` rule, which also matches ``reporter_config.get("x")``
+#: — a NESTED dict whose inner keys are not ``plugin_configs`` knobs at all.
+_TOP_LEVEL_CONFIG_RECEIVERS = frozenset({"config", "cfg", "opts", "_config"})
+
+
+def _read_site_key(node: ast.AST) -> Optional[str]:
+    """The literal key one ``config.get("k")`` / ``config["k"]`` node reads.
+
+    ``None`` for every other node, and for a read through a receiver outside
+    :data:`_TOP_LEVEL_CONFIG_RECEIVERS` or with a non-literal key (a
+    ``config.get(name)`` the scan cannot resolve offline).
+    """
+    if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "get" and node.args
+            and _config_base(node.func.value) in _TOP_LEVEL_CONFIG_RECEIVERS
+            and isinstance(node.args[0], ast.Constant)
+            and isinstance(node.args[0].value, str)):
+        return node.args[0].value
+    if (isinstance(node, ast.Subscript)
+            and _config_base(node.value) in _TOP_LEVEL_CONFIG_RECEIVERS
+            and isinstance(node.slice, ast.Constant)
+            and isinstance(node.slice.value, str)):
+        return node.slice.value
+    return None
+
+
+def plugin_config_read_sites(plugin: str) -> Optional[Dict[str, str]]:
+    """Where a plugin's source READS each top-level config key (#910).
+
+    Maps key → ``"<file>:<line>"`` of the first site found, by AST-scanning
+    the plugin package for ``config.get("key")`` / ``config["key"]``.  No
+    imports: the same offline discipline as :func:`plugin_config_keys`.
+
+    WHY A SECOND SCANNER, AND WHY IT RETURNS LOCATIONS.
+    :func:`plugin_config_keys` answers "may this plugin honour this name at
+    all", and unions in every ``"properties"`` block it finds — which for
+    ``memory`` means the ``store_memory`` TOOL parameters (``content``,
+    ``tags``, ``confidence``) land in the set.  That is the right bias for
+    its caller and the wrong one here: ``validate`` uses this to tell an
+    author their knob is live, so a hit must be a **config read**, not a
+    same-named tool argument.  Hence the narrower receiver rule, no schema
+    properties, and a file:line the reader can check rather than a claim
+    they must take on trust.
+
+    ``None`` means the plugin's source is NOT in the scanned tree (an
+    out-of-tree distribution, installed via an entry point) — "not checked",
+    which callers must not render as "not read".  An empty dict is the
+    different answer "scanned, and it reads no config key literally".
+
+    The scan still over-approximates: a shared helper that reads its own
+    ``config`` dict contributes its keys to the plugin that vends it.  That
+    bias is deliberate (#910) — the cost of not flagging a typo is a puzzled
+    hour, the cost of calling a working knob dead is a config change that
+    silently moves someone's data — and quoting the site keeps it checkable.
+    """
+    if plugin in _PLUGIN_READ_SITE_CACHE:
+        return _PLUGIN_READ_SITE_CACHE[plugin]
+
+    root = _PLUGIN_DIR / plugin
+    sites: Optional[Dict[str, str]] = None
+    if root.is_dir():
+        sites = {}
+        for py in sorted(root.rglob("*.py")):
+            if "__pycache__" in py.parts or "tests" in py.parts:
+                continue
+            try:
+                tree = ast.parse(py.read_text(encoding="utf-8"))
+            except (SyntaxError, OSError, UnicodeDecodeError):
+                continue
+            for node in ast.walk(tree):
+                key = _read_site_key(node)
+                if key and key not in sites:
+                    sites[key] = f"{py.name}:{node.lineno}"
+    _PLUGIN_READ_SITE_CACHE[plugin] = sites
+    return sites
+
+
 def _key_from_config_get(node: ast.AST) -> set:
     """``<something>config.get("key")`` → ``{"key"}``, else empty."""
     if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
