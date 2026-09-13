@@ -28,6 +28,7 @@ from jaato_sdk.plugins.model_provider.types import (
     normalize_inclusive_usage,
     parse_tool_call_arguments,
     render_result_for_model,
+    reported_cache_count,
     ToolSchema,
 )
 
@@ -608,8 +609,16 @@ def apply_cache_usage(raw_usage: Any, usage: TokenUsage) -> None:
 
     details = getattr(raw_usage, "prompt_tokens_details", None)
 
-    cached_tokens = _read_details(details, "cached_tokens")
-    if cached_tokens is not None and cached_tokens > 0:
+    # A reported zero is KEPT (``is not None``, not ``> 0``): OpenRouter
+    # sends ``cached_tokens: 0`` on the cold half of an exchange whose warm
+    # half hits, and on every call to an upstream that caches nothing it
+    # ever hits.  Folding that into ``None`` made "this model has no cache"
+    # and "this model cached nothing for you" the same report, which is the
+    # distinction ``TokenUsage`` and ``compute_cache_hit_percent`` both
+    # promise — and which the consumption aspect's per-tier rows need to
+    # publish a defensible session-wide rate.
+    cached_tokens = reported_cache_count(_read_details(details, "cached_tokens"))
+    if cached_tokens is not None:
         usage.cache_read_tokens = cached_tokens
 
     # Writes sit BESIDE the reads, in the same nested block, under

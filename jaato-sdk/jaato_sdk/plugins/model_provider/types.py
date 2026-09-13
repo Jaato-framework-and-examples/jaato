@@ -776,6 +776,51 @@ def uncached_prompt_tokens(
     return max(0, prompt_tokens - cached)
 
 
+def reported_cache_count(value: Any) -> Optional[int]:
+    """A cache count exactly as the upstream reported it, ZERO included.
+
+    The one question every provider seam has to answer about a cache
+    field, and the one every seam answered the same wrong way: each wrote
+    its own ``isinstance(value, int) and value > 0`` gate, so an upstream
+    that said "I cache, and this call hit nothing" was recorded
+    identically to one that reports no cache at all.
+
+    That collapse contradicted two contracts stated elsewhere in this very
+    tree.  :class:`TokenUsage` says ``None`` "means 'provider reported
+    nothing', which is distinct from a reported zero";
+    :func:`jaato_sdk.helpers.compute_cache_hit_percent` promises ``0.0``
+    for a reported zero as "a real measurement, distinct from 'no
+    support'", and tells clients to omit the line entirely for ``None``.
+    No OpenAI-shaped provider could deliver either distinction, so the
+    contract was unfeedable: a consumer holding ``None`` could not tell
+    an uncached model from an unlucky one, and a reader of
+    ``get_environment(aspect="consumption")`` got a row with the cache
+    keys missing in both cases.
+
+    A reported zero is a measurement and is kept.  Everything that is not
+    a plain non-negative ``int`` is "not reported":
+
+    * a ``bool`` — Python makes it an ``int``, and ``True`` tokens is not
+      a count.  It would also reach the subtraction in
+      :func:`uncached_prompt_tokens` as a 1;
+    * a ``str`` or a leftover test double — the count is ARITHMETIC at
+      this seam, so a non-number must never reach it (#758);
+    * a negative — a well-formed report has no negative subset, and
+      clamping a malformed one here would launder the upstream's bug into
+      a plausible-looking measurement.
+
+    Args:
+        value: Whatever the wire's cache field held.
+
+    Returns:
+        The count, ``0`` included, or ``None`` when nothing usable was
+        reported.
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value if value >= 0 else None
+
+
 def normalize_inclusive_usage(usage: TokenUsage) -> TokenUsage:
     """Rewrite an inclusive-convention ``usage`` in place, and return it.
 

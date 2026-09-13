@@ -328,7 +328,11 @@ BASELINE: Dict[str, int] = {
     "jaato-server/shared/plugins/model_provider/github_models/provider.py::GitHubModelsProvider._responses_api_response_to_provider": 19,
     "jaato-server/shared/plugins/model_provider/github_models/provider.py::GitHubModelsProvider.initialize": 18,
     "jaato-server/shared/plugins/model_provider/google_genai/converters.py::part_from_sdk": 23,
-    "jaato-server/shared/plugins/model_provider/google_genai/provider.py::GoogleGenAIProvider._complete_streaming": 43,
+    # 43 -> 42: the cached-token gate lost its ``and cached_tokens > 0``
+    # clause when the zero-vs-absent rule moved to
+    # ``types.reported_cache_count``.  radon counts ``and`` as a decision
+    # point, so centralising the rule pays for itself here too.
+    "jaato-server/shared/plugins/model_provider/google_genai/provider.py::GoogleGenAIProvider._complete_streaming": 42,
     "jaato-server/shared/plugins/model_provider/google_genai/provider.py::GoogleGenAIProvider.initialize": 16,
     "jaato-server/shared/plugins/model_provider/nebius/auth.py::validate_api_key": 16,
     "jaato-server/shared/plugins/model_provider/nebius/converters.py::message_to_openai": 16,

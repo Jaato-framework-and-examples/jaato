@@ -59,7 +59,11 @@ from ..base import (
     resolve_context_window,
     resolve_modalities,
 )
-from jaato_sdk.plugins.model_provider.types import ThinkingConfig, ToolSchema
+from jaato_sdk.plugins.model_provider.types import (
+    ThinkingConfig,
+    ToolSchema,
+    reported_cache_count,
+)
 from .env import (
     DEFAULT_BASE_URL,
     ENV_KIMI_API_KEY,
@@ -293,9 +297,15 @@ class KimiProvider(OpenAICompatProvider):
     @staticmethod
     def _extract_cache_tokens(usage: Any) -> Optional[int]:
         """Kimi reports the hit count as top-level ``usage.cached_tokens``;
-        fall back to the OpenAI-shaped location for a proxy that rewrites."""
-        cached = getattr(usage, "cached_tokens", None)
-        if isinstance(cached, int) and cached:
+        fall back to the OpenAI-shaped location for a proxy that rewrites.
+
+        The fallback is for ABSENCE, so it is gated on ``is None`` rather
+        than on truthiness: a top-level ``0`` is Kimi reporting a real miss
+        and must be returned as ``0``, not treated as a missing field that
+        sends us looking somewhere else.  See :func:`reported_cache_count`.
+        """
+        cached = reported_cache_count(getattr(usage, "cached_tokens", None))
+        if cached is not None:
             return cached
         return OpenAICompatProvider._extract_cache_tokens(usage)
 

@@ -40,6 +40,7 @@ from jaato_sdk.events import TurnCompletedEvent, UsageBreakdown
 from jaato_sdk.plugins.model_provider.types import (
     TokenUsage,
     normalize_inclusive_usage,
+    reported_cache_count,
     uncached_prompt_tokens,
 )
 from shared.pricing import PricingTable
@@ -51,6 +52,21 @@ from shared.pricing import PricingTable
 #: while a provider simply never invokes it, which is what the whole
 #: family did before #758.
 REVERSIONS = [
+    Reversion(
+        target="jaato-sdk/jaato_sdk/plugins/model_provider/types.py",
+        find="""    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value if value >= 0 else None""",
+        replace="""    return value if isinstance(value, int) and value else None""",
+        test=("TestEverySeamKeepsAReportedZero::"
+              "test_openai_compatible_seam"),
+        because="every provider seam folding a reported ``cached_tokens: "
+                "0`` back into ``None``, which makes an upstream that "
+                "cached nothing indistinguishable from one with no prompt "
+                "cache at all -- the distinction TokenUsage and "
+                "compute_cache_hit_percent both promise, and which the "
+                "consumption aspect needs to report a session-wide rate",
+    ),
     Reversion(
         target="jaato-sdk/jaato_sdk/plugins/model_provider/types.py",
         find="""    cached = (cache_read_tokens or 0) + (cache_creation_tokens or 0)
@@ -439,3 +455,144 @@ class TestUncachedPromptTokens:
         usage = TokenUsage(prompt_tokens=1_000, cache_read_tokens=900)
         assert normalize_inclusive_usage(usage) is usage
         assert usage.prompt_tokens == 100
+
+
+# ------------------------------------------- a reported zero IS a reading
+
+class TestReportedCacheCount:
+    """The rule every seam delegates to, exercised directly.
+
+    Its companion below is what actually matters -- a helper test cannot
+    notice a seam that never calls the helper -- but the rule itself has
+    four edges worth naming once.
+    """
+
+    def test_a_reported_zero_survives(self):
+        assert reported_cache_count(0) == 0
+
+    def test_a_count_passes_through(self):
+        assert reported_cache_count(9_500) == 9_500
+
+    def test_absent_is_not_reported(self):
+        assert reported_cache_count(None) is None
+
+    def test_a_bool_is_not_a_count(self):
+        # Python makes ``bool`` an ``int``; ``True`` would reach the
+        # subtraction in ``uncached_prompt_tokens`` as a 1.
+        assert reported_cache_count(True) is None
+        assert reported_cache_count(False) is None
+
+    def test_a_non_int_is_not_reported(self):
+        for value in ("9500", 9_500.0, object()):
+            assert reported_cache_count(value) is None, value
+
+    def test_a_negative_is_not_clamped_into_a_measurement(self):
+        # A subset cannot be negative.  Returning 0 here would launder an
+        # upstream's bug into a plausible-looking reading.
+        assert reported_cache_count(-1) is None
+
+
+class TestEverySeamKeepsAReportedZero:
+    """"I cache, and this call hit nothing" must not read as "I do not cache".
+
+    Same shape and same reason as
+    :class:`TestEveryInclusiveSeamConverts`: the rule lives in each
+    provider, so one test per seam.  Each of these seams carried its own
+    ``and value > 0`` gate, which is what made the two states
+    indistinguishable everywhere at once -- and left
+    ``get_environment(aspect="consumption")`` unable to say whether a
+    tier's missing cache row meant an uncached model or an unlucky one.
+    """
+
+    def test_openai_compatible_seam(self):
+        # nim / ovhcloud / doubleword / zhipuai_openai / nebius-via-base /
+        # minimax / mimo all inherit this one.
+        from shared.plugins.model_provider._openai_compat.base import (
+            OpenAICompatProvider,
+        )
+
+        raw = _openai_usage(10_000, 200, cached_tokens=0)
+        assert OpenAICompatProvider._extract_cache_tokens(raw) == 0
+
+    def test_nebius_seam(self):
+        from shared.plugins.model_provider.nebius.converters import (
+            cached_tokens_from,
+        )
+
+        assert cached_tokens_from(_openai_usage(10_000, 200, cached_tokens=0)) == 0
+
+    def test_openrouter_seam(self):
+        from shared.plugins.model_provider.openrouter.converters import (
+            apply_cache_usage,
+        )
+
+        usage = TokenUsage(prompt_tokens=10_000)
+        apply_cache_usage(_openai_usage(10_000, 200, cached_tokens=0), usage)
+        assert usage.cache_read_tokens == 0
+        # And the conversion is a no-op on a zero, so the prompt total
+        # this seam also owns is untouched.
+        assert usage.prompt_tokens == 10_000
+
+    def test_openai_responses_seam(self):
+        from shared.plugins.model_provider.openai.responses_converters import (
+            usage_from_responses,
+        )
+
+        usage = usage_from_responses(SimpleNamespace(
+            input_tokens=10_000,
+            output_tokens=200,
+            total_tokens=10_200,
+            input_tokens_details=SimpleNamespace(cached_tokens=0),
+        ))
+        assert usage.cache_read_tokens == 0
+        assert usage.prompt_tokens == 10_000
+
+    def test_kimi_seam_does_not_fall_through_on_a_reported_zero(self):
+        """Kimi's fallback is for ABSENCE, so a zero must stop there.
+
+        A top-level ``0`` is Kimi reporting a real miss.  Reading it as a
+        missing field sent the lookup to the OpenAI-shaped location,
+        which for this wire is an absence -- so a reported miss came back
+        as "no cache dimension" by a second route.
+        """
+        from shared.plugins.model_provider.kimi.provider import KimiProvider
+
+        assert KimiProvider._extract_cache_tokens(
+            SimpleNamespace(cached_tokens=0)) == 0
+
+    def test_google_genai_seam(self):
+        from shared.plugins.model_provider.google_genai.converters import (
+            extract_usage_from_response,
+        )
+
+        usage = extract_usage_from_response(SimpleNamespace(
+            usage_metadata=SimpleNamespace(
+                prompt_token_count=10_000,
+                candidates_token_count=200,
+                total_token_count=10_200,
+                cached_content_token_count=0,
+            )))
+        assert usage.cache_read_tokens == 0
+        assert usage.prompt_tokens == 10_000
+
+    def test_a_zero_reaches_the_hit_percentage_as_zero_not_as_silence(self):
+        """The payoff, at the far end of the chain.
+
+        ``compute_cache_hit_percent`` documents exactly this split --
+        ``0.0`` for a reported zero, ``None`` for no report -- and before
+        the seams kept the distinction no OpenAI-shaped provider could
+        produce the first value at all.
+        """
+        from shared.plugins.model_provider.openrouter.converters import (
+            apply_cache_usage,
+        )
+
+        usage = TokenUsage(prompt_tokens=10_000, output_tokens=200,
+                           total_tokens=10_200)
+        apply_cache_usage(_openai_usage(10_000, 200, cached_tokens=0), usage)
+        assert compute_cache_hit_percent(_turn_event(usage)) == 0.0
+
+        silent = TokenUsage(prompt_tokens=10_000, output_tokens=200,
+                            total_tokens=10_200)
+        apply_cache_usage(SimpleNamespace(prompt_tokens=10_000), silent)
+        assert compute_cache_hit_percent(_turn_event(silent)) is None

@@ -55,6 +55,7 @@ from jaato_sdk.plugins.model_provider.types import (
     normalize_inclusive_usage,
     parse_tool_call_arguments,
     render_result_for_model,
+    reported_cache_count,
 )
 
 from shared.tool_id_map import id_to_name, name_to_id
@@ -347,6 +348,9 @@ def usage_from_responses(usage: Any) -> TokenUsage:
     ``input_tokens`` on this wire, so it is normalised out of the prompt
     total — otherwise the cached tokens are counted on both sides of
     every downstream sum (#758).
+
+    A reported zero is kept as ``0`` rather than folded into ``None`` —
+    see :func:`reported_cache_count`.
     """
     if usage is None:
         return TokenUsage()
@@ -356,7 +360,7 @@ def usage_from_responses(usage: Any) -> TokenUsage:
         prompt_tokens=_get(usage, "input_tokens") or 0,
         output_tokens=_get(usage, "output_tokens") or 0,
         total_tokens=_get(usage, "total_tokens") or 0,
-        cache_read_tokens=cached if isinstance(cached, int) and cached else None,
+        cache_read_tokens=reported_cache_count(cached),
     ))
 
 

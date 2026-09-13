@@ -27,6 +27,7 @@ from jaato_sdk.plugins.model_provider.types import (
     normalize_inclusive_usage,
     parse_tool_call_arguments,
     render_result_for_model,
+    reported_cache_count,
     ToolSchema,
 )
 
@@ -342,16 +343,15 @@ def cached_tokens_from(usage: Any) -> Optional[int]:
     """OpenAI-compatible cache-hit count (``usage.prompt_tokens_details.cached_tokens``).
 
     Nebius's Context Caching (and the vLLM backends it serves) report automatic
-    prefix-cache hits here.  Returns the count when present + nonzero, else
-    ``None`` — so it maps onto ``TokenUsage.cache_read_tokens`` for cost /
-    cache-hit-rate measurement.  Defensive: the field is absent on responses
-    without a cache hit (and on backends that don't report it).
+    prefix-cache hits here.  Returns the count as reported — a ZERO included,
+    because a backend saying "no hit on this call" is a measurement and is
+    what distinguishes it from one that reports no cache at all — else
+    ``None``, so it maps onto ``TokenUsage.cache_read_tokens`` for cost /
+    cache-hit-rate measurement.  See :func:`reported_cache_count`.
     """
     details = getattr(usage, "prompt_tokens_details", None)
     cached = getattr(details, "cached_tokens", None) if details is not None else None
-    # Int-checked because the count is subtracted from ``prompt_tokens``
-    # at this seam; anything else reads as "not reported".
-    return cached if isinstance(cached, int) and cached else None
+    return reported_cache_count(cached)
 
 
 def extract_usage(response: "ChatCompletion") -> TokenUsage:

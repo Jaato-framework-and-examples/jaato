@@ -22,6 +22,8 @@ from jaato_sdk.plugins.model_provider.types import (
     ProviderResponse,
     TokenUsage,
 )
+from shared.tests.test_every_guard_detects_its_own_reversion import Reversion
+
 from shared.jaato_session import JaatoSession
 from shared.session_consumption import (
     COST_SOURCE_PRICING_TABLE,
@@ -29,6 +31,29 @@ from shared.session_consumption import (
     BindingUsage,
     ConsumptionLedger,
 )
+
+
+#: The pooled cache rate is the one figure here a reader ACTS on -- an
+#: operator sizing a cache, a model reporting its own efficiency -- so the
+#: guard that withholds it when its denominator is not established proves
+#: it detects its own removal.
+REVERSIONS = [
+    Reversion(
+        target="jaato-server/shared/session_consumption.py",
+        find="""        return (
+            self.measured_bindings > 0
+            and self.unmeasured_bindings > 0
+            and self.unmeasured_input_tokens > 0
+        )""",
+        replace="""        return False""",
+        test=("TestPooledCacheHitRate::"
+              "test_a_mixed_pool_withholds_the_session_wide_rate"),
+        because="the totals row going back to pooling a caching binding's "
+                "numerator with a non-reporting binding's denominator, "
+                "which is absent-read-as-zero by arithmetic and published "
+                "a 54.66% session 'cache efficiency' no binding had",
+    ),
+]
 
 
 def _response(
@@ -188,6 +213,154 @@ class TestConsumptionLedger:
         assert totals.responses == 0
         assert totals.turns == 0
         assert totals.as_dict()["total_tokens"] == 0
+
+
+# --------------------------------------------------------------------
+# The POOLED cache figure, where "absent is not zero" is easiest to break
+# --------------------------------------------------------------------
+
+def _mixed_pool():
+    """The measured two-tier voice session: one caching tier, one not.
+
+    Numbers are the ones a live session reported (executor
+    ``google/gemini-2.5-flash`` at 76.41%, voz ``openai/gpt-audio``
+    reporting no cache dimension at all), because the figure they pooled
+    to -- 54.66% -- is the regression this section exists to prevent.
+    """
+    ledger = ConsumptionLedger()
+    ledger.observe(provider="openrouter", model="google/gemini-2.5-flash",
+                   tier="executor", uncached_input_tokens=133_044,
+                   output_tokens=475, total_tokens=564_461,
+                   cache_read_tokens=430_942, turn_index=0)
+    ledger.observe(provider="openrouter", model="openai/gpt-audio", tier="voz",
+                   uncached_input_tokens=224_423, output_tokens=1_476,
+                   total_tokens=225_899, turn_index=1)
+    return ledger
+
+
+class TestPooledCacheHitRate:
+    """A session-wide rate is published only where its premise holds.
+
+    ``BindingUsage.cache_hit_percent`` divides by "input that COULD have
+    been a hit", which one binding establishes by its provider reporting
+    the dimension.  Summing across a binding that reported nothing keeps
+    the formula and drops the premise: the unmeasured input lands in the
+    denominator and nothing lands in the numerator, which is
+    absent-read-as-zero reached by arithmetic instead of by a literal --
+    the one thing this module's docstring forbids.
+    """
+
+    def test_a_mixed_pool_withholds_the_session_wide_rate(self):
+        totals = _mixed_pool().totals()
+        assert totals.cache_hit_percent is None
+        assert "cache_hit_percent" not in totals.as_dict()
+
+    def test_the_withheld_rate_is_the_one_that_would_have_misled(self):
+        """Pin the number, so a reversion fails loudly rather than quietly."""
+        totals = _mixed_pool().totals()
+        pooled = 100.0 * totals.cache_read_tokens / (
+            totals.cache_read_tokens + totals.uncached_input_tokens)
+        assert pooled == pytest.approx(54.66, abs=0.01)
+        # ... and no binding had it.
+        assert all(b.cache_hit_percent != pytest.approx(pooled, abs=0.01)
+                   for b in _mixed_pool().bindings())
+
+    def test_the_basis_names_what_could_not_be_measured(self):
+        basis = _mixed_pool().totals().as_dict()["cache_hit_basis"]
+        assert basis["measured_bindings"] == 1
+        assert basis["unmeasured_bindings"] == 1
+        # Exactly what a pooled denominator would have absorbed -- the
+        # unmeasured binding's UNCACHED input, not its input_tokens_total.
+        assert basis["unmeasured_input_tokens"] == 224_423
+        assert basis["measured_input_tokens"] == 563_986
+
+    def test_the_measured_subset_still_reports_its_rate(self):
+        """Withholding must not cost the reader the defensible figure."""
+        basis = _mixed_pool().totals().as_dict()["cache_hit_basis"]
+        assert basis["cache_hit_percent"] == pytest.approx(76.41)
+
+    def test_the_token_sums_are_untouched(self):
+        """Only the derived rate is withheld; sums of measurements stay."""
+        row = _mixed_pool().totals().as_dict()
+        assert row["cache_read_tokens"] == 430_942
+        assert row["input_tokens_total"] == 788_409
+
+    def test_a_homogeneous_pool_is_unchanged(self):
+        """The common case must not pay for the mixed one."""
+        ledger = ConsumptionLedger()
+        for model in ("a", "b"):
+            ledger.observe(provider="p", model=model, uncached_input_tokens=100,
+                           output_tokens=5, total_tokens=1_005,
+                           cache_read_tokens=900, turn_index=0)
+        row = ledger.totals().as_dict()
+        assert row["cache_hit_percent"] == pytest.approx(90.0)
+        assert "cache_hit_basis" not in row
+
+    def test_a_reported_zero_makes_the_pool_homogeneous(self):
+        """The payoff of not collapsing a reported 0 at the provider seam.
+
+        The same two bindings as the mixed pool in shape, except the
+        second says "I cache, and I hit nothing".  That is a measurement,
+        so the pooled denominator is fully established and the rate is
+        published -- which is why the provider-seam half of this fix is
+        what turns a withheld figure back into a real one.
+        """
+        ledger = ConsumptionLedger()
+        ledger.observe(provider="p", model="a", uncached_input_tokens=100,
+                       output_tokens=5, total_tokens=1_005,
+                       cache_read_tokens=900, turn_index=0)
+        ledger.observe(provider="p", model="b", uncached_input_tokens=200,
+                       output_tokens=5, total_tokens=205,
+                       cache_read_tokens=0, turn_index=1)
+        row = ledger.totals().as_dict()
+        assert row["cache_hit_percent"] == pytest.approx(75.0)
+        assert "cache_hit_basis" not in row
+
+    def test_a_pool_measuring_nothing_explains_nothing(self):
+        """``cache_read_tokens`` is already absent -- that reads correctly.
+
+        A basis here would explain the absence of a number no reader was
+        expecting, and would be the only place in the payload where an
+        all-uncached session says the word "cache".
+        """
+        ledger = ConsumptionLedger()
+        ledger.observe(provider="p", model="m", uncached_input_tokens=100,
+                       output_tokens=5, total_tokens=105, turn_index=0)
+        row = ledger.totals().as_dict()
+        assert "cache_hit_percent" not in row
+        assert "cache_hit_basis" not in row
+        assert "cache_read_tokens" not in row
+
+    def test_an_unmeasured_binding_with_no_uncached_input_is_not_mixed(self):
+        """It could not have moved the denominator, so nothing is withheld."""
+        ledger = ConsumptionLedger()
+        ledger.observe(provider="p", model="a", uncached_input_tokens=100,
+                       output_tokens=5, total_tokens=1_005,
+                       cache_read_tokens=900, turn_index=0)
+        ledger.observe(provider="p", model="b", uncached_input_tokens=0,
+                       output_tokens=5, total_tokens=5, turn_index=1)
+        row = ledger.totals().as_dict()
+        assert row["cache_hit_percent"] == pytest.approx(90.0)
+        assert "cache_hit_basis" not in row
+
+    def test_a_real_binding_never_carries_a_basis(self):
+        """The field is the totals row's alone; a binding is not a pool."""
+        for binding in _mixed_pool().bindings():
+            assert binding.cache_basis is None
+            assert "cache_hit_basis" not in binding.as_dict()
+
+    def test_the_note_promises_no_figure_it_does_not_publish(self):
+        """A measured subset whose own denominator is empty says less."""
+        ledger = ConsumptionLedger()
+        ledger.observe(provider="p", model="a", uncached_input_tokens=0,
+                       output_tokens=5, total_tokens=5,
+                       cache_read_tokens=0, turn_index=0)
+        ledger.observe(provider="p", model="b", uncached_input_tokens=200,
+                       output_tokens=5, total_tokens=205, turn_index=1)
+        basis = ledger.totals().as_dict()["cache_hit_basis"]
+        assert "cache_hit_percent" not in basis
+        assert "figure" not in basis["note"]
+        assert "cache_hit_percent here" not in basis["note"]
 
 
 # --------------------------------------------------------------------

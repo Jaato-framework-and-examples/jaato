@@ -233,7 +233,12 @@ class TestApplyCacheUsage:
         )
         apply_cache_usage(raw, usage)
         assert usage.cache_creation_tokens == 4403
-        assert usage.cache_read_tokens is None   # zero is not a hit
+        # Zero is not a hit -- and it is still a MEASUREMENT.  This wire
+        # said "I cache, and this call read nothing"; recording that as
+        # ``None`` made it indistinguishable from an upstream with no
+        # prompt cache at all, which is the one thing a consumer of
+        # ``cache_read_tokens`` cannot recover afterwards.
+        assert usage.cache_read_tokens == 0
 
     def test_the_warm_half_of_the_same_exchange(self):
         """The second call: the read lands, the write goes quiet."""
@@ -322,7 +327,15 @@ class TestApplyCacheUsage:
         assert usage.cache_creation_tokens is None
         assert usage.cost_usd is None
 
-    def test_zero_or_negative_cached_tokens_ignored(self):
+    def test_a_reported_zero_read_is_kept_a_zero_write_is_not(self):
+        """The two counts are deliberately NOT symmetric here.
+
+        ``cache_read_tokens`` feeds a rate whose denominator has to know
+        whether the dimension exists, so a reported zero is kept.  Nothing
+        divides by ``cache_creation_tokens``; its ``> 0`` gate is left
+        alone rather than widened on a hunch, and the asymmetry is pinned
+        here so the next reader finds it stated instead of inferred.
+        """
         from jaato_sdk.plugins.model_provider.types import TokenUsage
         usage = TokenUsage()
         raw = _usage_obj(
@@ -330,8 +343,23 @@ class TestApplyCacheUsage:
             cache_creation_input_tokens=0,
         )
         apply_cache_usage(raw, usage)
-        assert usage.cache_read_tokens is None
+        assert usage.cache_read_tokens == 0
         assert usage.cache_creation_tokens is None
+
+    def test_a_malformed_cached_count_is_not_reported(self):
+        """A negative or non-int subset is an upstream bug, not a zero.
+
+        It would otherwise reach the subtraction in
+        ``uncached_prompt_tokens`` and launder itself into a plausible
+        token count three layers downstream.
+        """
+        from jaato_sdk.plugins.model_provider.types import TokenUsage
+        for bad in (-1, True, "0", 1.5):
+            usage = TokenUsage()
+            apply_cache_usage(
+                _usage_obj(prompt_tokens_details=_usage_obj(cached_tokens=bad)),
+                usage)
+            assert usage.cache_read_tokens is None, bad
 
 
 class TestExtractUsageEnd2End:
