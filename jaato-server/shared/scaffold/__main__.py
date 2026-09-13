@@ -75,12 +75,19 @@ class ExplainScope:
             scope being renamed.
         render_named: the second renderer of an ``optional_named`` scope — what
             runs when a name IS supplied.  ``None`` for every other kind.
+        blurb: the trailing ``# ...`` note the overview banner prints beside
+            this topic, for the topics whose name does not say what they are.
+            Empty for the ones that do.  It lives HERE for the same reason
+            ``arg`` does: the banner used to be hand-typed prose and had
+            drifted to advertise 21 of 23 topics (#1006), so every string the
+            banner prints is now a field of the entry it describes.
     """
 
     render: Callable[..., Any]
     kind: str = "simple"
     arg: str = ""
     render_named: Optional[Callable[..., Any]] = None
+    blurb: str = ""
 
 
 #: Every `explain` topic, in the order the help line lists them.
@@ -105,30 +112,39 @@ _SCOPES = {
     "providers": ExplainScope(_explain.providers),
     "provider": ExplainScope(_explain.provider, "named", "<name>"),
     "gc": ExplainScope(_explain.gc),
-    "env": ExplainScope(_explain.env, "filter", "[<filter>]"),
-    "events": ExplainScope(_explain.events, "filter", "[<filter>]"),
+    "env": ExplainScope(_explain.env, "filter", "[<filter>]",
+                        blurb="vars the daemon + plugins READ"),
+    "events": ExplainScope(_explain.events, "filter", "[<filter>]",
+                           blurb="the client/server protocol"),
     # The hint says "or" rather than "|": the help line separates topics with
     # "|", so a hint carrying one is unreadable there and unparseable by
     # anything reading the line back.
-    "event": ExplainScope(_explain.event, "named", "<NAME or wire.value>"),
+    "event": ExplainScope(_explain.event, "named", "<NAME or wire.value>",
+                          blurb="one event's fields + docstring"),
     "transports": ExplainScope(_explain.transports),
     "clients": ExplainScope(_explain.clients),
     "runtime": ExplainScope(_explain.runtime),
     "tiers": ExplainScope(_explain.tiers),
-    "integrations": ExplainScope(_explain.integrations),
+    "integrations": ExplainScope(_explain.integrations,
+                                 blurb="tools jaato can wire into"),
     "sets": ExplainScope(_explain.sets, "workspace"),
-    "agents": ExplainScope(_explain.agents, "workspace"),
-    "services": ExplainScope(_explain.services, "workspace"),
+    "agents": ExplainScope(_explain.agents, "workspace",
+                           blurb="the PERSONA layer (.jaato/agents/)"),
+    "services": ExplainScope(_explain.services, "workspace",
+                             blurb="named HTTP APIs (.jaato/services/)"),
     # ``profile`` alone is the SCHEMA; ``profile <name>`` is what that named
     # profile INHERITS and what it costs per turn.  A profile file states what
     # it adds and never what it inherits, so the instruction tax is invisible
     # at authoring time and shows up later as a budget refusal.
     "profile": ExplainScope(_explain.profile, "optional_named", "[<name>]",
-                            render_named=_explain.profile_cost),
+                            render_named=_explain.profile_cost,
+                            blurb="a session's CAPABILITIES"),
     "paths": ExplainScope(_explain.paths),
     "prefetch": ExplainScope(_explain.prefetch),
-    "completion": ExplainScope(_explain.completion),
-    "archetypes": ExplainScope(_explain.archetypes),
+    "completion": ExplainScope(_explain.completion,
+                               blurb="the OUTPUT-side hook"),
+    "archetypes": ExplainScope(_explain.archetypes,
+                               blurb="what `new` WRITES"),
     "archetype": ExplainScope(_explain.archetype, "named", "<name>"),
 }
 
@@ -198,15 +214,52 @@ def _scopes_help() -> str:
         f"{scope} {spec.arg}".rstrip() for scope, spec in _SCOPES.items())
 
 
+def _workspace_readers() -> list:
+    """The topics whose renderer is handed the ``--workspace`` value.
+
+    One predicate, two consumers: ``--workspace``'s own help text and the
+    overview banner, which appends ``[--workspace DIR]`` to exactly these
+    topics.  Written once because the hand-typed banner put that hint on
+    ``sets`` alone while ``agents`` and ``services`` read the workspace just
+    as much (#1006).
+    """
+    return [n for n, s in _SCOPES.items()
+            if s.kind in ("workspace", "optional_named")]
+
+
 def _workspace_arg_help() -> str:
     """``--workspace``'s help — the topics that actually read it.
 
     Derived for the same reason the scope list is: this said "(for `sets`)"
     while three more workspace-reading topics had been added beside it.
     """
-    readers = [n for n, s in _SCOPES.items()
-               if s.kind in ("workspace", "optional_named")]
+    readers = _workspace_readers()
     return "workspace dir (for " + ", ".join(f"`{n}`" for n in readers) + ")"
+
+
+def scope_catalog() -> list:
+    """Every `explain` topic as data — what the overview banner renders from.
+
+    The banner is the THIRD surface that used to spell the topic list by hand
+    (#1006), after the ``one of:`` error and argparse's ``--help`` (#994).  It
+    advertised 21 topics while :data:`_SCOPES` carried 23, with ``env``,
+    ``event`` and ``events`` dispatching and named nowhere.  Exporting the
+    table as data — rather than letting :mod:`explain` import the CLI's
+    private dict — keeps the banner derived without making every field of
+    ``ExplainScope`` part of that module's contract.
+
+    Returns:
+        One dict per topic, in table order: ``scope``, ``arg`` (the argument
+        hint), ``kind``, ``reads_workspace`` (whether ``--workspace`` reaches
+        its renderer) and ``blurb``.
+    """
+    readers = set(_workspace_readers())
+    return [{"scope": name,
+             "arg": spec.arg,
+             "kind": spec.kind,
+             "reads_workspace": name in readers,
+             "blurb": spec.blurb}
+            for name, spec in _SCOPES.items()]
 
 
 _SCOPES_HELP = _scopes_help()

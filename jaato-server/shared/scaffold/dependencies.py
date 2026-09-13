@@ -682,16 +682,32 @@ def for_plugin(name: str, source: str) -> Dict[str, Any]:
 
 # --------------------------------------------------------------------- render
 
+#: The scopes that have a dependency facet OF THEIR OWN, keyed by the word the
+#: overview banner shows.  Each value is ``(accepted scope words, builder)``.
+#:
+#: The facet word is accepted after ANY scope — it is stripped before the topic
+#: is looked up, so nothing here rejects anything.  What this table decides is
+#: whether the answer is about the NAMED UNIT or about the framework: a scope
+#: absent from it (and any of these called without a name) falls through to
+#: :func:`framework_picture`, which is why the banner must not promise a
+#: per-topic facet for all 23 topics.  One declaration, because :func:`render`
+#: dispatches on it and ``explain``'s banner renders from it — the pairing
+#: #1006 asks for, so the advertised forms are the ones that route.
+UNIT_FACETS: Dict[str, Tuple[Tuple[str, ...], Any]] = {}
+
+
 def render(scope: Optional[str], name: Optional[str]) -> Tuple[Dict[str, Any], str]:
-    """``(data, text)`` for the dependency facet of ``scope``/``name``."""
-    if scope in ("provider", "providers") and name:
-        d = for_provider(name)
-        return d, _render_unit(d)
-    if scope in ("plugin", "plugins") and name:
-        d = _plugin_facet(name)
-        if "error" in d:
-            return d, d["error"]
-        return d, _render_unit(d)
+    """``(data, text)`` for the dependency facet of ``scope``/``name``.
+
+    A named provider or plugin is reported as itself; everything else — every
+    other scope, a bare ``explain dependencies``, and a unit scope with no name
+    — is reported as the framework's own picture, with a ``note`` saying so.
+    """
+    if name:
+        for aliases, build in UNIT_FACETS.values():
+            if scope in aliases:
+                d = build(name)
+                return (d, d["error"]) if "error" in d else (d, _render_unit(d))
 
     d = framework_picture()
     if scope:
@@ -722,6 +738,15 @@ def _plugin_facet(name: str) -> Dict[str, Any]:
     d["note"] = ("discovery skipped this plugin in this environment — reported "
                  "from its source, which is what the imports below explain")
     return d
+
+
+#: Populated here rather than at the declaration above, which precedes both
+#: builders; `render` reads it at call time, so the two sit where each is
+#: readable.
+UNIT_FACETS.update({
+    "provider": (("provider", "providers"), for_provider),
+    "plugin": (("plugin", "plugins"), _plugin_facet),
+})
 
 
 def _render_unit(d: Dict[str, Any]) -> str:

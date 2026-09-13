@@ -1692,3 +1692,235 @@ def events() -> Dict[str, EventInfo]:
             fields=list(cls[2]) if cls else [],
         )
     return out
+
+
+# ------------------------------------------- provider api_params forwarding
+
+#: The class attribute an OpenAI-shaped provider uses to allow-list the
+#: ``api_params`` keys it forwards.  Everything else it is handed is dropped
+#: BEFORE the request, with a WARNING naming the keys — see
+#: ``_openai_compat/base.py::_read_api_params``.
+_FORWARD_ATTR = "_FORWARDED_API_PARAMS"
+
+#: Set methods spelled as calls rather than operators.  ``kimi`` writes
+#: ``Base._FORWARDED_API_PARAMS.intersection({...})``.
+_SET_METHODS = {"union": "or_", "intersection": "and_", "difference": "sub"}
+
+#: Module-level set constants share the class index under this key, which is
+#: not a legal Python identifier and so cannot collide with a class name.
+_CONSTS_KEY = "<module-consts>"
+
+_FORWARD_INDEX_CACHE: Optional[Dict[str, Any]] = None
+_FORWARD_SITE_CACHE: Dict[str, Optional[Dict[str, Any]]] = {}
+
+
+def _provider_class_index() -> Dict[str, Any]:
+    """Every provider-tier class: its bases, its file, its allow-list (if any).
+
+    One AST pass over ``model_provider/**``, no imports — the same offline
+    discipline the provider-constant reader keeps, and for the same reason: a
+    provider whose vendor SDK is not installed must still be explainable.
+
+    A class maps to ``{bases, file, line, expr}``, the last two set only for a
+    class whose BODY assigns :data:`_FORWARD_ATTR`; ``expr`` is the unevaluated
+    right-hand side, handed to :func:`_eval_set_expr`.
+    """
+    global _FORWARD_INDEX_CACHE
+    if _FORWARD_INDEX_CACHE is not None:
+        return _FORWARD_INDEX_CACHE
+    index: Dict[str, Any] = {}
+    consts: Dict[str, Any] = {}
+    index[_CONSTS_KEY] = consts
+    for py in sorted(_PROVIDER_DIR.rglob("*.py")):
+        if "__pycache__" in py.parts or "tests" in py.parts:
+            continue
+        try:
+            tree = ast.parse(py.read_text(encoding="utf-8"))
+        except (SyntaxError, OSError, UnicodeDecodeError):
+            continue
+        rel = py.relative_to(_PROVIDER_DIR).as_posix()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ClassDef):
+                index[node.name] = _class_entry(node, rel)
+            elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+                _note_module_const(node, consts)
+    _FORWARD_INDEX_CACHE = index
+    return index
+
+
+def _note_module_const(node: ast.AST, consts: Dict[str, Any]) -> None:
+    """Record a module-level ``NAME = frozenset({...})`` for the evaluator.
+
+    ``_openai_compat``'s allow-list is ``frozenset({...}) | MEDIA_API_PARAMS``,
+    so without these the base set itself is unevaluable and every provider
+    inheriting it reports "not statically known".  A name defined twice with
+    DIFFERENT values is poisoned to ``None``: this index is flat across the
+    tree, and guessing which module a reference meant is how a diagnostic
+    starts inventing facts.
+    """
+    targets = (node.targets if isinstance(node, ast.Assign) else [node.target])
+    for target in targets:
+        if not isinstance(target, ast.Name) or node.value is None:
+            continue
+        value = _literal_str_set(node.value)
+        if value is None and isinstance(node.value, ast.Call):
+            func = node.value.func
+            if (isinstance(func, ast.Name) and func.id in ("frozenset", "set")
+                    and node.value.args):
+                value = _literal_str_set(node.value.args[0])
+        if value is None:
+            continue
+        if target.id in consts and consts[target.id] != value:
+            consts[target.id] = None
+        else:
+            consts.setdefault(target.id, value)
+
+
+def _class_entry(node: "ast.ClassDef", rel: str) -> Dict[str, Any]:
+    """One class's bases and its ``_FORWARDED_API_PARAMS`` assignment, if any."""
+    bases = [b.id if isinstance(b, ast.Name) else
+             b.attr if isinstance(b, ast.Attribute) else ""
+             for b in node.bases]
+    entry: Dict[str, Any] = {"bases": [b for b in bases if b], "file": rel,
+                             "line": None, "expr": None}
+    for stmt in node.body:
+        if not isinstance(stmt, ast.Assign):
+            continue
+        if any(isinstance(t, ast.Name) and t.id == _FORWARD_ATTR
+               for t in stmt.targets):
+            entry["line"], entry["expr"] = stmt.lineno, stmt.value
+    return entry
+
+
+def _literal_str_set(node: ast.AST) -> Optional[FrozenSet[str]]:
+    """``{"a", "b"}`` / ``["a"]`` → the set of strings, else ``None``."""
+    if not isinstance(node, (ast.Set, ast.List, ast.Tuple)):
+        return None
+    out = set()
+    for elt in node.elts:
+        if not (isinstance(elt, ast.Constant) and isinstance(elt.value, str)):
+            return None
+        out.add(elt.value)
+    return frozenset(out)
+
+
+def _eval_set_expr(node: ast.AST, index: Dict[str, Any],
+                   seen: Optional[set] = None) -> Optional[FrozenSet[str]]:
+    """Evaluate a provider's allow-list expression EXACTLY, or answer ``None``.
+
+    Exactly, because the alternative was measured and is unsafe: collecting
+    the string literals of the assignment over-approximates, and ``minimax``
+    and ``mimo`` SUBTRACT three keys from the base set --
+
+        (OpenAICompatProvider._FORWARDED_API_PARAMS
+         - frozenset({"frequency_penalty", "presence_penalty", "seed"}))
+
+    -- so a literal scan reports the removed keys as forwarded, and the caller
+    then tells an author a key reaches the request when the provider strips
+    it.  That is #1008's own defect committed by its fix.
+
+    Handles the four forms the tree uses: a literal set, ``frozenset(...)``,
+    the ``|`` / ``-`` / ``&`` operators, a reference to another class's
+    attribute (resolved through *index*), and the method spellings in
+    :data:`_SET_METHODS`.  Anything else is ``None`` -- *not statically
+    known*, which callers must render as a withheld claim and never as an
+    empty set.
+    """
+    seen = seen if seen is not None else set()
+    lit = _literal_str_set(node)
+    if lit is not None:
+        return lit
+    if isinstance(node, ast.BinOp):
+        return _eval_binop(node, index, seen)
+    if isinstance(node, ast.Name):
+        return index.get(_CONSTS_KEY, {}).get(node.id)
+    if isinstance(node, ast.Attribute) and node.attr == _FORWARD_ATTR:
+        return _eval_class_attr(node, index, seen)
+    if isinstance(node, ast.Call):
+        return _eval_set_call(node, index, seen)
+    return None
+
+
+def _eval_binop(node: "ast.BinOp", index, seen) -> Optional[FrozenSet[str]]:
+    left = _eval_set_expr(node.left, index, seen)
+    right = _eval_set_expr(node.right, index, seen)
+    if left is None or right is None:
+        return None
+    if isinstance(node.op, ast.BitOr):
+        return left | right
+    if isinstance(node.op, ast.Sub):
+        return left - right
+    if isinstance(node.op, ast.BitAnd):
+        return left & right
+    return None
+
+
+def _eval_class_attr(node: "ast.Attribute", index, seen) -> Optional[FrozenSet[str]]:
+    """``SomeProvider._FORWARDED_API_PARAMS`` → that class's evaluated set."""
+    owner = node.value.id if isinstance(node.value, ast.Name) else None
+    if owner is None or owner in seen:
+        return None
+    entry = index.get(owner)
+    if entry is None or entry["expr"] is None:
+        return None
+    return _eval_set_expr(entry["expr"], index, seen | {owner})
+
+
+def _eval_set_call(node: "ast.Call", index, seen) -> Optional[FrozenSet[str]]:
+    """``frozenset({...})`` / ``x.intersection({...})`` and friends."""
+    if isinstance(node.func, ast.Name) and node.func.id in ("frozenset", "set"):
+        if not node.args:
+            return frozenset()
+        return _eval_set_expr(node.args[0], index, seen)
+    if not (isinstance(node.func, ast.Attribute)
+            and node.func.attr in _SET_METHODS and len(node.args) == 1):
+        return None
+    recv = _eval_set_expr(node.func.value, index, seen)
+    arg = _eval_set_expr(node.args[0], index, seen)
+    if recv is None or arg is None:
+        return None
+    op = _SET_METHODS[node.func.attr]
+    return {"or_": recv | arg, "and_": recv & arg, "sub": recv - arg}[op]
+
+
+def provider_api_params_forwarding(dir_name: str) -> Optional[Dict[str, Any]]:
+    """How *dir_name* treats an ``api_params`` key it does not recognize.
+
+    Returns ``{"where": "<file>:<line>", "forwarded": frozenset | None}`` when
+    the provider — or a base it inherits inside the provider tree —
+    allow-lists the ``api_params`` keys it forwards.  For such a provider a key
+    outside the allow-list is **dropped before the request, with a WARNING
+    naming it**, which is the opposite of "silently ignored" (#1008).
+
+    ``forwarded is None`` means the expression could not be evaluated
+    statically: the allow-list exists, and which keys are in it was not
+    established.  Callers must withhold the consequence rather than assume
+    either answer.
+
+    A ``None`` return means no allow-list governs the provider at all: it reads
+    ``api_params`` key by key (``anthropic``, ``google_genai`` and
+    ``openrouter`` all do), so a key it does not read is simply never looked
+    at.  That too is *not established* rather than evidence of silence —
+    conflating the two is the defect this exists to end.
+    """
+    if dir_name in _FORWARD_SITE_CACHE:
+        return _FORWARD_SITE_CACHE[dir_name]
+
+    index = _provider_class_index()
+    prefix = f"{dir_name}/"
+    frontier = [n for n, e in index.items()
+                if n != _CONSTS_KEY
+                and (e["file"] == f"{dir_name}.py" or e["file"].startswith(prefix))]
+    seen, result = set(), None
+    while frontier:
+        cls = frontier.pop(0)
+        if cls in seen or cls not in index:
+            continue
+        seen.add(cls)
+        entry = index[cls]
+        if entry["line"] is not None and result is None:
+            result = {"where": f"{entry['file']}:{entry['line']}",
+                      "forwarded": _eval_set_expr(entry["expr"], index)}
+        frontier.extend(entry["bases"])
+    _FORWARD_SITE_CACHE[dir_name] = result
+    return result
