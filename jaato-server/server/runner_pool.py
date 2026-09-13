@@ -1137,6 +1137,28 @@ class PoolManager:
         # returns.
         self._reap_slot_profile(slot, reason=reason)
 
+    def profile_in_use(self, profile_name: str) -> bool:
+        """Is any idle slot still confined to *profile_name*? (#1033)
+
+        For callers OUTSIDE the pool that are about to unload a profile —
+        the WS workspace reaper is the one in this tree.  A
+        boundary-derived profile outlives its session, so "no session is
+        using it" is no longer sufficient grounds to unload it: a pooled
+        slot may be sitting idle inside it, waiting for the next session
+        of its cascade.
+
+        Only IDLE slots, deliberately.  A checked-out slot is not in this
+        list at all, and it does not need to be: such a slot always has a
+        live session, and that is the case
+        ``AppArmorManager.teardown_profile`` refuses on its own.  The two
+        guards together cover every slot the pool knows about.
+        """
+        if not profile_name:
+            return False
+        with self._lock:
+            return any(s.profile_name == profile_name
+                       for s in self._idle_slots)
+
     def _reap_slot_profile(self, slot: PoolSlot, *, reason: str) -> None:
         """Unload the AppArmor profile this slot was the last to wear.
 

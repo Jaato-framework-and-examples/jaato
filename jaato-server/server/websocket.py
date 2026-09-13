@@ -1091,7 +1091,21 @@ class JaatoWSServer:
                     workspace_id, workspace_id
                 )
                 if self._apparmor and self._apparmor.is_available():
-                    self._apparmor.teardown_profile(session_id)
+                    # #1033: a boundary-derived profile outlives its
+                    # session — a pooled slot may still be idle inside
+                    # it, waiting for the next session of its cascade —
+                    # so ask the pool before unloading.  Without a pool
+                    # this is exactly the call it always was.
+                    _pool = getattr(self, "_pool_manager_ref", None)
+                    _name = self._apparmor.get_profile_name(session_id)
+                    if _pool is not None and _pool.profile_in_use(_name):
+                        logger.info(
+                            "Workspace reaper: leaving AppArmor profile %s "
+                            "loaded — a pooled runner slot is still "
+                            "confined to it", _name,
+                        )
+                    else:
+                        self._apparmor.teardown_profile(session_id)
                 if self._cgroups and self._cgroups.is_available():
                     self._cgroups.teardown_cgroup(session_id)
                 self._workspace_to_session_id.pop(workspace_id, None)

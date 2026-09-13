@@ -644,6 +644,22 @@ class TestProfileLifetime:
 
         assert order == ["waitpid", "profile"]
 
+    def test_the_pool_answers_whether_a_profile_is_still_worn(self) -> None:
+        """The question an outside unloader has to ask now.
+
+        The WS workspace reaper unloads by session id on an hourly
+        sweep.  "No session is using it" stopped being sufficient
+        grounds the moment a profile could outlive its session, so the
+        reaper consults this before unloading.
+        """
+        pool = _pool(_slot(11, profile_name="jaato-ws-ws-aaaa"))
+
+        assert pool.profile_in_use("jaato-ws-ws-aaaa")
+        assert not pool.profile_in_use("jaato-ws-other-bbbb")
+        # An unconfined slot claims nothing, so neither does the empty
+        # name every session on a host without AppArmor carries.
+        assert not pool.profile_in_use("")
+
     def test_an_unconfined_slot_reaps_nothing(self) -> None:
         """Hosts without AppArmor tear slots down exactly as before."""
         pool = _pool()
