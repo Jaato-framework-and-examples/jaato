@@ -124,7 +124,26 @@ class SessionState:
     """
 
     sandbox_mode: Optional[str] = None
-    """Confinement mode at session-creation time (e.g. ``"apparmor"``).
+    """Confinement mode at session-creation time.
+
+    ``"apparmor"`` (a profile the kernel is ENFORCING),
+    ``"apparmor-complain"`` (#1014 — a profile loaded under
+    ``JAATO_APPARMOR_COMPLAIN``, where the kernel logs denials and allows
+    them, so there is NO boundary), ``"soft"`` (directory sandboxing only)
+    or ``None``.  A record must not claim a boundary the kernel was not
+    applying: this is what an operator reads weeks later during a
+    post-mortem, and what an auditor would read as evidence of enforcement.
+
+    Ask it through :func:`shared.apparmor_label.sandbox_mode_is_apparmor`
+    ("was a profile provisioned at all") or
+    :func:`~shared.apparmor_label.sandbox_mode_is_enforced` ("was there a
+    boundary") rather than by equality.  ``apparmor-complain`` widened this
+    field's value vocabulary rather than adding a record key, so the record
+    version was NOT bumped: the ``version`` string has one reader, right
+    here, and it gates on the MAJOR (``1.x`` / ``2.x``) — a field that gains
+    a value is what that gate is indifferent to.  An older reader comparing
+    ``== "apparmor"`` reads it as "not confined", which is TRUE and is the
+    safe direction.
 
     Persisted so disk-restore / orphan-revive re-applies the SAME
     confinement on runner re-spawn.  Without it a revived session's

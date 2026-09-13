@@ -112,16 +112,22 @@ REVERSIONS = [] if Reversion is None else [
     ),
     Reversion(
         target=_SESSION,
+        # Anchored on the call and the except-block tail that precedes it,
+        # NOT on the run from the call down to the next ``def``.  The old
+        # anchor spanned that gap and went stale the moment a helper was
+        # inserted between them (#1014's complain-mode announcement did
+        # exactly that), which reports BLOCKED: the guard is then neither
+        # known-good nor known-broken.  ``) from exc`` is the end of the
+        # error handling this call follows, and it moves only when the code
+        # this reversion is about moves.
+        #
+        # The 4-space indent is what distinguishes this call from the
+        # IDENTICAL 8-space one on the idempotent path above it; that one
+        # has its own reversion below.
         find="""        ) from exc
 
-    _retire_and_verify_threads(target_profile, recycle_pools)
-
-
-def _retire_and_verify_threads(""",
-        replace="""        ) from exc
-
-
-def _retire_and_verify_threads(""",
+    _retire_and_verify_threads(target_profile, recycle_pools)""",
+        replace="""        ) from exc""",
         test="test_the_transition_path_retires_and_verifies",
         because="a fresh transition stops recycling and stops being verified",
     ),

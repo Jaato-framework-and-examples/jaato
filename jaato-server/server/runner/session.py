@@ -34,6 +34,11 @@ from dataclasses import dataclass
 from typing import (Any, Callable, Dict, List, Optional, Protocol, Tuple,
                     TYPE_CHECKING)
 
+from shared.apparmor_label import (
+    AppArmorLabel,
+    COMPLAIN_ENV_VAR,
+    profile_name_ignoring_mode,
+)
 from shared.session_envelope import SessionInitEnvelope
 
 
@@ -731,7 +736,7 @@ def _maybe_self_confine(
         from .bootstrap import (
             ConfinementMismatchError,
             confine_to_profile,
-            read_current_profile,
+            current_confinement,
         )
     except ImportError as exc:  # noqa: BLE001 — boundary surface
         # AppArmor module not importable (test path or Windows host
@@ -747,7 +752,8 @@ def _maybe_self_confine(
         return
 
     try:
-        actual = read_current_profile()
+        label = current_confinement()
+        actual = label.raw
     except OSError as exc:
         # ``/proc/self/attr/current`` not readable — non-Linux or
         # apparmor-less host.  Daemon shouldn't have set
@@ -760,16 +766,22 @@ def _maybe_self_confine(
             f"running a profile-bearing envelope",
         ) from exc
 
-    # ``read_current_profile`` returns e.g. ``jaato-ws-<sid> (enforce)``
-    # post-transition, or ``unconfined`` pre-transition.  Match by
-    # prefix so the enforcement-mode suffix doesn't trip the check.
-    expected_prefix = f"{target_profile} "
-    if actual.startswith(expected_prefix) or actual == target_profile:
+    # ``current_confinement`` parses e.g. ``jaato-ws-<sid> (enforce)``
+    # post-transition, or ``unconfined`` pre-transition.  Match on the
+    # NAME only, ignoring the enforcement mode: this is an IDEMPOTENCY
+    # question -- "have we already transitioned, so skip the no-op
+    # re-transition" -- and re-entering the same profile would not change
+    # its mode, so mode-tolerance here is correct and deliberate (#1014).
+    #
+    # What it must NOT do is let "already confined" stand in for "there is
+    # a boundary".  The mode check below is that separation.
+    if profile_name_ignoring_mode(actual) == target_profile:
         logger.info(
-            "runner-session bootstrap: already confined to %s "
+            "runner-session bootstrap: already in AppArmor profile %s "
             "(kernel reports: %s); skipping redundant self-confine",
             target_profile, actual,
         )
+        _announce_unenforced_profile(label, target_profile)
         # NOT a skip of the #1023 work: this is the path a reused pool
         # slot takes when the next session of its cascade carries the
         # same profile, and a worker created before the slot's FIRST
@@ -789,7 +801,7 @@ def _maybe_self_confine(
         # has an old template loaded (pre-v28, no
         # ``change_profile -> jaato-ws-*,`` rule).  Restart the
         # daemon to pick up the new template.
-        current = actual.split(" ", 1)[0]  # strip mode suffix
+        current = profile_name_ignoring_mode(actual)
         likely_cause: str
         if current.startswith("jaato-ws-"):
             likely_cause = (
@@ -822,6 +834,37 @@ def _maybe_self_confine(
         ) from exc
 
     _retire_and_verify_threads(target_profile, recycle_pools)
+
+
+def _announce_unenforced_profile(
+    label: AppArmorLabel,
+    target_profile: str,
+) -> None:
+    """WARN when a profile is attached and the kernel is not enforcing it.
+
+    The idempotent bootstrap path (a pool slot serving its second session
+    of a cascade under the same profile) never calls
+    :func:`~server.runner.bootstrap.confine_to_profile`, so it never
+    reached that function's mode announcement.  Left silent, the commonest
+    path in a cascade would be the one that says nothing — which is how
+    #1014's posture stayed invisible: the record claims a boundary, the log
+    claims confinement, and no line anywhere names the mode.
+
+    No-op in the enforcing case, so an ordinary cascade gains no noise.
+    """
+    if label.enforced:
+        return
+    remedy = (
+        f"Unset {COMPLAIN_ENV_VAR} to enforce."
+        if label.complaining
+        else "No enforcement mode was reported, which is not evidence of "
+             "a boundary and is not treated as one."
+    )
+    logger.warning(
+        "runner-session bootstrap: AppArmor profile %s is attached WITHOUT "
+        "a kernel boundary: %s.  This session's tools are NOT confined.  %s",
+        target_profile, label.describe(), remedy,
+    )
 
 
 def _retire_and_verify_threads(

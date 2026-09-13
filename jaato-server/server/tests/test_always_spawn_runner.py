@@ -81,6 +81,13 @@ class _FakeAppArmorManager:
     def get_profile_name(self, session_id: str) -> str:
         return f"jaato-ws-{session_id}"
 
+    def profile_is_complain_mode(self, session_id: str) -> bool:
+        """#1014: the real manager records whether it RENDERED a
+        complain-mode profile.  This fake mirrors the surface; set
+        ``complain_mode`` on an instance to simulate
+        ``JAATO_APPARMOR_COMPLAIN``."""
+        return getattr(self, "complain_mode", False)
+
 
 class _FakeWSServer:
     def __init__(self, workspace_root: str) -> None:

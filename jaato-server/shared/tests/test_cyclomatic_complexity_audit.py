@@ -159,7 +159,7 @@ BASELINE: Dict[str, int] = {
     "jaato-server/server/session_manager.py::SessionManager._handle_turn_tracking_event": 21,
     "jaato-server/server/session_manager.py::SessionManager._intercept_prompt_help_refs": 17,
     "jaato-server/server/session_manager.py::SessionManager._load_session_impl": 51,
-    "jaato-server/server/session_manager.py::SessionManager._provision_ipc_apparmor_and_spawn_runner": 25,
+    "jaato-server/server/session_manager.py::SessionManager._provision_ipc_apparmor_and_spawn_runner": 24,
     "jaato-server/server/session_manager.py::SessionManager._run_ephemeral_session_impl": 21,
     "jaato-server/server/session_manager.py::SessionManager._save_session": 42,
     "jaato-server/server/session_manager.py::SessionManager._spawn_isolated_runner": 17,

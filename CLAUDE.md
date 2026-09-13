@@ -1124,6 +1124,100 @@ changes what every notebook cell runs under on confined hosts — which
 cannot be exercised without an enforcing kernel. It belongs in its own
 change.
 
+### A Profile Attached and a Kernel Enforcing Nothing (#1014)
+
+#1023 asked **which task** is confined. This is the other axis of the same
+readback: **which mode** the kernel is applying. `JAATO_APPARMOR_COMPLAIN=1`
+stamps `flags=(complain)` on the whole profile chain — base, `tool_hat` and
+`//child` alike — and a complain-mode profile **logs each denial and allows
+the syscall**. There is a profile and there is no boundary.
+
+Four of the five places that asked "is this session confined?" answered
+without consulting the mode — two by prefix-matching the profile NAME, one
+from the fact that provisioning succeeded, one from the presence of a
+callback:
+
+| Reader | Under complain |
+|---|---|
+| the post-transition readback (`runner/bootstrap.py`) | **"confined"** — the comment even read `# e.g. "jaato-ws-... (enforce)"` while the match accepted `(complain)` |
+| the idempotency check (`runner/session.py`) | **"already confined"** |
+| `sandbox_mode` in the session record | **`"apparmor"`** — mode never consulted |
+| `interactive_shell.require_confinement: true` | **satisfied** — the transition into `//child (complain)` succeeds |
+| `notebook/kernel_sandbox.apparmor_enforced_profile` | correctly reports no boundary |
+
+The fourth row is the sharpest: `require_confinement` is the strictest
+fail-closed knob in the tree — *"Refuse to spawn at all when no AppArmor…"* —
+and it passed while the kernel blocked nothing. The fifth is why the only
+visible symptom was a notebook cell failing to `import numpy`.
+
+And it was **silent**: grepping `complain` against `logger|warn` in
+`server/apparmor.py` returned nothing — no WARNING at generation, at
+provisioning or at startup, while every other weakened boundary here
+announces itself (`scrub_secret_env: none`, `--ws-unsafe-no-auth`,
+`notebook.allow_uncontained_exec`).
+
+**One definition, in one module.** `shared/apparmor_label.py` parses an
+`attr/current` value into profile + mode and is the only place either
+question is answered. Pure stdlib with zero jaato imports, the shape
+`shared/runtime_limits.py` already has, because `shared/` cannot import
+`server/` and `server.runner.bootstrap` must stay importable before plugin
+discovery — that is the bootstrap's one documented cross-import, and a
+guard test pins the module's import set. `apparmor_enforced_profile()` is
+unchanged in behaviour and now delegates; it was the one right answer, and
+lifting it out is what stops the other four carrying a fifth and sixth
+opinion.
+
+**Two questions, deliberately kept apart.** `profile_name_ignoring_mode` is
+mode-TOLERANT and named so it cannot be read as an enforcement assertion.
+Its callers ask *which profile is this task in* — #1023's per-thread
+comparison, and the bootstrap idempotency skip — where a complain-mode
+label is not divergence, and reading it as one would make the diagnostic
+unusable. `AppArmorLabel.enforced` is the only predicate that may stand
+behind a claim that a boundary exists. A label with **no** `(mode)`
+annotation is not enforced: absence of evidence is not a boundary.
+
+| Ask | Change |
+|---|---|
+| one predicate | `confine_to_profile` classifies the mode; the idempotency skip stays mode-tolerant and says so; `interactive_shell` and the notebook resolve through the same helper |
+| record the mode | `sandbox_mode` gains **`apparmor-complain`** beside `apparmor` and `soft` |
+| announce it | complain-mode generation WARNs once per daemon, naming the env var; `confine_to_profile` and the idempotency path WARN per session |
+| `require_confinement` means enforce | an installed child transition is necessary and no longer sufficient — the spawning thread's label must be `(enforce)` |
+
+**A value, not a field.** `apparmor-complain` widens an existing string's
+vocabulary rather than adding a record key, so the record version is not
+bumped. The record's `version` does have a reader — `deserialize_session_state`
+— and it gates on the **major** (`1.x` / `2.x`), which is exactly what a field
+gaining a value is indifferent to; 2.10 → 2.11 would have been cosmetic. An
+older reader comparing `sandbox_mode == "apparmor"` reads it as "not
+confined", which is TRUE and is the safe direction. In-tree readers ask through
+`sandbox_mode_is_apparmor` ("was a profile provisioned at all" — the revive
+gate, which re-arms confinement for either mode because the mode is
+re-decided at the next provisioning) or `sandbox_mode_is_enforced` ("was
+there a boundary" — the question the field could not answer before).
+
+**Complain mode is announced, not refused.** It is a documented diagnostic
+(harvest the missing-rule set in one cascade run, then ship targeted
+grants), and refusing to start under it would delete the diagnostic. What
+the default does instead is stop lying: the readback's leading words no
+longer say "confined", which is what made #1014's evidence unfindable — the
+truth sat in the parenthetical of `runner confined to AppArmor profile X
+(kernel reports: X (complain))`, and nobody greps a parenthetical.
+
+**The hook #1013 needs.** `confine_to_profile(..., require_enforce=True)`
+raises `ConfinementModeError`. #1013 names this readback as where
+`JAATO_APPARMOR_BEHAVIOR=require` would assert that the kernel applied the
+profile; built on the mode-blind version, `require` would have been
+satisfied by the exact posture it exists to refuse. That is why ask 1 is a
+prerequisite rather than a parallel cleanup — the flag itself is not wired
+to an env knob here, which is #1013's own change.
+
+Not done here: no kernel-side verification. This container carries no
+AppArmor LSM, so every site is exercised from a fabricated `attr/current`
+value — which is the point of routing the decision through one parser, and
+is also the limit of what was checked. `JAATO_APPARMOR_COMPLAIN` stays a
+`host`-scoped env var with no typed profile key; it is a whole-daemon
+diagnostic, not a per-session knob.
+
 ### Binary Media Chunks (delivery)
 
 Binary content (audio, images, PDFs) moves in three directions, and they are
@@ -3557,6 +3651,18 @@ none` and `--ws-unsafe-no-auth` already take. `require_confinement: true`
 refuses every spawn instead, the shape `notebook`'s in-process-exec gate has.
 The default is `false` because a PTY child is a separate process, the same risk
 class as a `cli` subprocess, which does not fail closed either.
+
+**`require_confinement` means ENFORCE (#1014).** An installed child
+transition is necessary and not sufficient: under `JAATO_APPARMOR_COMPLAIN`
+the transition into `//child (complain)` succeeds and the kernel blocks
+nothing, so the knob used to pass on a profile containing nothing. It now
+also reads the **spawning thread's** own label
+(`/proc/thread-self/attr/current` — `fork()` inherits the cred of the thread
+that calls it, and per #1023 a worker can differ from the main thread) and
+refuses anything that is not `(enforce)`, with wording distinct from the
+no-transition refusal because the operator's next move is different. The
+label is read only when the knob is set, so the default posture gains no
+per-spawn `/proc` read.
 
 ```yaml
 plugin_configs:
