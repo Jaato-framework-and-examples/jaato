@@ -42,8 +42,71 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 FIRST_PARTY = {"shared", "server", "jaato_sdk", "jaato_embedded", "jaato_premium"}
+#: The jaato distributions this repository knows the names of.  It is a SEED,
+#: not the answer: :func:`framework_dists` unions it with whatever jaato-named
+#: distribution is actually installed, so a distribution shipped separately —
+#: ``jaato-premium`` today, anything tomorrow — participates without an edit
+#: here.  Names absent from the environment stay in the list so "not installed"
+#: remains sayable about the ones we expect.
 JAATO_DISTS = ("jaato-sdk", "jaato-server", "jaato-tui", "jaato-eval", "jaato-premium")
-EXTRA_DISTS = ("jaato-sdk", "jaato-server")
+
+#: What makes a distribution one of jaato's own, matched against the
+#: NORMALISED name — so ``jaato_premium`` and ``Jaato-Premium`` both qualify.
+_JAATO_PREFIX = "jaato-"
+
+
+def _norm_dist(name: str) -> str:
+    """PEP 503-ish normalisation of a distribution name, for comparison only.
+
+    Distributions are compared and de-duplicated by this form; they are
+    REPORTED under the name their own metadata spells, which is what an
+    operator types into ``pip install``.
+    """
+    return (name or "").strip().lower().replace("_", "-")
+
+
+@lru_cache(maxsize=None)
+def installed_jaato_dists() -> Tuple[str, ...]:
+    """Every INSTALLED distribution whose name is a jaato one — discovered.
+
+    ``jaato-premium`` is a separate distribution this repository cannot see at
+    authoring time, and its nine extras (``pseudonymization`` →
+    ``presidio-analyzer``, ...) were invisible to every dependency answer
+    because the extras scan was a hardcoded ``("jaato-sdk", "jaato-server")``
+    pair (#966).  Adding one more name to that pair would have fixed the one
+    distribution that had already shipped and left the next one equally
+    invisible, so the set is MEASURED from installed metadata instead — the
+    same rule the rest of this module follows.
+
+    Returns:
+        The distribution names as their metadata spells them, sorted.  Empty
+        when metadata cannot be read at all; this is a diagnostic, and one
+        that raises is worse than one that is vague.
+    """
+    try:
+        from importlib.metadata import distributions
+        names = {(d.metadata["Name"] or "") for d in distributions()}
+    except Exception:      # noqa: BLE001 — metadata is best-effort here
+        return ()
+    return tuple(sorted({n for n in names
+                         if _norm_dist(n).startswith(_JAATO_PREFIX)}))
+
+
+@lru_cache(maxsize=None)
+def framework_dists() -> Tuple[str, ...]:
+    """The distributions every framework-wide answer here ranges over.
+
+    :data:`JAATO_DISTS` first (so the expected ones keep their order, and an
+    uninstalled one is still reportable as missing), then any further
+    jaato-named distribution found installed.
+    """
+    out: List[str] = list(JAATO_DISTS)
+    seen = {_norm_dist(n) for n in out}
+    for name in installed_jaato_dists():
+        if _norm_dist(name) not in seen:
+            out.append(name)
+            seen.add(_norm_dist(name))
+    return tuple(out)
 
 
 # ----------------------------------------------------------------- distributions
@@ -106,17 +169,20 @@ def environment() -> Dict[str, Any]:
 
 
 def framework_picture() -> Dict[str, Any]:
-    dists = [dist_state(n) for n in JAATO_DISTS]
-    extras: Dict[str, List[str]] = {}
-    for n in ("jaato-sdk", "jaato-server"):
-        for req in _requires(n):
-            if 'extra ==' in req:
-                mark = req.split('extra ==')[1].strip().strip('"\';')
-                extras.setdefault(f"{n}[{mark}]", []).append(req.split(';')[0].strip())
+    """The framework's own dependency picture: distributions, skew, extras.
+
+    Both halves range over :func:`framework_dists`, so a separately-shipped
+    distribution is described here on the same terms as an in-tree one.  The
+    extras half used to carry its own inline ``("jaato-sdk", "jaato-server")``
+    literal beside the extras index's copy of the same pair — neither of which
+    named ``jaato-premium``, though :data:`JAATO_DISTS` did (#966) — so there
+    is now ONE enumeration (:func:`_extras_by_label`) and both callers read it.
+    """
+    dists = [dist_state(n) for n in framework_dists()]
     return {"environment": environment(),
             "distributions": [d for d in dists if d["installed"]],
             "missing": [d["name"] for d in dists if not d["installed"]],
-            "extras": extras}
+            "extras": {k: list(v) for k, v in _extras_by_label().items()}}
 
 
 # ------------------------------------------------------------------- imports
@@ -446,12 +512,50 @@ def _extra_sizes() -> Dict[str, int]:
 
 
 @lru_cache(maxsize=None)
+def _extras_by_label() -> Dict[str, Tuple[str, ...]]:
+    """``{"jaato-server[interactive]": ("pexpect>=4.8",), ...}`` from metadata.
+
+    The enumeration :func:`framework_picture` renders and
+    :func:`_metadata_index` inverts, kept in ONE place so the two cannot
+    disagree about which distributions have extras.  An uninstalled
+    distribution contributes nothing (``_requires`` answers ``[]`` for it)
+    rather than a warning: the absence of ``jaato-premium`` is not a finding,
+    and a tool that nags about the extras of a package nobody installed is
+    noise.
+    """
+    out: Dict[str, List[str]] = {}
+    for dist_name in framework_dists():
+        for req in _requires(dist_name):
+            extra = _extra_marker(req)
+            if not extra:
+                continue
+            out.setdefault(f"{dist_name}[{extra}]", []).append(
+                req.split(";")[0].strip())
+    return {k: tuple(v) for k, v in out.items()}
+
+
+def reset_metadata_caches() -> None:
+    """Drop every cached read of installed distribution metadata.
+
+    Installed metadata does not change under a running process, so these are
+    cached for its lifetime.  A test that FAKES a distribution — the only way
+    to exercise a separately-shipped one (``jaato-premium``) from this
+    repository, which cannot depend on it — changes that metadata anyway, and
+    must be able to say so.
+    """
+    for fn in (installed_jaato_dists, framework_dists, _extras_by_label,
+               _metadata_index, _extras_index, _core_index, _extra_sizes,
+               _provided_import_names):
+        fn.cache_clear()
+
+
+@lru_cache(maxsize=None)
 def _metadata_index() -> Tuple[Dict[str, Set[str]], Dict[str, Set[str]], Dict[str, int]]:
     """One pass over installed metadata: extras, core requirements, extra sizes."""
     extras: Dict[str, Set[str]] = {}
     core: Dict[str, Set[str]] = {}
     sizes: Dict[str, int] = {}
-    for dist_name in EXTRA_DISTS:
+    for dist_name in framework_dists():
         for req in _requires(dist_name):
             extra = _extra_marker(req)
             pkg = _requirement_name(req)

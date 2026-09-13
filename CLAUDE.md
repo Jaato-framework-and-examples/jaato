@@ -2464,6 +2464,79 @@ stale one cannot outlive `pyproject.toml`. Best-effort by construction: it runs
 inside discovery's error path, and a diagnostic that raises is worse than a
 vague one.
 
+### When the Introspection Tools Misreport Their Own Environment (#966, #823)
+
+Two findings of one shape, and it is the one thing a diagnostic must not do:
+`jaato-doctor` and `jaato-scaffold explain` describing an environment that is
+not the one they are running in.
+
+**An incomplete install list is worse than none (#966).** `explain
+dependencies` enumerated extras over a hardcoded `("jaato-sdk",
+"jaato-server")` pair — written twice, as `EXTRA_DISTS` and again as an inline
+literal inside `framework_picture()`, which had drifted from the constant
+beside it. `jaato-premium` was in `FIRST_PARTY` and in `JAATO_DISTS` and in
+neither copy, so its nine extras were invisible: an operator was shown a list
+of what to install and the list was short. The same scan feeds the
+missing-import → extra index, so `presidio_analyzer` could not be traced back
+to `pip install 'jaato-premium[pseudonymization]'` the way `pexpect` is traced
+to `jaato-server[interactive]`.
+
+Adding `"jaato-premium"` to the tuple would fix the one distribution that had
+already shipped and leave the next one equally invisible — the same defect
+wearing the fix as a disguise. So the set is **measured**:
+`installed_jaato_dists()` reads installed metadata for every distribution whose
+normalised name starts with `jaato-`, `framework_dists()` unions that with the
+names this repo expects (so "not installed" stays sayable about the ones it
+knows), and one enumeration — `_extras_by_label()` — serves both the rendered
+listing and the index that inverts it. A distribution this repository cannot
+see at authoring time participates with no edit here.
+
+Not installed is **silence, not a finding**: `_requires` answers `[]` for an
+uninstalled distribution, so a workspace without premium is told nothing about
+premium's extras. What it is still told is that `jaato-premium` is not
+installed, which is the honest report and was already there. Deliberately not
+added: a note that `[pseudonymization]` also wants a spaCy model. It is true
+and it is a hardcoded fact about one extra of one package — the thing this
+change exists to stop.
+
+**The daemon is not running the code you are reading (#823).** A client and its
+daemon can resolve `jaato_sdk` from different checkouts with no mistake made by
+anyone: the daemon launched with a `PYTHONPATH` at a feature branch, the client
+launched without one and inheriting the venv's editable install. Both are
+installed correctly and they speak different event shapes, so the daemon sends
+`ToolOutputEvent.mime_type`, the client's class has nowhere to put it, pydantic
+drops it on ingest, and a handler dies with `AttributeError` several frames
+from anything the reader wrote. It bites hardest while the event protocol is
+being extended — the case where a field is new is the case where one side lacks
+it.
+
+`check_checkout_skew` sits beside the HOME comparison because it is the same
+class of defect (an invisible property of the daemon PROCESS that changes
+behaviour) answered from the same `/proc/<pid>/environ` block. The daemon's
+resolution is derived the way CPython would: its own `PYTHONPATH` entries in
+order, then the installed package.
+
+| Both sides resolve | Verdict |
+|---|---|
+| one directory | PASS |
+| two paths, at least one a source **checkout** | **FAIL** — never intentional in a dev loop |
+| two paths, both unpacked **installs** | WARN — what a rolling upgrade looks like; both versions are named |
+
+The discriminator is measured, not declared: a checkout has the distribution's
+`pyproject.toml` beside the package directory, an install in `site-packages`
+does not.
+
+**The false PASS it must never produce.** With no daemon `PYTHONPATH`, "the
+installed package" means installed for the DAEMON's interpreter. Resolving the
+caller's own `site-packages` instead would compare a path against itself and
+report PASS about two environments that were never compared — so
+`/proc/<pid>/exe` is read beside the environ, and when the interpreters
+demonstrably differ the check says it cannot tell. Every probe here is
+best-effort and returns rather than raises: `_proc_exe` uses `readlink` (not
+`realpath`, which answers with the path it was handed when nothing is there,
+reporting an interpreter that does not exist), and a `PYTHONPATH` entry that
+cannot be walked is skipped.
+
 ### Five Ways a Session Came Up Wrong and Said Nothing
 
 The findings above are about surfaces that would not TELL you something. These
