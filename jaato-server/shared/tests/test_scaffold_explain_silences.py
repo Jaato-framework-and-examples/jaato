@@ -262,6 +262,21 @@ def test_an_empty_child_plugin_list_keeps_the_parents(tmp_path):
     assert profs["kid2"].plugins == ["memory", "todo", "cli"]
 
 
+def _plugins_inheritance_row(profile_text: str) -> str:
+    """Just the ``plugins, preloaded_plugins`` row of the inheritance block.
+
+    Scoping the assertion to this slice is the difference between a real
+    check and a decorative one.  ``completion_processors`` — the very next
+    row — has carried the sentence "it does NOT clear the parents'" all
+    along, so a bare ``in profile_text`` would find THAT one and pass with
+    the ``plugins`` clause deleted: a grep matching a word that appears
+    elsewhere in the same output, passing for the wrong reason.
+    """
+    start = profile_text.index("    plugins, preloaded_plugins")
+    end = profile_text.index("    completion_processors", start)
+    return profile_text[start:end]
+
+
 def test_the_docs_state_that_an_empty_child_list_keeps_the_parents(
         profile_text):
     """And the topic says so, in the row for the key it is about.
@@ -271,8 +286,12 @@ def test_the_docs_state_that_an_empty_child_list_keeps_the_parents(
     standalone case unconditionally.  Read while holding a child profile —
     which is when the question is asked — that block answered "none".
     """
-    assert "does NOT clear the" in profile_text
-    assert "NO spelling that clears them" in profile_text
+    row = _plugins_inheritance_row(profile_text)
+    assert "does NOT clear the" in row, (
+        "the plugins row does not carry the empty-list sentence "
+        "(completion_processors' copy does not count)"
+    )
+    assert "NO spelling that clears them" in row
     # The standalone block must be scoped to the case it is true for.
     assert "WITH NO PARENT" in profile_text
 
