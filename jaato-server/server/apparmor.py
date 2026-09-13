@@ -377,7 +377,38 @@ class AppArmorManager:
     #       profile already grants (it carries the same two plus
     #       ``@{{HOME}}/.jaato/themes/**``), so no access appears here
     #       that the session did not already have.
-    _TEMPLATE_VERSION = 31
+    #  32 — (2026-09-13) ``/proc/*/task/ r,`` in the base body and in
+    #       the isolated sub-runner body (#1023).  Grants the DIRECTORY
+    #       listing of a task dir; the per-tid ``attr/current`` reads
+    #       inside it were already granted by v15.
+    #
+    #       ``aa_change_profile`` is per-TASK, and every confinement
+    #       check in this tree reads ``/proc/self/attr/current`` — which
+    #       AppArmor and procfs alike resolve to ``/proc/<pid>/``, i.e.
+    #       the MAIN THREAD's label.  A worker thread created before the
+    #       runner's transition keeps its own ``unconfined`` cred for the
+    #       life of the pool slot and is invisible to all of them; the
+    #       runner now walks ``/proc/self/task/*/attr/current`` after
+    #       confining and refuses the session on divergence.  The walk
+    #       needs to LIST the directory to be complete.
+    #
+    #       Without this rule the walk still runs: it falls back to
+    #       ``threading.enumerate()``, which needs no grant because it
+    #       reads no file, and which sees every thread the interpreter
+    #       created — the RPC lanes, the reader, the telemetry exporter,
+    #       i.e. every thread this defect is known to produce.  What the
+    #       fallback cannot see is a thread created by a C extension.  So
+    #       a runner confined by a v31-or-earlier profile is checked, not
+    #       unchecked, and pays one denial AVC per bootstrap.
+    #
+    #       It is a strict widening of what a confined session may read,
+    #       and it reveals tids and nothing else: the v30 hardening's
+    #       per-tid ``audit deny`` on ``environ`` / ``mem`` / ``pagemap``
+    #       / ``auxv`` / ``cmdline`` is unaffected, a deny beating an
+    #       allow at any specificity.  ``/proc/*/`` (one level up) has
+    #       been granted in the isolated body since v30 for the same
+    #       class of reason.
+    _TEMPLATE_VERSION = 32
 
     # AppArmor profile template.  Placeholders are filled per-session by
     # ``_render_profile()``.
@@ -725,6 +756,17 @@ profile jaato-ws-{session_id} flags=({profile_flags}) {{
   change_profile -> jaato-ws-*,
   owner /proc/*/attr/current      rw,
   owner /proc/*/task/*/attr/current rw,
+  # Template v32 (#1023): LIST the task directory, so the runner's
+  # post-transition per-thread confinement check can enumerate every
+  # thread rather than only the ones the interpreter knows about.  The
+  # per-tid ``attr/current`` reads above were already granted; without
+  # this the ``opendir`` is denied, the walk falls back to
+  # ``threading.enumerate()`` and a thread created by a C extension
+  # would go unexamined.  Grants tids and nothing else — ``environ``,
+  # ``mem``, ``pagemap``, ``auxv`` and ``cmdline`` stay denied per-tid
+  # by the v30 block above, and a deny beats an allow at any
+  # specificity.
+  /proc/*/task/                   r,
 
   # ---- per-session reference fragments ----
   # ``add_reference_fragment(session_id, ref_id, path)`` writes one
@@ -1676,6 +1718,10 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
   # profiles keep is intentionally absent.  Phase 5 template v15.
   owner /proc/*/attr/current      r,
   owner /proc/*/task/*/attr/current r,
+  # Template v32 (#1023): task-directory listing for the per-thread
+  # confinement check.  Same rationale as the base body; an isolated
+  # sub-runner bootstraps a session through the same code path.
+  /proc/*/task/                   r,
 
   # ---- DROP: external-reference admit (no add_reference_fragment
   # from sub-runner — Phase 5+ behind opt-in).

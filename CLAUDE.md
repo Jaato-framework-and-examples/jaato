@@ -1016,6 +1016,114 @@ and `set_session_id()` now **broadcasts** to plugins implementing it: a carried
 instance's `initialize()` early-returns, so nothing else refreshes the session
 identity it logs under.
 
+### A Profile the Process Wore and Two of Its Threads Did Not (#1023)
+
+`aa_change_profile` confines the **calling task**, not the process.
+`/proc/self/attr/current` resolves to `/proc/<pid>/attr/current`, which
+reports the label of the task whose tid == pid — the **main thread**. Every
+confinement check in this tree read exactly that path:
+
+| Reader | Saw |
+|---|---|
+| the post-transition readback (`runner/bootstrap.py`) | `(enforce)` ✅ |
+| the idempotency check (`runner/session.py`) | `(enforce)` ✅ |
+| `sandbox_mode` in the session record | `"apparmor"` ✅ |
+| an operator running `cat /proc/<pid>/attr/current` | `(enforce)` ✅ |
+
+So a worker thread created **before** the transition kept its `unconfined`
+cred for the life of the pool slot, and nothing in the framework could see
+it. Confirmed live on a fully enforcing host: **2 of 5 running session
+runners**, each with a `runner-rpc-work` thread in the unconfined set.
+
+`session.bootstrap` running synchronously on the reader thread was
+necessary and **not sufficient**, which the dispatch site's own comment had
+stated as a premise (*"main confines BEFORE any worker spawns"*).
+`ThreadPoolExecutor` spawns workers lazily on first submit, and a slot
+fields RPCs before its first bootstrap — `session.end` from the previous
+session of a cascade, a dispatch-watchdog probe — so the population is
+routine. Executors reuse workers and `TRAIT_SLOT_SCOPED` instances are
+deliberately carried across session boundaries, so it is durable and
+**re-accumulates** after any manual clear.
+
+The exposure is not the notebook, which is only the canary (the one
+subprocess surface that inherits passively, so the one whose failure is
+visible — and its failure was the audit-tier fail-safe working). It is
+**every in-process tool** dispatched onto such a thread: `readFile`,
+`file_edit`, `glob_files`, the notebook `local` backend, any in-process
+plugin. AppArmor restricts tasks, so those run bounded only by the
+application-layer containment heuristic, leave no AVC, and the session
+record asserts `sandbox_mode: apparmor` throughout.
+
+**Two changes, and the second is the one that makes the first checkable.**
+
+| | What | Where |
+|---|---|---|
+| retire | `RunnerRPC.recycle_worker_pools` replaces both executor OBJECTS, so every later RPC spawns a fresh worker under the confined cred | `runner/rpc.py` |
+| verify | `verify_thread_confinement` walks `/proc/self/task/*/attr/current` and refuses the bootstrap on divergence | `runner/bootstrap.py` |
+
+An existing thread cannot be repaired — the kernel enforces
+`current != task -> -EACCES` on an `attr/current` write, so no thread can
+confine another — it can only be retired. Both run on the **idempotent**
+path too, which is deliberate: a slot serving its second session of a
+cascade under the same profile takes that path, and a worker created before
+the slot's *first* bootstrap is unconfined on it.
+
+**Nothing in flight is dropped.** The recycle runs on the reader thread
+inside the synchronous bootstrap handler, which is the only submitter, so
+no *new* work can arrive while it runs. What may still be executing is a
+pre-bootstrap RPC, so the old executors are shut down with `wait=False` and
+**without** `cancel_futures`: cancelling would leave the daemon waiting for
+a response nobody writes, and waiting could deadlock against a task blocked
+on an `outgoing_call` that only the reader thread can resolve. A worker
+draining its last task is therefore briefly alive holding the old cred,
+which is why verification re-scans across a short grace window before
+calling divergence durable.
+
+**Divergence fails the bootstrap, and only positive evidence counts.** A
+label read successfully that names a different profile is proof that code
+in this process runs outside the boundary the record claims. A label that
+could not be read proves nothing — a restricted `/proc`, an unusual
+container, a profile template predating the task-dir grant — so that is
+logged and the session continues. Failing closed on *absence of evidence*
+would take down every session on a host whose `/proc` it merely could not
+read. The alternative for real divergence — log an ERROR and proceed — is
+the incident state itself, and #1013's proposed `require` mode would
+certify such a runner. An operator who cannot tolerate the refusal already
+has an honest opt-out: an empty `profile_name` runs the session unconfined
+and the record then claims nothing.
+
+**Template v32** adds `/proc/*/task/ r,` to the base and isolated
+sub-runner bodies — the *directory listing*; the per-tid `attr/current`
+reads inside it have been granted since v15. It reveals tids and nothing
+else (the v30 `audit deny` on per-tid `environ` / `mem` / `pagemap` /
+`auxv` / `cmdline` is unaffected, a deny beating an allow at any
+specificity). Without it the walk still runs — it falls back to
+`threading.enumerate()`, which needs no grant because it reads no file and
+sees every thread the interpreter created, i.e. every thread this defect is
+known to produce — so a runner confined by an older profile is checked
+rather than unchecked, and pays one denial AVC per bootstrap. The scan
+reports which route it took, because that bounds what it could have seen.
+
+**Checking a deployment** (any runner whose threads are not uniformly
+labelled is exposed; `/proc/<pid>/attr/current` alone will say it is fine):
+
+```bash
+for p in $(pgrep -f 'server\.runner'); do
+  proc=$(tr -d '\0' < /proc/$p/attr/current)
+  for t in /proc/$p/task/*; do
+    lbl=$(tr -d '\0' < "$t/attr/current")
+    [ "$lbl" = "$proc" ] || echo "DIVERGENT pid=$p tid=${t##*/} proc='$proc' thread='$lbl'"
+  done
+done
+```
+
+Not done here: giving the notebook kernel an explicit `//child` transition
+(the issue's fix 4). It is defence in depth against a *future* passive-`ix`
+spawn path, it does not address the in-process exposure above, and it
+changes what every notebook cell runs under on confined hosts — which
+cannot be exercised without an enforcing kernel. It belongs in its own
+change.
+
 ### Binary Media Chunks (delivery)
 
 Binary content (audio, images, PDFs) moves in three directions, and they are
