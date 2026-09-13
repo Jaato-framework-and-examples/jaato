@@ -25,6 +25,7 @@ from jaato_sdk.plugins.base import UserCommand, PermissionDisplayInfo
 from jaato_sdk.plugins.model_provider.types import ToolSchema, DISCOVERABILITY_EAGER
 from ..streaming.protocol import StreamingCapable, StreamChunk, ChunkCallback
 from .types import ExecutionStatus, OutputType
+from .kernel_sandbox import boundary_notice
 from .backends import NotebookBackend, LocalJupyterBackend, KaggleBackend, _KAGGLE_AVAILABLE
 from .code_analyzer import CodeAnalyzer, AnalysisResult, RiskLevel
 from .tool_stubs import ToolBridge, ToolExecutionError, generate_tools_module, generate_tool_signatures
@@ -809,6 +810,8 @@ class NotebookPlugin(StreamingCapable, RunnerForwardingMixin):
             if self._workspace_root:
                 sandbox_info += f"- Workspace root: {self._workspace_root}\n"
 
+        boundary_info = self._boundary_instruction_block()
+
         # Tool bindings information
         bindings_info = ""
         if self._tool_bindings_enabled and self._tool_bindings_signatures is not None:
@@ -871,7 +874,78 @@ class NotebookPlugin(StreamingCapable, RunnerForwardingMixin):
 - 30 hours/week free GPU (P100/T4)
 - Execution is async (may take 1-5 minutes)
 - Best for: ML training, large computations
-{sandbox_info}{bindings_info}"""
+{boundary_info}{sandbox_info}{bindings_info}"""
+
+    @staticmethod
+    def _boundary_announcement(result: Any) -> Dict[str, Any]:
+        """The boundary this KERNEL established, for its FIRST result (#1012).
+
+        The system prompt carries the same fact as a standing statement; this
+        is the kernel's own report, so a kernel that respawned under a
+        different posture — or one whose interpreter could install no audit
+        hook — contradicts the prompt visibly in the result the model is
+        already reading, instead of being discovered through a refusal
+        mid-task.
+
+        A separate method rather than three lines inside ``_execute_code``
+        because that function is baselined by the complexity ratchet at 40 and
+        may not grow; merging an always-present dict also keeps the branch out
+        of the caller entirely.
+
+        Args:
+            result: The backend's ``ExecutionResult``. A backend that predates
+                ``boundary_kind`` — or any object that simply lacks it — is
+                read as "no announcement", never as an unknown tier.
+
+        Returns:
+            ``{"execution_boundary": {...}}`` on a kernel's first result, else
+            an empty dict. The tier is the kernel's own; the prose comes from
+            ``kernel_sandbox.boundary_notice``, the one place it is written.
+        """
+        announced = getattr(result, "boundary_kind", None)
+        if not announced:
+            return {}
+        return {"execution_boundary": {
+            "boundary": announced,
+            "notes": list(boundary_notice(announced)),
+        }}
+
+    def _boundary_instruction_block(self) -> str:
+        """State the ACTIVE execution boundary and its consequences (#1012).
+
+        The standing half of #1012's answer — the per-kernel half is the
+        ``execution_boundary`` key ``_execute_code`` puts on the first result
+        from a fresh kernel. This one lands in the system prompt, so it is
+        paid on every request and on the prompt-cache prefix; three things
+        keep that cost bounded and the prefix stable:
+
+        - **Only the active tier's lines are rendered**, never a table of all
+          four. The text comes from ``kernel_sandbox.boundary_notice``, which
+          is the one place a tier's consequences are written down.
+        - **Two consequences, not an essay** — which tier, and what it means
+          for imports and for spawning. Everything else a model needs it can
+          find out by running a cell.
+        - **The answer is stable within a session.** Each backend's
+          ``boundary_kind`` derives from the process's AppArmor state, the
+          operator's opt-out and whether a workspace resolved, none of which
+          changes under a running daemon. A kernel that respawns under a
+          different posture is the case this cannot cover, and is exactly
+          what the per-result announcement exists for.
+
+        Returns:
+            A markdown block, or ``""`` when the active backend claims no
+            tier (``kaggle``, a third-party backend) — saying nothing beats
+            asserting a boundary this plugin cannot name.
+        """
+        backend = self._backends.get(self._active_backend_name)
+        if backend is None:
+            return ""
+        kind = backend.boundary_kind()
+        lines = boundary_notice(kind)
+        if not lines:
+            return ""
+        bullets = "\n".join(f"- {line}" for line in lines)
+        return (f"\n**Notebook execution boundary: {kind}**\n{bullets}\n")
 
     def get_auto_approved_tools(self) -> List[str]:
         """Read-only tools are auto-approved."""
@@ -1084,6 +1158,8 @@ class NotebookPlugin(StreamingCapable, RunnerForwardingMixin):
             response["tool_calls"] = binding_calls
             # Clear the log after including it so it doesn't accumulate
             self._tool_bindings_bridge.call_log.clear()
+
+        response.update(self._boundary_announcement(result))
 
         # Log response summary
         output_len = len(response.get("output", ""))

@@ -42,6 +42,10 @@ from ...workspace_venv import (
 from .base import NotebookBackend
 from .. import kernel_protocol as proto
 from ..kernel_sandbox import (
+    BOUNDARY_APPARMOR,
+    BOUNDARY_AUDIT,
+    BOUNDARY_NONE,
+    BOUNDARY_OPT_OUT,
     UNCONTAINED_OPT_IN_ENV,
     apparmor_enforced_profile,
     env_truthy,
@@ -88,7 +92,16 @@ def _set_pdeathsig() -> None:
 
 
 class _Kernel:
-    """A live kernel subprocess + its pipes + a per-kernel serialization lock."""
+    """A live kernel subprocess + its pipes + a per-kernel serialization lock.
+
+    Attributes:
+        announce_boundary: Whether the NEXT cell's result should carry the
+            boundary this kernel established (issue #1012).  Armed by
+            ``_spawn`` and cleared by the first ``execute`` that consumes it,
+            so the model is told the tier once per kernel rather than on every
+            cell — and told again after a respawn, which is the case a
+            standing statement in the system prompt cannot cover.
+    """
 
     def __init__(self, info: NotebookInfo, proc: subprocess.Popen,
                  wstream, rstream):
@@ -97,6 +110,7 @@ class _Kernel:
         self.wstream = wstream          # runner → kernel
         self.rstream = rstream          # kernel → runner
         self.lock = threading.Lock()
+        self.announce_boundary = False
 
     def close(self) -> None:
         try:
@@ -222,6 +236,39 @@ class SubprocessKernelBackend(NotebookBackend):
         self._allow_uncontained = (
             self._allow_uncontained or env_truthy(UNCONTAINED_OPT_IN_ENV))
 
+    def boundary_kind(self) -> str:
+        """The tier a kernel spawned now would establish, strongest first.
+
+        The ladder itself, in one place.  :meth:`execution_boundary` renders
+        this into prose and ``NotebookPlugin`` renders it into the model's
+        instructions through ``kernel_sandbox.boundary_notice`` (#1012), so
+        the two cannot disagree about which tier is in force — before #1012
+        the ladder was written out inline in ``execution_boundary`` and there
+        was nowhere to ask for the answer by name.
+
+        Mirrors ``kernel_sandbox.establish_containment``, which is the
+        authority: it runs *in the kernel*, and its answer travels back on the
+        READY frame and is recorded on ``NotebookInfo.boundary_kind``.  One
+        rung of that ladder is deliberately absent here — a kernel whose
+        interpreter provides no ``addaudithook`` degrades to
+        ``BOUNDARY_NONE``, and only the kernel can know that, because
+        ``workspace_venv`` may point at an interpreter this process is not.
+        That is why the READY answer outranks this one rather than confirming
+        it.
+
+        Returns:
+            A ``BOUNDARY_*`` constant.  ``BOUNDARY_NONE`` when there is no
+            workspace to contain to, which is what
+            :meth:`execution_boundary` turns into a refusal.
+        """
+        if apparmor_enforced_profile():
+            return BOUNDARY_APPARMOR
+        if self._allow_uncontained:
+            return BOUNDARY_OPT_OUT
+        if not (get_workspace_root() or self._workspace_root):
+            return BOUNDARY_NONE
+        return BOUNDARY_AUDIT
+
     def execution_boundary(self) -> Tuple[bool, str]:
         """What bounds a cell's filesystem reach, strongest available first.
 
@@ -232,18 +279,21 @@ class SubprocessKernelBackend(NotebookBackend):
         the code, and a boundary it could not install must stop cells there
         too, whatever this said.
 
+        The decision is :meth:`boundary_kind`; this method only words it.
+
         Returns:
             ``(allowed, description)``.  Refuses only when there is no
             workspace to contain to, since an unrooted kernel cannot be
             spawned at all.
         """
-        profile = apparmor_enforced_profile()
-        if profile:
-            return True, f"AppArmor-enforced profile {profile} (inherited by the kernel)"
-        if self._allow_uncontained:
+        kind = self.boundary_kind()
+        if kind == BOUNDARY_APPARMOR:
+            profile = apparmor_enforced_profile()
+            return True, (
+                f"AppArmor-enforced profile {profile} (inherited by the kernel)")
+        if kind == BOUNDARY_OPT_OUT:
             return True, "operator opt-out (uncontained)"
-        workspace = get_workspace_root() or self._workspace_root
-        if not workspace:
+        if kind == BOUNDARY_NONE:
             return False, (
                 "Notebook execution refused: no workspace root is resolved, so "
                 "cell code cannot be contained to one. Start the session with a "
@@ -251,7 +301,27 @@ class SubprocessKernelBackend(NotebookBackend):
                 f"{UNCONTAINED_OPT_IN_ENV}=1 (notebook plugin config "
                 "allow_uncontained_exec=true) to accept an uncontained notebook."
             )
+        workspace = get_workspace_root() or self._workspace_root
         return True, f"audit-hook workspace containment ({workspace})"
+
+    @staticmethod
+    def _consume_boundary_announcement(kernel: "_Kernel") -> Optional[str]:
+        """Take this kernel's one-shot boundary announcement, or ``None``.
+
+        Returns the tier the KERNEL reported on its READY frame — not
+        :meth:`boundary_kind`'s pre-spawn expectation — so the model is told
+        what actually bounded the process that ran its cell.  Where the two
+        disagree (a respawn on a host whose confinement changed, an
+        interpreter with no ``addaudithook``), this is the one that is true.
+
+        Returns ``None`` on every cell after the first, and on a kernel whose
+        handshake reported no tier: an announcement that repeats is noise, and
+        one that guesses is the second source of truth #1012 warns against.
+        """
+        if not kernel.announce_boundary:
+            return None
+        kernel.announce_boundary = False
+        return kernel.info.boundary_kind
 
     def is_available(self) -> bool:
         return True
@@ -281,6 +351,11 @@ class SubprocessKernelBackend(NotebookBackend):
         timeout = timeout_seconds or _DEFAULT_TIMEOUT_S
         cell_id = uuid.uuid4().hex[:8]
         start = datetime.datetime.now()
+        # Consumed once per kernel: whatever this cell does, the model has now
+        # been told which boundary ran it (#1012).  Read before the cell runs
+        # so a cell that is REFUSED by containment still carries the tier that
+        # refused it — that is the case the announcement exists for.
+        announce = self._consume_boundary_announcement(kernel)
         with kernel.lock:
             frame_out = {"type": proto.EXECUTE, "cell_id": cell_id, "code": code}
             # The session's `sandbox add` / `sandbox deny` paths ride EVERY
@@ -301,7 +376,8 @@ class SubprocessKernelBackend(NotebookBackend):
                     return ExecutionResult(
                         status=ExecutionStatus.CANCELLED, outputs=outputs,
                         error_name="TimeoutError",
-                        error_message=f"cell exceeded {timeout}s; kernel killed")
+                        error_message=f"cell exceeded {timeout}s; kernel killed",
+                        boundary_kind=announce)
                 try:
                     frame = proto.read_frame(kernel.rstream)
                 except EOFError:
@@ -316,7 +392,8 @@ class SubprocessKernelBackend(NotebookBackend):
                     return ExecutionResult(
                         status=ExecutionStatus.FAILED, outputs=outputs,
                         error_name="KernelDied",
-                        error_message="notebook kernel closed mid-execution")
+                        error_message="notebook kernel closed mid-execution",
+                        boundary_kind=announce)
                 ft = frame.get("type")
                 if ft == proto.STREAM:
                     otype = (OutputType.STDOUT if frame.get("name") == "stdout"
@@ -332,7 +409,7 @@ class SubprocessKernelBackend(NotebookBackend):
                     return ExecutionResult(
                         status=ExecutionStatus.COMPLETED, outputs=outputs,
                         execution_count=kernel.info.execution_count,
-                        duration_seconds=dur)
+                        duration_seconds=dur, boundary_kind=announce)
                 elif ft == proto.ERROR:
                     outputs.append(CellOutput(
                         OutputType.ERROR, frame.get("traceback", "")))
@@ -342,7 +419,7 @@ class SubprocessKernelBackend(NotebookBackend):
                         error_name=frame.get("ename"),
                         error_message=frame.get("evalue"),
                         traceback=frame.get("traceback"),
-                        duration_seconds=dur)
+                        duration_seconds=dur, boundary_kind=announce)
                 elif ft == proto.TOOL_CALL:
                     # The cell is blocked mid-exec waiting for this; run the tool
                     # runner-side and reply.  The loop then continues reading the
@@ -499,8 +576,18 @@ class SubprocessKernelBackend(NotebookBackend):
             try:
                 ready = proto.read_frame(rstream)   # READY
                 info.boundary = ready.get("boundary_description") or None
+                # The KIND travelled on this frame all along and was thrown
+                # away; it is what names the tier's consequences to the model
+                # (#1012).  Taking it from here rather than re-deriving it is
+                # what makes a kernel that came up under a different posture —
+                # a respawn on a host whose AppArmor state changed — visible
+                # instead of silently contradicting the system prompt.
+                info.boundary_kind = ready.get("boundary") or None
             except EOFError:
                 pass
+        # Announce the boundary on this kernel's FIRST cell.  Armed per spawn,
+        # so a respawn re-announces (issue #1012).
+        kernel.announce_boundary = True
         with self._lock:
             self._kernels[info.notebook_id] = kernel
         return kernel
