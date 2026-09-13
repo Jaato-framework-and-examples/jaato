@@ -54,8 +54,10 @@ jobs:
     # sabotage-plus-test cycle per declared reversion. At 10 the job was
     # being killed in post-cleanup while its tests had already passed
     # (9m44s of tests against a 10m ceiling on dde49dd9). 20 matches the
-    # `suite` legs below and leaves room for the next guard.
-    timeout-minutes: 20
+    # `suite` legs below and leaves room for the next guard.  Measured
+    # 2026-09-13 at 12-15 min as the guard set grew; 30 keeps the same
+    # proportional headroom the original 20 was chosen for.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
@@ -192,9 +194,15 @@ jobs:
   suite:
     name: suite (${{ matrix.leg.name }})
     runs-on: ubuntu-latest
-    # Longest leg is ~2 min of tests plus install; 20 leaves headroom on a
-    # slow runner without letting a hung leg hold the run for half an hour.
-    timeout-minutes: 20
+    # Measured 2026-09-13: the `shared/tests` leg is ~16-20 min of tests plus
+    # install, not the ~2 min this comment claimed for a year.  Three PRs were
+    # killed at 20:15 on the day ~100 tests were added to that leg, and one
+    # passed at 19:51 -- by nine seconds.  A timed-out leg reports as
+    # `cancelled`, not `timed out`, so it reads as a flake and invites re-runs
+    # that fail identically.  35 restores headroom without letting a genuinely
+    # hung leg hold the run indefinitely.  If this needs raising again, split
+    # the leg instead -- see the issue this comment's history points to.
+    timeout-minutes: 35
     strategy:
       fail-fast: false
       matrix:

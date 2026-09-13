@@ -74,6 +74,28 @@ class NotebookBackend(ABC):
             "must implement execution_boundary() before it may run cells."
         )
 
+    def boundary_kind(self) -> Optional[str]:
+        """Name the boundary tier this backend would execute a cell under.
+
+        The machine-readable sibling of :meth:`execution_boundary`, whose
+        return value is prose.  ``NotebookPlugin`` asks this to tell the model
+        which boundary it is under *before* its first cell (issue #1012), and
+        renders the answer through
+        ``kernel_sandbox.boundary_notice`` — which is the only place a tier's
+        consequences are written down.
+
+        This is an expectation, not an observation: the process that runs the
+        code decides its own boundary and reports it on the READY handshake,
+        and that answer outranks this one wherever the two can be compared.
+        Backends whose containment is not one of the ``BOUNDARY_*`` tiers
+        return ``None``, which renders as no claim rather than as a wrong one.
+
+        Returns:
+            A ``kernel_sandbox.BOUNDARY_*`` constant, or ``None`` when this
+            backend's containment is not described by that vocabulary.
+        """
+        return None
+
     @abstractmethod
     def is_available(self) -> bool:
         """Check if the backend is available and properly configured.

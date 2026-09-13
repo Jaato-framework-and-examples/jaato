@@ -3018,6 +3018,100 @@ host (there is no profile to transition from), and the in-process backend's
 memory-reach, which #710's grooming correctly separates and which the deferred
 kernel + tool-RPC redesign owns.
 
+#### The audit tier cannot import `ctypes`, and so cannot import numpy (#1011)
+
+The row above says `ctypes.dlopen` of anything **outside the interpreter
+installation** is refused. `dlopen(None)` — "this process's own symbols" — is
+refused too, and that one is paid by code that never mentions `ctypes`:
+CPython's `ctypes/__init__.py` runs `pythonapi = PyDLL(None)` at module import,
+so **`import ctypes` raises the event by itself**. `numpy/_core/_internal.py`
+does `import ctypes` guarded by `except ImportError`, and
+`NotebookContainmentError` is a `PermissionError`, so the guard does not catch
+it and the whole numpy import dies. With it go pandas, scipy, scikit-learn,
+matplotlib, shapely-via-geopandas, osmnx and torch. **On the audit tier a cell
+cannot run the scientific stack at all.**
+
+The compiled extension modules were never the problem — they load through the
+import machinery (`open` events) and site-packages is a read root via
+`sys.path`. Measured: with `dlopen(None)` permitted and every other rule
+intact, `import numpy` succeeds and `(numpy.arange(10)**2).sum()` is `285`.
+Only the stdlib's own initialization line fails.
+
+**This is not a sloppy check and relaxing it is not the fix.** `dlopen(None)`
+returns a handle to the whole process symbol table, so the object the stdlib
+builds *is* the escape: `ctypes.pythonapi.system(b"...")` resolves **and calls**
+libc `system(3)` — verified, it ran a shell command. The only event that path
+raises is `ctypes.dlsym`, which this hook does not audit, so a frame-gated
+exemption permitting just `ctypes/__init__.py`'s own `PyDLL(None)` would hand a
+cell arbitrary libc with nothing left to stop it. Auditing `dlsym` as well would
+not close it either: once the module is imported, `memmove` over a
+`from_buffer` view and `string_at` at a raw address give in-process memory
+read/write with no library load at all — the `_POLICY`-rebinding limit the
+module docstring already names. Under the audit tier you genuinely cannot have
+both `import ctypes` and this boundary.
+
+**The AppArmor tier has no such restriction**, because `establish_containment`
+installs no hook at all when `/proc/self/attr/current` reports an enforced
+profile — there, `import ctypes` and numpy work normally. Neither does a
+**subprocess**: a spawned child is bounded by the OS and nothing else, so the
+same import runs through `cli` or `!python`, which is also why `!pip install X`
+works. Those are the remedies, and they are all *other surfaces* — which is the
+whole reason the next section exists.
+
+#### Which boundary is in force, said before the first cell (#1012)
+
+The tier materially changes what a cell can do and the model was told none of
+it: it discovered the tier by hitting a refusal mid-task and reverse-engineering
+the boundary from one error string. A live session hit the `ctypes` refusal,
+read its old wording ("loading native code would bypass the notebook's
+filesystem boundary") as *the sandbox forbids native code*, told the user so
+three times with increasing confidence, and steered them to an external API. It
+had `cli` throughout, where one `python -c "import numpy, osmnx"` would have
+falsified the theory in a single call. It never occurred to it that the two
+surfaces have different containment.
+
+Both shapes the issue offers are implemented, because neither covers the other:
+
+| Surface | Carries | Why this one too |
+|---------|---------|------------------|
+| the plugin's **instruction contribution** | the active tier + its two consequences | the standing fact, in the system prompt, read BEFORE the first cell rather than after a refusal |
+| the **first `notebook_execute` result** of each kernel | the tier the KERNEL reported on its READY frame | a kernel that respawned under a different posture — or whose interpreter could install no hook — contradicts the prompt visibly, in the result the model is already reading |
+
+Both render through `kernel_sandbox.boundary_notice`, the **one** place a
+tier's consequences are written down, so the standing fact and the per-kernel
+one cannot disagree. Nothing derives a second answer: the tier comes from
+`establish_containment` in the kernel and travels on the READY frame (where the
+kind was already sent and was being discarded), and the pre-spawn expectation is
+`SubprocessKernelBackend.boundary_kind()` — the ladder `execution_boundary` used
+to write out inline, now named once and worded from there. A backend whose
+containment is not one of the four tiers answers `None`, which renders as **no
+claim** rather than a plausible wrong one.
+
+Two things the text gets right, both of them the distinction the failing session
+could not make:
+
+- **refused-by-containment is not not-installed.** The audit notice says so in
+  those words, and adds that other compiled extension modules import normally.
+- **a subprocess is not audited.** The same import succeeds through `cli`, and
+  `!pip install X` works — the single fact that would have ended the incident.
+
+It is paid on every request (it lands in the prompt-cache prefix), so only the
+**active** tier's lines are rendered, never a table of four, and it stops at two
+consequences. The answer is stable within a session — each backend's
+`boundary_kind` derives from AppArmor state, the operator's opt-out and whether
+a workspace resolved, none of which changes under a running daemon — so the
+prefix is stable; the respawn case is exactly what the per-result announcement
+covers, and it is spent **once per kernel**, re-armed by `_spawn`.
+
+**A refusal now names its tier.** Every message the hook raises is prefixed
+`notebook containment (audit tier)`, and the `ctypes` one names the culprit,
+denies the general claim, and lists the remedies. The hook is installed on the
+audit tier and on **no other**, so that prefix is also an operator signal: seeing
+it on a deployment that believes AppArmor is enforced is evidence of a silent
+degrade, where previously the only trace was a runner log line nobody reads.
+(`JAATO_REQUIRE_APPARMOR=1` remains the way to make that a refusal to start;
+this only stops the evidence being invisible.)
+
 ### A Cancel the Daemon Wrote and the Runner Threw Away (#988)
 
 `client.stop()` / `session.request_stop()` reach a runner-served tool as a

@@ -72,6 +72,15 @@ class ExecutionResult:
         error_message: Exception message if failed
         traceback: Full traceback if failed
         variables: Snapshot of defined variables (names and types)
+        boundary_kind: The ``kernel_sandbox.BOUNDARY_*`` tier the executing
+            process established, set on the FIRST result from a freshly
+            spawned kernel and ``None`` on every later one (issue #1012).
+            Not a property of the cell — it is how the model learns which
+            boundary it is under without hitting a refusal first, and how a
+            kernel that respawned under a different posture makes that
+            visible.  The plugin renders it through
+            ``kernel_sandbox.boundary_notice``; this field carries the tier,
+            never the prose.
     """
     status: ExecutionStatus
     outputs: List[CellOutput] = field(default_factory=list)
@@ -81,6 +90,7 @@ class ExecutionResult:
     error_message: Optional[str] = None
     traceback: Optional[str] = None
     variables: Dict[str, str] = field(default_factory=dict)  # name -> type
+    boundary_kind: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for serialization."""
@@ -93,6 +103,7 @@ class ExecutionResult:
             "error_message": self.error_message,
             "traceback": self.traceback,
             "variables": self.variables,
+            "boundary_kind": self.boundary_kind,
         }
 
     @classmethod
@@ -107,6 +118,7 @@ class ExecutionResult:
             error_message=data.get("error_message"),
             traceback=data.get("traceback"),
             variables=data.get("variables", {}),
+            boundary_kind=data.get("boundary_kind"),
         )
 
     def get_text_output(self) -> str:
@@ -143,6 +155,12 @@ class NotebookInfo:
             than the one configuration implies.  ``None`` for backends that do
             not report one; a boundary is never *inferred* from this field
             being absent.
+        boundary_kind: The same answer as a ``kernel_sandbox.BOUNDARY_*``
+            constant rather than prose (issue #1012).  It travelled on the
+            READY frame beside ``boundary_description`` from the start and was
+            discarded; it is kept now because it is what selects the tier's
+            consequences in ``kernel_sandbox.boundary_notice``, and a
+            description is not something to pattern-match a tier out of.
     """
     notebook_id: str
     name: str
@@ -153,6 +171,7 @@ class NotebookInfo:
     execution_count: int = 0
     variables: Dict[str, str] = field(default_factory=dict)
     boundary: Optional[str] = None
+    boundary_kind: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for serialization."""
@@ -166,6 +185,7 @@ class NotebookInfo:
             "execution_count": self.execution_count,
             "variables": self.variables,
             "boundary": self.boundary,
+            "boundary_kind": self.boundary_kind,
         }
 
 
