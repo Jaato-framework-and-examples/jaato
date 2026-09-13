@@ -621,6 +621,29 @@ class TestProfileLifetime:
             "a profile a sibling slot is still confined to was unloaded"
         )
 
+    def test_the_profile_outlives_the_process_that_wears_it(
+        self, monkeypatch,
+    ) -> None:
+        """Order, not just outcome: reap the process, THEN the profile.
+
+        Unloading a profile while a task is still confined to it is the
+        thing this whole change exists to avoid, and the slot is a task
+        until ``waitpid`` returns.
+        """
+        pool = _pool()
+        order: List[str] = []
+        pool.profile_reaper = lambda name: order.append("profile")
+        monkeypatch.setattr(
+            "server.runner_pool.os.waitpid",
+            lambda *a, **kw: order.append("waitpid"),
+        )
+
+        pool._teardown_slot(
+            _slot(11, profile_name="jaato-ws-ws-aaaa"), reason="cascade-idle",
+        )
+
+        assert order == ["waitpid", "profile"]
+
     def test_an_unconfined_slot_reaps_nothing(self) -> None:
         """Hosts without AppArmor tear slots down exactly as before."""
         pool = _pool()

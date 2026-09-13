@@ -893,11 +893,6 @@ class PoolManager:
             self._idle_slots.clear()
 
         for slot in slots:
-            # Same per-slot profile reaping the sweep does, for the same
-            # reason (#1033): the daemon is the last wearer's owner, and
-            # a boundary-derived profile is not tied to any one session
-            # that could have unloaded it earlier.
-            self._reap_slot_profile(slot, reason="daemon-shutdown")
             try:
                 slot.sock.close()
             except OSError:
@@ -908,6 +903,11 @@ class PoolManager:
                 os.waitpid(slot.pid, 0)
             except ChildProcessError:
                 pass
+            # Then the profile, for the same reason the sweep does it
+            # (#1033) and in the same order: the daemon owns the last
+            # wearer, and a boundary-derived profile is not tied to any
+            # one session that could have unloaded it earlier.
+            self._reap_slot_profile(slot, reason="daemon-shutdown")
 
         if slots:
             logger.info(
@@ -1095,7 +1095,6 @@ class PoolManager:
         # cancels the read task + drains in-flight futures
         # cleanly.  Falls back to bare sock.close() if no rpc
         # was ever stashed (rare — slot has run zero sessions).
-        self._reap_slot_profile(slot, reason=reason)
         rpc = slot.rpc
         if rpc is not None:
             # Best-effort close via the daemon loop; we run
@@ -1132,6 +1131,11 @@ class PoolManager:
             os.waitpid(slot.pid, 0)
         except ChildProcessError:
             pass
+        # AFTER the process is gone, not before: unloading a profile
+        # while a task is still confined to it is the thing this whole
+        # change exists to avoid, and the slot is a task until waitpid
+        # returns.
+        self._reap_slot_profile(slot, reason=reason)
 
     def _reap_slot_profile(self, slot: PoolSlot, *, reason: str) -> None:
         """Unload the AppArmor profile this slot was the last to wear.
