@@ -416,7 +416,11 @@ def client_timeouts() -> List[ClientTimeout]:
     return [
         ClientTimeout(
             name="connect_timeout",
-            where="jaato.session(...) / IPCClient.session(...)",
+            # Every ``where`` SPELLS its parameter, because that spelling is
+            # what an author greps for — #904 asked for a block "naming
+            # connect_timeout", and a row reading only ``jaato.session(...)``
+            # is the same silence one layer in.
+            where="jaato.session(connect_timeout=)",
             default=_num(_sig_default(open_session, "connect_timeout")),
             bounds="connecting to (or autostarting) the daemon",
             settable_via="facade",

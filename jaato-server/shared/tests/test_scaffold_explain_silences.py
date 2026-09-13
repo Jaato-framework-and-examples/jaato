@@ -185,12 +185,23 @@ def _live_defaults() -> dict:
 def test_every_documented_timeout_default_is_the_live_one(clients_text):
     """The rendered defaults ARE the installed SDK's, not a transcription."""
     live = _live_defaults()
-    reported = {t.where: t.default for t in introspect.client_timeouts()}
-    assert reported["IPCClient.create_session(timeout=)"] == live["create"]
-    assert reported["IPCClient.connect(timeout=)"] == live["bare_connect"]
-    assert reported["IPCClient(autostart_timeout=)"] == live["autostart"]
-    assert (reported["jaato.session(...) / IPCClient.session(...)"]
-            == live["facade_connect"])
+    rows = introspect.client_timeouts()
+
+    def reported(fragment: str):
+        """The one row whose ``where`` contains *fragment*.
+
+        Matched on a fragment rather than the whole string so that
+        rewording a location does not silently drop an assertion — the
+        failure is then "no row", never "a row that was not checked".
+        """
+        hits = [t for t in rows if fragment in t.where]
+        assert len(hits) == 1, f"{fragment!r} matched {len(hits)} rows"
+        return hits[0].default
+
+    assert reported("create_session") == live["create"]
+    assert reported("IPCClient.connect") == live["bare_connect"]
+    assert reported("autostart_timeout") == live["autostart"]
+    assert reported("connect_timeout") == live["facade_connect"]
     # …and each one reaches the page a reader actually opens.
     for key in ("create", "bare_connect", "facade_connect"):
         assert f"{live[key]:g}s" in clients_text, (
@@ -212,6 +223,20 @@ def test_the_session_new_budget_says_where_it_is_settable():
     row = next(t for t in introspect.client_timeouts()
                if t.where == "IPCClient.create_session(timeout=)")
     assert row.settable_via == ("both" if forwards else "bare client only")
+
+
+def test_every_timeout_is_greppable_by_its_parameter_name(clients_text):
+    """Each row SPELLS the parameter, because that is what an author types.
+
+    #904 asked for a block "naming connect_timeout", and the first draft of
+    this block rendered that row's location as ``jaato.session(...)`` — so
+    the one knob the issue named by name was the one `grep connect_timeout`
+    could not find in it.  The same silence, one layer in.
+    """
+    for t in introspect.client_timeouts():
+        assert t.name in clients_text, (
+            f"{t.name} ({t.where}) is not greppable in explain clients"
+        )
 
 
 def test_the_timeout_that_may_leave_a_session_running_says_so(clients_text):
