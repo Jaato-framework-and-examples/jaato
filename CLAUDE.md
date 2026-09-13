@@ -1635,7 +1635,29 @@ Four rules the payload holds to, each attached to a way it could mislead:
 - **Absent is not zero.** A dimension nothing reported is OMITTED, not
   rendered `null` or `0`: a provider with no prompt cache must not read as
   a cache that never hits, and a session with no pricing table must not
-  read as free. A reported `0` is a measurement and is shown.
+  read as free. A reported `0` is a measurement and is shown — which no
+  OpenAI-shaped provider could actually say until `reported_cache_count`
+  replaced the per-seam `and value > 0` gates that folded a reported
+  `cached_tokens: 0` into `None` (`_openai_compat`, `openrouter`, `nebius`,
+  the OpenAI Responses wire, `kimi`, `google_genai`). `TokenUsage` and
+  `compute_cache_hit_percent` had both documented the distinction for
+  longer than anything could feed it.
+- **And a TOTAL is where that rule is easiest to break by arithmetic.**
+  A pooled cache-hit rate sums the numerator over the bindings that HAVE a
+  cache and the denominator over all of them, so a binding reporting no
+  cache dimension contributes zero hits and its whole uncached input.
+  Measured on a two-tier voice session: a caching `executor`
+  (`google/gemini-2.5-flash`, 76.41%) pooled with a non-reporting `voz`
+  (`openai/gpt-audio`, 224,423 uncached input tokens) to **54.66%** — a
+  session-wide "efficiency" figure no binding had, which moves with the
+  tier mix rather than with anything a reader can act on. So `totals`
+  **withholds** `cache_hit_percent` whenever part of its denominator is
+  unmeasured and publishes `cache_hit_basis` instead: how many bindings
+  were measured, how much uncached input could not be, and the rate over
+  the subset that could. A homogeneous pool is unchanged, and a pool that
+  measured nothing explains nothing — `cache_read_tokens` is already
+  absent there, and a basis would explain the absence of a number nobody
+  expected.
 - **A cost says where it came from.** `cost_source` is `provider` (billed),
   `pricing_table` (computed from `.jaato/pricing.json`) or `mixed`. Nothing
   in the tree distinguished them before — `cost_usd` arrived as a bare

@@ -63,6 +63,7 @@ from jaato_sdk.plugins.model_provider.types import (
     TurnResult,
     normalize_inclusive_usage,
     parse_tool_call_arguments,
+    reported_cache_count,
     require_terminated_stream,
     resolve_tool_use_finish,
 )
@@ -723,10 +724,16 @@ class OpenAICompatProvider(OpenAIMediaOutputMixin, ModalityCapabilityMixin):
     @staticmethod
     def _extract_cache_tokens(usage: Any) -> Optional[int]:
         """OpenAI-compatible cache-hit count (``usage.prompt_tokens_details
-        .cached_tokens``), or None when absent / zero (no cache hit).
+        .cached_tokens``), or None when the upstream reported none.
 
         Lets cache hit-rate and $ savings be measured uniformly across the
         fleet — previously a per-provider copy (and missing entirely on nim).
+
+        A reported ZERO is kept as ``0``, not folded into ``None``: this
+        wire declaring "I cache, and this call hit nothing" is a
+        measurement, and it is the only thing that tells a consumer apart
+        from a model with no prompt cache at all.  See
+        :func:`reported_cache_count`, which owns that rule for every seam.
 
         This count is a SUBSET of the same usage object's
         ``prompt_tokens``.  Callers must therefore pair it with
@@ -735,11 +742,7 @@ class OpenAICompatProvider(OpenAIMediaOutputMixin, ModalityCapabilityMixin):
         """
         details = getattr(usage, "prompt_tokens_details", None)
         cached = getattr(details, "cached_tokens", None) if details is not None else None
-        # ``isinstance`` and not merely truthiness: the count is now
-        # ARITHMETIC (it comes out of ``prompt_tokens``), so a field an
-        # upstream sent as a string — or a test double left as a mock —
-        # must read as "not reported" rather than reach the subtraction.
-        return cached if isinstance(cached, int) and cached else None
+        return reported_cache_count(cached)
 
     def _stream_response(
         self,

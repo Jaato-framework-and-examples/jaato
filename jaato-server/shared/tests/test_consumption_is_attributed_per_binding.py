@@ -22,6 +22,8 @@ from jaato_sdk.plugins.model_provider.types import (
     ProviderResponse,
     TokenUsage,
 )
+from shared.tests.test_every_guard_detects_its_own_reversion import Reversion
+
 from shared.jaato_session import JaatoSession
 from shared.session_consumption import (
     COST_SOURCE_PRICING_TABLE,
@@ -29,6 +31,29 @@ from shared.session_consumption import (
     BindingUsage,
     ConsumptionLedger,
 )
+
+
+#: The pooled cache rate is the one figure here a reader ACTS on -- an
+#: operator sizing a cache, a model reporting its own efficiency -- so the
+#: guard that withholds it when its denominator is not established proves
+#: it detects its own removal.
+REVERSIONS = [
+    Reversion(
+        target="jaato-server/shared/session_consumption.py",
+        find="""        return (
+            self.measured_bindings > 0
+            and self.unmeasured_bindings > 0
+            and self.unmeasured_input_tokens > 0
+        )""",
+        replace="""        return False""",
+        test=("TestPooledCacheHitRate::"
+              "test_a_mixed_pool_withholds_the_session_wide_rate"),
+        because="the totals row going back to pooling a caching binding's "
+                "numerator with a non-reporting binding's denominator, "
+                "which is absent-read-as-zero by arithmetic and published "
+                "a 54.66% session 'cache efficiency' no binding had",
+    ),
+]
 
 
 def _response(

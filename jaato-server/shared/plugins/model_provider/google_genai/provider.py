@@ -63,6 +63,7 @@ from jaato_sdk.plugins.model_provider.types import (
     TurnResult,
     Part,
     normalize_inclusive_usage,
+    reported_cache_count,
     require_terminated_stream,
     resolve_tool_use_finish,
 )
@@ -1214,8 +1215,13 @@ class GoogleGenAIProvider(ModalityCapabilityMixin):
                         output_tokens=getattr(metadata, 'candidates_token_count', 0) or 0,
                         total_tokens=getattr(metadata, 'total_token_count', 0) or 0,
                     )
-                    cached_tokens = getattr(metadata, 'cached_content_token_count', None)
-                    if isinstance(cached_tokens, int) and cached_tokens > 0:
+                    # A reported zero is kept -- Gemini saying "no cached
+                    # content served this call" is a measurement, and folding
+                    # it into None makes it indistinguishable from a model
+                    # that reports no cache dimension at all.
+                    cached_tokens = reported_cache_count(
+                        getattr(metadata, 'cached_content_token_count', None))
+                    if cached_tokens is not None:
                         usage.cache_read_tokens = cached_tokens
                         # ``prompt_token_count`` counted these; TokenUsage
                         # does not.  See extract_usage_from_response.
