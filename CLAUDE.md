@@ -3336,6 +3336,64 @@ degrade, where previously the only trace was a runner log line nobody reads.
 (`JAATO_REQUIRE_APPARMOR=1` remains the way to make that a refusal to start;
 this only stops the evidence being invisible.)
 
+### A Bootstrap That Failed, Discovered at an Unrelated Verb (#1033)
+
+`session.new` began failing intermittently on a live daemon with
+
+```
+RunnerCallError: session.get_context_usage failed:
+ToolError: session not bootstrapped on this runner
+```
+
+`session.get_context_usage` is a read-only toolbar RPC. It is not what
+failed; it is what happened to ask first.
+
+**`dispatch_bootstrap_envelope` does not propagate a bootstrap failure** —
+deliberately: it emits `SessionTerminatedEvent` so cascade observers see the
+death, and it calls `mark_runner_ready()` so a warm pool slot cannot strand a
+client-tool push on a readiness timeout. Both are right and both still happen.
+What did not happen is anyone being **told**, so session creation carried
+straight on into `server.initialize()` — which asks the runner for its context
+usage with no guard, two dozen lines below the one call in that function that
+IS guarded, whose comment names this exact contingency (*"the runner-side
+handler may return `stage="no_session"` if `session.bootstrap` RPC hasn't
+completed"*). Every bootstrap failure class — an AppArmor confinement
+mismatch, a provider connect failure, a secret that would not resolve, the
+30 s bootstrap deadline — therefore reached the client as a toolbar read,
+with the real cause in a daemon-side WARNING nobody was reading.
+
+**It is not a race, and the lane split is not involved.** `session.bootstrap`
+runs SYNCHRONOUSLY on the runner's reader thread, so no frame can even be
+DECODED while it runs; and the daemon's own order is strictly sequential —
+spawn, dispatch bootstrap, then initialize, all in one function. A control-lane
+call cannot be served mid-bootstrap on this path. `no_host` was the honest
+answer to a question that should not have been asked.
+
+| Half | Where |
+|------|-------|
+| the outcome is recorded where it is known | `dispatch_bootstrap_envelope` → `JaatoServer.note_runner_bootstrap_outcome` (a summary on every failure path, `None` on success, so the field means "the outcome of THIS bootstrap" rather than "one failed once") |
+| it is consulted where session creation is decided | `session_manager.initialize_or_refuse` — a free function, because it reaches nothing on the manager: it is a precondition of the SERVER |
+
+Three properties:
+
+- **`_require_ready_session` is untouched.** Making it wait, retry or answer
+  optimistically would convert a visible refusal into a session reporting
+  usage nobody measured. The predicate is right; the dispatch was wrong.
+- **The refusal names the bootstrap failure**, as a non-recoverable
+  `ErrorEvent(error_type="RunnerBootstrapFailed")` through the in-init sink —
+  the shape `core.py`'s own in-init refusals use, followed by #882's
+  correlated `session.new` answer.
+- **`mark_runner_ready()` is still called on failure, and no longer claims
+  what it used to.** Readiness and success were one question in that
+  docstring ("the daemon-side JaatoSession remains authoritative"), naming a
+  §7c rollout window that has since closed: `initialize()` itself now reads
+  the runner's session. The log line moves WARNING → ERROR for the same
+  reason — it is the one place the real cause is recorded.
+
+**A bootstrap failure is a session failure either way; what changed is that it
+says so.** A server that dispatched no bootstrap at all (the embedded path,
+standalone WS) records nothing and initializes exactly as before.
+
 ### A Cancel the Daemon Wrote and the Runner Threw Away (#988)
 
 `client.stop()` / `session.request_stop()` reach a runner-served tool as a

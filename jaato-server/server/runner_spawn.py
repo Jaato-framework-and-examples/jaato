@@ -52,6 +52,7 @@ from server.egress_proxy.errors import (
 # profile's declared block (#735) rather than duck-typing it, and a lazy
 # import inside a per-session helper would pay the lookup on every spawn.
 from shared.runtime_limits import RuntimeLimits
+from shared.utils.errors import exc_message
 
 
 if TYPE_CHECKING:  # pragma: no cover — types only
@@ -959,6 +960,12 @@ def dispatch_bootstrap_envelope(
         # ``_emit_bootstrap_terminated`` helper for the exception-safe
         # emit + the rationale memory
         # ``project_backlog_bootstrap_time_visibility_gap``.
+        _note_bootstrap_outcome(
+            server,
+            "spawn_session_runner did not populate server.runner_rpc — "
+            "no session.bootstrap was dispatched, so the runner hosts no "
+            "session",
+        )
         _emit_bootstrap_terminated(
             server=server,
             session_id=session_id,
@@ -980,6 +987,7 @@ def dispatch_bootstrap_envelope(
             profile_name=profile_name,
         )
         result = rpc.bootstrap_session_threadsafe(envelope, timeout=timeout)
+        _note_bootstrap_outcome(server, None)
         logger.info(
             "runner session.bootstrap acknowledged for %s: %s",
             session_id, result,
@@ -991,10 +999,20 @@ def dispatch_bootstrap_envelope(
         # shape as MODEL_THREAD_TERMINAL_ERROR in core.py) so the class name
         # is always visible, plus ``exc_info=True`` for the traceback when
         # the logger config preserves it.
-        logger.warning(
-            "runner session.bootstrap failed for %s: error_type=%s error=%s — "
-            "daemon-side JaatoSession remains authoritative",
+        # #1033: ERROR, not WARNING, and no longer claiming a fallback.
+        # "daemon-side JaatoSession remains authoritative" described a §7c
+        # rollout window that has closed — ``initialize()`` itself now reads
+        # the runner's session (``session_get_context_usage_threadsafe``),
+        # and every ``session.*`` verb on a hostless runner answers
+        # ``no_host``.  This line is the ONE place the real cause is
+        # recorded, so it is logged at the severity of what it decides.
+        logger.error(
+            "runner session.bootstrap FAILED for %s: error_type=%s error=%s — "
+            "this runner hosts no session; the session will be refused",
             session_id, type(exc).__name__, exc, exc_info=True,
+        )
+        _note_bootstrap_outcome(
+            server, f"{type(exc).__name__}: {exc_message(exc)}",
         )
         # Server 0.6.169+ (bootstrap-time visibility): emit
         # SessionTerminatedEvent so cascade observers + reactor rules
@@ -1034,6 +1052,29 @@ def dispatch_bootstrap_envelope(
                 "post-bootstrap tool-id re-emit failed for %s",
                 session_id, exc_info=True,
             )
+
+
+def _note_bootstrap_outcome(server: Any, error: Optional[str]) -> None:
+    """Record the bootstrap outcome on *server* (#1033).
+
+    Best-effort by construction: this function is called from the
+    dispatch's own failure paths, and a diagnostic that raises there would
+    replace a reportable failure with an unreportable one.  Test doubles
+    for ``JaatoServer`` that predate the method simply do not record —
+    which reads downstream as "nothing known to be wrong", the same answer
+    a session with no runner gives.
+
+    Args:
+        server: the session's ``JaatoServer``.
+        error: one-line summary of the failure, or ``None`` on success.
+    """
+    note = getattr(server, "note_runner_bootstrap_outcome", None)
+    if not callable(note):
+        return
+    try:
+        note(error)
+    except Exception:  # noqa: BLE001 — a recorder must not fail the path
+        logger.debug("note_runner_bootstrap_outcome raised", exc_info=True)
 
 
 def _emit_bootstrap_terminated(
