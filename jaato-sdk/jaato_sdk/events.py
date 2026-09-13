@@ -1356,18 +1356,39 @@ class TurnCompletedEvent(Event):
     #: never had a completion schema and every turn that legitimately has
     #: more work to do.
     #:
-    #: ``"not_signalled_after_nudges"`` means the framework EXPECTED a
+    #: ``"not_signalled_after_nudges"`` would mean the framework EXPECTED a
     #: completion here and gave up asking: ``signal_completion`` was in the
     #: session's tool surface, the model ended its loop without calling it,
-    #: and the nudge budget (``MAX_COMPLETION_NUDGES``) is spent.
+    #: and the nudge budget (``max_completion_nudges``) is spent.
     #:
-    #: This is the only signal a consumer gets in that state. No
-    #: ``AgentCompletedEvent`` fires (only ``signal_completion`` produces
-    #: one) and no ``SessionTerminatedEvent`` fires (quiescence is gated on
-    #: ``signal_completion`` having been called), so a cascade driver
-    #: otherwise sees a turn end and must INVENT a reason for the missing
-    #: payload -- typically blaming the schema, which is the one thing that
-    #: was fine.
+    #: **No daemon in this tree delivers that value, and none is expected
+    #: to.  Watch the terminal instead** (#771):
+    #:
+    #: .. code-block:: python
+    #:
+    #:     SessionTerminatedEvent / ErrorEvent  with
+    #:     error_type == "NudgeExhausted"
+    #:
+    #: Why the field does not arrive on the path it describes: the value is
+    #: written in exactly one place -- ``server/core.py``
+    #: ``_start_model_thread``, in the ``status == "done"`` handler -- and
+    #: that runs AFTER ``on_agent_turn_completed`` has already built this
+    #: event, read the field and cleared it.  The session then terminates,
+    #: so no later turn event picks it up.  It is the one and only writer
+    #: in the server, which makes ``completion_gap`` reliably ``None`` for
+    #: every consumer today.
+    #:
+    #: The terminal is the better signal in any case, which is why this is
+    #: documented rather than plumbed: it is typed, unconditional, and
+    #: actually terminal.  ``jaato_eval`` already routes on it --
+    #: ``sign_off.UNSIGNED_TERMINALS == frozenset({"NudgeExhausted"})`` --
+    #: to tell an agent that worked and never signalled apart from a daemon
+    #: that died mid-turn.
+    #:
+    #: The field is kept (rather than removed) because it is part of a
+    #: released wire shape and a consumer may set or forward it; treat a
+    #: value arriving here as advisory, and never read its ABSENCE as
+    #: evidence that the completion was signalled.
     completion_gap: Optional[str] = None
     duration_seconds: float = 0.0
     function_calls: List[Dict[str, Any]] = Field(default_factory=list)

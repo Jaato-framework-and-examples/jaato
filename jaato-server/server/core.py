@@ -5934,6 +5934,13 @@ class JaatoServer:
                     and not should_nudge
                     and nudges_fired >= MAX_COMPLETION_NUDGES
                 ):
+                    # Written for a reader of the agent record; it does NOT
+                    # reach TurnCompletedEvent.completion_gap.  That event was
+                    # built and the field cleared by on_agent_turn_completed
+                    # before this line runs, and the session terminates below,
+                    # so no later turn event carries it (#771).  The consumer
+                    # signal is the NudgeExhausted terminal emitted a few lines
+                    # down -- typed, terminal, and unconditional.
                     _agent = server._agents.get(server._main_agent_id)
                     if _agent is not None:
                         _agent.completion_gap = "not_signalled_after_nudges"
@@ -5941,7 +5948,9 @@ class JaatoServer:
                         f"COMPLETION_GAP: agent ended without "
                         f"signal_completion after "
                         f"{nudges_fired}/{MAX_COMPLETION_NUDGES} nudges — "
-                        f"no terminal event will fire for this session"
+                        f"terminating NudgeExhausted (watch "
+                        f"SessionTerminatedEvent/ErrorEvent "
+                        f"error_type='NudgeExhausted')"
                     )
 
                 if should_nudge:

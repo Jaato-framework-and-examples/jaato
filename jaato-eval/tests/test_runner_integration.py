@@ -468,7 +468,12 @@ class RunnerCase(RunnerHarness):
         """
         result = self._run({"hang": 30}, arm_timeout_seconds=0.2)
         self.assertEqual(result.state, BLOCKED)
-        self.assertIn("harness ceiling", result.blocked_reason)
+        # Wording per #724: the ceiling names ITSELF and the knob that
+        # raises it, and disclaims the pool gate this docstring describes
+        # — an author who met the old "harness ceiling of 900s" had no way
+        # to tell the two apart or to find the flag.
+        self.assertIn("per-arm ceiling", result.blocked_reason)
+        self.assertIn("--arm-timeout", result.blocked_reason)
 
     def test_a_timed_out_arm_is_blocked_never_failed(self):
         """It was cut short; that says nothing about the configuration."""

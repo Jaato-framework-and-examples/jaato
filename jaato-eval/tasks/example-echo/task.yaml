@@ -46,6 +46,13 @@ budget:
   # here, which would leave this pool inert — so bounding an arm's clock
   # via the profile would silently disable the gate this task exists to
   # demonstrate.
+  #
+  # It is also NOT the per-arm ceiling.  There is a third wall clock —
+  # the harness's own, default 900s, raised with `--arm-timeout` — which
+  # bounds ONE arm's run because a pool's `seconds` is reconciled when a
+  # session ENDS and so cannot stop a session that never ends.  This
+  # pool allowance is deliberately under that ceiling; set it higher and
+  # `jaato-eval run` warns, because no single arm could reach it (#724).
   seconds: 600
   degrade:
     - at: 100%
