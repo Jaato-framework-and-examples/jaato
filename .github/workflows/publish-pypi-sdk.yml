@@ -11,7 +11,7 @@ on:
           - pypi
         default: testpypi
       suffix:
-        description: "Pre-release suffix for a staging retry, e.g. rc1 (TestPyPI only). An index accepts a version once, ever, so a second staging attempt of one release needs one."
+        description: "Pre-release suffix for a TestPyPI staging build (TestPyPI only). Blank means rc1 -- every staging build is a pre-release, so the newest one always shows as current on the project page. An index accepts a version once, ever, so a second staging attempt of one release needs rc2, rc3, ..."
         type: string
         default: ""
 
@@ -65,13 +65,24 @@ jobs:
             echo "host=pypi.org" >> "$GITHUB_OUTPUT"
             echo "upload=https://upload.pypi.org/legacy/" >> "$GITHUB_OUTPUT"
           else
+            # Every TestPyPI build is a pre-release, and there is no way to ask
+            # for a plain one.  PyPI pins "THIS RELEASE" to the newest STABLE
+            # version whenever one exists, so a plain 0.21.0 staged on Monday
+            # outranks the 0.21.0rc1 staged on Friday and the project page
+            # presents the older build as the current one.  With nothing but
+            # pre-releases on the index the newest upload is always the one
+            # shown.  Defaulting rather than refusing is what keeps the
+            # promotion run -- target: pypi, suffix left blank -- untouched.
+            [ -n "$SUFFIX" ] || SUFFIX=rc1
             echo "host=test.pypi.org" >> "$GITHUB_OUTPUT"
             echo "upload=https://test.pypi.org/legacy/" >> "$GITHUB_OUTPUT"
           fi
+          echo "Publishing suffix: '${SUFFIX:-<none>}'"
+          echo "suffix=$SUFFIX" >> "$GITHUB_OUTPUT"
 
       - name: Check version not already on the target index
         env:
-          SUFFIX: ${{ inputs.suffix }}
+          SUFFIX: ${{ steps.index.outputs.suffix }}
         run: |
           base=$(python -c "
           import tomllib, pathlib
@@ -98,9 +109,9 @@ jobs:
       # the commits that set it; a suffixed version matches no commit, so the
       # walk anchors on the bump commit itself -- measured: an EMPTY changelog.
       - name: Apply the staging suffix
-        if: inputs.suffix != ''
+        if: steps.index.outputs.suffix != ''
         env:
-          SUFFIX: ${{ inputs.suffix }}
+          SUFFIX: ${{ steps.index.outputs.suffix }}
         run: |
           sed -i "0,/^version = \"/{s/^\(version = \"[^\"]*\)\"/\1${SUFFIX}\"/}" pyproject.toml
           grep -m1 '^version = ' pyproject.toml

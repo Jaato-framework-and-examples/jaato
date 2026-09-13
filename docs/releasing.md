@@ -57,11 +57,14 @@ python3 -m venv /tmp/stage && . /tmp/stage/bin/activate
 pip install \
   --index-url https://test.pypi.org/simple/ \
   --extra-index-url https://pypi.org/simple/ \
-  'jaato-sdk==0.20.0' 'jaato-server[all]==0.13.0'
+  'jaato-sdk==0.21.0rc1' 'jaato-server[all]==0.14.0rc1'
 ```
 
 Pin the exact versions rather than relying on cross-index resolution picking the
-staged build. Then check the artifact is what you think it is:
+staged build. The pin is also what makes pip accept a pre-release at all: an
+exact `==` specifier naming one is honoured, while `jaato-server`'s own unpinned
+dependency on `jaato-sdk` would otherwise skip every `rcN`. Then check the
+artifact is what you think it is:
 
 ```bash
 python -c "import importlib.metadata as m; print(m.version('jaato-server'))"
@@ -74,7 +77,7 @@ Re-run the same workflow, same commit, `target: pypi`. Then verify against what
 the index actually serves, not against what the workflow said it uploaded:
 
 ```bash
-curl -s https://pypi.org/pypi/jaato-server/0.13.0/json | \
+curl -s https://pypi.org/pypi/jaato-server/0.14.0/json | \
   python3 -c 'import sys,json; d=json.load(sys.stdin); \
     print([u["packagetype"] for u in d["urls"]]); \
     print(d["info"]["description"].split("\n---\n")[0])'
@@ -86,11 +89,32 @@ Deleting a release does not free its version number. The two indexes are
 independent, so staging `0.20.0` on TestPyPI leaves `0.20.0` free on PyPI — but
 a **second** staging attempt of the same release cannot reuse it.
 
-That is what the **`suffix`** input is for: `rc1` builds and uploads `0.20.0rc1`
+That is what the **`suffix`** input is for: `rc1` builds and uploads `0.21.0rc1`
 without touching the version the repository declares. Iterate `rc1`, `rc2`, ...
-on TestPyPI, then publish the clean `0.20.0` to PyPI. The workflow refuses a
+on TestPyPI, then publish the clean `0.21.0` to PyPI. The workflow refuses a
 suffix when `target: pypi`, so the released version is always the one in
 `pyproject.toml`.
+
+## Every TestPyPI build is a pre-release
+
+Leaving `suffix` blank on `target: testpypi` does **not** stage a plain version
+— it stages `rc1`. There is no way to ask for an unsuffixed build on TestPyPI,
+and that is deliberate.
+
+PyPI pins the **THIS RELEASE** badge to the newest *stable* version whenever one
+exists, and only falls through to the newest pre-release when there is none. So
+a plain `0.21.0` staged on Monday outranks a `0.21.0rc1` staged on Friday: the
+project page presents the older build as the current one, and a tester reading
+it installs the wrong artifact. With nothing but pre-releases on the index the
+newest upload is always the one shown.
+
+It also stops a staging round from spending the number the release needs.
+`0.21.0` staged plainly is `0.21.0` gone from TestPyPI forever, so the next
+attempt at that same release has to be suffixed anyway — the rule just makes the
+first attempt behave like the second.
+
+`target: pypi` is unaffected: `suffix` stays blank there and is refused if set,
+so what ships is the version `pyproject.toml` declares.
 
 The suffix is applied **after** `build_readme.py` runs, deliberately: that
 script anchors the changelog by walking git history for the commits declaring
