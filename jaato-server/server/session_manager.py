@@ -855,6 +855,72 @@ def _stamp_session_id(event: Any, session_id: Optional[str]) -> None:
         pass
 
 
+def initialize_or_refuse(server: JaatoServer, session_id: str) -> bool:
+    """Run ``server.initialize()`` — unless the runner hosts no session.
+
+    A free function rather than a ``SessionManager`` method because it
+    reaches nothing on the manager: it is a precondition of the SERVER,
+    and the one creation funnel is simply where it has to be asked.
+
+    **#1033.**  ``dispatch_bootstrap_envelope`` does not propagate a
+    bootstrap failure, deliberately: it emits a terminal event and marks
+    the runner ready so a warm pool slot cannot strand a client-tool
+    push on a readiness timeout.  What it did not do was tell anyone, so
+    session creation carried straight on into ``initialize()`` — which
+    asks the runner ``session.get_context_usage`` with no guard — and
+    the runner answered, correctly, ``session not bootstrapped on this
+    runner``.  The client was then refused ``session.new`` naming a
+    read-only toolbar RPC, with the real cause (an AppArmor confinement
+    mismatch, a provider connect failure, a 30 s bootstrap timeout)
+    appearing only in a daemon-side log line nobody was reading.
+
+    The predicate on the runner side is right and is deliberately left
+    alone: ``no_host`` IS the honest answer to "what is this session's
+    context usage" when there is no session.  The defect is that the
+    question was asked at all.  So it is not asked: a runner that hosts
+    no session gets no ``session.*`` RPC, and the refusal names what
+    actually failed.
+
+    The check is scoped to a bootstrap that was DISPATCHED AND FAILED.
+    A server with no runner at all (the embedded path, standalone WS)
+    records nothing and initializes exactly as before.
+
+    Args:
+        server: the session's ``JaatoServer``.
+        session_id: for the log line and the emitted error.
+
+    Returns:
+        ``server.initialize()``'s own verdict, or ``False`` without
+        calling it when this session's bootstrap installed no host.
+    """
+    bootstrap_error = getattr(server, "runner_bootstrap_error", None)
+    if not bootstrap_error:
+        return server.initialize()
+
+    logger.error(
+        "session %s: refusing to initialize — session.bootstrap "
+        "installed no runner-side host (%s).  Every session.* RPC on "
+        "this runner would answer 'session not bootstrapped on this "
+        "runner'; the session is refused naming the bootstrap failure "
+        "instead (#1033)",
+        session_id, bootstrap_error,
+    )
+    # Same shape as core.py's own in-init refusals: a detailed,
+    # non-recoverable ErrorEvent through the in-init sink, which
+    # ``_create_session_impl`` then follows with the correlated
+    # ``session.new`` answer (#882).
+    server.emit(ErrorEvent(
+        error=(
+            f"Runner bootstrap failed for session {session_id}, so the "
+            f"runner hosts no session and cannot serve this session's "
+            f"tools, turns or state: {bootstrap_error}"
+        ),
+        error_type="RunnerBootstrapFailed",
+        recoverable=False,
+    ))
+    return False
+
+
 class SessionManager:
     """Manages multiple named sessions with persistence.
 
@@ -3781,7 +3847,13 @@ class SessionManager:
         # Initialize.  On failure, core.py already emits a
         # ConfigurationError event via the in-init sink — no need
         # for a redundant SessionError here.
-        if not server.initialize():
+        #
+        # #1033: ``_initialize_or_refuse`` answers the ONE question that has
+        # to be settled before ``initialize()`` may run — did this session's
+        # ``session.bootstrap`` install a runner-side host — because
+        # ``initialize()`` asks the runner for its context usage and that
+        # RPC is not a diagnostic.
+        if not initialize_or_refuse(server, envelope.session_id):
             return None, None
 
         # Hand the manager to every plugin that asks for it.  MUST live here,

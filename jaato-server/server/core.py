@@ -636,6 +636,22 @@ class JaatoServer:
         # on this (attach has no synchronous ready-gate like session.new, and the
         # §7c seat-flip forwards both to the runner).  Cleared on teardown.
         self._runner_ready: threading.Event = threading.Event()
+        # #1033: why ``session.bootstrap`` did not install a runner-side
+        # session host, or ``None`` when it did (and ``None`` on a session
+        # that never dispatched one at all — the embedded and standalone-WS
+        # paths).  Written by ``runner_spawn.dispatch_bootstrap_envelope``,
+        # which is the one place that knows the outcome, and read by
+        # ``SessionManager._initialize_or_refuse`` before the daemon asks
+        # the runner its first ``session.*`` question.
+        #
+        # WHY IT IS RECORDED RATHER THAN RAISED.  The dispatch deliberately
+        # does not propagate — it emits ``SessionTerminatedEvent`` and marks
+        # the runner ready so a warm pool slot cannot strand a client-tool
+        # push on a readiness timeout — and both of those must keep
+        # happening.  What was missing is that the outcome then reached
+        # nobody, so session creation carried on and discovered the dead
+        # runner at whichever ``session.*`` verb happened to come first.
+        self._runner_bootstrap_error: Optional[str] = None
         # Phase 2 cascade-sharing (server 0.6.144+): pool manager
         # reference for the cascade-aware teardown path in shutdown().
         # When the runner was served from the pool AND the cascade
@@ -6731,8 +6747,47 @@ class JaatoServer:
         after the bootstrap RPC settles (success OR the daemon-authoritative
         failure path) so a reused warm pool slot doesn't strand the push/send on
         a readiness timeout.  Idempotent.
+
+        Readiness is NOT a claim that the bootstrap SUCCEEDED — the two
+        questions were conflated until #1033, and the docstring line above
+        ("the daemon-authoritative failure path") names a rollout window
+        that has since closed: a runner whose bootstrap failed hosts no
+        session, and every ``session.*`` verb answers ``no_host``.  Ask
+        :meth:`runner_bootstrap_error` for the other question.
         """
         self._runner_ready.set()
+
+    def note_runner_bootstrap_outcome(self, error: Optional[str]) -> None:
+        """Record whether ``session.bootstrap`` installed a runner-side host.
+
+        Called from ``runner_spawn.dispatch_bootstrap_envelope`` on every
+        path it can take — with a summary string on each failure path, with
+        ``None`` on success.
+
+        Success CLEARS a previous failure rather than merely not setting
+        one: a pool slot's ``RunnerRPCClient`` outlives the session that
+        used it, and this server object does not, but the symmetry is what
+        keeps the field meaning "the outcome of THIS session's bootstrap"
+        rather than "a bootstrap failed once".
+
+        Args:
+            error: One-line summary naming the failure (its exception type
+                and message, or the runner's own ``stage``), or ``None``
+                when the bootstrap acknowledged.
+        """
+        self._runner_bootstrap_error = error or None
+
+    @property
+    def runner_bootstrap_error(self) -> Optional[str]:
+        """Why this session's ``session.bootstrap`` installed no host.
+
+        ``None`` means either that it succeeded or that no bootstrap was
+        dispatched for this server at all (the embedded and standalone-WS
+        paths construct a server with no runner).  Both are "nothing known
+        to be wrong", which is what the consumer — the session-creation
+        refusal in ``SessionManager._initialize_or_refuse`` — needs.
+        """
+        return self._runner_bootstrap_error
 
     def set_runner_rpc(
         self,
