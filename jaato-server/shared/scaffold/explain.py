@@ -27,15 +27,73 @@ def _yn(flag: bool) -> str:
 
 # ---------------------------------------------------------------- overview
 
+def _topic_lines() -> List[str]:
+    """One ``jaato-scaffold explain <topic>`` line per dispatched topic.
+
+    Derived from the CLI's scope table, so the banner advertises exactly what
+    ``explain`` answers (#1006).  ``[--workspace DIR]`` is appended to the
+    topics whose renderer is handed that value, and the trailing ``# ...`` is
+    the entry's own ``blurb`` — both read off the table rather than typed here,
+    because the hand-typed banner carried the workspace hint on one of the four
+    topics that take it.
+    """
+    from .__main__ import scope_catalog          # deferred: the CLI imports US
+    rows = [("  jaato-scaffold explain "
+             + f"{t['scope']} {t['arg']}".rstrip()
+             + (" [--workspace DIR]" if t["reads_workspace"] else ""),
+             t["blurb"]) for t in scope_catalog()]
+    width = max(len(cmd) for cmd, _ in rows)
+    return [f"{cmd:<{width}}  # {blurb}" if blurb else cmd for cmd, blurb in rows]
+
+
+def _facet_lines() -> List[str]:
+    """The `dependencies` block — a FACET, and the banner now says which.
+
+    ``dependencies`` is not a topic: ``_take_deps_word`` strips it from any
+    position BEFORE the scope is looked up, so it appears in no scope table and
+    a derivation from one would drop it (#1006).  It is also not, as the banner
+    used to claim, "a facet of every scope" — only a NAMED provider or plugin
+    has one of its own; every other scope falls through to the framework
+    picture with a note saying so.  Both halves are read from the routing:
+    :data:`dependencies.UNIT_FACETS` for the units, ``_DEPS_WORDS`` for the
+    spellings.
+    """
+    from .__main__ import _DEPS_WORDS            # deferred: the CLI imports US
+    from . import dependencies as _deps
+    word, alias = _DEPS_WORDS[0], _DEPS_WORDS[-1]
+    units = list(_deps.UNIT_FACETS)
+    cmds = [(f"  jaato-scaffold explain {word}", "distributions, skew, extras")]
+    cmds += [(f"  jaato-scaffold explain {u} <name> {alias}",
+              "what its code imports" if i == 0 else "")
+             for i, u in enumerate(units)]
+    width = max(len(c) for c, _ in cmds)
+    return [
+        f"`{word}` (or `{alias}`) is a FACET, not a topic: it is accepted in",
+        "any position after `explain` and consumed before the topic is looked",
+        "up, so it never appears in the list above.  It is also not a facet of",
+        f"every topic — only a NAMED {' or '.join(units)} has one of its own;",
+        f"anything else, a bare `explain {word}` included, answers with the",
+        "framework picture and says so.  Derived by parsing what is installed,",
+        "never from a table that could be wrong:",
+    ] + [f"{c:<{width}}   # {note}" if note else c for c, note in cmds] + [
+        "a named unit is read as its own source PLUS the shared machinery it",
+        "imports, and a MISSING package is printed with the extra declaring it.",
+    ]
+
+
 def overview() -> Rendered:
     P = introspect.providers()
     PL = introspect.plugins()
     GC = introspect.gc_strategies()
+    from .__main__ import scope_catalog          # deferred: the CLI imports US
     data = {
         "providers": sorted(P),
         "plugins": len(PL),
         "gc_strategies": sorted(GC),
         "archetypes": list(_archetypes.accepted()),
+        # The topics, machine-readably: `explain --json` advertised a count of
+        # everything EXCEPT what you can ask it next (#1006).
+        "topics": scope_catalog(),
     }
     # Counted, never spelled: a literal here is how the banner came to advertise
     # "4 client archetypes" while `new` accepted six (jaato #716).
@@ -45,36 +103,9 @@ def overview() -> Rendered:
         f"  {len(P)} providers   {len(PL)} plugins   "
         f"{len(GC)} gc strategies   {n_arch} archetypes\n\n"
         "drill down:\n"
-        "  jaato-scaffold explain plugins\n"
-        "  jaato-scaffold explain plugin <name>\n"
-        "  jaato-scaffold explain commands\n"
-        "  jaato-scaffold explain providers\n"
-        "  jaato-scaffold explain provider <name>\n"
-        "  jaato-scaffold explain gc\n"
-        "  jaato-scaffold explain transports\n"
-        "  jaato-scaffold explain clients\n"
-        "  jaato-scaffold explain runtime\n"
-        "  jaato-scaffold explain tiers\n"
-        "  jaato-scaffold explain sets [--workspace DIR]\n"
-        "  jaato-scaffold explain profile           # a session's CAPABILITIES\n"
-        "  jaato-scaffold explain agents            # ... and its PERSONA\n"
-        "  jaato-scaffold explain services          # named HTTP APIs (.jaato/services/)\n"
-        "  jaato-scaffold explain paths\n"
-        "  jaato-scaffold explain prefetch\n"
-        "  jaato-scaffold explain completion       # the OUTPUT-side hook\n"
-        "  jaato-scaffold explain archetypes        # what `new` WRITES\n"
-        "  jaato-scaffold explain archetype <name>\n"
+        + "\n".join(_topic_lines()) + "\n"
         "\n"
-        "  jaato-scaffold explain integrations      # tools jaato can wire into\n"
-        "\n"
-        "append `dependencies` (or `deps`) to ANY of the above — it is a facet of\n"
-        "every scope, not a scope of its own.  Derived by parsing what is installed,\n"
-        "never from a table that could be wrong:\n"
-        "  jaato-scaffold explain dependencies            # distributions, skew, extras\n"
-        "  jaato-scaffold explain provider <name> deps    # what its code imports\n"
-        "  jaato-scaffold explain plugin <name> deps\n"
-        "a named unit is read as its own source PLUS the shared machinery it\n"
-        "imports, and a MISSING package is printed with the extra declaring it.\n"
+        + "\n".join(_facet_lines()) + "\n"
         "\n"
         "integrations ship WITH this build, so an installed copy cannot describe a\n"
         "different framework than the one running:\n"

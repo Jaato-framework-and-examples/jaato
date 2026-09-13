@@ -339,19 +339,19 @@ def validate_profile(
                     continue  # pass-through — any key valid
                 for subkey in val:
                     if not knobs.accepts(key, subkey):
-                        add("error", "unknown_knob",
-                            f"'{subkey}' is not a valid {cfg_name} {key} knob "
-                            "(silently ignored at runtime)",
+                        _report_provider_unknown_knob(
+                            cfg_provider, cfg_name, key, subkey, layer.keys,
+                            add,
                             where=f"plugin_configs.{cfg_name}.{key}.{subkey}")
             elif key == "quirks" and isinstance(val, dict):
                 _check_quirks(val, cfg_provider, cfg_name, add)
             else:
                 # a top_level knob (or an api_key_param credential key)
                 if key not in auth_param_keys and not knobs.accepts("top_level", key):
-                    add("error", "unknown_knob",
-                        f"'{key}' is not a valid {cfg_name} top-level knob "
-                        "(silently ignored at runtime)",
-                        where=f"plugin_configs.{cfg_name}.{key}")
+                    _report_provider_unknown_knob(
+                        cfg_provider, cfg_name, "top-level", key,
+                        _known_layer_keys(knobs, "top_level", auth_param_keys),
+                        add, where=f"plugin_configs.{cfg_name}.{key}")
 
     # --- profile-level quirks -------------------------------------------
     prof_quirks = getattr(profile, "quirks", None)
@@ -1980,3 +1980,78 @@ def validate_workspace(
     for d in out[_before:]:
         d.tier = "workspace"
     return out
+
+
+def _provider_knob_tail(cfg_provider, cfg_name, layer_name, key):
+    """What to SAY about an undeclared provider knob, and at what severity.
+
+    The contract was violated — that much the validator always knows, and it
+    is why this family is ``error`` rather than ``warn``: ``PROVIDER_KNOBS`` is
+    a closed declared set, and ``layer.opaque`` already exempts the genuinely
+    pass-through layers.  What happens NEXT is a different claim, and the old
+    single tail asserted the one outcome that is most often wrong (#1008)::
+
+        "(silently ignored at runtime)"
+
+    For the fourteen providers whose request builder allow-lists ``api_params``
+    (``_openai_compat`` and its inheritors) an unrecognized key is dropped
+    BEFORE the request and ``_read_api_params`` logs a WARNING naming it —
+    loudly ignored, not silently.  Elsewhere the key might instead be
+    forwarded into a vendor 400.  So the consequence is stated only where the
+    tree establishes it, and the evidence is quoted the way #1005 quotes a
+    plugin's read site.
+
+    Three answers, from what
+    :func:`~shared.scaffold.introspect.provider_api_params_forwarding`
+    established:
+
+    * an allow-list governs the layer and does NOT contain the key → it is
+      dropped before the request, with a warning.  ``error``;
+    * an allow-list governs the layer and DOES contain the key → the
+      provider's code forwards a key its own declaration omits, so the
+      DECLARATION is what is incomplete and the author's profile works.
+      ``warn`` / ``undeclared_knob``, mirroring #1005's plugin-side split;
+    * no allow-list, or one that could not be read statically → say the
+      declaration was violated and stop there.
+
+    Returns ``(severity, code, tail)``.
+    """
+    fwd = (introspect.provider_api_params_forwarding(cfg_provider.dir_name)
+           if layer_name == "api_params" else None)
+    forwarded = fwd["forwarded"] if fwd else None
+    if forwarded is not None and key in forwarded:
+        return ("warn", "undeclared_knob",
+                f"absent from {cfg_name}'s declared {layer_name} knobs, but "
+                f"the provider's own forwarding allow-list names it "
+                f"({fwd['where']}) — so it does reach the request, and "
+                f"'explain provider {cfg_name}' will not list it")
+    if forwarded is not None:
+        return ("error", "unknown_knob",
+                f"not a valid {cfg_name} {layer_name} knob — the provider "
+                f"allow-lists the {layer_name} it forwards ({fwd['where']}) "
+                f"and this key is outside it, so it is dropped before the "
+                f"request reaches the vendor, with a WARNING naming it")
+    return ("error", "unknown_knob",
+            f"not a valid {cfg_name} {layer_name} knob — PROVIDER_KNOBS "
+            f"declares the accepted set and this key is outside it; what the "
+            f"provider does with it next was not established here")
+
+
+def _known_layer_keys(knobs, layer_name, extra=()):
+    """The accepted key names of one declared layer, plus *extra*.
+
+    A helper rather than an expression at the call site: ``validate_profile``
+    is baselined by the complexity ratchet at its current size, and a layer
+    that may be absent costs a branch there.
+    """
+    layer = knobs.get_layer(layer_name)
+    return (set(layer.keys) if layer is not None else set()) | set(extra)
+
+
+def _report_provider_unknown_knob(cfg_provider, cfg_name, layer_name, key,
+                                  known, add, where):
+    """Emit one undeclared-provider-knob finding, evidence-first (#1008)."""
+    severity, code, tail = _provider_knob_tail(
+        cfg_provider, cfg_name, layer_name, key)
+    known_txt = f" (known: {', '.join(sorted(known))})" if known else ""
+    add(severity, code, f"'{key}' is {tail}{known_txt}", where=where)
