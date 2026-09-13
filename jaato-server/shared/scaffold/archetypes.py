@@ -204,6 +204,57 @@ _CLIENT_FLAGS: Tuple[Tuple[str, str], ...] = (
      "afterwards (they shape a profile-set's YAML, not a client)"),
 )
 
+
+@dataclass(frozen=True)
+class TurnMethod:
+    """One of the facade's three turn methods, and what settles it.
+
+    The DECISION between them is :data:`TURN_METHOD_RULE`; these rows are the
+    same decision in table form, for a reader who wants the shape before the
+    prose.  Both are rendered by ``explain clients`` (jaato #909) and the rule
+    additionally by ``explain archetype <client>``, from these definitions —
+    there is no second copy of either to drift.
+
+    Attributes:
+        name: The method as a caller spells it (``ask``).
+        settles_on: The event the facade waits for.
+        returns: What the call hands back.
+        ends_session: Whether the session is over when it returns.
+        use_for: The one-line "pick this when".
+    """
+
+    name: str
+    settles_on: str
+    returns: str
+    ends_session: bool
+    use_for: str
+
+
+#: The three turn methods, in the order a reader meets them.
+TURN_METHODS: Tuple[TurnMethod, ...] = (
+    TurnMethod("ask", "TURN_COMPLETED", "the text of that turn", False,
+               "a conversation — the session survives, ask again"),
+    TurnMethod("stream", "TURN_COMPLETED", "the text, chunk by chunk", False,
+               "the same turn, rendered as it arrives"),
+    TurnMethod("complete", "SESSION_TERMINATED", "AGENT_COMPLETED.payload",
+               True,
+               "a cascade stage that produces one typed artifact and stops"),
+)
+
+#: The decision rule itself — ONE definition, two renderings.  It was only
+#: ever reachable through ``explain archetype observer``, where a reader who
+#: is not scaffolding that archetype never meets it (jaato #909).
+TURN_METHOD_RULE = (
+    "WHICH turn method: ask/stream for a NON-GATED session (its turn IS the "
+    "terminus; they wait on first-of {TURN_COMPLETED, SESSION_TERMINATED} "
+    "because a plain turn never self-terminates), complete() for a "
+    "COMPLETION-GATED one (an agent that ends a turn without "
+    "signal_completion is re-prompted and keeps working, so the turn event "
+    "fires mid-flight — jaato #767).  complete() also RETURNS the typed "
+    "AGENT_COMPLETED payload; waiting on the terminal event alone tells you "
+    "that a session ended and nothing about what it produced"
+)
+
 _CLIENT_GENERATED_CORRECT = (
     "the turn goes through the SDK's convenience facade "
     "(<Client>.session(...) -> Session.ask / .stream / .complete), not a "
@@ -218,14 +269,7 @@ _CLIENT_GENERATED_CORRECT = (
     "default of 5s is too short",
     "env_file is always a real path — env_file=None crashes the IPC handshake "
     "with an opaque os.PathLike TypeError",
-    "WHICH turn method: ask/stream for a NON-GATED session (its turn IS the "
-    "terminus; they wait on first-of {TURN_COMPLETED, SESSION_TERMINATED} "
-    "because a plain turn never self-terminates), complete() for a "
-    "COMPLETION-GATED one (an agent that ends a turn without "
-    "signal_completion is re-prompted and keeps working, so the turn event "
-    "fires mid-flight — jaato #767).  complete() also RETURNS the typed "
-    "AGENT_COMPLETED payload; waiting on the terminal event alone tells you "
-    "that a session ended and nothing about what it produced",
+    TURN_METHOD_RULE,
     "create_session RAISES SessionCreateFailed; it does not return None, and "
     "the facade lets it out of the context manager rather than yielding a "
     "dead session",
