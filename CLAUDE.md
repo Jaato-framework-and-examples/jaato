@@ -3925,6 +3925,14 @@ The webhook plugin provides an inbound HTTP listener for receiving external webh
       "secret_header": "X-Gitlab-Token",
       "secret_algo": "token",
       "event_type_header": "X-Gitlab-Event"
+    },
+    "slack": {
+      "path": "/webhook/slack",
+      "secret_header": "X-Slack-Signature",
+      "secret_algo": "hmac-sha256",
+      "signature_scheme": "slack-v0",
+      "timestamp_header": "X-Slack-Request-Timestamp",
+      "max_age_seconds": 300
     }
   }
 }
@@ -3935,7 +3943,7 @@ how the route's shared secret is checked:
 
 | Mode | Header carries | Property |
 |------|----------------|----------|
-| `hmac-sha256` | an HMAC digest over the request **body** | the secret never travels; a captured request cannot be replayed against another payload |
+| `hmac-sha256` | an HMAC digest keyed by the secret | the secret never travels; a captured request cannot be replayed against another payload — but it **can** be replayed against the same one, see below |
 | `token` | the shared secret **verbatim**, compared with `hmac.compare_digest` | **weaker**: readable by anything that terminates TLS, and replayable against any payload |
 
 `token` exists because a large class of producers signs nothing — GitLab sends
@@ -3960,10 +3968,128 @@ Three properties keep the wider vocabulary from becoming a softer posture:
   `scrub_secret_env: none` — so `token` cannot become the quiet path of least
   resistance for a producer that *does* sign bodies. Pair it with TLS.
 
+#### A Signature That Never Expired (#713)
+
+`secret_algo` says how the credential is CHECKED. It cannot say **what was
+signed** — and a digest over the request body alone binds no time, so it
+authenticates the same bytes forever. Whoever observes one delivery (a proxy
+log, a mirrored port, a misrouted retry) replays it verbatim, indefinitely, and
+it authenticates every time. Driven against the tree at `9abaffa5`: the original
+ACCEPTED, the replay ACCEPTED, the replay a year later ACCEPTED.
+
+Here that is not a duplicate row. The plugin exists to let external events drive
+long-running agent sessions (`webhook_subscribe` → `webhook_poll` → the agent
+acts), so a replayed webhook is a **re-triggered turn** — tool calls, ledger
+spend, whatever the persona authorises. The hardening already present (TLS/mTLS,
+CIDR allowlists, token buckets) constrains *who may connect*; none of it
+constrains replaying a request that was legitimately signed. And #930's `token`
+mode made it load-bearing for two modes rather than one: that mode is documented
+as *"replayable against any payload"* and the mitigation its weakness implies
+did not exist.
+
+**`signature_scheme` is the missing axis**, orthogonal to `secret_algo`:
+
+| `signature_scheme` | Signed payload | Timestamp from | Sender |
+|---|---|---|---|
+| `body` (default) | the request body | — binds none | GitHub, GitLab, most internal senders |
+| `slack-v0` | `v0:{ts}:{body}` | `timestamp_header` | Slack |
+| `stripe-v1` | `{ts}.{body}` | `t=` inside the signature header | Stripe |
+
+Both constructions are taken from the vendors' published documentation, and
+Slack's **published worked example** (secret, timestamp, body, digest) is a test
+vector in the suite — a signature this tree builds a different way cannot
+satisfy it.
+
+Two mechanisms, complements rather than alternatives. **A freshness window**
+(`max_age_seconds`, default 300, two-sided so a future-dated capture is refused
+too) bounds how long a captured delivery stays useful, and by construction
+catches nothing *inside* the window. **A bounded, TTL'd replay cache**
+(`replay_cache_size`, default 10 000 keys) catches the copy that arrives inside
+it, answering **409** — distinct from 403 so a repeat and a forgery are
+distinguishable in the access log.
+
+Three orderings are the security argument rather than style:
+
+- **Signature first, freshness second.** In both timestamped schemes the
+  timestamp is *part of the signed payload*, so it is evidence of nothing until
+  the signature holds — which is also what makes the window unbypassable:
+  rewriting the header to refresh a stale capture breaks the digest.
+- **The cache is written last**, only for a delivery that passed both. Recording
+  on arrival would let anyone who can reach the port register a guessed delivery
+  id and have the *genuine* delivery refused as a replay — a denial of service
+  built out of the anti-replay control.
+- **The cache TTL is the window.** Past it the entry is gone and the delivery is
+  also no longer fresh, so it is refused as stale rather than accepted; the two
+  hand off with no gap.
+
+**What each route shape gets**, and the backward-compatibility choice stated
+rather than inherited:
+
+| Route | Window | Replay cache |
+|---|---|---|
+| `slack-v0` / `stripe-v1` | on by default (300s) | keyed on the signature — automatic |
+| `body` + `replay_key_header` | none available | keyed on the delivery id |
+| **`body`, no delivery id** | **none available** | **none — a replay is accepted** |
+| `token` + `replay_key_header` | none available | keyed on the delivery id |
+| `token`, no delivery id | none available | none |
+
+The bold row is where **every route configured before #713 sits**, and it could
+not be fixed by choosing a braver default: the sender signs no timestamp, so
+there is nothing to check, and the credential is a pure function of the body, so
+two genuine deliveries of one payload are indistinguishable from a replay. The
+posture #863 took — make the default safe, make opting out the explicit act — is
+applied exactly where the material exists: a `slack-v0` / `stripe-v1` route gets
+a window and a cache with **no** extra keys, and `max_age_seconds: 0` is the
+announced opt-out. Where it does not, what is switched on instead is **saying
+so**: each such route logs a WARNING at listener startup naming itself and both
+remedies (`signature_scheme`, or `replay_key_header` — GitHub's
+`X-GitHub-Delivery`, GitLab's `X-Gitlab-Event-UUID`). **Stated cost:** the
+weakness persists for a deployment that reads no logs and changes nothing. The
+alternative was to break every existing route.
+
+**For `token` routes, `replay_key_header` is the whole answer.** There is no
+signed payload to bind a timestamp into, and the credential is byte-identical
+every time — so a cache keyed on it would refuse the second *legitimate*
+delivery. A delivery id refuses a verbatim replay within the TTL; it does not
+stop an attacker who *holds* the token from minting fresh requests, which is
+credential compromise rather than replay, and which that mode concedes by design.
+
+**The pair rule is preserved and extended.** Each of these is a
+`validate_config` **error** and a **500** at request time, never a fall-through:
+a `signature_scheme` outside the vocabulary (a typo does not degrade to `body`);
+`slack-v0` with no `timestamp_header`; `stripe-v1` *with* one (its timestamp is
+in the signature header, and an unsigned second source could win the window
+check); `timestamp_header` on `body`, where the value is not covered by the
+signature and whoever replays the request simply rewrites it — a window checking
+an attacker-controlled value reads like protection and is not; and a
+timestamp-bound scheme paired with `secret_algo: token`. An unparseable
+timestamp is a refusal, not a skipped check. No cross-mode leniency: `slack-v0`
+rejects a bare hex digest and an HMAC over the body alone, and `stripe-v1`
+ignores Stripe's legacy `v0` test-mode signature per Stripe's own downgrade
+guidance.
+
+**Constant-time comparison confirmed** (the issue's fourth ask): every
+credential comparison — both `secret_algo` modes and both schemes — goes through
+one helper over `hmac.compare_digest`, which encodes to UTF-8 first so a crafted
+non-ASCII header cannot turn a verification failure into a 500. A source-level
+guard fails the build if a `==` on a digest appears beside it.
+
+Also confirmed clean in the same pass, as the issue reported: the unbounded
+pre-auth body read. `do_POST` compares `Content-Length` against
+`config.max_body_size` **before** `self.rfile.read(content_length)`.
+
+Tests: `shared/plugins/webhook/tests/test_replay_protection_713.py` — the
+vendor vectors, a replayed request refused and a fresh one accepted on each
+scheme, an expired and a future-dated timestamp, a tampered body and a tampered
+timestamp, the cache-poisoning refusal, and the bounded-cache eviction counter.
+No test sleeps: both the window and the TTL take `now` as a parameter, so a test
+states the instant it means rather than betting on a clock (#996).
+
 **Corporate hardening** (all stdlib, no external deps):
 - **TLS/SSL**: HTTPS with optional mutual TLS (client certificate verification)
 - **IP allowlisting**: CIDR-aware, IPv4/IPv6, IPv4-mapped-IPv6 normalization
 - **Rate limiting**: Per-IP token-bucket algorithm
+- **Replay refusal**: per-route freshness window + a bounded, TTL'd delivery cache
 
 **Architecture:** HTTP server runs in a daemon thread using `http.server.HTTPServer`. Per-subscription event buffers (`deque(maxlen=1000)`) with `threading.Event`-based long-poll wakeup. Server starts lazily on first subscribe call.
 
