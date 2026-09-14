@@ -29,6 +29,7 @@ import pytest
 
 from ..config import SubagentConfig
 from ..plugin import SubagentPlugin, _is_isolated_optin
+from shared.tool_result_builder import split_executor_result as _split
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -152,10 +153,10 @@ class TestSpawnSubagentDetectsOptin:
         }
         plugin._dispatch_isolated_spawn = MagicMock(return_value=sentinel)
 
-        result = plugin._execute_spawn_subagent({
+        ok, result = _split(plugin._execute_spawn_subagent({
             "task": "do something",
             "agent_params": {"isolated": True},
-        })
+        }))
 
         # Dispatcher was called.
         plugin._dispatch_isolated_spawn.assert_called_once()
@@ -189,7 +190,7 @@ class TestSpawnSubagentDefaultShareUnchanged:
         # Leave _config, _runtime, _workspace_path unset so the
         # downstream flow surfaces a different error.
 
-        result = plugin._execute_spawn_subagent({"task": "do something"})
+        ok, result = _split(plugin._execute_spawn_subagent({"task": "do something"}))
 
         # The detection branch did NOT fire; a different downstream
         # error path produced the result.
@@ -202,10 +203,10 @@ class TestSpawnSubagentDefaultShareUnchanged:
         downstream error as the no-flag case."""
         plugin = _make_initialized_plugin()
 
-        result = plugin._execute_spawn_subagent({
+        ok, result = _split(plugin._execute_spawn_subagent({
             "task": "do something",
             "agent_params": {"isolated": False},
-        })
+        }))
 
         assert result["success"] is False
         assert "not yet implemented" not in result["error"].lower()
@@ -216,10 +217,10 @@ class TestSpawnSubagentDefaultShareUnchanged:
         passes; same downstream error as the no-flag case."""
         plugin = _make_initialized_plugin()
 
-        result = plugin._execute_spawn_subagent({
+        ok, result = _split(plugin._execute_spawn_subagent({
             "task": "do something",
             "agent_params": {"username": "alice", "case_id": "42"},
-        })
+        }))
 
         assert result["success"] is False
         assert "not yet implemented" not in result["error"].lower()
