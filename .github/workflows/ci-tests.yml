@@ -108,6 +108,22 @@ jobs:
   # Separate jobs strengthen that isolation rather than weaken it — the three
   # legs that carry more than one suite keep them in separate `pytest` calls.
   #
+  # ONE OF THOSE CAUSES IS GONE, and the split still stands. #974 was a
+  # *current-session* ContextVar (not the workspace-root one named above):
+  # a guard driving a tool-dispatch path against a
+  # `JaatoSession.__new__(JaatoSession)` shell published it process-wide,
+  # and `PermissionPlugin` / `ReferencesPlugin` then resolved a session off
+  # it. Measured at 4e5c95ba, `shared/tests` + `shared/plugins` in one
+  # process produced 122 failures that NEITHER leg produces alone (113
+  # permission, 9 references); with #974 fixed the same comparison is 0 —
+  # the combined failure set is exactly the union of the two separate ones.
+  # That is one pair of legs and one cause: apparmor and the bootstrap
+  # helpers were not re-measured, the reversion meta-suite was excluded
+  # (it rewrites source, #995), and this container cannot reproduce the
+  # `0 + 0` baseline at all because `shared/plugins` needs optional extras
+  # it does not have. So: evidence that merging legs is *less* dangerous
+  # than it was, not evidence that it is safe.
+  #
   # `fail-fast: false` replaces the old per-step `if: always()`: one red leg
   # must not hide the other legs' failure lists.
   #
