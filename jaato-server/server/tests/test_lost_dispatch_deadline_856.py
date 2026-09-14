@@ -821,35 +821,35 @@ def test_a_runner_that_remembers_nothing_while_having_run_things():
     assert verdict == "never_received"
 
 
-def test_a_runner_can_answer_a_call_with_nothing_and_stay_healthy():
-    """One demonstrated mechanism for the observed state (#856 triage).
+def test_the_response_side_drop_that_produced_this_state_is_closed():
+    """The mechanism this module demonstrated, and what became of it (#999).
 
     #920 made the runner refuse to WRITE an oversized frame rather than
     write one the peer cannot skip, and turned that drop into a small
-    typed error for the call it belonged to.  That substitution is
-    guarded by ``if not ok or self._closed: return`` — so it happens for
+    typed error for the call it belonged to.  That substitution used to be
+    guarded by ``if not ok or self._closed: return`` — so it happened for
     a SUCCESS response and not for an ERROR one, on the reasoning that
-    "an error frame that did not fit will not fit a second time".  The
-    substitute, though, is small by construction; what did not fit is
-    the original, whose ``result`` dict can carry megabytes of tool
-    output beside the traceback.
+    "an error frame that did not fit will not fit a second time".
 
-    The consequence is exactly the state the issue describes: the call
-    is answered with NOTHING, the channel stays OPEN, the runner returns
-    to idle with an empty active set, and the daemon waits forever.
-    Distinct from #851 in the one way that matters — there is no EOF, so
-    nothing fails the in-flight future.
+    The premise named the wrong frame: the substitute is small by
+    construction, and what did not fit is the ORIGINAL, whose ``result``
+    dict carries megabytes of tool output beside the traceback.  So an
+    error response over the cap was answered with NOTHING while the
+    channel stayed OPEN and the runner returned to idle — the exact state
+    this module is about, and distinct from #851 in the one way that
+    matters: no EOF, so nothing fails the in-flight future.
 
-    This is NOT a claim that it is what happened in the reported
-    incident: that would need the runner's own log, which the report
-    does not carry.  It is a demonstration that the class of failure is
-    reachable, and it is the case the ``finished`` verdict answers — the
-    id has left ``active_call_ids`` and is still in
-    ``known_request_ids``, so the daemon reports a lost RESPONSE rather
-    than a lost dispatch.
+    **#999 closed it.**  Both paths now substitute, so this producer no
+    longer exists.  What this module pins is unaffected: the deadline
+    bounds the CLASS rather than any one producer, and the ``finished``
+    verdict is still the right answer whenever a response is lost — which
+    a closed channel, a severed peer and any future drop can still cause.
+    Nothing here ever claimed this was the reported incident's cause;
+    that would need the runner's own log, which the report does not carry.
     """
     from shared.framing import MAX_MESSAGE_SIZE
     from server.runner.envelope import ErrorPayload
+    from server.runner.json_codec import loads as _loads
     from server.runner.rpc import RunnerRPC
 
     a, b = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -858,24 +858,30 @@ def test_a_runner_can_answer_a_call_with_nothing_and_stay_healthy():
         oversized = "x" * (MAX_MESSAGE_SIZE + 1024)
         b.settimeout(0.3)
 
-        # ok=True: #920's substitution fires, so the caller IS answered.
+        # ok=True: #920's substitution, unchanged.
         rpc._emit_response(
             request_id=41, ok=True, result={"stdout": oversized},
         )
         assert read_frame_sync(b) is not None
         assert rpc._closed is False
 
-        # ok=False: nothing is written at all.
+        # ok=False: #999.  This wrote nothing at all until it was fixed.
         rpc._emit_response(
             request_id=42, ok=False, result={"stdout": oversized},
-            error=ErrorPayload(type="ToolError", message=oversized),
+            error=ErrorPayload(type="ToolError", message="the tool failed"),
         )
-        with pytest.raises(socket.timeout):
-            read_frame_sync(b)
-        assert rpc._closed is False, (
-            "the channel stayed open, which is what makes this NOT #851: "
-            "no EOF reaches the daemon, so no in-flight future fails"
+        raw = read_frame_sync(b)
+        assert raw is not None, (
+            "an error response over the cap is dropped in full — the caller "
+            "is then answered only by this module's own watchdog"
         )
+        frame = _loads(raw)
+        assert frame["id"] == 42 and frame["ok"] is False
+        assert "ToolError" in frame["error"]["message"], (
+            "the runner knew what failed; a substitute that says only "
+            "'too large' throws that away"
+        )
+        assert rpc._closed is False
     finally:
         a.close()
         b.close()
