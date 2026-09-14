@@ -133,12 +133,12 @@ PROMPT = "Who are you? Reply in one sentence."
 
 
 async def main() -> int:
-    # Inline spec so this runs before you have a profile.  Swap for
-    # profile="<name>", agent="<name>" to use a profile set: profile is
-    # WHAT IT CAN DO (model, plugins, ceilings), agent is WHO IT IS.
+    # profile is WHAT IT CAN DO (model, plugins, ceilings); agent is WHO IT
+    # IS.  Add agent="<name>" to layer a persona from .jaato/agents/ — or
+    # let the profile's own default_agent supply one.
     try:
         async with _open_session(
-                profile={"model": MODEL, "provider": PROVIDER}) as s:
+                profile=__SESSION_BINDING__) as s:
             # stream() yields the model's text as it arrives; s.ask(PROMPT)
             # is the same turn collected into one string.  Either way the
             # FACADE owns the wait — first-of {TURN_COMPLETED,
@@ -187,12 +187,12 @@ PROMPT = "Kick off the long-running task."
 
 async def main() -> int:
     """Fire-and-forget: send one message, do NOT wait for completion."""
-    # Inline spec so this runs before you have a profile.  Swap for
-    # profile="<name>", agent="<name>" to use a profile set: profile is
-    # WHAT IT CAN DO (model, plugins, ceilings), agent is WHO IT IS.
+    # profile is WHAT IT CAN DO (model, plugins, ceilings); agent is WHO IT
+    # IS.  Add agent="<name>" to layer a persona from .jaato/agents/ — or
+    # let the profile's own default_agent supply one.
     try:
         async with _open_session(
-                profile={"model": MODEL, "provider": PROVIDER}) as s:
+                profile=__SESSION_BINDING__) as s:
             # NOT s.ask()/s.complete() — those WAIT for a terminus, which is
             # the one thing this archetype must not do.  send_message on the
             # underlying client dispatches and returns; the facade's context
@@ -368,9 +368,9 @@ HOST_TOOLS = [{
 
 
 async def main() -> int:
-    # Inline spec so this runs before you have a profile.  Swap for
-    # profile="<name>", agent="<name>" to use a profile set: profile is
-    # WHAT IT CAN DO (model, plugins, ceilings), agent is WHO IT IS.
+    # profile is WHAT IT CAN DO (model, plugins, ceilings); agent is WHO IT
+    # IS.  Add agent="<name>" to layer a persona from .jaato/agents/ — or
+    # let the profile's own default_agent supply one.
     #
     # client_tools= is why this archetype can use the facade at all: the
     # facade registers them AFTER connect but BEFORE create_session, which is
@@ -379,7 +379,7 @@ async def main() -> int:
     # connect/register/create dance this exists to replace.
     try:
         async with _open_session(
-                profile={"model": MODEL, "provider": PROVIDER},
+                profile=__SESSION_BINDING__,
                 client_tools=HOST_TOOLS) as s:
             # ask() collects the turn's text; the tool call happens mid-turn
             # and prints from _send_to_user above as it fires.

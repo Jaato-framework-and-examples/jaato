@@ -1229,8 +1229,8 @@ def _command_block(commands: List[Any]) -> List[str]:
     return out
 
 
-def _config_block(settings) -> List[str]:
-    """Render one ``plugin_configs.<plugin>.*`` knob per line.
+def _config_block(settings, depth: int = 0) -> List[str]:
+    """Render one ``plugin_configs.<plugin>.*`` knob per line, nesting included.
 
     The declared ``enum`` is rendered because it is CHECKED: ``validate``
     reports a value outside it as ``invalid_knob_value`` (#925), and this
@@ -1239,15 +1239,80 @@ def _config_block(settings) -> List[str]:
     and a knob's description can run to several lines.  ``type`` may be a
     union (``string|array``), which is why the column is wider than the
     single JSON-Schema token it used to hold.
+
+    Sub-knobs are rendered at every declared depth, NOT one level
+    the way a tool parameter is (:func:`_nested_params`).  The two look
+    similar and the reader's need is opposite: a nested tool parameter is
+    one call's argument, so one level plus ``--json`` is enough, while
+    ``permission.policy`` IS the plugin's whole configuration surface —
+    stopping at ``policy  object  Permission policy rules`` left the only
+    honest route to ``defaultPolicy`` / ``whitelist.tools`` running through
+    ``shared/plugins/permission/policy.py``, which is the one thing this
+    page exists to make unnecessary.
+
+    A ``free_form`` knob is marked rather than silently bottomed out: it is
+    the difference between "this page did not tell you the keys" and "there
+    is no closed set of keys to tell you", and it is exactly where
+    ``validate`` stops reporting unknown names.
     """
+    pad = "    " + "  " * depth
     out: List[str] = []
     for s in settings:
         dflt = f"  (default {s.default!r})" if s.default is not None else ""
         desc = f"  {s.description}" if s.description else ""
         enum = ("  one of: " + ", ".join(repr(c) for c in s.enum)
                 if s.enum else "")
-        out.append(f"    {s.name:22} {s.type:12}{enum}{desc}{dflt}")
+        width = max(4, 22 - 2 * depth)
+        out.append(f"{pad}{s.name:{width}} {s.type:12}{enum}{desc}{dflt}")
+        if s.free_form:
+            out.append(f"{pad}  (open key set — any key is accepted here, so "
+                       f"`validate` reports none of them as unknown)")
+        if s.children:
+            out.extend(_config_block(s.children, depth + 1))
     return out
+
+
+def _config_json(settings) -> List[Dict[str, Any]]:
+    """``--json`` view of the knob tree — the same recursion as the text one.
+
+    Kept beside :func:`_config_block` so a field added to
+    :class:`~shared.scaffold.introspect.ConfigSetting` is rendered by both or
+    by neither; a machine consumer that could not see ``children`` would be
+    in exactly the position the human page was.
+    """
+    return [{"name": s.name, "type": s.type, "default": s.default,
+             "description": s.description, "enum": s.enum,
+             "free_form": s.free_form,
+             "children": _config_json(s.children) if s.children else None}
+            for s in settings]
+
+
+def _client_gate_note() -> List[str]:
+    """The gate on ``signal_completion`` that is NOT a profile key.
+
+    A root session's CLIENT decides it, so the same profile completes under
+    a headless driver and cannot complete under the TUI — the one gate an
+    author cannot see by reading their own files, and the reason a persona
+    that instructs the model to signal can look correct and broken at once.
+    Probed (:func:`~shared.scaffold.introspect.client_gate`), never spelled,
+    and omitted entirely when the probe finds nothing rather than printing a
+    heading over an empty fact.
+    """
+    gate = introspect.client_gate()
+    keeps, hides = gate.get("keeps") or [], gate.get("hides") or []
+    if not keeps or not hides:
+        return []
+    return [
+        "  THE OTHER GATE IS NOT A PROFILE KEY — it is the CLIENT.  A ROOT",
+        f"  session keeps signal_completion for client_type {', '.join(keeps)}",
+        f"  and HIDES it for {', '.join(hides)}, which expect the session to",
+        "  stay open for more turns.  So one profile completes under a",
+        "  headless driver and cannot complete under the TUI, and a persona",
+        "  that tells the model to signal is right in one and wrong in the",
+        "  other.  A SUBAGENT is unaffected: it keeps the tool whenever a",
+        "  schema is declared, whatever its parent's client is.",
+        "",
+    ]
 
 
 #: The name the profile loader and ``explain profile`` both use for the
@@ -1279,6 +1344,7 @@ def lifecycle() -> Rendered:
         "selectable": False,
         "tools": [{"name": s.name, "gate": s.gate,
                    "description": s.description} for s in ST],
+        "client_gate": introspect.client_gate(),
         "see_also": ["explain completion", "explain profile"],
     }
     lines = [
@@ -1314,10 +1380,10 @@ def lifecycle() -> Rendered:
         "complete at all.",
         "  `jaato-scaffold validate` reports the second case "
         "(completion_asset_missing).",
-        "  A root session on an INTERACTIVE client (terminal/web/chat) also "
-        "hides it;",
-        "  client_type=api keeps it, which is why a driver sets that.",
+        "  A root session on an INTERACTIVE client also hides it — see "
+        "below.",
         "",
+    ] + _client_gate_note() + [
         "  see also:  `explain completion`  the gate that runs when it is "
         "called",
         "             `explain clients`     which turn method captures its "
@@ -1373,9 +1439,7 @@ def plugin(name: str) -> Rendered:
             "tools": [{"name": t.name, "discoverability": t.discoverability,
                        "description": t.description,
                        "parameters": t.parameters} for t in pi.tools],
-            "config": [{"name": s.name, "type": s.type, "default": s.default,
-                        "description": s.description, "enum": s.enum}
-                       for s in pi.config_settings]}
+            "config": _config_json(pi.config_settings)}
     return data, "\n".join(lines)
 
 
@@ -2777,8 +2841,11 @@ def completion() -> Rendered:
         "  and not in `explain plugins`.  `explain plugin lifecycle` has the",
         "  tools and their gates.  What turns gating ON is one profile key:",
         "  completion_payload_schema.  Without it signal_completion is not on",
-        "  the wire at all and the session just ends when the model stops.",
+        "  the wire at all and the session just ends when the model stops —",
+        "  so a profile carrying completion_processors and no schema has a",
+        "  gate that can never run (`validate` reports that pair).",
         "",
+    ] + _client_gate_note() + [
         "  TWO SHAPES OF A CORRECT FINISH, and a watcher must not read the",
         "  second as a loop:",
         "    one-shot     signal_completion(<the whole payload>)",

@@ -551,6 +551,13 @@ def main(argv=None) -> int:
     pn.add_argument("--workspace", required=True, help="target workspace dir")
     pn.add_argument("--provider", help="provider name")
     pn.add_argument("--model", help="model name")
+    pn.add_argument("--profile", metavar="NAME",
+                    help="bind the generated client to an EXISTING profile "
+                         "instead of an inline {model, provider} spec. A "
+                         "profile carries plugins, persona, GC, ceilings and "
+                         "the completion schema, which a spec cannot; "
+                         "mutually exclusive with --provider/--model, and "
+                         "refused if NAME does not resolve in --workspace.")
     pn.add_argument("--set", help="profile-set name (provider_model)")
     pn.add_argument("--agents", help="comma-separated agent names for a set")
     pn.add_argument("--name", help="processor name for `new processor` — the "

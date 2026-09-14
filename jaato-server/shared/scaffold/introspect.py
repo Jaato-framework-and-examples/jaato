@@ -143,12 +143,33 @@ class ConfigSetting:
     ``enum`` is the declared closed value set (JSON Schema ``enum``, or a
     ``PluginSetting.choices`` list) — ``None`` when the knob declares none,
     which is not the same as an empty one.
+
+    ``children`` carries a knob whose value is itself a declared object.
+    ``permission.policy`` is the only one in the tree today — and it is the
+    one that matters, carrying ``defaultPolicy`` with its enum, the
+    ``whitelist`` / ``blacklist`` tool lists, and a four-deep
+    ``sanitization.path_scope`` sub-tree.  Those declarations were always
+    machine-readable and were thrown away here, so
+    ``explain plugin permission`` rendered the whole policy vocabulary as one
+    line reading ``policy  object  Permission policy rules`` and the only
+    route to the real shape was ``shared/plugins/permission/policy.py``.  Now
+    both surfaces descend it: ``explain`` prints the tree, ``validate``
+    checks names and values at every declared depth.
+
+    ``free_form`` marks the frontier where descending must STOP — a knob
+    declaring ``additionalProperties`` (``permission.evaluators``, a map from
+    tool name to script path) accepts keys nobody enumerated, so a name below
+    it is not a typo and must never be reported as one.  ``children`` is
+    ``None`` for the object form (:class:`~jaato_sdk.plugins.base.PluginSetting`
+    declares no nesting) and for a scalar knob.
     """
     name: str
     type: str = ""
     default: Any = None
     description: str = ""
     enum: Optional[List[Any]] = None
+    children: Optional[List["ConfigSetting"]] = None
+    free_form: bool = False
 
 
 @dataclass
@@ -528,6 +549,47 @@ def _probe_lifecycle(schema: bool, tiers: bool) -> List[Any]:
     return LifecycleTools(stub).get_tool_schemas()
 
 
+def client_gate() -> Dict[str, List[str]]:
+    """Which CLIENT types a ROOT session keeps ``signal_completion`` under.
+
+    The second gate on ``signal_completion`` is not a profile key and so
+    cannot appear in :data:`_LIFECYCLE_GATES`: an interactive root session
+    (``client_type`` in TERMINAL / WEB / CHAT) hides the tool because those
+    clients expect the session to stay available for more turns, while a
+    headless ``API`` driver keeps it because that is what a cascade
+    entry-point completes with.
+
+    Which makes it the one gate an author cannot see in their own profile.
+    A persona instructing the model to call ``signal_completion`` is correct
+    under the driver and broken under the TUI, with the same profile, and
+    ``explain`` said nothing about the difference — so this is probed the
+    same way the profile gates are, by exercising it rather than restating
+    it.
+
+    Returns:
+        ``{"keeps": [...], "hides": [...]}`` — client-type VALUES, sorted.
+        Empty lists if the probe raises (a subagent-shaped session is
+        unaffected either way, so there is nothing to warn about).
+    """
+    import types
+
+    out: Dict[str, List[str]] = {"keeps": [], "hides": []}
+    try:
+        from jaato_sdk.events import ClientType
+
+        from shared.lifecycle_tools import LifecycleTools
+        for ct in ClientType:
+            stub = types.SimpleNamespace()
+            stub._completion_payload_schema = {"type": "object", "properties": {}}
+            stub._presentation_context = types.SimpleNamespace(client_type=ct)
+            names = {getattr(s, "name", "") for s in LifecycleTools(stub).get_tool_schemas()}
+            bucket = "keeps" if "signal_completion" in names else "hides"
+            out[bucket].append(str(getattr(ct, "value", ct)))
+    except Exception:  # pragma: no cover - probe is best-effort
+        return {"keeps": [], "hides": []}
+    return {k: sorted(v) for k, v in out.items()}
+
+
 def session_tools() -> List[SessionToolInfo]:
     """The lifecycle tool surface, probed gate by gate.
 
@@ -726,10 +788,33 @@ def profile_schema() -> List[ProfileField]:
             name=f.name,
             type=_type_name(f.type),
             default=default,
-            description=f.metadata.get("description", ""),
+            description=_field_description(f),
             allowed=constraints.get(f.name, ""),
         ))
     return out
+
+
+def _field_description(f) -> str:
+    """One profile field's description, saying so when it is NOT a file key.
+
+    This page renders ``dataclasses.fields(SubagentProfile)``, and two of
+    those fields cannot be written into a profile file at all:
+    ``preloaded_plugins`` and ``tool_scopes`` are DERIVED by
+    ``parse_plugin_list`` from the ``plugins:`` list's own modifiers.
+    Listing them beside the twenty-odd keys that ARE authored is an
+    invitation to write one — and the loader then reads it by nobody, in
+    silence, which is what ``validate`` now reports as
+    ``derived_profile_key``.  The two surfaces read the same constant so
+    they cannot disagree about which fields those are.
+    """
+    from shared.plugins.subagent.config import PROFILE_DERIVED_FIELDS
+
+    described = f.metadata.get("description", "")
+    derived = PROFILE_DERIVED_FIELDS.get(f.name)
+    if not derived:
+        return described
+    note = f"NOT a profile-file key — {derived}."
+    return f"{note}  {described}" if described else note
 
 
 # ------------------------------------------------------- completion processors
@@ -907,6 +992,51 @@ def _schema_enum(declared: Any) -> Optional[List[Any]]:
     return None
 
 
+#: How deep :func:`_settings_from_properties` will descend a declared object.
+#: ``permission.policy.sanitization.path_scope.allowed_roots`` is four, which
+#: is the deepest declaration in the tree; the cap exists so a plugin that
+#: declares a recursive or pathological schema cannot hang an ``explain``.
+_MAX_KNOB_DEPTH = 6
+
+
+def _settings_from_properties(props: Any, depth: int = 0) -> List["ConfigSetting"]:
+    """Normalize one JSON-Schema ``properties`` dict into knob settings.
+
+    Recursive, because a knob's declared value may itself be an object with
+    its own ``properties`` — which is the shape of every knob that actually
+    decides behaviour (``permission.policy``), and which both consumers used
+    to be unable to see past.
+
+    Descent stops at three places, each for its own reason:
+
+    * a knob with no ``properties`` — nothing is declared, so nothing is
+      asserted;
+    * ``additionalProperties`` — the plugin has said the key set is open, so
+      ``free_form`` is set and the declared ``properties`` (if any) are still
+      carried as children, because a declared key is still describable even
+      where undeclared ones are permitted;
+    * :data:`_MAX_KNOB_DEPTH`.
+    """
+    out: List["ConfigSetting"] = []
+    if not isinstance(props, dict):
+        return out
+    for knob, spec in props.items():
+        spec = spec if isinstance(spec, dict) else {}
+        kids = None
+        if depth < _MAX_KNOB_DEPTH:
+            kids = _settings_from_properties(spec.get("properties"), depth + 1)
+        out.append(ConfigSetting(
+            name=str(knob),
+            type=_schema_type(spec.get("type")),
+            default=spec.get("default", None),
+            description=str(spec.get("description", "") or ""),
+            enum=_schema_enum(spec.get("enum")),
+            children=kids or None,
+            free_form=bool(spec.get("additionalProperties")),
+        ))
+    return out
+
+
 def plugins() -> Dict[str, PluginInfo]:
     """All tool/enrichment plugins, best-effort offline.
 
@@ -961,17 +1091,8 @@ def plugins() -> Dict[str, PluginInfo]:
             schema = reg.get_plugin_config_schema(name) or []
             settings: List[ConfigSetting] = []
             if isinstance(schema, dict):
-                props = schema.get("properties")
-                if isinstance(props, dict):
-                    for knob, spec in props.items():
-                        spec = spec if isinstance(spec, dict) else {}
-                        settings.append(ConfigSetting(
-                            name=str(knob),
-                            type=_schema_type(spec.get("type")),
-                            default=spec.get("default", None),
-                            description=str(spec.get("description", "") or ""),
-                            enum=_schema_enum(spec.get("enum")),
-                        ))
+                settings.extend(_settings_from_properties(
+                    schema.get("properties")))
             else:
                 for s in schema:
                     if hasattr(s, "name"):

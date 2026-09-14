@@ -2844,6 +2844,188 @@ stale one cannot outlive `pyproject.toml`. Best-effort by construction: it runs
 inside discovery's error path, and a diagnostic that raises is worse than a
 vague one.
 
+### Six Things a Session Log Said the Authoring Surface Still Would Not
+
+A 2026-09 transcript of an assistant bringing up a workspace from scratch —
+venv, a simple client, then a two-stage GitLab MR cascade — records eight
+corrections. Three were already closed (`deprecated_system_instructions`,
+`explain services`, the `configure_service_auth` chain), one had since been
+*inverted* (#950 made `plugin_configs.<plugin>` apply whether or not the
+plugin is in `plugins:`, so the transcript's own correction is now false),
+and what survived was six gaps of one shape: **the author wrote something
+that had no effect and nothing said so.**
+
+That family already has four entries — #910, #925, #947, #950 — and the gap
+each of these closes is one layer out from where those stopped.
+
+**A profile's own top-level keys were never checked.** `unknown_knob` covers
+`plugin_configs.<plugin>.<knob>`, `trace:` refuses its own unknown keys,
+`runtime_limits` parks them in `extra` — and the outermost layer had no
+reporter at all. `SubagentProfile` construction is keyword-explicit (the
+snapshot-version note in `config.py` says so), so a key outside
+`PROFILE_FILE_KEYS` is read by nobody, silently.
+
+The transcript contains a live instance nobody noticed: told *"te falta
+activar el config_root"*, the author added `config_root: .jaato` to two base
+profiles. `config_root` is a session/SDK parameter and **not a profile key**,
+so the line did nothing; what actually fixed the session was the duplicated
+`.jaato/` path prefix removed in the same edit (now
+`redundant_config_root_prefix`). The session ended successfully with a wrong
+belief baked into the workspace.
+
+| Finding | Severity | Fires when |
+|---------|----------|-----------|
+| `unknown_profile_key` | warn | a top-level key the loader does not read; a near-miss from the accepted set is named (`plugins_configs` → `plugin_configs`) |
+| `derived_profile_key` | warn | the key IS a `SubagentProfile` field and is DERIVED, not read from the file |
+
+The second exists because `explain profile` renders
+`dataclasses.fields(SubagentProfile)`, and two of those fields cannot be
+written into a file at all: `preloaded_plugins` and `tool_scopes` come out of
+the `plugins:` list's own modifiers (`todo(preload)`, `memory(tools:[a,b])`).
+The page was **advertising two keys a file may not set**; it now says so
+beside each, reading the same `PROFILE_DERIVED_FIELDS` constant the finding
+does.
+
+Warn rather than error, the posture the whole family takes: an `inherits`
+base may carry a key a later version reads, and a snapshot may be newer than
+the installation reading it. `PROFILE_FILE_KEYS` is a declared constant
+because the loader reads four of its keys through block parsers and one
+(`env`) through a parameter default, so no scan alone could produce it —
+and `test_profile_file_keys.py` AST-scans the six loader functions and fails
+the build if any literal key read is missing from it. 26 of 27 keys are
+covered that way.
+
+**`explain plugin permission` rendered the whole policy vocabulary as one
+line.** `policy  object  Permission policy rules` — while
+`get_config_schema()` has always declared `defaultPolicy` with its
+`allow`/`deny`/`ask` enum, `whitelist.tools`, `blacklist.patterns` and the
+four-deep `sanitization.path_scope.*` tree. So the only honest route to the
+shape was `shared/plugins/permission/policy.py`, and the transcript took it —
+for a page whose entire job is to make that unnecessary.
+
+`ConfigSetting` gains `children` and `free_form`, and both surfaces descend:
+`explain` prints the tree at every declared depth, `validate` checks names
+and values at every declared depth. Nesting is rendered **fully**, unlike a
+tool PARAMETER, which stops at one level (#1020): the reader's need is the
+opposite — a nested parameter is one call's argument, while `policy` IS the
+plugin's whole configuration surface. Descent stops at
+`additionalProperties` (`permission.evaluators` maps tool names to scripts,
+so every key there is authored and none is a typo); that frontier is
+declared by the plugin, marked in the render, and is where `validate` stops
+reporting unknown names. `permission.policy.defaultPolicy: denied` is now
+`invalid_knob_value`, an error; it used to validate clean.
+
+**The permission whitelist was unchecked against the tool inventory
+`tool_scopes` has been checked against since the validator shipped.** One key
+over, and the key where being wrong is expensive: under `defaultPolicy: deny`
+a name matching nothing is a permanent denial of a tool the author believes
+they approved, and the runtime symptom is the one #951 exists to make
+legible — the call reaches the gate and vanishes. It is also the cheapest
+thing in a profile to misspell, because nothing else in the file repeats the
+name.
+
+| Finding | Severity | Both lists? |
+|---------|----------|-------------|
+| `unknown_tool` | warn | yes — the name is exposed by no installed plugin and is not a framework session tool |
+| `permission_rule_without_plugin` | warn | **whitelist only** — the tool exists and its plugin is absent from `plugins:`, so the rule governs a tool that never reaches the wire |
+
+The blacklist is deliberately exempt from the second: denying a tool the
+profile does not enable is defence in depth, and a profile that adds the
+plugin later keeps the protection it already wrote. Silent by design: a
+profile whose `plugins:` list is EMPTY (an abstract base declares no
+surface — the carve-out `missing_model` already uses), a name of MCP shape
+(`mcp__server__tool` / `mcp.server.tool`, whose inventory comes from the
+servers a LIVE session connects to), and the framework's own session tools
+(`signal_completion`, `askPermission`), which belong to no entry in
+`plugins:`.
+
+**`validate` never asked whether the provider's SDK was installed.** It did
+not import `shared/scaffold/dependencies.py` at all, while both halves of the
+answer lived there: the AST closure of the provider package, and the
+import-name → extra index that turns a missing module into the `pip install`
+line. So `provider: azure_openai` with no `openai` validated clean and died
+at `connect()` with an ImportError several layers from anything the author
+wrote — the transcript's first runtime error.
+
+```
+[warn] provider 'azure_openai' needs azure, openai, which are not installed
+here — the profile is valid and the session will fail at connect() with an
+ImportError.  Run: pip install 'jaato-server[azure-openai]'
+```
+
+`provider_import_gaps` probes with `find_spec`, importing nothing, because
+`validate` is required to be side-effect free and a provider SDK's import can
+register handlers, read environment or open a config file (`_health`, which
+serves an operator-requested report, still imports; a subprocess test asserts
+the difference, with a control run that would notice an import). Every tier's
+provider is checked too — a tier binds a (provider, model) PAIR (#1036), and
+the second provider is the one nobody notices until `enter_tier`. **Warn**,
+not error: validating a workspace from a machine that is not the one that
+will run it is legitimate. Only TOP-LEVEL names are probed, so a namespace
+package whose submodule is absent reads as present (`google` resolves from
+`google-api-core`); that blind spot is `_health`'s too, and it is the safe
+direction.
+
+**Processors declared behind a tool that is not on the wire.**
+`_should_hide_signal_completion` gate 1 hides `signal_completion` whenever no
+`completion_payload_schema` is declared, so a profile carrying
+`completion_processors` and no schema has a gate that can never run — the
+agent hunts for the tool through `list_tools`, the nudge budget drains, and
+the driver is handed `None` by a session that looked like it ran. That is
+exactly the state the transcript spent an afternoon in, and the fact was
+already written down: `docs/design/completion-gate.md` §9 is why
+`jaato-scaffold new sweep` emits the schema, the processor and the profile
+keys as ONE set. Nothing enforced it for a profile written by hand, which is
+the only way to reach the state. `completion_processors_without_schema`,
+**error**, matching `completion_asset_missing` — the two are the same defect
+by different routes. Silent for a profile binding neither `model` nor
+`model_tiers`: processors are inherited, so every concrete descendant is
+checked in resolved form.
+
+**And the OTHER gate on `signal_completion` is not a profile key at all.** A
+root session on an interactive client (`terminal` / `web` / `chat`) hides the
+tool; `api` keeps it. So one profile completes under a headless driver and
+cannot complete under the TUI, with the same files — the one gate an author
+cannot see by reading their own workspace, and `explain` stated it only as
+hand-written prose on one page. It is now **probed**
+(`introspect.client_gate()`, which exercises `LifecycleTools` once per
+`ClientType`) and rendered on both `explain completion` and `explain plugin
+lifecycle`, so it cannot drift from the gate it describes.
+
+**`new client` always emitted the inline spec.** The template's comment said
+*"Inline spec so this runs before you have a profile. Swap for
+profile=…"* — and the generator always wrote the spec, whatever the workspace
+already had in it, while the only message an author saw when they supplied no
+flags was `missing required --provider / --model`: the inline answer, pointing
+away from the one form that can carry plugins, a persona, GC, ceilings and a
+completion schema. The transcript's first correction was *"en lugar de un
+.env, usa un profile"*.
+
+```bash
+jaato-scaffold new client --workspace . --profile collector
+```
+
+`--profile` satisfies the binding on any archetype and is mutually exclusive
+with `--provider`/`--model` (two bindings for one session, where the profile
+wins at runtime, so the flags would decide nothing). It is refused on
+`--transport in_process`, where the embedded client IS the binding. The name
+is resolved through the framework's own resolver under the set the workspace
+actually selects — `JAATO_PROFILE_SET` from its `.env`, or `--set` — so a
+profile that resolves only through `inherits` counts, and one that exists
+only inside an unselected set is reported as that rather than as missing.
+Three properties:
+
+- **`[]` and `None` are different answers.** `[]` is "this workspace declares
+  no profiles", which `--profile` can be refused against; `None` is "I could
+  not look", which must not become "your profile does not exist".
+- **The workspace `.env` is never rewritten for a `--profile` client**, even
+  under `--force`: that file is where `JAATO_PROFILE_SET` lives, and this
+  archetype's template carries a provider/model pair the profile supersedes.
+- **With no `--profile`, nothing changes.** An empty workspace gets the same
+  message and the same inline-spec client it always did; the `--profile`
+  suggestion appears only when the workspace demonstrably has profiles to
+  name.
+
 ### When the Introspection Tools Misreport Their Own Environment (#966, #823)
 
 Two findings of one shape, and it is the one thing a diagnostic must not do:

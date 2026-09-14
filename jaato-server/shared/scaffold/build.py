@@ -599,8 +599,134 @@ def _client_factory_block(template: str) -> str:
     return "\n\n".join(blocks)
 
 
+def workspace_profile_names(workspace, set_name=None) -> Optional[List[str]]:
+    """Profile names declared in a workspace, sorted — or ``None``.
+
+    Read through the framework's own resolver rather than by globbing stems,
+    so a profile whose ``name:`` differs from its filename is named the way a
+    caller would have to write it, and one that exists only through
+    ``inherits`` still counts.
+
+    ``[]`` and ``None`` are deliberately different answers.  ``[]`` is "this
+    workspace declares no profiles", which is a fact ``--profile`` can be
+    refused against; ``None`` is "I could not look" — no workspace given, or
+    the resolver raised — and turning that into "your profile does not exist"
+    would block a legitimate generate against a workspace this process cannot
+    read.  A generator that raises while composing an error message is worse
+    than one that offers no suggestion, so every failure lands on ``None``.
+    """
+    if not workspace:
+        return None
+    try:
+        from shared.plugins.subagent.config import discover_profiles
+
+        ws = Path(workspace).resolve()
+        result = discover_profiles(profiles_dir=".jaato/profiles",
+                                   base_path=str(ws),
+                                   config_root=str(ws / ".jaato"),
+                                   force_profile_set=set_name
+                                   or _env_profile_set(ws))
+        return sorted(result.profiles)
+    except Exception:           # pragma: no cover - suggestion is best-effort
+        return None
+
+
+def _env_profile_set(ws: Path) -> Optional[str]:
+    """``JAATO_PROFILE_SET`` from the workspace ``.env``, if it declares one.
+
+    A profile inside ``profiles/<set>/`` is only in the effective set when
+    that set is selected, and the selector a generated workspace runs under
+    lives in its own ``.env`` — written there by ``new profile-set``.  So
+    reading it is what makes ``--profile <name>`` resolve against the SAME
+    set the generated client will run under, rather than against a
+    set-less view in which every scaffolded agent profile is invisible.
+    """
+    envf = ws / ".env"
+    if not envf.is_file():
+        return None
+    try:
+        for line in envf.read_text(encoding="utf-8", errors="replace").splitlines():
+            key, _, value = line.partition("=")
+            if key.strip() == "JAATO_PROFILE_SET":
+                return value.strip() or None
+    except OSError:             # pragma: no cover - best-effort
+        return None
+    return None
+
+
+def _profile_sets(ws: Path) -> List[str]:
+    """Profile-set directory names under ``<ws>/.jaato/profiles/``."""
+    root = ws / ".jaato" / "profiles"
+    if not root.is_dir():
+        return []
+    return sorted(d.name for d in root.iterdir() if d.is_dir())
+
+
+def _check_named_profile(args, archetype: str, name: str):
+    """``None`` if *name* resolves in the workspace, else an exit code.
+
+    Refusing here is the point of the flag: a generated client naming a
+    profile that does not exist fails at ``session.new``, in a daemon, with a
+    message about a profile rather than about the command that wrote it.  The
+    check is the same resolver the daemon uses, so a profile that resolves
+    only through ``inherits`` counts as present.
+
+    A workspace whose profiles cannot be enumerated at all is ACCEPTED rather
+    than refused — see :func:`workspace_profile_names` on why ``None`` must
+    not be read as "no profiles".  An enumerated EMPTY workspace is refused,
+    because there the absence is measured.
+    """
+    ws_arg = getattr(args, "workspace", None)
+    set_name = getattr(args, "set", None)
+    names = workspace_profile_names(ws_arg, set_name)
+    if names is None or name in names:
+        return None
+    elsewhere = _sets_declaring(Path(ws_arg).resolve(), name) if ws_arg else []
+    if elsewhere:
+        # Found, but only under a set this workspace is not running.  Saying
+        # "does not exist" about a file the author can see would send them
+        # looking for a typo they did not make.
+        print(f"new {archetype}: profile '{name}' exists only in profile-set "
+              f"{' / '.join(elsewhere)}, which this workspace does not "
+              f"select — pass --set {elsewhere[0]}, or set JAATO_PROFILE_SET "
+              f"in the workspace .env")
+        return 2
+    have = ", ".join(names) if names else "this workspace declares none"
+    print(f"new {archetype}: no profile '{name}' in {ws_arg} ({have}) — "
+          f"`jaato-scaffold new profile-set` creates one")
+    return 2
+
+
+def _sets_declaring(ws: Path, name: str) -> List[str]:
+    """Profile-set names under which *name* resolves, for a not-found report."""
+    return [s for s in _profile_sets(ws)
+            if name in (workspace_profile_names(str(ws), s) or ())]
+
+
+def _binding_flags_missing(args, archetype: str, missing: List[str]) -> int:
+    """Report an absent session binding, naming ``--profile`` when it applies.
+
+    The generator knows which situation it is in and used to say only
+    "missing required --provider / --model", which is the inline-spec answer
+    — so an author with a workspace full of profiles was steered, by the only
+    message they saw, at the one form that cannot carry plugins, a persona, a
+    GC strategy or a completion schema.  When the workspace already declares
+    profiles, they are named here and ``--profile`` is offered first.
+    """
+    names = workspace_profile_names(getattr(args, "workspace", None),
+                                    getattr(args, "set", None)) or []
+    print(f"new {archetype}: missing required --{' / --'.join(missing)}")
+    if names:
+        preview = ", ".join(names[:8]) + (" …" if len(names) > 8 else "")
+        print(f"  this workspace already declares profiles ({preview}) — "
+              f"prefer --profile <name>, which carries the plugins, persona, "
+              f"ceilings and completion schema an inline --provider/--model "
+              f"spec cannot")
+    return 2
+
+
 def _resolve_client_binding(args, archetype: str, transport: str):
-    """Validate ``--provider`` / ``--model`` for this archetype + transport.
+    """Validate ``--profile`` / ``--provider`` / ``--model`` for this archetype.
 
     Returns ``(exit_code_or_None, provider, model)`` — the caller propagates a
     non-None code as its own.
@@ -613,11 +739,27 @@ def _resolve_client_binding(args, archetype: str, transport: str):
     forced an arbitrary choice the profile then overrode, and baked a
     misleading default into ``.env`` and the placeholder (jaato #820).
 
+    ``--profile`` satisfies the binding on any archetype.  It is the
+    form a real client uses — a profile carries plugins, a persona, GC, the
+    ceilings and the completion schema, none of which an inline spec can
+    express — and until it existed the ONLY way to generate a client was the
+    inline one, whatever the workspace already had in it.  It is mutually
+    exclusive with ``--provider`` / ``--model``: emitting both would put two
+    bindings in one call, and the profile wins at runtime, so the flags the
+    author passed would silently decide nothing.
+
     ``in_process`` is the exception on EVERY archetype: the embedded client IS
     the binding — there is no daemon to resolve a profile against — so the
     flags stay required there whatever the archetype.
     """
     from ._client_templates import PROVIDER_OPTIONAL
+
+    profile_name = getattr(args, "profile", None)
+    provider = getattr(args, "provider", None)
+    model = getattr(args, "model", None)
+    if profile_name:
+        return _resolve_profile_binding(args, archetype, transport,
+                                        profile_name, provider, model)
 
     binding_optional = (archetype in PROVIDER_OPTIONAL
                         and transport != "in_process")
@@ -625,10 +767,7 @@ def _resolve_client_binding(args, archetype: str, transport: str):
                 else ["workspace", "provider", "model"])
     missing = [f for f in required if not getattr(args, f, None)]
     if missing:
-        print(f"new {archetype}: missing required --{' / --'.join(missing)}")
-        return 2, None, None
-    provider = getattr(args, "provider", None)
-    model = getattr(args, "model", None)
+        return _binding_flags_missing(args, archetype, missing), None, None
     # Half a binding is not a binding: a --model with no --provider (or the
     # reverse) would emit one live constant and one placeholder, which reads
     # as a working spec and is not one.
@@ -644,7 +783,52 @@ def _resolve_client_binding(args, archetype: str, transport: str):
     return None, provider, model
 
 
-def _binding_substitutions(archetype: str, provider, model) -> Dict[str, str]:
+def _should_write_client_env(args, env_file: Path) -> bool:
+    """Whether ``new <client-archetype>`` may write the workspace ``.env``.
+
+    A missing file is always written.  An EXISTING one is replaced only under
+    ``--force``, and never for a ``--profile`` client: that workspace's
+    ``.env`` is where ``JAATO_PROFILE_SET`` lives, and this archetype's
+    template carries a provider/model pair the profile supersedes — so
+    rewriting it would drop the selector the named profile needs in order to
+    resolve at all, in the name of writing two lines that decide nothing.
+    """
+    if not env_file.exists():
+        return True
+    return bool(getattr(args, "force", False)) and not getattr(
+        args, "profile", None)
+
+
+def _resolve_profile_binding(args, archetype: str, transport: str,
+                             profile_name: str, provider, model):
+    """The ``--profile`` half of :func:`_resolve_client_binding`.
+
+    Split out to keep its caller under the cyclomatic ceiling, and because
+    the two halves answer different questions: this one asks whether a NAME
+    resolves in a workspace, the other whether a provider/model PAIR is
+    complete and installed.
+
+    Returns the same ``(exit_code_or_None, provider, model)`` triple, with
+    both binding values ``None`` on success — a profile carries them, and
+    emitting a ``MODEL`` / ``PROVIDER`` constant beside it would put a second
+    binding in the generated file that decides nothing.
+    """
+    if provider or model:
+        print(f"new {archetype}: --profile and --provider/--model are two "
+              f"bindings for one session; the profile wins at runtime, so "
+              f"pass one or the other")
+        return 2, None, None
+    if transport == "in_process":
+        print(f"new {archetype}: --profile needs a daemon to resolve it "
+              f"against; --transport in_process IS the binding, so pass "
+              f"--provider/--model there")
+        return 2, None, None
+    code = _check_named_profile(args, archetype, profile_name)
+    return (code, None, None) if code else (None, None, None)
+
+
+def _binding_substitutions(archetype: str, provider, model,
+                           profile_name=None) -> Dict[str, str]:
     """The placeholders that depend on whether a provider/model was bound.
 
     ``MODEL`` / ``PROVIDER`` are emitted only where the body READS them.
@@ -667,6 +851,12 @@ def _binding_substitutions(archetype: str, provider, model) -> Dict[str, str]:
         "__PROVIDER__": provider or "",
         "__MODEL_CONSTANTS__": (f'MODEL = "{model}"\nPROVIDER = "{provider}"'
                                 if bind else ""),
+        # What the generated body passes as ``profile=``.  A named profile
+        # when one was given, else the inline spec — so a client generated
+        # against a workspace that has profiles uses them, and one generated
+        # against an empty workspace still runs.
+        "__SESSION_BINDING__": (f'"{profile_name}"' if profile_name
+                                else spec),
         "__STAGE_PROFILE__": spec if bind else '"<profile-name>"',
         "__INLINE_SPEC__": (spec if bind else
                             '{"model": "<model>", "provider": "<provider>"}'),
@@ -731,7 +921,8 @@ def _new_client_archetype(args, archetype: str) -> int:
     socket = "/tmp/jaato.sock"
     _, template, title = TEMPLATES[archetype]
 
-    subs = _binding_substitutions(archetype, provider, model)
+    subs = _binding_substitutions(archetype, provider, model,
+                                  getattr(args, "profile", None))
     subs.update({
         "__SOCKET__": socket,
         "__ENV_FILE__": str(env_file),
@@ -800,7 +991,7 @@ def _new_client_archetype(args, archetype: str) -> int:
         print(f"new {archetype}: {py_file} exists (use --force to overwrite)")
         return 2
     plan.write(py_file, _fill(template))
-    if not env_file.exists() or args.force:
+    if _should_write_client_env(args, env_file):
         active = ([f"JAATO_PROVIDER={provider}", f"MODEL_NAME={model}"]
                   if provider else [])
         plan.write(env_file, _compose_env(provider, active),
