@@ -19,17 +19,29 @@ enumerates what a workspace already has.
 - `plugins` is a **union** — a child cannot remove what a parent added, and
   `plugins: []` in a child **adds nothing; it does not clear the parent's**.
   You do NOT need to repeat a parent's list to extend it. To reduce the tool
-  surface: `tool_scopes`, the permission whitelist, or do not inherit.
+  surface, re-list the plugin carrying an allow-list —
+  `plugins: [memory(tools:[a,b])]` — or use the permission whitelist, or do
+  not inherit.
 - `completion_processors` **concatenate**; the only removal is naming an entry
   in `suppress_inherited_processors`, and an entry matching nothing is a load
   error.
 - `max_turns` is **most-restrictive-wins**.
 - Scalars are child-replaces.
-- `plugin_configs`, `env`, `tool_scopes`, `quirks` are **per-key dict-merge —
-  ONE level deep.**
+- `plugin_configs`, `env`, `quirks` are **per-key dict-merge — ONE level
+  deep.**
+- `preloaded_plugins` and `tool_scopes` are **derived, never written.** They
+  come out of the `plugins` entries' own modifiers, so writing either as a
+  top-level key in a profile FILE is read by **nobody** — it parses, it
+  validates as structurally fine, and the restriction silently does not apply.
+  The only spelling is
+  `plugins: [todo(preload), memory(tools:[a,b])]`.
+  They merge the way their source does: `preloaded_plugins` by union,
+  `tool_scopes` per-key with the value at a key replaced. NB a child that
+  re-lists a plugin with **no** `tools:` modifier keeps the *parent's*
+  allow-list; widening it back means enumerating the wider set in the child.
 
-That last one is the trap. Per-key merge applies at the first level under the
-plugin name; a **nested dict is replaced wholesale**:
+The dict-merge rule is the other trap. Per-key merge applies at the first level
+under the plugin name; a **nested dict is replaced wholesale**:
 
 ```yaml
 # parent
