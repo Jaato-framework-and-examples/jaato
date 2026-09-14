@@ -992,13 +992,13 @@ Model uses `list_tools()` → `get_tool_schemas()` workflow to discover tools.
 
 Sessions consume a pre-warm runner subprocess from a pool instead of cold-spawning one each time.  Cuts per-session bootstrap from ~30s (with full plugin discovery + imports) to ~7s on cascade workloads.
 
-Architecture: daemon spawns a **template subprocess** at startup that imports all runner-tier plugin modules.  N pre-warm **pool slots** fork from the template (no exec), inheriting the warm imports.  When a session arrives, daemon claims a pool slot and dispatches `session.bootstrap` to it via the same `RunnerRPCClient` it would use for a cold-spawned runner.  Slot self-confines to the session's AppArmor profile in bootstrap step 1c via `aa_change_profile` (main-thread dispatch so subsequently-spawned worker threads inherit the confined cred).
+Architecture: daemon spawns a **template subprocess** at startup that imports all runner-tier plugin modules.  N pre-warm **pool slots** fork from the template (no exec), inheriting the warm imports.  When a session arrives, daemon claims a pool slot and dispatches `session.bootstrap` to it via the same `RunnerRPCClient` it would use for a cold-spawned runner.  A slot that has never been confined self-confines to the session's AppArmor profile in bootstrap step 1c via `aa_change_profile` (main-thread dispatch so subsequently-spawned worker threads inherit the confined cred).  A slot that already wears a profile does **not** transition — it is only ever handed to a session that wants the profile it has, which is what the reuse key enforces (#1033, below).
 
 **Operational properties:**
 - **Subreaper**: daemon calls `prctl(PR_SET_CHILD_SUBREAPER, 1)` at startup so orphaned descendants (slots whose template died) re-parent to the daemon.
 - **Watchdog**: `PoolManager` replenishment thread detects template death + auto-respawns + refills pool.
 - **READY handshake**: template sends `"READY\n"` after plugin discovery completes; daemon's `TemplateManager.spawn` blocks for it (30s timeout) instead of a fixed sleep.
-- **Telemetry**: `PoolManager.get_telemetry()` exposes counters (`pool_slot_acquired_total`, `pool_acquire_miss_total`, `pool_replenish_success_total`, `pool_replenish_failures_total`, `template_respawn_attempts_total`, `template_respawn_failures_total`, `pool_slots_over_cap_total`, `pool_stale_reservation_evicted_total`, `pool_replenish_ceiling_blocked_total`).
+- **Telemetry**: `PoolManager.get_telemetry()` exposes counters (`pool_slot_acquired_total`, `pool_acquire_miss_total`, `pool_replenish_success_total`, `pool_replenish_failures_total`, `template_respawn_attempts_total`, `template_respawn_failures_total`, `pool_slots_over_cap_total`, `pool_stale_reservation_evicted_total`, `pool_replenish_ceiling_blocked_total`, `pool_profile_mismatch_skips_total`).
 
 **Configuration:**
 - Enabled by default (`JAATO_RUNNER_POOL_ENABLED=true`).  Disable with `=false` / `0` / `no` / `off`.
@@ -1042,7 +1042,89 @@ cascade-idle sweep remains the backstop. Two counters are the sizing signal:
 and `max_size` refused) — nonzero on a multi-tenant daemon means raise
 `JAATO_RUNNER_POOL_MAX_SIZE`.
 
-**Pool routing gates** (`spawn_session_runner`): pool is consulted iff `pool_manager` wired AND env flag enabled AND `cgroup_attach is None` (cgroup migration mid-life is a follow-up).  Apparmor opt-in sessions ARE eligible (slot self-confines to the per-session profile).
+**Pool routing gates** (`spawn_session_runner`): pool is consulted iff `pool_manager` wired AND env flag enabled AND `cgroup_attach is None` (cgroup migration mid-life is a follow-up).  Apparmor opt-in sessions ARE eligible — but **not** because the slot re-confines itself per session; see the next section for what actually makes that true.
+
+### A Key That Said "Reusable" and a Name That Said "New" (#1033)
+
+The slot reuse key was `(cascade_id, config_root)` and the AppArmor profile
+was named `jaato-ws-{session_id}` — **the one property guaranteed to differ
+on every reuse**. Both statements cannot be true once confinement is
+per-task, and #1023 is what made that visible: `aa_change_profile` confines
+the CALLING TASK, the kernel refuses `current != task` (`-EACCES`), and
+#1026 can retire only the two RPC executor lanes. `OtelBatchSpanRe` and the
+reader/`Thread-N` set are not executors, so on every **reused** slot the
+thread population straddled two profiles and `verify_thread_confinement`
+correctly refused the bootstrap.
+
+Measured on the maintainer's enforcing host: five consecutive session
+creations failed with `RunnerCallError`, each naming four of five threads
+still labelled with the PRIOR session's profile. Deterministic per slot — a
+fresh slot bootstrapped, a reused one refused — which is exactly why it read
+as intermittent.
+
+**The guard was right; the naming was wrong.** So the profile is named after
+the BOUNDARY (`server/confinement_id.py`), and the key contains it:
+
+| property the slot carries | in the key |
+|---|---|
+| warm plugin state from the config tree | `config_root` |
+| warm plugin instances, tenant isolation | `cascade_id` |
+| **the AppArmor profile its threads wear** | **`workspace_root` + `profile_name`** |
+| the cgroup (`runtime_limits` kernel trio) | not needed — `cgroup_attach is not None` routes the session away from the pool entirely |
+| session `env:` / secrets | not needed — overlaid per turn, never baked into the slot |
+
+The rule that generates it: **the key must contain every property of the
+slot that the next session cannot change.** With the name derived from the
+key, "reused slot" and "same profile" are one statement, so a reused slot
+takes `_maybe_self_confine`'s **idempotent** path — no `aa_change_profile`,
+nothing to diverge.
+
+`confinement_id` = a workspace slug plus a digest of the **rendered profile
+body**, which folds in the config root, the env file, the composed fragments'
+contents and the plugin-contributed rules. Rendering rather than hashing the
+inputs is what stops a second "what goes into a profile" implementation
+drifting from the renderer. Including the body is not belt-and-braces: two
+CONCURRENT sessions of one cascade — a narrow stage and a broad one, each on
+its own slot — would otherwise share a name, and provisioning the broad one
+would reload the profile the narrow one is confined to. A silent widening of
+a live boundary is worse than the failure being fixed.
+
+Three consequences, each handled rather than inherited:
+
+- **The gate is on BOTH acquire paths.** A standalone session (no cascade)
+  returns its slot as PURE IDLE — profile and all — and path (2) hands it to
+  the next arrival of any kind. The cascade key never covered that path, so
+  every unrelated pair of workspaces on one daemon reproduced the same
+  straddle. `SlotKey.accepts_unaffined` is that gate: a never-confined slot
+  fits anybody, a confined one fits only the profile it already wears.
+  Counter: `pool_profile_mismatch_skips_total`.
+- **Profile teardown is per-SLOT, not per-session.** A boundary-derived
+  profile outlives its session, so unloading it at session end would strip
+  the boundary off a live runner. `PoolManager._reap_slot_profile` unloads
+  when the last slot wearing it dies; `AppArmorManager.teardown_profile`
+  refuses to unload an id a live session still holds. Unbounded accumulation
+  goes with the per-session name: boundary-derived names are bounded by the
+  number of distinct boundaries a deployment has.
+- **The profile name no longer identifies the session.** It stays
+  human-readable (`jaato-ws-my-repo-3f2a9c1b7d4e`), and #812's
+  `runner_identity` is what records which runner ran which session.
+
+**Two standalone sessions in one workspace and config root now share a slot
+and a profile.** With `cascade_id = None` the key collapses to the boundary,
+which is identical for both, and #890 parks nothing for a standalone
+session — so there is no warm state to leak, and the kernel boundary they
+share is the one each would have been given separately.
+
+Costs, stated: a cascade whose stages have genuinely different boundaries now
+uses a slot per boundary instead of one slot and a transition, and a
+boundary's AppArmor **reference fragments** (`selectReferences` grants) are
+shared by every session on it rather than starting empty per session. Both
+are the direct price of a slot being unable to change the profile it wears.
+
+Not verified here: no kernel. This container carries no AppArmor LSM, so the
+tests exercise the naming, the key and the lifetime with `is_available()` and
+`apparmor_parser` stubbed — they prove the framework stops ASKING the kernel
+to do what #1023 says it cannot, not that the kernel then behaves.
 
 See `docs/design/runner_prewarm_pool_plan.md` for the full multi-PR plan + decision log.
 

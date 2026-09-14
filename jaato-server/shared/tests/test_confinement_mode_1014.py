@@ -536,8 +536,13 @@ def test_complain_provisioning_records_the_mode_not_a_boundary_claim(tmp_path):
         def provision_profile(self, *a, **kw):
             return True
 
+        def confinement_id_for_boundary(self, workspace_path, **kw):
+            """#1033: the profile is named after the boundary.  This test
+            is about the MODE, so the id is a constant."""
+            return "boundary"
+
         def get_profile_name(self, session_id):
-            return f"jaato-ws-{session_id}"
+            return "jaato-ws-boundary"
 
         def profile_is_complain_mode(self, session_id):
             return self._complain
@@ -557,7 +562,7 @@ def test_complain_provisioning_records_the_mode_not_a_boundary_claim(tmp_path):
             config_root=None,
             env_file=None,
         )
-        assert name == "jaato-ws-s1"
+        assert name == "jaato-ws-boundary"
         assert mode == expected
 
 

@@ -661,10 +661,19 @@ def _maybe_self_confine(
     §4.4 for the full lifecycle.
 
     Path by initial state:
-      - ``unconfined`` → P1  (cold-spawn or first session of cascade)
-      - P_N → P_{N+1}  (Phase 3: reused slot, session N+1 of same
-                       cascade; requires the v28 template rule)
-      - P → P  (idempotent skip — same profile, no transition)
+      - ``unconfined`` → P1  (cold-spawn, or the first session ever
+                             served by this pool slot)
+      - P → P  (idempotent skip — same profile, no transition).  **This
+               is the reuse path now** (#1033): a slot's reuse key
+               carries the profile its threads wear, so a slot is only
+               ever handed to a session that wants the profile it has.
+      - P_N → P_{N+1}  (requires the v28 template rule).  Reachable only
+                       where a daemon hands a confined runner a
+                       different profile, which the pool no longer does
+                       — because ``aa_change_profile`` is per-task and
+                       the threads created under P_N could not follow
+                       (#1023).  Kept because the transition itself is
+                       still legal and a non-pool caller may use it.
       - empty profile_name  (operator opted out; unconfined session)
 
     Cold-spawn runners self-confined in ``__main__.py`` step 2 BEFORE

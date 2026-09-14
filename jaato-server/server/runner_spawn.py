@@ -176,6 +176,14 @@ def spawn_session_runner(
             ``disable_confine`` gate is removed — sessions with
             AppArmor opt-in are now eligible for pool routing.
 
+            #1033: a slot that has ALREADY been confined does not
+            transition again — ``aa_change_profile`` is per-task and its
+            other threads could not follow (#1023).  What makes reuse
+            safe is that the profile name is part of the reuse key, so
+            such a slot is only handed to a session wanting the profile
+            it already wears; the transition above is the first-session
+            path.
+
     Raises:
         RuntimeError: when *daemon_loop* is None or the runner-RPC
             start times out.  Caller catches and downgrades to
@@ -222,6 +230,14 @@ def spawn_session_runner(
             # one's bootstrap derived -- profiles, agents, prompt library,
             # permission config.
             config_root=getattr(server, "config_root", None),
+            # ...and its THREADS are stuck in the AppArmor profile it was
+            # last confined to, which grants one workspace and cannot be
+            # changed for the threads that already exist (#1023).  Both
+            # are part of the reuse key; see ``runner_pool.SlotKey``.
+            # Passed raw; ``SlotKey.build`` folds "" to None so that
+            # "unconfined" and "no workspace" each have one spelling.
+            workspace_root=workspace_path,
+            profile_name=profile_name,
         )
         if slot is not None:
             spawned = SpawnedRunner(

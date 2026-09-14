@@ -33,7 +33,7 @@ import socket
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 
 logger = logging.getLogger(__name__)
@@ -70,6 +70,36 @@ class PoolSlot:
             has to include what the slot actually carries.
 
             ``None`` for a slot that has never served.
+        workspace_root: The workspace the slot's last session ran in
+            (#1033).  Part of the reuse key for two independent reasons.
+
+            The load-bearing one is CONFINEMENT.  A slot self-confines to
+            the session's AppArmor profile, and the profile's whole point
+            is that it grants one workspace — so a slot that has served a
+            session in workspace A is wearing a boundary that does not
+            fit workspace B.  Since ``aa_change_profile`` is per-task and
+            existing threads cannot be re-confined (#1023), the slot
+            cannot be re-fitted; it can only be refused.
+
+            The second is warmth: #890 already declines to adopt
+            ``TRAIT_SLOT_SCOPED`` plugin instances on a workspace
+            mismatch, so a workspace-crossing reuse was already half
+            wasted.  It simply was not UNSAFE until per-thread
+            verification made the straddle visible.
+
+            ``None`` for a slot that has never served.
+        profile_name: The AppArmor profile this slot's threads wear, as
+            of its last session (``""``/``None`` = unconfined).  The one
+            property of a slot that the next session cannot change, so it
+            is in the key and the key is what the profile is NAMED after
+            (``server.confinement_id``) — which makes "reused slot" and
+            "same profile" the same statement, and leaves nothing for a
+            transition to do.
+
+            This is also what gates a slot that carries no cascade.  A
+            standalone session returns its slot to the pool as PURE IDLE,
+            where any later session may take it — profile and all.  The
+            cascade-affinity key never covered that path.
         cascade_id: Optional cascade-driver ID this slot is currently
             affined to.  ``None`` for a fresh slot or a slot that has
             never served a session (PURE IDLE).  Set when a session
@@ -88,6 +118,8 @@ class PoolSlot:
     sock: socket.socket
     cascade_id: Optional[str] = None
     config_root: Optional[str] = None
+    workspace_root: Optional[str] = None
+    profile_name: Optional[str] = None
     last_session_end_ts: Optional[float] = None
     # Phase 3 cascade-sharing (server 0.6.146+): identifier of the
     # most recent session this slot served.  Set when the slot
@@ -115,6 +147,123 @@ class PoolSlot:
     #
     # Typed ``Any`` to avoid the cycle through ``runner_rpc_client``.
     rpc: Optional[Any] = None
+
+
+@dataclass(frozen=True)
+class SlotKey:
+    """What a slot IS, and therefore who may be handed it (#1033).
+
+    The rule that generates this tuple: **the key must contain every
+    property of the slot that the next session cannot change.**  Applied
+    field by field:
+
+    ======================================  ==========================
+    property the slot carries               in the key
+    ======================================  ==========================
+    warm plugin state from the config tree  ``config_root``
+    warm plugin instances, tenant isolation ``cascade_driver_id``
+    the AppArmor profile its threads wear   ``workspace_root`` +
+                                            ``profile_name``
+    the cgroup (``runtime_limits`` trio)    not needed — a session
+                                            needing one is routed away
+                                            from the pool entirely
+                                            (``spawn_session_runner``
+                                            consults the pool only when
+                                            ``cgroup_attach is None``)
+    session ``env:`` / secrets              not needed — overlaid per
+                                            turn, never baked in
+    ======================================  ==========================
+
+    The third row is the one that was missing, and it cost a P0: the key
+    said "reusable" while the profile name (``jaato-ws-{session_id}``)
+    said "new boundary", and once #1023 made confinement per-task both
+    could not be true.  Every reused slot straddled two profiles and its
+    bootstrap was correctly refused.
+
+    ``workspace_root`` and ``profile_name`` are both present rather than
+    one standing in for the other: ``profile_name`` is ``""`` on a host
+    with no AppArmor, where the workspace is still the thing #890 cares
+    about; and ``workspace_root`` alone does not distinguish two
+    boundaries over one workspace.
+    """
+
+    cascade_driver_id: Optional[str] = None
+    config_root: Optional[str] = None
+    workspace_root: Optional[str] = None
+    profile_name: Optional[str] = None
+
+    @classmethod
+    def build(
+        cls,
+        cascade_driver_id: Optional[str] = None,
+        config_root: Optional[str] = None,
+        workspace_root: Optional[str] = None,
+        profile_name: Optional[str] = None,
+    ) -> "SlotKey":
+        """Normalize the caller's values into a comparable key.
+
+        Paths are canonicalised (``realpath``) so two spellings of one
+        directory do not read as two tenants, and ``""`` is folded to
+        ``None`` so "unconfined" has one spelling rather than two.
+        """
+        return cls(
+            cascade_driver_id=cascade_driver_id or None,
+            config_root=_canonical_path(config_root),
+            workspace_root=_canonical_path(workspace_root),
+            profile_name=profile_name or None,
+        )
+
+    @classmethod
+    def of_slot(cls, slot: "PoolSlot") -> "SlotKey":
+        """The key a slot currently carries."""
+        return cls(
+            cascade_driver_id=slot.cascade_id or None,
+            config_root=_canonical_path(slot.config_root),
+            workspace_root=_canonical_path(slot.workspace_root),
+            profile_name=slot.profile_name or None,
+        )
+
+    def stamp(self, slot: "PoolSlot") -> None:
+        """Record this key on *slot* — the four fields move together.
+
+        Stamped as a unit because they ARE the slot's identity: a slot
+        affined to a cascade without recording the boundary it was
+        confined to is a slot whose reuse check cannot be right.
+        """
+        slot.cascade_id = self.cascade_driver_id
+        slot.config_root = self.config_root
+        slot.workspace_root = self.workspace_root
+        slot.profile_name = self.profile_name
+
+    def accepts_unaffined(self, slot: "PoolSlot") -> bool:
+        """May this key take *slot*, which carries no cascade affinity?
+
+        Warm state is not the question here — a PURE IDLE slot's warm
+        state is either absent (never served) or already forfeit.  The
+        question is the KERNEL BOUNDARY its threads are stuck inside.
+
+        So: a slot that was never confined (``profile_name`` unset) fits
+        anyone, and a slot wearing a profile fits only a session that
+        wants that same profile.  On a host with no AppArmor every
+        profile name is empty and this is a tautology — which is exactly
+        the "no AppArmor at all: completely unchanged" requirement.
+        """
+        return not slot.profile_name or slot.profile_name == self.profile_name
+
+
+def _canonical_path(path: Optional[str]) -> Optional[str]:
+    """``realpath`` for key comparison, tolerant of a missing directory.
+
+    ``realpath`` answers with its input when nothing is there, which is
+    what is wanted: the key has to be comparable before anything is
+    created on disk.
+    """
+    if not path:
+        return None
+    try:
+        return os.path.realpath(str(path))
+    except OSError:  # pragma: no cover — realpath is near-total
+        return str(path)
 
 
 # Phase 1 alias.  All in-tree callers were updated in Phase 2 to use
@@ -239,6 +388,14 @@ class PoolManager:
         self._replenish_thread: Optional[threading.Thread] = None
         # Phase 2 cascade-sharing idle timeout.
         self._cascade_idle_timeout = float(cascade_idle_timeout_seconds)
+
+        # Optional ``(profile_name) -> None`` hook the daemon wires so a
+        # slot's AppArmor profile is unloaded when the LAST slot wearing
+        # it dies (#1033).  An attribute rather than a constructor
+        # argument: the pool is built at daemon startup, long before any
+        # ``AppArmorManager`` exists, and every test-built PoolManager
+        # should keep working without knowing this exists.
+        self.profile_reaper: Optional[Callable[[str], None]] = None
         # Pool PR 5d telemetry counters.  Monotonically-incrementing
         # process-lifetime totals.  Snapshot via :meth:`get_telemetry`
         # for diagnostic surfaces (logs, admin commands, OTel
@@ -385,20 +542,21 @@ class PoolManager:
     def acquire_slot(
         self, cascade_driver_id: Optional[str] = None,
         config_root: Optional[str] = None,
+        workspace_root: Optional[str] = None,
+        profile_name: Optional[str] = None,
     ) -> Optional[PoolSlot]:
         """Pop an idle slot off the pool — cascade-affinity aware (Phase 2).
 
         Affinity routing (per design doc §4.2 claim flow):
 
-        1. If ``cascade_driver_id`` is provided, walk the idle list
-           for the first slot whose ``cascade_id`` matches.  Match
-           → return it (slot stays affined to its cascade; reuse hit).
-        2. Else (no cascade requested OR no match), take any PURE
-           IDLE slot (``cascade_id is None``).  If the caller did
-           supply a cascade_id, stamp it on the returned slot — the
-           slot is now affined to that cascade for the rest of its
-           life.
-        3. If no idle slot exists, return ``None``.  Caller falls
+        1. If ``cascade_driver_id`` is provided, walk the idle list for
+           the first slot whose whole :class:`SlotKey` matches.  Match
+           → return it (reuse hit).
+        2. Else (no cascade requested OR no match), take a PURE IDLE
+           slot (``cascade_id is None``) **whose kernel boundary fits**
+           — see :meth:`SlotKey.accepts_unaffined`.  Stamp the key on it;
+           the slot is now that key's for the rest of its life.
+        3. If no idle slot qualifies, return ``None``.  Caller falls
            back to cold-spawn (which spawns a fresh session-mode
            runner, NOT a pool slot).
 
@@ -407,6 +565,14 @@ class PoolManager:
         or close the daemon-side socket (which signals the slot to
         exit).
 
+        **The boundary gate is on BOTH paths, and path (2) is the one
+        that is easy to miss** (#1033).  A standalone session — no
+        cascade — returns its slot to the pool as PURE IDLE, confined to
+        the profile it served under; path (2) then hands that slot to
+        the next arrival whatever profile IT wants.  Gating only the
+        cascade path would leave every standalone reuse producing the
+        cross-profile thread population #1023 refuses.
+
         Telemetry (in addition to the Phase 1 counters):
           - ``cascade_slot_reuse_hits_total`` incremented on path (1).
           - ``cascade_slot_reuse_misses_total`` incremented when
@@ -414,67 +580,95 @@ class PoolManager:
             (whether or not we fell through to a PURE IDLE on path
             (2)).  Pairs with hits_total to score cascade-reuse
             efficacy on the workload.
+          - ``pool_profile_mismatch_skips_total`` counts idle slots that
+            path (2) passed over because their kernel boundary did not
+            fit.  Nonzero on a daemon whose sessions span several
+            workspaces or several profile shapes; growing alongside
+            ``pool_acquire_miss_total`` means the pool is being split
+            across more boundaries than ``target_size`` keeps stocked.
 
         Args:
             cascade_driver_id: Optional cascade tenant ID.  ``None``
-                (default) means "no cascade affinity" — behaves like
-                Phase 1 (any IDLE slot, FIFO).
+                (default) means "no cascade affinity" — the slot is
+                taken from, and returned to, the unaffined pool.
+            config_root: The ``.jaato`` root this session's warm plugin
+                state would be built from.
+            workspace_root: The workspace this session runs in.  Part of
+                the key since #1033 — see :class:`SlotKey`.
+            profile_name: The AppArmor profile this session's runner will
+                confine to, ``""``/``None`` for unconfined.
 
         Returns:
-            A :class:`PoolSlot` (with ``cascade_id`` set to the
-            requested cascade if reuse fired OR if a PURE IDLE slot
-            was stamped) or ``None`` if the pool is empty.
+            A :class:`PoolSlot` carrying the requested key, or ``None``
+            when nothing in the pool qualifies.
         """
+        key = SlotKey.build(
+            cascade_driver_id=cascade_driver_id,
+            config_root=config_root,
+            workspace_root=workspace_root,
+            profile_name=profile_name,
+        )
+        mismatch_skips = 0
         with self._lock:
-            # Path (1): cascade-affinity match.
-            if cascade_driver_id is not None:
+            # Path (1): whole-key match.  Every field is load-bearing and
+            # the reasons differ per field — see :class:`SlotKey`.
+            if key.cascade_driver_id is not None:
                 for i, slot in enumerate(self._idle_slots):
-                    # BOTH must match.  The cascade id says "same cascade";
-                    # the config root says "same warm state".  Matching on the
-                    # id alone let a session reuse a slot warmed from a
-                    # different .jaato -- different profiles, agents, prompts,
-                    # permission config -- and inherit whatever the first
-                    # session's bootstrap had already derived from it.
-                    if (slot.cascade_id == cascade_driver_id
-                            and slot.config_root == config_root):
+                    if SlotKey.of_slot(slot) == key:
                         slot = self._idle_slots.pop(i)
                         self._incr("pool_slot_acquired_total")
                         self._incr("cascade_slot_reuse_hits_total")
                         logger.info(
                             "PoolManager.acquire_slot: cascade reuse "
-                            "HIT — slot pid=%d cascade=%s",
-                            slot.pid, cascade_driver_id,
+                            "HIT — slot pid=%d cascade=%s profile=%s",
+                            slot.pid, key.cascade_driver_id,
+                            key.profile_name or "(unconfined)",
                         )
                         return slot
                 # Cascade requested but no match.
                 self._incr("cascade_slot_reuse_misses_total")
 
-            # Path (2) / (3): any PURE IDLE slot, else None.  PURE
-            # IDLE is preferred over cascade-affined-to-other-cascade
-            # because cross-cascade reuse is forbidden by design
+            # Path (2) / (3): a PURE IDLE slot whose boundary fits, else
+            # None.  PURE IDLE is preferred over affined-to-another-
+            # cascade because cross-cascade reuse is forbidden by design
             # (warm plugin state belongs to the original cascade).
-            pure_idle_idx = next(
-                (i for i, s in enumerate(self._idle_slots)
-                 if s.cascade_id is None),
-                None,
-            )
+            pure_idle_idx = None
+            for i, candidate in enumerate(self._idle_slots):
+                if candidate.cascade_id is not None:
+                    continue
+                if not key.accepts_unaffined(candidate):
+                    mismatch_skips += 1
+                    continue
+                pure_idle_idx = i
+                break
             if pure_idle_idx is None:
                 self._incr("pool_acquire_miss_total")
+                if mismatch_skips:
+                    self._incr(
+                        "pool_profile_mismatch_skips_total", mismatch_skips)
+                    logger.info(
+                        "PoolManager.acquire_slot: no usable idle slot — "
+                        "%d idle slot(s) passed over because they are "
+                        "confined to another profile (wanted %s)",
+                        mismatch_skips, key.profile_name or "(unconfined)",
+                    )
                 return None
             slot = self._idle_slots.pop(pure_idle_idx)
+        if mismatch_skips:
+            self._incr("pool_profile_mismatch_skips_total", mismatch_skips)
 
-        # Stamp cascade affinity if caller supplied one.  Slot is
-        # now affined for the rest of its life.
-        if cascade_driver_id is not None:
-            slot.cascade_id = cascade_driver_id
-            # Stamped together: the pair IS the slot's identity, and a slot
-            # affined to a cascade without recording what it was warmed from
-            # is a slot whose reuse check cannot be right.
-            slot.config_root = config_root
+        # Stamp the key.  A slot picked up on path (2) may have been
+        # unconfined and is about to be confined, or may already wear
+        # exactly this profile; either way the four fields now describe
+        # it, and they are written together for the reason
+        # :meth:`SlotKey.stamp` gives.
+        key.stamp(slot)
+        if key.cascade_driver_id is not None:
             logger.info(
                 "PoolManager.acquire_slot: cascade reuse MISS — fresh "
-                "slot pid=%d stamped cascade=%s",
-                slot.pid, cascade_driver_id,
+                "slot pid=%d stamped cascade=%s profile=%s",
+                slot.pid, key.cascade_driver_id,
+                key.profile_name or "(unconfined)",
             )
         self._incr("pool_slot_acquired_total")
         return slot
@@ -709,6 +903,11 @@ class PoolManager:
                 os.waitpid(slot.pid, 0)
             except ChildProcessError:
                 pass
+            # Then the profile, for the same reason the sweep does it
+            # (#1033) and in the same order: the daemon owns the last
+            # wearer, and a boundary-derived profile is not tied to any
+            # one session that could have unloaded it earlier.
+            self._reap_slot_profile(slot, reason="daemon-shutdown")
 
         if slots:
             logger.info(
@@ -932,6 +1131,88 @@ class PoolManager:
             os.waitpid(slot.pid, 0)
         except ChildProcessError:
             pass
+        # AFTER the process is gone, not before: unloading a profile
+        # while a task is still confined to it is the thing this whole
+        # change exists to avoid, and the slot is a task until waitpid
+        # returns.
+        self._reap_slot_profile(slot, reason=reason)
+
+    def profile_in_use(self, profile_name: str) -> bool:
+        """Is any idle slot still confined to *profile_name*? (#1033)
+
+        For callers OUTSIDE the pool that are about to unload a profile —
+        the WS workspace reaper is the one in this tree.  A
+        boundary-derived profile outlives its session, so "no session is
+        using it" is no longer sufficient grounds to unload it: a pooled
+        slot may be sitting idle inside it, waiting for the next session
+        of its cascade.
+
+        Only IDLE slots, deliberately.  A checked-out slot is not in this
+        list at all, and it does not need to be: such a slot always has a
+        live session, and that is the case
+        ``AppArmorManager.teardown_profile`` refuses on its own.  The two
+        guards together cover every slot the pool knows about.
+        """
+        if not profile_name:
+            return False
+        with self._lock:
+            return any(s.profile_name == profile_name
+                       for s in self._idle_slots)
+
+    def _reap_slot_profile(self, slot: PoolSlot, *, reason: str) -> None:
+        """Unload the AppArmor profile this slot was the last to wear.
+
+        **Profile teardown is per-SLOT now, not per-session** (#1033
+        consequence 1).  It used to run right after the next session's
+        ``aa_change_profile`` succeeded, keyed off
+        ``PoolSlot.last_session_id`` — which was sound only while a
+        profile belonged to exactly one session.  A boundary-derived
+        profile OUTLIVES its session: the slot goes on wearing it, so
+        unloading at session end would strip the kernel boundary off a
+        live runner.  The thing that may reap it is the death of the
+        last wearer.
+
+        Two guards, and they cover different wearers:
+
+        - here, another IDLE slot wearing the same profile.  Boundaries
+          are shared by construction now, so a cascade that fans out has
+          several slots inside one profile;
+        - inside the reaper (``AppArmorManager.teardown_profile``), any
+          live SESSION still claiming the id.  A checked-out slot is not
+          in ``_idle_slots`` at all, and that is the guard that covers
+          it.
+
+        Best-effort in both directions: no reaper wired (an embedded or
+        test PoolManager) and no profile on the slot are both ordinary,
+        and a reaper that raises must not abort the teardown it is part
+        of — a leaked kernel profile is a bounded, visible cost, while a
+        half-torn-down slot is a leaked process.
+        """
+        reaper = self.profile_reaper
+        profile_name = slot.profile_name
+        if reaper is None or not profile_name:
+            return
+        with self._lock:
+            still_worn = any(
+                other is not slot and other.profile_name == profile_name
+                for other in self._idle_slots
+            )
+        if still_worn:
+            logger.debug(
+                "PoolManager: slot pid=%d torn down (%s) but profile %s "
+                "is still worn by another idle slot; leaving it loaded",
+                slot.pid, reason, profile_name,
+            )
+            return
+        try:
+            reaper(profile_name)
+        except Exception as exc:  # noqa: BLE001 — best-effort
+            logger.warning(
+                "PoolManager: profile reaper raised for %s while tearing "
+                "down slot pid=%d (%s): %s — leaving the kernel profile "
+                "loaded",
+                profile_name, slot.pid, reason, exc,
+            )
 
     def _drain_pending_teardown(self) -> None:
         """Tear down slots the capacity check dropped.

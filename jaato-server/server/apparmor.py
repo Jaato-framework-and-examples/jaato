@@ -19,7 +19,17 @@ privileges), all methods are no-ops and ``is_available()`` returns False.
 Callers should check availability and fall back to directory-level sandboxing
 (which is the existing default behaviour).
 
-Profile naming convention: ``jaato-ws-{session_id}``
+Profile naming convention: ``jaato-ws-{confinement_id}``, where the id names
+the BOUNDARY rather than the session — the workspace, the config root and a
+digest of the rendered rules (``server.confinement_id``).  It was
+``jaato-ws-{session_id}`` until #1033: a pre-warm pool slot cannot change the
+profile its existing threads wear (``aa_change_profile`` is per-task, and the
+kernel refuses ``current != task``), so a per-session name meant every slot
+reuse straddled two profiles and its bootstrap was refused by #1023's
+verification.  Callers that supply no ``confinement_id`` still get
+``jaato-ws-{session_id}``; the two are the same string for a session whose id
+IS its boundary id.  The ``{session_id}`` placeholder inside PROFILE_TEMPLATE
+keeps its name and is fed whichever id was resolved.
 
 Thread-level confinement
 ------------------------
@@ -935,6 +945,20 @@ profile jaato-ws-{session_id} flags=({profile_flags}) {{
         # of a turn, so a second read is a second question.  #1014.
         self._complain_profiles: Dict[str, bool] = {}
 
+        # session_id -> the CONFINEMENT ID its profile is named after.
+        #
+        # The profile name used to be ``jaato-ws-{session_id}``, so it
+        # changed on every session — and a pre-warm pool slot cannot
+        # change the profile its existing threads wear, because
+        # ``aa_change_profile`` is per-task and the kernel refuses to let
+        # one thread re-confine another (#1023).  The name is therefore
+        # derived from the BOUNDARY (workspace + config root + rendered
+        # rules) and this map records which id each session landed on.
+        # Absent = the caller supplied none and the id IS the session id,
+        # which is the pre-fix shape and what every untaught caller and
+        # every test still gets.
+        self._confinement_ids: Dict[str, str] = {}
+
         # User-local cache directory for apparmor_parser, avoiding the
         # system-level /var/cache/apparmor which requires root access.
         self._cache_dir = Path("~/.jaato/apparmor-cache").expanduser().resolve()
@@ -1171,6 +1195,7 @@ profile jaato-ws-{session_id} flags=({profile_flags}) {{
         env_file: Optional[str] = None,
         requested_fragments: Optional[List[str]] = None,
         plugin_rules: Optional[List[str]] = None,
+        confinement_id: Optional[str] = None,
     ) -> bool:
         """Create and load an AppArmor profile for a session.
 
@@ -1179,11 +1204,21 @@ profile jaato-ws-{session_id} flags=({profile_flags}) {{
         unconfined main loop when called from a confined worker
         (e.g. a reactor-spawned child session whose creation fires
         from a confined parent thread).
+
+        Args:
+            confinement_id: Name the profile after this id instead of
+                after *session_id* (#1033).  A pool slot cannot change
+                the profile its existing threads wear, so the name has
+                to be a property of the BOUNDARY rather than of whoever
+                is using it this time; see
+                :meth:`confinement_id_for_boundary`.  ``None`` keeps the
+                pre-fix ``jaato-ws-{session_id}`` name, which is what an
+                un-pooled caller and every existing test get.
         """
         return self._run_unconfined(
             self._provision_profile_impl,
             session_id, workspace_path, config_root, env_file,
-            requested_fragments, plugin_rules,
+            requested_fragments, plugin_rules, confinement_id,
         )
 
     def _provision_profile_impl(
@@ -1194,6 +1229,7 @@ profile jaato-ws-{session_id} flags=({profile_flags}) {{
         env_file: Optional[str] = None,
         requested_fragments: Optional[List[str]] = None,
         plugin_rules: Optional[List[str]] = None,
+        confinement_id: Optional[str] = None,
     ) -> bool:
         """Inner body of :meth:`provision_profile`.
 
@@ -1241,10 +1277,19 @@ profile jaato-ws-{session_id} flags=({profile_flags}) {{
         if not self.is_available():
             return False
 
-        profile_name = self.get_profile_name(session_id)
+        # Record the boundary-derived name BEFORE rendering, so every
+        # later lookup for this session — ``get_profile_name``, the refs
+        # dir, the complain-mode readback, teardown — resolves to the
+        # profile the kernel is about to be handed.
+        if confinement_id:
+            validate_session_id(confinement_id)
+            self._confinement_ids[session_id] = confinement_id
+        render_id = self.confinement_id_of(session_id)
+
+        profile_name = self.profile_name_for_confinement_id(render_id)
         profile_path = self._profile_dir / profile_name
         profile_content = self._render_profile(
-            session_id, workspace_path, config_root, env_file,
+            render_id, workspace_path, config_root, env_file,
             requested_fragments=requested_fragments,
             plugin_rules=plugin_rules,
         )
@@ -1411,6 +1456,11 @@ profile jaato-ws-{session_id} flags=({profile_flags}) {{
         if not self.is_available():
             return False, "AppArmor unavailable on this host"
 
+        # Compose the sub-profile under the parent's CONFINEMENT id, so
+        # its ``jaato-ws-<parent>//<sub>`` prefix names the profile the
+        # parent runner is actually wearing (#1033).  Resolves to the
+        # session id when the parent was provisioned the pre-fix way.
+        parent_session_id = self.confinement_id_of(parent_session_id)
         sub_profile_name = self.get_sub_profile_name(
             parent_session_id, subagent_id,
         )
@@ -1514,6 +1564,14 @@ profile jaato-ws-{session_id} flags=({profile_flags}) {{
         if not self.is_available():
             return False
 
+        # Same resolution the provisioning side does (#1033): the
+        # sub-profile was composed under the parent's CONFINEMENT id, so
+        # that is the name on disk.  Resolves to the session id when the
+        # parent was provisioned the pre-fix way, and when the parent's
+        # own teardown has already released its row — in which case the
+        # file is simply not there and this reports success, as it
+        # already did for a sub-profile that was never written.
+        parent_session_id = self.confinement_id_of(parent_session_id)
         sub_profile_name = self.get_sub_profile_name(
             parent_session_id, subagent_id,
         )
@@ -1794,8 +1852,26 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
         Dispatches to ``_teardown_profile_impl`` via ``_run_unconfined``
         so unloading + file deletion run on the unconfined main loop
         when called from a confined session-end path.
+
+        Refuses to unload a boundary another live session still holds —
+        see :meth:`_teardown_profile_impl`.
         """
         return self._run_unconfined(self._teardown_profile_impl, session_id)
+
+    def teardown_profile_by_confinement_id(self, confinement_id: str) -> bool:
+        """Unload the profile named after *confinement_id*, if unheld.
+
+        The slot-teardown counterpart of :meth:`teardown_profile` (#1033).
+        A boundary-derived profile OUTLIVES the session that created it —
+        the pool slot goes on wearing it — so the thing that may reap it
+        is the death of the last wearer, not the end of a session.  Every
+        guard in :meth:`_teardown_profile_impl` applies: an id still
+        claimed by a live session is left loaded.
+
+        Safe to call with an id no session ever used; the profile is
+        simply not on disk and the method reports success.
+        """
+        return self.teardown_profile(confinement_id)
 
     def _teardown_profile_impl(self, session_id: str) -> bool:
         """Inner body of :meth:`teardown_profile`.
@@ -1820,14 +1896,32 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
         if not self.is_available():
             return False
 
-        profile_name = self.get_profile_name(session_id)
+        confinement_id = self.confinement_id_of(session_id)
+        profile_name = self.profile_name_for_confinement_id(confinement_id)
         profile_path = self._profile_dir / profile_name
+
+        # Release THIS session's claim on the name first, then ask whether
+        # anybody else still holds one.  A boundary-derived profile is
+        # shared by every session on that boundary (#1033), so unloading
+        # it on one session's exit would strip the kernel boundary off a
+        # sibling that is still running — the exact failure direction this
+        # whole change exists to avoid.
+        self._confinement_ids.pop(session_id, None)
+        if confinement_id in self._confinement_ids.values():
+            logger.info(
+                "AppArmor: leaving profile %s loaded — session %s released "
+                "it but %d other live session(s) share this boundary",
+                profile_name, session_id,
+                sum(1 for v in self._confinement_ids.values()
+                    if v == confinement_id),
+            )
+            return True
 
         # Drop the recorded enforcement mode with the profile it describes
         # (#1014); a stale entry would outlive its session on a long-lived
         # daemon.  Done before the early return, so a profile already gone
         # from disk still releases it.
-        self._complain_profiles.pop(session_id, None)
+        self._complain_profiles.pop(confinement_id, None)
 
         if not profile_path.exists():
             return True  # Already gone
@@ -1871,12 +1965,14 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
             logger.exception("Failed to delete AppArmor profile file %s", profile_path)
             return False
 
-        # Drop any per-session reference fragments and the lock state.
-        # Both are session-scoped — keeping them around after the
-        # profile is gone would leak across session_id reuse.
-        self._remove_all_reference_fragments(session_id)
+        # Drop any reference fragments and the lock state.  Keyed by the
+        # CONFINEMENT id, not the session id: both hang off the profile
+        # name (the refs dir is ``<profile>.refs.d``), and this session's
+        # row in ``_confinement_ids`` is already gone, so a session-keyed
+        # lookup here would resolve to a directory nobody ever wrote.
+        self._remove_all_reference_fragments(confinement_id)
         with self._session_locks_guard:
-            self._session_locks.pop(session_id, None)
+            self._session_locks.pop(confinement_id, None)
 
         logger.info("Removed AppArmor profile %s", profile_name)
         return True
@@ -2059,7 +2155,11 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
         fragment_path = refs_dir / safe_id
         fragment_body = self._fragment_content(path)
 
-        with self._session_lock(session_id):
+        # Locked by CONFINEMENT id: the refs dir hangs off the profile
+        # name, which several sessions may share (#1033), and a
+        # session-keyed lock would let two of them write the same
+        # directory concurrently.
+        with self._session_lock(self.confinement_id_of(session_id)):
             try:
                 refs_dir.mkdir(parents=True, exist_ok=True)
                 tmp_path = fragment_path.with_suffix(".tmp")
@@ -2120,7 +2220,7 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
         profile_path = self._profile_dir / self.get_profile_name(session_id)
         fragment_path = refs_dir / safe_id
 
-        with self._session_lock(session_id):
+        with self._session_lock(self.confinement_id_of(session_id)):
             if not fragment_path.exists():
                 return True
 
@@ -2174,15 +2274,91 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
     # Helpers
     # ------------------------------------------------------------------
 
+    def confinement_id_of(self, session_id: str) -> str:
+        """The id this session's profile is NAMED after.
+
+        The session's own id when nothing else was recorded, which keeps
+        every pre-#1033 caller and every test on the behaviour they had.
+        See :attr:`_confinement_ids`.
+        """
+        return self._confinement_ids.get(session_id, session_id)
+
+    def confinement_id_for_boundary(
+        self,
+        workspace_path: str,
+        config_root: Optional[str] = None,
+        env_file: Optional[str] = None,
+        requested_fragments: Optional[List[str]] = None,
+        plugin_rules: Optional[List[str]] = None,
+    ) -> str:
+        """Compute the confinement id for a boundary, without loading it.
+
+        Renders the profile body once with :data:`confinement_id.PROBE_ID`
+        standing in for the identifier and digests the result, so the id
+        is a function of the RULES — workspace, config root, env file,
+        the composed fragments' CONTENTS, the plugin-contributed rules,
+        the complain flag — rather than of the session that asked.  Two
+        boundaries that differ anywhere get two ids; two that are alike
+        get one, which is what lets a pool slot keep the profile its
+        threads already wear.
+
+        Rendering rather than hashing the inputs is deliberate: a
+        separate input-hash would be a second implementation of "what
+        goes into a profile" and would drift from the renderer the first
+        time a placeholder was added.
+
+        A render that raises degrades to a workspace+config-root digest
+        with a WARNING rather than failing session creation here: the
+        same render is about to run inside ``provision_profile``, which
+        is where that failure is already reported.
+        """
+        from server.confinement_id import PROBE_ID, confinement_id
+
+        body: Optional[str] = None
+        try:
+            body = self._render_profile(
+                PROBE_ID, workspace_path, config_root, env_file,
+                requested_fragments=requested_fragments,
+                plugin_rules=plugin_rules,
+            )
+        except Exception as exc:  # noqa: BLE001 — diagnostic, not a gate
+            logger.warning(
+                "AppArmor: could not render a probe profile for "
+                "workspace=%s to derive its confinement id (%s: %s); "
+                "falling back to a workspace+config_root digest.  "
+                "provision_profile will report the underlying failure.",
+                workspace_path, type(exc).__name__, exc,
+            )
+        finally:
+            # The probe is not a session; it must not leave a row in the
+            # per-session complain map it shares with real renders.
+            self._complain_profiles.pop(PROBE_ID, None)
+
+        return confinement_id(
+            workspace_root=workspace_path,
+            config_root=config_root,
+            rendered_body=body,
+        )
+
     def get_profile_name(self, session_id: str) -> str:
         """Return the AppArmor profile name for a session.
+
+        Resolves through :meth:`confinement_id_of`, so a session whose
+        profile was provisioned under a boundary-derived id gets THAT
+        name — the one the kernel actually reports for its runner.
 
         Fail-closed on an unsafe id: the name is interpolated into the profile
         grammar and the on-disk profile filename, so a traversal / injection id
         must never reach it.
         """
-        validate_session_id(session_id)
-        return f"jaato-ws-{session_id}"
+        return self.profile_name_for_confinement_id(
+            self.confinement_id_of(session_id))
+
+    @staticmethod
+    def profile_name_for_confinement_id(confinement_id: str) -> str:
+        """``jaato-ws-<id>`` — the one place the prefix is spelled."""
+        validate_session_id(confinement_id)
+        return f"jaato-ws-{confinement_id}"
 
     def profile_is_complain_mode(self, session_id: str) -> bool:
         """Was this session's profile generated in complain (log-only) mode?
@@ -2192,7 +2368,8 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
         this manager never rendered a profile for, which is the same
         answer "no complain-mode profile exists here" deserves.
         """
-        return self._complain_profiles.get(session_id, False)
+        return self._complain_profiles.get(
+            self.confinement_id_of(session_id), False)
 
     @staticmethod
     def _format_plugin_contributed_rules(

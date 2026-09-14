@@ -61,6 +61,7 @@ class _FakeAppArmorManager:
         self.available = True
         self.provision_outcome = True
         self.provision_calls: List[Dict[str, Any]] = []
+        self._confinement_ids: Dict[str, str] = {}
         _FakeAppArmorManager.instances.append(self)
 
     def is_available(self) -> bool:
@@ -71,15 +72,30 @@ class _FakeAppArmorManager:
         config_root: Optional[str] = None, env_file: Optional[str] = None,
         requested_fragments: Optional[List[str]] = None,
         plugin_rules: Optional[List[str]] = None,
+        confinement_id: Optional[str] = None,
     ) -> bool:
         self.provision_calls.append({
             "session_id": session_id,
             "workspace_path": workspace_path,
         })
+        if confinement_id:
+            self._confinement_ids[session_id] = confinement_id
         return self.provision_outcome
 
+    def confinement_id_for_boundary(
+        self, workspace_path: str, **kwargs: Any,
+    ) -> str:
+        """#1033: the profile is named after the boundary, not the
+        session — so the caller derives an id before provisioning."""
+        from server.confinement_id import confinement_id
+        return confinement_id(
+            workspace_root=workspace_path,
+            config_root=kwargs.get("config_root"),
+            rendered_body=repr(sorted(kwargs.items(), key=str)),
+        )
+
     def get_profile_name(self, session_id: str) -> str:
-        return f"jaato-ws-{session_id}"
+        return f"jaato-ws-{self._confinement_ids.get(session_id, session_id)}"
 
     def profile_is_complain_mode(self, session_id: str) -> bool:
         """#1014: the real manager records whether it RENDERED a
@@ -189,7 +205,9 @@ def test_apparmor_optin_spawns_runner_with_profile(
     assert len(spawn_calls) == 1
     call = spawn_calls[0]
     assert call["disable_confine"] is False
-    assert call["profile_name"] == "jaato-ws-s-aa"
+    # #1033: boundary-derived, so the session id is NOT in the name.
+    assert call["profile_name"].startswith("jaato-ws-")
+    assert "s-aa" not in call["profile_name"]
 
 
 def test_apparmor_unavailable_still_spawns_unconfined(
@@ -409,7 +427,7 @@ def test_apparmor_helper_callable_in_isolation(
     # documented 2-tuple contract -- not that this host can confine.  A host
     # without AppArmor returns ("", "soft") by design, so asserting
     # mode == "apparmor" would make the refactor pin fail on environment.
-    assert (profile_name, mode) in {
-        ("jaato-ws-s-iso", "apparmor"),   # AppArmor available + provisioned
-        ("", "soft"),                     # unavailable / provisioning failed
-    }, f"undocumented return: {(profile_name, mode)!r}"
+    assert (
+        (mode == "apparmor" and profile_name.startswith("jaato-ws-"))
+        or (profile_name, mode) == ("", "soft")
+    ), f"undocumented return: {(profile_name, mode)!r}"

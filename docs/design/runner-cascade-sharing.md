@@ -290,10 +290,30 @@ classification, not whole-plugin categorisation.
 
 (Revised 2026-05-20 — see Amendment at head of §4.)
 
-**Profile naming**: stays `jaato-ws-{session_id}`.  Each session has
-its own apparmor profile, composed against that session's profile's
-plugins + fragments — identical to the pre-cascade-sharing model.
-No `get_apparmor_rules` signature change.
+> **Superseded 2026-09-13 by #1033.**  The cross-session
+> `aa_change_profile` this section specifies is not something the kernel
+> can perform: `aa_change_profile` confines the CALLING TASK, and a slot's
+> other threads — the telemetry exporter, the reader, anything a plugin
+> started — keep the cred they were created with and cannot be re-confined
+> (`current != task -> -EACCES`).  #1023's per-thread verification made
+> that visible and refused every reused slot's bootstrap; #1026 can retire
+> only the two RPC executor lanes.
+>
+> Profile naming is therefore `jaato-ws-{confinement_id}`, where the id is
+> derived from the BOUNDARY — workspace, config root, and a digest of the
+> rendered profile body (`server/confinement_id.py`).  A slot's reuse key
+> carries that name, so a reused slot is by construction one whose profile
+> has not changed and **no transition happens at all**.  This is narrower
+> than the withdrawn "one profile per cascade" decision below: sessions of
+> one cascade whose boundaries differ get different profiles AND different
+> slots, and sessions of different cascades that share a boundary share a
+> profile.  See CLAUDE.md, "A Key That Said \"Reusable\" and a Name That
+> Said \"New\"".
+
+**Profile naming**: ~~stays `jaato-ws-{session_id}`~~ (see the #1033 note
+above).  Each session has its own apparmor profile, composed against that
+session's profile's plugins + fragments — identical to the
+pre-cascade-sharing model.  No `get_apparmor_rules` signature change.
 
 **Slot lifecycle vs apparmor profile lifecycle:**
 
