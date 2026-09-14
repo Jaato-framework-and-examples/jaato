@@ -210,6 +210,63 @@ def isolated_machine_state(monkeypatch):
     return _ISOLATED_HOME
 
 
+@pytest.fixture(autouse=True)
+def isolated_session_context():
+    """Keep one test's current-session ContextVar out of the next one.
+
+    ``shared.session_context._current_session`` is process-global for
+    the life of a thread, and ``JaatoSession`` publishes ``self`` into
+    it from ``configure()`` and from both tool-dispatch paths.  Dozens
+    of guards here drive those paths against a shell built with
+    ``JaatoSession.__new__(JaatoSession)`` — so a test that finishes
+    leaves a half-built session visible to every test that runs after
+    it, in any package, for the rest of the process.
+
+    The consequence was measured (issue #974): with
+    ``shared/tests/`` run ahead of ``shared/plugins/permission/`` in one
+    pytest process, **113 permission tests** that pass in isolation
+    failed with ``AttributeError: 'JaatoSession' object has no attribute
+    '_state_providers'`` — ``PermissionPlugin`` resolving its
+    per-session policy off the leaked shell.  The damage landed
+    hundreds of tests away from its cause, and it made a whole-suite
+    failure *count* unusable as a baseline: a real one-test regression
+    is invisible against a hundred-failure floor that only appears in
+    combination.
+
+    This is the net, not the fix.  The leak is fixed where it is set —
+    ``shared/tests/test_unreadable_tool_args_are_not_executed.py`` wraps
+    its shell in :func:`~shared.session_context.isolated_current_session`
+    — and this fixture exists so that the *next* one cannot escape the
+    test that causes it.
+
+    Scoped at ``jaato-server/`` rather than at ``shared/tests/`` because
+    the leak is directional only by accident — a plugin suite that
+    drives a session shell would poison ``shared/tests/`` the same way.
+
+    HOW WIDE THE LEAK ACTUALLY IS, since the crash made it look like one
+    test's mistake.  Instrumented over
+    ``shared/tests/ + shared/plugins/permission/`` at ``4e5c95ba``,
+    **114 tests across 12 files** left a session behind — every one of
+    them a fully-built ``JaatoSession`` from a real ``configure()``.
+    Those were harmless only by luck: a complete session answers
+    ``get_session_state`` rather than raising, so the next test simply
+    resolved its permission policy off *somebody else's session* and
+    nobody noticed.  Exactly one of the 114 was a ``__new__`` shell, and
+    that one crashed 113 permission tests.  The fixture absorbs all of
+    them.
+
+    It restores silently and deliberately does not warn.  114 warnings
+    per run is a signal that is always on, which tells a reader nothing;
+    the count above is the useful form of the same fact, recorded once.
+    A leak is not a *defect* in the test that causes it — the defect was
+    that it escaped — so there is nothing here for anyone to act on.
+    """
+    from shared.session_context import isolated_current_session
+
+    with isolated_current_session():
+        yield
+
+
 @pytest.fixture(scope="session")
 def real_home() -> Path:
     """The home directory of whoever is running the suite.

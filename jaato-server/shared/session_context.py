@@ -52,12 +52,28 @@ Usage in session wiring (already handled by JaatoSession)::
     from shared.session_context import set_current_session
 
     set_current_session(self)  # before tool execution
+
+Putting it back
+~~~~~~~~~~~~~~~
+
+``set_current_session`` has no counterpart in production, and does not
+need one: a real session holds the variable for as long as it is the
+session running.  A *caller that is not a session* — a test driving
+``configure()`` or a dispatch path against a hand-built shell — is the
+case that needs one, because what it publishes outlives it.
+:func:`isolated_current_session` is that counterpart, and it is a
+context manager rather than a ``clear()`` because returning the
+variable to **unset** is only expressible through the ``Token`` of the
+``set()`` that left it (issue #974).
 """
 
 import contextvars
 import os
 from contextvars import ContextVar, Token
-from typing import Any, Callable, Dict, Optional, Tuple, TYPE_CHECKING, TypeVar
+from contextlib import contextmanager
+from typing import (
+    Any, Callable, Dict, Iterator, Optional, Tuple, TYPE_CHECKING, TypeVar,
+)
 
 # The session-env trio is DEFINED in the SDK and imported here, not
 # redefined (issue #918).  Object identity is the whole point: the
@@ -99,10 +115,59 @@ def set_current_session(session: 'JaatoSession') -> None:
 def get_current_session() -> 'JaatoSession':
     """Get the current session for this thread/context.
 
+    ``None`` reads as "no session", not as a session that happens to be
+    ``None``.  Nothing in the framework ever stores it; the value exists
+    so that a *restorable* "no session" state can be written, which a
+    bare ``ContextVar`` has no other way to express — once set, it
+    returns to the unset state only through the ``Token`` of the very
+    ``set()`` that left it, and production code calling
+    :func:`set_current_session` hands that token to nobody.
+    :func:`isolated_current_session` is the one writer of ``None``, and
+    the reason this branch exists (issue #974).
+
     Raises:
         LookupError: If no session has been set in this context.
     """
-    return _current_session.get()
+    session = _current_session.get(None)
+    if session is None:
+        raise LookupError('current_session')
+    return session
+
+
+@contextmanager
+def isolated_current_session() -> Iterator[None]:
+    """Restore :data:`_current_session` to its entry state on exit.
+
+    The current-session ``ContextVar`` is process-global for the life of
+    a thread, and :func:`set_current_session` is called from deep inside
+    ``JaatoSession`` — ``configure()`` and both tool-dispatch paths.  A
+    caller that drives one of those against a session it built by hand
+    (every ``JaatoSession.__new__(JaatoSession)`` shell in the test
+    suite) therefore publishes that half-built object to everything that
+    runs afterwards in the same process.
+
+    Not theoretical: one such test poisoned 113 of the permission
+    package's tests when the two ran in one pytest process, because
+    ``PermissionPlugin`` reads the current session to resolve its
+    per-session policy and a shell has no ``_state_providers``
+    (issue #974).  The failures surfaced hundreds of tests away from
+    their cause, which is what made a whole-suite failure count useless
+    as a baseline.
+
+    Wrap anything that may set the variable::
+
+        with isolated_current_session():
+            session._execute_single_tool(call, None)
+
+    On exit the variable is returned to exactly what it was — *unset*
+    included, which is what the ``Token`` buys and what a plain
+    save-and-restore cannot do.
+    """
+    token = _current_session.set(_current_session.get(None))
+    try:
+        yield
+    finally:
+        _current_session.reset(token)
 
 
 # ── Session-scoped environment ──────────────────────────────────────────

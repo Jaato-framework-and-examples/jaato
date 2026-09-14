@@ -76,6 +76,7 @@ from jaato_sdk.plugins.model_provider.types import (
     unreadable_arguments_error,
 )
 
+from shared.session_context import isolated_current_session
 from shared.tests.test_every_guard_detects_its_own_reversion import Reversion
 
 
@@ -263,6 +264,11 @@ def _session_with_stub_executor():
     the other session guards do: constructing a real session needs a
     provider, a runtime and a registry, none of which this contract
     touches.
+
+    **Drive it only through the ``stub_session`` fixture below.**  Both
+    dispatch paths publish ``self`` into the process-global
+    current-session ``ContextVar``, and this shell has no
+    ``_state_providers`` — see the fixture for what that cost (#974).
     """
     from shared.jaato_session import JaatoSession
 
@@ -287,6 +293,31 @@ def _session_with_stub_executor():
     return session
 
 
+@pytest.fixture
+def stub_session():
+    """The shell above, with the current-session ContextVar restored.
+
+    ``_execute_single_tool`` and ``_execute_single_tool_for_parallel``
+    both call ``set_current_session(self)``, which writes a
+    process-global ``ContextVar`` that nothing here ever cleared.  So
+    the first test below left a half-built ``JaatoSession`` visible to
+    *every test that ran afterwards in the same pytest process* —
+    including, in a combined run, the permission package, whose
+    ``PermissionPlugin`` reads the current session to resolve its
+    per-session policy and then calls ``get_session_state`` on it.
+
+    Measured at ``4e5c95ba``: this file alone, followed by
+    ``shared/plugins/permission/``, produced **113 failures** in tests
+    that pass cleanly on their own, every one of them
+    ``AttributeError: 'JaatoSession' object has no attribute
+    '_state_providers'`` (issue #974).  The blast radius is why the
+    restore belongs here, at the site that sets it, and not only in the
+    package-wide safety net in ``jaato-server/conftest.py``.
+    """
+    with isolated_current_session():
+        yield _session_with_stub_executor()
+
+
 def _unreadable_call():
     args, unreadable = parse_tool_call_arguments(
         '{"path": "notes.md", "content": "----------'
@@ -295,9 +326,9 @@ def _unreadable_call():
                         unreadable_args=unreadable)
 
 
-def test_the_session_refuses_a_call_it_could_not_read():
+def test_the_session_refuses_a_call_it_could_not_read(stub_session):
     """The executor is never reached, and the model is told why."""
-    session = _session_with_stub_executor()
+    session = stub_session
 
     result = session._execute_single_tool(_unreadable_call(), None)
 
@@ -308,14 +339,14 @@ def test_the_session_refuses_a_call_it_could_not_read():
     assert payload["unreadable_arguments"].startswith('{"path"')
 
 
-def test_the_parallel_path_refuses_it_too():
+def test_the_parallel_path_refuses_it_too(stub_session):
     """Both execution paths, or the refusal is a coin flip on batch size.
 
     ``_execute_function_call_group`` routes a single call to the
     sequential path and two or more to the thread pool, so a fix applied
     to only one of them holds exactly until the model batches its calls.
     """
-    session = _session_with_stub_executor()
+    session = stub_session
 
     result = session._execute_single_tool_for_parallel(_unreadable_call())
 
@@ -325,14 +356,14 @@ def test_the_parallel_path_refuses_it_too():
     assert "could not be parsed" in payload["error"]
 
 
-def test_a_readable_call_still_reaches_the_executor():
+def test_a_readable_call_still_reaches_the_executor(stub_session):
     """The refusal is narrow.
 
     Without this the session half could be satisfied by refusing
     everything, which would be a far louder outage than the one being
     fixed.
     """
-    session = _session_with_stub_executor()
+    session = stub_session
     session._executor.execute = MagicMock(return_value=(True, {"ok": True}))
 
     args, unreadable = parse_tool_call_arguments('{"path": "notes.md"}')
