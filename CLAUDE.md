@@ -1938,6 +1938,85 @@ resolved-looking name hiding it. The OpenAI-shaped loops also emit a
 later delta than the one that opens the call, leaving the `TOOL_CALL_START`
 record honestly nameless.
 
+### A Turn Ends Because It ENDED, Not Because It Was Billed (#881)
+
+A completion-gated session did its work, the agent called `signal_completion`,
+the payload was accepted and delivered as `AgentCompletedEvent` — and then **no
+terminal event was ever emitted**. `Session.complete()` / `.ask()` / `.stream()`
+waited out their own timeouts. Nothing was logged on either side: the daemon was
+content, the files were written, and only the driver was stuck.
+
+`_turn_accounting` is a **usage ledger**. A turn lands in it only when the
+provider reported tokens, and every consumer of `len()` reads it that way — the
+`turns` figure in `get_context_usage`, `get_consumption`'s unattributed-turn
+reconciliation, the persisted `turn_count`. `rpc._forward_post_turn_hooks` —
+the **single site** that fires both halves of the terminus
+(`on_agent_turn_completed` → `TurnCompletedEvent`, `flush_session_quiescent()` →
+`SessionTerminatedEvent`) — gated on that ledger growing. So a **usage** fact
+stood in for the **lifecycle** fact "a turn ran":
+
+| `plugin_configs.echo.usage` | outcome |
+|---|---|
+| present | `TurnCompletedEvent` immediately; `complete()` returns |
+| absent | `AGENT_COMPLETED`; **no** `TURN_COMPLETED`, **no** `SESSION_TERMINATED` |
+
+**The gate was not buying what its docstring claimed.** It was justified as
+refused-turn suppression, and a refused turn *is* suppressed — but by
+`send_message` returning at the budget gate **before** the chat loop, so no
+`turn_data` is ever built and the append site is never reached. The one thing
+`total > 0` uniquely suppressed was a turn that ran and was not metered.
+
+So the two facts are separated rather than merged. `JaatoSession._record_turn_ran`
+is the one place that closes a turn: it always bumps `_turns_ran` and stamps
+`_last_turn_ran`, and appends to the usage ledger only when tokens were
+reported. `get_turns_ran()` / `get_last_turn_ran()` are what the fan-out reads.
+Option 2 of the issue — drop the gate, append every turn — is deliberately **not**
+taken: it would silently change what all three `len()` consumers mean. Option 3
+— move only the quiescence flush — is deliberately not taken either: it fixes
+`complete()` and leaves `ask()` / `stream()`, whose only terminus is
+`TURN_COMPLETED`, still hanging.
+
+Three properties, each attached to a way it could go wrong:
+
+- **`turn_number` follows the lifecycle count.** `jaato-tui/agent_registry.py`
+  indexes a list by it, so sourcing it from the ledger gave every unmetered turn
+  the same ordinal and the second overwrote the first.
+- **A session without the accessors gets the PRE-#881 behaviour**, not an
+  exception and not an unguarded double emission. `RunnerRPC._turns_ran_snapshot`
+  falls back to the ledger length for a duck-typed double or an out-of-tree
+  session class; a real `JaatoSession` never takes that path.
+- **The in-process path (`shared/jaato_client.py`) already fired
+  unconditionally**, with a comment saying why ("Some providers report 0 tokens;
+  skipping the hook would leave buffered content stuck in the pipeline"). The
+  two paths disagreed, and the runner path — the default — was the wrong one.
+  That path is otherwise unchanged here; it still re-emits the previous turn on
+  a *refused* send, which the runner path has always suppressed.
+
+**Nothing about this is `echo`-specific.** Any provider that completes a turn
+without reporting usage reaches the same state — a stream that never delivers a
+usage frame, a gateway that strips the field, a zero-cost cached turn. `echo` is
+where it is *guaranteed*, and it is what every new harness reaches for first
+because it is credential-free and deterministic.
+
+**And the suite could not see it.** `jaato_sdk/conformance/` stayed green for
+the whole life of the defect precisely because every conformance profile passed
+`usage=TURN_USAGE`; a suite whose every
+profile is metered is structurally unable to catch this class however many
+scenarios it runs. `conformance-unmetered` is the fifth profile, and the only
+one that differs from another by a **missing** key.
+
+**The silence is now announced (#688 item 3).** A turn that carries no tokens
+logs a WARNING **once per session**, naming the provider and model, and saying
+what stops working: the consumption report reads empty and a `budget_control`
+ceiling on `tokens` / `usd` is fed zero, so a run that looks capped is uncapped.
+Deliberately worded as *this turn carried no tokens* rather than *the provider
+reported nothing* — nothing in the tree can yet tell a reported zero from an
+unreported one (`TokenUsage` starts at all-zeros and is only overwritten when a
+frame arrives, so the two share a value), and asserting the stronger claim would
+be a statement the data does not support. Giving them separate representations,
+and deciding what `budget_control` should do with "unknown", is **#688 items 1
+and 2** and is not done here.
+
 ### What a Session Spent, and Which Model Spent It
 
 `get_environment(aspect="context")` has always reported how FULL the context

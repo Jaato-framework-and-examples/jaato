@@ -3650,14 +3650,19 @@ class RunnerRPC:
         # synchronously here; output streams via on_output;
         # usage + gc-threshold events stream via notification frames.
         # Turn-count snapshot: the post-turn forwarding below must fire iff a
-        # NEW turn actually landed in turn_accounting.  This is the mechanical
-        # guarantee behind the refused-turn suppression (a refused turn
-        # appends nothing, so the event would re-emit the PREVIOUS turn's
-        # numbers) AND what makes it safe to forward on the cancelled path.
-        try:
-            _turns_before = len(session.get_turn_accounting() or ())
-        except Exception:  # noqa: BLE001
-            _turns_before = None
+        # NEW turn actually RAN.  This is the mechanical guarantee behind the
+        # refused-turn suppression (a refused turn never enters the chat loop,
+        # so the count does not move and the event would re-emit the PREVIOUS
+        # turn's numbers) AND what makes it safe to forward on the cancelled
+        # path.
+        #
+        # It reads the LIFECYCLE counter, not the length of the usage ledger
+        # (#881).  The ledger only grows when the provider reported tokens, so
+        # gating on it meant a turn that ran and reported nothing emitted
+        # neither TurnCompletedEvent nor SessionTerminatedEvent -- and a
+        # driver blocked on either waited out its own timeout with nothing
+        # logged on either side.
+        _turns_before = RunnerRPC._turns_ran_snapshot(session)
 
         try:
             try:
@@ -3865,6 +3870,61 @@ class RunnerRPC:
     # to refresh.
     _NOTIF_DESCRIPTION_UPDATED = "description_updated"
 
+    @staticmethod
+    def _turns_ran_snapshot(session) -> Optional[int]:
+        """How many turns this session has RUN, or ``None`` if it cannot say.
+
+        The LIFECYCLE count (#881).  ``JaatoSession.get_turns_ran`` moves for
+        every turn that entered the chat loop; ``len(get_turn_accounting())``
+        moves only for a turn whose provider reported tokens, and the gap
+        between them is the whole of #881.
+
+        Falls back to the ledger length for a session object that has no
+        ``get_turns_ran`` — a duck-typed double, or a session class from
+        outside this tree.  That fallback is exactly the pre-#881 behaviour
+        rather than an invention, so such a caller is no worse off than
+        before; a real :class:`~shared.jaato_session.JaatoSession` never takes
+        it.
+
+        ``None`` when neither can be read, which the caller treats as "do not
+        gate" — forwarding a turn twice is recoverable, forwarding it never
+        is what hung the driver.
+        """
+        getter = getattr(session, "get_turns_ran", None)
+        if callable(getter):
+            try:
+                return int(getter())
+            except Exception:  # noqa: BLE001
+                return None
+        try:
+            return len(session.get_turn_accounting() or ())
+        except Exception:  # noqa: BLE001
+            return None
+
+    @staticmethod
+    def _last_turn_ran(session, turn_accounting) -> Optional[Dict[str, Any]]:
+        """The accounting dict of the last turn that RAN, or ``None``.
+
+        ``JaatoSession.get_last_turn_ran`` is the same object
+        ``turn_accounting[-1]`` is whenever the provider reported usage, and
+        the ONLY source for a turn where it did not — that dict still carries
+        real timing, a real ``finish_reason`` and the real ``function_calls``,
+        with zeroes only where the provider was silent.  Sourcing the payload
+        from the ledger instead is why an unmetered turn had nothing to report
+        and therefore reported nothing at all (#881).
+
+        Falls back to the ledger's last entry, then to ``None``.
+        """
+        getter = getattr(session, "get_last_turn_ran", None)
+        if callable(getter):
+            try:
+                last = getter()
+            except Exception:  # noqa: BLE001
+                last = None
+            if last is not None:
+                return last
+        return turn_accounting[-1] if turn_accounting else None
+
     def _forward_post_turn_hooks(self, session, turns_before) -> None:
         """Fire the post-turn ``AgentUIHooks`` fan-out for a turn that RAN.
 
@@ -3880,13 +3940,25 @@ class RunnerRPC:
         own budget ends by cancellation, so the leak hit exactly the
         children whose spend mattered most.
 
-        Gated on a NEW turn having landed in ``turn_accounting``
-        (``turns_before`` snapshot).  That is the mechanical guarantee: the
-        payload is sourced from ``turn_accounting[-1]``, so firing when
-        nothing was appended re-emits the PREVIOUS turn's tokens and
-        duration — which is what a REFUSED turn would do, and why refused
-        turns must stay suppressed.  The count check subsumes the
-        refused-flag check and covers every other no-op path too.
+        Gated on a NEW turn having RUN (``turns_before`` snapshot against
+        :meth:`_turns_ran_snapshot`).  That is the mechanical guarantee: the
+        payload is one turn's accounting dict, so firing when no turn ran
+        re-emits the PREVIOUS turn's tokens and duration — which is what a
+        REFUSED turn would do, and why refused turns must stay suppressed.
+        The count check subsumes the refused-flag check and covers every
+        other no-op path too.
+
+        **The counter is a lifecycle fact, not a usage one (#881).**  It used
+        to be ``len(turn_accounting)``, which the session only grows when the
+        provider reported tokens — so a turn that ran and reported nothing
+        fired NEITHER half of the terminus, and a driver waiting on
+        ``TurnCompletedEvent`` (``ask()`` / ``stream()``) or on
+        ``SessionTerminatedEvent`` (``complete()``) blocked until its own
+        timeout while the daemon sat content and logged nothing.  Any
+        provider can be in that state — a stream that never delivers a usage
+        frame, a gateway that drops the field, a zero-cost cached turn — and
+        ``echo`` is simply where it is guaranteed, which is the first thing
+        every new harness reaches for.
 
         Best-effort throughout: forwarding failure must not corrupt the
         send_message response.
@@ -3898,17 +3970,28 @@ class RunnerRPC:
             turn_accounting = session.get_turn_accounting() or []
         except Exception:  # noqa: BLE001
             return
+        # Named on the CLASS, not through ``self``: this method is driven
+        # with a stand-in ``self`` by the runner tests (it reaches nothing
+        # on the instance), so a bound lookup would make the helpers
+        # unreachable there.
+        turns_now = RunnerRPC._turns_ran_snapshot(session)
         # No new turn => nothing completed => do not re-emit the last one.
-        if turns_before is not None and len(turn_accounting) <= turns_before:
+        if (turns_before is not None and turns_now is not None
+                and turns_now <= turns_before):
             return
-        if not turn_accounting:
+        last_turn = RunnerRPC._last_turn_ran(session, turn_accounting)
+        if last_turn is None:
             return
         try:
             agent_id = getattr(session, "_agent_id", None) or "main"
-            last_turn = turn_accounting[-1]
+            turn_number = max(
+                0,
+                (turns_now if turns_now is not None
+                 else len(turn_accounting)) - 1,
+            )
             ui_hooks.on_agent_turn_completed(
                 agent_id=agent_id,
-                turn_number=max(0, len(turn_accounting) - 1),
+                turn_number=turn_number,
                 prompt_tokens=last_turn.get("prompt", 0),
                 output_tokens=last_turn.get("output", 0),
                 total_tokens=last_turn.get("total", 0),

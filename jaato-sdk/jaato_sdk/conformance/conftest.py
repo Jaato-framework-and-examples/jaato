@@ -69,7 +69,7 @@ ALWAYS_REFUSES = (
 
 @pytest.fixture(scope="module")
 def daemon():
-    """A daemon serving FOUR profiles, one per ending a session can have.
+    """A daemon serving FIVE profiles, one per ending a session can have.
 
     The first two are needed and neither substitutes for the other -- the
     defects that hide behind a prose ending are exactly the ones the terminus
@@ -91,6 +91,19 @@ def daemon():
     nudge loop, and a caller settling on the first of several turns.  Neither
     profile above reaches it: the prose one is not gated, and the terminus one
     signals on turn 1.
+
+    ``conformance-unmetered`` is the fifth, and it is the one profile here
+    that differs from another by a MISSING key rather than a present one: it
+    is ``conformance-terminus`` with ``usage`` dropped, so echo reports no
+    tokens at all.  Every other profile passes ``TURN_USAGE``, and that is
+    precisely why this suite stayed green for the life of jaato #881 -- the
+    post-turn event fan-out gated on the USAGE ledger growing, so a turn that
+    ran and reported nothing emitted neither ``TurnCompletedEvent`` nor
+    ``SessionTerminatedEvent`` and every driver waiting on one hung.  A suite
+    whose every profile is metered is structurally unable to see it, however
+    many scenarios it runs.  Nothing about the state is echo-specific: a
+    stream that never delivers a usage frame, a gateway that strips the
+    field and a zero-cost cached turn all reach it.
     """
     root = Path(tempfile.mkdtemp(prefix="jaato-conformance-ws-"))
     echo_workspace(root, usage=TURN_USAGE, response="conformance ok",
@@ -111,6 +124,13 @@ def daemon():
                                     "max_refusals": MAX_REFUSALS,
                                     "on_exhausted": "allow"},
                    name="conformance-refused")
+    # The fifth ending: a turn that RAN and reported nothing.  ``usage`` is
+    # omitted, not set to zeros -- that is the shape a provider which never
+    # sends a usage frame actually produces (jaato #881).
+    echo_workspace(root,
+                   tool_call=SIGNAL_COMPLETION_CALL,
+                   completion_schema=COMPLETION_SCHEMA,
+                   name="conformance-unmetered")
     d = ConformanceDaemon(root)
     try:
         yield d.start()

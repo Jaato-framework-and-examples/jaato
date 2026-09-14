@@ -349,6 +349,26 @@ def _should_drop_introspection(has_deferred_to_discover, tool_names) -> bool:
 _BUDGET_TOOL_CALLS_OBSERVED = "_budget_tool_calls_observed"
 _BUDGET_SECONDS_OBSERVED = "_budget_seconds_observed"
 
+#: Finish reasons for a turn that REACHED THE END, and therefore should have
+#: been billed.  Only these raise the unmetered-turn warning (#688 item 3):
+#: a turn that errored, was cancelled or was cut off mid-stream also carries
+#: no tokens, and blaming the provider's usage reporting for it sends an
+#: operator after a reporting defect that is really a failed turn.  Both chat
+#: loops close through the same ``finally``, so every one of those paths
+#: reaches ``_record_turn_ran``.
+#:
+#: ``unknown`` is IN the set on purpose: per :class:`FinishReason` it means the
+#: turn ended and the upstream's word for why was not one we recognise -- a
+#: clean end with an unmapped label.  ``incomplete`` is its opposite and is
+#: out.
+_METERABLE_FINISH_REASONS = frozenset({
+    FinishReason.STOP.value,
+    FinishReason.MAX_TOKENS.value,
+    FinishReason.TOOL_USE.value,
+    FinishReason.SAFETY.value,
+    FinishReason.UNKNOWN.value,
+})
+
 
 def _resolve_parallel_width(
     explicit: Optional[int],
@@ -660,6 +680,20 @@ class JaatoSession:
         # (no turn ran).  Read runner-side to suppress the post-turn
         # TurnCompletedEvent — see ``was_last_send_refused``.
         self._last_send_refused: bool = False
+        # LIFECYCLE, not usage (#881).  ``_turn_accounting`` is a USAGE
+        # ledger: a turn lands in it only when the provider reported tokens,
+        # and every consumer of ``len(_turn_accounting)`` -- the ``turns``
+        # figure in ``get_context_usage``, the unattributed-turn reconciliation
+        # in ``get_consumption``, the persisted ``turn_count`` -- reads it as
+        # one.  These two answer the DIFFERENT question "did a turn run", and
+        # they are what the post-turn event fan-out gates on.  Keeping them
+        # apart is what lets a provider that reports no usage still terminate
+        # the session's event stream; conflating them is #881.
+        self._turns_ran: int = 0
+        self._last_turn_ran: Optional[Dict[str, Any]] = None
+        # #688 item 3: latched by ``_warn_unmetered_turn_once`` so a provider
+        # that reports no usage says so once rather than every turn.
+        self._unmetered_warning_emitted: bool = False
         self._active_tier: Optional[str] = None
 
         # Spawn-time parameters passed to this session by the caller
@@ -7275,8 +7309,7 @@ NOTES
             turn_data['duration_seconds'] = (turn_end - turn_start).total_seconds()
             self._budget_observe_turn(turn_data)
 
-            if turn_data['total'] > 0:
-                self._turn_accounting.append(turn_data)
+            self._record_turn_ran(turn_data)
 
             # Update instruction budget with conversation tokens
             self._update_conversation_budget()
@@ -10979,11 +11012,14 @@ NOTES
 
         NOT the mechanism that actually protects this today, despite what the
         wording above implies.  ``rpc._forward_post_turn_hooks`` gates on a NEW
-        turn having landed in ``turn_accounting`` -- strictly stronger, since
-        it covers every no-op path rather than just a budget refusal -- so a
-        refused turn already emits nothing.  This accessor has no consumer and
-        is kept only because a caller may want to ASK whether the last send
-        was refused; do not add a second suppression path on top of it.
+        turn having RUN (:meth:`get_turns_ran`) -- strictly stronger, since it
+        covers every no-op path rather than just a budget refusal -- so a
+        refused turn already emits nothing.  The gate used to read
+        ``len(turn_accounting)`` instead, which suppressed a refused turn for
+        the right reason and an UNMETERED one for the wrong one (#881).  This
+        accessor has no consumer and is kept only because a caller may want to
+        ASK whether the last send was refused; do not add a second suppression
+        path on top of it.
         """
         return self._last_send_refused
 
@@ -11887,8 +11923,141 @@ NOTES
                 "skipped, session will still wind down correctly", exc,
             )
 
+    def _record_turn_ran(self, turn_data: Dict[str, Any]) -> None:
+        """Close one turn: record that it RAN, and its usage if there was any.
+
+        The two halves are deliberately separate (#881).
+
+        ``_turn_accounting`` is a **usage ledger**.  A turn whose provider
+        reported no tokens is appended nowhere, because ``len()`` of that list
+        is read as a token-bearing turn count by
+        :meth:`get_context_usage` (``turns``), by :meth:`get_consumption`
+        (the unattributed-turn reconciliation), and by the persisted
+        ``turn_count``.  Appending an all-zero turn would change what every
+        one of those numbers means.
+
+        ``_turns_ran`` / ``_last_turn_ran`` are the **lifecycle** fact, and
+        they are what the post-turn event fan-out gates on.  Until #881 that
+        fan-out gated on the ledger growing, so a provider that reported no
+        usage produced no ``TurnCompletedEvent`` and no
+        ``SessionTerminatedEvent`` at all -- the session did its work, the
+        agent signalled completion, and the driver's ``complete()`` /
+        ``ask()`` / ``stream()`` waited until their own timeout with nothing
+        logged on either side.  Measured with the ``echo`` provider: dropping
+        ``plugin_configs.echo.usage`` was the whole difference between a
+        cascade that returns and one that hangs.
+
+        A REFUSED send still records nothing here, and does not need to be
+        excluded: :meth:`send_message` returns before the chat loop is
+        entered, so no ``turn_data`` is ever built and this method is never
+        reached.  That -- not the old ``total > 0`` gate -- is what has always
+        suppressed a refused turn's event.
+
+        The unmetered WARNING (#688 item 3) is raised only for a turn that
+        finished normally -- see :data:`_METERABLE_FINISH_REASONS`.  A turn
+        that errored, was cancelled or was cut off mid-stream also carries no
+        tokens, and blaming the provider's usage reporting for it would be
+        wrong in the one direction that costs an operator time: chasing a
+        reporting defect that is really a failed turn.  Those paths run
+        through this ``finally`` too, so the distinction has to be made here.
+
+        Args:
+            turn_data: The turn-accounting dict for the turn just finished.
+                Stored by reference as ``_last_turn_ran``; the caller must not
+                mutate it afterwards.
+        """
+        self._turns_ran += 1
+        self._last_turn_ran = turn_data
+        if turn_data['total'] > 0:
+            self._turn_accounting.append(turn_data)
+        elif turn_data.get('finish_reason') in _METERABLE_FINISH_REASONS:
+            self._warn_unmetered_turn_once()
+
+    def _warn_unmetered_turn_once(self) -> None:
+        """Announce, once per session, that a turn carried no token usage.
+
+        #688 item 3: there was no signal at all.  A provider or gateway that
+        drops usage zeroes the token accounting silently, and the two
+        consumers of that accounting fail in opposite directions without
+        saying so -- the consumption report reads empty, and
+        ``budget_control`` enforces its ``tokens`` / ``usd`` ceilings from
+        exactly this data, so a run that appears capped is uncapped.
+
+        WHAT THIS CAN AND CANNOT SAY.  It reports what is measurable today:
+        this turn's responses carried no tokens.  It does NOT claim the
+        upstream sent no usage frame, because nothing in the tree can yet
+        tell a reported zero from an unreported one -- ``TokenUsage`` starts
+        at all-zeros and is only overwritten when a frame arrives, so the two
+        share a value.  Giving them separate representations is #688 item 1,
+        and this wording is deliberately chosen not to pre-empt it: a warning
+        that asserted "the provider reported nothing" would be a claim the
+        data does not support, which is the same class of error as the
+        silence it replaces.
+
+        Once per session, because the condition is a property of the
+        provider rather than of the turn, and a per-turn line on a long run
+        would bury it.  Best-effort and total: this is an observation ABOUT a
+        turn, never part of its contract, so a session double that lacks the
+        binding attributes gets a vaguer line rather than an exception.
+        """
+        if getattr(self, '_unmetered_warning_emitted', False):
+            return
+        self._unmetered_warning_emitted = True
+        provider = getattr(self, '_active_provider_name', None) or '?'
+        model = getattr(self, '_model_name', None) or '?'
+        try:
+            self._trace(
+                f"UNMETERED_TURN provider={provider} model={model} "
+                f"turns_ran={self._turns_ran}")
+        except Exception:  # noqa: BLE001 — a trace must not fail a turn
+            pass
+        logger.warning(
+            "provider %r (model %r) reported no token usage for a completed "
+            "turn. Token accounting for this session will under-report, and "
+            "any budget_control ceiling on 'tokens' or 'usd' is being fed "
+            "zero and will not fire. Reported once per session.",
+            provider, model,
+        )
+
+    def get_turns_ran(self) -> int:
+        """How many turns have RUN in this session, usage or no usage.
+
+        The lifecycle counter behind the post-turn event fan-out (#881).
+        ``len(get_turn_accounting())`` answers a different question -- how
+        many turns had usage to record -- and the two diverge exactly when a
+        provider reports nothing.  A caller deciding whether a turn happened
+        wants this one; a caller summing tokens wants the ledger.
+
+        Not persisted: it exists to compare a before/after snapshot taken
+        around a single ``send_message`` call, so a revived session starting
+        again at ``0`` is correct rather than merely harmless.
+        """
+        return self._turns_ran
+
+    def get_last_turn_ran(self) -> Optional[Dict[str, Any]]:
+        """The turn-accounting dict of the last turn that RAN, or ``None``.
+
+        The payload source for the post-turn fan-out.  It is the same dict
+        ``get_turn_accounting()[-1]`` returns whenever the provider reported
+        usage, and the ONLY source for a turn where it did not -- in that
+        case the dict carries real timing, a real ``finish_reason`` and the
+        real ``function_calls``, with zeroes only where the provider was
+        silent.
+
+        ``None`` until the first turn runs.
+        """
+        return self._last_turn_ran
+
     def get_turn_accounting(self) -> List[Dict[str, Any]]:
-        """Get token usage and timing per turn."""
+        """Token usage and timing for every turn that REPORTED USAGE.
+
+        A usage ledger, not a turn log: a turn whose provider reported no
+        tokens is absent, and ``len()`` of this list is read as a
+        metered-turn count by :meth:`get_context_usage` (``turns``), by
+        :meth:`get_consumption` and by the persisted ``turn_count``.  For
+        "did a turn run" and "what happened on it" use :meth:`get_turns_ran`
+        and :meth:`get_last_turn_ran`; conflating the two is #881.
+        """
         return list(self._turn_accounting)
 
     def get_consumption(self, detail: str = DETAIL_SUMMARY) -> Dict[str, Any]:
@@ -13136,8 +13305,7 @@ NOTES
             turn_data['duration_seconds'] = (turn_end - turn_start).total_seconds()
             self._budget_observe_turn(turn_data)
 
-            if turn_data['total'] > 0:
-                self._turn_accounting.append(turn_data)
+            self._record_turn_ran(turn_data)
 
     # ==================== Context Garbage Collection ====================
 

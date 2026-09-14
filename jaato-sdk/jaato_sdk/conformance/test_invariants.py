@@ -397,3 +397,68 @@ def test_a_gate_that_always_refuses_stops_refusing_at_its_ceiling(daemon):
             await c.disconnect()
 
     asyncio.run(go())
+
+
+# ----------------------------------------------------- the unmetered session
+
+def test_a_turn_that_reports_no_usage_still_reaches_its_terminus(daemon):
+    """A session must end because its WORK ended, not because it was billed.
+
+    The one profile in this suite that passes no ``usage``, and the reason it
+    exists: every other one passes ``TURN_USAGE``, so the whole suite went
+    green for the life of jaato #881 (9/9 when the issue was filed, 10/10 by
+    the time it was fixed -- growing it did not help).  The post-turn event
+    fan-out gated on the USAGE ledger growing, and the session only appends
+    to that ledger when the provider reported tokens -- so a turn that ran
+    and reported nothing emitted NEITHER half of the terminus, and every
+    driver waiting on one blocked until its own timeout with nothing logged
+    on either side.  Measured against a live daemon: dropping
+    ``plugin_configs.echo.usage`` was the whole difference.
+
+    ``AGENT_COMPLETED`` is asserted FIRST and separately, because it is what
+    separates this defect from a broken profile.  On the pre-fix tree it
+    arrives -- the agent did the work and the payload was accepted -- and
+    then nothing follows.  A run where it is also missing is a different
+    failure and must not be read as this one.
+
+    Bounded by a poll count rather than by awaiting the terminal, for the
+    reason the refusal invariant is: the failing case does not stop on its
+    own, and a hung CI job reads as infrastructure rather than as the defect.
+    Not a timing bet either -- on the pre-fix tree the events are never
+    emitted at all, so no amount of extra waiting produces them.
+    """
+    async def go():
+        c = await _client(daemon)
+        completed: list = []
+        turns: list = []
+        terminal: list = []
+        try:
+            c.subscribe(EventType.AGENT_COMPLETED, completed.append)
+            c.subscribe(EventType.TURN_COMPLETED, turns.append)
+            c.subscribe(EventType.SESSION_TERMINATED, terminal.append)
+            await c.create_session(profile="conformance-unmetered")
+            await c.send_message("go")
+            for _ in range(120):
+                if turns and terminal:
+                    break
+                await asyncio.sleep(0.25)
+
+            assert completed, (
+                "the unmetered session never signalled completion at all; "
+                "that is a broken profile, not the usage/lifecycle coupling "
+                "this invariant is about"
+            )
+            assert turns, (
+                "the agent completed and no TURN_COMPLETED followed -- "
+                "ask() and stream() have no terminus and block until their "
+                "own timeout, because the turn reported no tokens"
+            )
+            assert terminal, (
+                "the agent completed and no SESSION_TERMINATED followed -- "
+                "complete() has no terminus and blocks until its own "
+                "timeout, because the turn reported no tokens"
+            )
+        finally:
+            await c.disconnect()
+
+    asyncio.run(go())

@@ -50,15 +50,24 @@ def test_echo_is_not_reported_as_an_unknown_provider():
     assert _codes(diags, "echo_is_a_test_double")
 
 
-def test_echo_without_usage_warns_that_no_terminal_event_will_fire():
+def test_echo_without_usage_warns_that_its_accounting_reads_empty():
+    """The finding survived #881; its CONSEQUENCE changed.
+
+    It used to be a hang -- the post-turn hook gated on the usage ledger
+    growing, so an unmetered turn emitted no terminal event at all.  That gate
+    now reads a lifecycle counter, so the session terminates normally and what
+    remains is the accounting hole: an empty consumption report and a
+    budget_control ceiling on `tokens` / `usd` being fed zero.  A warning that
+    still promised a hang would send its reader looking for the wrong symptom.
+    """
     diags = _validate("echo", {"echo": {"response": "hi"}})
     found = _codes(diags, "echo_reports_no_usage")
     assert found, "an echo profile with no usage must be flagged"
     assert found[0].severity == "warn"
     assert found[0].where == "plugin_configs.echo.usage"
-    # The message has to name the consequence, not just the missing key:
-    # the author's symptom is a hang, and nothing else will tell them why.
-    assert "TurnCompletedEvent" in found[0].message
+    # The message has to name the consequence, not just the missing key.
+    assert "budget_control" in found[0].message
+    assert "uncapped" in found[0].message
 
 
 def test_echo_with_usage_is_quiet():
