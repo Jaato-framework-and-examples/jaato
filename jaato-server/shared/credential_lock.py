@@ -39,7 +39,12 @@ Three properties make it the right primitive here:
   lands while another thread holds the lock, where the child would
   inherit a descriptor holding a lock it never took -- the live
   descriptors are tracked and closed in the child by an
-  ``os.register_at_fork`` hook.
+  ``os.register_at_fork`` hook, installed on **first acquisition**
+  rather than at import.  ``RunnerSpawner`` forks and calls
+  ``os.setsid()`` in the child, and after-fork handlers run between the
+  two; a handler put there merely because a module was imported is work
+  on a path that never asked for it, at a moment when there is nothing
+  to protect.
 
 THE RE-READ IS THE FIX.  A lock alone turns a race into a queue: N
 sessions still perform N refreshes, each rotating the token out from
@@ -188,7 +193,37 @@ def _drop_inherited_locks() -> None:
             pass
 
 
-if hasattr(os, "register_at_fork"):  # POSIX only
+#: Whether the fork hook has been installed.  Registration is LAZY --
+#: deferred to the first lock acquisition rather than done at import --
+#: because ``os.register_at_fork`` is a process-global side effect and
+#: importing an auth plugin must not put a handler on the critical path
+#: of every ``fork()`` in the process.  That path is real and narrow:
+#: ``RunnerSpawner`` forks and calls ``os.setsid()`` in the child, and
+#: after-fork handlers run in between.  A handler there is work the
+#: forking code did not ask for, in a window where this module has
+#: nothing to protect -- no lock has ever been held, so nothing can be
+#: inherited.
+#:
+#: Registering before the first acquisition is sufficient and not merely
+#: cheaper: a descriptor can only be inherited by a fork that happens
+#: while one is held, and the first hold is preceded by this call.
+_FORK_HOOK_INSTALLED = False
+
+
+def _ensure_fork_hook() -> None:
+    """Install the after-fork hook once, on first use.
+
+    A benign double-install is possible if two threads reach the flag
+    together; the handler is idempotent and the cost is one extra no-op
+    call per fork, which is preferable to a module-level lock -- another
+    lock object exposed to ``fork()`` is the shape this module exists to
+    avoid.  ``register_at_fork`` cannot be undone, so it is never
+    installed speculatively.
+    """
+    global _FORK_HOOK_INSTALLED
+    if _FORK_HOOK_INSTALLED or not hasattr(os, "register_at_fork"):
+        return
+    _FORK_HOOK_INSTALLED = True
     os.register_at_fork(after_in_child=_drop_inherited_locks)
 
 
@@ -318,6 +353,7 @@ def credential_lock(
     timeout fires.  Keep the call sites flat: a helper called from inside
     the lock must not take it again.
     """
+    _ensure_fork_hook()
     wait = lock_timeout_seconds() if timeout is None else timeout
     path = lock_path_for(credential_path)
     fd = _open_lock_file(path)

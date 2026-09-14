@@ -472,6 +472,38 @@ def test_no_lock_descriptor_is_held_at_rest(tmp_path: Path) -> None:
     assert cl._HELD_FDS == set()
 
 
+def test_importing_this_module_installs_no_fork_hook() -> None:
+    """Importing an auth plugin must not put a handler on every fork().
+
+    ``os.register_at_fork`` is a process-global side effect and cannot be
+    undone.  ``RunnerSpawner`` forks and calls ``os.setsid()`` in the
+    child, and after-fork handlers run *between* those two — so a hook
+    installed merely because some module was imported is work on a
+    critical path that never asked for it, in a window where this module
+    has nothing to protect: no lock has ever been held, so none can be
+    inherited.
+
+    Registration is therefore deferred to the first acquisition, which
+    is sufficient — a descriptor is only inheritable by a fork that
+    happens while one is held.
+    """
+    import subprocess
+
+    probe = (
+        "import sys; sys.path.insert(0, %r); "
+        "from shared import credential_lock as cl; "
+        "print(cl._FORK_HOOK_INSTALLED)" % _server_dir()
+    )
+    out = subprocess.run(
+        [sys.executable, "-c", probe], capture_output=True, text=True,
+    )
+    assert out.returncode == 0, out.stderr
+    assert out.stdout.strip() == "False", (
+        "importing shared.credential_lock registered an at-fork handler; "
+        "it must wait until a lock is actually taken"
+    )
+
+
 @pytest.mark.skipif(not hasattr(os, "fork"), reason="POSIX fork only")
 def test_a_forked_child_does_not_inherit_a_held_lock(tmp_path: Path) -> None:
     """``fork()`` duplicates descriptors — including one holding a lock.
