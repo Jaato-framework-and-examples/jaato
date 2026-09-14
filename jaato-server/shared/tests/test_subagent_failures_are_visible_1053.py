@@ -79,33 +79,63 @@ REVERSIONS = [
 
 # --------------------------------------------------------------- the AST guard
 
-def _failure_returns(tree: ast.AST):
-    """Every ``return`` whose value is a self-declared failure payload."""
-    bare, contract = [], []
+def _is_contract_failure(value: ast.expr) -> bool:
+    """``return False, payload`` — the shape ToolExecutor reads as a failure."""
+    if not isinstance(value, ast.Tuple) or len(value.elts) != 2:
+        return False
+    flag = value.elts[0]
+    return isinstance(flag, ast.Constant) and flag.value is False
+
+
+def _declares_success_false(keywords) -> bool:
+    """Does this keyword list carry ``success=False``?"""
+    for kw in keywords:
+        if kw.arg != "success":
+            continue
+        if isinstance(kw.value, ast.Constant) and kw.value.value is False:
+            return True
+    return False
+
+
+def _is_result_type_failure(value: ast.expr) -> bool:
+    """``SubagentResult(success=False, ...).to_dict()`` — a bare dict."""
+    if not isinstance(value, ast.Call):
+        return False
+    func = value.func
+    if not isinstance(func, ast.Attribute) or func.attr != "to_dict":
+        return False
+    if not isinstance(func.value, ast.Call):
+        return False
+    return _declares_success_false(func.value.keywords)
+
+
+def _is_literal_dict_failure(value: ast.expr) -> bool:
+    """``{"success": False, ...}`` — also a bare dict."""
+    if not isinstance(value, ast.Dict):
+        return False
+    for key, val in zip(value.keys, value.values):
+        if not (isinstance(key, ast.Constant) and key.value == "success"):
+            continue
+        if isinstance(val, ast.Constant) and val.value is False:
+            return True
+    return False
+
+
+def _returned_values(tree: ast.AST):
+    """Every ``return`` in *tree* that returns something, as (lineno, value)."""
     for node in ast.walk(tree):
-        if not isinstance(node, ast.Return) or node.value is None:
-            continue
-        v = node.value
-        if (isinstance(v, ast.Tuple) and len(v.elts) == 2
-                and isinstance(v.elts[0], ast.Constant)
-                and v.elts[0].value is False):
-            contract.append(node.lineno)
-            continue
-        # SubagentResult(success=False, ...).to_dict()
-        if (isinstance(v, ast.Call) and isinstance(v.func, ast.Attribute)
-                and v.func.attr == "to_dict"
-                and isinstance(v.func.value, ast.Call)):
-            for kw in v.func.value.keywords:
-                if (kw.arg == "success" and isinstance(kw.value, ast.Constant)
-                        and kw.value.value is False):
-                    bare.append(node.lineno)
-        # {"success": False, ...}
-        elif isinstance(v, ast.Dict):
-            for k, val in zip(v.keys, v.values):
-                if (isinstance(k, ast.Constant) and k.value == "success"
-                        and isinstance(val, ast.Constant)
-                        and val.value is False):
-                    bare.append(node.lineno)
+        if isinstance(node, ast.Return) and node.value is not None:
+            yield node.lineno, node.value
+
+
+def _failure_returns(tree: ast.AST):
+    """Split self-declared failure returns into (bare, contract) line lists."""
+    bare, contract = [], []
+    for lineno, value in _returned_values(tree):
+        if _is_contract_failure(value):
+            contract.append(lineno)
+        elif _is_result_type_failure(value) or _is_literal_dict_failure(value):
+            bare.append(lineno)
     return bare, contract
 
 
