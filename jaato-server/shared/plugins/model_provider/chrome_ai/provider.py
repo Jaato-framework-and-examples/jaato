@@ -134,7 +134,7 @@ class ChromeAIProvider(ModalityCapabilityMixin):
         self._model_name: Optional[str] = None
         self._connected = False
         self._context_limit: int = 0
-        self._last_usage = TokenUsage()
+        self._last_usage = TokenUsage(reported=False)   # no turn yet (#688)
         self._agent_id = "main"
 
         # Knobs (populated in initialize()).
@@ -313,7 +313,7 @@ class ChromeAIProvider(ModalityCapabilityMixin):
                            "cold-start cost will fall on the first turn)",
                            exc_info=True)
         finally:
-            self._last_usage = TokenUsage()
+            self._last_usage = TokenUsage(reported=False)   # warmup is not a turn (#688)
 
     @property
     def is_connected(self) -> bool:

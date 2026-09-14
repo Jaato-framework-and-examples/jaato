@@ -178,7 +178,7 @@ class AntigravityProvider(ModalityCapabilityMixin):
         self._thinking_budget: int = 8192  # For Claude thinking models
 
         # Per-call accounting (updated by complete())
-        self._last_usage: TokenUsage = TokenUsage()
+        self._last_usage: TokenUsage = TokenUsage(reported=False)
 
         # Agent context for tracing
         self._agent_type: str = "main"
@@ -999,7 +999,7 @@ class AntigravityProvider(ModalityCapabilityMixin):
         parts: List[Part] = []
         accumulated_text: List[str] = []
         thinking_text: List[str] = []
-        usage = TokenUsage()
+        usage = TokenUsage(reported=False)   # until a chunk reports it (#688)
         finish_reason = FinishReason.UNKNOWN
         # Whether the SSE stream declared its own end -- either a chunk
         # carrying a finish reason, or the protocol's ``done`` sentinel.

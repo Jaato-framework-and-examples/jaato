@@ -832,7 +832,7 @@ class VLLMProvider(OpenAICompatLocalHostProvider):
         # turn (#687).
         terminal_seen = False
         function_calls: List[FunctionCall] = []
-        usage = TokenUsage()
+        usage = TokenUsage(reported=False)   # until a chunk reports it (#688)
         was_cancelled = False
 
         tool_call_accumulators: Dict[int, Dict[str, Any]] = {}

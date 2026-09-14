@@ -666,6 +666,12 @@ class JaatoSession:
         # apply.  ``_budget_terminal_action`` latches the last terminal action
         # a rung asked for, so a caller can see WHY a session wound down.
         self._budget_tracker: Optional['BudgetTracker'] = None
+        self._budget_control: Optional['BudgetControlConfig'] = None
+        # One warning per session when a provider reports no usage (#688).
+        # An unmetered provider is unmetered on EVERY turn, so a per-response
+        # line would bury the run's real output -- the same reason #881's
+        # no-token warning is latched.
+        self._budget_unmetered_warned: bool = False
         self._budget_terminal_action: Optional[str] = None
         # Set once an ``abort`` rung fires.  Gates EVERY subsequent turn —
         # see ``_refuse_if_budget_exhausted``.  Distinct from
@@ -2803,9 +2809,14 @@ class JaatoSession:
         if budget_control is not None:
             from .budget_control import BudgetTracker
             self._budget_tracker = BudgetTracker(budget_control)
+            # Kept beside the tracker because ``on_unmetered`` is read per
+            # response, on a path that has the session but not the profile.
+            self._budget_control = budget_control
             logger.info(
-                "Budget control active: limits=%s, %d degrade rung(s)",
+                "Budget control active: limits=%s, %d degrade rung(s), "
+                "on_unmetered=%s",
                 dict(budget_control.limits), len(budget_control.degrade),
+                budget_control.on_unmetered,
             )
 
         # Tool-pool width (#862), from whichever of the two vehicles
@@ -11084,6 +11095,24 @@ NOTES
         (``_resolve_span_cost``: provider-reported -> pricing table -> None).
         A ``None`` cost leaves the ``usd`` dimension untouched — a budget
         must never hard-stop on a number it invented.
+
+        UNREPORTED USAGE IS NOT ZERO SPEND (#688).  ``TokenUsage.reported``
+        is ``False`` when the provider — or a proxy in front of it — sent no
+        usage block at all.  Before that flag existed the two were the same
+        all-zero value, so an unmetered upstream advanced no dimension, no
+        rung ever fired, and a run that looked capped was uncapped.  What
+        happens instead is the profile's to choose
+        (``budget_control.on_unmetered``):
+
+        * ``estimate`` (default) — charge ``tokens`` from a local estimate
+          and leave ``usd`` untouched.  The asymmetry is the docstring rule
+          above: GC already estimates token counts for its own threshold, so
+          that quantity is one the framework routinely computes, while a
+          dollar figure derived from guessed tokens is a price nobody quoted.
+        * ``halt`` — trip the session's cancel token, the same stop an
+          ``abort`` rung uses.  Opt-in: as a default it would take down every
+          deployment behind a usage-dropping proxy on upgrade.
+        * ``ignore`` — the pre-#688 behaviour, chosen explicitly.
         """
         if self._budget_tracker is None:
             return
@@ -11091,15 +11120,98 @@ NOTES
         if usage is None:
             return
         try:
-            fired = self._budget_tracker.observe(
-                tokens=int(getattr(usage, "total_tokens", 0) or 0),
-                usd=self._resolve_span_cost(usage),
-            )
+            if getattr(usage, "reported", True):
+                fired = self._budget_tracker.observe(
+                    tokens=int(getattr(usage, "total_tokens", 0) or 0),
+                    usd=self._resolve_span_cost(usage),
+                )
+            else:
+                fired = self._budget_observe_unmetered(response)
+                if fired is None:
+                    return
             self._apply_budget_rungs(fired)
         except Exception as exc:  # noqa: BLE001
             # Budgeting is a guardrail, not part of the turn's contract —
             # never let it break a live turn.
             logger.warning("budget: response observation failed: %s", exc)
+
+    def _budget_observe_unmetered(self, response: ProviderResponse):
+        """Apply ``on_unmetered`` for a response that measured nothing.
+
+        Returns the fired rungs to apply, or ``None`` when there is nothing
+        to apply (``ignore``, or a ``halt`` that has already stopped the
+        session — re-entering the ladder after a stop would double-report).
+
+        The warning is emitted ONCE per session, keyed the same way #881's
+        no-token warning is: an unmetered provider is unmetered for every
+        turn, and a per-response line would bury the run's real output.
+        """
+        cfg = getattr(self, "_budget_control", None)
+        policy = getattr(cfg, "on_unmetered", None) or "estimate"
+
+        if not self._budget_unmetered_warned:
+            self._budget_unmetered_warned = True
+            logger.warning(
+                "budget: provider reported no usage (provider=%s model=%s); "
+                "budget_control.on_unmetered=%s. A ceiling on 'usd' is fed "
+                "nothing whatever the policy, because a cost computed from "
+                "unmeasured tokens is invented; 'tokens' is %s.",
+                self._provider_name_override or "?", self._model_name or "?",
+                policy,
+                {"estimate": "charged from a local estimate",
+                 "halt": "not charged — the session is being stopped",
+                 "ignore": "not charged at all"}.get(policy, policy),
+            )
+
+        if policy == "ignore":
+            return None
+
+        if policy == "halt":
+            logger.error(
+                "budget: halting — provider reported no usage and "
+                "budget_control.on_unmetered='halt'. The ceiling cannot be "
+                "enforced on unmeasured spend, so the session stops rather "
+                "than continuing uncapped.",
+            )
+            self._budget_terminal_action = "abort"
+            self.request_stop()
+            return None
+
+        # estimate: tokens only, never usd.
+        return self._budget_tracker.observe(
+            tokens=self._estimate_response_tokens(response),
+        )
+
+    def _estimate_response_tokens(self, response: ProviderResponse) -> int:
+        """Rough token count for a response the provider did not measure.
+
+        Deliberately the SAME estimator GC uses for its own threshold
+        (``instruction_budget.estimate_tokens``, 4 chars/token) rather than a
+        second approximation with its own error: a budget and a GC threshold
+        disagreeing about the size of one turn is a defect that is very hard
+        to see from either side.
+
+        Counts the request side too — the history replayed on this call is
+        input the upstream charged for, and a ceiling fed only the reply
+        would under-count by roughly the whole conversation.
+        """
+        from .instruction_budget import estimate_tokens
+        from .plugins.gc.utils import estimate_message_tokens
+
+        total = 0
+        for part in (getattr(response, "parts", None) or ()):
+            text = getattr(part, "text", None)
+            if text:
+                total += estimate_tokens(text)
+        text = getattr(response, "text", None)
+        if text and not total:
+            total += estimate_tokens(text)
+        try:
+            for message in self._history.messages:
+                total += estimate_message_tokens(message)
+        except Exception:  # noqa: BLE001 — estimation must not break a turn
+            pass
+        return max(1, total)
 
     def _budget_observe_turn(self, turn_data: Dict[str, Any]) -> None:
         """Feed one completed turn: its turn count, plus whatever the

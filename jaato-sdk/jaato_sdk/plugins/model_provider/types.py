@@ -710,6 +710,11 @@ class TokenUsage:
         thinking_tokens: Tokens used for extended thinking (Anthropic/Gemini).
             Subset of output_tokens spent on thinking content.
             Extracted from API when available, otherwise estimated from text.
+        reported: Whether the provider actually reported usage for this
+            call.  ``False`` means NOTHING was measured — which is not
+            the same fact as a measured zero, and is what stops an
+            unmetered upstream from silently disabling ``budget_control``
+            (#688).  See the field comment for why it defaults ``True``.
     """
     prompt_tokens: int = 0
     output_tokens: int = 0
@@ -729,6 +734,35 @@ class TokenUsage:
     # boundary.  Provider-reported values always win — they're
     # closer to the source of truth.
     cost_usd: Optional[float] = None
+    # Whether a provider actually REPORTED usage for this call (#688).
+    #
+    # An all-zero ``TokenUsage`` is produced on two completely different
+    # occasions and, until this field, they were the same value:
+    #
+    #   * the provider measured the call and it genuinely cost nothing
+    #     (a cached turn, a refusal short-circuited before the wire);
+    #   * the provider — or a proxy in front of it — sent no ``usage``
+    #     block at all, so nothing was ever measured.
+    #
+    # ``budget_control`` enforces its ``usd`` / ``tokens`` ceilings from
+    # this data, so conflating the two makes an unmetered upstream
+    # SILENTLY DISABLE spend enforcement: the ladder is fed zero, never
+    # advances, and a run that looks capped is uncapped.  Failing open on
+    # a spend control is the wrong direction, and it failed open quietly.
+    #
+    # DEFAULT IS ``True``, deliberately.  A seam that has not been
+    # migrated — an out-of-tree provider, jaato-premium, a third-party
+    # adapter — therefore behaves exactly as it did before this field
+    # existed, rather than being marked "unknown" and having a budget
+    # policy applied to it that its author never saw.  The in-tree
+    # placeholders are all migrated in the same change that added this,
+    # so the default protects strangers, not us: there is no
+    # half-migrated state in this repository for it to paper over.
+    #
+    # The same distinction, for the same reason, is already carried by
+    # ``cache_read_tokens`` — ``None`` there means "provider reported
+    # nothing" and is documented as distinct from a reported zero.
+    reported: bool = True
 
 
 def uncached_prompt_tokens(

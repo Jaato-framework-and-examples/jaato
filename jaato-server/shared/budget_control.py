@@ -79,6 +79,33 @@ logger = logging.getLogger(__name__)
 DIMENSIONS: Tuple[str, ...] = ("usd", "tokens", "seconds", "tool_calls", "turns")
 VALID_DIMENSIONS: frozenset = frozenset(DIMENSIONS)
 
+#: What ``budget_control`` does when a provider reports NO usage (#688).
+#:
+#: An unmetered upstream — or a proxy that strips ``usage`` — fed the
+#: tracker an all-zero measurement, so no dimension advanced, no rung
+#: fired, and a run that looked capped was uncapped.  Failing open on a
+#: spend control is the wrong direction, and it failed open silently.
+#:
+#: ``estimate`` (the default) charges the ``tokens`` dimension from a
+#: local estimate and leaves ``usd`` ALONE.  That asymmetry is the
+#: house rule stated in ``_budget_observe_response``'s own docstring —
+#: *a budget must never hard-stop on a number it invented* — and the
+#: two dimensions are not alike: GC already estimates token counts for
+#: its own threshold, so an estimate there is a quantity the framework
+#: routinely computes, while a dollar figure derived from guessed
+#: tokens is a price nobody quoted.
+#:
+#: ``halt`` is the fail-closed posture for a deployment that would
+#: rather stop than spend unmeasured.  It is OPT-IN because making it
+#: the default would, on upgrade, take down every deployment sitting
+#: behind a usage-dropping proxy — most of the "approximately
+#: OpenAI-compatible" surface.
+#:
+#: ``ignore`` is the pre-#688 behaviour, named so that a deployment
+#: choosing it has chosen it.
+UNMETERED_POLICIES: Tuple[str, ...] = ("estimate", "halt", "ignore")
+DEFAULT_UNMETERED_POLICY = "estimate"
+
 # Terminal actions a rung may take instead of / alongside an overlay.
 #   finalize -> inject "wrap up and answer with what you have" (graceful)
 #   abort    -> hard stop (ungraceful; for when a partial answer is worthless)
@@ -204,6 +231,35 @@ def _parse_at(raw: object) -> float:
             f"'at' must be a percentage in (0, 100], got {value}"
         )
     return value
+
+
+def _parse_on_unmetered(raw: object) -> str:
+    """Validate the ``on_unmetered`` key of a ``budget_control`` block.
+
+    Split out of :meth:`BudgetControlConfig.from_dict` to keep that
+    method under the complexity ceiling, following the same shape as
+    :func:`_parse_at` — the parser for one key, owning that key's error
+    message.
+
+    Raises:
+        BudgetControlConfigError: Not a string, or not a known policy.
+            A typo must not degrade to a default nobody chose.
+    """
+    if raw is None:
+        return DEFAULT_UNMETERED_POLICY
+    if not isinstance(raw, str):
+        raise BudgetControlConfigError(
+            f"budget_control.on_unmetered must be a string, "
+            f"got {type(raw).__name__}"
+        )
+    # The VOCABULARY is not checked here, deliberately.  ``from_dict``
+    # constructs the dataclass immediately below, so ``__post_init__``
+    # sees every value this returns -- and that check also covers direct
+    # construction, which jaato-premium and the tests use.  Checking in
+    # both places is not defence in depth: it makes each copy
+    # individually unreachable, so neither can be shown to do anything
+    # and a guard on either is decorative.  One check, one door.
+    return raw
 
 
 def _parse_degrade_overlay(
@@ -364,10 +420,14 @@ class BudgetControlConfig:
         limits: Dimension → positive ceiling.  Keys are a subset of
             :data:`VALID_DIMENSIONS`; an absent dimension is unbounded.
         degrade: Rungs ordered by strictly increasing ``at_percent``.
+        on_unmetered: What to do when a provider reports no usage —
+            one of :data:`UNMETERED_POLICIES`.  See that constant for
+            why ``estimate`` is the default and ``halt`` is opt-in.
     """
 
     limits: Mapping[str, float] = field(default_factory=dict)
     degrade: Tuple[DegradeRung, ...] = ()
+    on_unmetered: str = DEFAULT_UNMETERED_POLICY
 
     def __post_init__(self) -> None:
         for dim, value in self.limits.items():
@@ -384,6 +444,12 @@ class BudgetControlConfig:
                 raise BudgetControlConfigError(
                     f"limits.{dim}: must be > 0, got {value}"
                 )
+        if self.on_unmetered not in UNMETERED_POLICIES:
+            raise BudgetControlConfigError(
+                f"budget_control.on_unmetered: unknown policy "
+                f"'{self.on_unmetered}' "
+                f"(valid: {', '.join(UNMETERED_POLICIES)})"
+            )
         # Strictly increasing thresholds: two rungs at the same 'at' would
         # make "which fires first" arbitrary, and is nearly always a
         # copy-paste slip rather than intent.
@@ -454,12 +520,13 @@ class BudgetControlConfig:
             raise BudgetControlConfigError(
                 f"budget_control must be an object, got {type(data).__name__}"
             )
-        unknown = set(data) - {"limits", "degrade"}
+        unknown = set(data) - {"limits", "degrade", "on_unmetered"}
         if unknown:
             raise BudgetControlConfigError(
                 f"budget_control: unknown key(s) {sorted(unknown)} "
-                f"(valid: degrade, limits)"
+                f"(valid: degrade, limits, on_unmetered)"
             )
+        on_unmetered = _parse_on_unmetered(data.get("on_unmetered"))
 
         raw_limits = data.get("limits") or {}
         if raw_limits and not isinstance(raw_limits, Mapping):
@@ -481,8 +548,12 @@ class BudgetControlConfig:
         )
 
         if not limits and not degrade:
+            # ``on_unmetered`` alone enforces nothing — it only says what
+            # to do about ceilings, and there are none.  Parsing to None
+            # keeps "absent" and "says nothing enforceable" identical, as
+            # the class docstring promises.
             return None
-        return cls(limits=limits, degrade=degrade)
+        return cls(limits=limits, degrade=degrade, on_unmetered=on_unmetered)
 
     def to_dict(self) -> Dict[str, Any]:
         """Round-trip form for the session envelope (daemon -> runner).
@@ -498,6 +569,8 @@ class BudgetControlConfig:
             out["limits"] = dict(self.limits)
         if self.degrade:
             out["degrade"] = [r.to_dict() for r in self.degrade]
+        if self.on_unmetered != DEFAULT_UNMETERED_POLICY:
+            out["on_unmetered"] = self.on_unmetered
         return out
 
 

@@ -168,8 +168,8 @@ class EchoProvider(ModalityCapabilityMixin):
         # configures ``plugin_configs.echo.usage`` -- echo costs nothing, but
         # it can REPORT a cost so the budget subsystem is assertable without
         # a provider that spends.
-        self._last_usage: TokenUsage = TokenUsage()
-        self._usage: TokenUsage = TokenUsage()
+        self._last_usage: TokenUsage = TokenUsage(reported=False)
+        self._usage: TokenUsage = TokenUsage(reported=False)
 
     @property
     def name(self) -> str:
@@ -227,7 +227,12 @@ class EchoProvider(ModalityCapabilityMixin):
         asserting it would read the framework's silence as its own bug.
         """
         if not spec:
-            return TokenUsage()
+            # No ``usage`` key at all -- echo then behaves like a provider
+            # that reports NOTHING, which is what ``conformance-unmetered``
+            # exists to exercise.  ``reported`` is itself an accepted key
+            # (``allowed`` is derived from the dataclass), so a profile can
+            # assert either side of the #688 distinction explicitly.
+            return TokenUsage(reported=False)
         allowed = {f.name for f in dataclasses.fields(TokenUsage)}
         unknown = set(spec) - allowed
         if unknown:
