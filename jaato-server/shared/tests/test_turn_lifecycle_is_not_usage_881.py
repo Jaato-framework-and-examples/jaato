@@ -256,22 +256,23 @@ def test_a_session_without_the_lifecycle_accessors_behaves_as_before():
     ``get_turns_ran``; it must still get the ledger-length gate it had, not
     an exception and not an unguarded double emission.
     """
-    hooks = _Hooks()
-    old = SimpleNamespace(
-        _ui_hooks=hooks, _agent_id="main",
-        get_turn_accounting=lambda: [_turn(total=99)],
-        get_context_usage=lambda: {},
-        get_history=lambda: [],
-    )
-    _fwd(old, turns_before=0)
-    assert len(hooks.turns) == 1
-    assert hooks.turns[0]["total_tokens"] == 99
+    def _legacy(hooks):
+        return SimpleNamespace(
+            _ui_hooks=hooks, _agent_id="main",
+            get_turn_accounting=lambda: [_turn(total=99)],
+            get_context_usage=lambda: {},
+            get_history=lambda: [],
+        )
 
-    hooks2 = _Hooks()
-    old.get_turn_accounting = lambda: [_turn(total=99)]
-    old._ui_hooks = hooks2
-    _fwd(old, turns_before=1)          # ledger did not grow
-    assert hooks2.turns == []
+    grew = _Hooks()
+    _fwd(_legacy(grew), turns_before=0)     # the ledger grew
+    assert len(grew.turns) == 1
+    assert grew.turns[0]["total_tokens"] == 99
+    assert grew.turns[0]["turn_number"] == 0
+
+    flat = _Hooks()
+    _fwd(_legacy(flat), turns_before=1)     # the ledger did not
+    assert flat.turns == []
 
 
 # ------------------------------------------- the signal that was not there
