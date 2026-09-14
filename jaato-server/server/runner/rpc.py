@@ -98,6 +98,14 @@ from .envelope import (
 logger = logging.getLogger(__name__)
 
 
+#: Characters of a dropped failure's own message carried into the
+#: substitute response (#999).  Enough to name what went wrong, four
+#: orders of magnitude under ``MAX_MESSAGE_SIZE`` so the substitute
+#: cannot itself be refused — which is the premise the pre-#999 skip
+#: asserted about the wrong frame and never checked.
+OVERSIZE_MESSAGE_CHARS = 2000
+
+
 # We deliberately re-use :class:`jaato_sdk.plugins.model_provider.types.CancelToken`
 # rather than defining a runner-private type: ``run_command`` and the
 # rest of the in-process plugin contract already poll
@@ -558,7 +566,22 @@ class RunnerRPC:
         text: str,
         mode: Optional[str],
     ) -> None:
-        """Emit a streaming-output chunk for the given in-flight call."""
+        """Emit a streaming-output chunk for the given in-flight call.
+
+        AN OVERSIZED CHUNK IS DROPPED WITH NO SUBSTITUTE, and that is a
+        decision rather than an omission (#999 asked for it to be stated).
+        A chunk is display output, not an answer: the call still ends in a
+        response, so dropping one costs the viewer some text and costs the
+        CALLER nothing — where dropping a response costs the caller the
+        whole call, which is why :meth:`_emit_response` substitutes.
+
+        Substituting here would also be the wrong shape twice over: a
+        stream frame has no field in which to say "something was dropped"
+        that is not itself display text, and a per-chunk error would arrive
+        interleaved with real output as though the model had said it.  The
+        drop is already logged at ERROR by :meth:`_write` with the call id,
+        which is where an operator looks for it.
+        """
         frame = StreamFrame(
             id=request_id,
             source=source,
@@ -653,22 +676,76 @@ class RunnerRPC:
         # result did not fit, and the channel survives to serve the
         # next call.  A result carrying megabytes of tool output is the
         # realistic case; the substitute is small by construction.
-        if not ok or self._closed:
-            # An error frame that did not fit will not fit a second
-            # time, and a closed channel has nowhere to put either.
+        #
+        # #999: that used to skip ``ok=False`` on the reasoning that "an
+        # error frame that did not fit will not fit a second time".  The
+        # premise names the wrong frame.  What did not fit is the
+        # ORIGINAL, whose ``result`` dict carries the same megabytes of
+        # tool output beside ``ErrorPayload.traceback`` — the
+        # domain-failure branch of ``_handle_request`` passes exactly
+        # that.  The substitute is a different, bounded frame, so it
+        # fits.  Measured on the pre-fix tree over a real socketpair:
+        # ``ok=True`` answered the caller in 221 bytes and ``ok=False``
+        # wrote NOTHING, leaving ``_closed`` False — the channel open,
+        # the runner idle, the daemon waiting.  #856's ack watchdog
+        # bounds that at 120 s with a ``RunnerResultLost`` verdict; it
+        # does not recover the reason the runner already had in hand.
+        if self._closed:
+            # A closed channel has nowhere to put either.  This is the
+            # only half of the old guard that was ever true.
             return
-        self._write(ResponseEnvelope(
+        if not self._write(
+                self._oversize_substitute(request_id, ok, error).to_dict()):
+            # Belt and braces on "small by construction": if even that
+            # did not fit, the only text it borrowed is the one thing
+            # that can be dropped.  A caller told nothing is the state
+            # #999 is about, so it is worth one more bounded attempt.
+            self._write(self._oversize_substitute(
+                request_id, ok, None).to_dict())
+
+    def _oversize_substitute(
+        self,
+        request_id: int,
+        ok: bool,
+        error: Optional[ErrorPayload],
+    ) -> ResponseEnvelope:
+        """The small frame that answers a call whose real response did not fit.
+
+        Always a FAILURE, whichever way the original went: a success whose
+        result was dropped is not a success the caller can use, and saying
+        so is the whole point.
+
+        CARRIES THE ORIGINAL FAILURE'S ``type`` AND A BOUNDED PREFIX OF ITS
+        ``message`` when there was one.  The runner knows what went wrong
+        and the pre-#999 caller was told only that something did not fit —
+        which for a domain failure is the less useful half of the truth.
+        The traceback is deliberately NOT carried: it is usually what made
+        the frame oversized, and it is the part a bounded substitute cannot
+        promise to deliver.
+
+        Bounded by :data:`OVERSIZE_MESSAGE_CHARS` against a frame cap four
+        orders of magnitude larger, so "small by construction" is enforced
+        here rather than argued at the call site.
+        """
+        detail = (
+            f"runner RPC: response exceeded the {MAX_MESSAGE_SIZE}-byte "
+            "frame cap and was dropped"
+        )
+        if error is not None:
+            message = error.message or ""
+            if len(message) > OVERSIZE_MESSAGE_CHARS:
+                message = message[:OVERSIZE_MESSAGE_CHARS] + " […truncated]"
+            detail += (
+                f". The call had already FAILED with {error.type}: {message}"
+            )
+        elif not ok:
+            detail += ". The call had already FAILED, with no error payload"
+        return ResponseEnvelope(
             id=request_id,
             ok=False,
             result=None,
-            error=ErrorPayload(
-                type="FrameTooLargeError",
-                message=(
-                    "runner RPC: response exceeded the "
-                    f"{MAX_MESSAGE_SIZE}-byte frame cap and was dropped"
-                ),
-            ),
-        ).to_dict())
+            error=ErrorPayload(type="FrameTooLargeError", message=detail),
+        )
 
     # --------------------------- request paths -------------------------
 

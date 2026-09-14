@@ -4336,24 +4336,40 @@ error RESPONSE (`unknown method: ...`), and `serve()` wraps its loop body
 in no broad `except`, so an unexpected reader-thread exception closes the
 channel and becomes #851 rather than this.
 
-What IS reachable, and demonstrated in
-`test_a_runner_can_answer_a_call_with_nothing_and_stay_healthy`, is a
+What WAS reachable, and demonstrated in
+`test_the_response_side_drop_that_produced_this_state_is_closed`, is a
 response-side drop. #920 refuses to write an oversized frame and
 substitutes a small typed error for the call — guarded by `if not ok or
-self._closed: return`, so the substitution happens for a SUCCESS
+self._closed: return`, so the substitution happened for a SUCCESS
 response and not for an ERROR one, on the reasoning that an error frame
 that did not fit will not fit again. But the substitute is small by
 construction; what did not fit is the original, whose `result` dict
 carries megabytes of tool output beside the traceback. Measured: `ok=True`
-answers the caller in 221 bytes, `ok=False` writes **nothing at all** and
-leaves `_closed` **False** — the channel open, the runner idle, the
+answered the caller in 221 bytes, `ok=False` wrote **nothing at all** and
+left `_closed` **False** — the channel open, the runner idle, the
 daemon waiting forever. Not a claim about the reported incident, which
 would need the runner's own log; a demonstration that the class is
 reachable, and it is precisely what the `finished` verdict answers.
 
-So: **bounded, not root-caused.** The remaining gap — extending #920's
-substitution to error responses — is now bounded by this deadline rather
-than infinite, and is left as its own change.
+**That producer is closed (#999).** Both paths substitute now, and
+`_emit_response`'s guard is `if self._closed` alone — the only half of it
+that was ever true. The substitute also carries the original failure's
+`type` and a bounded prefix of its `message`, because the runner held the
+reason and telling the caller only "too large" threw it away; the
+traceback is deliberately not carried, being usually what made the frame
+oversized. `OVERSIZE_MESSAGE_CHARS` (2000, against a 10 MB cap) makes
+"small by construction" an enforced property rather than the unchecked
+claim the old guard rested on, and a second, quotation-free attempt is
+written if even that is refused.
+
+The deadline is unaffected and is still what matters here: it bounds the
+CLASS rather than any one producer, and the `finished` verdict remains
+the right answer whenever a response is lost — a closed channel, a
+severed peer, or whatever drops one next. An oversized STREAM chunk is
+still dropped with no substitute, now as a stated decision: a chunk is
+display output rather than an answer, so the call still ends in a
+response, and a per-chunk error would arrive interleaved with real output
+as though the model had said it.
 
 ### Interactive Shell Sessions (`shared/plugins/interactive_shell/`)
 

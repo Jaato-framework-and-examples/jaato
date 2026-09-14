@@ -14,6 +14,21 @@ output naming which tree was loaded.
 These tests are deliberately NOT marked ``conformance``.  They are about the
 fixture, not about a daemon, and a guard that only runs under the opt-in
 marker would not run in the leg where this regression would reappear.
+
+NO ``REVERSIONS`` BLOCK, because the meta-guard cannot reach one here:
+``_guard_modules`` walks ``shared/tests`` and ``server/tests`` only, so a
+list declared in this package would be silently undiscovered -- decorative in
+exactly the way that suite exists to prevent.  Importing it would also be the
+first ``shared`` import in the SDK, which the package does not do.  Both
+reversions were therefore checked by hand and are recorded here so the next
+reader can repeat them:
+
+* remove ``env=env`` from the ``Popen`` call ->
+  ``test_the_spawn_is_given_an_env_naming_this_tree`` fails (verified);
+* make ``tree_roots`` take the server tier from resolution instead of the
+  anchor's checkout -> ``test_the_server_tier_comes_from_the_anchors_own
+  _checkout`` fails (verified against the first draft, which did exactly
+  that).
 """
 
 from __future__ import annotations
@@ -36,7 +51,6 @@ from jaato_sdk.conformance.daemon import (
     tree_pythonpath,
     tree_roots,
 )
-
 
 _REAL_FIND_SPEC = dmod.importlib.util.find_spec
 
