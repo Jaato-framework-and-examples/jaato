@@ -15,6 +15,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from ..plugin import SubagentPlugin
+from shared.tool_result_builder import split_executor_result as _split
 
 
 def _make_mock_session(agent_id="main"):
@@ -219,7 +220,7 @@ class TestCloseSubagentIsolation:
         _register_subagent(plugin, "subagent_1", owner)
 
         plugin.set_parent_session(owner)
-        result = plugin._execute_close_subagent({'subagent_id': 'subagent_1'})
+        ok, result = _split(plugin._execute_close_subagent({'subagent_id': 'subagent_1'}))
         assert result['success'] is True
 
     def test_close_other_owners_subagent_fails(self):
@@ -233,7 +234,7 @@ class TestCloseSubagentIsolation:
 
         # owner_b tries to close owner_a's subagent
         plugin.set_parent_session(owner_b)
-        result = plugin._execute_close_subagent({'subagent_id': 'subagent_1'})
+        ok, result = _split(plugin._execute_close_subagent({'subagent_id': 'subagent_1'}))
         assert result['success'] is False
         assert 'No active session found' in result['message']
 
@@ -261,7 +262,7 @@ class TestCancelSubagentIsolation:
 
         # owner_b tries to cancel owner_a's subagent
         plugin.set_parent_session(owner_b)
-        result = plugin._execute_cancel_subagent({'subagent_id': 'subagent_1'})
+        ok, result = _split(plugin._execute_cancel_subagent({'subagent_id': 'subagent_1'}))
         assert result['success'] is False
         assert 'No active session found' in result['message']
 
@@ -285,10 +286,10 @@ class TestSendToSubagentIsolation:
 
         # owner_b tries to send to owner_a's subagent
         plugin.set_parent_session(owner_b)
-        result = plugin._execute_send_to_subagent({
+        ok, result = _split(plugin._execute_send_to_subagent({
             'subagent_id': 'subagent_1',
             'message': 'hello',
-        })
+        }))
         assert result['success'] is False
         assert 'No active session found' in result['error']
 

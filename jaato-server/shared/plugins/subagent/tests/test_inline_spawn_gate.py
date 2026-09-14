@@ -30,6 +30,7 @@ import pytest
 
 from ..config import SubagentConfig, SubagentProfile
 from ..plugin import SubagentPlugin
+from shared.tool_result_builder import split_executor_result as _split
 
 
 def _plugin(*, allow_inline=None, profiles=None, inline_allowed_plugins=None,
@@ -137,7 +138,7 @@ class TestExecutorGate:
             SubagentProfile(name="documentalista", description="writes docs",
                             plugins=["file_edit"]),
         ])
-        result = plugin._execute_spawn_subagent({"task": "write a doc"})
+        ok, result = _split(plugin._execute_spawn_subagent({"task": "write a doc"}))
         assert result["success"] is False
         assert "requires a 'profile'" in result["error"]
         # Matches the wording a WRONG profile name has always produced.
@@ -145,7 +146,7 @@ class TestExecutorGate:
 
     def test_refusal_says_so_when_no_profiles_exist_at_all(self):
         plugin = _plugin(allow_inline=False)
-        result = plugin._execute_spawn_subagent({"task": "write a doc"})
+        ok, result = _split(plugin._execute_spawn_subagent({"task": "write a doc"}))
         assert result["success"] is False
         assert "No profiles are configured" in result["error"]
 
@@ -153,10 +154,10 @@ class TestExecutorGate:
         plugin = _plugin(allow_inline=False, profiles=[
             SubagentProfile(name="writer", description="", plugins=["file_edit"]),
         ])
-        result = plugin._execute_spawn_subagent({
+        ok, result = _split(plugin._execute_spawn_subagent({
             "task": "write a doc", "profile": "writer",
             "inline_config": {"plugins": ["cli"]},
-        })
+        }))
         assert result["success"] is False
         assert "inline_config" in result["error"]
 
@@ -172,8 +173,8 @@ class TestExecutorGate:
         plugin = _plugin(allow_inline=False, profiles=[
             SubagentProfile(name="writer", description="", plugins=["file_edit"]),
         ])
-        result = plugin._execute_spawn_subagent({
-            "task": "t", "profile": "typo"})
+        ok, result = _split(plugin._execute_spawn_subagent({
+            "task": "t", "profile": "typo"}))
         assert result["success"] is False
         assert "not found" in result["error"]
 
@@ -187,7 +188,7 @@ class TestExecutorGate:
             SubagentProfile(name="writer", description="", plugins=["cli"]),
         ])
         plugin._self_profile_name = "writer"
-        result = plugin._execute_spawn_subagent({"task": "t", "profile": "writer"})
+        ok, result = _split(plugin._execute_spawn_subagent({"task": "t", "profile": "writer"}))
         assert result["success"] is False
         assert "inline_config" not in result["error"]
 
@@ -228,7 +229,7 @@ class TestInlineAllowedPlugins:
         plugin = _plugin(allow_inline=True,
                          inline_allowed_plugins=["cli", "todo"],
                          parent_plugins=["cli", "file_edit"])
-        result = plugin._execute_spawn_subagent({"task": "do it"})
+        ok, result = _split(plugin._execute_spawn_subagent({"task": "do it"}))
         assert result["success"] is False
         assert "not allowed for inline creation" in result["error"]
         assert "file_edit" in result["error"]
@@ -344,8 +345,8 @@ class TestDefaultAgent:
         import server.session_manager as sm
         monkeypatch.setattr(sm.SessionManager, "_resolve_agent",
                             staticmethod(lambda *a, **k: None))
-        result = plugin._execute_spawn_subagent({"task": "t",
-                                                 "profile": "documentalista"})
+        ok, result = _split(plugin._execute_spawn_subagent({"task": "t",
+                                                 "profile": "documentalista"}))
         assert result["success"] is False
         assert "declares default_agent 'gone'" in result["error"]
         assert "configuration error" in result["error"]
