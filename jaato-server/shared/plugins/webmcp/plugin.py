@@ -31,7 +31,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from typing import Any, Callable, Dict, List, Optional
 
 from jaato_sdk.plugins.base import UserCommand
@@ -39,6 +38,7 @@ from jaato_sdk.plugins.model_provider.types import (
     TRAIT_UNTRUSTED_CONTENT, ToolSchema)
 
 from shared.cdp import CDPConnectionError
+from shared.session_context import get_session_env
 
 from .browser import WebMCPPage, WebMCPUnsupportedError
 
@@ -105,11 +105,17 @@ class WebMCPPlugin:
         """Return the page session, building it on first use."""
         if self._page is None:
             cfg = self._config
+            # get_session_env, never os.environ: the daemon overlays each
+            # session's `env:` map onto the process environment for the
+            # duration of a turn, so on a daemon serving two workspaces a
+            # plain read can hand this session the OTHER one's page or
+            # browser.  All three are declared `session`-scoped in
+            # shared/env_scope.py, which is the same claim.
             self._page = WebMCPPage(
-                page_url=cfg.get("page_url") or os.environ.get(
+                page_url=cfg.get("page_url") or get_session_env(
                     "JAATO_WEBMCP_PAGE_URL", DEFAULT_PAGE_URL),
-                cdp_url=cfg.get("cdp_url") or os.environ.get("JAATO_WEBMCP_CDP_URL"),
-                binary=cfg.get("binary") or os.environ.get("JAATO_WEBMCP_BINARY"),
+                cdp_url=cfg.get("cdp_url") or get_session_env("JAATO_WEBMCP_CDP_URL"),
+                binary=cfg.get("binary") or get_session_env("JAATO_WEBMCP_BINARY"),
                 user_data_dir=cfg.get("user_data_dir"),
                 headless=bool(cfg.get("headless", True)),
                 extra_args=cfg.get("extra_args"),
@@ -199,7 +205,8 @@ class WebMCPPlugin:
         With no ``page_url`` there is nothing to drive, and describing a
         browser the session will never open is context spent for nothing.
         """
-        if not (self._config.get("page_url") or os.environ.get("JAATO_WEBMCP_PAGE_URL")):
+        if not (self._config.get("page_url")
+                or get_session_env("JAATO_WEBMCP_PAGE_URL")):
             return None
         return (
             "The open web page may declare its own tools via WebMCP. Call "
