@@ -866,13 +866,18 @@ def _check_echo_profile(profile, add) -> None:
     if not echo_cfg.get("usage"):
         add("warn", "echo_reports_no_usage",
             "echo is configured without `usage`, so it reports ZERO tokens "
-            "every turn — and a turn is recorded only when the provider "
-            "reported tokens.  The post-turn hook gated on that record is the "
-            "one site that emits BOTH TurnCompletedEvent and "
-            "SessionTerminatedEvent, so this session will do its work, deliver "
-            "AgentCompletedEvent, and then emit NO terminal event: a driver "
-            "awaiting the terminus (Session.complete/.ask/.stream) hangs to "
-            "its timeout with nothing logged.  Declare a spend, e.g. "
+            "every turn and a turn is entered in the usage ledger only when "
+            "the provider reported tokens.  Until #881 that ledger also gated "
+            "the post-turn hook — the one site emitting BOTH "
+            "TurnCompletedEvent and SessionTerminatedEvent — so such a "
+            "session did its work, delivered AgentCompletedEvent and emitted "
+            "NO terminal event, hanging every driver awaiting the terminus "
+            "(Session.complete/.ask/.stream).  That gate now reads a "
+            "lifecycle counter, so the session terminates normally; what is "
+            "left is an accounting hole.  This profile's consumption report "
+            "will read empty, and any budget_control ceiling on `tokens` or "
+            "`usd` is fed zero and will never fire, so a run that looks "
+            "capped is uncapped.  Declare a spend, e.g. "
             "plugin_configs.echo.usage: {prompt_tokens: 1000, output_tokens: "
             "200}.",
             where=f"plugin_configs.{ECHO_PROVIDER}.usage")

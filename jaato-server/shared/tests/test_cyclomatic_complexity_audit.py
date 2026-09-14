@@ -138,7 +138,10 @@ BASELINE: Dict[str, int] = {
     "jaato-server/server/runner/rpc.py::RunnerRPC._dispatch_method": 54,
     "jaato-server/server/runner/rpc.py::RunnerRPC._handle_session_register_client_tools": 17,
     "jaato-server/server/runner/rpc.py::RunnerRPC._handle_session_resolve_fork_point": 17,
-    "jaato-server/server/runner/rpc.py::RunnerRPC._handle_session_send_message": 20,
+    # Down one in #881: the inline try/except that snapshotted
+    # ``len(turn_accounting)`` became a call to ``_turns_ran_snapshot``,
+    # which is where the lifecycle-vs-usage question is now answered once.
+    "jaato-server/server/runner/rpc.py::RunnerRPC._handle_session_send_message": 18,
     "jaato-server/server/runner/rpc.py::RunnerRPC._handle_subagent_forward_event": 19,
     "jaato-server/server/runner/rpc.py::RunnerRPC._install_session_notification_callbacks": 20,
     "jaato-server/server/runner/rpc.py::RunnerRPC._restore_session_notification_callbacks": 29,
@@ -217,8 +220,11 @@ BASELINE: Dict[str, int] = {
     # (36 -> 31).  Down one more in #913, which moved the parts loop's
     # cap-gate-append onto the shared _append_tool_results_to_history so
     # the terminal signal_completion path writes history the same way.
-    "jaato-server/shared/jaato_session.py::JaatoSession._run_chat_loop": 86,
-    "jaato-server/shared/jaato_session.py::JaatoSession._run_chat_loop_with_parts": 30,
+    # Both down one more in #881: the ``if turn_data['total'] > 0`` append
+    # in each loop's ``finally`` became a call to ``_record_turn_ran``,
+    # which owns the split between the lifecycle fact and the usage one.
+    "jaato-server/shared/jaato_session.py::JaatoSession._run_chat_loop": 85,
+    "jaato-server/shared/jaato_session.py::JaatoSession._run_chat_loop_with_parts": 29,
     "jaato-server/shared/jaato_session.py::JaatoSession._send_tool_results_and_continue": 27,
     "jaato-server/shared/jaato_session.py::JaatoSession._track_activated_tools_in_budget": 20,
     "jaato-server/shared/jaato_session.py::JaatoSession._update_conversation_budget": 37,

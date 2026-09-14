@@ -170,17 +170,23 @@ returns the typed payload. A plain session's turn IS its terminus, so use
 that stops in prose without signalling is re-prompted and keeps going, so the
 turn event fires mid-flight.
 
-## Three ways a harness hangs with nothing logged
+## Three ways a harness goes wrong with nothing logged
 
-All three end the same way — the daemon is content, the work is done, and your
-driver sits there — so none looks like the bug it is. `validate` reports the
-first two before you run anything.
+Traps 2 and 3 end the same way — the daemon is content and your driver sits
+there — so neither looks like the bug it is. Trap 1 used to, and now fails
+quietly in a different direction instead. `validate` reports the first two
+before you run anything.
 
-**1. `echo` with no `usage` → no terminal event, ever.** A turn is recorded only
-when the provider reported tokens, and the post-turn hook gated on that record
-is the one site emitting both `TurnCompletedEvent` and the quiescence flush
-(`SessionTerminatedEvent`). So a zero-usage turn delivers its payload and then
-nothing. Every echo-backed profile needs a spend:
+**1. `echo` with no `usage` → accounting that reads empty.** A turn enters the
+usage ledger only when the provider reported tokens. Until #881 that ledger also
+gated the post-turn hook — the one site emitting both `TurnCompletedEvent` and
+the quiescence flush (`SessionTerminatedEvent`) — so a zero-usage turn delivered
+its payload and then nothing at all, and every driver awaiting the terminus
+hung. That gate now reads a lifecycle counter, so the session terminates
+normally; what is left is the accounting hole. The consumption report reads
+empty, and a `budget_control` ceiling on `tokens` or `usd` is fed zero and never
+fires, so a run that looks capped is uncapped. Every echo-backed profile needs a
+spend:
 
 ```yaml
 plugin_configs:
@@ -212,9 +218,10 @@ at prep, and prefer `{{!py?:...}}` so a failure drops the placeholder instead of
 aborting session-prep.
 
 When you do hit a hang, the discriminating probe is cheap: subscribe to every
-`EventType`, run the stage, print what arrived. `AGENT_COMPLETED` with
-`TURN_COMPLETED`/`SESSION_TERMINATED` absent is trap 1; no session at all is
-trap 2 or 3.
+`EventType`, run the stage, print what arrived. No session at all is trap 2 or
+3. `AGENT_COMPLETED` with `TURN_COMPLETED`/`SESSION_TERMINATED` absent was
+trap 1's signature before #881 and should no longer occur on a current daemon —
+seeing it means you are running an older one, which `jaato-doctor` will say.
 
 ## Keeping this file honest
 
