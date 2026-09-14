@@ -288,17 +288,25 @@ def test_an_empty_child_plugin_list_keeps_the_parents(tmp_path):
 
 
 def _plugins_inheritance_row(profile_text: str) -> str:
-    """Just the ``plugins, preloaded_plugins`` row of the inheritance block.
+    """Just the ``plugins`` row of the inheritance block.
 
     Scoping the assertion to this slice is the difference between a real
-    check and a decorative one.  ``completion_processors`` — the very next
-    row — has carried the sentence "it does NOT clear the parents'" all
-    along, so a bare ``in profile_text`` would find THAT one and pass with
-    the ``plugins`` clause deleted: a grep matching a word that appears
+    check and a decorative one.  ``completion_processors`` — two rows down
+    — has carried the sentence "it does NOT clear the parents'" all along,
+    so a bare ``in profile_text`` would find THAT one and pass with the
+    ``plugins`` clause deleted: a grep matching a word that appears
     elsewhere in the same output, passing for the wrong reason.
+
+    The row used to be labelled ``plugins, preloaded_plugins`` and the slice
+    ended at ``completion_processors``.  ``preloaded_plugins`` is a DERIVED
+    field, not a profile-file key, so co-labelling the row with it said the
+    opposite of what ``explain profile``'s field listing says — the defect
+    ``test_derived_profile_fields_carry_their_spelling`` now guards.  Both
+    derived fields moved to their own row, which is where this slice now
+    ends.
     """
-    start = profile_text.index("    plugins, preloaded_plugins")
-    end = profile_text.index("    completion_processors", start)
+    start = profile_text.index("    plugins                      UNION")
+    end = profile_text.index("    preloaded_plugins,", start)
     return profile_text[start:end]
 
 
@@ -336,6 +344,10 @@ def test_the_only_ways_to_narrow_are_named(profile_text, tmp_path):
     assert profs["kid"].plugins == ["memory", "todo"]
     assert profs["kid"].tool_scopes == {"memory": ["retrieve_memories"]}
     assert "tool_scopes" in profile_text
+    # ...and naming it is not enough: tool_scopes is not a key a FILE may
+    # set, so the page must carry the modifier that actually sets it or the
+    # reader writes `tool_scopes:` at the top level and it is silently inert.
+    assert "tools:[" in profile_text
 
 
 def test_a_nested_plugin_config_value_is_replaced_not_merged(tmp_path):
