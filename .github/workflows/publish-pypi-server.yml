@@ -61,7 +61,7 @@ jobs:
     needs: test
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write   # push the release tag below
       id-token: write
     environment:
       name: ${{ inputs.target == 'pypi' && 'pypi-server' || 'testpypi-server' }}
@@ -164,3 +164,40 @@ jobs:
         with:
           packages-dir: jaato-server/dist/
           repository-url: ${{ steps.index.outputs.upload }}
+
+      # A release tag is the ONLY record of the commit a version shipped
+      # from.  scripts/build_readme.py anchors the next changelog on it,
+      # because the commit that SET a version is not the commit it shipped
+      # from whenever a release is held across staging rounds so later PRs
+      # fold into it -- measured 19 commits apart for jaato-server 0.14.0,
+      # whose entries were then re-listed in 0.15.0's changelog.
+      #
+      # Never on TestPyPI.  Staging is not a release, and a tag there would
+      # anchor the next changelog on a build nobody shipped, dropping every
+      # entry that landed before the real release.
+      #
+      # `continue-on-error` because by this point the upload has HAPPENED:
+      # failing the job would report a release that shipped as a release
+      # that did not.  The annotation below carries the manual remedy, and
+      # a missed tag degrades the next changelog rather than the release.
+      - name: Tag the published commit
+        if: inputs.target == 'pypi'
+        continue-on-error: true
+        run: |
+          read -r name version <<<"$(python -c "
+          import tomllib, pathlib
+          d = tomllib.loads(pathlib.Path('jaato-server/pyproject.toml').read_text())['project']
+          print(d['name'], d['version'])
+          ")"
+          tag="${name}-${version}"
+          if git rev-parse -q --verify "refs/tags/${tag}" >/dev/null; then
+            echo "::notice::${tag} already exists -- leaving it where it is"
+            exit 0
+          fi
+          git tag "$tag"                       # lightweight: no identity needed
+          if git push origin "refs/tags/${tag}"; then
+            echo "::notice::tagged $(git rev-parse --short HEAD) as ${tag}"
+          else
+            echo "::error::${name} ${version} was PUBLISHED but not tagged. The release is fine; the next changelog will re-list this one's entries until someone runs: git tag ${tag} ${GITHUB_SHA} && git push origin ${tag}"
+            exit 1
+          fi
