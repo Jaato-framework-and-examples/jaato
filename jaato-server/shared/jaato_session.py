@@ -854,12 +854,16 @@ class JaatoSession:
         #
         #   cache re-wire fails      -> the session runs UNCACHED from here
         #   reliability retarget     -> patterns judged against the wrong model
+        #   context-window refresh   -> GC and every "how full am I" figure
+        #                               measured against the previous model's
+        #                               window
         #
-        # Three best-effort blocks is not the smell; three UNOBSERVABLE ones
-        # is.  Both counters ride the LLM span alongside ``jaato.tier``, so a
-        # consumer can see a degraded session instead of inferring it.
+        # Best-effort blocks are not the smell; UNOBSERVABLE ones are.  Every
+        # counter rides the LLM span alongside ``jaato.tier``, so a consumer
+        # can see a degraded session instead of inferring it.
         self._tier_cache_rewire_failures: int = 0
         self._tier_reliability_retarget_failures: int = 0
+        self._tier_context_limit_refresh_failures: int = 0
 
         # Thinking mode
         self._thinking_plugin: Optional['ThinkingPlugin'] = None
@@ -2777,16 +2781,7 @@ class JaatoSession:
         )
 
         if tier_config is not None:
-            self._tier_config = tier_config
-            self._active_tier = tier_config.initial_tier
-            initial_model = tier_config.tiers[tier_config.initial_tier].model
-            if self._model_name and self._model_name != initial_model:
-                logger.info(
-                    "Tier mode active: overriding session model %s with "
-                    "initial tier %s's model %s",
-                    self._model_name, tier_config.initial_tier, initial_model,
-                )
-            self._model_name = initial_model
+            self._apply_initial_tier_binding(tier_config)
 
         # Store preloaded plugins for use in deferred instruction collection
         self._preloaded_plugins = preloaded_plugins or set()
@@ -3342,9 +3337,24 @@ class JaatoSession:
             # V2 cross-provider tiers: record which provider this instance IS and
             # seed the per-provider cache so switch_tier can compare against it
             # and reuse it on a switch back.
-            self._active_provider_name = cfg['provider_name']
-            if cfg['provider_name'] is not None:
-                self._provider_cache[cfg['provider_name']] = self._provider
+            #
+            # ``cfg['provider_name']`` is the session's OVERRIDE, and ``None``
+            # there does not mean "no provider" — it means "whichever one the
+            # runtime is configured for", which is exactly what
+            # ``create_provider`` just resolved (``provider_name or
+            # self._provider_name``).  Recording the ``None`` left this
+            # instance unnamed and out of the cache, so a tier naming that
+            # same provider compared unequal and built a second instance of
+            # it.  Ask the runtime for the name it resolved instead; when
+            # neither side names one there is nothing to key on and the field
+            # stays ``None``, as before.
+            resolved_provider_name = (
+                cfg['provider_name']
+                or getattr(self._runtime, 'provider_name', None)
+            )
+            self._active_provider_name = resolved_provider_name
+            if resolved_provider_name is not None:
+                self._provider_cache[resolved_provider_name] = self._provider
             # Propagate agent context to provider for trace identification.
             if hasattr(self._provider, 'set_agent_context'):
                 self._provider.set_agent_context(
@@ -3355,16 +3365,15 @@ class JaatoSession:
             # Resolve the real context window now that the provider exists.
             # The budget was created at configure() time with context_limit=0
             # because the provider is lazy-created and didn't exist yet.  This
-            # is the single point where the model's actual limit (e.g. vLLM's
-            # configured context_length) becomes the budget-GC denominator —
-            # it runs on first model use, before any conversation grows or any
-            # after-turn GC check, so the GC threshold is computed against the
-            # true window from the very first turn.  See
+            # is the FIRST of the two points where the model's actual limit
+            # (e.g. vLLM's configured context_length) becomes the budget-GC
+            # denominator — it runs on first model use, before any
+            # conversation grows or any after-turn GC check, so the GC
+            # threshold is computed against the true window from the very
+            # first turn.  The second is ``_connect_tier_entry``, which is the
+            # other way the binding under this session changes.  See
             # _populate_instruction_budget for the failure mode this closes.
-            if self._instruction_budget is not None:
-                self._instruction_budget.context_limit = (
-                    self._provider.get_context_limit()
-                )
+            self._refresh_context_limit_from_provider()
             # Wire cache plugin now that the provider exists.  Pre-defer
             # this fired at the end of configure() unconditionally.
             self._wire_cache_plugin()
@@ -4791,6 +4800,13 @@ NOTES
                 provider_name=self._provider_name_override,
                 session_id=self._daemon_session_id,
             )
+            # Keep the per-provider cache pointing at the LIVE instance.
+            # ``_provider_for_tier`` hands a tier whatever is cached under
+            # its provider name, so a stale entry here would have a later
+            # ``enter_tier`` switch back to the instance this command just
+            # replaced — carrying the model it was replaced FOR.
+            if self._active_provider_name is not None:
+                self._provider_cache[self._active_provider_name] = self._provider
 
             # Propagate agent context to new provider for trace identification
             if hasattr(self._provider, 'set_agent_context'):
@@ -5418,6 +5434,8 @@ NOTES
                 getattr(self, "_tier_cache_rewire_failures", 0))
             attrs["jaato.tier.reliability_retarget_failures"] = int(
                 getattr(self, "_tier_reliability_retarget_failures", 0))
+            attrs["jaato.tier.context_limit_refresh_failures"] = int(
+                getattr(self, "_tier_context_limit_refresh_failures", 0))
         cache = getattr(self, "_cache_plugin", None)
         if cache and hasattr(cache, "get_telemetry_attributes"):
             try:
@@ -14031,6 +14049,51 @@ NOTES
                 "tier reliability retarget for %s failed; records will name "
                 "the previous model: %s", entry.model, exc,
             )
+        try:
+            self._refresh_context_limit_from_provider()
+        except Exception as exc:  # noqa: BLE001
+            self._tier_context_limit_refresh_failures = getattr(
+                self, '_tier_context_limit_refresh_failures', 0) + 1
+            logger.warning(
+                "tier context-window refresh for %s failed; GC and the "
+                "context readout keep measuring against the previous "
+                "model's window: %s", entry.model, exc,
+            )
+
+    def _refresh_context_limit_from_provider(self) -> None:
+        """Re-read the active model's window into the budget denominator.
+
+        ``InstructionBudget.context_limit`` is the denominator for every
+        figure that says how full this session is: the after-turn GC
+        threshold, the pre-send refusal guard, ``get_context_usage`` (so
+        ``get_environment(aspect="context")`` and every client's context
+        readout), and the GC pressure checks.  It was stamped ONCE, when
+        the provider was lazily created, and a tier switch re-points the
+        session at a different model with a different window.
+
+        So a session that booted on a 200k-window tier and entered an 8k
+        one kept measuring against 200k: GC could not fire before the
+        request overflowed, the refusal guard let it through, and the
+        upstream rejected it — at which point
+        ``_try_gc_for_context_recovery`` trims history in the STORE, which
+        is destructive and shared, so the tier that had the room loses the
+        conversation too.  In the other direction the session GCs a history
+        that comfortably fits.
+
+        ``get_context_limit()`` already answers for whatever provider is
+        active, so this is the one value that had to follow it and did not.
+        Both callers — first materialisation and every later tier connect —
+        go through here, so the two cannot disagree about where the number
+        comes from.
+
+        A budget that does not exist yet (``configure()`` has not run) is a
+        no-op, exactly as the inline stamp was.
+        """
+        if self._instruction_budget is None or self._provider is None:
+            return
+        self._instruction_budget.context_limit = (
+            self._provider.get_context_limit()
+        )
 
     def _retarget_reliability_model(self, model: str) -> None:
         """Tell the reliability plugin which model is now running.
@@ -14063,6 +14126,60 @@ NOTES
         if plugin is None:
             return
         plugin.set_model_context(model)
+
+    def _apply_initial_tier_binding(self, tier_config) -> None:
+        """Bind the session to the initial tier's ``(provider, model)`` pair.
+
+        Called from :meth:`configure` when a session runs in tier mode, and
+        it is the counterpart of :meth:`_connect_tier_entry` for the one
+        tier entry that is not a *switch*: the session simply starts there.
+
+        **A tier binds a pair, and only half of it used to take.** The model
+        was overridden here from the day tier mode shipped; the provider was
+        left at the profile's top-level ``provider:`` — ``None`` when the
+        profile declares none, because every tier declares its own. Two
+        things followed:
+
+        * turn 0 ran the initial tier's MODEL on somebody else's PROVIDER
+          (the runtime default, or a top-level value that disagrees);
+        * ``_active_provider_name`` — what :meth:`_connect_tier_entry`
+          compares ``entry.provider`` against to decide whether to SWAP —
+          was that same wrong value, so entering a tier naming the provider
+          the session was already running compared unequal and built a
+          SECOND instance of it.
+
+        The second is the one that is not merely wasteful. A duplicate
+        instance of a stateless provider costs a handshake; ``claude_cli``
+        is not stateless — it sends ``messages[-1]`` and nothing else,
+        leaving the transcript to the CLI's own ``--resume`` session — so a
+        second instance is a second CLI conversation, and that tier then
+        genuinely keeps a history of its own.
+
+        A tier that declares no ``provider`` leaves the choice untouched:
+        that is what "use the session's main provider" means, and it is the
+        single-provider shape that predates cross-provider tiers.
+        """
+        self._tier_config = tier_config
+        self._active_tier = tier_config.initial_tier
+        entry = tier_config.tiers[tier_config.initial_tier]
+        if self._model_name and self._model_name != entry.model:
+            logger.info(
+                "Tier mode active: overriding session model %s with "
+                "initial tier %s's model %s",
+                self._model_name, tier_config.initial_tier, entry.model,
+            )
+        self._model_name = entry.model
+        if not entry.provider:
+            return
+        if (self._provider_name_override
+                and self._provider_name_override != entry.provider):
+            logger.info(
+                "Tier mode active: overriding session provider %s with "
+                "initial tier %s's provider %s",
+                self._provider_name_override, tier_config.initial_tier,
+                entry.provider,
+            )
+        self._provider_name_override = entry.provider
 
     def switch_tier(self, requested_tier: str) -> Dict[str, Any]:
         """Switch the session's active model tier.
