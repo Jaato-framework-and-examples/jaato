@@ -1703,8 +1703,14 @@ def _validate_plugin_knobs(cfg_name, cfg, plugins, add):
     pinfo = plugins.get(cfg_name)
     if pinfo is None or not pinfo.config_settings:
         return
-    _walk_knobs(cfg_name, cfg, pinfo.config_settings, "",
-                introspect.plugin_config_read_sites(cfg_name), True, add)
+    # Kept as a named local rather than inlined into the call: it is the
+    # EVIDENCE #910 asked for, ``test_validate_claims_only_what_it_knows``
+    # declares a reversion against this exact line, and a reversion whose
+    # target text has been refactored away sabotages nothing — the guard
+    # then passes decoratively, which is the one failure mode that suite
+    # exists to prevent.
+    sites = introspect.plugin_config_read_sites(cfg_name)
+    _walk_knobs(cfg_name, cfg, pinfo.config_settings, "", sites, True, add)
 
 
 def _walk_knobs(cfg_name, cfg, settings, prefix, sites, strict, add) -> None:
