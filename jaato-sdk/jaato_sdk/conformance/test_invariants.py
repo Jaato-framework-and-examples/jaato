@@ -405,8 +405,9 @@ def test_a_turn_that_reports_no_usage_still_reaches_its_terminus(daemon):
     """A session must end because its WORK ended, not because it was billed.
 
     The one profile in this suite that passes no ``usage``, and the reason it
-    exists: every other one passes ``TURN_USAGE``, so a suite of nine
-    scenarios went 9/9 while jaato #881 was live.  The post-turn event
+    exists: every other one passes ``TURN_USAGE``, so the whole suite went
+    green for the life of jaato #881 (9/9 when the issue was filed, 10/10 by
+    the time it was fixed -- growing it did not help).  The post-turn event
     fan-out gated on the USAGE ledger growing, and the session only appends
     to that ledger when the provider reported tokens -- so a turn that ran
     and reported nothing emitted NEITHER half of the terminus, and every

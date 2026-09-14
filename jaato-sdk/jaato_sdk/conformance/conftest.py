@@ -96,7 +96,7 @@ def daemon():
     that differs from another by a MISSING key rather than a present one: it
     is ``conformance-terminus`` with ``usage`` dropped, so echo reports no
     tokens at all.  Every other profile passes ``TURN_USAGE``, and that is
-    precisely why this suite went 9/9 while jaato #881 was live -- the
+    precisely why this suite stayed green for the life of jaato #881 -- the
     post-turn event fan-out gated on the USAGE ledger growing, so a turn that
     ran and reported nothing emitted neither ``TurnCompletedEvent`` nor
     ``SessionTerminatedEvent`` and every driver waiting on one hung.  A suite

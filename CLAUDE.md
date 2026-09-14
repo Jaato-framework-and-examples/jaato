@@ -1998,8 +1998,9 @@ usage frame, a gateway that strips the field, a zero-cost cached turn. `echo` is
 where it is *guaranteed*, and it is what every new harness reaches for first
 because it is credential-free and deterministic.
 
-**And the suite could not see it.** `jaato_sdk/conformance/` went 9/9 precisely
-because every conformance profile passed `usage=TURN_USAGE`; a suite whose every
+**And the suite could not see it.** `jaato_sdk/conformance/` stayed green for
+the whole life of the defect precisely because every conformance profile passed
+`usage=TURN_USAGE`; a suite whose every
 profile is metered is structurally unable to catch this class however many
 scenarios it runs. `conformance-unmetered` is the fifth profile, and the only
 one that differs from another by a **missing** key.
