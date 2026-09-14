@@ -6,26 +6,59 @@ types from headers.
 
 Two verification modes, selected by ``RouteConfig.secret_algo``:
 
-* ``hmac-sha256`` — the header carries an HMAC digest over the request BODY.
-  Not replayable and not readable by a TLS-terminating hop.
+* ``hmac-sha256`` — the header carries an HMAC digest.  Not readable by a
+  TLS-terminating hop.
 * ``token`` — the header carries the shared secret VERBATIM, compared for
-  equality in constant time.  Strictly weaker (replayable; exposed to anything
-  that terminates TLS), and the only mode available for producers that do not
-  sign bodies — GitLab's ``X-Gitlab-Token`` is the canonical case.  Pair it
-  with TLS.
+  equality in constant time.  Strictly weaker (exposed to anything that
+  terminates TLS, and replayable against any payload), and the only mode
+  available for producers that do not sign bodies — GitLab's
+  ``X-Gitlab-Token`` is the canonical case.  Pair it with TLS.
 
 Both are one predicate to the caller: a route declaring ``secret_header`` +
 ``secret_algo`` is authenticated, and an incomplete or unrecognised pair is
 REFUSED rather than downgraded to unsigned.
+
+**What ``secret_algo`` cannot say is what was SIGNED** (#713).  An HMAC over
+the body alone binds no time, so the digest authenticates the same request
+forever: whoever observes one delivery — a proxy log, a mirrored port, a
+misrouted retry — replays it verbatim, indefinitely, and it authenticates every
+time.  On a listener whose whole purpose is to drive agent sessions that is not
+a duplicate row, it is a re-triggered turn: tool calls, ledger spend, and
+whatever side effects the persona authorises.
+
+Two mechanisms close it, and they are complementary rather than alternatives:
+
+1. **A freshness window**, from ``RouteConfig.signature_scheme`` +
+   ``max_age_seconds``.  Only a scheme that binds a timestamp INTO the
+   signature can carry one — see :mod:`.signature_schemes`.  It bounds how long
+   a captured request stays useful, and catches nothing inside the window.
+2. **A replay cache**, :class:`.replay.ReplayCache`, keyed per delivery and
+   TTL'd to that window.  This is the part that catches a replay inside it.
+
+Order of operations is load-bearing.  The signature is verified FIRST, because
+in both timestamped schemes the timestamp is part of the signed payload and is
+therefore only evidence once the signature holds.  The freshness window is
+second.  The replay cache is recorded LAST, only for a delivery that has passed
+both — recording earlier would let anyone who can reach the port poison the
+cache with a guessed delivery id and have the genuine delivery refused as a
+replay, building a denial of service out of the anti-replay control.
 """
 
 import hashlib
 import hmac
 import json
 import logging
+import time
 from typing import Any, Dict, Optional, Tuple
 
-from .config import SECRET_ALGO_TOKEN, SECRET_ALGOS, RouteConfig
+from .config import (
+    SECRET_ALGO_HMAC_SHA256,
+    SECRET_ALGO_TOKEN,
+    SECRET_ALGOS,
+    RouteConfig,
+)
+from .replay import ReplayCache, replay_key_for
+from . import signature_schemes as schemes
 
 logger = logging.getLogger(__name__)
 
@@ -131,6 +164,8 @@ def _authenticate_route(
     route: RouteConfig,
     global_secret: Optional[str],
     transport_authenticated: bool,
+    now: float,
+    replay_cache: Optional[ReplayCache],
 ) -> Optional[Tuple[int, str]]:
     """Decide whether a request to ``route`` is authenticated.
 
@@ -156,6 +191,10 @@ def _authenticate_route(
         global_secret: Fallback secret from ``WebhookConfig``.
         transport_authenticated: Whether the deployment authenticates below
             the shared-secret layer.
+        now: Current Unix time, injected by the caller so the freshness window
+            and the replay TTL are stated rather than slept through.
+        replay_cache: The listener's replay cache, or None when it has none
+            (an embedded caller, or a deployment that disabled it).
 
     Returns:
         None when the request is authenticated, else ``(status, message)``
@@ -204,6 +243,10 @@ def _authenticate_route(
             "verification cannot run."
         )
 
+    scheme_failure = _scheme_config_error(route_name, route)
+    if scheme_failure is not None:
+        return scheme_failure
+
     secret = route.metadata.get('secret') or global_secret
     if not secret:
         logger.warning(
@@ -212,13 +255,261 @@ def _authenticate_route(
         )
         return 500, "Server misconfigured: no secret for signature verification"
 
-    sig_value = lower_headers.get(route.secret_header.lower(), '')
-    if not verify_signature(body, secret, sig_value, route.secret_algo):
+    return _verify_credential(
+        body, lower_headers, route_name, route, secret, now, replay_cache,
+    )
+
+
+def _scheme_config_error(
+    route_name: str,
+    route: RouteConfig,
+) -> Optional[Tuple[int, str]]:
+    """Refuse a route whose replay-protection keys cannot be honoured (#713).
+
+    ``validate_config`` reports every one of these, but a route can be built
+    programmatically around that check — which is exactly the reasoning the
+    ``secret_algo`` guard above already records.  The refusal is a **500**, not
+    a 403: it describes a broken server, not a bad request, and the two must
+    not read the same to whoever is looking at the logs.
+
+    Nothing here falls through to a weaker check.  A mistyped
+    ``signature_scheme`` does not degrade to ``'body'``; a Slack route with no
+    ``timestamp_header`` does not verify the body alone.  Widening the scheme
+    vocabulary widens what a route may SAY, never what it may omit.
+
+    Args:
+        route_name: Name of the matched route (for logs).
+        route: The matched route.
+
+    Returns:
+        None when the scheme keys are coherent, else ``(500, message)``.
+    """
+    scheme = route.signature_scheme
+    if scheme not in schemes.SIGNATURE_SCHEMES:
         logger.warning(
-            "Secret verification (%s) failed for route '%s'",
-            route.secret_algo, route_name,
+            "Route '%s' declares unknown signature_scheme '%s'; refusing "
+            "(fail-closed).", route_name, scheme,
+        )
+        return 500, (
+            "Server misconfigured: unknown signature_scheme, so the signed "
+            "payload cannot be reconstructed."
+        )
+
+    if not route.binds_timestamp():
+        if route.timestamp_header:
+            logger.warning(
+                "Route '%s' sets timestamp_header on signature_scheme '%s', "
+                "which does not sign the timestamp — refusing (fail-closed), "
+                "because checking a value the replayer can rewrite is not "
+                "replay protection.", route_name, scheme,
+            )
+            return 500, (
+                "Server misconfigured: timestamp_header is set on a "
+                "signature_scheme that does not cover the timestamp with the "
+                "signature."
+            )
+        return None
+
+    # From here the scheme binds a timestamp, so both halves must be present
+    # and the MAC must be the one the scheme is defined over.
+    if route.secret_algo != SECRET_ALGO_HMAC_SHA256:
+        logger.warning(
+            "Route '%s' pairs signature_scheme '%s' with secret_algo '%s'; "
+            "refusing (fail-closed).", route_name, scheme, route.secret_algo,
+        )
+        return 500, (
+            "Server misconfigured: this signature_scheme is defined over an "
+            f"HMAC-SHA256 digest, so secret_algo must be "
+            f"'{SECRET_ALGO_HMAC_SHA256}'."
+        )
+
+    wants_header = (
+        schemes.SCHEME_TIMESTAMP_SOURCE[scheme] == schemes.TIMESTAMP_FROM_HEADER
+    )
+    if wants_header and not route.timestamp_header:
+        logger.warning(
+            "Route '%s' declares signature_scheme '%s' but names no "
+            "timestamp_header; refusing (fail-closed).", route_name, scheme,
+        )
+        return 500, (
+            "Server misconfigured: this signature_scheme signs a timestamp "
+            "carried in its own header, but the route names no "
+            "timestamp_header."
+        )
+    if not wants_header and route.timestamp_header:
+        logger.warning(
+            "Route '%s' declares signature_scheme '%s', which carries its "
+            "timestamp inside the signature header, but also names a "
+            "timestamp_header; refusing (fail-closed).", route_name, scheme,
+        )
+        return 500, (
+            "Server misconfigured: this signature_scheme reads its timestamp "
+            "from the signature header, so timestamp_header must not be set."
+        )
+    return None
+
+
+def _run_scheme(
+    body: bytes,
+    secret: str,
+    signature_value: str,
+    lower_headers: Dict[str, str],
+    route: RouteConfig,
+) -> schemes.SignatureVerdict:
+    """Verify the request against the route's signature scheme.
+
+    The ``'body'`` branch delegates to :func:`verify_signature`, so every
+    pre-#713 route is verified by byte-identical code on a byte-identical
+    input.  Its verdict carries **no** replay material: with no timestamp in
+    the signed payload the digest is a pure function of the body, so two
+    genuine deliveries of the same payload would be indistinguishable from a
+    replay and the second one wrongly refused.  Such a route keys its cache on
+    a delivery id or gets none — see :func:`.replay.replay_key_for`.
+
+    Args:
+        body: Raw request body bytes.
+        secret: The route's shared secret.
+        signature_value: The ``secret_header`` value from the request.
+        lower_headers: Request headers with lowercased keys.
+        route: The matched route.  Its scheme keys have already been checked
+            by :func:`_scheme_config_error`, so ``timestamp_header`` is present
+            wherever the scheme needs one.
+
+    Returns:
+        The scheme's verdict.  Freshness is NOT applied here — one policy, one
+        place, so it cannot drift per sender.
+    """
+    scheme = route.signature_scheme
+
+    if scheme == schemes.SCHEME_SLACK_V0:
+        timestamp_raw = lower_headers.get(route.timestamp_header.lower(), '')
+        return schemes.verify_slack_v0(body, secret, signature_value, timestamp_raw)
+
+    if scheme == schemes.SCHEME_STRIPE_V1:
+        return schemes.verify_stripe_v1(body, secret, signature_value)
+
+    ok = verify_signature(body, secret, signature_value, route.secret_algo)
+    return schemes.SignatureVerdict(
+        ok, schemes.REASON_OK if ok else schemes.REASON_BAD_SIGNATURE,
+    )
+
+
+def _verify_credential(
+    body: bytes,
+    lower_headers: Dict[str, str],
+    route_name: str,
+    route: RouteConfig,
+    secret: str,
+    now: float,
+    replay_cache: Optional[ReplayCache],
+) -> Optional[Tuple[int, str]]:
+    """Run signature, then freshness, then replay — in that order.
+
+    The order is the security argument, not a style choice:
+
+    1. **Signature.**  In both timestamped schemes the timestamp is part of
+       the signed payload, so it is evidence of nothing until the signature
+       holds.  Checking freshness first would also let an unauthenticated
+       caller probe the window.
+    2. **Freshness.**  Bounds how long a captured delivery stays useful.
+    3. **Replay.**  Catches the copy that arrives INSIDE the window, which
+       freshness by construction cannot.  Recorded last, so a request that
+       failed either earlier check never writes to the cache — otherwise
+       anyone who can reach the port could poison it with a guessed delivery
+       id and have the genuine delivery refused.
+
+    Args:
+        body: Raw request body bytes.
+        lower_headers: Request headers with lowercased keys.
+        route_name: Name of the matched route.
+        route: The matched route.
+        secret: The resolved shared secret.
+        now: Current Unix time, injected by the caller.
+        replay_cache: The listener's cache, or None when it has none.
+
+    Returns:
+        None when the request is authenticated and fresh and new, else
+        ``(status, message)``.
+    """
+    signature_value = lower_headers.get(route.secret_header.lower(), '')
+    verdict = _run_scheme(body, secret, signature_value, lower_headers, route)
+
+    if not verdict.ok:
+        logger.warning(
+            "Secret verification failed for route '%s' (algo=%s scheme=%s): %s",
+            route_name, route.secret_algo, route.signature_scheme, verdict.reason,
         )
         return 403, "Signature verification failed"
+
+    if route.binds_timestamp() and not schemes.is_fresh(
+        verdict.timestamp, now, route.max_age_seconds
+    ):
+        logger.warning(
+            "Route '%s': signature verified but the signed timestamp (%s) is "
+            "outside the %ds freshness window — refusing as stale/skewed.",
+            route_name, verdict.timestamp, route.max_age_seconds,
+        )
+        return 403, "Request timestamp is outside the freshness window"
+
+    return _check_replay(
+        route_name, route, lower_headers, verdict, now, replay_cache,
+    )
+
+
+def _check_replay(
+    route_name: str,
+    route: RouteConfig,
+    lower_headers: Dict[str, str],
+    verdict: schemes.SignatureVerdict,
+    now: float,
+    replay_cache: Optional[ReplayCache],
+) -> Optional[Tuple[int, str]]:
+    """Record an authenticated delivery, refusing it if it is a repeat.
+
+    A route with nothing unique-per-delivery to key on gets no cache and no
+    refusal — the honest outcome, since keying on a constant credential would
+    reject the second legitimate request rather than a replay.  That case is
+    announced once at listener startup rather than silently accepted.
+
+    Disabling the freshness window (``max_age_seconds: 0``) does NOT disable
+    the cache: the TTL falls back to the default window, so an operator who
+    turns the window off still keeps short-horizon replay refusal rather than
+    losing both controls with one key.
+
+    Args:
+        route_name: Name of the matched route, used to namespace the key.
+        route: The matched route.
+        lower_headers: Request headers with lowercased keys.
+        verdict: The verified signature verdict.
+        now: Current Unix time.
+        replay_cache: The listener's cache, or None.
+
+    Returns:
+        None when the delivery is new, else ``(409, message)``.
+    """
+    if replay_cache is None:
+        return None
+
+    delivery_id = None
+    if route.replay_key_header:
+        delivery_id = lower_headers.get(route.replay_key_header.lower()) or None
+
+    key = replay_key_for(
+        route_name, delivery_id, verdict.replay_material, route.binds_timestamp(),
+    )
+    if key is None:
+        return None
+
+    ttl = (
+        route.max_age_seconds if route.max_age_seconds > 0
+        else schemes.DEFAULT_MAX_AGE_SECONDS
+    )
+    if replay_cache.check_and_record(key, now, ttl):
+        logger.warning(
+            "Route '%s': refusing a REPLAYED delivery — this request was "
+            "already accepted within the last %ds.", route_name, ttl,
+        )
+        return 409, "Duplicate delivery: this request has already been accepted"
 
     return None
 
@@ -230,6 +521,8 @@ def parse_webhook_request(
     route: RouteConfig,
     global_secret: Optional[str] = None,
     transport_authenticated: bool = False,
+    now: Optional[float] = None,
+    replay_cache: Optional[ReplayCache] = None,
 ) -> Tuple[Optional[Dict[str, Any]], Optional[int], Optional[str]]:
     """Parse and validate a webhook request against a matched route.
 
@@ -248,11 +541,22 @@ def parse_webhook_request(
             allowlist). The caller (``WebhookHTTPServer``) decides this. It lets
             a route without a secret still accept requests without an explicit
             ``allow_unauthenticated`` opt-in.
+        now: Current Unix time.  Defaults to ``time.time()``; a caller passes
+            it so the freshness window (#713) is a value the test states
+            rather than a clock it waits on.
+        replay_cache: The listener's :class:`.replay.ReplayCache`.  None means
+            no replay refusal — every other check is unchanged, so a caller
+            that does not supply one is exactly as safe as it was before.
 
     Returns:
         Tuple of (parsed_event_dict, None, None) on success, or
-        (None, http_status_code, error_message) on failure.
+        (None, http_status_code, error_message) on failure.  A replayed
+        delivery is ``409`` — deliberately distinct from ``403``, so an
+        operator can tell a repeat from a forgery in the access log.
     """
+    if now is None:
+        now = time.time()
+
     # Case-insensitive header lookup
     lower_headers = {k.lower(): v for k, v in headers.items()}
 
@@ -265,6 +569,8 @@ def parse_webhook_request(
         body, lower_headers, route_name, route,
         global_secret=global_secret,
         transport_authenticated=transport_authenticated,
+        now=now,
+        replay_cache=replay_cache,
     )
     if auth_failure is not None:
         status, message = auth_failure

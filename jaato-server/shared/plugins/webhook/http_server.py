@@ -21,6 +21,8 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from typing import Any, Callable, Dict, List, Optional, Union
 
 from .config import SECRET_ALGO_TOKEN, RouteConfig, WebhookConfig
+from .replay import ReplayCache
+from .signature_schemes import DEFAULT_MAX_AGE_SECONDS
 from .routes import match_route, parse_webhook_request
 
 logger = logging.getLogger(__name__)
@@ -94,6 +96,14 @@ class WebhookHTTPServer:
         # Rate limiter state: ip_str → (token_count, last_refill_time)
         self._rate_buckets: Dict[str, List[float]] = {}
         self._rate_lock = threading.Lock()
+
+        # One replay cache per listener, shared by every route; keys are
+        # namespaced by route name so two routes cannot collide on a shared
+        # delivery-id space.  Constructed unconditionally: which routes it
+        # actually protects is a per-route property (``replay_protected``),
+        # decided per request, and an unused cache costs one empty dict.
+        self._replay_cache = ReplayCache(max_entries=config.replay_cache_size)
+        self.requests_refused_replay: int = 0
 
     def start(self) -> None:
         """Start the HTTP server in a background daemon thread.
@@ -177,6 +187,11 @@ class WebhookHTTPServer:
           payload.  Louder when TLS is off, since the secret is then sent in
           the clear.  Announcing it is what stops ``token`` from becoming the
           quiet path of least resistance for a producer that DOES sign bodies.
+
+        A fourth, orthogonal to all three, is delegated to
+        :meth:`_announce_replay_posture`: how long a valid request STAYS
+        valid.  It is asked of every route, because it is a property of the
+        signature scheme rather than of the authentication mode.
         """
         if not self.config.routes:
             logger.warning(
@@ -199,6 +214,10 @@ class WebhookHTTPServer:
                 )
             elif has_secret and route.secret_algo == SECRET_ALGO_TOKEN:
                 self._warn_plain_token_route(name, route)
+            # Independent of HOW the route authenticates: announce for how
+            # LONG that authentication stays valid.  An unconditional call so
+            # this loop gains no branch (its score is near the ratchet).
+            self._announce_replay_posture(name, route, has_secret)
 
     def _warn_plain_token_route(self, name: str, route: RouteConfig) -> None:
         """Warn that one route authenticates with a plain shared secret.
@@ -229,6 +248,81 @@ class WebhookHTTPServer:
                 name, route.path, route.secret_header,
                 self.config.host, self.config.port,
             )
+
+    def _announce_replay_posture(
+        self, name: str, route: RouteConfig, has_secret: bool,
+    ) -> None:
+        """Announce how long an accepted request on ``route`` stays valid (#713).
+
+        The three postures, and why each is at the level it is:
+
+        * **No timestamp binding and no delivery id** — the WEAK default, and
+          the state every route configured before #713 is in.  A signature over
+          the body alone (or a plain token) authenticates the same bytes
+          forever, so whoever observes one delivery replays it indefinitely.
+          WARNING, naming both remedies.  This is the cost of the
+          backward-compatibility choice made deliberately in #713: the
+          protection could not be switched on for these routes, because the
+          sender signs no timestamp and there is nothing to check — so what is
+          switched on instead is saying so.
+        * **A delivery id but no timestamp binding** — bounded protection:
+          a verbatim replay and a sender retry are refused within the TTL, and
+          an attacker who rewrites the unsigned id is not.  INFO, because the
+          operator chose it knowingly and the bound is stated.
+        * **A timestamp-bound scheme with the window disabled**
+          (``max_age_seconds: 0``) — the explicit opt-out, so it announces
+          itself, the posture ``scrub_secret_env: none`` and
+          ``--ws-unsafe-no-auth`` already take.
+
+        A timestamp-bound scheme with a live window says nothing: that is the
+        strong posture, and a log line per listener start for the correct
+        configuration is noise.
+
+        Args:
+            name: The route's config key, so the operator can find it.
+            route: The route being announced.
+            has_secret: Whether the route authenticates with a shared secret at
+                all.  An unsigned route is already announced above, and adding
+                "its signature never expires" to a route that has no signature
+                would be false.
+        """
+        if not has_secret:
+            return
+
+        if route.binds_timestamp():
+            if route.max_age_seconds <= 0:
+                logger.warning(
+                    "Webhook route '%s' (%s) uses signature scheme '%s' but has "
+                    "max_age_seconds=0, so the freshness window is DISABLED — a "
+                    "captured request stays valid indefinitely. The replay cache "
+                    "still refuses repeats for %ds.",
+                    name, route.path, route.signature_scheme,
+                    DEFAULT_MAX_AGE_SECONDS,
+                )
+            return
+
+        if route.replay_key_header:
+            logger.info(
+                "Webhook route '%s' (%s) binds no timestamp (signature_scheme "
+                "'%s'), so a captured request does not expire; replays are "
+                "refused for %ds by delivery id (%s). An attacker who rewrites "
+                "that header is not caught — no sender here signs its headers.",
+                name, route.path, route.signature_scheme,
+                route.max_age_seconds or DEFAULT_MAX_AGE_SECONDS,
+                route.replay_key_header,
+            )
+            return
+
+        logger.warning(
+            "Webhook route '%s' (%s) has NO replay protection: signature_scheme "
+            "'%s' binds no timestamp and no replay_key_header is set, so a "
+            "request captured once authenticates forever and re-drives agent "
+            "sessions on every replay. Set signature_scheme 'slack-v0' or "
+            "'stripe-v1' if the sender signs a timestamp, or replay_key_header "
+            "(GitHub: X-GitHub-Delivery, GitLab: X-Gitlab-Event-UUID) for "
+            "delivery-id deduplication.",
+            name, route.path, route.signature_scheme,
+        )
 
     def stop(self) -> None:
         """Stop the HTTP server and join the thread."""
@@ -345,6 +439,8 @@ class WebhookHTTPServer:
         if self.config.rate_limit_per_second > 0:
             stats["rate_limit_per_second"] = self.config.rate_limit_per_second
             stats["requests_blocked_rate"] = self.requests_blocked_rate
+        stats["requests_refused_replay"] = self.requests_refused_replay
+        stats["replay_cache"] = self._replay_cache.get_stats()
         return stats
 
 
@@ -420,9 +516,12 @@ def _create_handler(server_instance: WebhookHTTPServer):
             event, err_status, err_msg = parse_webhook_request(
                 body, headers, route_name, route, config.secret,
                 transport_authenticated=server_instance.transport_authenticated(),
+                replay_cache=server_instance._replay_cache,
             )
 
             if event is None:
+                if err_status == 409:
+                    server_instance.requests_refused_replay += 1
                 self._respond(err_status, {"error": err_msg})
                 return
 

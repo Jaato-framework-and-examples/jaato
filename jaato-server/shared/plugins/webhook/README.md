@@ -159,6 +159,7 @@ Each layer is deep-merged, not replaced — a profile can override just `port` w
 | `tls` | object | `{"enabled": false}` | TLS/SSL configuration (see below) |
 | `allowed_ips` | string[] | `[]` | IP/CIDR allowlist. Empty = all allowed. |
 | `rate_limit_per_second` | float | `0` | Per-IP rate limit. 0 = unlimited. |
+| `replay_cache_size` | int | `10000` | Delivery keys the listener remembers for replay refusal. One cache serves every route. |
 
 ### Route Configuration
 
@@ -167,6 +168,10 @@ Each layer is deep-merged, not replaced — a profile can override just `port` w
 | `path` | str | Yes | URL path (must start with `/`) |
 | `secret_header` | str | No | Header carrying the route's credential — an HMAC digest, or the shared secret itself under `secret_algo: "token"` |
 | `secret_algo` | str | No | How that header is verified: `hmac-sha256` (preferred) or `token` (weaker — see below) |
+| `signature_scheme` | str | No | How the signed payload is **constructed**: `body` (default), `slack-v0`, `stripe-v1` — see [Replay protection](#replay-protection) |
+| `timestamp_header` | str | No | Header carrying the signed timestamp (`slack-v0` only). Refused on `stripe-v1` and `body`. |
+| `max_age_seconds` | int | No | Freshness window, default `300`. `0` disables it (announced at WARNING). |
+| `replay_key_header` | str | No | Header carrying a unique delivery id (`X-GitHub-Delivery`, `X-Gitlab-Event-UUID`) used to dedupe repeats |
 | `event_type_header` | str | No | Header to extract event type from |
 | `metadata` | object | No | Static metadata merged into every event. `metadata.secret` overrides the global `secret` for this route. |
 | `allow_unauthenticated` | bool | No | Accept **unsigned** requests on this route (default `false`, fail-closed). A route with no `secret_header` is refused unless mutual TLS or an IP allowlist is configured, or this is set. |
@@ -177,11 +182,17 @@ a **500**, never a silent downgrade to unsigned, and an unrecognised
 
 #### `secret_algo: "hmac-sha256"` — the default choice
 
-The header carries an HMAC-SHA256 digest **over the request body**, keyed by the
-shared secret, optionally prefixed `sha256=` (GitHub convention). The secret
-never travels, and a captured request cannot be replayed against a different
-body. Use this whenever the producer signs bodies — GitHub, Stripe, and most
-large senders do.
+The header carries an HMAC-SHA256 digest keyed by the shared secret. Under the
+default `signature_scheme: "body"` the digest covers the request body,
+optionally prefixed `sha256=` (GitHub convention). The secret never travels, and
+a captured request cannot be replayed against a *different* body. Use this
+whenever the producer signs bodies — GitHub, Stripe, Slack and most large
+senders do.
+
+> It **can** be replayed against the *same* body, indefinitely, unless the route
+> also configures replay protection. `secret_algo` says how the credential is
+> checked; it cannot say *what was signed*, and a digest over a body alone binds
+> no time. See [Replay protection](#replay-protection).
 
 #### `secret_algo: "token"` — for producers that don't sign
 
@@ -213,6 +224,14 @@ that was right there in the request.
 > and header, and a louder one when TLS is off — the same posture as
 > `--ws-unsafe-no-auth` and `scrub_secret_env: none`. The mode is deliberately
 > not the quiet path of least resistance.
+>
+> **Replay protection in `token` mode** is `replay_key_header` and nothing else.
+> There is no signed payload, so no timestamp can be bound into anything; and
+> the credential is byte-identical on every request, so a cache keyed on it
+> would refuse the second *legitimate* delivery rather than a replay. A delivery
+> id (`X-Gitlab-Event-UUID`) refuses a verbatim replay within the TTL. It does
+> not stop an attacker who *holds* the token from minting fresh requests with
+> new ids — that is credential compromise, which this mode concedes by design.
 
 > **Authentication (fail-closed).** A route is accepted only when it is
 > authenticated by one of: the route's shared secret (`secret_header` +
@@ -220,6 +239,106 @@ that was right there in the request.
 > `allowed_ips` allowlist, or an explicit `allow_unauthenticated: true`. A
 > matched route with none of these returns **401** — an untrusted caller can
 > never drive agent sessions through an unsigned endpoint left open by omission.
+
+### Replay protection
+
+A signature over the request body alone authenticates the same bytes **forever**.
+Anyone who observes one delivery — a proxy log, a mirrored port, a misrouted
+retry — can replay it verbatim, indefinitely, and it authenticates every time.
+On a listener whose purpose is to drive agent sessions that is not a duplicate
+row: it is a re-triggered turn, with tool calls, ledger spend and whatever side
+effects the persona authorises.
+
+Two mechanisms close it, and they are complements rather than alternatives.
+
+**1. A freshness window** — `signature_scheme` + `max_age_seconds`. Only a
+scheme that binds the timestamp **into the signature** can carry one; a
+timestamp the signature does not cover is rewritten by whoever is replaying the
+request, so checking it would be theatre. `timestamp_header` on
+`signature_scheme: "body"` is therefore a config error and a 500, not a warning.
+
+| `signature_scheme` | Signed payload | Timestamp from | Senders |
+|---|---|---|---|
+| `body` (default) | the request body | — (binds none) | GitHub, GitLab, most internal senders |
+| `slack-v0` | `v0:{ts}:{body}` | `timestamp_header` | Slack |
+| `stripe-v1` | `{ts}.{body}` | `t=` inside the signature header | Stripe |
+
+**2. A replay cache** — bounded, TTL'd to the window, keyed per delivery. The
+timestamp alone cannot catch a replay *inside* the window, because every copy
+carries the same signed timestamp and is equally fresh. This is the part that
+does. Only an authenticated, fresh delivery is ever recorded, so nobody can
+poison the cache with a guessed id to have the genuine delivery refused. A
+repeat answers **409**, distinct from 403 so a repeat and a forgery are
+distinguishable in the access log.
+
+```json
+"slack": {
+  "path": "/webhook/slack",
+  "secret_header": "X-Slack-Signature",
+  "secret_algo": "hmac-sha256",
+  "signature_scheme": "slack-v0",
+  "timestamp_header": "X-Slack-Request-Timestamp",
+  "max_age_seconds": 300
+},
+"stripe": {
+  "path": "/webhook/stripe",
+  "secret_header": "Stripe-Signature",
+  "secret_algo": "hmac-sha256",
+  "signature_scheme": "stripe-v1"
+},
+"github": {
+  "path": "/webhook/github",
+  "secret_header": "X-Hub-Signature-256",
+  "secret_algo": "hmac-sha256",
+  "replay_key_header": "X-GitHub-Delivery",
+  "event_type_header": "X-GitHub-Event"
+}
+```
+
+#### What each route shape actually gets
+
+| Route | Freshness window | Replay cache |
+|---|---|---|
+| `slack-v0` / `stripe-v1` | yes, on by default (300s) | yes, keyed on the signature — automatic, no extra config |
+| `body` + `replay_key_header` | none available | yes, keyed on the delivery id |
+| `body`, no delivery id | none available | **none** — a replay is accepted |
+| `token` + `replay_key_header` | none available | yes, keyed on the delivery id |
+| `token`, no delivery id | none available | **none** |
+
+**The last-but-one row is where every route configured before this feature
+sits**, and it is a deliberate choice rather than an oversight: the protection
+could not be switched on for them, because the sender signs no timestamp and
+there is nothing to check. What is switched on instead is *saying so* — each
+such route logs a **WARNING at listener startup** naming itself and both
+remedies. The cost is that the weakness persists for a deployment that reads no
+logs and changes nothing; the alternative was to break every existing route.
+
+Where the material *does* exist, the safe posture is the default: configuring
+`slack-v0` or `stripe-v1` gets a 300-second window and a replay cache with no
+further keys, and turning the window off (`max_age_seconds: 0`) is the explicit,
+WARNING-announced act.
+
+#### Fail-closed rules
+
+Widening the vocabulary widens what a route may **say**, never what it may omit.
+Each of these is a `validate_config` **error** and a **500** at request time —
+never a fall-through to a weaker check:
+
+- a `signature_scheme` outside the vocabulary (a typo does not fall back to `body`)
+- `slack-v0` with no `timestamp_header`
+- `stripe-v1` **with** a `timestamp_header` (its timestamp is in the signature header; a second source could disagree with the signed one)
+- `timestamp_header` on `body` (the value is not signed)
+- a timestamp-bound scheme with `secret_algo` other than `hmac-sha256`
+
+A timestamp that is present but unparseable is a **refusal**, not a skipped
+check. And no scheme accepts another scheme's construction: `slack-v0` rejects a
+bare hex digest and an HMAC over the body alone, and `stripe-v1` ignores Stripe's
+legacy `v0` test-mode signature entirely, per Stripe's own downgrade guidance.
+
+Every credential comparison — both `secret_algo` modes and both schemes — goes
+through `hmac.compare_digest`, via one helper (`constant_time_equals`) that
+encodes to UTF-8 first so a crafted non-ASCII header cannot turn a verification
+failure into a 500.
 
 ### TLS Configuration
 
