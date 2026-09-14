@@ -18,6 +18,7 @@ import logging
 import os
 from shared.session_context import get_workspace_root, get_config_root
 from shared.secret_repr import secret_safe_repr
+from shared.credential_lock import credential_lock
 import time
 import urllib.parse
 from dataclasses import dataclass
@@ -680,18 +681,25 @@ def clear_copilot_token() -> None:
     This forces re-exchange of the OAuth token for a new Copilot token
     on the next API call. Useful when a 401 is received even though the
     token appeared valid.
+
+    Held under the credential lock because this is a read-modify-write of
+    the file that also holds the OAuth tokens: racing it against another
+    process's save can drop the OAuth section, which is a real logout
+    (#683).  Never called from inside the lock — the lock is not
+    reentrant, see :mod:`shared.credential_lock`.
     """
     path = _get_token_storage_path()
     if not path.exists():
         return
 
     try:
-        with open(path) as f:
-            data = json.load(f)
-        if "copilot" in data:
-            del data["copilot"]
-            with open(path, "w") as f:
-                json.dump(data, f)
+        with credential_lock(path):
+            with open(path) as f:
+                data = json.load(f)
+            if "copilot" in data:
+                del data["copilot"]
+                with open(path, "w") as f:
+                    json.dump(data, f)
     except Exception:
         pass
 
@@ -722,29 +730,59 @@ def get_stored_access_token() -> Optional[str]:
     _oauth_trace(f"get_stored_access_token: copilot_token={bool(copilot_token)}")
 
     if copilot_token and not copilot_token.needs_refresh():
+        # The common path, deliberately outside the lock: taking one on
+        # every token read would serialise every request behind a file
+        # lock to guard an exchange that is not happening.
         _oauth_trace("get_stored_access_token: returning existing valid token")
         return copilot_token.token
 
-    # Need to refresh - get OAuth token
-    _oauth_trace("get_stored_access_token: token expired/missing, loading OAuth...")
-    oauth_tokens = load_tokens()
-    _oauth_trace(f"get_stored_access_token: oauth_tokens={bool(oauth_tokens)}")
-    if not oauth_tokens:
-        _oauth_trace("get_stored_access_token: no OAuth tokens, returning None")
-        return None
+    return _exchange_copilot_token_under_lock()
 
-    # Exchange OAuth token for Copilot token
-    _oauth_trace("get_stored_access_token: exchanging for Copilot token...")
-    try:
-        copilot_token = exchange_oauth_for_copilot_token(oauth_tokens.access_token)
-        _oauth_trace("get_stored_access_token: exchange successful, saving...")
-        save_copilot_token(copilot_token)
-        _oauth_trace("get_stored_access_token: returning new token")
-        return copilot_token.token
-    except RuntimeError as e:
-        # Token exchange failed - OAuth token may be invalid
-        _oauth_trace(f"get_stored_access_token: exchange failed: {e}")
-        return None
+
+def _exchange_copilot_token_under_lock() -> Optional[str]:
+    """Exchange the OAuth token for a Copilot token, once across processes.
+
+    Unlike Anthropic and Antigravity, GitHub's stored OAuth token does
+    **not** rotate — it is a device-flow token with no refresh token at
+    all — so a lost race here does not void a credential.  Two things
+    still make the lock worth taking (#683):
+
+    - The Copilot token is derived by an API call, and N sessions waking
+      together each made that call.  The re-read after acquiring
+      collapses them to one exchange instead of N, which matters because
+      the exchange endpoint is rate-limited.
+    - ``save_copilot_token`` is a read-modify-write of the *shared* auth
+      file — it loads the whole JSON, sets one key and writes it back —
+      so two concurrent savers can lose the OAuth section outright.  That
+      one IS a logout.
+    """
+    path = _get_token_storage_path()
+
+    with credential_lock(path):
+        # Somebody else may have exchanged while we waited.
+        copilot_token = load_copilot_token()
+        if copilot_token and not copilot_token.needs_refresh():
+            _oauth_trace("get_stored_access_token: another holder exchanged; reusing")
+            return copilot_token.token
+
+        _oauth_trace("get_stored_access_token: token expired/missing, loading OAuth...")
+        oauth_tokens = load_tokens()
+        _oauth_trace(f"get_stored_access_token: oauth_tokens={bool(oauth_tokens)}")
+        if not oauth_tokens:
+            _oauth_trace("get_stored_access_token: no OAuth tokens, returning None")
+            return None
+
+        _oauth_trace("get_stored_access_token: exchanging for Copilot token...")
+        try:
+            copilot_token = exchange_oauth_for_copilot_token(oauth_tokens.access_token)
+            _oauth_trace("get_stored_access_token: exchange successful, saving...")
+            save_copilot_token(copilot_token)
+            _oauth_trace("get_stored_access_token: returning new token")
+            return copilot_token.token
+        except RuntimeError as e:
+            # Token exchange failed - OAuth token may be invalid
+            _oauth_trace(f"get_stored_access_token: exchange failed: {e}")
+            return None
 
 
 def get_stored_oauth_token() -> Optional[str]:

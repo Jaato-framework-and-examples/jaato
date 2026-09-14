@@ -3170,6 +3170,105 @@ which stays readable for any pid because CPython's `close_fds` path
 enumerates it at every subprocess spawn and AppArmor has no rule form for
 "my own pid only".
 
+### A Refresh Token That Rotates, and Two Sessions Refreshing It (#683)
+
+An OAuth refresh token **rotates**: the response replaces the token that
+bought it, and the old one is void the moment the provider answers. So
+
+```
+load -> stale? -> refresh -> save
+```
+
+is a read-modify-write on a shared file, and two of them at once produce
+two refreshes, each rotating the other's token away. Last-write-wins
+decides which superseded credential lands on disk. The loser does not
+fail then — it fails at its **next** refresh, and the user is logged out
+with nothing in the failure naming the cause. That opacity is why a
+small defect is a P1: the symptom is an unexplained re-login.
+
+**A daemon is more exposed than a one-process CLI, and the pool makes it
+worse.** Claude Code is one process per session and still needed a
+cross-process lock for this. Here, many sessions share one process,
+runner subprocesses refresh independently of the daemon, and pool slots
+`fork()` from a template that has already imported the auth plugins. A
+cascade fanning out after an idle period is N stages waking at once
+against one expired token — the normal shape, not an edge case. So an
+in-process `threading.Lock` is **not sufficient**: it does not exist
+across the runner boundary, and a lock object held at fork time is
+inherited in a state the child cannot reason about.
+
+`shared/credential_lock.py` is the one mechanism, the shape
+`shared/completion_nudge.py` and `shared/apparmor_label.py` already have:
+one definition, so four auth plugins cannot drift apart on it.
+
+**A lock alone is not the fix.** It converts the race into a queue — N
+sessions still perform N refreshes, politely one at a time, and the last
+one still wins for reasons nobody can see. What collapses the queue into
+a single refresh is **re-reading the credential after acquiring**, so a
+caller that blocked adopts the token the winner just wrote. The guard
+asserts `refresh_count == 1`, not "the writes did not interleave": with
+the lock intact and only the re-read removed, both race tests fail `2 ==
+1`.
+
+| Ask | Where | Note |
+|-----|-------|------|
+| lock spans read-check-refresh-write, cross-process | `credential_lock()` — an `flock` on a sibling `<cred>.lock` | a sibling, not the credential itself: `os.replace` swaps the inode and would detach the lock from what it guards |
+| re-read after acquiring | `refresh_under_lock()` | the half that makes it a fix rather than a queue |
+| refresh before expiry, with a margin | `with_margin()` / `JAATO_OAUTH_REFRESH_MARGIN` | the margin was **already there** (a hardcoded 300s in each provider); it is now one definition and configurable |
+| a transient failure is not a logout | `TransientRefreshError` vs `InvalidGrantError` | only an explicit OAuth error code reads as a dead credential |
+
+**One primitive covers threads and processes.** `fcntl.flock` attaches to
+the open file *description*, and each acquisition opens its own — so two
+threads of one daemon contend exactly as two processes do. That is why
+there is no second in-process lock: two locks are how a deadlock is
+built. The corollary is that the lock is **not reentrant**, so call sites
+stay flat — a helper called from inside the lock must not take it again.
+
+**Nothing is held at import time**, which is the fork answer: the
+descriptor lives inside one call, so a pool slot forked from the template
+inherits no lock state. For the residual case — a `fork()` landing while
+another thread holds it, where the child inherits a descriptor holding a
+lock it never took — live descriptors are closed in the child by an
+`os.register_at_fork` hook.
+
+**The margin does not disperse a herd, and the docs no longer imply it
+does.** Every process computes the same threshold from the same
+`expires_at`, so N sessions cross it at the same instant exactly as they
+crossed real expiry — the margin only moves the instant earlier. Its real
+job is to make the refresh happen while the old token is still **valid**,
+which is what gives a transient failure something to fall back on: a
+token inside the margin is stale but still accepted, so a network blip
+there returns the stored token instead of raising.
+
+**The asymmetry in classifying a failure runs one way, deliberately.**
+Mistaking a dead grant for a transient costs one wasted retry; mistaking
+a transient for a dead grant costs the user their session — the same
+symptom the lock exists to prevent, arriving by a different route. So
+only `invalid_grant` / `invalid_client` / `unauthorized_client` /
+`invalid_token` in the body is read as a dead credential. A bare 401 from
+a proxy, a 429, a 502, a connect timeout: all transient. Both subclass
+`RuntimeError`, so existing callers that catch it are unaffected.
+
+**Which plugins actually share the pattern.** The issue names four; the
+tree says three, and the third is different in kind:
+
+| Plugin | Rotates? | Wired |
+|--------|----------|-------|
+| `anthropic_auth` | yes — `data.get("refresh_token", refresh_token)` | `get_valid_access_token` under the lock |
+| `antigravity_auth` | yes (Google) | `get_valid_access_token` **and** the provider's per-request `_refresh_token_if_needed`, which had its own unlocked refresh and was the hot path |
+| `github_auth` | **no** — the stored device-flow token has no refresh token at all | the *Copilot* exchange is locked anyway: N sessions each made that rate-limited call, and `save_copilot_token` is a read-modify-write of the file that also holds the OAuth section |
+| `zhipuai_auth` | **no refresh path exists** — a static API key | nothing to wire |
+
+**`save_accounts` rewrites the whole account file**, so Antigravity's
+locked helper writes back the manager it read *under the lock* rather
+than the long-lived one the provider holds — saving a stale manager
+republishes every other account's stale tokens over whatever another
+process just refreshed. Not fixed here, and worth knowing: the remaining
+`save_accounts(self._account_manager)` calls in `shutdown()` and
+`_rotate_account_on_rate_limit` are still whole-file last-write-wins
+across accounts. That is a merge problem, not a locking one, and wants
+its own change.
+
 ### Approver Identity (#859)
 
 `PermissionResolvedEvent` said HOW a decision was reached (`method`) and
@@ -5225,6 +5324,8 @@ covers it, where one exists. `jaato-scaffold explain env` renders the tags;
 | `JAATO_RUNNER_ACK_TIMEOUT` | Seconds a dispatched runner RPC may go with NO frame bearing its id before the daemon stops assuming and asks the runner what it actually has (default 120; `0` disables). **Not** a cap on how long an RPC may take — a turn legitimately runs for minutes, and a runner that claims the id buys another full window. What it bounds is an unbounded WAIT: before it, a request the daemon wrote and the runner does not have hung the caller forever with every thread idle (#856). Host-scoped, because it bounds the channel, which a pool slot shares across several sessions in turn. A negative or unparseable value falls back to the default — "unbounded" is the bug this exists to fix. |
 | `JAATO_RUNNER_POOL_MAX_SIZE` | Hard ceiling on **total** idle pool slots, reservations included (default: `2 x JAATO_RUNNER_POOL_SIZE`).  This is the memory bound — a slot is 129–187 MB — on the growth that per-tenant reservations imply.  Raise it when `pool_replenish_ceiling_blocked_total` is nonzero: some tenant is being served by cold-spawn while reservations hold the ceiling. |
 | `JAATO_IPC_EVENT_QUEUE_MAX` | Per-client IPC event-queue bound (default 2048). Beyond it, lossy tool-output chunks are evicted oldest-first (media before text); essential lifecycle events are queued past the bound rather than dropped, because losing one desynchronises the client permanently. A non-numeric or non-positive value falls back to the default — "unbounded" is the bug this exists to fix. See [Binary Media Chunks](docs/design/binary-media-chunks.md). |
+| `JAATO_CREDENTIAL_LOCK_TIMEOUT` | Seconds a caller waits for another process to finish refreshing a rotating OAuth credential before giving up (default 60). Host-scoped for the reason `JAATO_RUNNER_ACK_TIMEOUT` is: what is bounded is contention on a FILE, and the contenders — daemon, runner subprocesses, pool slots — serve sessions that have no say in each other's timeouts. A non-numeric or non-positive value falls back to the default; "unbounded" is the bug this exists to fix. See [A Refresh Token That Rotates](#a-refresh-token-that-rotates-and-two-sessions-refreshing-it-683). |
+| `JAATO_OAUTH_REFRESH_MARGIN` | Seconds before real expiry at which an OAuth access token is treated as stale and refreshed (default 300 — the value each provider previously hardcoded). Host-scoped because every process sharing one credential file must agree on when that file's token is stale. Note what it does **not** do: a fixed margin does not disperse a thundering herd (every process crosses it at the same instant), it makes the refresh happen while the old token is still valid — which is what lets a transient failure fall back on it instead of logging the user out. |
 | `JAATO_AMBIGUOUS_WIDTH` | Width for East Asian Ambiguous chars in tables (`1` default, `2` for CJK terminals) |
 | `JAATO_SESSION_LOG_DIR` | Per-session log directory, relative to workspace (default: `.jaato/logs`) |
 | `JAATO_CGROUPS_ROOT` | Parent cgroup v2 directory for the WS server's per-session cgroup tree (default: `/sys/fs/cgroup/jaato`). Override when the host has subtree_control delegated under a different path. Must already exist with `memory`, `pids`, `cpu` in `cgroup.subtree_control`. |

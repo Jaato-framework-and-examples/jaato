@@ -13,6 +13,12 @@ import logging
 import os
 from shared.session_context import get_workspace_root, get_config_root
 from shared.secret_repr import secret_safe_repr
+from shared.credential_lock import (
+    has_expired,
+    raise_for_refresh_failure,
+    refresh_under_lock,
+    with_margin,
+)
 import secrets
 import threading
 import time
@@ -56,8 +62,26 @@ class OAuthTokens:
 
     @property
     def is_expired(self) -> bool:
-        """Check if access token is expired (with 5 min buffer)."""
-        return time.time() > (self.expires_at - 300)
+        """Whether the access token is stale — real expiry minus a margin.
+
+        "Stale" is deliberately wider than "expired": the margin
+        (``JAATO_OAUTH_REFRESH_MARGIN``, 5 minutes by default) makes the
+        refresh happen while the current token is still *valid*, which
+        is what gives :attr:`is_hard_expired` something to fall back on
+        when a refresh fails transiently.  See
+        :mod:`shared.credential_lock`.
+        """
+        return with_margin(self.expires_at)
+
+    @property
+    def is_hard_expired(self) -> bool:
+        """Whether the access token is past real expiry, margin ignored.
+
+        The other half of the pair above.  A token that is stale but not
+        hard-expired is still accepted by the API, so a transient
+        refresh failure in that window must not become a logout (#683).
+        """
+        return has_expired(self.expires_at)
 
     def to_dict(self) -> dict:
         return {
@@ -412,14 +436,25 @@ def exchange_code_for_tokens(code: str, code_verifier: str, state: str) -> OAuth
 def refresh_tokens(refresh_token: str) -> OAuthTokens:
     """Refresh expired access token.
 
+    Anthropic **rotates** the refresh token: the value returned here
+    supersedes the one passed in, and the old one is void immediately.
+    That makes the surrounding load-check-refresh-write a read-modify-
+    write on a shared file, which is why callers must reach this through
+    :func:`shared.credential_lock.refresh_under_lock` rather than
+    calling it directly (#683).
+
     Args:
         refresh_token: Current refresh token.
 
     Returns:
-        New OAuthTokens (note: refresh token may also be rotated).
+        New OAuthTokens (the refresh token is normally rotated).
 
     Raises:
-        RuntimeError: If refresh fails.
+        InvalidGrantError: The server says this refresh token is dead —
+            re-authentication is genuinely required.
+        TransientRefreshError: The request failed without disproving the
+            stored credential.  Both subclass ``RuntimeError``, so
+            callers that only catch that are unaffected.
     """
     import requests
 
@@ -445,10 +480,13 @@ def refresh_tokens(refresh_token: str) -> OAuthTokens:
         resp.raise_for_status()
         data = resp.json()
     except requests.exceptions.HTTPError as e:
-        error_body = e.response.text if e.response else str(e)
-        raise RuntimeError(f"Token refresh failed: {error_body}")
+        status = e.response.status_code if e.response is not None else None
+        body = e.response.text if e.response is not None else str(e)
+        raise_for_refresh_failure(status, body, "Anthropic")
     except requests.exceptions.RequestException as e:
-        raise RuntimeError(f"Token refresh failed: {e}")
+        # No HTTP response at all: DNS, connect, TLS, timeout.  Transient
+        # by definition — nothing about the stored token was disproved.
+        raise_for_refresh_failure(None, str(e), "Anthropic")
 
     access_token = data.get("access_token")
     # Anthropic rotates refresh tokens - use new one if provided
@@ -456,7 +494,9 @@ def refresh_tokens(refresh_token: str) -> OAuthTokens:
     expires_in = data.get("expires_in", 3600)
 
     if not access_token:
-        raise RuntimeError(f"Invalid refresh response: {data}")
+        # A 200 with no token is the server misbehaving, not the
+        # credential being rejected: do not read it as a logout.
+        raise_for_refresh_failure(None, f"invalid refresh response: {data}", "Anthropic")
 
     return OAuthTokens(
         access_token=access_token,
@@ -618,25 +658,50 @@ def get_valid_access_token(
 ) -> Optional[str]:
     """Get a valid access token, refreshing if needed.
 
+    The load-check-refresh-write sequence runs under a cross-process
+    lock on the token file, and the token is **re-read after the lock is
+    acquired** — so when a cascade fans out and N sessions all find the
+    token stale at the same instant, one of them refreshes and the rest
+    adopt what it wrote.  Without the re-read a lock only converts the
+    race into a queue: N refreshes, each rotating the token out from
+    under the next, and the loser stores a superseded credential that
+    fails at its *next* refresh as an unexplained logout (#683).
+
     Returns:
         Valid access token, or None if no tokens stored.
 
     Raises:
-        RuntimeError: If refresh fails.
+        InvalidGrantError: Re-authentication is required.
+        TransientRefreshError: The refresh failed and the stored token
+            had already passed real expiry, so there was nothing to fall
+            back on.  Both subclass ``RuntimeError``.
     """
-    tokens = load_tokens(workspace_path=workspace_path, config_root=config_root)
-    if not tokens:
+    # Lock the file that gets WRITTEN, not the one that gets read: those
+    # can differ (read searches project tier then home, write picks one),
+    # and the race is over the write.  Every process sharing a workspace
+    # resolves the same write path, which is what makes the lock shared;
+    # once the first write lands, the read path resolves to it too.
+    path = _get_token_storage_path(
+        for_write=True, workspace_path=workspace_path, config_root=config_root,
+    )
+
+    def _load() -> Optional[OAuthTokens]:
+        return load_tokens(workspace_path=workspace_path, config_root=config_root)
+
+    def _save(tokens: OAuthTokens) -> None:
+        save_tokens(tokens, workspace_path=workspace_path, config_root=config_root)
+
+    tokens = refresh_under_lock(
+        credential_path=path,
+        load=_load,
+        needs_refresh=lambda t: t.is_expired,
+        still_usable=lambda t: not t.is_hard_expired,
+        refresh=lambda t: refresh_tokens(t.refresh_token),
+        save=_save,
+        label="Anthropic",
+    )
+    if tokens is None:
         return None
-
-    # Refresh if expired
-    if tokens.is_expired:
-        tokens = refresh_tokens(tokens.refresh_token)
-        save_tokens(
-            tokens,
-            workspace_path=workspace_path,
-            config_root=config_root,
-        )
-
     return tokens.access_token
 
 
