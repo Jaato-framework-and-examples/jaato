@@ -64,6 +64,13 @@ def test_telemetry_starts_at_zero() -> None:
         # Multi-tenant capacity counters (#898).
         "pool_stale_reservation_evicted_total": 0,
         "pool_replenish_ceiling_blocked_total": 0,
+        # Liveness counters (#1058).  Both declared rather than sprung
+        # into existence for the same reason the over-cap pair is: on a
+        # healthy daemon they must read 0, not be absent.  Nonzero on
+        # either is a fault report -- a runner that died unasked, or a
+        # session torn down twice.
+        "pool_dead_slot_evicted_total": 0,
+        "pool_duplicate_return_refused_total": 0,
     }
 
 

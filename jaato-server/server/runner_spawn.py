@@ -39,7 +39,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
+from typing import Any, Callable, Dict, List, Optional, Tuple, TYPE_CHECKING
 
 # Leaf module (no package-internal deps of its own): the strict-posture egress
 # failure is the one wire-up error the spawn path must NOT swallow, so the type
@@ -192,7 +192,7 @@ def spawn_session_runner(
         Exception: any spawn / RPC failure.  Caller catches and
             downgrades.
     """
-    from server.runner_spawner import SpawnedRunner, RunnerSpawner
+    from server.runner_spawner import SpawnedRunner
     from server.runner_rpc_client import RunnerRPCClient
 
     if daemon_loop is None:
@@ -273,49 +273,12 @@ def spawn_session_runner(
 
     # ----- Cold-spawn fallback (pre-PR-4 behavior) -----
     if spawned is None:
-        spawner = RunnerSpawner()
-
-        # Phase 5 §5.1b, re-scoped by #735: these two kwargs become the
-        # ``JAATO_RUNNER_MAX_OUTPUT_CHARS`` /
-        # ``JAATO_RUNNER_TOOL_TIMEOUT_SECONDS`` env vars, and those
-        # configure ``server/runner/tool_executor.ToolExecutor`` — the
-        # PHASE-2, cli-only ``execute_fn`` surface.  They are NOT this
-        # session's enforcement path and never were: ``RunnerRPC``
-        # routes to ``host.session._executor`` whenever a session host
-        # exists, which is on every path that dispatches
-        # ``session.bootstrap`` (all of them).  The measured consequence
-        # was a ``tool_timeout_seconds: 2`` profile running a
-        # ``sleep 60`` for 60.02 s on cold-spawn as well as on the pool.
-        #
-        # They are kept, not deleted, because the Phase-2 executor is a
-        # LIVE fallback for a runner with no session host (cli-only
-        # runners, harnesses, tests) and deleting them would silently
-        # drop that surface back to its compile-time defaults — the same
-        # class of regression, in the same direction.  Both values come
-        # from the one source of truth, ``server._profile.runtime_limits``,
-        # so the two surfaces cannot disagree about a number; they simply
-        # bound different executors.  The session's own caps ride
-        # ``SessionInitEnvelope.runtime_limits`` (v7), built above in
-        # ``build_session_envelope`` and applied in
-        # ``JaatoSession.configure``.
-        profile = getattr(server, "_profile", None)
-        runtime_limits = getattr(profile, "runtime_limits", None) if profile else None
-        max_output_chars = (
-            runtime_limits.max_output_bytes
-            if runtime_limits is not None else None
-        )
-        tool_timeout_seconds = (
-            runtime_limits.tool_timeout_seconds
-            if runtime_limits is not None else None
-        )
-
-        spawned = spawner.spawn(
+        spawned = _cold_spawn_runner(
+            server,
             profile_name=profile_name,
             session_id=session_id,
             workspace_path=workspace_path,
             log_path=log_path,
-            max_output_chars=max_output_chars,
-            tool_timeout_seconds=tool_timeout_seconds,
             disable_confine=disable_confine,
             cgroup_attach=cgroup_attach,
         )
@@ -328,8 +291,35 @@ def spawn_session_runner(
     # socket fail; ``server._runner_rpc`` ends up None; sessions
     # crash with ``NoneType.session_send_message_threadsafe``.
     # See PR #173.
+    #
+    # #1058: ...and reuse it only if it is LIVE.  ``PoolManager`` now
+    # refuses to hand out a slot whose client has died, so reaching this
+    # branch with a corpse takes a race — ``acquire_slot`` ran off the
+    # daemon loop, and the read loop that sets the flag runs on it — but
+    # a race is exactly what the reported symptom looks like from here,
+    # and verifying at the point of USE is what makes the reuse a
+    # checked assumption rather than an inherited one.
     pool_slot = getattr(spawned, "pool_slot", None) if pool_served else None
-    existing_rpc = getattr(pool_slot, "rpc", None) if pool_slot else None
+    existing_rpc, slot_discarded = _reusable_slot_rpc(
+        pool_slot, session_id, pool_manager, daemon_loop)
+    if slot_discarded:
+        # The slot was discarded with its dead client.  Its socket was
+        # adopted by that client's asyncio transport, so a second
+        # ``RunnerRPCClient`` on the same socket is the PR #173 failure
+        # this whole reuse path exists to avoid — the session gets a
+        # freshly spawned runner instead of an unknown-state transport.
+        spawned = _cold_spawn_runner(
+            server,
+            profile_name=profile_name,
+            session_id=session_id,
+            workspace_path=workspace_path,
+            log_path=log_path,
+            disable_confine=disable_confine,
+            cgroup_attach=cgroup_attach,
+        )
+        pool_slot = None
+        pool_served = False
+        server._pool_manager_ref = None
     if existing_rpc is not None:
         # Returned slot — reuse the rpc client.  Per-session state
         # was cleared by the slot-return path's
@@ -369,6 +359,225 @@ def spawn_session_runner(
         not disable_confine,
         pool_served,
     )
+
+
+def _cold_spawn_runner(
+    server: Any,
+    *,
+    profile_name: str,
+    session_id: str,
+    workspace_path: Optional[str],
+    log_path: Optional[str],
+    disable_confine: bool,
+    cgroup_attach: Optional[Any],
+) -> Any:
+    """Spawn a fresh session-mode runner subprocess.
+
+    The pre-pool behaviour, and the fallback for every path the pool
+    cannot serve: pool disabled, pool empty, a ``cgroup_attach`` the
+    pool cannot honour, or — since #1058 — a pool slot whose RPC client
+    turned out to be dead at the point of use.
+
+    A free function with two call sites rather than a block inside
+    :func:`spawn_session_runner`: the second call site is what lets the
+    dead-slot path produce a working session instead of a refusal, and
+    a copied forty-line block is a copy that rots.
+
+    Args:
+        server: The session's ``JaatoServer`` — read only for its
+            resolved profile's ``runtime_limits``.
+        profile_name: AppArmor profile to confine to (``""`` =
+            unconfined).
+        session_id: Session this runner will serve.
+        workspace_path: The runner's cwd.
+        log_path: Where the runner writes its own log, or ``None`` to
+            inherit the daemon's stderr.
+        disable_confine: Skip the AppArmor transition entirely.
+        cgroup_attach: Optional ``preexec`` callback migrating the
+            forked runner into a per-session cgroup.
+
+    Returns:
+        The ``SpawnedRunner`` handle.  It carries NO ``pool_slot``, which
+        is what makes the teardown path (``JaatoServer.shutdown``) take
+        the cold close rather than trying to return a slot to the pool.
+    """
+    from server.runner_spawner import RunnerSpawner
+
+    spawner = RunnerSpawner()
+
+    # Phase 5 §5.1b, re-scoped by #735: these two kwargs become the
+    # ``JAATO_RUNNER_MAX_OUTPUT_CHARS`` /
+    # ``JAATO_RUNNER_TOOL_TIMEOUT_SECONDS`` env vars, and those
+    # configure ``server/runner/tool_executor.ToolExecutor`` — the
+    # PHASE-2, cli-only ``execute_fn`` surface.  They are NOT this
+    # session's enforcement path and never were: ``RunnerRPC``
+    # routes to ``host.session._executor`` whenever a session host
+    # exists, which is on every path that dispatches
+    # ``session.bootstrap`` (all of them).  The measured consequence
+    # was a ``tool_timeout_seconds: 2`` profile running a
+    # ``sleep 60`` for 60.02 s on cold-spawn as well as on the pool.
+    #
+    # They are kept, not deleted, because the Phase-2 executor is a
+    # LIVE fallback for a runner with no session host (cli-only
+    # runners, harnesses, tests) and deleting them would silently
+    # drop that surface back to its compile-time defaults — the same
+    # class of regression, in the same direction.  Both values come
+    # from the one source of truth, ``server._profile.runtime_limits``,
+    # so the two surfaces cannot disagree about a number; they simply
+    # bound different executors.  The session's own caps ride
+    # ``SessionInitEnvelope.runtime_limits`` (v7), built by
+    # ``build_session_envelope`` and applied in
+    # ``JaatoSession.configure``.
+    runtime_limits = _profile_runtime_limits(getattr(server, "_profile", None))
+    max_output_chars = (
+        runtime_limits.max_output_bytes
+        if runtime_limits is not None else None
+    )
+    tool_timeout_seconds = (
+        runtime_limits.tool_timeout_seconds
+        if runtime_limits is not None else None
+    )
+
+    return spawner.spawn(
+        profile_name=profile_name,
+        session_id=session_id,
+        workspace_path=workspace_path,
+        log_path=log_path,
+        max_output_chars=max_output_chars,
+        tool_timeout_seconds=tool_timeout_seconds,
+        disable_confine=disable_confine,
+        cgroup_attach=cgroup_attach,
+    )
+
+
+def _revive_slot_rpc(rpc: Any, daemon_loop: Any) -> bool:
+    """Reopen a pooled client whose read task was cancelled (#1058).
+
+    Driven from the spawn path rather than from the pool because
+    restarting a reader needs the event loop, and ``PoolManager`` has
+    none — it runs on the replenish thread and on whichever thread is
+    acquiring.  ``spawn_session_runner`` already holds ``daemon_loop``
+    and already schedules :meth:`RunnerRPCClient.start` on it the same
+    way.
+
+    Best-effort and bounded: a revive that raises, times out, or is
+    refused by the client's own evidence check answers ``False``, and
+    the caller discards the slot and cold-spawns.  A slot is worth one
+    short attempt, never a stalled session.
+
+    Args:
+        rpc: The slot's ``RunnerRPCClient``.
+        daemon_loop: The loop the client's transport is bound to.
+
+    Returns:
+        ``True`` when the channel is usable again.
+    """
+    revive = getattr(rpc, "revive_read_loop", None)
+    if not callable(revive) or daemon_loop is None:
+        return False
+    try:
+        fut = asyncio.run_coroutine_threadsafe(revive(), daemon_loop)
+        return bool(fut.result(timeout=5.0))
+    except Exception as exc:  # noqa: BLE001 — a failed revive is a discard
+        logger.warning(
+            "spawn_session_runner: reviving the slot's rpc read loop "
+            "raised %s — discarding the slot instead", exc,
+        )
+        return False
+
+
+def _reusable_slot_rpc(
+    pool_slot: Any,
+    session_id: str,
+    pool_manager: Any,
+    daemon_loop: Any = None,
+) -> Tuple[Optional[Any], bool]:
+    """The slot's RPC client, but only when it is still alive (#1058).
+
+    Layer 2 of the dead-slot fix.  ``PoolManager.acquire_slot`` is layer
+    1 and is the one that makes the reported failure unreachable; this is
+    the check at the point of USE, where the assumption is actually
+    consumed.  It is not decorative: ``spawn_session_runner`` runs OFF
+    the daemon loop (it blocks on ``run_coroutine_threadsafe``), so the
+    read loop that sets ``is_closed`` can run between the acquire and
+    here.
+
+    A closed client gets ONE repair, and only on positive evidence.  If
+    its ``close_reason`` says its read task was CANCELLED, then the
+    runner was never signalled and the transport was never closed — what
+    died is the reader, and a task cannot be un-cancelled, so a fresh
+    read task is started on the surviving transport
+    (``RunnerRPCClient.revive_read_loop``).  Clearing the flag alone
+    would hand back a channel nobody is reading, which fails later and
+    more confusingly than failing here.
+
+    Every other cause DISCARDS the slot: the peer is gone (``eof``), the
+    runner was reaped (``explicit-close``), or the stream is
+    desynchronised mid-frame (``oversized-frame`` / ``malformed-frame``).
+    Re-ADOPTING the socket is not among the options in any of those
+    cases: it is already owned by the dead client's asyncio transport,
+    and a second ``connect_accepted_socket`` on it is the exact PR #173
+    failure the shared-client design exists to avoid.  The caller
+    cold-spawns instead.
+
+    Args:
+        pool_slot: The acquired slot, or ``None`` for a cold-spawned
+            session (in which case there is nothing to reuse).
+        session_id: The arriving session — for the log line.
+        pool_manager: The daemon's :class:`~server.runner_pool.PoolManager`,
+            used to queue a discarded slot for teardown so its runner
+            process is reaped rather than leaked.  ``None`` is tolerated:
+            an unwired pool cannot reap, and refusing the reuse still
+            beats handing back a closed client.
+        daemon_loop: The loop the slot's transport is bound to, needed to
+            start a new read task.  ``None`` disables the revive, which
+            degrades to the discard path rather than to a wrong answer.
+
+    Returns:
+        ``(rpc, discarded)``.  ``rpc`` is the usable client or ``None``;
+        ``discarded`` says the SLOT is gone and the caller must
+        cold-spawn.  Two values because ``None`` alone conflates the
+        routine case — the first session on a slot, which has no client
+        yet and must create one on the slot's socket — with the failure
+        case, where the socket belongs to a dead client and must not be
+        touched.  Cold-spawning for the first case would bypass the pool
+        entirely, silently, on every fresh slot.
+    """
+    rpc = getattr(pool_slot, "rpc", None) if pool_slot is not None else None
+    if rpc is None:
+        return None, False
+
+    from server.runner_pool import slot_rpc_death
+
+    if not getattr(rpc, "is_closed", False):
+        return rpc, False
+
+    # Closed, but possibly only because its READER was cancelled — the
+    # transport and the runner survive that, and a task cannot be
+    # un-cancelled, so clearing a flag would hand back a channel nobody
+    # is reading.  A fresh read task on the surviving transport is the
+    # repair; ``can_revive`` is the evidence that it is the right one.
+    if getattr(rpc, "can_revive", False) and _revive_slot_rpc(
+            rpc, daemon_loop):
+        logger.info(
+            "spawn_session_runner: session %s revived the read loop of "
+            "pool slot pid=%s before reusing its rpc client",
+            session_id, getattr(pool_slot, "pid", "?"),
+        )
+        return rpc, False
+
+    reason = slot_rpc_death(pool_slot) or "closed"
+
+    logger.error(
+        "spawn_session_runner: session %s was handed pool slot pid=%s "
+        "whose rpc client is closed (reason=%s) — discarding the slot "
+        "and cold-spawning instead (#1058)",
+        session_id, getattr(pool_slot, "pid", "?"), reason,
+    )
+    discard = getattr(pool_manager, "discard_acquired_slot", None)
+    if callable(discard):
+        discard(pool_slot, reason=f"dead-rpc:{reason}")
+    return None, True
 
 
 def _profile_runtime_limits(profile: Any) -> Optional[RuntimeLimits]:

@@ -147,6 +147,14 @@ class PoolSlot:
     #
     # Typed ``Any`` to avoid the cycle through ``runner_rpc_client``.
     rpc: Optional[Any] = None
+    #: Why this slot was queued for teardown, set when it is put on
+    #: ``PoolManager._pending_teardown`` and read by the drain so the
+    #: teardown log and the AppArmor-profile reap name the real cause
+    #: (#1058).  The drain used to label EVERY queued slot
+    #: ``"over-capacity"``, which was true of its only producer and
+    #: became a lie the moment a second one existed.  ``None`` for a
+    #: slot that was never queued.
+    teardown_reason: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -271,6 +279,69 @@ def _canonical_path(path: Optional[str]) -> Optional[str]:
 # ``server.runner_pool.SlotHandle`` keep type-checking.  No tuple
 # semantics — ``PoolSlot`` is a dataclass with ``.pid`` / ``.sock``.
 SlotHandle = PoolSlot
+
+
+def slot_rpc_death(slot: PoolSlot) -> Optional[str]:
+    """Positive evidence that *slot*'s RPC client is dead, else ``None``.
+
+    The pool's ONE liveness predicate (#1058).  A slot whose
+    ``RunnerRPCClient`` has closed cannot serve anybody: every later
+    ``call`` raises up front, so the next session to take it fails
+    ``session.bootstrap`` with ``RunnerCallError: RunnerRPCClient is
+    closed`` — discovered by the consumer, one layer too late.
+
+    A POLL, deliberately.  The read loop's ``finally`` already knows the
+    channel died and already sets the flag; what was missing was anybody
+    asking.  Asking at the point of use cannot silently stop working and
+    is checkable by a test, where a callback registered at slot creation
+    is inert the moment one construction path forgets it — the #735
+    shape, in a pool whose slots are built on two different paths
+    (``spawn_initial_slots`` and the replenish loop).
+
+    **Only positive evidence counts**, the posture #1014 and #1023 take
+    about confinement labels:
+
+    ==================================  =========================
+    Slot state                          Verdict
+    ==================================  =========================
+    no ``rpc`` (never served a session)  alive — there is no
+                                         channel to have died, and
+                                         the first session on the
+                                         slot creates one
+    ``rpc`` reporting ``is_closed``      **dead**, with its reason
+    ...unless it reports ``can_revive``  alive — its reader was
+                                         cancelled but its transport
+                                         and its runner survived, and
+                                         the spawn path reopens it
+                                         (``revive_read_loop``).  The
+                                         pool cannot do that itself:
+                                         it holds no event loop, and
+                                         a new read task needs one
+    ``rpc`` with no ``is_closed``        alive — a duck-typed or
+                                         out-of-tree client that
+                                         cannot answer proves
+                                         nothing, and reading
+                                         absence as death would
+                                         empty the pool
+    ==================================  =========================
+
+    Args:
+        slot: The idle slot to judge.
+
+    Returns:
+        The client's ``close_reason`` (``"eof"``, ``"read-loop-crash"``,
+        ``"explicit-close"``, ...), or the bare string ``"closed"`` when
+        a client reports death without naming a cause, or ``None`` when
+        there is no evidence the slot is dead.
+    """
+    rpc = getattr(slot, "rpc", None)
+    if rpc is None:
+        return None
+    if not getattr(rpc, "is_closed", False):
+        return None
+    if getattr(rpc, "can_revive", False):
+        return None
+    return getattr(rpc, "close_reason", None) or "closed"
 
 
 class PoolManager:
@@ -461,6 +532,23 @@ class PoolManager:
             # tenant is being served by cold-spawn while reservations
             # hold the ceiling.  Raise ``JAATO_RUNNER_POOL_MAX_SIZE``.
             "pool_replenish_ceiling_blocked_total": 0,
+            # #1058.  Idle slots dropped because their RunnerRPCClient
+            # had died while the slot sat in the pool.  Declared here
+            # rather than sprung into existence by ``_incr`` so
+            # ``get_telemetry`` reports 0 on a healthy daemon instead of
+            # omitting the key — an absent counter reads as "never
+            # measured", which is the one thing this must not say.
+            #
+            # NONZERO IS NOT THE POOL RECOVERING QUIETLY.  Each unit is a
+            # runner that died without anybody asking it to, so a growing
+            # value is evidence of an external kill (OOM, a signal) or of
+            # a frame-level fault on the channel.  The WARNING beside it
+            # names which.
+            "pool_dead_slot_evicted_total": 0,
+            # #1058.  Returns refused because the slot was already in
+            # the idle pool.  Nonzero means some session is being torn
+            # down twice; the ERROR beside it names the slot.
+            "pool_duplicate_return_refused_total": 0,
         }
         self._counters_lock = threading.Lock()
 
@@ -510,6 +598,106 @@ class PoolManager:
         )
         return forked
 
+    def _evict_dead_slots_locked(self) -> int:
+        """Drop every idle slot whose RPC client has died (#1058).
+
+        **Caller must hold ``self._lock``.**  Evicted slots are moved to
+        ``_pending_teardown``, which the replenish thread drains through
+        :meth:`_teardown_slot` — so the runner process is reaped and its
+        AppArmor profile unloaded.  Skipping a corpse and leaving it in
+        the list would have been cheaper and wrong twice over: the
+        process leaks, and — the sharper half — the corpse keeps counting
+        toward ``unreserved_idle_count`` and ``max_size``, so
+        replenishment reads the pool as full and never forks the
+        replacement.  That is #898's failure in a new costume: capacity
+        that no arriving session can use, counted as capacity for
+        everybody.
+
+        The ONE removal point, called from :meth:`acquire_slot` (so the
+        check cannot be forgotten on one of the two affinity paths) and
+        from :meth:`_sweep_dead_slots` (so a corpse is reaped and its
+        capacity restored even when no session arrives to trip over it).
+
+        Logs at WARNING and counts ``pool_dead_slot_evicted_total``: a
+        dead runner is never routine, and a pool that recovered silently
+        would hide whatever killed it.  Both happen while the lock is
+        held, matching :meth:`acquire_slot`, which already calls
+        :meth:`_incr` inside it.
+
+        Returns:
+            How many slots were evicted.
+        """
+        survivors: List[PoolSlot] = []
+        dead: List[Tuple[PoolSlot, str]] = []
+        for slot in self._idle_slots:
+            reason = slot_rpc_death(slot)
+            if reason is None:
+                survivors.append(slot)
+            else:
+                dead.append((slot, reason))
+        if not dead:
+            return 0
+        self._idle_slots = survivors
+        for slot, reason in dead:
+            slot.teardown_reason = f"dead-rpc:{reason}"
+            self._pending_teardown.append(slot)
+            self._incr("pool_dead_slot_evicted_total")
+            logger.warning(
+                "PoolManager: idle slot pid=%d (cascade=%s) dropped — its "
+                "RPC client is closed (reason=%s); the runner died while "
+                "the slot sat in the pool.  Queued for teardown; the pool "
+                "will refill (#1058).",
+                slot.pid, slot.cascade_id or "(pure)", reason,
+            )
+        return len(dead)
+
+    def discard_acquired_slot(self, slot: PoolSlot, *, reason: str) -> None:
+        """Give up on a slot that was already handed out (#1058).
+
+        An acquired slot is NOT in ``_idle_slots`` — :meth:`acquire_slot`
+        popped it — so nothing in the pool would ever reap it if its
+        consumer simply walked away.  This queues it for the same
+        teardown a dropped idle slot gets: transport closed, runner
+        process reaped, AppArmor profile unloaded when the last slot
+        wearing it dies.
+
+        The alternative, letting the caller abandon the handle, leaks a
+        runner process per occurrence — worse than the failure being
+        recovered from.
+
+        Args:
+            slot: The acquired slot to give up on.
+            reason: Short token for the log line, e.g.
+                ``"dead-rpc:eof"``.
+        """
+        slot.teardown_reason = reason
+        with self._lock:
+            self._pending_teardown.append(slot)
+        self._incr("pool_dead_slot_evicted_total")
+        logger.warning(
+            "PoolManager.discard_acquired_slot: slot pid=%d discarded "
+            "(%s); queued for teardown",
+            slot.pid, reason,
+        )
+
+    def _sweep_dead_slots(self) -> None:
+        """Reap idle slots whose RPC client has died.
+
+        Runs every replenish iteration beside :meth:`_sweep_cascade_idle`
+        and is deliberately NOT exempt for ``cascade_id is None``.
+
+        That exemption is right for the cascade sweep — a PURE IDLE slot
+        has no cascade affinity to time out, and tearing it down on a
+        timer would throw away exactly the warmth the pool exists for.
+        It is wrong as a health policy, and it is why the reported
+        incident went unnoticed: a standalone session returns its slot as
+        PURE IDLE (#1033), so the one reaper the pool had was exempt from
+        looking at it, and nothing else looked at all.  Warmth and
+        liveness are different questions; only the first has a timeout.
+        """
+        with self._lock:
+            self._evict_dead_slots_locked()
+
     def idle_count(self) -> int:
         """Return the current count of idle slots — reservations included.
 
@@ -546,6 +734,13 @@ class PoolManager:
         profile_name: Optional[str] = None,
     ) -> Optional[PoolSlot]:
         """Pop an idle slot off the pool — cascade-affinity aware (Phase 2).
+
+        Every idle slot whose RPC client has died is dropped FIRST
+        (:meth:`_evict_dead_slots_locked`), so both affinity paths below
+        walk a list that contains only slots a session can actually be
+        served by.  Liveness is a property of the pool, not a
+        precondition the caller has to re-check — see #1058 for what the
+        caller's-problem version cost.
 
         Affinity routing (per design doc §4.2 claim flow):
 
@@ -599,8 +794,8 @@ class PoolManager:
                 confine to, ``""``/``None`` for unconfined.
 
         Returns:
-            A :class:`PoolSlot` carrying the requested key, or ``None``
-            when nothing in the pool qualifies.
+            A :class:`PoolSlot` carrying the requested key and a LIVE
+            RPC client, or ``None`` when nothing in the pool qualifies.
         """
         key = SlotKey.build(
             cascade_driver_id=cascade_driver_id,
@@ -610,6 +805,13 @@ class PoolManager:
         )
         mismatch_skips = 0
         with self._lock:
+            # #1058: drop corpses BEFORE either affinity path walks the
+            # list.  Here rather than inside each path because there are
+            # two of them and a third would be written one day; a filter
+            # applied at the single point they both read from is one that
+            # cannot be forgotten on one branch.
+            self._evict_dead_slots_locked()
+
             # Path (1): whole-key match.  Every field is load-bearing and
             # the reasons differ per field — see :class:`SlotKey`.
             if key.cascade_driver_id is not None:
@@ -673,7 +875,7 @@ class PoolManager:
         self._incr("pool_slot_acquired_total")
         return slot
 
-    def return_slot_after_session(self, slot: PoolSlot) -> None:
+    def return_slot_after_session(self, slot: PoolSlot) -> bool:
         """Return a slot to the idle pool after its session ended (Phase 2).
 
         Pre-condition: caller has ALREADY invoked the slot's
@@ -688,17 +890,58 @@ class PoolManager:
         Stamps ``last_session_end_ts`` to the current monotonic
         wall-clock for the idle-teardown sweep.
 
+        **ONE SLOT, ONE ENTRY.**  A slot object already in
+        ``_idle_slots`` is refused (by identity) and reported at ERROR.
+        The list is a set of distinct runners in disguise, and a
+        duplicate is not a cosmetic double-count: the two entries share
+        one ``rpc``, so the first to be acquired and torn down leaves the
+        SECOND sitting in the pool pointing at a closed client and a
+        reaped process — #1058's exact state, arrived at without
+        anything having gone wrong on the channel.
+
+        The producer of a duplicate is a double teardown of one session:
+        :meth:`JaatoServer.shutdown` captures ``_runner_rpc`` /
+        ``_spawned_runner`` / ``_pool_manager_ref`` and nulls them
+        WITHOUT a lock, and it is called from several places (session
+        unload, ``session.stop``, the #812 orphan sweep, daemon
+        shutdown), so two concurrent callers can both see the live
+        triple and both return the same slot.  Guarding here rather than
+        there is the #674 argument: the pool owns this list, one
+        boundary check covers every present and future caller, and the
+        alternative is auditing every teardown path forever.  It does
+        not FIX the double shutdown — it makes the double shutdown
+        visible (an ERROR naming the slot) instead of silently
+        corrupting the pool.
+
         Args:
             slot: The slot to return.  ``slot.cascade_id`` controls
                 whether the slot becomes IDLE_FOR_CASCADE (cascade_id
                 set) or PURE IDLE (cascade_id None — only legal if
                 the slot was never stamped with a cascade, i.e. it
                 served a standalone session).
+
+        Returns:
+            ``True`` when the slot is now IN the pool, ``False`` when it
+            was dropped at capacity or refused as a duplicate.  Callers
+            log their own teardown lines and used to assert the first
+            outcome unconditionally; see the log-line note below.
         """
         slot.last_session_end_ts = time.monotonic()
         evicted: Optional[PoolSlot] = None
         stale_reservation_evicted = False
         with self._lock:
+            if any(s is slot for s in self._idle_slots):
+                logger.error(
+                    "PoolManager.return_slot_after_session: slot pid=%d is "
+                    "ALREADY in the idle pool — refusing to add it twice.  "
+                    "Its session was torn down more than once; the two "
+                    "entries would share one rpc client, so tearing either "
+                    "down would leave the other pointing at a closed "
+                    "channel (#1058).",
+                    slot.pid,
+                )
+                self._incr("pool_duplicate_return_refused_total")
+                return False
             if len(self._idle_slots) >= self.max_size:
                 # AT CAPACITY.  ``target_size`` said how many to keep at
                 # LEAST and nothing said how many at most, so this list
@@ -748,14 +991,26 @@ class PoolManager:
                 len(self._idle_slots), self.max_size,
                 evicted.pid, evicted.cascade_id or "(pure)",
             )
+        # The outcome, said accurately.  This line used to read
+        # "returned to pool" whatever happened — including when ``slot``
+        # was the one dropped at capacity, which is the branch a pool
+        # reading ``idle_count=N/N`` is in.  A log that asserts the slot
+        # is pooled when it is on its way to teardown is not a small
+        # thing: it is what an operator reads when a later session fails
+        # on that slot, and it sent the #1058 diagnosis down the wrong
+        # path for two rounds.
+        pooled = evicted is not slot
         logger.info(
-            "PoolManager.return_slot_after_session: slot pid=%d "
-            "returned to pool (cascade=%s; idle_count=%d/%d, "
-            "unreserved=%d/%d)",
-            slot.pid, slot.cascade_id or "(pure)",
+            "PoolManager.return_slot_after_session: slot pid=%d %s "
+            "(cascade=%s; idle_count=%d/%d, unreserved=%d/%d)",
+            slot.pid,
+            "returned to pool" if pooled
+            else "NOT pooled — dropped at capacity, queued for teardown",
+            slot.cascade_id or "(pure)",
             len(self._idle_slots), self.max_size,
             self.unreserved_idle_count(), self.target_size,
         )
+        return pooled
 
     def _pick_capacity_victim(self) -> Optional[int]:
         """Choose which resident an AFFINE returning slot displaces.
@@ -857,6 +1112,12 @@ class PoolManager:
             raised.  Attempts >> failures means flaky template;
             attempts == failures means template can't be respawned
             (operator action needed).
+          - ``pool_dead_slot_evicted_total`` (#1058): idle slots
+            dropped because their RPC client had died in the pool.
+            NOT a success metric — each unit is a runner that died
+            unasked, so a growing value points at an external kill
+            (OOM, a signal) or a frame-level channel fault.  The
+            WARNING beside each eviction names which.
         """
         with self._counters_lock:
             return dict(self._counters)
@@ -1016,6 +1277,13 @@ class PoolManager:
                 if not self._template_manager.is_alive():
                     self._handle_template_death()
                     continue
+
+                # #1058: reap slots whose RPC client died in the pool.
+                # BEFORE the cascade sweep, because that sweep is what
+                # drains ``_pending_teardown`` — running it first means a
+                # corpse is evicted and reaped in the SAME iteration, so
+                # the capacity check below never reads it as capacity.
+                self._sweep_dead_slots()
 
                 # Phase 2: cascade-idle teardown sweep.  Reaps slots
                 # that have sat IDLE_FOR_CASCADE longer than the
@@ -1224,11 +1492,13 @@ class PoolManager:
         with self._lock:
             pending, self._pending_teardown = self._pending_teardown, []
         for slot in pending:
-            self._teardown_slot(slot, reason="over-capacity")
+            reason = slot.teardown_reason or "over-capacity"
+            self._teardown_slot(slot, reason=reason)
             self._incr("pool_slots_over_cap_torndown_total")
             logger.info(
-                "PoolManager: torn down over-capacity slot pid=%d "
-                "(cascade=%s)", slot.pid, slot.cascade_id or "(pure)",
+                "PoolManager: torn down queued slot pid=%d "
+                "(cascade=%s, reason=%s)",
+                slot.pid, slot.cascade_id or "(pure)", reason,
             )
 
     def _sweep_cascade_idle(self) -> None:
@@ -1247,6 +1517,11 @@ class PoolManager:
         sweep cannot race with an active session.  PURE IDLE slots
         (``cascade_id is None``) are also exempt — they have no
         cascade affinity to time out.
+
+        That exemption is about WARMTH and says nothing about health.
+        A pure-idle slot whose runner has died is reaped by
+        :meth:`_sweep_dead_slots`, which runs immediately before this
+        one and exempts nobody (#1058).
 
         Called every replenish iteration (~0.5s).  Cheap when the
         pool has no IDLE_FOR_CASCADE entries.
