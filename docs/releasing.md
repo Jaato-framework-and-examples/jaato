@@ -30,12 +30,16 @@ changelog is anchored on the version `pyproject.toml` declares.
 Only the ones the merges since the last release actually touched:
 
 ```bash
-last=$(git log --format=%H -1 --grep='^Bump jaato-')      # or the known release sha
 for p in jaato-sdk jaato-server jaato-tui jaato-eval; do
-  echo "=== $p: $(git log --oneline $last..origin/main -- $p/ | wc -l) commit(s)"
-  git log --oneline $last..origin/main -- $p/
+  last=$(git describe --tags --abbrev=0 --match "$p-[0-9]*" origin/main 2>/dev/null)
+  echo "=== $p since ${last:-the beginning}: \
+$(git log --oneline ${last:+$last..}origin/main -- $p/ | wc -l) commit(s)"
+  git log --oneline ${last:+$last..}origin/main -- $p/
 done
 ```
+
+Each package is measured from **its own** release tag, because they ship
+independently — `jaato-tui` routinely sits out a release the other three are in.
 
 A package with an empty diff is not republished. Level follows the commits: any
 `feat` in the range is a minor, fixes alone are a patch.
@@ -126,6 +130,38 @@ The suffix is applied **after** `build_readme.py` runs, deliberately: that
 script anchors the changelog by walking git history for the commits declaring
 the version in `pyproject.toml`, and a suffixed version matches no commit — the
 walk then anchors on the bump commit itself and emits an empty changelog.
+
+## Release tags
+
+A successful `target: pypi` run tags the commit it uploaded from,
+`<distribution>-<version>` (`jaato-server-0.14.0`). Nothing tags a TestPyPI
+staging build: staging is not a release, and anchoring the next changelog on
+one would drop every entry that landed before the real release.
+
+The tag is what `scripts/build_readme.py` anchors the next changelog on, and it
+exists because **the commit that sets a version is not the commit it ships
+from**. Holding a version across staging rounds is a deliberate practice here —
+it is what lets later PRs fold into the release those numbers already name — and
+it puts distance between the two. Measured: `jaato-server 0.14.0` was set at
+`5257d25d` and published 19 commits later at `9abaffa5`, so anchoring on the
+set-point made `0.15.0`'s changelog re-list 16 entries `0.14.0` had already
+shipped. With the tag in place that changelog went from 27 entries to 11, and
+its overlap with the published `0.14.0` from 16 to zero.
+
+Releases published before tagging existed were tagged retroactively at the
+commit each was built from, established from the workflow run's `head_sha` and
+cross-checked against PyPI's own recorded upload time.
+
+If a publish succeeds and the tag does not land, the run goes amber with an
+error annotation naming the fix — the release itself is fine, and the cost is
+that the next changelog repeats this one until someone runs:
+
+```bash
+git tag jaato-server-0.15.0 <the published sha> && git push origin jaato-server-0.15.0
+```
+
+With no tag for a package, the script falls back to walking `pyproject.toml`
+history for the previous version-set point, exactly as it did before.
 
 ## Trusted publishers
 

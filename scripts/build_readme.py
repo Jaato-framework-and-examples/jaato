@@ -128,6 +128,54 @@ def _find_release_anchors(pkg_dir: Path, repo_root: Path,
     return current_sha, previous_sha
 
 
+RELEASE_TAG_GLOB = "{dist}-[0-9]*"
+
+
+def _published_anchor(dist: str, declared_version: str,
+                      repo_root: Path) -> tuple[str | None, str | None]:
+    """``(tag, sha)`` of the newest release of ``dist`` REACHABLE from HEAD.
+
+    A release tag records where a version was *published*; the version line
+    in pyproject records where it was *set*.  Those are the same commit only
+    when a bump is published immediately, and this repository deliberately
+    holds a version across several staging rounds so later PRs fold into the
+    release those numbers already name.  Measured on jaato-server 0.15.0:
+    0.14.0 was SET at 5257d25d and PUBLISHED 19 commits later at 9abaffa5,
+    so anchoring on the set-point re-listed 16 entries 0.14.0 had already
+    shipped.  A tag is the only record of the publish point -- it is written
+    by the workflow that uploaded the files, on the commit it uploaded them
+    from.
+
+    ``--merged HEAD`` keeps a tag on an abandoned branch from anchoring a
+    release, and ``-creatordate`` orders by when each was shipped rather
+    than by version string, so a patch released after a minor still reads as
+    the more recent one.
+
+    A tag naming the DECLARED version is skipped: that is this version's own
+    publish, which happens when the script is re-run against an
+    already-released tree, and anchoring there would report a released
+    version as carrying only what landed after itself.
+
+    Returns ``(None, None)`` when nothing matches -- no tags yet, a shallow
+    clone, or a checkout that fetched none -- and the caller then walks
+    pyproject history exactly as before.
+    """
+    names = _git("tag", "--list", RELEASE_TAG_GLOB.format(dist=dist),
+                 "--merged", "HEAD", "--sort=-creatordate",
+                 cwd=repo_root).splitlines()
+    prefix = f"{dist}-"
+    for name in names:
+        name = name.strip()
+        if not name.startswith(prefix):
+            continue
+        if name[len(prefix):] == declared_version:
+            continue
+        sha = _git("rev-list", "-n", "1", name, cwd=repo_root)
+        if sha:
+            return name, sha
+    return None, None
+
+
 def _collect_commits(previous_sha: str | None, current_sha: str | None,
                      pkg_dir: Path, repo_root: Path) -> list[str]:
     """Commit subjects touching pkg_dir since ``previous_sha`` (exclusive).
@@ -214,6 +262,16 @@ def main() -> None:
     repo_root = Path(_git("rev-parse", "--show-toplevel", cwd=pkg_dir))
 
     current_sha, previous_sha = _find_release_anchors(pkg_dir, repo_root, version)
+
+    # A release tag, where one exists, outranks the pyproject walk: it names
+    # the commit the files were uploaded from, which is what "since the last
+    # release" means.  `current_sha` still comes from the walk -- it answers
+    # a different question (which commit set THIS version, so the bump is
+    # not an entry in its own changelog) that a tag cannot answer.
+    tag_name, tag_sha = _published_anchor(project["name"], version, repo_root)
+    if tag_sha:
+        previous_sha = tag_sha
+
     commits = _collect_commits(previous_sha, current_sha, pkg_dir, repo_root)
     changelog = _build_changelog(version, commits)
 
@@ -227,7 +285,12 @@ def main() -> None:
     # Write combined file
     out_path = pkg_dir / "PKG_README.md"
     out_path.write_text(f"{changelog}\n---\n\n{original_readme}")
-    anchor = previous_sha[:12] if previous_sha else "(none - full history)"
+    if tag_name:
+        anchor = f"{tag_name} ({previous_sha[:12]})"
+    elif previous_sha:
+        anchor = f"{previous_sha[:12]} (no release tag; version-set point)"
+    else:
+        anchor = "(none - full history)"
     print(f"Generated {out_path} ({len(commits)} changelog entries "
           f"since {anchor})")
 
