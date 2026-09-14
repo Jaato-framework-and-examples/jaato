@@ -207,3 +207,71 @@ def test_the_dependency_message_asserts_no_runtime_consequence(env, monkeypatch)
     assert _OVERCLAIM not in msgs[0]
     assert "not a certain failure" in msgs[0]
     assert "pip install x" in msgs[0]      # still imperative
+
+
+# --- re-review: the five block-level keys, and the surfaces below them ----
+
+#: Read straight off ``initialize(config)`` (``plugin.py:508-544``) — the
+#: surface an author writes and ``explain plugin`` publishes.  Declaring
+#: them is this PR's own thesis applied to the plugin it audited: someone
+#: configuring a webhook approval channel had no route to the shape but the
+#: source.
+_BLOCK_LEVEL = ("agent_name", "config_path", "workspace_path",
+                "channel_type", "channel_config")
+
+
+@pytest.mark.parametrize("key", _BLOCK_LEVEL)
+def test_the_block_an_author_writes_is_declared(key):
+    from shared.scaffold import explain
+
+    data, text = explain.plugin("permission")
+    assert key in {c["name"] for c in data["config"]}, key
+    assert key in text
+
+
+def test_channel_type_publishes_the_set_it_accepts(env):
+    # An enum is worth more than a type here: `console`/`webhook`/`queue`/
+    # `file` is what config_loader.validate_config enforces.
+    diags = _run(env, plugin_configs={"permission": {
+        "channel_type": "carrier_pigeon"}})
+    assert [c for c, _ in _codes(diags, "invalid_knob_value")] == [
+        "invalid_knob_value"]
+
+
+def test_channel_config_is_an_open_key_set(env):
+    # Surface 3: the names belong to the CHANNEL, not to this plugin, so
+    # nothing here judges them.  additionalProperties is the honest marker.
+    diags = _run(env, plugin_configs={"permission": {"channel_config": {
+        "endpoint": "https://x", "headers": {}, "auth_token": "t",
+        "timeout": 5, "base_path": "/tmp", "poll_interval": 1,
+        "whatever_the_channel_wants": True}}})
+    assert _codes(diags, "unknown_knob", "undeclared_knob") == []
+
+
+def test_a_typo_beside_the_new_keys_is_still_caught(env):
+    diags = _run(env, plugin_configs={"permission": {"channel_typ": "webhook"}})
+    assert [c for c, _ in _codes(diags, "unknown_knob")] == ["unknown_knob"]
+
+
+# --- the census is a measurement, and says so -----------------------------
+
+def test_the_census_separates_the_framework_surface():
+    # A wrong method name in the first draft returned [] and silently
+    # reclassified ~20 framework reads as schema gaps — the census's own
+    # headline number, wrong in the alarming direction.
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "plugin_schema_census", Path("scripts/plugin_schema_census.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    keys = mod.framework_injected_keys()
+    assert set(keys) == {"agent_name", "config_root", "session_id",
+                         "workspace_path"}, keys
+
+
+def test_the_census_is_not_wired_as_a_guard():
+    # It is a measurement that has to precede a ratchet, not one itself:
+    # "every key a plugin reads is declared" is four questions in this tree.
+    ci = Path(".github/workflows/ci-tests.yml").read_text(encoding="utf-8")
+    assert "plugin_schema_census" not in ci

@@ -2935,6 +2935,36 @@ inner names are not `plugin_configs` knobs). Widening that set would have
 been the wrong fix twice over. The three keys above are now declared too, so
 `explain plugin permission` shows them.
 
+**And so are the five an author actually writes.** `agent_name`,
+`config_path`, `workspace_path`, `channel_type` and `channel_config` are read
+straight off `initialize(config)`, and someone configuring a webhook approval
+channel had no route to their shape but the source — which is the sentence
+this whole section opens with. `channel_config` is declared
+`additionalProperties`, because the names inside it (`endpoint`, `headers`,
+`auth_token`, `timeout`, …) belong to the CHANNEL and nothing in this plugin
+should judge them.
+
+**The gap is a measurement before it is a rule.** Reconciling every in-tree
+plugin's schema against its own reader gives 123 undeclared reads across 26
+plugins — and the number is not one number: 33 are the keys
+`PluginRegistry._augment_plugin_config` INJECTS into every plugin's config
+(`workspace_path` / `config_root` / `session_id` / `agent_name`, `setdefault`
+so an author may still override one), and the rest span the block an author
+writes, a nested dict with its own owner, and *a different file the block
+points at* — `permission.config_path` names a permissions JSON whose own keys
+(`version`, `channel`) are not `plugin_configs.permission` keys at all.
+
+So `scripts/plugin_schema_census.py` ships as a **census, not a guard**, with
+its output committed at [Plugin schema census](docs/design/plugin-schema-census.md)
+and `permission` worked through site by site as the one audited row. A
+ratchet needs a definition before it needs a baseline: seeded today it would
+freeze that four-way ambiguity as though it were a fact, and its
+stale-entry rule would then charge every unrelated PR that declares a knob
+with updating a number nobody can re-derive. If it becomes one, the thing to
+count is the block an author writes — keys read off `initialize(config)` —
+said so in its docstring, with the other three surfaces a documented
+exclusion.
+
 **The permission whitelist was unchecked against the tool inventory
 `tool_scopes` has been checked against since the validator shipped.** One key
 over, and the key where being wrong is expensive: under `defaultPolicy: deny`
@@ -5692,5 +5722,6 @@ This is not optional cleanup — treat missing or inaccurate docstrings as a def
 - [Agent Continuity Pattern](docs/design/agent-continuity.md) - `{{continuity_scope}}` + memory plugin enrichment + raw/curated lifecycle: persona-level continuity across sessions composed from existing primitives, no new framework code. Reference impl in `jaato-knowledge-manager/.jaato.example/`.
 - [Model Tiers × Prompt Caching](docs/design/model-tier-prompt-cache.md) - What `enter_tier` costs when prompt caching is on: cache is keyed per model, so an in-place tier switch re-reads the whole prefix cold (break-even ~6 consecutive calls at the new tier). Covers the `_wire_cache_plugin` gap that made profile cache knobs inert, the system-block tier line that invalidates BP1, and the per-provider knob divergence + proposed common `cache:` field.
 - [MiniMax, Kimi and MiMo providers](docs/design/minimax-kimi-mimo-providers.md) - Design for three first-party OpenAI-compatible providers (`minimax`, `kimi`, `mimo`) and the framework prerequisite they share: **reasoning replay** — sending an assistant turn's `reasoning_content` back on the next request of a tool-call loop, which the session currently drops from history and every OpenAI-shaped converter ignores. Covers the surface decision (chat completions, not the Anthropic shims), per-vendor thinking-control dialects, tool-choice vocabularies, catalog vs table context resolution, error taxonomies, and the registration checklist.
+- [Plugin schema census](docs/design/plugin-schema-census.md) - Which config keys each plugin READS that its `get_config_schema()` does not DECLARE, measured tree-wide by `scripts/plugin_schema_census.py`. A census, deliberately **not** a guard: the raw count spans four surfaces (framework-injected keys, the block an author writes, a nested dict with its own owner, and a separate file the block points at), and a ratchet seeded before those are separated would freeze the ambiguity as a fact. `permission` is worked through site by site as the one audited row.
 - [AppArmor Setup](docs/apparmor-setup.md) - Kernel-enforced workspace isolation. WS deployments confine automatically when AppArmor is available; IPC clients opt in via `IPCClient(..., apparmor=True)` (defaults to `False`).
 - [GCP Setup Guide](docs/gcp-setup.md) - Setting up GCP project for Vertex AI
