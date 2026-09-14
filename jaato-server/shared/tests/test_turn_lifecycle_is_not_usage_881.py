@@ -315,3 +315,28 @@ def test_a_metered_turn_says_nothing(caplog):
 
     assert [r for r in caplog.records
             if "no token usage" in r.getMessage()] == []
+
+
+def test_a_failed_turn_is_not_blamed_on_the_provider(caplog):
+    """A cancelled or errored turn carries no tokens for a different reason.
+
+    Both chat loops close through the same ``finally``, so those paths reach
+    ``_record_turn_ran`` too.  Warning there would send an operator after a
+    usage-reporting defect that is really a failed turn -- wrong in the one
+    direction that costs time.  The lifecycle count still moves: the turn ran.
+    """
+    import logging
+
+    s = _bare_session()
+    with caplog.at_level(logging.WARNING, logger="shared.jaato_session"):
+        s._record_turn_ran(_turn(total=0, finish_reason="cancelled"))
+        s._record_turn_ran(_turn(total=0, finish_reason="error"))
+        s._record_turn_ran(_turn(total=0, finish_reason="incomplete"))
+        s._record_turn_ran(_turn(total=0, finish_reason=None))
+
+    assert [r for r in caplog.records
+            if "no token usage" in r.getMessage()] == []
+    assert s.get_turns_ran() == 4, (
+        "a turn that failed still RAN; suppressing the warning must not "
+        "suppress the terminus"
+    )

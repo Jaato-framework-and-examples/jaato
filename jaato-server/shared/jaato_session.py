@@ -349,6 +349,26 @@ def _should_drop_introspection(has_deferred_to_discover, tool_names) -> bool:
 _BUDGET_TOOL_CALLS_OBSERVED = "_budget_tool_calls_observed"
 _BUDGET_SECONDS_OBSERVED = "_budget_seconds_observed"
 
+#: Finish reasons for a turn that REACHED THE END, and therefore should have
+#: been billed.  Only these raise the unmetered-turn warning (#688 item 3):
+#: a turn that errored, was cancelled or was cut off mid-stream also carries
+#: no tokens, and blaming the provider's usage reporting for it sends an
+#: operator after a reporting defect that is really a failed turn.  Both chat
+#: loops close through the same ``finally``, so every one of those paths
+#: reaches ``_record_turn_ran``.
+#:
+#: ``unknown`` is IN the set on purpose: per :class:`FinishReason` it means the
+#: turn ended and the upstream's word for why was not one we recognise -- a
+#: clean end with an unmapped label.  ``incomplete`` is its opposite and is
+#: out.
+_METERABLE_FINISH_REASONS = frozenset({
+    FinishReason.STOP.value,
+    FinishReason.MAX_TOKENS.value,
+    FinishReason.TOOL_USE.value,
+    FinishReason.SAFETY.value,
+    FinishReason.UNKNOWN.value,
+})
+
 
 def _resolve_parallel_width(
     explicit: Optional[int],
@@ -11933,6 +11953,14 @@ NOTES
         reached.  That -- not the old ``total > 0`` gate -- is what has always
         suppressed a refused turn's event.
 
+        The unmetered WARNING (#688 item 3) is raised only for a turn that
+        finished normally -- see :data:`_METERABLE_FINISH_REASONS`.  A turn
+        that errored, was cancelled or was cut off mid-stream also carries no
+        tokens, and blaming the provider's usage reporting for it would be
+        wrong in the one direction that costs an operator time: chasing a
+        reporting defect that is really a failed turn.  Those paths run
+        through this ``finally`` too, so the distinction has to be made here.
+
         Args:
             turn_data: The turn-accounting dict for the turn just finished.
                 Stored by reference as ``_last_turn_ran``; the caller must not
@@ -11942,7 +11970,7 @@ NOTES
         self._last_turn_ran = turn_data
         if turn_data['total'] > 0:
             self._turn_accounting.append(turn_data)
-        else:
+        elif turn_data.get('finish_reason') in _METERABLE_FINISH_REASONS:
             self._warn_unmetered_turn_once()
 
     def _warn_unmetered_turn_once(self) -> None:
@@ -12021,7 +12049,15 @@ NOTES
         return self._last_turn_ran
 
     def get_turn_accounting(self) -> List[Dict[str, Any]]:
-        """Get token usage and timing per turn."""
+        """Token usage and timing for every turn that REPORTED USAGE.
+
+        A usage ledger, not a turn log: a turn whose provider reported no
+        tokens is absent, and ``len()`` of this list is read as a
+        metered-turn count by :meth:`get_context_usage` (``turns``), by
+        :meth:`get_consumption` and by the persisted ``turn_count``.  For
+        "did a turn run" and "what happened on it" use :meth:`get_turns_ran`
+        and :meth:`get_last_turn_ran`; conflating the two is #881.
+        """
         return list(self._turn_accounting)
 
     def get_consumption(self, detail: str = DETAIL_SUMMARY) -> Dict[str, Any]:
