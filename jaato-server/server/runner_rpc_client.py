@@ -619,6 +619,12 @@ class RunnerRPCClient:
         self._writer: Optional[asyncio.StreamWriter] = None
         self._read_task: Optional[asyncio.Task] = None
         self._closed = False
+        #: Why this channel closed, or ``None`` while it is live (#1058).
+        #: Set exactly once, by :meth:`_mark_closed`, from whichever of
+        #: the two writers of ``_closed`` gets there first.  The pool
+        #: reads it through :attr:`close_reason` so an evicted slot's
+        #: log line names the cause instead of only the symptom.
+        self._close_reason: Optional[str] = None
         self._next_id = 1
 
         # In-flight calls — resolved by the read loop when the
@@ -690,6 +696,150 @@ class RunnerRPCClient:
     def runner_pid(self) -> int:
         return self._runner_pid
 
+    @property
+    def is_closed(self) -> bool:
+        """Whether this channel is dead — every later :meth:`call` will fail.
+
+        The public form of ``_closed``, which has two writers:
+        :meth:`close` (explicit teardown) and the read loop's ``finally``
+        (EOF, a frame-level error, a crash, or cancellation) — plus
+        :meth:`_on_read_task_done` for the one cancellation the
+        ``finally`` cannot see.
+
+        "Closed" is not always "unrecoverable": see :attr:`can_revive`
+        for the single cause — an externally cancelled read task — that
+        leaves the runner and the transport intact and can be reopened.
+        Every other cause is terminal for this channel.
+
+        Read by :mod:`server.runner_pool` so a pool slot whose client has
+        died is never handed to the next session (#1058).  It is a POLL —
+        the pool asks at the two points where a slot's liveness is
+        load-bearing — rather than a callback the pool would have to have
+        registered: a registration nobody performs is inert and silent,
+        which is the shape #735 is named after.
+        """
+        return self._closed
+
+    @property
+    def close_reason(self) -> Optional[str]:
+        """Why the channel closed, or ``None`` while it is live (#1058).
+
+        One of ``"explicit-close"``, ``"eof"``, ``"read-loop-crash"``,
+        ``"oversized-frame"``, ``"malformed-frame"`` or ``"cancelled"``.
+
+        Exists because the two shapes that end the read loop are
+        operationally different — the runner process died, versus the
+        loop raised on a frame — and the daemon log did not distinguish
+        them at the point where the consequence is felt.  The pool's
+        eviction line names this, so the next occurrence is diagnosable
+        from one line rather than from a correlated read of the whole
+        daemon log.
+        """
+        return self._close_reason
+
+    @property
+    def can_revive(self) -> bool:
+        """Whether a closed channel can be REOPENED on its own transport.
+
+        True for exactly one cause of death: somebody outside this class
+        cancelled the read task (#1058).  That case is special in three
+        ways that no other is:
+
+        * the runner was never signalled, so the process is alive;
+        * the socket and its asyncio transport were never closed, so the
+          writer still works and the bytes still arrive;
+        * nothing was in flight — a pooled idle slot has no traffic — so
+          the reader is parked on a frame boundary with an empty buffer
+          and no half-read frame to desynchronise on.
+
+        What died is only the task that was consuming frames, and a task
+        cannot be un-cancelled — but a NEW one can be created on the same
+        reader.  That is what :meth:`revive_read_loop` does, and this is
+        the evidence it requires first.
+
+        Every other cause is refused, and each for its own reason:
+
+        ====================  ====================================
+        ``close_reason``      Why no revive
+        ====================  ====================================
+        ``eof``               the peer is gone; a new reader would
+                              read EOF and close again
+        ``explicit-close``    :meth:`close` reaped the runner — a
+                              reader on a socket whose peer is a
+                              corpse is worse than no slot
+        ``oversized-frame``   the stream is desynchronised: the
+        ``malformed-frame``   length prefix was consumed and the
+                              body was not
+        ``None`` (live)       nothing to revive
+        ====================  ====================================
+
+        Note that ``close()`` can never produce ``"cancelled"``: it
+        stamps ``"explicit-close"`` BEFORE cancelling the read task, and
+        :meth:`_mark_closed` keeps the first cause.  So this predicate is
+        also a precise statement about provenance — a channel that
+        answers True was cancelled by something outside this module.
+        """
+        if not self._closed or self._close_reason != "cancelled":
+            return False
+        if self._in_flight:
+            return False
+        if self._writer is None or self._writer.is_closing():
+            return False
+        return self._reader is not None and not self._reader.at_eof()
+
+    async def revive_read_loop(self) -> bool:
+        """Start a fresh read task on the surviving transport (#1058).
+
+        Must be awaited ON the client's own event loop — it creates a
+        task — which is why the caller drives it through
+        ``run_coroutine_threadsafe`` exactly as it drives :meth:`start`.
+
+        Re-checks :attr:`can_revive` here rather than trusting the
+        caller's check: the caller runs off the loop, so the state it
+        read may have moved by the time this is scheduled, and reviving a
+        channel whose peer has since gone would install a reader that
+        immediately closes it again — the same failure, one layer later.
+
+        Returns:
+            ``True`` when a new reader is running and the channel is
+            usable again; ``False`` when the evidence did not support it,
+            in which case the channel is left exactly as it was and the
+            caller should discard the slot.
+        """
+        if not self.can_revive:
+            return False
+        self._closed = False
+        self._close_reason = None
+        self._read_task = asyncio.get_running_loop().create_task(
+            self._read_loop(),
+            name=f"runner-rpc-read-{self._runner_pid}",
+        )
+        self._read_task.add_done_callback(self._on_read_task_done)
+        logger.warning(
+            "RunnerRPCClient: read task for runner pid=%d had been "
+            "CANCELLED by something outside this client; a fresh reader "
+            "was started on the surviving transport (#1058).  Nothing in "
+            "this tree cancels it — if this line appears, find what does.",
+            self._runner_pid,
+        )
+        return True
+
+    def _mark_closed(self, reason: str) -> None:
+        """Record that the channel is closed, and why.
+
+        First writer wins: ``close()`` and the read loop's ``finally``
+        can both run for one teardown (``close`` cancels the read task),
+        and the FIRST cause is the informative one — a reader told
+        ``"cancelled"`` about a channel that actually died on EOF learns
+        the wrong thing.
+
+        Args:
+            reason: One of the vocabulary listed on :attr:`close_reason`.
+        """
+        self._closed = True
+        if self._close_reason is None:
+            self._close_reason = reason
+
     # --------------------------- lifecycle -----------------------------
 
     async def start(self) -> None:
@@ -716,6 +866,33 @@ class RunnerRPCClient:
             self._read_loop(),
             name=f"runner-rpc-read-{self._runner_pid}",
         )
+        self._read_task.add_done_callback(self._on_read_task_done)
+
+    def _on_read_task_done(self, task: "asyncio.Task") -> None:
+        """Catch a read task cancelled BEFORE its first step (#1058).
+
+        The loop body's ``finally`` records every way the reader can
+        end — except one.  ``Task.cancel()`` on a task that has not been
+        scheduled yet cancels it without ever entering the coroutine, so
+        no ``except`` and no ``finally`` runs and ``_closed`` stays
+        ``False``.  The channel then reports itself HEALTHY while having
+        no reader at all: writes reach the runner, replies are never
+        consumed, and every ``call`` waits out its deadline.  That is
+        worse than the closed-client failure this whole change is about,
+        because the pool's liveness poll is answered "alive" and #856's
+        reconciliation is the only thing left between it and a hang.
+
+        Narrow on purpose: it fires only when the task was CANCELLED and
+        nothing has recorded a cause, which is exactly that window.
+        Every other ending has already been through ``_mark_closed`` and
+        is left alone, so this cannot overwrite a real reason with
+        ``"cancelled"``.
+
+        Args:
+            task: The finished read task (the callback's own argument).
+        """
+        if not self._closed and task.cancelled():
+            self._mark_closed("cancelled")
 
     def reset_for_slot_reuse(self) -> None:
         """Phase 2 cascade-sharing: clear per-session RPC state while
@@ -798,7 +975,7 @@ class RunnerRPCClient:
         """
         if self._closed:
             return
-        self._closed = True
+        self._mark_closed("explicit-close")
 
         # #284/#280: capture the slot's process group BEFORE teardown
         # begins.  The slot leads its own session (os.setsid at fork),
@@ -1012,7 +1189,17 @@ class RunnerRPCClient:
         On peer-EOF (graceful) or any transport error, fail every
         in-flight future and return — the caller's ``close()`` cleans
         up the rest.
+
+        Every exit path names itself in ``reason`` before leaving, and
+        the ``finally`` hands that to :meth:`_mark_closed` (#1058).  A
+        pooled slot's client dies HERE, silently, long after the session
+        that created it ended; the pool learns of it by polling
+        :attr:`is_closed`, and the recorded reason is what tells an
+        operator whether the RUNNER died (``"eof"``) or the loop did
+        (``"read-loop-crash"`` and friends) — two different incidents
+        that used to leave the same evidence.
         """
+        reason = "eof"
         try:
             while True:
                 try:
@@ -1022,9 +1209,13 @@ class RunnerRPCClient:
                         "RunnerRPCClient: peer sent oversized frame: %s",
                         exc,
                     )
+                    reason = "oversized-frame"
                     break
                 if raw is None:
-                    logger.info("RunnerRPCClient: runner closed connection")
+                    logger.info(
+                        "RunnerRPCClient: runner closed connection "
+                        "(pid=%d)", self._runner_pid,
+                    )
                     break
 
                 try:
@@ -1033,6 +1224,7 @@ class RunnerRPCClient:
                     logger.error(
                         "RunnerRPCClient: malformed JSON frame: %s", exc,
                     )
+                    reason = "malformed-frame"
                     break
 
                 kind = payload.get("kind")
@@ -1140,15 +1332,21 @@ class RunnerRPCClient:
                         "RunnerRPCClient: unknown frame kind=%r", kind,
                     )
         except asyncio.CancelledError:
+            reason = "cancelled"
             raise
         except Exception:  # noqa: BLE001
-            logger.exception("RunnerRPCClient: read loop crashed")
+            reason = "read-loop-crash"
+            logger.exception(
+                "RunnerRPCClient: read loop crashed (pid=%d)",
+                self._runner_pid,
+            )
         finally:
             # Mark the channel closed so subsequent ``call()`` attempts
             # raise RunnerCallError up front instead of writing to a
             # dead transport (which would surface as ConnectionResetError
-            # at a confusing layer).
-            self._closed = True
+            # at a confusing layer).  ``_mark_closed`` also records WHY,
+            # which is what the pool's eviction line reports (#1058).
+            self._mark_closed(reason)
             for fid, fut in list(self._in_flight.items()):
                 if not fut.done():
                     fut.set_exception(

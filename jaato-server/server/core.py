@@ -450,6 +450,34 @@ def merge_pending_continuations(
     return text, attachments
 
 
+
+def _slot_return_phrase(pooled: bool) -> str:
+    """How to describe what the pool did with a returned slot (#1058).
+
+    A free function because :meth:`JaatoServer.shutdown` sits on its
+    cyclomatic-complexity baseline and may not grow — and because the
+    distinction is worth a name.  ``PoolManager.return_slot_after_session``
+    does not always keep the slot: at capacity it drops the returner, and
+    it refuses a slot it already holds.  Either way the slot belongs to
+    the pool and the caller must not close the transport, so only the
+    LOG differs — but that log is what an operator reads when a later
+    session fails on that slot, and asserting "returned to pool" for a
+    slot on its way to teardown is how #1058 was mis-diagnosed twice.
+
+    Args:
+        pooled: What ``return_slot_after_session`` reported.
+
+    Returns:
+        The phrase to splice into the teardown log line.
+    """
+    if pooled:
+        return "returned to pool"
+    return (
+        "handed to the pool and NOT retained (dropped at capacity or "
+        "refused as a duplicate) — the pool will tear it down"
+    )
+
+
 class JaatoServer:
     """Core server logic for Jaato - UI-agnostic.
 
@@ -7070,14 +7098,26 @@ class JaatoServer:
                                               # session stashed it here;
                                               # subsequent sessions
                                               # re-affirm the binding.
-                        pool_manager.return_slot_after_session(pool_slot)
+                        # The pool decides whether it KEEPS the slot:
+                        # at capacity it drops the returner instead, and
+                        # it refuses a slot it already holds.  Either way
+                        # the slot is the pool's now — so this path still
+                        # must not close the transport — but the log has
+                        # to say which happened.  It used to assert
+                        # "returned to pool ... transport preserved"
+                        # unconditionally, which is the sentence an
+                        # operator reads when a later session fails on
+                        # that slot (#1058).
+                        pooled = pool_manager.return_slot_after_session(
+                            pool_slot)
                         cascade_returned = True
                         logger.info(
-                            "JaatoServer.shutdown: pool slot pid=%d "
-                            "returned to pool after session_end "
-                            "(plugins_reset=%d cascade=%s last_session=%s; "
-                            "rpc reset, transport preserved)",
+                            "JaatoServer.shutdown: pool slot pid=%d %s "
+                            "after session_end (plugins_reset=%d "
+                            "cascade=%s last_session=%s; rpc reset, "
+                            "transport preserved)",
                             pool_slot.pid,
+                            _slot_return_phrase(pooled),
                             result.get("plugins_reset", 0),
                             pool_slot.cascade_id or "(standalone)",
                             self._session_id,

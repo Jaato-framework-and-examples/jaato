@@ -998,7 +998,8 @@ Architecture: daemon spawns a **template subprocess** at startup that imports al
 - **Subreaper**: daemon calls `prctl(PR_SET_CHILD_SUBREAPER, 1)` at startup so orphaned descendants (slots whose template died) re-parent to the daemon.
 - **Watchdog**: `PoolManager` replenishment thread detects template death + auto-respawns + refills pool.
 - **READY handshake**: template sends `"READY\n"` after plugin discovery completes; daemon's `TemplateManager.spawn` blocks for it (30s timeout) instead of a fixed sleep.
-- **Telemetry**: `PoolManager.get_telemetry()` exposes counters (`pool_slot_acquired_total`, `pool_acquire_miss_total`, `pool_replenish_success_total`, `pool_replenish_failures_total`, `template_respawn_attempts_total`, `template_respawn_failures_total`, `pool_slots_over_cap_total`, `pool_stale_reservation_evicted_total`, `pool_replenish_ceiling_blocked_total`, `pool_profile_mismatch_skips_total`).
+- **Telemetry**: `PoolManager.get_telemetry()` exposes counters (`pool_slot_acquired_total`, `pool_acquire_miss_total`, `pool_replenish_success_total`, `pool_replenish_failures_total`, `template_respawn_attempts_total`, `template_respawn_failures_total`, `pool_slots_over_cap_total`, `pool_stale_reservation_evicted_total`, `pool_replenish_ceiling_blocked_total`, `pool_profile_mismatch_skips_total`, `pool_dead_slot_evicted_total`, `pool_duplicate_return_refused_total`).
+- **Liveness**: a slot whose `RunnerRPCClient` has died is never handed out and is reaped rather than skipped — see [A Slot the Pool Kept Offering After Its Channel Died](#a-slot-the-pool-kept-offering-after-its-channel-died-1058).
 
 **Configuration:**
 - Enabled by default (`JAATO_RUNNER_POOL_ENABLED=true`).  Disable with `=false` / `0` / `no` / `off`.
@@ -1043,6 +1044,111 @@ and `max_size` refused) — nonzero on a multi-tenant daemon means raise
 `JAATO_RUNNER_POOL_MAX_SIZE`.
 
 **Pool routing gates** (`spawn_session_runner`): pool is consulted iff `pool_manager` wired AND env flag enabled AND `cgroup_attach is None` (cgroup migration mid-life is a follow-up).  Apparmor opt-in sessions ARE eligible — but **not** because the slot re-confines itself per session; see the next section for what actually makes that true.
+
+### A Slot the Pool Kept Offering After Its Channel Died (#1058)
+
+`PoolManager` had **no notion of RPC liveness**. `_closed` is set in exactly
+two places — `RunnerRPCClient.close` and the read loop's `finally` — and the
+second runs long after the session that created the client ended, while the
+slot sits in `_idle_slots`. Nothing told the pool. `acquire_slot` handed back
+whatever was at the head of the list, and the next session discovered the
+corpse by failing its own bootstrap:
+
+```
+19:00:25,826  spawn_session_runner: session ... served by pool slot pid=5307
+19:00:25,826  spawn_session_runner: session ... reused slot's rpc client
+19:00:25,828  [ERROR] runner session.bootstrap FAILED:
+              error_type=RunnerCallError error=RunnerRPCClient is closed
+```
+
+**The one reaper the pool had was exempt from looking.** `_sweep_cascade_idle`
+skips `cascade_id is None`, which is right — a PURE IDLE slot has no cascade
+affinity to *time out* — and a standalone session returns its slot as PURE IDLE
+(#1033). So the reported slots sat in the one state nothing ever inspected.
+Warmth has a timeout; liveness is not warmth, and `_sweep_dead_slots` exempts
+nobody.
+
+**A poll, not a callback.** The read loop already knows and already sets the
+flag; what was missing was anybody asking. `slot_rpc_death` is asked at the two
+points where a slot's liveness is load-bearing — `acquire_slot`, and the
+replenish sweep — because a poll at the point of use cannot silently stop
+working, where a callback registered at slot construction is inert the moment
+one of the two construction paths forgets it (#735). Only **positive evidence**
+counts, the posture #1014 and #1023 take about confinement labels: no client is
+alive (nothing has died), and a client that cannot answer `is_closed` is alive
+(reading absence as death would empty the pool).
+
+**Skipping would have been cheaper and wrong twice.** A corpse left in the list
+leaks its runner process, and — the sharper half — keeps counting toward
+`unreserved_idle_count` and `max_size`, so replenishment reads the pool as full
+and never forks the replacement. That is #898's failure in a new costume:
+capacity no arriving session can use, counted as capacity for everybody. Dead
+slots go to `_pending_teardown`, which the existing drain reaps.
+
+**Layer 2 does more than check a flag.** `spawn_session_runner` runs OFF the
+daemon loop while the read loop that sets the flag runs on it, so the reuse
+fast-path can still be handed a client that died since the acquire. What it
+does about it depends on **how** the client died, which is why the cause is now
+recorded (`close_reason`):
+
+| `close_reason` | What survives | Action |
+|---|---|---|
+| `cancelled` | the runner, the socket, the transport — only the READER task is gone | start a **fresh read task** on the surviving transport (`revive_read_loop`) |
+| `eof` | nothing — the peer is gone | discard the slot, cold-spawn |
+| `explicit-close` | nothing — `close()` reaped the runner | discard, cold-spawn |
+| `oversized-frame` / `malformed-frame` | the stream is desynchronised mid-frame | discard, cold-spawn |
+
+A task cannot be un-cancelled, so clearing the boolean would hand back a channel
+nobody is reading — a hang instead of an error. Re-**adopting** the socket is
+never an option: it is already owned by the dead client's asyncio transport, and
+a second `connect_accepted_socket` on it is the PR #173 failure the shared-client
+design exists to avoid. `close()` can never produce `cancelled` — it stamps
+`explicit-close` *before* cancelling the read task and the first cause wins — so
+that reason is a statement of provenance: something **outside** this client
+cancelled it.
+
+**Two nearby defects the same investigation turned up, both fixed:**
+
+- **A read task cancelled before its first step never runs its `finally`**, so
+  `_closed` stayed `False` and the channel reported itself HEALTHY with no
+  reader: writes land, replies are never consumed, every call waits out its
+  deadline. Worse than the reported failure, because the liveness poll answers
+  "alive". A done-callback records it, narrowly — only when the task was
+  cancelled and nothing else has recorded a cause.
+- **`return_slot_after_session` logged "returned to pool" for a slot it did not
+  pool.** At capacity with a pure-idle returner, the returner is the one
+  dropped — and the line still said it was pooled. The incident's key log line
+  (`slot pid=5307 returned to pool (idle_count=4/4)`) is *exactly* that branch's
+  shape, and reading it as proof the slot entered the pool cost two rounds of
+  diagnosis. The method now returns whether the slot was retained, and both its
+  own line and `JaatoServer.shutdown`'s say which happened.
+
+**One slot, one entry.** `return_slot_after_session` refuses (by identity) a
+slot already in `_idle_slots`, at ERROR, counted. `JaatoServer.shutdown`
+captures and nulls `_runner_rpc` / `_spawned_runner` / `_pool_manager_ref`
+**without a lock** and is called from session unload, `session.stop`, the #812
+orphan sweep and daemon shutdown — so two concurrent callers can both see the
+live triple and both return the same slot. The two entries share one `rpc`:
+tear either down and the other is a corpse in the pool that no teardown line
+names. Guarded at the pool rather than at the four teardown paths, the #674
+argument — the pool owns the list, so one boundary check covers callers that do
+not exist yet. It does not *fix* the double shutdown; it makes it audible.
+
+**What killed the reported client is still unknown, and is now answerable.**
+Both read-loop exit lines named no channel (`RunnerRPCClient: runner closed
+connection`, `read loop crashed`), so an operator's grep for a pid could not
+detect a read-loop exit at all — which is why three rounds of evidence went into
+distinguishing lines that could have named themselves. Both carry
+`pid=` now, `close_reason` records which of the five endings it was, and the
+pool's eviction WARNING prints it. Counters: `pool_dead_slot_evicted_total`
+(**not** a success metric — each unit is a runner that died unasked) and
+`pool_duplicate_return_refused_total`.
+
+Latent, not the cause, and worth its own change: `MCPClientManager.__aexit__`
+cancels **every task on the running loop** (`asyncio.all_tasks()`, unscoped).
+Today it runs on a dedicated loop in a dedicated thread in the runner process,
+so it cannot reach a daemon-side read task — but it is one `async with` on the
+daemon loop away from doing exactly what this issue describes.
 
 ### A Key That Said "Reusable" and a Name That Said "New" (#1033)
 
