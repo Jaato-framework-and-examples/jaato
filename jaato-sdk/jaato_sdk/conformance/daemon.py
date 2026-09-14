@@ -20,6 +20,7 @@ because the alternative fails silently:
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import shutil
@@ -29,7 +30,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Dict, List, Optional
 
 #: Seconds to wait for a cold daemon to accept a connection.  Generous
 #: because CI runners are slow and plugin discovery is real work; bounded
@@ -38,6 +39,183 @@ STARTUP_TIMEOUT = 90.0
 
 #: Seconds between connect attempts while waiting.
 POLL_INTERVAL = 0.25
+
+
+#: The modules the daemon needs, and which tree they must come from.
+#: ``jaato_sdk`` is what the test code drives the daemon THROUGH; ``server``
+#: and ``shared`` are what the daemon IS.  A suite in which these resolve to
+#: a checkout nobody chose is asserting about a tree nobody ran (jaato #1050).
+TREE_MODULES = ("jaato_sdk", "server", "shared")
+
+#: The two server-tier packages, and the directory that holds them in a
+#: source checkout of this repository.
+_SERVER_PACKAGES = ("server", "shared")
+_SERVER_SIBLING = "jaato-server"
+
+#: Printed by the child, with the env the daemon is about to be given, in the
+#: cwd the daemon is about to be given -- both matter, since ``-c`` and
+#: ``-m`` alike put the cwd on ``sys.path`` ahead of ``PYTHONPATH``.  It
+#: RESOLVES rather than imports: importing ``server`` costs plugin discovery,
+#: and a preflight slower than the thing it checks will be deleted.
+_PREFLIGHT_SRC = """\
+import importlib.util, json
+out = {}
+for name in %r:
+    try:
+        spec = importlib.util.find_spec(name)
+    except BaseException:
+        spec = None
+    out[name] = spec.origin if spec is not None and spec.origin else None
+print(json.dumps(out))
+"""
+
+#: Seconds allowed for the preflight.  It is one interpreter start and three
+#: ``find_spec`` calls; a bound this generous can only be hit by a machine in
+#: trouble, and the alternative to a bound is a fixture that hangs.
+PREFLIGHT_TIMEOUT = 30.0
+
+
+class DaemonTreeMismatch(RuntimeError):
+    """The daemon would import a different checkout than the tests came from.
+
+    Raised BEFORE the daemon is started, because the failure it prevents is
+    not a crash -- it is a suite that passes or fails about code it never
+    ran.  Names both sides, since the whole difficulty of jaato #1050 was
+    that nothing in the output said which tree had been loaded.
+    """
+
+
+def _resolve(name: str) -> Optional[str]:
+    """Where does THIS process resolve *name*, without importing it?
+
+    Resolution, not import: the fixture must be able to ask where ``server``
+    lives without paying plugin discovery for the answer, and without it
+    depending on whether some earlier test happened to import it.
+
+    ``None`` for anything this helper cannot answer for -- a namespace
+    package, a zipimport, a layout it does not understand.  ``find_spec``
+    imports parent packages, so it can raise anything an import can raise,
+    and a fixture helper is not worth a collection failure.
+    """
+    try:
+        spec = importlib.util.find_spec(name)
+    except BaseException:
+        return None
+    if spec is None or not spec.origin:
+        return None
+    return str(Path(spec.origin).resolve())
+
+
+def _package_root(origin: str) -> str:
+    """The directory to put on ``PYTHONPATH`` so *origin* is importable.
+
+    For a package (``<root>/pkg/__init__.py``) that is the grandparent; for a
+    single-module file it is the parent.  Anything else would put the package
+    itself on the path, which imports its submodules as top-level names.
+    """
+    path = Path(origin).resolve()
+    return str(path.parent.parent if path.name == "__init__.py"
+               else path.parent)
+
+
+def tree_roots() -> Dict[str, str]:
+    """``{"sdk": <dir>, "server": <dir>}`` -- the tree the tests came from.
+
+    THE ANCHOR IS ``jaato_sdk``, and everything follows from it.  That module
+    is where this very file was imported from, so it identifies the checkout
+    the test code came from BY CONSTRUCTION -- no configuration, no guessing
+    which of several trees the author meant.
+
+    The server tier is then taken from the SAME checkout when one is there
+    (``<checkout>/jaato-server`` holding both ``server`` and ``shared``).
+    That is a layout assumption, and a deliberate one: the alternative --
+    "wherever ``server`` happens to resolve" -- is what the defect already
+    does.  Measured in the configuration this was found in: pytest running
+    the SDK leg from a worktree inserts ``<worktree>/jaato-sdk`` on
+    ``sys.path`` and NOT ``<worktree>/jaato-server``, so ``jaato_sdk``
+    resolves to the worktree while ``server`` and ``shared`` still resolve
+    through the editable install.  A fix that merely propagated what this
+    process resolves would faithfully reproduce that split.
+
+    Nothing is lost where the assumption does not hold: an installed tree
+    with no co-located checkout falls back to resolution, which is correct
+    there because there is only one of everything.
+
+    Safe here specifically because the conformance package imports neither
+    ``server`` nor ``shared`` in-process -- the daemon is their only
+    consumer, so pointing it at the co-located checkout cannot put the two
+    halves of a test run out of step.
+    """
+    roots: Dict[str, str] = {}
+
+    sdk_origin = _resolve("jaato_sdk")
+    if sdk_origin:
+        roots["sdk"] = _package_root(sdk_origin)
+
+    checkout = Path(roots["sdk"]).parent if "sdk" in roots else None
+    if checkout is not None:
+        sibling = checkout / _SERVER_SIBLING
+        if all((sibling / pkg / "__init__.py").is_file()
+               for pkg in _SERVER_PACKAGES):
+            roots["server"] = str(sibling)
+
+    if "server" not in roots:
+        for name in _SERVER_PACKAGES:
+            origin = _resolve(name)
+            if origin:
+                roots["server"] = _package_root(origin)
+                break
+    return roots
+
+
+def tree_pythonpath() -> List[str]:
+    """The directories of :func:`tree_roots`, in search order, deduplicated."""
+    out: List[str] = []
+    for root in tree_roots().values():
+        if root not in out:
+            out.append(root)
+    return out
+
+
+def expected_origins() -> Dict[str, str]:
+    """What a child given :func:`tree_pythonpath` OUGHT to resolve.
+
+    Stated rather than assumed, so the preflight below checks the child
+    against the tree that was chosen for it -- not against whatever this
+    process happens to resolve, which in the worktree case is the split
+    :func:`tree_roots` exists to repair.  It therefore also catches a child
+    whose search path is shadowed by something ahead of ours: its cwd, a
+    stale ``.pth``, a conflicting install.
+    """
+    roots = tree_roots()
+    expected: Dict[str, str] = {}
+    if "sdk" in roots:
+        expected["jaato_sdk"] = str(
+            Path(roots["sdk"]) / "jaato_sdk" / "__init__.py")
+    if "server" in roots:
+        for pkg in _SERVER_PACKAGES:
+            candidate = Path(roots["server"]) / pkg / "__init__.py"
+            if candidate.is_file():
+                expected[pkg] = str(candidate)
+    return expected
+
+
+def daemon_env(base: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+    """*base* (default ``os.environ``) with this tree prepended to PYTHONPATH.
+
+    PREPENDED, and an existing ``PYTHONPATH`` is kept after it: an operator
+    who exported one meant it, and dropping it would trade this bug for the
+    opposite one.  Ours wins, because the suite's whole claim is that the
+    daemon runs the code the tests came from.
+    """
+    env = dict(os.environ if base is None else base)
+    existing = env.get("PYTHONPATH", "")
+    parts = tree_pythonpath()
+    if existing:
+        parts = parts + [existing]
+    if parts:
+        env["PYTHONPATH"] = os.pathsep.join(parts)
+    return env
 
 
 class DaemonStartupError(RuntimeError):
@@ -218,15 +396,126 @@ class ConformanceDaemon:
         # through the failure that motivated this.
         self._out = Path(self._tmpdir) / "daemon.out"
         self._out_handle = open(self._out, "wb")
+
+        # THE DAEMON MUST IMPORT THE TREE THESE TESTS CAME FROM.  It is a
+        # separate process, so it does not inherit pytest's rootdir
+        # insertion: with a bare ``os.environ`` it resolved ``server`` /
+        # ``shared`` / ``jaato_sdk`` through the editable install, which
+        # points at one fixed checkout whatever tree pytest is running from.
+        # In a ``git worktree`` that is a different tree, and the suite then
+        # passes or fails about code it never ran (jaato #1050).  This
+        # module's own docstring already names the class -- "the next run
+        # inherits a process that is not the one it thinks it is testing" --
+        # and had it only from the leaked-daemon direction.
+        env = daemon_env()
+        self._verify_child_tree(env)
+
         self._proc = subprocess.Popen(
             cmd,
             cwd=str(self.workspace),
+            env=env,
             stdout=self._out_handle,
             stderr=subprocess.STDOUT,
             start_new_session=True,          # so teardown can kill the group
         )
         self._await_ready()
         return self
+
+    def _verify_child_tree(self, env: Dict[str, str]) -> None:
+        """Ask a child, with the daemon's own env and cwd, what it resolves.
+
+        Run BEFORE the daemon, because the point is to refuse rather than to
+        explain afterwards, and a 90-second startup spent on the wrong tree
+        is time nobody gets back.
+
+        Checked against :func:`expected_origins` -- the tree that was CHOSEN
+        for the child -- rather than against whatever this process resolves,
+        which in the worktree case is the very split :func:`tree_roots`
+        exists to repair.
+
+        ONLY POSITIVE EVIDENCE COUNTS, the rule jaato #1023 states for a
+        thread label and which holds for the same reason here: a resolution
+        read successfully that names a different file is proof the daemon
+        would run other code, while a preflight that could not run proves
+        nothing about the tree and must not fail a suite on a machine whose
+        only fault is being unusual.  So divergence RAISES and an unreadable
+        preflight WARNS -- into the daemon's own output file, which the
+        startup error path already attaches.
+
+        External mode never reaches here: ``start`` returns before this for
+        ``JAATO_CONFORMANCE_SOCKET``, because there the operator has
+        deliberately taken responsibility for what is running.
+        """
+        expected = expected_origins()
+        theirs = self._preflight(env)
+        if theirs is None:
+            return
+
+        divergent = {
+            name: (expected[name], theirs[name])
+            for name in sorted(set(expected) & set(theirs))
+            if theirs[name] and expected[name] != theirs[name]
+        }
+        self._note(
+            "tree check: " + ", ".join(
+                f"{name}={theirs.get(name) or '<unresolved>'}"
+                for name in TREE_MODULES
+            )
+        )
+        if not divergent:
+            return
+
+        detail = "\n".join(
+            f"  {name}\n    the tests' tree: {here}\n"
+            f"    the daemon:     {there}"
+            for name, (here, there) in divergent.items()
+        )
+        raise DaemonTreeMismatch(
+            "the daemon would import a different checkout than the tests "
+            "came from.\n"
+            f"{detail}\n"
+            "Nothing in a suite run distinguishes this from a real result, "
+            "so the fixture refuses rather than report one (jaato #1050)."
+        )
+
+    def _preflight(self, env: Dict[str, str]) -> Optional[Dict[str, Optional[str]]]:
+        """Where would the daemon resolve :data:`TREE_MODULES`?  ``None`` if unknown."""
+        try:
+            proc = subprocess.run(
+                [sys.executable, "-c", _PREFLIGHT_SRC % (list(TREE_MODULES),)],
+                cwd=str(self.workspace),
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=PREFLIGHT_TIMEOUT,
+            )
+            resolved = json.loads(proc.stdout.strip().splitlines()[-1])
+        except Exception as exc:                    # noqa: BLE001 - see docstring
+            self._note(f"tree check SKIPPED: {type(exc).__name__}: {exc}")
+            return None
+        if not isinstance(resolved, dict):
+            self._note(f"tree check SKIPPED: unparseable preflight output")
+            return None
+        return {
+            name: (str(Path(origin).resolve()) if origin else None)
+            for name, origin in resolved.items()
+        }
+
+    def _note(self, line: str) -> None:
+        """Record a fixture-level fact in the daemon's own output file.
+
+        The file, not a logger: a pytest run swallows logging by default, and
+        ``DaemonStartupError`` already attaches this file's contents -- so
+        anything written here reaches the reader on exactly the path that
+        needs it.  Best-effort; a diagnostic that raises is worse than none.
+        """
+        try:
+            if self._out_handle is not None:
+                self._out_handle.write(
+                    f"[conformance fixture] {line}\n".encode())
+                self._out_handle.flush()
+        except Exception:                           # noqa: BLE001
+            pass
 
     def _await_ready(self) -> None:
         deadline = time.monotonic() + STARTUP_TIMEOUT
